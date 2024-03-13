@@ -5,6 +5,7 @@ from datetime import datetime
 from discord.ext import commands
 from discord import app_commands
 
+# Load the environment variables
 dotenv.load_dotenv()
 
 intents = discord.Intents.default()
@@ -12,105 +13,98 @@ intents.messages = True
 intents.message_content = True
 intents.reactions = True
 
-bot = commands.Bot(command_prefix="!", intents=intents, debug_guilds=[1097030241874096139])
+# Replace the token with your bot's token
+TOKEN = os.getenv("BOT_TOKEN")
+# Replace with your actual guild ID
+GUILD_ID = 1097030241874096139
 
-draft_message_id = None  # Variable to store the draft message ID
-sign_ups = []  # List to store the names of users who signed up
+bot = commands.Bot(command_prefix="!", intents=intents, debug_guilds=[GUILD_ID])
+
+# Variable to store the draft message ID and channel ID
+draft_message_id = None
+draft_channel_id = None
+
+# Dictionary to store the sign-ups with user IDs as keys and display names as values
+sign_ups = {}
+
+# Constants for the button custom ID
+SIGN_UP_BUTTON_ID = 'sign_up'
+
+class SignUpButton(discord.ui.Button):
+    def __init__(self, label, style, custom_id):
+        super().__init__(style=style, label=label, custom_id=custom_id)
+    
+    async def callback(self, interaction: discord.Interaction):
+        global sign_ups
+
+        # Acknowledge the interaction immediately to avoid "This interaction failed" message
+        await interaction.response.defer()
+
+        user_id = interaction.user.id
+        user_display_name = interaction.user.display_name
+
+        # Toggle the sign-up state
+        if user_id in sign_ups:
+            # User is canceling their sign-up
+            del sign_ups[user_id]
+            self.style = discord.ButtonStyle.green
+            self.label = 'Sign Up'
+        else:
+            # User is signing up
+            sign_ups[user_id] = user_display_name
+            self.style = discord.ButtonStyle.red
+            self.label = 'Cancel Sign Up'
+        
+        # Update the embed and the button
+        await update_draft_message(interaction.message, user_id)
+
 
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}!')
-
-# Global variables to store the draft message and channel IDs
-draft_message_id = None
-draft_channel_id = None
 
 @bot.tree.command(name='startdraft', description='Start a Magic: The Gathering draft table')
 async def start_draft(interaction: discord.Interaction):
     global draft_message_id, draft_channel_id
     await interaction.response.defer()
 
-    # Store the current time as the start time using datetime
+    # Create the embed object with the initial title
     draft_start_time = datetime.now().timestamp()
-
-    # Create the embed object
     embed = discord.Embed(
         title=f"Vintage Cube Team Draft Queue - Started <t:{int(draft_start_time)}:R>",
-        description="React to join the draft table!",
-        color=discord.Color.dark_magenta()  # You can choose a color that fits your server's theme
+        description="Click the button to join the draft table!",
+        color=discord.Color.dark_magenta()
     )
-    
-    # Optionally add fields, images, etc. to the embed
     embed.add_field(name="Sign-Ups", value="No players yet.", inline=False)
-    embed.set_thumbnail(url=os.getenv("IMG_URL"))  # URL to a relevant image
-    embed.set_footer(text="React below to sign up!")
 
-    # Send the message as an embed
-    draft_message = await interaction.followup.send(embed=embed, ephemeral=False)
+    # Create a view with a sign-up button
+    view = discord.ui.View()
+    sign_up_button = SignUpButton(label='Sign Up', style=discord.ButtonStyle.green, custom_id=SIGN_UP_BUTTON_ID)
+    view.add_item(sign_up_button)
+
+    # Send the embed with the button
+    draft_message = await interaction.followup.send(embed=embed, view=view)
     
-    # Store the IDs for later reference
+    # Store the message and channel IDs
     draft_message_id = draft_message.id
     draft_channel_id = draft_message.channel.id
 
-
-async def update_draft_message():
-    global sign_ups, draft_message_id, draft_channel_id
-    if draft_message_id and draft_channel_id:
-        channel = bot.get_channel(draft_channel_id)
-        if channel:
-            try:
-                message = await channel.fetch_message(draft_message_id)
-                embed = message.embeds[0]  # Assuming there's at least one embed in the message
-                if sign_ups:
-                    sign_ups_str = '\n'.join(sign_ups)
-                else:
-                    sign_ups_str = 'No players yet.'
-                embed.set_field_at(0, name="Sign-Ups", value=sign_ups_str, inline=False)
-                await message.edit(embed=embed)
-            except discord.NotFound:
-                print(f"Message with ID {draft_message_id} not found.")
-            except discord.Forbidden:
-                print("Bot doesn't have permissions to edit the message or fetch the channel.")
-            except Exception as e:
-                print(f"An error occurred: {e}")
+async def update_draft_message(message, user_id):
+    global sign_ups
+    embed = message.embeds[0]
+    sign_ups_str = '\n'.join(sign_ups.values()) if sign_ups else 'No players yet.'
+    embed.set_field_at(0, name="Sign-Ups", value=sign_ups_str, inline=False)
+    
+    # Update the button state based on the user's sign-up status
+    button_label = 'Cancel Sign Up' if user_id in sign_ups else 'Sign Up'
+    button_style = discord.ButtonStyle.red if user_id in sign_ups else discord.ButtonStyle.green
+    view = discord.ui.View()
+    view.add_item(SignUpButton(label=button_label, style=button_style, custom_id=SIGN_UP_BUTTON_ID))
+    
+    # Edit the message with the updated embed and view
+    # Use 'followup' since 'defer' was called earlier
+    await message.edit(embed=embed, view=view)
 
 
-@bot.event
-async def on_raw_reaction_add(payload):
-    global sign_ups, draft_message_id
-    # Ensure the reaction is to the draft message
-    if payload.message_id == draft_message_id:
-        # No check for a specific emoji, any reaction will do
-        channel = bot.get_channel(payload.channel_id)
-        if channel:
-            try:
-                user = await bot.fetch_user(payload.user_id)
-                display_name = user.display_name
-                if display_name not in sign_ups:
-                    sign_ups.append(display_name)
-                    await update_draft_message()
-            except Exception as e:
-                print(f"An error occurred: {e}")
-
-
-@bot.event
-async def on_raw_reaction_remove(payload):
-    global sign_ups, draft_message_id, draft_channel_id
-    # Ensure the reaction removed is from the draft message
-    if payload.message_id == draft_message_id:
-        channel = bot.get_channel(draft_channel_id)
-        if channel:
-            try:
-                user = await bot.fetch_user(payload.user_id)
-                display_name = user.display_name
-                # Remove the user from the sign-ups list if they are in it
-                if display_name in sign_ups:
-                    sign_ups.remove(display_name)
-                    await update_draft_message()
-            except Exception as e:
-                print(f"An error occurred while removing a reaction: {e}")
-
-
-
-# Replace 'YOUR BOT TOKEN HERE' with your actual bot token
-bot.run(os.getenv("BOT_TOKEN"))
+# Run the bot with the specified token
+bot.run(TOKEN)
