@@ -101,7 +101,7 @@ class GenerateDraftmancerLinkButton(discord.ui.Button):
             description=f"**Team A**:\n" + "\n".join(team_a) + 
                          "\n\n**Team B**:\n" + "\n".join(team_b) + 
                          "\n\n**Seating Order:**\n" + " -> ".join(seating_order) +
-                         f"\n\n**Draftmancer Session**: [Join Here]({draft_link})",
+                         f"\n\n**Draftmancer Session**: **[Join Here]({draft_link})**",
             color=discord.Color.gold()
         )
         embed.set_thumbnail(url=os.getenv("IMG_URL"))
@@ -127,7 +127,7 @@ async def start_draft(interaction: discord.Interaction):
     draft_start_time = datetime.now().timestamp()
     embed = discord.Embed(
         title=f"Vintage Cube Team Draft Queue - Started <t:{int(draft_start_time)}:R>",
-        description=f"Click the button to join the draft table!\n\n**Draftmancer Session**: [Join Here]({draft_link})",
+        description=f"Click the button to join the draft table!\n\n**Draftmancer Session**: **[Join Here]({draft_link})**",
         color=discord.Color.dark_magenta()
     )
     embed.add_field(name="Sign-Ups", value="No players yet.", inline=False)
