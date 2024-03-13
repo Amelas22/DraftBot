@@ -1,8 +1,10 @@
 import discord
+import asyncio
 import os
 import dotenv
 from datetime import datetime
 from discord.ext import commands
+from discord.ui import Button, View
 import random
 import secrets
 
@@ -20,12 +22,13 @@ GUILD_ID = int(os.getenv("GUILD_ID"))
 
 bot = commands.Bot(command_prefix="!", intents=intents, debug_guilds=[GUILD_ID])
 
+session_id  = None
 draft_message_id = None
 draft_channel_id = None
 draft_link = None
 sign_ups = {}
 
-class SignUpButton(discord.ui.Button):
+class SignUpButton(Button):
     def __init__(self):
         super().__init__(style=discord.ButtonStyle.green, label="Sign Up", custom_id="sign_up")
 
@@ -45,7 +48,7 @@ class SignUpButton(discord.ui.Button):
         await update_draft_message(interaction.message, interaction.user.id)
 
 
-class CancelSignUpButton(discord.ui.Button):
+class CancelSignUpButton(Button):
     def __init__(self):
         super().__init__(style=discord.ButtonStyle.red, label="Cancel Sign Up", custom_id="cancel_sign_up")
 
@@ -64,32 +67,34 @@ class CancelSignUpButton(discord.ui.Button):
 
         await update_draft_message(interaction.message, interaction.user.id)
 
-class DraftCompleteButton(discord.ui.Button):
+class DraftCompleteButton(Button):
     def __init__(self):
         super().__init__(style=discord.ButtonStyle.green, label="Draft Complete", custom_id="draft_complete")
 
     async def callback(self, interaction: discord.Interaction):
-        global sign_ups
+        global sign_ups, session_id
 
-        user_id = interaction.user.id
-        # Check if the user is in the sign-up list
-        if user_id not in sign_ups:
-            await interaction.response.send_message("You are not authorized to complete the draft.", ephemeral=True)
+        # Make sure there are participants
+        if not sign_ups:
+            await interaction.response.send_message("There are no participants to start the draft.", ephemeral=True)
             return
         
         guild = interaction.guild
-
         team_a, team_b = split_into_teams(list(sign_ups.values()))
-        team_a_members = [guild.get_member(user_id) for user_id in sign_ups if sign_ups[user_id] in team_a]
-        team_b_members = [guild.get_member(user_id) for user_id in sign_ups if sign_ups[user_id] in team_b]
 
-        team_a_channel = await create_team_channel(guild, "Team A Chat", team_a_members)
-        team_b_channel = await create_team_channel(guild, "Team B Chat", team_b_members)
+        # Get guild members for each team
+        team_a_members = [guild.get_member(int(user_id)) for user_id, name in sign_ups.items() if name in team_a]
+        team_b_members = [guild.get_member(int(user_id)) for user_id, name in sign_ups.items() if name in team_b]
 
-        await interaction.response.send_message(f"Team channels created: {team_a_channel.mention} and {team_b_channel.mention}", ephemeral=True)
+        # Create team channels asynchronously
+        asyncio.create_task(create_team_channel(guild, "Team-A", team_a_members))
+        asyncio.create_task(create_team_channel(guild, "Team-B", team_b_members))
+        
+        # Respond to the interaction
+        await interaction.response.send_message("Team channels have been created", ephemeral=True)
 
 
-class CancelDraftButton(discord.ui.Button):
+class CancelDraftButton(Button):
     def __init__(self):
         super().__init__(style=discord.ButtonStyle.grey, label='Cancel Draft', custom_id='cancel_draft')
 
@@ -107,7 +112,7 @@ class CancelDraftButton(discord.ui.Button):
             await interaction.response.send_message("You cannot cancel the draft as you are not signed up or others are signed up.", ephemeral=True)
 
 
-class GenerateDraftmancerLinkButton(discord.ui.Button):
+class GenerateDraftmancerLinkButton(Button):
     def __init__(self):
         # Initializes the button with the label "Start Draft"
         super().__init__(style=discord.ButtonStyle.blurple, label="Start Draft", custom_id='start_draft')
@@ -134,7 +139,7 @@ class GenerateDraftmancerLinkButton(discord.ui.Button):
         )
 
         # Remove the "Start Draft" button and add the "Draft Complete" button
-        view = discord.ui.View()
+        view = View()
         view.add_item(DraftCompleteButton())  # Assumes DraftCompleteButton is defined
         await interaction.response.edit_message(embed=embed, view=view)
 
@@ -148,7 +153,7 @@ import secrets
 @bot.tree.command(name='startdraft', description='Start a Magic: The Gathering draft table')
 async def start_draft(interaction: discord.Interaction):
     await interaction.response.defer()
-    global draft_message_id, draft_channel_id, draft_link
+    global draft_message_id, draft_channel_id, draft_link, session_id
     
     # Generate and store the Draftmancer link
     session_id = ''.join(secrets.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
@@ -174,12 +179,24 @@ async def start_draft(interaction: discord.Interaction):
     draft_channel_id = message.channel.id
 
 async def create_team_channel(guild, team_name, team_members):
+    # Updated channel name to include session_id
+    channel_name = f"{team_name}-Draft-{session_id}"
     overwrites = {
-        guild.default_role: discord.PermissionOverwrite(read_messages=False)
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        guild.me: discord.PermissionOverwrite(read_messages=True)  # Ensure the bot can access
     }
     overwrites.update({member: discord.PermissionOverwrite(read_messages=True) for member in team_members})
 
-    channel = await guild.create_text_channel(name=team_name, overwrites=overwrites)
+    channel = await guild.create_text_channel(name=channel_name, overwrites=overwrites)
+
+    # Post initial message about deletion timing
+    deletion_notice = await channel.send("This channel will be deleted in 6 hours.")
+
+    # Schedule channel deletion and update notice message
+    await asyncio.sleep(6 * 3600)  # Wait for 6 hours
+    await deletion_notice.edit(content="This channel is being deleted now.")
+    await channel.delete()
+
     return channel
 
 async def update_draft_message(message, user_id=None):
@@ -189,7 +206,7 @@ async def update_draft_message(message, user_id=None):
     sign_ups_str = '\n'.join(sign_ups.values()) if sign_ups else 'No players yet.'
     embed.set_field_at(0, name=sign_ups_field_name, value=sign_ups_str, inline=False)
 
-    view = discord.ui.View()
+    view = View()
     view.add_item(SignUpButton())
     view.add_item(CancelSignUpButton())
     view.add_item(CancelDraftButton())
