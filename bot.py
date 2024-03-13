@@ -14,7 +14,7 @@ intents.message_content = True
 intents.reactions = True
 
 TOKEN = os.getenv("BOT_TOKEN")
-GUILD_ID = int(os.getenv("GUILD_ID"))  # Ensure this is an integer
+GUILD_ID = int(os.getenv("GUILD_ID"))
 
 bot = commands.Bot(command_prefix="!", intents=intents, debug_guilds=[GUILD_ID])
 
@@ -23,19 +23,41 @@ draft_channel_id = None
 sign_ups = {}
 
 class SignUpButton(discord.ui.Button):
-    def __init__(self, label, style):
-        super().__init__(style=style, label=label, custom_id='sign_up')
+    def __init__(self):
+        super().__init__(style=discord.ButtonStyle.green, label="Sign Up", custom_id="sign_up")
 
     async def callback(self, interaction: discord.Interaction):
-        global sign_ups  # Correct use of global inside a method
-
-        await interaction.response.defer()
+        global sign_ups
 
         user_id = interaction.user.id
         if user_id in sign_ups:
-            del sign_ups[user_id]
+            # User is already signed up; inform them
+            await interaction.response.send_message("You are already signed up!", ephemeral=True)
         else:
+            # User is signing up
             sign_ups[user_id] = interaction.user.display_name
+            # Optionally, send a confirmation message or update the sign-up list in the main message
+            await interaction.response.send_message("You are now signed up.", ephemeral=True)
+
+        await update_draft_message(interaction.message, interaction.user.id)
+
+
+class CancelSignUpButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(style=discord.ButtonStyle.red, label="Cancel Sign Up", custom_id="cancel_sign_up")
+
+    async def callback(self, interaction: discord.Interaction):
+        global sign_ups
+
+        user_id = interaction.user.id
+        if user_id not in sign_ups:
+            # User is not signed up; inform them
+            await interaction.response.send_message("You are not signed up!", ephemeral=True)
+        else:
+            # User is canceling their sign-up
+            del sign_ups[user_id]
+            # Optionally, send a confirmation message or update the sign-up list in the main message
+            await interaction.response.send_message("Your sign-up has been canceled.", ephemeral=True)
 
         await update_draft_message(interaction.message, interaction.user.id)
 
@@ -97,7 +119,8 @@ async def start_draft(interaction: discord.Interaction):
     embed.set_thumbnail(url=os.getenv("IMG_URL"))
 
     view = discord.ui.View()
-    view.add_item(SignUpButton(label='Sign Up', style=discord.ButtonStyle.green))
+    view.add_item(SignUpButton())
+    view.add_item(CancelSignUpButton())
     view.add_item(CancelDraftButton())
     view.add_item(GenerateDraftmancerLinkButton())
 
@@ -114,7 +137,8 @@ async def update_draft_message(message, user_id=None):
     embed.set_field_at(0, name=sign_ups_field_name, value=sign_ups_str, inline=False)
 
     view = discord.ui.View()
-    view.add_item(SignUpButton(label='Sign Up', style=discord.ButtonStyle.green))
+    view.add_item(SignUpButton())
+    view.add_item(CancelSignUpButton())
     view.add_item(CancelDraftButton())
     view.add_item(GenerateDraftmancerLinkButton())
 
