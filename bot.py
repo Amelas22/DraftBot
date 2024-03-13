@@ -12,7 +12,8 @@ dotenv.load_dotenv()
 intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
-intents.reactions = True
+intents.guilds = True
+intents.members = True
 
 TOKEN = os.getenv("BOT_TOKEN")
 GUILD_ID = int(os.getenv("GUILD_ID"))
@@ -63,6 +64,30 @@ class CancelSignUpButton(discord.ui.Button):
 
         await update_draft_message(interaction.message, interaction.user.id)
 
+class DraftCompleteButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(style=discord.ButtonStyle.green, label="Draft Complete", custom_id="draft_complete")
+
+    async def callback(self, interaction: discord.Interaction):
+        global sign_ups
+
+        user_id = interaction.user.id
+        # Check if the user is in the sign-up list
+        if user_id not in sign_ups:
+            await interaction.response.send_message("You are not authorized to complete the draft.", ephemeral=True)
+            return
+        
+        guild = interaction.guild
+
+        team_a, team_b = split_into_teams(list(sign_ups.values()))
+        team_a_members = [guild.get_member(user_id) for user_id in sign_ups if sign_ups[user_id] in team_a]
+        team_b_members = [guild.get_member(user_id) for user_id in sign_ups if sign_ups[user_id] in team_b]
+
+        team_a_channel = await create_team_channel(guild, "Team A Chat", team_a_members)
+        team_b_channel = await create_team_channel(guild, "Team B Chat", team_b_members)
+
+        await interaction.response.send_message(f"Team channels created: {team_a_channel.mention} and {team_b_channel.mention}", ephemeral=True)
+
 
 class CancelDraftButton(discord.ui.Button):
     def __init__(self):
@@ -83,19 +108,22 @@ class CancelDraftButton(discord.ui.Button):
 
 
 class GenerateDraftmancerLinkButton(discord.ui.Button):
-    def __init__(self, label="Start Draft", style=discord.ButtonStyle.blurple):
-        super().__init__(style=style, label=label, custom_id='start_draft')
-    
+    def __init__(self):
+        # Initializes the button with the label "Start Draft"
+        super().__init__(style=discord.ButtonStyle.blurple, label="Start Draft", custom_id='start_draft')
+
     async def callback(self, interaction: discord.Interaction):
         global sign_ups, draft_link
 
+        # Check if there are participants
         if not sign_ups:
             await interaction.response.send_message("There are no participants to start the draft.", ephemeral=True)
             return
 
         team_a, team_b = split_into_teams(list(sign_ups.values()))
         seating_order = generate_seating_order(team_a, team_b)
-        
+
+        # Create the embed message for the draft
         embed = discord.Embed(
             title="Draft is Ready!",
             description=f"**Team A**:\n" + "\n".join(team_a) + 
@@ -104,9 +132,11 @@ class GenerateDraftmancerLinkButton(discord.ui.Button):
                          f"\n\n**Draftmancer Session**: **[Join Here]({draft_link})**",
             color=discord.Color.gold()
         )
-        embed.set_thumbnail(url=os.getenv("IMG_URL"))
-        await interaction.response.edit_message(embed=embed, view=None)
-        await interaction.followup.send("DRAFT READY: " + ' '.join([f"<@{uid}>" for uid in sign_ups.keys()]), allowed_mentions=discord.AllowedMentions(users=True))
+
+        # Remove the "Start Draft" button and add the "Draft Complete" button
+        view = discord.ui.View()
+        view.add_item(DraftCompleteButton())  # Assumes DraftCompleteButton is defined
+        await interaction.response.edit_message(embed=embed, view=view)
 
 
 @bot.event
@@ -143,6 +173,14 @@ async def start_draft(interaction: discord.Interaction):
     draft_message_id = message.id
     draft_channel_id = message.channel.id
 
+async def create_team_channel(guild, team_name, team_members):
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False)
+    }
+    overwrites.update({member: discord.PermissionOverwrite(read_messages=True) for member in team_members})
+
+    channel = await guild.create_text_channel(name=team_name, overwrites=overwrites)
+    return channel
 
 async def update_draft_message(message, user_id=None):
     embed = message.embeds[0]
