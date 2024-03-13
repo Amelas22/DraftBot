@@ -1,6 +1,7 @@
 import discord
 import os
 import dotenv
+from datetime import datetime
 from discord.ext import commands
 from discord import app_commands
 
@@ -29,9 +30,12 @@ async def start_draft(interaction: discord.Interaction):
     global draft_message_id, draft_channel_id
     await interaction.response.defer()
 
+    # Store the current time as the start time using datetime
+    draft_start_time = datetime.now().timestamp()
+
     # Create the embed object
     embed = discord.Embed(
-        title="Vintage Cube Team Draft Queue",
+        title=f"Vintage Cube Team Draft Queue - Started <t:{int(draft_start_time)}:R>",
         description="React to join the draft table!",
         color=discord.Color.dark_magenta()  # You can choose a color that fits your server's theme
     )
