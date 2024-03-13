@@ -16,7 +16,7 @@ intents.reactions = True
 # Replace the token with your bot's token
 TOKEN = os.getenv("BOT_TOKEN")
 # Replace with your actual guild ID
-GUILD_ID = 1097030241874096139
+GUILD_ID = os.getenv("GUILD_ID")
 
 bot = commands.Bot(command_prefix="!", intents=intents, debug_guilds=[GUILD_ID])
 
@@ -112,11 +112,18 @@ async def start_draft(interaction: discord.Interaction):
     draft_channel_id = draft_message.channel.id
 
 
-async def update_draft_message(message, user_id):
+async def update_draft_message(message, user_id=None):
     global sign_ups
     embed = message.embeds[0]
+    # Count the number of sign-ups and format the field name with the count
+    sign_ups_count = len(sign_ups)
+    sign_ups_field_name = f"Sign-Ups ({sign_ups_count}):" if sign_ups else "Sign-Ups (0):"
     sign_ups_str = '\n'.join(sign_ups.values()) if sign_ups else 'No players yet.'
-    embed.set_field_at(0, name="Sign-Ups", value=sign_ups_str, inline=False)
+    # Update or add the field for sign-ups in the embed
+    if embed.fields:
+        embed.set_field_at(0, name=sign_ups_field_name, value=sign_ups_str, inline=False)
+    else:
+        embed.add_field(name=sign_ups_field_name, value=sign_ups_str, inline=False)
     
     view = discord.ui.View()
     sign_up_button_label = 'Cancel Sign Up' if user_id in sign_ups else 'Sign Up'
@@ -124,8 +131,8 @@ async def update_draft_message(message, user_id):
     view.add_item(SignUpButton(label=sign_up_button_label, style=sign_up_button_style, custom_id=SIGN_UP_BUTTON_ID))
     view.add_item(CancelDraftButton())
     
+    # Edit the message with the updated embed and view
     await message.edit(embed=embed, view=view)
-
 
 
 # Run the bot with the specified token
