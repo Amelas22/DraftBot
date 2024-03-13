@@ -27,6 +27,7 @@ draft_message_id = None
 draft_channel_id = None
 draft_link = None
 draft_start_time = None
+draft_chat_channel = None
 sign_ups = {}
 
 class SignUpButton(Button):
@@ -75,25 +76,43 @@ class DraftCompleteButton(Button):
     async def callback(self, interaction: discord.Interaction):
         global sign_ups, session_id
 
+        # Quickly acknowledge the interaction to avoid "This interaction failed" message
+        await interaction.response.defer(ephemeral=True)
+
         if not sign_ups:
-            await interaction.response.send_message("There are no participants to start the draft.", ephemeral=True)
+            # Since we've already deferred, we need to follow up with the actual response
+            await interaction.followup.send("There are no participants to start the draft.", ephemeral=True)
             return
 
         guild = interaction.guild
-
-        # Assuming split_into_teams now returns lists of user IDs for team_a and team_b
         team_a_ids, team_b_ids = split_into_teams(list(sign_ups.keys()))
-
         team_a_members = [guild.get_member(user_id) for user_id in team_a_ids]
         team_b_members = [guild.get_member(user_id) for user_id in team_b_ids]
         all_members = [guild.get_member(user_id) for user_id in sign_ups.keys()]
 
-        # Create team channels asynchronously
-        asyncio.create_task(create_team_channel(guild, "Team-A", team_a_members, session_id))
-        asyncio.create_task(create_team_channel(guild, "Team-B", team_b_members, session_id))
-        asyncio.create_task(create_team_channel(guild, "Draft-chat", all_members, session_id))
+        # Proceed with the channel creation and other tasks asynchronously
+        # Gather all tasks to be executed
+        tasks = [
+            create_team_channel(guild, "Team-A", team_a_members, session_id),
+            create_team_channel(guild, "Team-B", team_b_members, session_id),
+            create_team_channel(guild, "Draft-chat", all_members, session_id)
+        ]
 
-        await interaction.response.send_message("Team channels and the draft chat have been created.", ephemeral=True)
+        # Wait for all tasks to complete
+        team_a_channel, team_b_channel, draft_chat_channel = await asyncio.gather(*tasks)
+        
+        # Enable the "Post Pairings" button by editing the original message's view
+        message = await interaction.channel.fetch_message(interaction.message.id)
+        view = message.components  # Get the current view from the message
+        
+        # Find and enable the PostPairingsButton
+        for item in view:
+            if isinstance(item, PostPairingsButton):
+                item.disabled = False  # Enable the button
+        
+        # Update the message with the new view
+        await message.edit(view=view)
+        await interaction.response.send_message("Draft complete. You can now post pairings.", ephemeral=True)
 
 
 class CancelDraftButton(Button):
@@ -140,10 +159,40 @@ class GenerateDraftmancerLinkButton(Button):
             color=discord.Color.gold()
         )
 
-        # Remove the "Start Draft" button and add the "Draft Complete" button
+        # Remove the "Start Draft" button and add the "Draft Complete" and "Post Pairings" button
         view = View()
-        view.add_item(DraftCompleteButton())  # Assumes DraftCompleteButton is defined
+        view.add_item(DraftCompleteButton())
+        view.add_item(PostPairingsButton())
+
         await interaction.response.edit_message(embed=embed, view=view)
+
+
+class PostPairingsButton(Button):
+    def __init__(self):
+        super().__init__(style=discord.ButtonStyle.primary, label="Post Pairings", custom_id="post_pairings")
+
+    async def callback(self, interaction: discord.Interaction):
+        global draft_chat_channel, sign_ups
+
+        if draft_chat_channel is None:
+            # Draft not completed yet, inform the user
+            await interaction.response.send_message("Pairings can't be posted until the draft is completed.", ephemeral=True)
+            return
+
+        # Split sign-ups into team A and team B
+        team_a_ids, team_b_ids = split_into_teams(list(sign_ups.keys()))
+
+        # Generate pairings
+        pairings = calculate_pairings(team_a_ids, team_b_ids)
+
+        # Post the pairings
+        guild = interaction.guild
+        draft_chat_channel_obj = guild.get_channel(draft_chat_channel)
+        if draft_chat_channel_obj:
+            await post_pairings(draft_chat_channel_obj, pairings, guild)
+            await interaction.response.send_message("Pairings have been posted in the draft chat.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Draft chat channel not found.", ephemeral=True)
 
 
 @bot.event
@@ -181,6 +230,8 @@ async def start_draft(interaction: discord.Interaction):
     draft_channel_id = message.channel.id
 
 async def create_team_channel(guild, team_name, team_members, session_id=None):
+    global draft_chat_channel  
+
     channel_name = f"{team_name}-Draft"
     if session_id:
         channel_name += f"-{session_id}"
@@ -195,6 +246,10 @@ async def create_team_channel(guild, team_name, team_members, session_id=None):
         overwrites[member] = discord.PermissionOverwrite(read_messages=True)
 
     channel = await guild.create_text_channel(name=channel_name, overwrites=overwrites)
+
+    # Update draft_chat_channel with the ID of the draft chat channel
+    if team_name == "Draft-chat":
+        draft_chat_channel = channel.id
 
     # Convert timestamp to datetime
     draft_start_datetime = datetime.fromtimestamp(draft_start_time)
@@ -224,6 +279,16 @@ async def update_draft_message(message, user_id=None):
 
     await message.edit(embed=embed, view=view)
 
+async def post_pairings(channel, pairings, guild):
+    for round_number, round_pairings in pairings.items():
+        message_content = f"**Round {round_number}**\n"
+        for player_id, opponent_id in round_pairings:
+            player = guild.get_member(player_id)
+            opponent = guild.get_member(opponent_id)
+            message_content += f"{player.display_name if player else 'Unknown'} vs {opponent.display_name if opponent else 'Unknown'}\n"
+        await channel.send(message_content)
+
+
 def split_into_teams(signups):
     random.shuffle(signups)
     mid = len(signups) // 2
@@ -237,5 +302,28 @@ def generate_seating_order(team_a, team_b):
         if i < len(team_b):
             seating_order.append(team_b[i])
     return seating_order
+
+def calculate_pairings(team_a_ids, team_b_ids):
+    """
+    Calculate pairings for a three-round tournament where each member of team A faces a unique member of team B.
+    team_a_ids and team_b_ids must be of the same length.
+    """
+    assert len(team_a_ids) == len(team_b_ids), "Teams must be of equal size"
+    total_players = len(team_a_ids)
+    pairings = {1: [], 2: [], 3: []}
+
+    # Initial pairings for round 1
+    for a, b in zip(team_a_ids, team_b_ids):
+        pairings[1].append((a, b))
+
+    # Generate pairings for subsequent rounds
+    for round_number in [2, 3]:
+        # Rotate Team B members to get new pairings
+        team_b_ids = team_b_ids[1:] + team_b_ids[:1]
+        for a, b in zip(team_a_ids, team_b_ids):
+            pairings[round_number].append((a, b))
+
+    return pairings
+
 
 bot.run(TOKEN)
