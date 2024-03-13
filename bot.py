@@ -2,7 +2,7 @@ import discord
 import asyncio
 import os
 import dotenv
-from datetime import datetime
+from datetime import datetime, timedelta
 from discord.ext import commands
 from discord.ui import Button, View
 import random
@@ -26,6 +26,7 @@ session_id  = None
 draft_message_id = None
 draft_channel_id = None
 draft_link = None
+draft_start_time = None
 sign_ups = {}
 
 class SignUpButton(Button):
@@ -74,24 +75,25 @@ class DraftCompleteButton(Button):
     async def callback(self, interaction: discord.Interaction):
         global sign_ups, session_id
 
-        # Make sure there are participants
         if not sign_ups:
             await interaction.response.send_message("There are no participants to start the draft.", ephemeral=True)
             return
-        
-        guild = interaction.guild
-        team_a, team_b = split_into_teams(list(sign_ups.values()))
 
-        # Get guild members for each team
-        team_a_members = [guild.get_member(int(user_id)) for user_id, name in sign_ups.items() if name in team_a]
-        team_b_members = [guild.get_member(int(user_id)) for user_id, name in sign_ups.items() if name in team_b]
+        guild = interaction.guild
+
+        # Assuming split_into_teams now returns lists of user IDs for team_a and team_b
+        team_a_ids, team_b_ids = split_into_teams(list(sign_ups.keys()))
+
+        team_a_members = [guild.get_member(user_id) for user_id in team_a_ids]
+        team_b_members = [guild.get_member(user_id) for user_id in team_b_ids]
+        all_members = [guild.get_member(user_id) for user_id in sign_ups.keys()]
 
         # Create team channels asynchronously
-        asyncio.create_task(create_team_channel(guild, "Team-A", team_a_members))
-        asyncio.create_task(create_team_channel(guild, "Team-B", team_b_members))
-        
-        # Respond to the interaction
-        await interaction.response.send_message("Team channels have been created", ephemeral=True)
+        asyncio.create_task(create_team_channel(guild, "Team-A", team_a_members, session_id))
+        asyncio.create_task(create_team_channel(guild, "Team-B", team_b_members, session_id))
+        asyncio.create_task(create_team_channel(guild, "Draft-chat", all_members, session_id))
+
+        await interaction.response.send_message("Team channels and the draft chat have been created.", ephemeral=True)
 
 
 class CancelDraftButton(Button):
@@ -153,7 +155,7 @@ import secrets
 @bot.tree.command(name='startdraft', description='Start a Magic: The Gathering draft table')
 async def start_draft(interaction: discord.Interaction):
     await interaction.response.defer()
-    global draft_message_id, draft_channel_id, draft_link, session_id
+    global draft_message_id, draft_channel_id, draft_link, session_id, draft_start_time
     
     # Generate and store the Draftmancer link
     session_id = ''.join(secrets.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
@@ -178,25 +180,33 @@ async def start_draft(interaction: discord.Interaction):
     draft_message_id = message.id
     draft_channel_id = message.channel.id
 
-async def create_team_channel(guild, team_name, team_members):
-    # Updated channel name to include session_id
-    channel_name = f"{team_name}-Draft-{session_id}"
+async def create_team_channel(guild, team_name, team_members, session_id=None):
+    channel_name = f"{team_name}-Draft"
+    if session_id:
+        channel_name += f"-{session_id}"
+    if team_name == "Draft-chat":
+        channel_name = f"{team_name}-{session_id}"
+
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(read_messages=False),
-        guild.me: discord.PermissionOverwrite(read_messages=True)  # Ensure the bot can access
+        guild.me: discord.PermissionOverwrite(read_messages=True)
     }
-    overwrites.update({member: discord.PermissionOverwrite(read_messages=True) for member in team_members})
+    for member in team_members:
+        overwrites[member] = discord.PermissionOverwrite(read_messages=True)
 
     channel = await guild.create_text_channel(name=channel_name, overwrites=overwrites)
 
-    # Post initial message about deletion timing
-    deletion_notice = await channel.send("This channel will be deleted in 6 hours.")
-
-    # Schedule channel deletion and update notice message
-    await asyncio.sleep(6 * 3600)  # Wait for 6 hours
+    # Convert timestamp to datetime
+    draft_start_datetime = datetime.fromtimestamp(draft_start_time)
+    deletion_time = draft_start_datetime + timedelta(hours=6)
+    
+    # Use deletion_time to format message
+    deletion_notice = await channel.send(f"This channel will be deleted <t:{int(deletion_time.timestamp())}:R>.")
+    
+    # Wait for 6 hours before deleting the channel and updating the deletion notice
+    await asyncio.sleep(6 * 3600)
     await deletion_notice.edit(content="This channel is being deleted now.")
     await channel.delete()
-
     return channel
 
 async def update_draft_message(message, user_id=None):
