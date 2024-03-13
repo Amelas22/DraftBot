@@ -28,24 +28,47 @@ draft_channel_id = None
 async def start_draft(interaction: discord.Interaction):
     global draft_message_id, draft_channel_id
     await interaction.response.defer()
-    draft_message = await interaction.followup.send('React to join the draft table!\n\n**Sign-Ups:**', ephemeral=False)
+
+    # Create the embed object
+    embed = discord.Embed(
+        title="Vintage Cube Team Draft Queue",
+        description="React to join the draft table!",
+        color=discord.Color.dark_magenta()  # You can choose a color that fits your server's theme
+    )
+    
+    # Optionally add fields, images, etc. to the embed
+    embed.add_field(name="Sign-Ups", value="No players yet.", inline=False)
+    embed.set_thumbnail(url=os.getenv("IMG_URL"))  # URL to a relevant image
+    embed.set_footer(text="React below to sign up!")
+
+    # Send the message as an embed
+    draft_message = await interaction.followup.send(embed=embed, ephemeral=False)
+    
+    # Store the IDs for later reference
     draft_message_id = draft_message.id
-    draft_channel_id = draft_message.channel.id  # Store the channel ID
+    draft_channel_id = draft_message.channel.id
 
 
 async def update_draft_message():
     global sign_ups, draft_message_id, draft_channel_id
-    if draft_message_id and draft_channel_id:  # Check if both IDs are set
-        channel = bot.get_channel(draft_channel_id)  # Use the channel ID to fetch the channel
+    if draft_message_id and draft_channel_id:
+        channel = bot.get_channel(draft_channel_id)
         if channel:
             try:
                 message = await channel.fetch_message(draft_message_id)
-                new_content = f'React to join the draft table!\n\n**Sign-Ups:**\n' + '\n'.join(sign_ups)
-                await message.edit(content=new_content)
+                embed = message.embeds[0]  # Assuming there's at least one embed in the message
+                if sign_ups:
+                    sign_ups_str = '\n'.join(sign_ups)
+                else:
+                    sign_ups_str = 'No players yet.'
+                embed.set_field_at(0, name="Sign-Ups", value=sign_ups_str, inline=False)
+                await message.edit(embed=embed)
             except discord.NotFound:
                 print(f"Message with ID {draft_message_id} not found.")
             except discord.Forbidden:
                 print("Bot doesn't have permissions to edit the message or fetch the channel.")
+            except Exception as e:
+                print(f"An error occurred: {e}")
 
 
 @bot.event
