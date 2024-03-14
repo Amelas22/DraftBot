@@ -184,6 +184,39 @@ class DraftSession:
                 seating_order.append(team_b_members[i].display_name)  # Adjusted for member objects
         return seating_order
     
+    async def move_message_to_draft_channel(self, bot, original_channel_id, original_message_id, draft_chat_channel_id):
+        original_channel = bot.get_channel(original_channel_id)
+        if not original_channel:
+            print(f"Original channel {original_channel_id} not found.")
+            return
+        try:
+            original_message = await original_channel.fetch_message(original_message_id)
+        except discord.NotFound:
+            print(f"Message {original_message_id} not found in channel {original_channel_id}.")
+            return
+
+        # Check if the draft chat channel is set and exists
+        draft_chat_channel = bot.get_channel(draft_chat_channel_id)
+        if not draft_chat_channel:
+            print(f"Draft chat channel {draft_chat_channel_id} not found.")
+            return
+
+        # Send the content of the original message to the draft chat channel
+        content = original_message.content
+        embeds = original_message.embeds
+        attachments = original_message.attachments
+        files = [await attachment.to_file() for attachment in attachments]  # Convert attachments to files
+
+        # Send content, embeds, and attachments if they exist
+        if content or embeds or files:
+            await draft_chat_channel.send(content=content, embeds=embeds, files=files)
+        else:
+            # If the original message has no content, embeds, or attachments, send a placeholder
+            await draft_chat_channel.send("Moved message content not available.")
+
+        # Delete the original message after a delay
+        await asyncio.sleep(5)  # Wait for 5 seconds before deleting the message
+        await original_message.delete()
 
 
 class SignUpButton(Button):
@@ -335,21 +368,25 @@ class PostPairingsButton(Button):
         self.session_id = session_id
 
     async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()  # Ensure there's enough time for operations
+        
         session = sessions.get(self.session_id)
         if session is None:
-            await interaction.response.send_message("The draft session for this message could not be found.", ephemeral=True)
+            await interaction.followup.send("The draft session for this message could not be found.", ephemeral=True)
             return
 
+        # Move the original draft announcement message before posting pairings
+        original_message_id = session.message_id
+        original_channel_id = interaction.channel.id  # Assuming the original message is in the same channel as the interaction
+        draft_chat_channel_id = session.draft_chat_channel
+        await session.move_message_to_draft_channel(bot, original_channel_id, original_message_id, draft_chat_channel_id)
+
+        # Generate and post pairings
         team_a_ids, team_b_ids = session.split_into_teams()
-
-        # Assuming calculate_pairings and post_pairings are correctly implemented
         pairings = session.calculate_pairings(team_a_ids, team_b_ids)
-
-        # Ensure post_pairings is adapted to use the pairings and does not require unnecessary arguments
         await session.post_pairings(interaction.guild)
 
-        await interaction.response.send_message("Pairings have been posted to the draft chat channel.", ephemeral=True)
-
+        await interaction.followup.send("Pairings have been posted to the draft chat channel and the original message moved.", ephemeral=True)
 
 
 @bot.event
