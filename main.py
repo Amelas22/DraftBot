@@ -215,7 +215,7 @@ class DraftSession:
             await draft_chat_channel.send("Moved message content not available.")
 
         # Delete the original message after a delay
-        await asyncio.sleep(5)  # Wait for 5 seconds before deleting the message
+        await asyncio.sleep(10)  # Wait for 10 seconds before deleting the message
         await original_message.delete()
 
 
