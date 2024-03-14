@@ -18,9 +18,8 @@ intents.guilds = True
 intents.members = True
 
 TOKEN = os.getenv("BOT_TOKEN")
-GUILD_ID = int(os.getenv("GUILD_ID"))
 
-bot = commands.Bot(command_prefix="!", intents=intents, debug_guilds=[GUILD_ID])
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 session_id  = None
 draft_message_id = None
