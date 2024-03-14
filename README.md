@@ -45,10 +45,14 @@ To start organizing a team draft event, use the following command in your Discor
 
 -   `/startdraft`: Triggers the bot to open sign-ups for the draft event, pinging users with a "Cube Drafter" role, and generates a link to Draftmancer.  
 
-**NOTE**: This bot does not update settings in Draftmancer. It generates a unique Draftmancer link, but settings like importing the cube, and seating order (set in the next step) still need to be completed by the host. 
+- **NOTE**: This bot does not update settings in Draftmancer. It generates a unique Draftmancer link, but settings like importing the cube, and seating order (set in the next step) still need to be completed by the host. 
 
-- Participants can interact with the bot through buttons to sign up, cancel their sign-up, or cancel the draft. After six or eight players have signed up, push "randomize teams" to create two teams and the seating order (**NOTE**: Host of Draftmancer link needs to rearrange seating order in Draftmancer as per the stated seating order. The Randomize Seating button must also be disabled).
-- Once thr draft is complete, push the "Draft Complete" button. This will generate three chat rooms: A combined chat with all users and two private channels for each respective teams. These channels will automatically delete themselves after six hours. 
+- Participants can interact with the bot through buttons to sign up, cancel their sign-up, or cancel the draft. After six or eight players have signed up, push "randomize teams" to create two teams and the seating order
+  
+- **NOTE**: Host of Draftmancer link needs to rearrange seating order in Draftmancer as per the stated seating order. The Randomize Seating button in Draftmancer must also be disabled.
+  
+- Once the draft is complete, push the "Draft Complete" button. This will generate three chat rooms: A combined chat with all users and two private channels for each respective team. These channels will automatically delete themselves after six hours.
+  
 - Once the rooms are created, push "Post Pairings". This will post round pairings into the shared chat channel.
 - Enjoy your draft! 
 
