@@ -44,7 +44,6 @@ class SignUpButton(Button):
         else:
             # User is signing up
             sign_ups[user_id] = interaction.user.display_name
-            # Optionally, send a confirmation message or update the sign-up list in the main message
             await interaction.response.send_message("You are now signed up.", ephemeral=True)
 
         await update_draft_message(interaction.message, interaction.user.id)
@@ -64,7 +63,6 @@ class CancelSignUpButton(Button):
         else:
             # User is canceling their sign-up
             del sign_ups[user_id]
-            # Optionally, send a confirmation message or update the sign-up list in the main message
             await interaction.response.send_message("Your sign-up has been canceled.", ephemeral=True)
 
         await update_draft_message(interaction.message, interaction.user.id)
@@ -76,11 +74,9 @@ class DraftCompleteButton(Button):
     async def callback(self, interaction: discord.Interaction):
         global sign_ups, session_id
 
-        # Quickly acknowledge the interaction to avoid "This interaction failed" message
         await interaction.response.defer(ephemeral=True)
 
         if not sign_ups:
-            # Since we've already deferred, we need to follow up with the actual response
             await interaction.followup.send("There are no participants to start the draft.", ephemeral=True)
             return
 
@@ -90,7 +86,6 @@ class DraftCompleteButton(Button):
         team_b_members = [guild.get_member(user_id) for user_id in team_b_ids]
         all_members = [guild.get_member(user_id) for user_id in sign_ups.keys()]
 
-        # Proceed with the channel creation and other tasks asynchronously
         # Gather all tasks to be executed
         tasks = [
             create_team_channel(guild, "Team-A", team_a_members, session_id),
@@ -101,7 +96,6 @@ class DraftCompleteButton(Button):
         # Wait for all tasks to complete
         team_a_channel, team_b_channel, draft_chat_channel = await asyncio.gather(*tasks)
         
-        # Enable the "Post Pairings" button by editing the original message's view
         message = await interaction.channel.fetch_message(interaction.message.id)
         view = message.components  # Get the current view from the message
         
@@ -109,8 +103,7 @@ class DraftCompleteButton(Button):
         for item in view:
             if isinstance(item, PostPairingsButton):
                 item.disabled = False  # Enable the button
-        
-        # Update the message with the new view
+ 
         await message.edit(view=view)
         await interaction.response.send_message("Draft complete. You can now post pairings.", ephemeral=True)
 
@@ -120,7 +113,7 @@ class CancelDraftButton(Button):
         super().__init__(style=discord.ButtonStyle.grey, label='Cancel Draft', custom_id='cancel_draft')
 
     async def callback(self, interaction: discord.Interaction):
-        global draft_message_id, draft_channel_id, sign_ups  # Correct use of global
+        global draft_message_id, draft_channel_id, sign_ups  
 
         user_id = interaction.user.id
 
@@ -217,7 +210,7 @@ async def start_draft(interaction: discord.Interaction):
     # Prepare the ping message
     ping_message = f"{cube_drafter_role.mention if cube_drafter_role else 'Cube Drafter'} Vintage Cube Draft Queue Open!"
     
-    # Send the ping message using followup since you've already called defer
+    # Send the ping message to role or "Cube Drafter" if role not found
     await interaction.followup.send(ping_message, ephemeral=False)
 
     embed = discord.Embed(
@@ -234,7 +227,6 @@ async def start_draft(interaction: discord.Interaction):
     view.add_item(CancelDraftButton())
     view.add_item(GenerateDraftmancerLinkButton())
     
-    # Now send the main message using followup as well
     message = await interaction.followup.send(embed=embed, view=view)
     draft_message_id = message.id
     draft_channel_id = message.channel.id
@@ -243,7 +235,7 @@ async def start_draft(interaction: discord.Interaction):
 async def create_team_channel(guild, team_name, team_members, session_id=None):
     global draft_chat_channel
 
-    # Find the category by name
+    # Find the chat category by name
     draft_category = discord.utils.get(guild.categories, name="Draft Channels")
     
     channel_name = f"{team_name}-Draft-{session_id}" if session_id else f"{team_name}-Draft"
@@ -261,7 +253,6 @@ async def create_team_channel(guild, team_name, team_members, session_id=None):
     if team_name == "Draft-chat":
         draft_chat_channel = channel.id
 
-    # Convert timestamp to datetime
     draft_start_datetime = datetime.fromtimestamp(draft_start_time)
     deletion_time = draft_start_datetime + timedelta(hours=6)
     
@@ -292,7 +283,7 @@ async def update_draft_message(message, user_id=None):
 
 async def post_pairings(channel, pairings, guild):
     # Ensure member mentions are enabled in the channel
-    await channel.edit(slowmode_delay=0)  # Temporarily ensure we can send multiple messages quickly
+    await channel.edit(slowmode_delay=0) 
     
     for round_number, round_pairings in pairings.items():
         # Create an embed for the round
@@ -312,33 +303,6 @@ async def post_pairings(channel, pairings, guild):
     # Construct a message tagging all participants
     sign_up_tags = ' '.join([guild.get_member(user_id).mention for user_id in sign_ups.keys() if guild.get_member(user_id)])
     await channel.send(f"{sign_up_tags}\nPairings Posted Above")
-
-    # Restore the original slowmode delay if needed
-    # await channel.edit(slowmode_delay=YOUR_ORIGINAL_SLOWMODE_DELAY)
-async def post_pairings(channel, pairings, guild):
-    # Ensure member mentions are enabled in the channel
-    await channel.edit(slowmode_delay=0)  # Temporarily ensure we can send multiple messages quickly
-    
-    for round_number, round_pairings in pairings.items():
-        # Create an embed for the round
-        embed = discord.Embed(title=f"Round {round_number} Pairings", color=discord.Color.blue())
-        
-        for player_id, opponent_id in round_pairings:
-            player = guild.get_member(player_id)
-            opponent = guild.get_member(opponent_id)
-            player_name = player.display_name if player else 'Unknown'
-            opponent_name = opponent.display_name if opponent else 'Unknown'
-            # Add each pairing as a field in the embed
-            embed.add_field(name=f"Match {round_pairings.index((player_id, opponent_id)) + 1}", value=f"{player_name} vs {opponent_name}", inline=False)
-        
-        # Send the embed for the current round
-        await channel.send(embed=embed)
-
-    # Construct a message tagging all participants
-    sign_up_tags = ' '.join([guild.get_member(user_id).mention for user_id in sign_ups.keys() if guild.get_member(user_id)])
-    await channel.send(f"{sign_up_tags}\nPairings Posted Above")
-
-
 
 
 def split_into_teams(signups):
