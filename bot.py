@@ -167,24 +167,34 @@ class PostPairingsButton(Button):
         global draft_chat_channel, sign_ups
 
         if draft_chat_channel is None:
-            # Draft not completed yet, inform the user
             await interaction.response.send_message("Pairings can't be posted until the draft is completed.", ephemeral=True)
             return
 
-        # Split sign-ups into team A and team B
-        team_a_ids, team_b_ids = split_into_teams(list(sign_ups.keys()))
+        # Initially respond with an ephemeral message indicating the action is in progress
+        await interaction.response.send_message("Posting pairings and original post to the draft chat...", ephemeral=True)
 
-        # Generate pairings
-        pairings = calculate_pairings(team_a_ids, team_b_ids)
-
-        # Post the pairings
+        # Proceed with moving the content
         guild = interaction.guild
         draft_chat_channel_obj = guild.get_channel(draft_chat_channel)
+        original_message = await interaction.channel.fetch_message(interaction.message.id)
+        
         if draft_chat_channel_obj:
+            # Move the content of the original post to the draft chat channel
+            await draft_chat_channel_obj.send(embed=original_message.embeds[0])
+            for attachment in original_message.attachments:
+                await draft_chat_channel_obj.send(attachment.url)
+            
+            # Generate and post the pairings
+            team_a_ids, team_b_ids = split_into_teams(list(sign_ups.keys()))
+            pairings = calculate_pairings(team_a_ids, team_b_ids)
             await post_pairings(draft_chat_channel_obj, pairings, guild)
-            await interaction.response.send_message("Pairings have been posted in the draft chat.", ephemeral=True)
+            
+            # Delete the original message after moving its content
+            await original_message.delete()
+
         else:
-            await interaction.response.send_message("Draft chat channel not found.", ephemeral=True)
+            # Handle the case where the draft chat channel is not found
+            print("Draft chat channel not found.")
 
 
 @bot.event
