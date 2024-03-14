@@ -408,30 +408,23 @@ async def on_ready():
 async def start_draft(interaction: discord.Interaction):
     await interaction.response.defer()
 
-    # Correctly define draft_start_time before using it
     draft_start_time = datetime.now().timestamp()
-
-    # Generate a unique session ID
     session_id = f"{interaction.user.id}-{int(draft_start_time)}"
     draft_id = ''.join(secrets.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
-    # Generate and store the Draftmancer link
     draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
 
-    # Create a new session and store relevant details
     session = DraftSession(session_id)
-    session.guild_id = interaction.guild_id  # Store the guild ID for later use
+    session.guild_id = interaction.guild_id
     session.draft_link = draft_link
     session.draft_id = draft_id
     session.draft_start_time = draft_start_time
 
     sessions[session_id] = session
 
-    # Prepare the ping message
     cube_drafter_role = discord.utils.get(interaction.guild.roles, name="Cube Drafter")
     ping_message = f"{cube_drafter_role.mention if cube_drafter_role else 'Cube Drafter'} Vintage Cube Draft Queue Open!"
     await interaction.followup.send(ping_message, ephemeral=False)
 
-    # Embed creation using draft_start_time correctly defined
     embed = discord.Embed(
         title=f"Vintage Cube Team Draft Queue - Started <t:{int(draft_start_time)}:R>",
         description=f"Click the button to join the draft table!\n\n**Draftmancer Session**: **[Join Here]({draft_link})**",
@@ -446,14 +439,15 @@ async def start_draft(interaction: discord.Interaction):
     view.add_item(CancelDraftButton(session_id))
     view.add_item(GenerateDraftmancerLinkButton(session_id))
     
-    # Send the draft session details to the channel
     message = await interaction.followup.send(embed=embed, view=view)
     
-    # Update session with message and channel IDs
     session.draft_message_id = message.id
     session.message_id = message.id
-    #schedule cleanup
+    
     await session.schedule_session_cleanup()
+
+    # Pin the message to the channel
+    await message.pin()
 
 
 bot.run(TOKEN)
