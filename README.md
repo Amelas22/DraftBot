@@ -32,11 +32,11 @@ Installation and Setup
 
 3.  Configure your bot by creating a `.env` file in the root directory of the project. Add your Discord bot token to this file:
 
- `BOT_TOKEN=your_discord_bot_token_here`
+    `BOT_TOKEN=your_discord_bot_token_here`
 
 4.  Run the bot by executing the main script:
 
-    `python bot.py`
+    `python main.py`
 
 Usage
 -----
