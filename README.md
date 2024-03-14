@@ -4,7 +4,7 @@ README for Magic: The Gathering Team Draft Bot
 Overview
 --------
 
-The Magic: The Gathering Team Draft Bot is a Discord application designed to facilitate and manage team draft events within the Discord platform. It automates several aspects of the drafting process, including participant sign-ups, team randomization, channel creation for team communication, and match pairings announcements. This tool aims to streamline the organization of draft events, making it easier for both organizers and participants to enjoy the game.
+The Magic: The Gathering Team Draft Bot is a Discord application designed to facilitate and manage team draft events within the Discord platform. It automates several aspects of the drafting process, including participant sign-ups, team randomization, channel creation for team communication, and match pairings announcements. This tool aims to streamline the organization of draft events, making it easier for both organizers and participants to enjoy the draft. 
 
 Features
 --------
@@ -28,20 +28,13 @@ Installation and Setup
 
 2.  Install dependencies by ensuring you have the latest version of `discord.py` library. You can install it using pip:
 
-    bashCopy code
-
     `pip install discord.py`
 
-3.  Configure your bot by creating a `.env` file in the root directory of the project. Add your Discord bot token and the target guild (server) ID in this file:
+3.  Configure your bot by creating a `.env` file in the root directory of the project. Add your Discord bot token to this file:
 
-    makefileCopy code
-
-    `BOT_TOKEN=your_discord_bot_token_here
-    GUILD_ID=your_discord_guild_id_here`
+ `BOT_TOKEN=your_discord_bot_token_here`
 
 4.  Run the bot by executing the main script:
-
-    bashCopy code
 
     `python bot.py`
 
@@ -50,9 +43,14 @@ Usage
 
 To start organizing a team draft event, use the following command in your Discord server:
 
--   `/startdraft`: Triggers the bot to open sign-ups for the draft event, notify users, and initiate the drafting process.
+-   `/startdraft`: Triggers the bot to open sign-ups for the draft event, pinging users with a "Cube Drafter" role, and generates a link to Draftmancer.  
 
-Participants can interact with the bot through buttons to sign up, cancel their sign-up, and view the randomized teams and match pairings once the draft begins.
+**NOTE**: This bot does not update settings in Draftmancer. It generates a unique Draftmancer link, but settings like importing the cube, and seating order (set in the next step) still need to be completed by the host. 
+
+- Participants can interact with the bot through buttons to sign up, cancel their sign-up, or cancel the draft. After six or eight players have signed up, push "randomize teams" to create two teams and the seating order (**NOTE**: Host of Draftmancer link needs to rearrange seating order in Draftmancer as per the stated seating order. The Randomize Seating button must also be disabled).
+- Once thr draft is complete, push the "Draft Complete" button. This will generate three chat rooms: A combined chat with all users and two private channels for each respective teams. These channels will automatically delete themselves after six hours. 
+- Once the rooms are created, push "Post Pairings". This will post round pairings into the shared chat channel.
+- Enjoy your draft! 
 
 Contributing
 ------------
