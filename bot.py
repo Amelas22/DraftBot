@@ -135,8 +135,8 @@ class CancelDraftButton(Button):
 
 class GenerateDraftmancerLinkButton(Button):
     def __init__(self):
-        # Initializes the button with the label "Start Draft"
-        super().__init__(style=discord.ButtonStyle.blurple, label="Start Draft", custom_id='start_draft')
+        # Initializes the button with the label "Randomize Teams"
+        super().__init__(style=discord.ButtonStyle.blurple, label="Randomize Teams", custom_id='start_draft')
 
     async def callback(self, interaction: discord.Interaction):
         global sign_ups, draft_link
@@ -199,7 +199,6 @@ class PostPairingsButton(Button):
 async def on_ready():
     print(f'Logged in as {bot.user}!')
 
-import secrets
 
 @bot.tree.command(name='startdraft', description='Start a Magic: The Gathering draft table')
 async def start_draft(interaction: discord.Interaction):
@@ -211,6 +210,16 @@ async def start_draft(interaction: discord.Interaction):
     draft_link = f"https://draftmancer.com/?session=DB{session_id}"
     
     draft_start_time = datetime.now().timestamp()
+
+    # Find the "Cube Drafter" role by name
+    cube_drafter_role = discord.utils.get(interaction.guild.roles, name="Cube Drafter")
+    
+    # Prepare the ping message
+    ping_message = f"{cube_drafter_role.mention if cube_drafter_role else 'Cube Drafter'} Vintage Cube Draft Queue Open!"
+    
+    # Send the ping message using followup since you've already called defer
+    await interaction.followup.send(ping_message, ephemeral=False)
+
     embed = discord.Embed(
         title=f"Vintage Cube Team Draft Queue - Started <t:{int(draft_start_time)}:R>",
         description=f"Click the button to join the draft table!\n\n**Draftmancer Session**: **[Join Here]({draft_link})**",
@@ -224,20 +233,21 @@ async def start_draft(interaction: discord.Interaction):
     view.add_item(CancelSignUpButton())
     view.add_item(CancelDraftButton())
     view.add_item(GenerateDraftmancerLinkButton())
-
+    
+    # Now send the main message using followup as well
     message = await interaction.followup.send(embed=embed, view=view)
     draft_message_id = message.id
     draft_channel_id = message.channel.id
 
+
 async def create_team_channel(guild, team_name, team_members, session_id=None):
-    global draft_chat_channel  
+    global draft_chat_channel
 
-    channel_name = f"{team_name}-Draft"
-    if session_id:
-        channel_name += f"-{session_id}"
-    if team_name == "Draft-chat":
-        channel_name = f"{team_name}-{session_id}"
-
+    # Find the category by name
+    draft_category = discord.utils.get(guild.categories, name="Draft Channels")
+    
+    channel_name = f"{team_name}-Draft-{session_id}" if session_id else f"{team_name}-Draft"
+    
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(read_messages=False),
         guild.me: discord.PermissionOverwrite(read_messages=True)
@@ -245,9 +255,9 @@ async def create_team_channel(guild, team_name, team_members, session_id=None):
     for member in team_members:
         overwrites[member] = discord.PermissionOverwrite(read_messages=True)
 
-    channel = await guild.create_text_channel(name=channel_name, overwrites=overwrites)
+    # Specify the category in the channel creation
+    channel = await guild.create_text_channel(name=channel_name, overwrites=overwrites, category=draft_category)
 
-    # Update draft_chat_channel with the ID of the draft chat channel
     if team_name == "Draft-chat":
         draft_chat_channel = channel.id
 
@@ -262,6 +272,7 @@ async def create_team_channel(guild, team_name, team_members, session_id=None):
     await asyncio.sleep(6 * 3600)
     await deletion_notice.edit(content="This channel is being deleted now.")
     await channel.delete()
+
     return channel
 
 async def update_draft_message(message, user_id=None):
