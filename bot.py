@@ -5,7 +5,6 @@ import dotenv
 from datetime import datetime, timedelta
 from discord.ext import commands
 from discord.ui import Button, View
-import links
 import random
 import secrets
 
