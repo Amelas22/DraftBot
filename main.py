@@ -77,16 +77,27 @@ class DraftSession:
         deletion_message = await channel.send(f"This channel will be deleted <t:{deletion_timestamp}:R>.")
         
         # Automatically delete the channel after 7 hours
-        await asyncio.sleep(45)
+        await asyncio.sleep(7 * 3600)
         await channel.delete(reason="Scheduled draft session cleanup")
 
-    async def cleanup(self, guild):
-        for channel_id in self.channel_ids:
-            channel = guild.get_channel(channel_id)
-            if channel:
-                await channel.delete(reason="Draft session ended")
-        # Remove the session from the sessions dictionary
-        sessions.pop(self.message_id, None)
+    async def schedule_session_cleanup(self):
+        # Calculate the wait time until deletion
+        now = datetime.now()
+        wait_time = (self.deletion_time - now).total_seconds()
+
+        # Schedule the cleanup task to run after the wait time
+        asyncio.create_task(self.cleanup_task())
+    
+    async def cleanup_task(self):
+        # Calculate the wait time again to ensure accuracy
+        now = datetime.now()
+        wait_time = (self.deletion_time - now).total_seconds()
+
+        # Use asyncio.sleep to wait until the deletion time
+        await asyncio.sleep(wait_time)
+
+        # Perform the cleanup: Remove the session from the sessions dictionary
+        sessions.pop(self.session_id, None)
         
     async def update_draft_complete_message(self, interaction):
         message = await interaction.channel.fetch_message(self.message_id)
@@ -441,6 +452,8 @@ async def start_draft(interaction: discord.Interaction):
     # Update session with message and channel IDs
     session.draft_message_id = message.id
     session.message_id = message.id
+    #schedule cleanup
+    await session.schedule_session_cleanup()
 
 
 bot.run(TOKEN)
