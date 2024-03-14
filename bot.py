@@ -280,13 +280,54 @@ async def update_draft_message(message, user_id=None):
     await message.edit(embed=embed, view=view)
 
 async def post_pairings(channel, pairings, guild):
+    # Ensure member mentions are enabled in the channel
+    await channel.edit(slowmode_delay=0)  # Temporarily ensure we can send multiple messages quickly
+    
     for round_number, round_pairings in pairings.items():
-        message_content = f"**Round {round_number}**\n"
+        # Create an embed for the round
+        embed = discord.Embed(title=f"Round {round_number} Pairings", color=discord.Color.blue())
+        
         for player_id, opponent_id in round_pairings:
             player = guild.get_member(player_id)
             opponent = guild.get_member(opponent_id)
-            message_content += f"{player.display_name if player else 'Unknown'} vs {opponent.display_name if opponent else 'Unknown'}\n"
-        await channel.send(message_content)
+            player_name = player.display_name if player else 'Unknown'
+            opponent_name = opponent.display_name if opponent else 'Unknown'
+            # Add each pairing as a field in the embed
+            embed.add_field(name=f"Match {round_pairings.index((player_id, opponent_id)) + 1}", value=f"{player_name} vs {opponent_name}", inline=False)
+        
+        # Send the embed for the current round
+        await channel.send(embed=embed)
+
+    # Construct a message tagging all participants
+    sign_up_tags = ' '.join([guild.get_member(user_id).mention for user_id in sign_ups.keys() if guild.get_member(user_id)])
+    await channel.send(f"{sign_up_tags}\nPairings Posted Above")
+
+    # Restore the original slowmode delay if needed
+    # await channel.edit(slowmode_delay=YOUR_ORIGINAL_SLOWMODE_DELAY)
+async def post_pairings(channel, pairings, guild):
+    # Ensure member mentions are enabled in the channel
+    await channel.edit(slowmode_delay=0)  # Temporarily ensure we can send multiple messages quickly
+    
+    for round_number, round_pairings in pairings.items():
+        # Create an embed for the round
+        embed = discord.Embed(title=f"Round {round_number} Pairings", color=discord.Color.blue())
+        
+        for player_id, opponent_id in round_pairings:
+            player = guild.get_member(player_id)
+            opponent = guild.get_member(opponent_id)
+            player_name = player.display_name if player else 'Unknown'
+            opponent_name = opponent.display_name if opponent else 'Unknown'
+            # Add each pairing as a field in the embed
+            embed.add_field(name=f"Match {round_pairings.index((player_id, opponent_id)) + 1}", value=f"{player_name} vs {opponent_name}", inline=False)
+        
+        # Send the embed for the current round
+        await channel.send(embed=embed)
+
+    # Construct a message tagging all participants
+    sign_up_tags = ' '.join([guild.get_member(user_id).mention for user_id in sign_ups.keys() if guild.get_member(user_id)])
+    await channel.send(f"{sign_up_tags}\nPairings Posted Above")
+
+
 
 
 def split_into_teams(signups):
