@@ -5,6 +5,7 @@ import dotenv
 from datetime import datetime, timedelta
 from discord.ext import commands
 from discord.ui import Button, View
+import links
 import random
 import secrets
 
@@ -218,7 +219,7 @@ async def start_draft(interaction: discord.Interaction):
         color=discord.Color.dark_magenta()
     )
     embed.add_field(name="Sign-Ups", value="No players yet.", inline=False)
-    embed.set_thumbnail(url=os.getenv("IMG_URL"))
+    embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1186757246936424558/1217295353972527176/131.png?ex=660381a4&is=65f10ca4&hm=bce17bd735e33bc0d35ef3bd44fa9b48ee20b80a32bfe32e200013d7dec666f9&")
 
     view = discord.ui.View()
     view.add_item(SignUpButton())
