@@ -57,7 +57,7 @@ class DraftSession:
 
     async def create_team_channel(self, guild, team_name, team_members):
         draft_category = discord.utils.get(guild.categories, name="Draft Channels")
-        channel_name = f"{team_name}-Draft-{self.draft_id}"
+        channel_name = f"{team_name}-Chat-{self.draft_id}"
 
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
