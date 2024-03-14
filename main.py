@@ -23,6 +23,42 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 sessions = {}
 
+class Match:
+    def __init__(self, match_id, player1_id, player2_id):
+        self.match_id = match_id
+        self.player1_id = player1_id
+        self.player2_id = player2_id
+        self.player1_wins = None
+        self.player2_wins = None
+
+
+class ReportResultsModal(discord.ui.Modal):
+    def __init__(self, *args, session, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.session = session
+
+        self.match_number = discord.ui.TextInput(label="What match number? (see pairings)", style=discord.TextStyle.short)
+        self.add_item(self.match_number)
+
+        self.your_wins = discord.ui.TextInput(label="Your game wins:", style=discord.TextStyle.short)
+        self.add_item(self.your_wins)
+
+        self.opponent_wins = discord.ui.TextInput(label="Opponent game wins:", style=discord.TextStyle.short)
+        self.add_item(self.opponent_wins)
+
+    async def callback(self, interaction: discord.Interaction):
+        match_number = int(self.match_number.value)
+        your_wins = int(self.your_wins.value)
+        opponent_wins = int(self.opponent_wins.value)
+
+        # Assuming the session has a method to report match results
+        try:
+            self.session.report_match_result(match_number, your_wins, opponent_wins)
+            await interaction.response.send_message(f"Results for Match {match_number} reported successfully.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"Failed to report results: {str(e)}", ephemeral=True)
+
+
 class DraftSession:
     def __init__(self, session_id):
         self.session_id = session_id
@@ -156,21 +192,37 @@ class DraftSession:
     
     def calculate_pairings(self, team_a_ids, team_b_ids):
         assert len(team_a_ids) == len(team_b_ids), "Teams must be of equal size"
-        total_players = len(team_a_ids)
-        pairings = {1: [], 2: [], 3: []}
+        total_rounds = 3  # Assuming 3 rounds for simplicity
+        pairings = {round_num: [] for round_num in range(1, total_rounds + 1)}
+        match_id_counter = 1
 
         # Initial pairings for round 1
         for a, b in zip(team_a_ids, team_b_ids):
             pairings[1].append((a, b))
 
         # Generate pairings for subsequent rounds
-        for round_number in [2, 3]:
+        for round_number in range(2, total_rounds + 1):
             # Rotate Team B members to get new pairings
             team_b_ids = team_b_ids[1:] + team_b_ids[:1]
             for a, b in zip(team_a_ids, team_b_ids):
                 pairings[round_number].append((a, b))
 
+        self.matches = []
+        # Here's where we correctly handle the iteration over rounds and their matches
+        for round_number, matches in pairings.items():
+            for player1, player2 in matches:
+                # Use match_id_counter as the unique match ID
+                self.matches.append(Match(match_id_counter, player1, player2))
+                match_id_counter += 1  # Increment for the next match
+
         return pairings
+
+    
+    def report_match_result(self, match_id, player1_wins, player2_wins):
+        match = next((m for m in self.matches if m.match_id == match_id), None)
+        if match:
+            match.player1_wins = player1_wins
+            match.player2_wins = player2_wins
     
     def split_into_teams(self):
         sign_ups_list = list(self.sign_ups.keys())
@@ -450,5 +502,32 @@ async def start_draft(interaction: discord.Interaction):
     # Pin the message to the channel
     await message.pin()
 
+@bot.tree.command(name='reportresults', description='Report the results of your match')
+async def report_results(interaction: discord.Interaction):
+    # You'll need a way to get the session associated with the interaction
+    # For simplicity, let's assume each channel is associated with a unique session
+    channel_name = interaction.channel.name
+    draft_id = get_draft_id_from_channel_name(channel_name)  
+    session_id = find_session_id_by_draft_id(draft_id)  
+    session = sessions.get(session_id)
+
+    if session:
+        modal = ReportResultsModal(title="Report Match Results", session=session)
+        await interaction.response.send_modal(modal)
+    else:
+        await interaction.response.send_message("No active draft session found for this channel.", ephemeral=True)
+
+
+def get_draft_id_from_channel_name(channel_name):
+    # Example implementation, adjust based on your channel naming convention
+    # Assuming the draft_id is at the end of the channel name, following a dash
+    return channel_name.split('-')[-1]
+
+def find_session_id_by_draft_id(draft_id):
+    # Iterate over sessions to find the one with the matching draft_id
+    for session_id, session in sessions.items():
+        if session.draft_id == draft_id:
+            return session_id
+    return None
 
 bot.run(TOKEN)
