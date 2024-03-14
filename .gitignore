@@ -3,6 +3,7 @@ key
 *.pub
 *.png
 
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -132,6 +133,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+stage/
 
 # Spyder project settings
 .spyderproject
