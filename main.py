@@ -405,7 +405,7 @@ class PostPairingsButton(Button):
 async def on_ready():
     print(f'Logged in as {bot.user}!')
 
-@bot.tree.command(name='startdraft', description='Start a Magic: The Gathering draft table')
+@bot.slash_command(name='startdraft', description='Start a Magic: The Gathering draft table', guild_id=None)
 async def start_draft(interaction: discord.Interaction):
     await interaction.response.defer()
 
