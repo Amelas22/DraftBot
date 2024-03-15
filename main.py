@@ -225,10 +225,39 @@ class DraftSession:
 
 class PersistentView(View):
     def __init__(self, session_id):
-        super().__init__(timeout=None)  # Make view persistent
-        self.session_id = session_id 
+        super().__init__(timeout=None)
+        self.session_id = session_id
 
-    async def sign_up_callback(self, interaction: discord.Interaction, user_id: int): 
+        # Initialize buttons without directly setting callbacks via decorators
+        self.add_item(discord.ui.Button(label="Sign Up", style=discord.ButtonStyle.green, custom_id=f"{session_id}_sign_up"))
+        self.add_item(discord.ui.Button(label="Cancel Sign Up", style=discord.ButtonStyle.red, custom_id=f"{session_id}_cancel_sign_up"))
+        self.add_item(discord.ui.Button(label="Cancel Draft", style=discord.ButtonStyle.grey, custom_id=f"{session_id}_cancel_draft"))
+        self.add_item(discord.ui.Button(label="Randomize Teams", style=discord.ButtonStyle.blurple, custom_id=f"{session_id}_randomize_teams"))
+        self.add_item(discord.ui.Button(label="Draft Complete", style=discord.ButtonStyle.green, custom_id=f"{session_id}_draft_complete", disabled=True))
+        self.add_item(discord.ui.Button(label="Post Pairings", style=discord.ButtonStyle.primary, custom_id=f"{session_id}_post_pairings", disabled=True))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.data['custom_id'] == f"{self.session_id}_sign_up":
+            await self.sign_up_callback(interaction)
+        elif interaction.data['custom_id'] == f"{self.session_id}_cancel_sign_up":
+            await self.cancel_sign_up_callback(interaction)
+        elif interaction.data['custom_id'] == f"{self.session_id}_cancel_draft":
+            await self.cancel_draft_callback(interaction)
+        elif interaction.data['custom_id'] == f"{self.session_id}_randomize_teams":
+            await self.randomize_teams_callback(interaction)
+        elif interaction.data['custom_id'] == f"{self.session_id}_draft_complete":
+            await self.draft_complete_callback(interaction)
+        elif interaction.data['custom_id'] == f"{self.session_id}_post_pairings":
+            await self.post_pairings_callback(interaction)
+        else:
+            # If the custom_id doesn't match any known button, you may want to log this or handle it appropriately.
+            # Returning False will stop the interaction from being processed further by this View.
+            return False
+
+        # Returning True to indicate the interaction has been successfully processed.
+        return True
+
+    async def sign_up_callback(self, interaction: discord.Interaction): 
         session = sessions.get(self.session_id)
         if not session:
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
@@ -247,7 +276,7 @@ class PersistentView(View):
             await session.update_draft_message(interaction)
         
 
-    async def cancel_sign_up_callback(self, interaction: discord.Interaction, user_id: int):
+    async def cancel_sign_up_callback(self, interaction: discord.Interaction):
         session = sessions.get(self.session_id)
         if not session:
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
@@ -345,8 +374,18 @@ class PersistentView(View):
             color=discord.Color.gold()
         )
 
-        # Respond with the embed
-        await interaction.response.edit_message(embed=embed)
+        # Iterate over the view's children (buttons) to update their disabled status
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                # Enable "Post Pairings" and "Draft Complete" buttons
+                if item.custom_id in [f"{self.session_id}_post_pairings", f"{self.session_id}_draft_complete"]:
+                    item.disabled = False
+                else:
+                    # Disable all other buttons
+                    item.disabled = True
+
+        # Respond with the embed and updated view
+        await interaction.response.edit_message(embed=embed, view=self)
 
         
     
@@ -373,27 +412,27 @@ class PersistentView(View):
         
 
 
-    @discord.ui.button(label="Sign Up", style=discord.ButtonStyle.green, custom_id="persistent_sign_up")
+    #@discord.ui.button(label="Sign Up", style=discord.ButtonStyle.green, custom_id="persistent_sign_up")
     async def sign_up(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.sign_up_callback(interaction, interaction.user.id)
 
-    @discord.ui.button(label="Cancel Sign Up", style=discord.ButtonStyle.red, custom_id="persistent_cancel_sign_up")
+    #@discord.ui.button(label="Cancel Sign Up", style=discord.ButtonStyle.red, custom_id="persistent_cancel_sign_up")
     async def cancel_sign_up(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.cancel_sign_up_callback(interaction, interaction.user.id)
         
-    @discord.ui.button(label="Draft Complete", style=discord.ButtonStyle.green, custom_id="persistent_draft_complete")
+    #@discord.ui.button(label="Draft Complete", style=discord.ButtonStyle.green, custom_id="persistent_draft_complete")
     async def draft_complete(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.draft_complete_callback(interaction)
 
-    @discord.ui.button(label="Cancel Draft", style=discord.ButtonStyle.grey, custom_id="persistent_cancel_draft")
+    #@discord.ui.button(label="Cancel Draft", style=discord.ButtonStyle.grey, custom_id="persistent_cancel_draft")
     async def cancel_draft(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.cancel_draft_callback(interaction)
 
-    @discord.ui.button(label="Randomize Teams", style=discord.ButtonStyle.blurple, custom_id="persistent_randomize_teams")
+    #@discord.ui.button(label="Randomize Teams", style=discord.ButtonStyle.blurple, custom_id="persistent_randomize_teams")
     async def randomize_teams(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.randomize_teams_callback(interaction)
 
-    @discord.ui.button(label="Post Pairings", style=discord.ButtonStyle.primary, custom_id="persistent_post_pairings")
+    #@discord.ui.button(label="Post Pairings", style=discord.ButtonStyle.primary, custom_id="persistent_post_pairings")
     async def post_pairings(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.post_pairings_callback(interaction)
 
