@@ -428,6 +428,8 @@ async def start_draft(interaction: discord.Interaction):
 
     sessions[session_id] = session
 
+    add_session(session_id, session)
+
     cube_drafter_role = discord.utils.get(interaction.guild.roles, name="Cube Drafter")
     ping_message = f"{cube_drafter_role.mention if cube_drafter_role else 'Cube Drafter'} Vintage Cube Draft Queue Open!"
     await interaction.followup.send(ping_message, ephemeral=False)
@@ -449,6 +451,18 @@ async def start_draft(interaction: discord.Interaction):
     # Pin the message to the channel
     await message.pin()
 
+def add_session(session_id, session):
+    # Ensure the sessions dictionary doesn't exceed 20 entries
+    if len(sessions) >= 20:
+        # Sort sessions by their ID (which includes the timestamp) and remove the oldest
+        oldest_session_id = sorted(sessions.keys())[0]
+        del sessions[oldest_session_id]
+        print(f"Removed oldest session: {oldest_session_id}")
+
+    # Add the new session
+    sessions[session_id] = session
+    print(f"Added new session: {session_id}")
+
 async def cleanup_sessions_task():
     while True:
         current_time = datetime.now()
@@ -466,7 +480,7 @@ async def cleanup_sessions_task():
                 
                 # Once all associated channels are handled, remove the session from the dictionary
                 del sessions[session_id]
-                print(f"Session {session_id} has been removed.")
+                print(f"Session {session_id} has been removed due to time.")
 
         # run function every hour
         await asyncio.sleep(3600)  # Sleep for 1 hour
