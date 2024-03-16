@@ -35,6 +35,8 @@ class DraftSession:
         self.draft_chat_channel = None
         self.guild_id = None
         self.draft_id = None
+        self.team_a = None
+        self.team_b = None
         self.sign_ups = {}
         self.channel_ids = []
 
@@ -49,83 +51,55 @@ class DraftSession:
         await message.edit(embed=embed)
 
 
-    async def create_team_channel(self, guild, team_name, team_members):
+    async def create_team_channel(self, guild, team_name, team_members, team_a, team_b):
         draft_category = discord.utils.get(guild.categories, name="Draft Channels")
         channel_name = f"{team_name}-Chat-{self.draft_id}"
 
+        # Retrieve the "Cube Overseer" role
+        overseer_role = discord.utils.get(guild.roles, name="Cube Overseer")
+        
+        # Basic permissions overwrites for the channel
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             guild.me: discord.PermissionOverwrite(read_messages=True)
         }
+
+        # If it's a team channel, adjust permissions specifically for overseers in the draft
+        if team_name in ["Team-A", "Team-B"]:
+            # Add all overseers with read permission initially
+            if overseer_role:
+                overwrites[overseer_role] = discord.PermissionOverwrite(read_messages=True)
+            
+            participating_overseers = [member for member in overseer_role.members if member.id in team_a or member.id in team_b]
+            for overseer in participating_overseers:
+                # Remove access for overseers who are part of the other team
+                if (team_name == "Team-A" and overseer.id in team_b) or (team_name == "Team-B" and overseer.id in team_a):
+                    overwrites[overseer] = discord.PermissionOverwrite(read_messages=False)
+        
+        # Add team members with read permission. This specifically allows these members, overriding role-based permissions if needed.
         for member in team_members:
             overwrites[member] = discord.PermissionOverwrite(read_messages=True)
-
+        
+        # Create the channel with the specified overwrites
         channel = await guild.create_text_channel(name=channel_name, overwrites=overwrites, category=draft_category)
         self.channel_ids.append(channel.id)
 
         if team_name == "Draft-chat":
             self.draft_chat_channel = channel.id
 
-        # Since self.draft_start_time is a datetime object, you can directly add timedelta to it
-        deletion_timestamp = int(self.deletion_time.timestamp())  # Convert to integer for Unix time
-        deletion_message = await channel.send(f"This channel will be deleted <t:{deletion_timestamp}:R>.")
-        
-        # Automatically delete the channel after 7 hours
-        await asyncio.sleep(7 * 3600)
-        await channel.delete(reason="Scheduled draft session cleanup")
-
-    async def schedule_session_cleanup(self):
-        # Calculate the wait time until deletion
-        now = datetime.now()
-        wait_time = (self.deletion_time - now).total_seconds()
-
-        # Schedule the cleanup task to run after the wait time
-        asyncio.create_task(self.cleanup_task())
-    
-    async def cleanup_task(self):
-        # Calculate the wait time again to ensure accuracy
-        now = datetime.now()
-        wait_time = (self.deletion_time - now).total_seconds()
-
-        # Use asyncio.sleep to wait until the deletion time
-        await asyncio.sleep(wait_time)
-
-        # Perform the cleanup: Remove the session from the sessions dictionary
-        sessions.pop(self.session_id, None)
-        
+           
     async def update_draft_complete_message(self, interaction):
-        message = await interaction.channel.fetch_message(self.message_id)
-        view = View()
-        
-        # Assuming you want to disable all buttons in the view
-        for item in message.components:  # This will not work as expected since message.components is not directly iterable in this way.
-            if isinstance(item, discord.ui.Button):  # This is pseudo-code; you'll need to adapt it based on your actual need.
-                # Clone or recreate the buttons you need in your view, and set them to disabled if necessary
-                new_button = discord.ui.Button(style=item.style, label=item.label, custom_id=item.custom_id, disabled=True)
-                view.add_item(new_button)
-
-        await message.edit(view=view)  # Use the new view instance here
         await interaction.followup.send("Draft complete. You can now post pairings.", ephemeral=True)
-    
-    def split_into_teams(self):
-        sign_ups_list = list(self.sign_ups.keys())
-        random.shuffle(sign_ups_list)
-        mid_point = len(sign_ups_list) // 2
-        return sign_ups_list[:mid_point], sign_ups_list[mid_point:]
-    
-    async def post_pairings(self, guild):
+        
+    async def post_pairings(self, guild, pairings):
         if not self.draft_chat_channel:
             print("Draft chat channel not set.")
             return
-        
+
         draft_chat_channel_obj = guild.get_channel(self.draft_chat_channel)
         if not draft_chat_channel_obj:
             print("Draft chat channel not found.")
             return
-
-        # Generate pairings
-        team_a_ids, team_b_ids = self.split_into_teams()
-        pairings = self.calculate_pairings(team_a_ids, team_b_ids)
 
         # Ensure member mentions are enabled in the channel
         await draft_chat_channel_obj.edit(slowmode_delay=0)
@@ -148,45 +122,46 @@ class DraftSession:
         sign_up_tags = ' '.join([guild.get_member(user_id).mention for user_id in self.sign_ups.keys() if guild.get_member(user_id)])
         await draft_chat_channel_obj.send(f"{sign_up_tags}\nPairings Posted Above")
     
-    def calculate_pairings(self, team_a_ids, team_b_ids):
-        assert len(team_a_ids) == len(team_b_ids), "Teams must be of equal size"
-        total_players = len(team_a_ids)
+    def calculate_pairings(self):
+        # Ensure team lists are of equal size and convert to lists if they're not already
+        team_a = list(self.team_a)
+        team_b = list(self.team_b)
+        assert len(team_a) == len(team_b), "Teams must be of equal size."
+
         pairings = {1: [], 2: [], 3: []}
+        total_players = len(team_a)
 
-        # Initial pairings for round 1
-        for a, b in zip(team_a_ids, team_b_ids):
-            pairings[1].append((a, b))
+        # Shuffle teams to randomize matchups
+        random.shuffle(team_a)
+        random.shuffle(team_b)
 
-        # Generate pairings for subsequent rounds
-        for round_number in [2, 3]:
-            # Rotate Team B members to get new pairings
-            team_b_ids = team_b_ids[1:] + team_b_ids[:1]
-            for a, b in zip(team_a_ids, team_b_ids):
-                pairings[round_number].append((a, b))
+        # Schedule round-robin
+        for round_number in range(1, 4):
+            for i, player_a in enumerate(team_a):
+                opponent_index = (i + round_number - 1) % total_players
+                pairings[round_number].append((player_a, team_b[opponent_index]))
 
         return pairings
+
     
     def split_into_teams(self):
         sign_ups_list = list(self.sign_ups.keys())
         random.shuffle(sign_ups_list)
         mid_point = len(sign_ups_list) // 2
-        team_a_ids = sign_ups_list[:mid_point]
-        team_b_ids = sign_ups_list[mid_point:]
-        return team_a_ids, team_b_ids
+        self.team_a = sign_ups_list[:mid_point]
+        self.team_b = sign_ups_list[mid_point:]
     
     async def generate_seating_order(self):
         guild = bot.get_guild(self.guild_id)
-        # Assuming guild.get_member() is sufficient and members are cached
-        team_a_ids, team_b_ids = self.split_into_teams()
-        team_a_members = [guild.get_member(user_id) for user_id in team_a_ids]
-        team_b_members = [guild.get_member(user_id) for user_id in team_b_ids]
+        team_a_members = [guild.get_member(user_id) for user_id in self.team_a]
+        team_b_members = [guild.get_member(user_id) for user_id in self.team_b]
 
         seating_order = []
         for i in range(max(len(team_a_members), len(team_b_members))):
             if i < len(team_a_members) and team_a_members[i]:
-                seating_order.append(team_a_members[i].display_name)  # Adjusted for member objects
+                seating_order.append(team_a_members[i].display_name)
             if i < len(team_b_members) and team_b_members[i]:
-                seating_order.append(team_b_members[i].display_name)  # Adjusted for member objects
+                seating_order.append(team_b_members[i].display_name)
         return seating_order
     
     async def move_message_to_draft_channel(self, bot, original_channel_id, original_message_id, draft_chat_channel_id):
@@ -233,7 +208,7 @@ class PersistentView(View):
         self.add_item(discord.ui.Button(label="Cancel Sign Up", style=discord.ButtonStyle.red, custom_id=f"{session_id}_cancel_sign_up"))
         self.add_item(discord.ui.Button(label="Cancel Draft", style=discord.ButtonStyle.grey, custom_id=f"{session_id}_cancel_draft"))
         self.add_item(discord.ui.Button(label="Randomize Teams", style=discord.ButtonStyle.blurple, custom_id=f"{session_id}_randomize_teams"))
-        self.add_item(discord.ui.Button(label="Draft Complete", style=discord.ButtonStyle.green, custom_id=f"{session_id}_draft_complete", disabled=True))
+        self.add_item(discord.ui.Button(label="Create Chat Rooms", style=discord.ButtonStyle.green, custom_id=f"{session_id}_draft_complete", disabled=True))
         self.add_item(discord.ui.Button(label="Post Pairings", style=discord.ButtonStyle.primary, custom_id=f"{session_id}_post_pairings", disabled=True))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -304,24 +279,27 @@ class PersistentView(View):
 
         guild = interaction.guild
 
-        # Splits sign-ups into teams
-        team_a_ids, team_b_ids = session.split_into_teams()
-        team_a_members = [guild.get_member(user_id) for user_id in team_a_ids]
-        team_b_members = [guild.get_member(user_id) for user_id in team_b_ids]
-        all_members = [guild.get_member(user_id) for user_id in session.sign_ups.keys()]
+        # Assuming team_a and team_b are lists of member IDs
+        team_a_members = [guild.get_member(user_id) for user_id in session.team_a]
+        team_b_members = [guild.get_member(user_id) for user_id in session.team_b]
+        all_members = team_a_members + team_b_members
 
-        # Creates channels for the teams and draft chat
+        team_a_members = [member for member in team_a_members if member]  # Filter out None
+        team_b_members = [member for member in team_b_members if member]  # Filter out None
+
+        # Correctly pass team_a and team_b IDs to the method
         tasks = [
-            session.create_team_channel(guild, "Team-A", team_a_members),
-            session.create_team_channel(guild, "Team-B", team_b_members),
-            session.create_team_channel(guild, "Draft-chat", all_members)
+            session.create_team_channel(guild, "Team-A", team_a_members, session.team_a, session.team_b),
+            session.create_team_channel(guild, "Team-B", team_b_members, session.team_a, session.team_b),
+            session.create_team_channel(guild, "Draft-chat", all_members, session.team_a, session.team_b)  # Assuming you want overseers in draft chat too
         ]
         await asyncio.gather(*tasks)
 
-        # Update the original message to reflect the draft completion
+        # No changes needed here if update_draft_complete_message does not require modification
         await session.update_draft_complete_message(interaction)
         
-
+    #this implementation needs work. Right now it removes a user if they are in the session, but does not cancel it.
+    #it only cancels if no one remains in session. Maybe thats better?
     async def cancel_draft_callback(self, interaction: discord.Interaction):
         session = sessions.get(self.session_id)
         if not session:
@@ -338,7 +316,7 @@ class PersistentView(View):
                 # Optionally, update the draft message to reflect the change in sign-ups
                 await session.update_draft_message(interaction)
             if not session.sign_ups:
-                # If there are no more sign-ups, consider deleting the draft session
+                #if no more signups, delete the draft session
                 await interaction.message.delete()
                 sessions.pop(self.session_id, None)
                 await interaction.response.send_message("The draft has been canceled.", ephemeral=True)
@@ -354,25 +332,25 @@ class PersistentView(View):
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
             return
 
-        if len(session.sign_ups) < 2:  # Ensure there are enough sign-ups to form teams
-            await interaction.response.send_message("Not enough sign-ups to randomize teams.", ephemeral=True)
-            return
+        if session.team_a is None or session.team_b is None:
+            session.split_into_teams()
 
-        team_a_ids, team_b_ids = session.split_into_teams()
-        team_a = [session.sign_ups[user_id] for user_id in team_a_ids]
-        team_b = [session.sign_ups[user_id] for user_id in team_b_ids]
+        # Generate names for display using the session's sign_ups dictionary
+        team_a_display_names = [session.sign_ups[user_id] for user_id in session.team_a]
+        team_b_display_names = [session.sign_ups[user_id] for user_id in session.team_b]
         seating_order = await session.generate_seating_order()
 
-        # Create the embed message for the draft
+        # Create the embed message for displaying the teams and seating order
         embed = discord.Embed(
             title="Draft is Ready!",
-            description=f"**Team A**:\n" + "\n".join(team_a) +
-                        "\n\n**Team B**:\n" + "\n".join(team_b) +
-                        "\n\n**Seating Order:**\n" + " -> ".join(seating_order) +
-                        "\n\nNote: Host of Draftmancer must manually adjust seating as per above" +
-                        f"\n\n**Draftmancer Session**: **[Join Here]({session.draft_link})**",
-            color=discord.Color.gold()
+            description=f"**Draftmancer Session**: **[Join Here]({session.draft_link})**" +
+                        "\n\nNote: Host of Draftmancer must manually adjust seating as per below",
+            color=discord.Color.blue()
         )
+        embed.add_field(name="Team A", value="\n".join(team_a_display_names), inline=True)
+        embed.add_field(name="Team B", value="\n".join(team_b_display_names), inline=True)
+        embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+
 
         # Iterate over the view's children (buttons) to update their disabled status
         for item in self.children:
@@ -391,48 +369,40 @@ class PersistentView(View):
     
     async def post_pairings_callback(self, interaction: discord.Interaction):
         await interaction.response.defer()  # Ensure there's enough time for operations
-        
+
         session = sessions.get(self.session_id)
         if not session:
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
             return
 
-        # Move the original draft announcement message before posting pairings
         original_message_id = session.message_id
-        original_channel_id = interaction.channel.id  # Assuming the original message is in the same channel as the interaction
+        original_channel_id = interaction.channel.id  
         draft_chat_channel_id = session.draft_chat_channel
         await session.move_message_to_draft_channel(bot, original_channel_id, original_message_id, draft_chat_channel_id)
 
-        # Generate and post pairings
-        team_a_ids, team_b_ids = session.split_into_teams()
-        pairings = session.calculate_pairings(team_a_ids, team_b_ids)
-        await session.post_pairings(interaction.guild)
+        # Use the existing team_a and team_b for pairings
+        pairings = session.calculate_pairings()
+
+        # Post pairings in the draft chat channel
+        await session.post_pairings(interaction.guild, pairings)
 
         await interaction.followup.send("Pairings have been posted to the draft chat channel and the original message moved.", ephemeral=True)
-        
-
-
-    #@discord.ui.button(label="Sign Up", style=discord.ButtonStyle.green, custom_id="persistent_sign_up")
+    
     async def sign_up(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.sign_up_callback(interaction, interaction.user.id)
 
-    #@discord.ui.button(label="Cancel Sign Up", style=discord.ButtonStyle.red, custom_id="persistent_cancel_sign_up")
     async def cancel_sign_up(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.cancel_sign_up_callback(interaction, interaction.user.id)
         
-    #@discord.ui.button(label="Draft Complete", style=discord.ButtonStyle.green, custom_id="persistent_draft_complete")
     async def draft_complete(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.draft_complete_callback(interaction)
 
-    #@discord.ui.button(label="Cancel Draft", style=discord.ButtonStyle.grey, custom_id="persistent_cancel_draft")
     async def cancel_draft(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.cancel_draft_callback(interaction)
 
-    #@discord.ui.button(label="Randomize Teams", style=discord.ButtonStyle.blurple, custom_id="persistent_randomize_teams")
     async def randomize_teams(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.randomize_teams_callback(interaction)
 
-    #@discord.ui.button(label="Post Pairings", style=discord.ButtonStyle.primary, custom_id="persistent_post_pairings")
     async def post_pairings(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.post_pairings_callback(interaction)
 
@@ -473,13 +443,32 @@ async def start_draft(interaction: discord.Interaction):
     view = PersistentView(session_id)
   
     message = await interaction.followup.send(embed=embed, view=view)
-    
+    print(f"Session {session_id} has been created.")
     session.draft_message_id = message.id
     session.message_id = message.id
-    
-    await session.schedule_session_cleanup()
-
     # Pin the message to the channel
     await message.pin()
+
+async def cleanup_sessions_task():
+    while True:
+        current_time = datetime.now()
+        for session_id, session in list(sessions.items()):  # Use list to avoid RuntimeError due to size change during iteration
+            if current_time >= session.deletion_time:
+                # Attempt to delete each channel associated with the session
+                for channel_id in session.channel_ids:
+                    channel = bot.get_channel(channel_id)
+                    if channel:  # Check if channel was found
+                        try:
+                            await channel.delete(reason="Session expired.")
+                            print(f"Deleted channel: {channel.name}")
+                        except discord.HTTPException as e:
+                            print(f"Failed to delete channel: {channel.name}. Reason: {e}")
+                
+                # Once all associated channels are handled, remove the session from the dictionary
+                del sessions[session_id]
+                print(f"Session {session_id} has been removed.")
+
+        # run function every hour
+        await asyncio.sleep(3600)  # Sleep for 1 hour
 
 bot.run(TOKEN)
