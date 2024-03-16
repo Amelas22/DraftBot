@@ -320,18 +320,22 @@ class PersistentView(View):
     
     async def remove_user_button_callback(self, interaction: discord.Interaction):
         session = sessions.get(self.session_id)
-        if session:
-            if session.sign_ups:
-                # Pass 'self.session_id' to the UserRemovalView constructor
-                view = UserRemovalView(session_id=self.session_id)
-                options = [SelectOption(label=user_name, value=str(user_id)) for user_id, user_name in session.sign_ups.items()]
-                select_menu = UserRemovalSelect(options=options, session_id=self.session_id)
-                view.add_item(select_menu)
-                await interaction.response.send_message("Select a user to remove:", view=view, ephemeral=True)
-            else:
-                await interaction.response.send_message("No users to remove.", ephemeral=True)
-        else:
+        if not session:
             await interaction.response.send_message("Session not found.", ephemeral=True)
+            return
+
+        # Check if the user initiating the remove action is in the sign_ups
+        if interaction.user.id not in session.sign_ups:
+            await interaction.response.send_message("You are not authorized to remove users.", ephemeral=True)
+            return
+
+        # If the session exists and has sign-ups, and the user is authorized, proceed
+        if session.sign_ups:
+            options = [SelectOption(label=user_name, value=str(user_id)) for user_id, user_name in session.sign_ups.items()]
+            view = UserRemovalView(session_id=self.session_id)
+            await interaction.response.send_message("Select a user to remove:", view=view, ephemeral=True)
+        else:
+            await interaction.response.send_message("No users to remove.", ephemeral=True)
 
     async def randomize_teams_callback(self, interaction: discord.Interaction):
         session = sessions.get(self.session_id)
@@ -440,11 +444,10 @@ class UserRemovalSelect(Select):
 class UserRemovalView(View):
     def __init__(self, session_id: str):
         super().__init__()
-        self.session_id = session_id
-        session = sessions.get(self.session_id)
-        if session:
+        session = sessions.get(session_id)
+        if session and session.sign_ups:
             options = [SelectOption(label=user_name, value=str(user_id)) for user_id, user_name in session.sign_ups.items()]
-            self.add_item(UserRemovalSelect(options=options, session_id=self.session_id))
+            self.add_item(UserRemovalSelect(options=options, session_id=session_id))
 
 
 @bot.event
