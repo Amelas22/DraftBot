@@ -4,7 +4,8 @@ import os
 import dotenv
 from datetime import datetime, timedelta
 from discord.ext import commands
-from discord.ui import Button, View
+from discord.ui import View, Select 
+from discord import SelectOption
 import random
 import secrets
 
@@ -209,6 +210,7 @@ class PersistentView(View):
         self.add_item(discord.ui.Button(label="Sign Up", style=discord.ButtonStyle.green, custom_id=f"{session_id}_sign_up"))
         self.add_item(discord.ui.Button(label="Cancel Sign Up", style=discord.ButtonStyle.red, custom_id=f"{session_id}_cancel_sign_up"))
         self.add_item(discord.ui.Button(label="Cancel Draft", style=discord.ButtonStyle.grey, custom_id=f"{session_id}_cancel_draft"))
+        self.add_item(discord.ui.Button(label="Remove User", style=discord.ButtonStyle.grey, custom_id=f"{session_id}_remove_user"))
         self.add_item(discord.ui.Button(label="Randomize Teams", style=discord.ButtonStyle.blurple, custom_id=f"{session_id}_randomize_teams"))
         self.add_item(discord.ui.Button(label="Create Chat Rooms", style=discord.ButtonStyle.green, custom_id=f"{session_id}_draft_complete", disabled=True))
         self.add_item(discord.ui.Button(label="Post Pairings", style=discord.ButtonStyle.primary, custom_id=f"{session_id}_post_pairings", disabled=True))
@@ -226,6 +228,9 @@ class PersistentView(View):
             await self.draft_complete_callback(interaction)
         elif interaction.data['custom_id'] == f"{self.session_id}_post_pairings":
             await self.post_pairings_callback(interaction)
+        elif interaction.data['custom_id'] == f"{self.session_id}_remove_user":
+            await self.remove_user_button_callback(interaction)
+            return False
         else:
             return False
 
@@ -312,7 +317,21 @@ class PersistentView(View):
         else:
             # If the user is not signed up and there are sign-ups present, inform the user
             await interaction.response.send_message("You cannot cancel this draft because you are not signed up.", ephemeral=True)
-        
+    
+    async def remove_user_button_callback(self, interaction: discord.Interaction):
+        session = sessions.get(self.session_id)
+        if session:
+            if session.sign_ups:
+                # Pass 'self.session_id' to the UserRemovalView constructor
+                view = UserRemovalView(session_id=self.session_id)
+                options = [SelectOption(label=user_name, value=str(user_id)) for user_id, user_name in session.sign_ups.items()]
+                select_menu = UserRemovalSelect(options=options, session_id=self.session_id)
+                view.add_item(select_menu)
+                await interaction.response.send_message("Select a user to remove:", view=view, ephemeral=True)
+            else:
+                await interaction.response.send_message("No users to remove.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Session not found.", ephemeral=True)
 
     async def randomize_teams_callback(self, interaction: discord.Interaction):
         session = sessions.get(self.session_id)
@@ -395,6 +414,37 @@ class PersistentView(View):
 
     async def post_pairings(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.post_pairings_callback(interaction)
+
+class UserRemovalSelect(Select):
+    def __init__(self, options: list[SelectOption], session_id: str, *args, **kwargs):
+        super().__init__(*args, **kwargs, placeholder="Choose a user to remove...", min_values=1, max_values=1, options=options)
+        self.session_id = session_id
+
+    async def callback(self, interaction: discord.Interaction):
+        user_id_to_remove = int(self.values[0])
+        session = sessions.get(self.session_id)
+
+        if user_id_to_remove in session.sign_ups:
+            removed_user_name = session.sign_ups.pop(user_id_to_remove)
+            await interaction.response.send_message(f"Removed {removed_user_name} from the draft.", ephemeral=False)
+            
+            # After removing a user, update the original message with the new sign-up list
+            await session.update_draft_message(interaction)
+
+            # Optionally, after sending a response, you may want to update or remove the select menu
+            # This line will edit the message to only show the text, removing the select menu.
+            await interaction.edit_original_response(content=f"Removed {removed_user_name} from the draft.", view=None)
+        else:
+            await interaction.response.send_message("User not found in sign-ups.", ephemeral=True)
+
+class UserRemovalView(View):
+    def __init__(self, session_id: str):
+        super().__init__()
+        self.session_id = session_id
+        session = sessions.get(self.session_id)
+        if session:
+            options = [SelectOption(label=user_name, value=str(user_id)) for user_id, user_name in session.sign_ups.items()]
+            self.add_item(UserRemovalSelect(options=options, session_id=self.session_id))
 
 
 @bot.event
