@@ -209,7 +209,7 @@ class PersistentView(View):
         self.add_item(discord.ui.Button(label="Sign Up", style=discord.ButtonStyle.green, custom_id=f"{session_id}_sign_up"))
         self.add_item(discord.ui.Button(label="Cancel Sign Up", style=discord.ButtonStyle.red, custom_id=f"{session_id}_cancel_sign_up"))
         self.add_item(discord.ui.Button(label="Cancel Draft", style=discord.ButtonStyle.grey, custom_id=f"{session_id}_cancel_draft"))
-        self.add_item(discord.ui.Button(label="Randomize Teams", style=discord.ButtonStyle.blurple, custom_id=f"{session_id}_randomize_teams"), disabled=True)
+        self.add_item(discord.ui.Button(label="Randomize Teams", style=discord.ButtonStyle.blurple, custom_id=f"{session_id}_randomize_teams"))
         self.add_item(discord.ui.Button(label="Create Chat Rooms", style=discord.ButtonStyle.green, custom_id=f"{session_id}_draft_complete", disabled=True))
         self.add_item(discord.ui.Button(label="Post Pairings", style=discord.ButtonStyle.primary, custom_id=f"{session_id}_post_pairings", disabled=True))
 
@@ -331,8 +331,10 @@ class PersistentView(View):
         # Create the embed message for displaying the teams and seating order
         embed = discord.Embed(
             title="Draft is Ready!",
-            description=f"**Draftmancer Session**: **[Join Here]({session.draft_link})**" +
-                        "\n\nNote: Host of Draftmancer must manually adjust seating as per below",
+            description=f"**Draftmancer Session**: **[Join Here]({session.draft_link})** \n" +
+                        "Host of Draftmancer must manually adjust seating as per below" +
+                        "\n\nAfter the draft, select Create Chat Rooms, then select Post Pairings" +
+                        "\nPost Pairings will take about 10 seconds to process. Only press once.",
             color=discord.Color.blue()
         )
         embed.add_field(name="Team A", value="\n".join(team_a_display_names), inline=True)
@@ -398,6 +400,7 @@ class PersistentView(View):
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}!')
+    bot.loop.create_task(cleanup_sessions_task())
 
 @bot.slash_command(name='startdraft', description='Start a Magic: The Gathering draft table', guild_id=None)
 async def start_draft(interaction: discord.Interaction):
