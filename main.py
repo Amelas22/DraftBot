@@ -426,8 +426,6 @@ async def start_draft(interaction: discord.Interaction):
     session.draft_id = draft_id
     session.draft_start_time = draft_start_time
 
-    sessions[session_id] = session
-
     add_session(session_id, session)
 
     cube_drafter_role = discord.utils.get(interaction.guild.roles, name="Cube Drafter")
@@ -452,12 +450,17 @@ async def start_draft(interaction: discord.Interaction):
     await message.pin()
 
 def add_session(session_id, session):
-    # Ensure the sessions dictionary doesn't exceed 20 entries
+    # Check if the sessions dictionary already contains 20 sessions
     if len(sessions) >= 20:
-        # Sort sessions by their ID (which includes the timestamp) and remove the oldest
-        oldest_session_id = sorted(sessions.keys())[0]
-        del sessions[oldest_session_id]
-        print(f"Removed oldest session: {oldest_session_id}")
+        # Sort sessions by the timestamp in their ID (assuming session_id format includes a timestamp) and remove the oldest
+        oldest_session_id = sorted(sessions.keys(), key=lambda x: int(x.split('-')[-1]))[0]
+        oldest_session = sessions.pop(oldest_session_id)
+        # Delete associated chat channels if they still exist
+        for channel_id in oldest_session.channel_ids:
+            channel = bot.get_channel(channel_id)
+            if channel:  # Check if channel was found and still exists
+                asyncio.create_task(channel.delete(reason="Session expired due to session cap."))
+                print(f"Deleting channel: {channel.name} for session {oldest_session_id}")
 
     # Add the new session
     sessions[session_id] = session
