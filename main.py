@@ -64,18 +64,21 @@ class DraftSession:
             guild.me: discord.PermissionOverwrite(read_messages=True)
         }
 
-        # If it's a team channel, adjust permissions specifically for overseers in the draft
         if team_name in ["Team-A", "Team-B"]:
-            # Add all overseers with read permission initially
+            # Add all overseers with read permission initially, if it's a team-specific channel
+            if overseer_role:
+                for overseer in overseer_role.members:
+                    # Check if the overseer is part of the current team or not
+                    if overseer.id not in team_a and overseer.id not in team_b:
+                        overwrites[overseer] = discord.PermissionOverwrite(read_messages=True)
+                    elif (team_name == "Team-A" and overseer.id in team_b) or (team_name == "Team-B" and overseer.id in team_a):
+                        # Remove access for overseers who are part of the other team
+                        overwrites[overseer] = discord.PermissionOverwrite(read_messages=False)
+        else:
+            # For the "Draft-chat" channel, add all overseers
             if overseer_role:
                 overwrites[overseer_role] = discord.PermissionOverwrite(read_messages=True)
-            
-            participating_overseers = [member for member in overseer_role.members if member.id in team_a or member.id in team_b]
-            for overseer in participating_overseers:
-                # Remove access for overseers who are part of the other team
-                if (team_name == "Team-A" and overseer.id in team_b) or (team_name == "Team-B" and overseer.id in team_a):
-                    overwrites[overseer] = discord.PermissionOverwrite(read_messages=False)
-        
+
         # Add team members with read permission. This specifically allows these members, overriding role-based permissions if needed.
         for member in team_members:
             overwrites[member] = discord.PermissionOverwrite(read_messages=True)
