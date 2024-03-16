@@ -203,11 +203,10 @@ class PersistentView(View):
         super().__init__(timeout=None)
         self.session_id = session_id
 
-        # Initialize buttons without directly setting callbacks via decorators
         self.add_item(discord.ui.Button(label="Sign Up", style=discord.ButtonStyle.green, custom_id=f"{session_id}_sign_up"))
         self.add_item(discord.ui.Button(label="Cancel Sign Up", style=discord.ButtonStyle.red, custom_id=f"{session_id}_cancel_sign_up"))
         self.add_item(discord.ui.Button(label="Cancel Draft", style=discord.ButtonStyle.grey, custom_id=f"{session_id}_cancel_draft"))
-        self.add_item(discord.ui.Button(label="Randomize Teams", style=discord.ButtonStyle.blurple, custom_id=f"{session_id}_randomize_teams"))
+        self.add_item(discord.ui.Button(label="Randomize Teams", style=discord.ButtonStyle.blurple, custom_id=f"{session_id}_randomize_teams"), disabled=True)
         self.add_item(discord.ui.Button(label="Create Chat Rooms", style=discord.ButtonStyle.green, custom_id=f"{session_id}_draft_complete", disabled=True))
         self.add_item(discord.ui.Button(label="Post Pairings", style=discord.ButtonStyle.primary, custom_id=f"{session_id}_post_pairings", disabled=True))
 
@@ -225,11 +224,8 @@ class PersistentView(View):
         elif interaction.data['custom_id'] == f"{self.session_id}_post_pairings":
             await self.post_pairings_callback(interaction)
         else:
-            # If the custom_id doesn't match any known button, you may want to log this or handle it appropriately.
-            # Returning False will stop the interaction from being processed further by this View.
             return False
 
-        # Returning True to indicate the interaction has been successfully processed.
         return True
 
     async def sign_up_callback(self, interaction: discord.Interaction): 
@@ -295,11 +291,8 @@ class PersistentView(View):
         ]
         await asyncio.gather(*tasks)
 
-        # No changes needed here if update_draft_complete_message does not require modification
         await session.update_draft_complete_message(interaction)
         
-    #this implementation needs work. Right now it removes a user if they are in the session, but does not cancel it.
-    #it only cancels if no one remains in session. Maybe thats better?
     async def cancel_draft_callback(self, interaction: discord.Interaction):
         session = sessions.get(self.session_id)
         if not session:
@@ -309,21 +302,13 @@ class PersistentView(View):
         user_id = interaction.user.id
         # Check if the user is in session.sign_ups or if session.sign_ups is empty
         if user_id in session.sign_ups or not session.sign_ups:
-            # Perform cancellation
-            if user_id in session.sign_ups:
-                del session.sign_ups[user_id]
-                await interaction.response.send_message("Your sign-up has been canceled.", ephemeral=True)
-                # Optionally, update the draft message to reflect the change in sign-ups
-                await session.update_draft_message(interaction)
-            if not session.sign_ups:
-                #if no more signups, delete the draft session
-                await interaction.message.delete()
-                sessions.pop(self.session_id, None)
-                await interaction.response.send_message("The draft has been canceled.", ephemeral=True)
+            # Delete the draft message and remove the session
+            await interaction.message.delete()
+            sessions.pop(self.session_id, None)
+            await interaction.response.send_message("The draft has been canceled.", ephemeral=True)
         else:
-            # If the user is not signed up and there are sign-ups present, do not allow cancellation
-            await interaction.response.send_message("You cannot cancel this draft because you are not signed up or there are active sign-ups.", ephemeral=True)
-
+            # If the user is not signed up and there are sign-ups present, inform the user
+            await interaction.response.send_message("You cannot cancel this draft because you are not signed up.", ephemeral=True)
         
 
     async def randomize_teams_callback(self, interaction: discord.Interaction):
