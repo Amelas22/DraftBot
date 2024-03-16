@@ -4,7 +4,7 @@ import os
 import dotenv
 from datetime import datetime, timedelta
 from discord.ext import commands
-from discord.ui import View, Select 
+from discord.ui import Select, View
 from discord import SelectOption
 import random
 import secrets
@@ -38,6 +38,9 @@ class DraftSession:
         self.draft_id = None
         self.team_a = None
         self.team_b = None
+        self.matches = {}  
+        self.match_results = {}
+        self.match_counter = 1  
         self.sign_ups = {}
         self.channel_ids = []
 
@@ -105,48 +108,57 @@ class DraftSession:
             print("Draft chat channel not found.")
             return
 
-        # Ensure member mentions are enabled in the channel
         await draft_chat_channel_obj.edit(slowmode_delay=0)
         
         for round_number, round_pairings in pairings.items():
-            # Create an embed for the round
             embed = discord.Embed(title=f"Round {round_number} Pairings", color=discord.Color.blue())
-            for player_id, opponent_id in round_pairings:
+            for player_id, opponent_id, match_number in round_pairings:
                 player = guild.get_member(player_id)
                 opponent = guild.get_member(opponent_id)
                 player_name = player.display_name if player else 'Unknown'
                 opponent_name = opponent.display_name if opponent else 'Unknown'
-                # Add each pairing as a field in the embed
-                embed.add_field(name=f"Match {round_pairings.index((player_id, opponent_id)) + 1}", value=f"{player_name} vs {opponent_name}", inline=False)
+                
+                embed.add_field(name=f"Match {match_number}", value=f"{player_name} vs {opponent_name}", inline=False)
             
-            # Send the embed for the current round
             await draft_chat_channel_obj.send(embed=embed)
 
-        # Construct a message tagging all participants
-        sign_up_tags = ' '.join([guild.get_member(user_id).mention for user_id in self.sign_ups.keys() if guild.get_member(user_id)])
+        # Optionally send a tag message for all participants
+        sign_up_tags = ' '.join([guild.get_member(user_id).mention for user_id in self.sign_ups if guild.get_member(user_id)])
         await draft_chat_channel_obj.send(f"{sign_up_tags}\nPairings Posted Above")
     
     def calculate_pairings(self):
-        # Ensure team lists are of equal size and convert to lists if they're not already
-        team_a = list(self.team_a)
-        team_b = list(self.team_b)
-        assert len(team_a) == len(team_b), "Teams must be of equal size."
+        num_players = len(self.team_a) + len(self.team_b)
+        if num_players not in [6, 8]:
+            raise ValueError("Unsupported number of players. Only 6 or 8 players are supported.")
+
+        # Ensure that teams are of equal size and combined size matches the expected total
+        assert len(self.team_a) == len(self.team_b), "Teams must be of equal size."
 
         pairings = {1: [], 2: [], 3: []}
-        total_players = len(team_a)
 
-        # Shuffle teams to randomize matchups
-        random.shuffle(team_a)
-        random.shuffle(team_b)
+        # Rotate Team B to generate unique pairings for 3 rounds
+        for round in range(1, 4):
+            round_pairings = []
+            for i, player_a in enumerate(self.team_a):
+                # Calculate index for Team B by rotating based on the round number
+                player_b_index = (i + round - 1) % len(self.team_b)
+                player_b = self.team_b[player_b_index]
 
-        # Schedule round-robin
-        for round_number in range(1, 4):
-            for i, player_a in enumerate(team_a):
-                opponent_index = (i + round_number - 1) % total_players
-                pairings[round_number].append((player_a, team_b[opponent_index]))
+                # Assign and increment match counter
+                match_number = self.match_counter
+                self.matches[match_number] = {"players": (player_a, player_b), "results": None}
+                round_pairings.append((player_a, player_b, match_number))
+                self.match_counter += 1
+
+            pairings[round] = round_pairings
 
         return pairings
 
+    def create_match(self, player1_id, player2_id):
+        match_id = self.match_counter
+        self.matches[match_id] = {"players": (player1_id, player2_id), "results": None}
+        self.match_counter += 1
+        return match_id
     
     def split_into_teams(self):
         sign_ups_list = list(self.sign_ups.keys())
@@ -236,10 +248,15 @@ class PersistentView(View):
 
         return True
 
-    async def sign_up_callback(self, interaction: discord.Interaction): 
+    async def sign_up_callback(self, interaction: discord.Interaction):
         session = sessions.get(self.session_id)
         if not session:
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
+            return
+        
+        # Check if the sign-up list is already full
+        if len(session.sign_ups) >= 8:
+            await interaction.response.send_message("The sign-up list is already full. No more players can sign up.", ephemeral=True)
             return
 
         user_id = interaction.user.id
@@ -249,11 +266,13 @@ class PersistentView(View):
         else:
             # User is signing up
             session.sign_ups[user_id] = interaction.user.display_name
-            # Confirm signup
-            await interaction.response.send_message("You are now signed up.", ephemeral=True)
+            # Confirm signup with draft link
+            draft_link = session.draft_link  # Ensure you have the draft_link available in your session
+            signup_confirmation_message = f"You are now signed up. Join Here: {draft_link}"
+            await interaction.response.send_message(signup_confirmation_message, ephemeral=True)
             # Update the draft message to reflect the new list of sign-ups
             await session.update_draft_message(interaction)
-        
+       
 
     async def cancel_sign_up_callback(self, interaction: discord.Interaction):
         session = sessions.get(self.session_id)
@@ -398,7 +417,7 @@ class PersistentView(View):
 
         # Post pairings in the draft chat channel
         await session.post_pairings(interaction.guild, pairings)
-
+        
         await interaction.followup.send("Pairings have been posted to the draft chat channel and the original message moved.", ephemeral=True)
     
     async def sign_up(self, button: discord.ui.Button, interaction: discord.Interaction):
