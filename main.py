@@ -138,8 +138,15 @@ class DraftSession:
     def create_pairings_view(self, round_pairings):
         view = discord.ui.View(timeout=None)  # Persistent view
         for player_id, opponent_id, match_number in round_pairings:
-            view.add_item(self.MatchResultButton(self.session_id, match_number))
+            # Determine the style based on whether results have been reported
+            match_details = self.match_results.get(match_number, {})
+            button_style = discord.ButtonStyle.grey if match_details.get('player1_wins') is not None or match_details.get('player2_wins') is not None else discord.ButtonStyle.primary
+
+            # Instantiate MatchResultButton with the determined style
+            button = self.MatchResultButton(self.session_id, match_number, style=button_style)
+            view.add_item(button)
         return view
+
     
     def calculate_pairings(self):
         num_players = len(self.team_a) + len(self.team_b)
@@ -272,6 +279,19 @@ class DraftSession:
         
         return embed
 
+    def create_updated_view_for_pairings_message(self, pairings_message_id):
+        view = discord.ui.View(timeout=None)
+        # Loop through all matches to reconstruct the view
+        for match_id, details in self.matches.items():
+            if details.get('message_id') == pairings_message_id:
+                match_details = self.match_results.get(match_id, {})
+                # Determine the button style based on whether results have been reported
+                button_style = discord.ButtonStyle.gray if match_details.get('player1_wins') is not None or match_details.get('player2_wins') is not None else discord.ButtonStyle.primary
+                # Instantiate a new button with the determined style and the same match number
+                button = self.MatchResultButton(self.session_id, match_id, style=button_style)
+                view.add_item(button)
+        return view
+
     async def update_pairings_posting(self, match_number):
         guild = bot.get_guild(self.guild_id)
         if not guild:
@@ -300,31 +320,30 @@ class DraftSession:
                 print("No embed found in pairings message.")
                 return
 
-            # Initialize the field index as not found
-            field_index = -1
+            # Update the embed with the new match results
             for i, field in enumerate(embed.fields):
                 if f"**Match {match_number}**" in field.value:
-                    field_index = i
-                    break
-
-            if field_index != -1:
-                player1 = guild.get_member(match_details['player1_id'])
-                player2 = guild.get_member(match_details['player2_id'])
-                if player1 and player2:
+                    player1 = guild.get_member(match_details['player1_id'])
+                    player2 = guild.get_member(match_details['player2_id'])
                     player1_wins = match_details['player1_wins'] or 0
                     player2_wins = match_details['player2_wins'] or 0
                     updated_value = f"**Match {match_number}**\n{player1.display_name}: {player1_wins} wins\n{player2.display_name}: {player2_wins} wins"
-                    embed.set_field_at(field_index, name="\u200b", value=updated_value, inline=False)
-                    await message.edit(embed=embed)
-                else:
-                    print(f"Could not find one or both players in guild for match {match_number}.")
-            else:
-                print(f"Could not find the embed field for Match {match_number}.")
+                    embed.set_field_at(i, name=field.name, value=updated_value, inline=field.inline)
+                    break
+
+            # Re-generate the view with potentially updated button styles
+            new_view = self.create_updated_view_for_pairings_message(message_id)
+
+            # Edit the message with the updated embed and view
+            await message.edit(embed=embed, view=new_view)
 
         except discord.NotFound:
             print(f"Pairings message with ID {message_id} not found in channel.")
         except Exception as e:
             print(f"Failed to update pairings posting for match {match_number}: {e}")
+
+
+
 
 
     def calculate_team_wins(self):
@@ -350,8 +369,8 @@ class DraftSession:
 
     
     class MatchResultButton(discord.ui.Button):
-        def __init__(self, session_id, match_number, **kwargs):
-            super().__init__(label=f"Match {match_number} Results", style=discord.ButtonStyle.primary, **kwargs)
+        def __init__(self, session_id, match_number, style=discord.ButtonStyle.primary, **kwargs):
+            super().__init__(label=f"Match {match_number} Results", style=style, **kwargs)
             self.session_id = session_id
             self.match_number = match_number
 
@@ -677,146 +696,6 @@ class UserRemovalView(View):
             self.add_item(UserRemovalSelect(options=options, session_id=session_id))
 
 
-# def calculate_team_wins(self):
-#     team_a_wins = 0
-#     team_b_wins = 0
-
-#     for match_id, result in self.match_results.items():
-#         if result['player1_wins'] is not None and result['player2_wins'] is not None:
-#             if result['player1_wins'] > result['player2_wins']:
-#                 team_a_wins += 1
-#             elif result['player1_wins'] < result['player2_wins']:
-#                 team_b_wins += 1
-#             # No increment if it's a draw
-
-#     return team_a_wins, team_b_wins
-
-
-# class MatchResultButton(discord.ui.Button):
-#     def __init__(self, session_id, match_number, player1_id, player1_name, player2_id, player2_name, **kwargs):
-#         # Ensure to call the super class constructor with label and style
-#         super().__init__(label=f"Match {match_number} Results", style=discord.ButtonStyle.primary, **kwargs)
-#         self.session_id = session_id
-#         self.match_number = match_number
-#         self.player1_id = player1_id
-#         self.player1_name = player1_name
-#         self.player2_id = player2_id
-#         self.player2_name = player2_name
-
-#     async def callback(self, interaction: discord.Interaction):
-#         # Pass session_id as the first parameter
-#         view = ResultReportView(self.session_id, self.player1_id, self.player1_name, self.player2_id, self.player2_name, self.match_number)
-#         await interaction.response.send_message(f"Report results for Match {self.match_number}.", view=view, ephemeral=True)
-
-
-
-
-# class WinSelect(discord.ui.Select):
-#     def __init__(self, session_id, match_number, player_id, *args, **kwargs):
-#         super().__init__(*args, **kwargs)
-#         self.session_id = session_id
-#         self.match_number = match_number
-#         self.player_id = player_id
-
-#     async def callback(self, interaction: discord.Interaction):
-#         # Retrieve the session using session_id
-#         session = sessions.get(self.session_id)
-#         if not session:
-#             await interaction.response.send_message("Draft session not found.", ephemeral=True)
-#             return
-
-        # # Retrieve match result entry
-        # match_result = session.match_results.get(self.match_number)
-        # if not match_result:
-        #     # Handle case where match result is unexpectedly missing
-        #     await interaction.response.send_message("Match result not found.", ephemeral=True)
-        #     return
-
-        # # Determine which player's wins are being updated and update directly
-        # if self.player_id == match_result['player1_id']:
-        #     match_result['player1_wins'] = int(self.values[0])
-        # elif self.player_id == match_result['player2_id']:
-        #     match_result['player2_wins'] = int(self.values[0])
-        # else:
-        #     # Handle unexpected case where player ID doesn't match either player in the match
-        #     await interaction.response.send_message("Player not found in match.", ephemeral=True)
-        #     return
-
-        # # Respond to the interaction
-        # player_name = interaction.guild.get_member(self.player_id).display_name
-        # await interaction.response.send_message(f"Recorded {self.values[0]} wins for {player_name} in Match {self.match_number}.", ephemeral=True)
-
-
-
-# class ResultReportView(discord.ui.View):
-#     def __init__(self, session_id, player1_id, player1_name, player2_id, player2_name, match_number):
-#         super().__init__(timeout=180)
-#         self.session_id = session_id
-#         self.player1_id = player1_id
-#         self.player1_name = player1_name
-#         self.player2_id = player2_id
-#         self.player2_name = player2_name
-#         self.match_number = match_number
-
-        # win_options = [
-        #     discord.SelectOption(label="2 wins", value="2"),
-        #     discord.SelectOption(label="1 win", value="1"),
-        #     discord.SelectOption(label="0 wins", value="0"),
-        # ]
-
-        # self.add_item(WinSelect(session_id, match_number, player1_id, placeholder=f"{player1_name} Wins:", options=win_options, custom_id=f"{match_number}_p1"))
-        # self.add_item(WinSelect(session_id, match_number, player2_id, placeholder=f"{player2_name} Wins:", options=win_options, custom_id=f"{match_number}_p2"))
-
-# class DraftSummaryView(discord.ui.View):
-#     def __init__(self, session):
-#         super().__init__()
-#         self.session = session
-#         self.update_view()
-
-#     def update_view(self):
-#         team_a_wins = 0
-#         team_b_wins = 0
-#         match_wins = {player_id: 0 for player_id in self.session.team_a + self.session.team_b}
-
-#         # Calculate match and team wins
-#         for match_id, result in self.session.match_results.items():
-#             if result['player1_wins'] is not None and result['player2_wins'] is not None:
-#                 if result['player1_wins'] > result['player2_wins']:
-#                     match_wins[result['player1_id']] += 1
-#                     if result['player1_id'] in self.session.team_a:
-#                         team_a_wins += 1
-#                     else:
-#                         team_b_wins += 1
-#                 elif result['player2_wins'] > result['player1_wins']:
-#                     match_wins[result['player2_id']] += 1
-#                     if result['player2_id'] in self.session.team_a:
-#                         team_a_wins += 1
-#                     else:
-#                         team_b_wins += 1
-        
-#         # Create the embed
-#         embed = discord.Embed(title=f"Pairings for Draft {self.session.draft_id} are ready!", color=discord.Color.blue())
-#         embed.add_field(name="Team A", value="\n".join([self.session.guild.get_member(member_id).display_name for member_id in self.session.team_a]), inline=True)
-#         embed.add_field(name="Team B", value="\n".join([self.session.guild.get_member(member_id).display_name for member_id in self.session.team_b]), inline=True)
-        
-#         embed.add_field(name="\u200b", value="\u200b", inline=False)  # Spacer
-
-#         embed.add_field(name="**Draft Standings**", value=f"**Team A Wins:** {team_a_wins}\n**Team B Wins:** {team_b_wins}", inline=False)
-
-#         # Add match results by round
-#         for round_number, round_pairings in self.session.pairings.items():
-#             round_results = f"**Round {round_number} Results**\n"
-#             for player_a, player_b, match_id in round_pairings:
-#                 player_a_name = self.session.guild.get_member(player_a).display_name
-#                 player_b_name = self.session.guild.get_member(player_b).display_name
-#                 player_a_wins = self.session.match_results[match_id]['player1_wins'] or 0
-#                 player_b_wins = self.session.match_results[match_id]['player2_wins'] or 0
-#                 round_results += f"__Match {match_id}__\n{player_a_name}: {player_a_wins} wins\n{player_b_name}: {player_b_wins} wins\n"
-#             embed.add_field(name=f"Round {round_number}", value=round_results, inline=True)
-
-#         self.clear_items()  
-
-
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}!')
@@ -880,7 +759,7 @@ def add_session(session_id, session):
 async def cleanup_sessions_task():
     while True:
         current_time = datetime.now()
-        for session_id, session in list(sessions.items()):  # Use list to avoid RuntimeError due to size change during iteration
+        for session_id, session in list(sessions.items()):  
             if current_time >= session.deletion_time:
                 # Attempt to delete each channel associated with the session
                 for channel_id in session.channel_ids:
