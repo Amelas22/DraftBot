@@ -114,7 +114,7 @@ class DraftSession:
 
         for round_number, round_pairings in pairings.items():
             embed = discord.Embed(title=f"Round {round_number} Pairings", color=discord.Color.blue())
-            view = discord.ui.View(timeout=None)  # Persistent view
+            view = self.create_pairings_view(round_pairings)  # Persistent view
 
             for player_id, opponent_id, match_number in round_pairings:
                 player = guild.get_member(player_id)
@@ -122,17 +122,24 @@ class DraftSession:
                 player_name = player.display_name if player else 'Unknown'
                 opponent_name = opponent.display_name if opponent else 'Unknown'
 
-                embed.add_field(name=f"Match {match_number}", value=f"{player_name} vs {opponent_name}", inline=False)
-                view.add_item(self.MatchResultButton(self.session_id, match_number))
+                # Formatting the pairings without wins
+                match_info = f"**Match {match_number}**\n{player_name}\n{opponent_name}"
+                embed.add_field(name="\u200b", value=match_info, inline=False)
 
-
-            await draft_chat_channel_obj.send(embed=embed, view=view)
+            pairings_message = await draft_chat_channel_obj.send(embed=embed, view=view)
+            # Store the message ID with the round and match number for later reference
+            for _, _, match_number in round_pairings:
+                self.matches[match_number]['message_id'] = pairings_message.id
 
         # Optionally send a tag message for all participants
         sign_up_tags = ' '.join([guild.get_member(user_id).mention for user_id in self.sign_ups if guild.get_member(user_id)])
         await draft_chat_channel_obj.send(f"{sign_up_tags}\nPairings Posted Above")
 
-
+    def create_pairings_view(self, round_pairings):
+        view = discord.ui.View(timeout=None)  # Persistent view
+        for player_id, opponent_id, match_number in round_pairings:
+            view.add_item(self.MatchResultButton(self.session_id, match_number))
+        return view
     
     def calculate_pairings(self):
         num_players = len(self.team_a) + len(self.team_b)
@@ -265,7 +272,61 @@ class DraftSession:
         
         return embed
 
-    
+    async def update_pairings_posting(self, match_number):
+        guild = bot.get_guild(self.guild_id)
+        if not guild:
+            print("Guild not found.")
+            return
+
+        match_details = self.match_results.get(match_number)
+        if not match_details:
+            print(f"Match details for match {match_number} not found.")
+            return
+
+        message_id = self.matches.get(match_number, {}).get('message_id')
+        if not message_id:
+            print(f"Pairings message ID for match {match_number} not found.")
+            return
+
+        channel = guild.get_channel(self.draft_chat_channel)
+        if not channel:
+            print("Pairings message channel not found.")
+            return
+
+        try:
+            message = await channel.fetch_message(message_id)
+            embed = message.embeds[0] if message.embeds else None
+            if not embed:
+                print("No embed found in pairings message.")
+                return
+
+            # Initialize the field index as not found
+            field_index = -1
+            for i, field in enumerate(embed.fields):
+                if f"**Match {match_number}**" in field.value:
+                    field_index = i
+                    break
+
+            if field_index != -1:
+                player1 = guild.get_member(match_details['player1_id'])
+                player2 = guild.get_member(match_details['player2_id'])
+                if player1 and player2:
+                    player1_wins = match_details['player1_wins'] or 0
+                    player2_wins = match_details['player2_wins'] or 0
+                    updated_value = f"**Match {match_number}**\n{player1.display_name}: {player1_wins} wins\n{player2.display_name}: {player2_wins} wins"
+                    embed.set_field_at(field_index, name="\u200b", value=updated_value, inline=False)
+                    await message.edit(embed=embed)
+                else:
+                    print(f"Could not find one or both players in guild for match {match_number}.")
+            else:
+                print(f"Could not find the embed field for Match {match_number}.")
+
+        except discord.NotFound:
+            print(f"Pairings message with ID {message_id} not found in channel.")
+        except Exception as e:
+            print(f"Failed to update pairings posting for match {match_number}: {e}")
+
+
     def calculate_team_wins(self):
         team_a_wins = 0
         team_b_wins = 0
@@ -338,7 +399,8 @@ class DraftSession:
 
             # Respond to the interaction
             player_name = interaction.guild.get_member(self.player_id).display_name
-            await self.session.update_draft_summary()
+            await self.session.update_draft_summary()  # Update the draft summary as before
+            await self.session.update_pairings_posting(self.match_number)  # Update the pairings message
             await interaction.response.send_message(f"Recorded {self.values[0]} wins for {player_name} in Match {self.match_number}.", ephemeral=True)
 
 
