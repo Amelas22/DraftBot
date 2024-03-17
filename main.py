@@ -59,14 +59,26 @@ class DraftSession:
         await message.edit(embed=embed)
 
     async def handle_ready_interaction(self, user_id: int):
+        # If user is in 'not_ready', remove them from there
+        if user_id in self.ready_check_status["not_ready"]:
+            self.ready_check_status["not_ready"].remove(user_id)
+        # Only add to 'ready' if they're not already there
+        if user_id not in self.ready_check_status["ready"]:
+            self.ready_check_status["ready"].append(user_id)
+        # Remove from 'no_response' regardless
         if user_id in self.ready_check_status["no_response"]:
             self.ready_check_status["no_response"].remove(user_id)
-        self.ready_check_status["ready"].append(user_id)
 
     async def handle_not_ready_interaction(self, user_id: int):
+        # If user is in 'ready', remove them from there
+        if user_id in self.ready_check_status["ready"]:
+            self.ready_check_status["ready"].remove(user_id)
+        # Only add to 'not_ready' if they're not already there
+        if user_id not in self.ready_check_status["not_ready"]:
+            self.ready_check_status["not_ready"].append(user_id)
+        # Remove from 'no_response' regardless
         if user_id in self.ready_check_status["no_response"]:
             self.ready_check_status["no_response"].remove(user_id)
-        self.ready_check_status["not_ready"].append(user_id)
 
     async def update_ready_check_message(self, interaction: discord.Interaction):
         embed = discord.Embed(title="Ready Check Initiated",
