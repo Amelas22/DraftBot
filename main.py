@@ -32,7 +32,7 @@ class DraftSession:
         self.draft_message_id = None
         self.draft_link = None
         self.draft_start_time = datetime.now()
-        self.deletion_time = datetime.now() + timedelta(hours=7)
+        self.deletion_time = datetime.now() + timedelta(hours=5)
         self.draft_chat_channel = None
         self.guild_id = None
         self.draft_id = None
