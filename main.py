@@ -109,44 +109,49 @@ class DraftSession:
             return
 
         await draft_chat_channel_obj.edit(slowmode_delay=0)
-        
+
         for round_number, round_pairings in pairings.items():
             embed = discord.Embed(title=f"Round {round_number} Pairings", color=discord.Color.blue())
+            view = discord.ui.View(timeout=None)  # Persistent view
+
             for player_id, opponent_id, match_number in round_pairings:
                 player = guild.get_member(player_id)
                 opponent = guild.get_member(opponent_id)
                 player_name = player.display_name if player else 'Unknown'
                 opponent_name = opponent.display_name if opponent else 'Unknown'
-                
+
                 embed.add_field(name=f"Match {match_number}", value=f"{player_name} vs {opponent_name}", inline=False)
-            
-            await draft_chat_channel_obj.send(embed=embed)
+                view.add_item(MatchResultButton(self.session_id, match_number, player_id, player_name, opponent_id, opponent_name))
+
+            await draft_chat_channel_obj.send(embed=embed, view=view)
 
         # Optionally send a tag message for all participants
         sign_up_tags = ' '.join([guild.get_member(user_id).mention for user_id in self.sign_ups if guild.get_member(user_id)])
         await draft_chat_channel_obj.send(f"{sign_up_tags}\nPairings Posted Above")
+
+
     
     def calculate_pairings(self):
         num_players = len(self.team_a) + len(self.team_b)
         if num_players not in [6, 8]:
             raise ValueError("Unsupported number of players. Only 6 or 8 players are supported.")
 
-        # Ensure that teams are of equal size and combined size matches the expected total
         assert len(self.team_a) == len(self.team_b), "Teams must be of equal size."
-
+        
+        self.match_results = {}  # Reset or initialize the match results
         pairings = {1: [], 2: [], 3: []}
 
-        # Rotate Team B to generate unique pairings for 3 rounds
+        # Generate pairings
         for round in range(1, 4):
             round_pairings = []
             for i, player_a in enumerate(self.team_a):
-                # Calculate index for Team B by rotating based on the round number
                 player_b_index = (i + round - 1) % len(self.team_b)
                 player_b = self.team_b[player_b_index]
 
-                # Assign and increment match counter
                 match_number = self.match_counter
                 self.matches[match_number] = {"players": (player_a, player_b), "results": None}
+                self.match_results[match_number] = {"player1_id": player_a, "player1_wins": None, "player2_id": player_b, "player2_wins": None}
+                
                 round_pairings.append((player_a, player_b, match_number))
                 self.match_counter += 1
 
@@ -467,6 +472,82 @@ class UserRemovalView(View):
         if session and session.sign_ups:
             options = [SelectOption(label=user_name, value=str(user_id)) for user_id, user_name in session.sign_ups.items()]
             self.add_item(UserRemovalSelect(options=options, session_id=session_id))
+
+class MatchResultButton(discord.ui.Button):
+    def __init__(self, session_id, match_number, player1_id, player1_name, player2_id, player2_name, **kwargs):
+        # Ensure to call the super class constructor with label and style
+        super().__init__(label=f"Match {match_number} Results", style=discord.ButtonStyle.primary, **kwargs)
+        self.session_id = session_id
+        self.match_number = match_number
+        self.player1_id = player1_id
+        self.player1_name = player1_name
+        self.player2_id = player2_id
+        self.player2_name = player2_name
+
+    async def callback(self, interaction: discord.Interaction):
+        # Pass session_id as the first parameter
+        view = ResultReportView(self.session_id, self.player1_id, self.player1_name, self.player2_id, self.player2_name, self.match_number)
+        await interaction.response.send_message(f"Report results for Match {self.match_number}.", view=view, ephemeral=True)
+
+
+
+
+class WinSelect(discord.ui.Select):
+    def __init__(self, session_id, match_number, player_id, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.session_id = session_id
+        self.match_number = match_number
+        self.player_id = player_id
+
+    async def callback(self, interaction: discord.Interaction):
+        # Retrieve the session using session_id
+        session = sessions.get(self.session_id)
+        if not session:
+            await interaction.response.send_message("Draft session not found.", ephemeral=True)
+            return
+
+        # Retrieve match result entry
+        match_result = session.match_results.get(self.match_number)
+        if not match_result:
+            # Handle case where match result is unexpectedly missing
+            await interaction.response.send_message("Match result not found.", ephemeral=True)
+            return
+
+        # Determine which player's wins are being updated and update directly
+        if self.player_id == match_result['player1_id']:
+            match_result['player1_wins'] = int(self.values[0])
+        elif self.player_id == match_result['player2_id']:
+            match_result['player2_wins'] = int(self.values[0])
+        else:
+            # Handle unexpected case where player ID doesn't match either player in the match
+            await interaction.response.send_message("Player not found in match.", ephemeral=True)
+            return
+
+        # Respond to the interaction
+        player_name = interaction.guild.get_member(self.player_id).display_name
+        await interaction.response.send_message(f"Recorded {self.values[0]} wins for {player_name} in Match {self.match_number}.", ephemeral=True)
+
+
+
+class ResultReportView(discord.ui.View):
+    def __init__(self, session_id, player1_id, player1_name, player2_id, player2_name, match_number):
+        super().__init__(timeout=180)
+        self.session_id = session_id
+        self.player1_id = player1_id
+        self.player1_name = player1_name
+        self.player2_id = player2_id
+        self.player2_name = player2_name
+        self.match_number = match_number
+
+        win_options = [
+            discord.SelectOption(label="2 wins", value="2"),
+            discord.SelectOption(label="1 win", value="1"),
+            discord.SelectOption(label="0 wins", value="0"),
+        ]
+
+        self.add_item(WinSelect(session_id, match_number, player1_id, placeholder=f"{player1_name} Wins:", options=win_options, custom_id=f"{match_number}_p1"))
+        self.add_item(WinSelect(session_id, match_number, player2_id, placeholder=f"{player2_name} Wins:", options=win_options, custom_id=f"{match_number}_p2"))
+
 
 
 @bot.event
