@@ -88,7 +88,6 @@ class DraftSession:
         embed.add_field(name="Not Ready", value="\n".join([interaction.guild.get_member(user_id).mention for user_id in self.ready_check_status["not_ready"]]), inline=False)
         embed.add_field(name="No Response", value="\n".join([interaction.guild.get_member(user_id).mention for user_id in self.ready_check_status["no_response"]]), inline=False)
 
-        # Assuming `ready_check_message_id` is stored when initially sending out the ready check
         message = await interaction.channel.fetch_message(self.ready_check_message_id)
         await message.edit(embed=embed)
 
@@ -110,9 +109,12 @@ class DraftSession:
 
         # Send the message as a follow-up to the interaction
         message = await interaction.followup.send(embed=embed, view=view)
-
-        # Store the message ID for later use
         self.ready_check_message_id = message.id
+        sign_up_tags = ' '.join([interaction.guild.get_member(user_id).mention for user_id in self.sign_ups.keys()])
+
+        # Send a separate follow-up message to tag all signed-up users
+        await interaction.followup.send(f"A Ready Check has been called! Make sure you are in the Draftmancer lobby. {sign_up_tags}")
+        
 
     class ReadyCheckView(discord.ui.View):
         def __init__(self, session_id, *args, **kwargs):
@@ -209,7 +211,7 @@ class DraftSession:
             for _, _, match_number in round_pairings:
                 self.matches[match_number]['message_id'] = pairings_message.id
 
-        # Optionally send a tag message for all participants
+        # Send a tag message for all participants
         sign_up_tags = ' '.join([guild.get_member(user_id).mention for user_id in self.sign_ups if guild.get_member(user_id)])
         await draft_chat_channel_obj.send(f"{sign_up_tags}\nPairings Posted Above")
 
@@ -419,10 +421,6 @@ class DraftSession:
             print(f"Pairings message with ID {message_id} not found in channel.")
         except Exception as e:
             print(f"Failed to update pairings posting for match {match_number}: {e}")
-
-
-
-
 
     def calculate_team_wins(self):
         team_a_wins = 0
