@@ -688,10 +688,10 @@ class PersistentView(View):
 
         # Create the embed message for displaying the teams and seating order
         embed = discord.Embed(
-            title="Draft is Ready!",
+            title=f"Draft-{session.draft_id} is Ready!",
             description=f"**Draftmancer Session**: **[Join Here]({session.draft_link})** \n" +
-                        "Host of Draftmancer must manually adjust seating as per below" +
-                        "\n\nAfter the draft, select Create Chat Rooms, then select Post Pairings" +
+                        "Host of Draftmancer must manually adjust seating as per below. **TURN OFF RANDOM SEATING SETTING IN DRAFMANCER**" +
+                        "\n\nAfter the draft, select Create Chat Rooms (give it five seconds to generate rooms) then select Post Pairings" +
                         "\nPost Pairings will take about 10 seconds to process. Only press once.",
             color=discord.Color.blue()
         )
@@ -810,7 +810,13 @@ async def start_draft(interaction: discord.Interaction):
 
     embed = discord.Embed(
         title=f"Vintage Cube Team Draft Queue - Started <t:{int(draft_start_time)}:R>",
-        description=f"\n**Click Sign Up to Join!** \n\nNote: Draftmancer settings, such as importing the cube, must still be managed by the host. Seating order will be determined in the next step.\n\n**Draftmancer Session**: **[Join Here]({draft_link})**",
+        description="\n**How to use bot**:\n1. Click sign up and click the draftmancer link. Draftmancer host still has to update settings and import the cube.\n" +
+                        "2. When enough people join (6 or 8), Push Ready Check. Once everyone is ready, push Create Teams\n" +
+                        "3. Create Teams will create randoms teams and a corresponding seating order. Draftmancer host needs to adjust table to match seating order. **TURN OFF RANDOM SEATING IN DRAFTMANCER** \n" +
+                        "4. After the draft, come back to this message (it'll be in pins) and click Create Chat Rooms. After 5 seconds chat rooms will be ready and you can press Post Pairings. This takes 10 seconds to process.\n" +
+                        "5. You will now have a private team chat with just your team and a shared draft chat that has pairings and match results. You can select the Match Results buttons to report results.\n" +
+                        "6. Chat channels will automatically close around five hours after the /startdraft command was used." +
+                        f"\n\n**Draftmancer Session**: **[Join Here]({draft_link})**",
         color=discord.Color.dark_magenta()
     )
     embed.add_field(name="Sign-Ups", value="No players yet.", inline=False)
