@@ -82,7 +82,7 @@ class DraftSession:
 
     async def update_ready_check_message(self, interaction: discord.Interaction):
         embed = discord.Embed(title="Ready Check Initiated",
-                              description="Please indicate if you are ready.",
+                              description="Please indicate if you are ready. \nClick a name to open a DM if you're waiting on a response",
                               color=discord.Color.gold())
         embed.add_field(name="Ready", value="\n".join([interaction.guild.get_member(user_id).mention for user_id in self.ready_check_status["ready"]]), inline=False)
         embed.add_field(name="Not Ready", value="\n".join([interaction.guild.get_member(user_id).mention for user_id in self.ready_check_status["not_ready"]]), inline=False)
@@ -340,7 +340,10 @@ class DraftSession:
             return None
 
         team_a_wins, team_b_wins = self.calculate_team_wins()
-        embed = discord.Embed(title=f"Pairings for Draft {self.draft_id} are ready!", color=discord.Color.blue())
+        embed = discord.Embed(title=f"Pairings for Draft {self.draft_id} are ready!", 
+                              description="Note: If a player is missing from this chat or your team chat, \n" +
+                              "they probably have the Discord Invisible setting on. Tag them to make sure they see the channel.", 
+                              color=discord.Color.blue())
         embed.add_field(name="Team A", value="\n".join([guild.get_member(player_id).display_name for player_id in self.team_a]), inline=True)
         embed.add_field(name="Team B", value="\n".join([guild.get_member(player_id).display_name for player_id in self.team_b]), inline=True)
         embed.add_field(name="\u200b", value="\u200b", inline=False)  # Spacer
@@ -638,9 +641,25 @@ class PersistentView(View):
     async def ready_check_callback(self, interaction: discord.Interaction):
         session = sessions.get(self.session_id)
         if session:
-            await session.initiate_ready_check(interaction)
+            # Check if the user is in the sign-up list
+            if interaction.user.id in session.sign_ups:
+                # Proceed with the ready check
+                await session.initiate_ready_check(interaction)
+
+                # Disable the "Ready Check" button after use
+                for item in self.children:
+                    if isinstance(item, discord.ui.Button) and item.custom_id == f"{self.session_id}_ready_check":
+                        item.disabled = True
+                        break  # Stop the loop once the button is found and modified
+
+                # Ensure the view reflects the updated state with the button disabled
+                await interaction.edit_original_response(view=self)
+            else:
+                # Inform the user they're not in the sign-up list, hence can't initiate a ready check
+                await interaction.response.send_message("You must be signed up to initiate a ready check.", ephemeral=True)
         else:
             await interaction.response.send_message("Session not found.", ephemeral=True)
+
 
 
     async def cancel_draft_callback(self, interaction: discord.Interaction):
@@ -698,7 +717,7 @@ class PersistentView(View):
             title=f"Draft-{session.draft_id} is Ready!",
             description=f"**Draftmancer Session**: **[Join Here]({session.draft_link})** \n" +
                         "Host of Draftmancer must manually adjust seating as per below. **TURN OFF RANDOM SEATING SETTING IN DRAFMANCER**" +
-                        "\n\nAfter the draft, select Create Chat Rooms (give it five seconds to generate rooms) then select Post Pairings" +
+                        "\n\n**AFTER THE DRAFT**, select Create Chat Rooms (give it five seconds to generate rooms) then select Post Pairings" +
                         "\nPost Pairings will take about 10 seconds to process. Only press once.",
             color=discord.Color.blue()
         )
@@ -824,7 +843,7 @@ async def start_draft(interaction: discord.Interaction):
 
     embed = discord.Embed(
         title=f"MTGO Team Draft Queue - Started <t:{int(draft_start_time)}:R>",
-        description="\n**How to use bot**:\n1. Click sign up and click the draftmancer link. Draftmancer host still has to update settings and import the cube.\n" +
+        description="\n**How to use bot**:\n1. Click sign up and click the draftmancer link. Draftmancer host still has to update settings and  from CubeCobra.\n" +
                         "2. When enough people join (6 or 8), Push Ready Check. Once everyone is ready, push Create Teams\n" +
                         "3. Create Teams will create randoms teams and a corresponding seating order. Draftmancer host needs to adjust table to match seating order. **TURN OFF RANDOM SEATING IN DRAFTMANCER** \n" +
                         "4. After the draft, come back to this message (it'll be in pins) and click Create Chat Rooms. After 5 seconds chat rooms will be ready and you can press Post Pairings. This takes 10 seconds to process.\n" +
