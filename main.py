@@ -469,6 +469,7 @@ class DraftSession:
             self.session = session
 
         async def callback(self, interaction: discord.Interaction):
+            await interaction.response.defer(ephemeral=True)
             match_result = self.session.match_results.get(self.match_number)
             
             if not match_result:
@@ -496,7 +497,7 @@ class DraftSession:
             player_name = interaction.guild.get_member(self.player_id).display_name
             await self.session.update_draft_summary()  # Update the draft summary as before
             await self.session.update_pairings_posting(self.match_number)  # Update the pairings message
-            await interaction.response.send_message(f"Recorded {self.values[0]} wins for {player_name} in Match {self.match_number}.", ephemeral=True)
+            await interaction.followup.send(f"Recorded {self.values[0]} wins for {player_name} in Match {self.match_number}.", ephemeral=True)
 
 
     class ResultReportView(discord.ui.View):
@@ -534,6 +535,7 @@ class PersistentView(View):
         self.add_item(discord.ui.Button(label="Post Pairings", style=discord.ButtonStyle.primary, custom_id=f"{session_id}_post_pairings", disabled=True))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        session = sessions.get(self.session_id)
         if interaction.data['custom_id'] == f"{self.session_id}_sign_up":
             await self.sign_up_callback(interaction)
         elif interaction.data['custom_id'] == f"{self.session_id}_cancel_sign_up":
