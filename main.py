@@ -631,7 +631,7 @@ class PersistentView(View):
             if item.custom_id == f"{self.session_id}_draft_complete":
                 item.disabled = True
                 break  # Stop the loop once the button is found and modified 
-            
+
         await interaction.edit_original_response(view=self)
         await session.update_draft_complete_message(interaction)
     
@@ -823,7 +823,7 @@ async def start_draft(interaction: discord.Interaction):
     await interaction.followup.send(ping_message, ephemeral=False)
 
     embed = discord.Embed(
-        title=f"Vintage Cube Team Draft Queue - Started <t:{int(draft_start_time)}:R>",
+        title=f"MTGO Team Draft Queue - Started <t:{int(draft_start_time)}:R>",
         description="\n**How to use bot**:\n1. Click sign up and click the draftmancer link. Draftmancer host still has to update settings and import the cube.\n" +
                         "2. When enough people join (6 or 8), Push Ready Check. Once everyone is ready, push Create Teams\n" +
                         "3. Create Teams will create randoms teams and a corresponding seating order. Draftmancer host needs to adjust table to match seating order. **TURN OFF RANDOM SEATING IN DRAFTMANCER** \n" +
