@@ -607,12 +607,11 @@ class PersistentView(View):
         if not session:
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
             return
-
+        
         await interaction.response.defer(ephemeral=True)
-
+        
         guild = interaction.guild
 
-        # Assuming team_a and team_b are lists of member IDs
         team_a_members = [guild.get_member(user_id) for user_id in session.team_a]
         team_b_members = [guild.get_member(user_id) for user_id in session.team_b]
         all_members = team_a_members + team_b_members
@@ -620,7 +619,6 @@ class PersistentView(View):
         team_a_members = [member for member in team_a_members if member]  # Filter out None
         team_b_members = [member for member in team_b_members if member]  # Filter out None
 
-        # Correctly pass team_a and team_b IDs to the method
         tasks = [
             session.create_team_channel(guild, "Team-A", team_a_members, session.team_a, session.team_b),
             session.create_team_channel(guild, "Team-B", team_b_members, session.team_a, session.team_b),
@@ -628,6 +626,13 @@ class PersistentView(View):
         ]
         await asyncio.gather(*tasks)
 
+        # Disable the "Create Chat Rooms" button after use
+        for item in self.children:
+            if item.custom_id == f"{self.session_id}_draft_complete":
+                item.disabled = True
+                break  # Stop the loop once the button is found and modified 
+            
+        await interaction.edit_original_response(view=self)
         await session.update_draft_complete_message(interaction)
     
     async def ready_check_callback(self, interaction: discord.Interaction):
@@ -724,6 +729,12 @@ class PersistentView(View):
         if not session:
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
             return
+        
+        for item in self.children:
+            if item.custom_id == f"{self.session_id}_post_pairings":
+                item.disabled = True
+                break  # Stop the loop once the button is found and modified
+        await interaction.edit_original_response(view=self)
 
         original_message_id = session.message_id
         original_channel_id = interaction.channel.id  
@@ -731,6 +742,7 @@ class PersistentView(View):
         self.pairings = session.calculate_pairings()
         await session.move_message_to_draft_channel(bot, original_channel_id, original_message_id, draft_chat_channel_id)
 
+        
         # Post pairings in the draft chat channel
         await session.post_pairings(interaction.guild, self.pairings)
         
