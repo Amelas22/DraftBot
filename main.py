@@ -39,14 +39,16 @@ class DraftSession:
         self.guild_id = None
         self.draft_id = None
         self.pairings = {}
-        self.team_a = None
-        self.team_b = None
+        self.team_a = [] 
+        self.team_b = []
         self.draft_summary_message_id = None
         self.matches = {}  
         self.match_results = {}
         self.match_counter = 1  
         self.sign_ups = {}
         self.channel_ids = []
+        self.session_type = None
+        self.pre_made_teams = {'team_1': [], 'team_2': []}
 
     async def update_draft_message(self, interaction):
         message = await interaction.channel.fetch_message(self.message_id)
@@ -212,8 +214,8 @@ class DraftSession:
                 self.matches[match_number]['message_id'] = pairings_message.id
 
         # Send a tag message for all participants
-        sign_up_tags = ' '.join([guild.get_member(user_id).mention for user_id in self.sign_ups if guild.get_member(user_id)])
-        await draft_chat_channel_obj.send(f"{sign_up_tags}\nPairings Posted Above")
+        # sign_up_tags = ' '.join([guild.get_member(user_id).mention for user_id in self.sign_ups if guild.get_member(user_id)])
+        # await draft_chat_channel_obj.send(f"{sign_up_tags}\nPairings Posted Above")
 
     def create_pairings_view(self, round_pairings):
         view = discord.ui.View(timeout=None)  # Persistent view
@@ -274,6 +276,9 @@ class DraftSession:
         team_a_members = [guild.get_member(user_id) for user_id in self.team_a]
         team_b_members = [guild.get_member(user_id) for user_id in self.team_b]
 
+        random.shuffle(team_a_members)
+        random.shuffle(team_b_members)
+
         seating_order = []
         for i in range(max(len(team_a_members), len(team_b_members))):
             if i < len(team_a_members) and team_a_members[i]:
@@ -307,7 +312,7 @@ class DraftSession:
         self.draft_summary_message_id = summary_message.id  # Store the message ID for later updates
 
         # Delete the original signup message after a delay to clean up
-        await asyncio.sleep(10)  # Wait for 10 seconds before deleting the message
+        await asyncio.sleep(30)  # Wait for 10 seconds before deleting the message
         await original_message.delete()
 
     
@@ -340,7 +345,7 @@ class DraftSession:
             return None
 
         team_a_wins, team_b_wins = self.calculate_team_wins()
-        embed = discord.Embed(title=f"Pairings for Draft {self.draft_id} are ready!", 
+        embed = discord.Embed(title=f"Team Results for Draft-{self.draft_id}", 
                               description="Note: If a player is missing from this chat or your team chat, \n" +
                               "they probably have the Discord Invisible setting on. Tag them to make sure they see the channel.", 
                               color=discord.Color.blue())
@@ -374,6 +379,30 @@ class DraftSession:
                 button = self.MatchResultButton(self.session_id, match_id, style=button_style)
                 view.add_item(button)
         return view
+    
+    async def update_team_view(self, interaction: discord.Interaction):
+        # Fetch the message to be updated
+        message = await interaction.channel.fetch_message(self.message_id)
+        embed = message.embeds[0]  # Assuming there's only one embed attached to the message
+
+        # Fetch member display names for each team
+        guild = interaction.guild
+        team_a_names = [guild.get_member(user_id).display_name for user_id in self.team_a]
+        team_b_names = [guild.get_member(user_id).display_name for user_id in self.team_b]
+
+        # Update the fields for Team A and Team B with new compositions and counts
+        # Find the index of the Team A and Team B fields
+        team_a_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith("Team A")), None)
+        team_b_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith("Team B")), None)
+
+        # Update the fields if found
+        if team_a_index is not None:
+            embed.set_field_at(team_a_index, name=f"Team A ({len(self.team_a)}):", value="\n".join(team_a_names) if team_a_names else "No players yet.", inline=False)
+        if team_b_index is not None:
+            embed.set_field_at(team_b_index, name=f"Team B ({len(self.team_b)}):", value="\n".join(team_b_names) if team_b_names else "No players yet.", inline=False)
+
+        # Edit the original message with the updated embed
+        await message.edit(embed=embed)
 
     async def update_pairings_posting(self, match_number):
         guild = bot.get_guild(self.guild_id)
@@ -527,13 +556,21 @@ class PersistentView(View):
     def __init__(self, session_id):
         super().__init__(timeout=None)
         self.session_id = session_id
+        session = sessions.get(session_id)
 
-        self.add_item(discord.ui.Button(label="Sign Up", style=discord.ButtonStyle.green, custom_id=f"{session_id}_sign_up"))
-        self.add_item(discord.ui.Button(label="Cancel Sign Up", style=discord.ButtonStyle.red, custom_id=f"{session_id}_cancel_sign_up"))
+        
+        if session.session_type == 'premade':
+            self.add_item(discord.ui.Button(label="Team A", style=discord.ButtonStyle.green, custom_id=f"{session_id}_Team_A"))
+            self.add_item(discord.ui.Button(label="Team B", style=discord.ButtonStyle.red, custom_id=f"{session_id}_Team_B"))
+            self.add_item(discord.ui.Button(label="Generate Seating Order", style=discord.ButtonStyle.blurple, custom_id=f"{session_id}_generate_seating"))
+        elif session.session_type == 'random':
+            self.add_item(discord.ui.Button(label="Sign Up", style=discord.ButtonStyle.green, custom_id=f"{session_id}_sign_up"))
+            self.add_item(discord.ui.Button(label="Cancel Sign Up", style=discord.ButtonStyle.red, custom_id=f"{session_id}_cancel_sign_up"))
+            self.add_item(discord.ui.Button(label="Create Teams", style=discord.ButtonStyle.blurple, custom_id=f"{session_id}_randomize_teams"))
+                
         self.add_item(discord.ui.Button(label="Cancel Draft", style=discord.ButtonStyle.grey, custom_id=f"{session_id}_cancel_draft"))
         self.add_item(discord.ui.Button(label="Remove User", style=discord.ButtonStyle.grey, custom_id=f"{session_id}_remove_user"))
         self.add_item(discord.ui.Button(label="Ready Check", style=discord.ButtonStyle.green, custom_id=f"{session_id}_ready_check"))
-        self.add_item(discord.ui.Button(label="Create Teams", style=discord.ButtonStyle.blurple, custom_id=f"{session_id}_randomize_teams"))
         self.add_item(discord.ui.Button(label="Create Chat Rooms", style=discord.ButtonStyle.green, custom_id=f"{session_id}_draft_complete", disabled=True))
         self.add_item(discord.ui.Button(label="Post Pairings", style=discord.ButtonStyle.primary, custom_id=f"{session_id}_post_pairings", disabled=True))
 
@@ -553,6 +590,12 @@ class PersistentView(View):
             await self.post_pairings_callback(interaction)
         elif interaction.data['custom_id'] == f"{self.session_id}_ready_check":
             await self.ready_check_callback(interaction)
+        elif interaction.data['custom_id'] == f"{self.session_id}_Team_A":
+            await self.team_assignment_callback(interaction)
+        elif interaction.data['custom_id'] == f"{self.session_id}_Team_B":
+            await self.team_assignment_callback(interaction)
+        elif interaction.data['custom_id'] == f"{self.session_id}_generate_seating":
+            await self.randomize_teams_callback(interaction)
         elif interaction.data['custom_id'] == f"{self.session_id}_remove_user":
             await self.remove_user_button_callback(interaction)
             return False
@@ -612,7 +655,17 @@ class PersistentView(View):
             return
         
         await interaction.response.defer(ephemeral=True)
-        
+
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):  # Ensure it's a Button you're iterating over
+                # Disable the "Create Chat Rooms" button after use
+                if item.custom_id == f"{self.session_id}_draft_complete":
+                    item.disabled = True
+                # Enable the "Post Pairings" button
+                elif item.custom_id == f"{self.session_id}_post_pairings":
+                    item.disabled = False
+
+        await interaction.edit_original_response(view=self)
         guild = interaction.guild
 
         team_a_members = [guild.get_member(user_id) for user_id in session.team_a]
@@ -629,13 +682,7 @@ class PersistentView(View):
         ]
         await asyncio.gather(*tasks)
 
-        # Disable the "Create Chat Rooms" button after use
-        for item in self.children:
-            if item.custom_id == f"{self.session_id}_draft_complete":
-                item.disabled = True
-                break  # Stop the loop once the button is found and modified 
-
-        await interaction.edit_original_response(view=self)
+        
         await session.update_draft_complete_message(interaction)
     
     async def ready_check_callback(self, interaction: discord.Interaction):
@@ -661,6 +708,50 @@ class PersistentView(View):
             await interaction.response.send_message("Session not found.", ephemeral=True)
 
 
+    async def team_assignment_callback(self, interaction: discord.Interaction):
+        session = sessions.get(self.session_id)
+        if not session:
+            await interaction.response.send_message("Session not found.", ephemeral=True)
+            return
+
+        user_id = interaction.user.id
+        custom_id = interaction.data["custom_id"]
+        user_name = interaction.user.display_name
+
+        if "_Team_A" in custom_id:
+            primary_team_key = "team_a"
+            secondary_team_key = "team_b"
+        elif "_Team_B" in custom_id:
+            primary_team_key = "team_b"
+            secondary_team_key = "team_a"
+        else:
+            await interaction.response.send_message("An error occurred.", ephemeral=True)
+            return
+
+        primary_team = getattr(session, primary_team_key, [])
+        secondary_team = getattr(session, secondary_team_key, [])
+
+        # Add or remove the user from the team lists
+        if user_id in primary_team:
+            primary_team.remove(user_id)
+            del session.sign_ups[user_id]  # Remove from sign-ups dictionary
+            action_message = f"You have been removed from a team."
+        else:
+            if user_id in secondary_team:
+                secondary_team.remove(user_id)
+                del session.sign_ups[user_id]  # Remove from sign-ups dictionary before re-adding to correct team
+            primary_team.append(user_id)
+            session.sign_ups[user_id] = user_name  # Add/update in sign-ups dictionary
+            action_message = f"You have been added to a team."
+
+        # Update session attribute to reflect changes
+        setattr(session, primary_team_key, primary_team)
+        setattr(session, secondary_team_key, secondary_team)
+
+        await interaction.response.send_message(action_message, ephemeral=True)
+        await session.update_team_view(interaction)
+
+    
 
     async def cancel_draft_callback(self, interaction: discord.Interaction):
         session = sessions.get(self.session_id)
@@ -704,12 +795,14 @@ class PersistentView(View):
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
             return
 
-        if session.team_a is None or session.team_b is None:
+        # Check session type and prepare teams if necessary
+        if session.session_type == 'random' and (session.team_a is None or session.team_b is None):
             session.split_into_teams()
 
         # Generate names for display using the session's sign_ups dictionary
-        team_a_display_names = [session.sign_ups[user_id] for user_id in session.team_a]
-        team_b_display_names = [session.sign_ups[user_id] for user_id in session.team_b]
+        team_a_display_names = [interaction.guild.get_member(user_id).display_name for user_id in session.team_a]
+        team_b_display_names = [interaction.guild.get_member(user_id).display_name for user_id in session.team_b]
+        
         seating_order = await session.generate_seating_order()
 
         # Create the embed message for displaying the teams and seating order
@@ -725,12 +818,11 @@ class PersistentView(View):
         embed.add_field(name="Team B", value="\n".join(team_b_display_names), inline=True)
         embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
 
-
         # Iterate over the view's children (buttons) to update their disabled status
         for item in self.children:
             if isinstance(item, discord.ui.Button):
                 # Enable "Post Pairings" and "Draft Complete" buttons
-                if item.custom_id in [f"{self.session_id}_post_pairings", f"{self.session_id}_draft_complete"]:
+                if item.custom_id == f"{self.session_id}_draft_complete":
                     item.disabled = False
                 else:
                     # Disable all other buttons
@@ -739,8 +831,7 @@ class PersistentView(View):
         # Respond with the embed and updated view
         await interaction.response.edit_message(embed=embed, view=self)
 
-        
-    
+
     async def post_pairings_callback(self, interaction: discord.Interaction):
         await interaction.response.defer()  # Ensure there's enough time for operations
 
@@ -755,17 +846,21 @@ class PersistentView(View):
                 break  # Stop the loop once the button is found and modified
         await interaction.edit_original_response(view=self)
 
+        draft_chat_channel_id = session.draft_chat_channel
+        draft_chat_channel = bot.get_channel(draft_chat_channel_id)
+        sign_up_tags = ' '.join([interaction.guild.get_member(user_id).mention for user_id in session.sign_ups.keys() if interaction.guild.get_member(user_id)])
+        await draft_chat_channel.send(f"Pairings Processing. Standby. {sign_up_tags}")
+
         original_message_id = session.message_id
         original_channel_id = interaction.channel.id  
-        draft_chat_channel_id = session.draft_chat_channel
         self.pairings = session.calculate_pairings()
         await session.move_message_to_draft_channel(bot, original_channel_id, original_message_id, draft_chat_channel_id)
-
         
         # Post pairings in the draft chat channel
         await session.post_pairings(interaction.guild, self.pairings)
+
         
-        await interaction.followup.send("Pairings have been posted to the draft chat channel and the original message moved.", ephemeral=True)
+        # Remove the processing message after pairings are posted
     
     async def sign_up(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.sign_up_callback(interaction, interaction.user.id)
@@ -784,6 +879,15 @@ class PersistentView(View):
 
     async def post_pairings(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.post_pairings_callback(interaction)
+    
+    async def Team_A(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await self.team_assignment_callback(interaction)
+
+    async def Team_B(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await self.team_assignment_callback(interaction)
+
+    async def generate_seating(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await self.generate_seating_callback(interaction)
 
 class UserRemovalSelect(Select):
     def __init__(self, options: list[SelectOption], session_id: str, *args, **kwargs):
@@ -820,7 +924,7 @@ async def on_ready():
     print(f'Logged in as {bot.user}!')
     bot.loop.create_task(cleanup_sessions_task())
                
-@bot.slash_command(name='startdraft', description='Start a Magic: The Gathering draft table', guild_id=None)
+@bot.slash_command(name='startdraft', description='Start a team draft with random teams', guild_id=None)
 async def start_draft(interaction: discord.Interaction):
     await interaction.response.defer()
 
@@ -834,6 +938,7 @@ async def start_draft(interaction: discord.Interaction):
     session.draft_link = draft_link
     session.draft_id = draft_id
     session.draft_start_time = draft_start_time
+    session.session_type = "random"
 
     add_session(session_id, session)
 
@@ -842,7 +947,7 @@ async def start_draft(interaction: discord.Interaction):
     await interaction.followup.send(ping_message, ephemeral=False)
 
     embed = discord.Embed(
-        title=f"MTGO Team Draft Queue - Started <t:{int(draft_start_time)}:R>",
+        title=f"MTGO Random Team Draft Queue - Started <t:{int(draft_start_time)}:R>",
         description="\n**How to use bot**:\n1. Click sign up and click the draftmancer link. Draftmancer host still has to update settings and  from CubeCobra.\n" +
                         "2. When enough people join (6 or 8), Push Ready Check. Once everyone is ready, push Create Teams\n" +
                         "3. Create Teams will create randoms teams and a corresponding seating order. Draftmancer host needs to adjust table to match seating order. **TURN OFF RANDOM SEATING IN DRAFTMANCER** \n" +
@@ -858,12 +963,51 @@ async def start_draft(interaction: discord.Interaction):
     view = PersistentView(session_id)
   
     message = await interaction.followup.send(embed=embed, view=view)
-    print(f"Session {session_id} has been created.")
+    print(f"Random Draft: {session_id} has been created.")
     session.draft_message_id = message.id
     session.message_id = message.id
     # Pin the message to the channel
     await message.pin()
 
+@bot.slash_command(name='premadedraft', description='Start a team draft with premade teams', guild_id=None)
+async def premade_draft(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    draft_start_time = datetime.now().timestamp()
+    session_id = f"{interaction.user.id}-{int(draft_start_time)}"
+    draft_id = ''.join(secrets.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
+    draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
+
+    session = DraftSession(session_id)
+    session.guild_id = interaction.guild_id
+    session.draft_link = draft_link
+    session.draft_id = draft_id
+    session.draft_start_time = draft_start_time
+    session.session_type = "premade"
+
+    add_session(session_id, session)
+
+    embed = discord.Embed(
+        title=f"MTGO Premade Team Draft Queue - Started <t:{int(draft_start_time)}:R>",
+        description="\n**How to use bot**:\n1. Click Team A or Team B to join that team. Enter the draftmancer link. Draftmancer host still has to update settings and  from CubeCobra.\n" +
+                        "2. When all teams are joined, Push Ready Check. Once everyone is ready, push Generate Seating Order\n" +
+                        "3. Draftmancer host needs to adjust table to match seating order. **TURN OFF RANDOM SEATING IN DRAFTMANCER** \n" +
+                        "4. After the draft, come back to this message (it'll be in pins) and click Create Chat Rooms. After 5 seconds chat rooms will be ready and you can press Post Pairings. This takes 10 seconds to process.\n" +
+                        "5. You will now have a private team chat with just your team and a shared draft chat that has pairings and match results. You can select the Match Results buttons to report results.\n" +
+                        "6. Chat channels will automatically close around five hours after the /startdraft command was used." +
+                        f"\n\n**Draftmancer Session**: **[Join Here]({draft_link})**",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="Team A", value="No players yet.", inline=False)
+    embed.add_field(name="Team B", value="No players yet.", inline=False)
+    embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1219018393471025242/1219410709440495746/image.png?ex=660b33b8&is=65f8beb8&hm=b7e40e9b872d8e04dd70a30c5abc15917379f9acb7dce74ca0372105ec98b468&")
+
+    view = PersistentView(session_id)
+  
+    message = await interaction.followup.send(embed=embed, view=view)
+    print(f"Premade Draft: {session_id} has been created.")
+    session.draft_message_id = message.id
+    session.message_id = message.id
 
 def add_session(session_id, session):
     # Check if the sessions dictionary already contains 20 sessions
