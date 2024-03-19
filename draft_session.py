@@ -5,9 +5,8 @@ import random
 from sessions import sessions
 
 class DraftSession:
-    def __init__(self, session_id, bot):
+    def __init__(self, session_id):
         self.session_id = session_id
-        self.bot = bot
         self.message_id = None
         self.draft_channel_id = None
         self.draft_message_id = None
@@ -20,14 +19,15 @@ class DraftSession:
         self.guild_id = None
         self.draft_id = None
         self.pairings = {}
-        self.team_a = None
-        self.team_b = None
+        self.team_a = []
+        self.team_b = []
         self.draft_summary_message_id = None
         self.matches = {}  
         self.match_results = {}
         self.match_counter = 1  
         self.sign_ups = {}
         self.channel_ids = []
+        self.session_type = None
 
     async def update_draft_message(self, interaction):
         message = await interaction.channel.fetch_message(self.message_id)
@@ -193,8 +193,8 @@ class DraftSession:
                 self.matches[match_number]['message_id'] = pairings_message.id
 
         # Send a tag message for all participants
-        sign_up_tags = ' '.join([guild.get_member(user_id).mention for user_id in self.sign_ups if guild.get_member(user_id)])
-        await draft_chat_channel_obj.send(f"{sign_up_tags}\nPairings Posted Above")
+        # sign_up_tags = ' '.join([guild.get_member(user_id).mention for user_id in self.sign_ups if guild.get_member(user_id)])
+        # await draft_chat_channel_obj.send(f"{sign_up_tags}\nPairings Posted Above")
 
     def create_pairings_view(self, round_pairings):
         view = discord.ui.View(timeout=None)  # Persistent view
@@ -237,11 +237,6 @@ class DraftSession:
 
         return pairings
 
-    def create_match(self, player1_id, player2_id):
-        match_id = self.match_counter
-        self.matches[match_id] = {"players": (player1_id, player2_id), "results": None}
-        self.match_counter += 1
-        return match_id
     
     def split_into_teams(self):
         sign_ups_list = list(self.sign_ups.keys())
@@ -249,11 +244,15 @@ class DraftSession:
         mid_point = len(sign_ups_list) // 2
         self.team_a = sign_ups_list[:mid_point]
         self.team_b = sign_ups_list[mid_point:]
+
     
     async def generate_seating_order(self):
         guild = self.bot.get_guild(self.guild_id)
         team_a_members = [guild.get_member(user_id) for user_id in self.team_a]
         team_b_members = [guild.get_member(user_id) for user_id in self.team_b]
+
+        random.shuffle(team_a_members)
+        random.shuffle(team_b_members)
 
         seating_order = []
         for i in range(max(len(team_a_members), len(team_b_members))):
@@ -288,8 +287,9 @@ class DraftSession:
         self.draft_summary_message_id = summary_message.id  # Store the message ID for later updates
 
         # Delete the original signup message after a delay to clean up
-        await asyncio.sleep(30)  # Wait for 30 seconds before deleting the message
+        await asyncio.sleep(30)  # Wait for 10 seconds before deleting the message
         await original_message.delete()
+        await summary_message.pin()
 
     
     async def update_draft_summary(self):
@@ -321,7 +321,7 @@ class DraftSession:
             return None
 
         team_a_wins, team_b_wins = self.calculate_team_wins()
-        embed = discord.Embed(title=f"Pairings for Draft {self.draft_id} are ready!", 
+        embed = discord.Embed(title=f"Team Results for Draft-{self.draft_id}", 
                               description="Note: If a player is missing from this chat or your team chat, \n" +
                               "they probably have the Discord Invisible setting on. Tag them to make sure they see the channel.", 
                               color=discord.Color.blue())
@@ -355,6 +355,30 @@ class DraftSession:
                 button = self.MatchResultButton(self.session_id, match_id, style=button_style)
                 view.add_item(button)
         return view
+    
+    async def update_team_view(self, interaction: discord.Interaction):
+        # Fetch the message to be updated
+        message = await interaction.channel.fetch_message(self.message_id)
+        embed = message.embeds[0]  # Assuming there's only one embed attached to the message
+
+        # Fetch member display names for each team
+        guild = interaction.guild
+        team_a_names = [guild.get_member(user_id).display_name for user_id in self.team_a]
+        team_b_names = [guild.get_member(user_id).display_name for user_id in self.team_b]
+
+        # Update the fields for Team A and Team B with new compositions and counts
+        # Find the index of the Team A and Team B fields
+        team_a_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith("Team A")), None)
+        team_b_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith("Team B")), None)
+
+        # Update the fields if found
+        if team_a_index is not None:
+            embed.set_field_at(team_a_index, name=f"Team A ({len(self.team_a)}):", value="\n".join(team_a_names) if team_a_names else "No players yet.", inline=False)
+        if team_b_index is not None:
+            embed.set_field_at(team_b_index, name=f"Team B ({len(self.team_b)}):", value="\n".join(team_b_names) if team_b_names else "No players yet.", inline=False)
+
+        # Edit the original message with the updated embed
+        await message.edit(embed=embed)
 
     async def update_pairings_posting(self, match_number):
         guild = self.bot.get_guild(self.guild_id)
@@ -503,3 +527,27 @@ class DraftSession:
 
             self.add_item(self.session.WinSelect(self.match_number, player1_id, self.session, placeholder=f"{player1_name} Wins:", options=win_options, custom_id=f"{self.match_number}_p1"))
             self.add_item(self.session.WinSelect(self.match_number, player2_id, self.session, placeholder=f"{player2_name} Wins:", options=win_options, custom_id=f"{self.match_number}_p2"))
+
+    def to_dict(self):
+        # Convert all attributes to a dictionary, except for those that need special handling
+        session_dict = {k: v for k, v in self.__dict__.items() if not k.startswith('_') and not callable(v) and not isinstance(v, datetime)}
+
+        # Manually convert datetime objects to ISO format strings
+        if isinstance(self.draft_start_time, datetime):
+            session_dict['draft_start_time'] = self.draft_start_time.isoformat()
+        if isinstance(self.deletion_time, datetime):
+            session_dict['deletion_time'] = self.deletion_time.isoformat()
+
+        return session_dict
+
+    def update_from_dict(self, session_dict):
+        """
+        Update the session instance based on a dictionary.
+        This is intended for use when loading session data from JSON.
+        """
+        for key, value in session_dict.items():
+            if key in ['draft_start_time', 'deletion_time'] and isinstance(value, str):
+                # Convert from ISO format string to datetime
+                setattr(self, key, datetime.fromisoformat(value))
+            else:
+                setattr(self, key, value)
