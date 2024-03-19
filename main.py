@@ -314,6 +314,7 @@ class DraftSession:
         # Delete the original signup message after a delay to clean up
         await asyncio.sleep(30)  # Wait for 10 seconds before deleting the message
         await original_message.delete()
+        await summary_message.pin()
 
     
     async def update_draft_summary(self):
@@ -849,13 +850,13 @@ class PersistentView(View):
         draft_chat_channel_id = session.draft_chat_channel
         draft_chat_channel = bot.get_channel(draft_chat_channel_id)
         sign_up_tags = ' '.join([interaction.guild.get_member(user_id).mention for user_id in session.sign_ups.keys() if interaction.guild.get_member(user_id)])
-        await draft_chat_channel.send(f"Pairings Processing. Standby. {sign_up_tags}")
+        await draft_chat_channel.send(f"Pairings in Progress. This takes about 20 seconds. Standby. {sign_up_tags}")
 
         original_message_id = session.message_id
         original_channel_id = interaction.channel.id  
         self.pairings = session.calculate_pairings()
         await session.move_message_to_draft_channel(bot, original_channel_id, original_message_id, draft_chat_channel_id)
-        
+    
         # Post pairings in the draft chat channel
         await session.post_pairings(interaction.guild, self.pairings)
 
