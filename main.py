@@ -39,7 +39,7 @@ class DraftSession:
         self.guild_id = None
         self.draft_id = None
         self.pairings = {}
-        self.team_a = [] 
+        self.team_a = []
         self.team_b = []
         self.draft_summary_message_id = None
         self.matches = {}  
@@ -48,7 +48,6 @@ class DraftSession:
         self.sign_ups = {}
         self.channel_ids = []
         self.session_type = None
-        self.pre_made_teams = {'team_1': [], 'team_2': []}
 
     async def update_draft_message(self, interaction):
         message = await interaction.channel.fetch_message(self.message_id)
@@ -270,6 +269,7 @@ class DraftSession:
         mid_point = len(sign_ups_list) // 2
         self.team_a = sign_ups_list[:mid_point]
         self.team_b = sign_ups_list[mid_point:]
+
     
     async def generate_seating_order(self):
         guild = bot.get_guild(self.guild_id)
@@ -797,12 +797,12 @@ class PersistentView(View):
             return
 
         # Check session type and prepare teams if necessary
-        if session.session_type == 'random' and (session.team_a is None or session.team_b is None):
+        if session.session_type == 'random':
             session.split_into_teams()
 
         # Generate names for display using the session's sign_ups dictionary
-        team_a_display_names = [interaction.guild.get_member(user_id).display_name for user_id in session.team_a]
-        team_b_display_names = [interaction.guild.get_member(user_id).display_name for user_id in session.team_b]
+        team_a_display_names = [session.sign_ups[user_id] for user_id in session.team_a]
+        team_b_display_names = [session.sign_ups[user_id] for user_id in session.team_b]
         
         seating_order = await session.generate_seating_order()
 
