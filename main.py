@@ -348,33 +348,78 @@ class DraftSession:
         team_a_wins, team_b_wins = self.calculate_team_wins()
         total_matches = len(self.match_results)
         half_matches = total_matches // 2
-
-        # Check victory or draw conditions
+        #Check victory or draw conditions
         if team_a_wins > half_matches or team_b_wins > half_matches or (team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0):
             # Generate the victory or draw embed
             embed = self.generate_draft_summary_embed()
             three_zero_drafters = self.calculate_three_zero_drafters(guild)
             embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
-            
+
+            # Post or update in the draft-chat channel
             draft_chat_channel = guild.get_channel(self.draft_chat_channel)
-            if not draft_chat_channel:
-                print("Draft chat channel not found.")
-                return
+            await self.post_or_update_victory_message(draft_chat_channel, embed, 'victory_message_id_draft_chat')
+
+            # Post or update in the team-draft-results channel
+            results_channel = discord.utils.get(guild.text_channels, name="team-draft-results")
+            await self.post_or_update_victory_message(results_channel, embed, 'victory_message_id_results_channel')
+
+    async def post_or_update_victory_message(self, channel, embed, victory_message_attr):
+        if not channel:
+            print(f"Channel not found: {channel}")
+            return
+
+        # Check if the message ID attribute exists and post or update the message accordingly
+        if not hasattr(self, victory_message_attr) or getattr(self, victory_message_attr) is None:
+            message = await channel.send(embed=embed)
+            setattr(self, victory_message_attr, message.id)  # Store the ID of the newly posted message
+        else:
+            try:
+                message_id = getattr(self, victory_message_attr)
+                message = await channel.fetch_message(message_id)
+                await message.edit(embed=embed)  # Edit the existing message with the updated embed
+            except discord.NotFound:
+                print(f"Victory message with ID {message_id} not found in {channel.name}.")
+            except Exception as e:
+                print(f"Failed to update victory message in {channel.name}: {e}")
+
+# Ensure the calculate_three_zero_drafters and generate_draft_summary_embed methods are defined and handle the logic as required.
+
+    # async def check_and_post_victory_or_draw(self):
+    #     guild = bot.get_guild(self.guild_id)
+    #     if not guild:
+    #         print("Guild not found.")
+    #         return
+
+    #     team_a_wins, team_b_wins = self.calculate_team_wins()
+    #     total_matches = len(self.match_results)
+    #     half_matches = total_matches // 2
+
+    #     # Check victory or draw conditions
+    #     if team_a_wins > half_matches or team_b_wins > half_matches or (team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0):
+    #         # Generate the victory or draw embed
+    #         embed = self.generate_draft_summary_embed()
+    #         three_zero_drafters = self.calculate_three_zero_drafters(guild)
+    #         embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
             
-            if not hasattr(self, 'victory_message_id') or self.victory_message_id is None:
-                # Post the victory or draw message if it doesn't exist
-                message = await draft_chat_channel.send(embed=embed)
-                self.victory_message_id = message.id  # Store the ID of the newly posted message
-                message.pin()
-            else:
-                # Fetch and edit the existing message
-                try:
-                    message = await draft_chat_channel.fetch_message(self.victory_message_id)
-                    await message.edit(embed=embed)  # Edit the existing message with the updated embed
-                except discord.NotFound:
-                    print(f"Victory message with ID {self.victory_message_id} not found.")
-                except Exception as e:
-                    print(f"Failed to update victory message: {e}")
+    #         draft_chat_channel = guild.get_channel(self.draft_chat_channel)
+    #         if not draft_chat_channel:
+    #             print("Draft chat channel not found.")
+    #             return
+            
+    #         if not hasattr(self, 'victory_message_id') or self.victory_message_id is None:
+    #             # Post the victory or draw message if it doesn't exist
+    #             message = await draft_chat_channel.send(embed=embed)
+    #             self.victory_message_id = message.id  # Store the ID of the newly posted message
+
+    #         else:
+    #             # Fetch and edit the existing message
+    #             try:
+    #                 message = await draft_chat_channel.fetch_message(self.victory_message_id)
+    #                 await message.edit(embed=embed)  # Edit the existing message with the updated embed
+    #             except discord.NotFound:
+    #                 print(f"Victory message with ID {self.victory_message_id} not found.")
+    #             except Exception as e:
+    #                 print(f"Failed to update victory message: {e}")
 
     
     def generate_draft_summary_embed(self):
@@ -414,8 +459,8 @@ class DraftSession:
         guild = bot.get_guild(self.guild_id)
         if team_a_wins > half_matches or team_b_wins > half_matches:
             winner_team = self.team_a if team_a_wins > team_b_wins else self.team_b
-            title = "Team A has won the draft!" if team_a_wins > team_b_wins else "Team B has won the draft!"
-            description = "Congratulations to "  + ", ".join([guild.get_member(member_id).display_name for member_id in winner_team])
+            title = "Congratulations to " + ", ".join([guild.get_member(member_id).display_name for member_id in winner_team]) + " on winning the draft!"
+            description = f"Draft Start: <t:{int(self.draft_start_time)}:F>"
         elif team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0:
             title = "The Draft is a Draw!"
             description = "Great effort from both teams!"
