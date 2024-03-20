@@ -700,6 +700,7 @@ class PersistentView(View):
         if not session:
             await interaction.followup.send("The draft session could not be found.", ephemeral=True)
             return
+        session.session_stage = 'pairings'
 
         guild = interaction.guild
 
@@ -1128,4 +1129,5 @@ async def cleanup_sessions_task():
         # run function every hour
         await asyncio.sleep(3600)  # Sleep for 1 hour
 
-bot.run(TOKEN)
+if __name__ == "__main__":
+    bot.run(TOKEN)
