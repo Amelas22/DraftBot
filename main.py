@@ -1199,7 +1199,6 @@ async def periodic_save_sessions():
     while True:
         await asyncio.sleep(200)  # Wait for 10 minutes
         save_sessions_to_file(sessions)  # Assume this function saves your sessions to a file
-        print("Sessions have been saved.")
 
 async def cleanup_sessions_task():
     while True:
