@@ -381,45 +381,6 @@ class DraftSession:
             except Exception as e:
                 print(f"Failed to update victory message in {channel.name}: {e}")
 
-# Ensure the calculate_three_zero_drafters and generate_draft_summary_embed methods are defined and handle the logic as required.
-
-    # async def check_and_post_victory_or_draw(self):
-    #     guild = bot.get_guild(self.guild_id)
-    #     if not guild:
-    #         print("Guild not found.")
-    #         return
-
-    #     team_a_wins, team_b_wins = self.calculate_team_wins()
-    #     total_matches = len(self.match_results)
-    #     half_matches = total_matches // 2
-
-    #     # Check victory or draw conditions
-    #     if team_a_wins > half_matches or team_b_wins > half_matches or (team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0):
-    #         # Generate the victory or draw embed
-    #         embed = self.generate_draft_summary_embed()
-    #         three_zero_drafters = self.calculate_three_zero_drafters(guild)
-    #         embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
-            
-    #         draft_chat_channel = guild.get_channel(self.draft_chat_channel)
-    #         if not draft_chat_channel:
-    #             print("Draft chat channel not found.")
-    #             return
-            
-    #         if not hasattr(self, 'victory_message_id') or self.victory_message_id is None:
-    #             # Post the victory or draw message if it doesn't exist
-    #             message = await draft_chat_channel.send(embed=embed)
-    #             self.victory_message_id = message.id  # Store the ID of the newly posted message
-
-    #         else:
-    #             # Fetch and edit the existing message
-    #             try:
-    #                 message = await draft_chat_channel.fetch_message(self.victory_message_id)
-    #                 await message.edit(embed=embed)  # Edit the existing message with the updated embed
-    #             except discord.NotFound:
-    #                 print(f"Victory message with ID {self.victory_message_id} not found.")
-    #             except Exception as e:
-    #                 print(f"Failed to update victory message: {e}")
-
     
     def generate_draft_summary_embed(self):
         guild = bot.get_guild(self.guild_id)
@@ -602,60 +563,6 @@ class DraftSession:
                 else:
                     await interaction.response.send_message("Guild not found.", ephemeral=True)
 
-    # class MatchResultButton(discord.ui.Button):
-    #     def __init__(self, session_id, match_number, style=discord.ButtonStyle.primary, **kwargs):
-    #         super().__init__(label=f"Match {match_number} Results", style=style, **kwargs)
-    #         self.session_id = session_id
-    #         self.match_number = match_number
-
-    #     async def callback(self, interaction: discord.Interaction):
-    #         session = sessions.get(self.session_id)
-    #         if session:
-    #             guild = bot.get_guild(session.guild_id)  # Use bot instance to fetch guild
-    #             if guild:
-    #                 view = DraftSession.ResultReportView(self.match_number, session, guild)  # Pass guild to view
-    #                 await interaction.response.send_message(f"Report results for Match {self.match_number}.", view=view, ephemeral=True)
-    #             else:
-    #                 await interaction.response.send_message("Guild not found.", ephemeral=True)
-
-    
-    # class WinSelect(discord.ui.Select):
-    #     def __init__(self, match_number, player_id, session, *args, **kwargs):
-    #         super().__init__(*args, **kwargs)
-    #         self.match_number = match_number
-    #         self.player_id = player_id
-    #         self.session = session
-
-    #     async def callback(self, interaction: discord.Interaction):
-    #         await interaction.response.defer(ephemeral=True)
-    #         match_result = self.session.match_results.get(self.match_number)
-            
-    #         if not match_result:
-    #             await interaction.response.send_message("Match result not found.", ephemeral=True)
-    #             return
-            
-    #         # Retrieve match result entry
-    #         match_result = self.session.match_results.get(self.match_number)
-    #         if not match_result:
-    #             # Handle case where match result is unexpectedly missing
-    #             await interaction.response.send_message("Match result not found.", ephemeral=True)
-    #             return
-
-    #         # Determine which player's wins are being updated and update directly
-    #         if self.player_id == match_result['player1_id']:
-    #             match_result['player1_wins'] = int(self.values[0])
-    #         elif self.player_id == match_result['player2_id']:
-    #             match_result['player2_wins'] = int(self.values[0])
-    #         else:
-    #             # Handle unexpected case where player ID doesn't match either player in the match
-    #             await interaction.response.send_message("Player not found in match.", ephemeral=True)
-    #             return
-
-    #         # Respond to the interaction
-    #         player_name = interaction.guild.get_member(self.player_id).display_name
-    #         await self.session.update_draft_summary()  # Update the draft summary as before
-    #         await self.session.update_pairings_posting(self.match_number)  # Update the pairings message
-    #         await interaction.followup.send(f"Recorded {self.values[0]} wins for {player_name} in Match {self.match_number}.", ephemeral=True)
 
     class MatchResultSelect(discord.ui.Select):
         def __init__(self, match_number, session, guild, *args, **kwargs):
@@ -755,8 +662,6 @@ class PersistentView(View):
         self.add_item(discord.ui.Button(label="Cancel Draft", style=discord.ButtonStyle.grey, custom_id=f"{session_id}_cancel_draft"))
         self.add_item(discord.ui.Button(label="Remove User", style=discord.ButtonStyle.grey, custom_id=f"{session_id}_remove_user"))
         self.add_item(discord.ui.Button(label="Ready Check", style=discord.ButtonStyle.green, custom_id=f"{session_id}_ready_check"))
-        #self.add_item(discord.ui.Button(label="Create Chat Rooms", style=discord.ButtonStyle.green, custom_id=f"{session_id}_draft_complete", disabled=True))
-        #self.add_item(discord.ui.Button(label="Post Pairings", style=discord.ButtonStyle.primary, custom_id=f"{session_id}_post_pairings", disabled=True))
         self.add_item(discord.ui.Button(label="Create Rooms & Post Pairings", style=discord.ButtonStyle.primary, custom_id=f"{session_id}_create_rooms_pairings", disabled=True))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -769,10 +674,6 @@ class PersistentView(View):
             await self.cancel_draft_callback(interaction)
         elif interaction.data['custom_id'] == f"{self.session_id}_randomize_teams":
             await self.randomize_teams_callback(interaction)
-        elif interaction.data['custom_id'] == f"{self.session_id}_draft_complete":
-            await self.draft_complete_callback(interaction)
-        elif interaction.data['custom_id'] == f"{self.session_id}_post_pairings":
-            await self.post_pairings_callback(interaction)
         elif interaction.data['custom_id'] == f"{self.session_id}_ready_check":
             await self.ready_check_callback(interaction)
         elif interaction.data['custom_id'] == f"{self.session_id}_Team_A":
@@ -881,48 +782,6 @@ class PersistentView(View):
             # Update the draft message to reflect the change in sign-ups
             await session.update_draft_message(interaction)
         
-
-    async def draft_complete_callback(self, interaction: discord.Interaction):
-        session = sessions.get(self.session_id)
-        if not session:
-            await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
-            return
-        
-        await interaction.response.defer(ephemeral=True)
-
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):  # Ensure it's a Button you're iterating over
-                # Disable the "Create Chat Rooms" button after use
-                if item.custom_id == f"{self.session_id}_draft_complete":
-                    item.disabled = True
- 
-        await interaction.edit_original_response(view=self)
-        guild = interaction.guild
-
-        team_a_members = [guild.get_member(user_id) for user_id in session.team_a]
-        team_b_members = [guild.get_member(user_id) for user_id in session.team_b]
-        all_members = team_a_members + team_b_members
-
-        team_a_members = [member for member in team_a_members if member]  # Filter out None
-        team_b_members = [member for member in team_b_members if member]  # Filter out None
-
-        tasks = [
-            session.create_team_channel(guild, "Draft-chat", all_members, session.team_a, session.team_b), 
-            session.create_team_channel(guild, "Team-A", team_a_members, session.team_a, session.team_b),
-            session.create_team_channel(guild, "Team-B", team_b_members, session.team_a, session.team_b)
-        ]
-        await asyncio.gather(*tasks)
-
-        await asyncio.sleep(2)
-        for item in self.children:
-            if isinstance(item, discord.ui.Button) and item.custom_id == f"{self.session_id}_post_pairings":
-                item.disabled = False
-                break  
-
-        # Enabling the "Post Pairings" button
-        await interaction.edit_original_response(view=self)
-        
-        await session.update_draft_complete_message(interaction)
     
     async def ready_check_callback(self, interaction: discord.Interaction):
         session = sessions.get(self.session_id)
@@ -1071,61 +930,7 @@ class PersistentView(View):
 
         # Respond with the embed and updated view
         await interaction.response.edit_message(embed=embed, view=self)
-
-
-    async def post_pairings_callback(self, interaction: discord.Interaction):
-        await interaction.response.defer()  # Ensure there's enough time for operations
-
-        session = sessions.get(self.session_id)
-        if not session:
-            await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
-            return
-        
-        for item in self.children:
-            if item.custom_id == f"{self.session_id}_post_pairings":
-                item.disabled = True
-                break  # Stop the loop once the button is found and modified
-        await interaction.edit_original_response(view=self)
-
-        draft_chat_channel_id = session.draft_chat_channel
-        draft_chat_channel = bot.get_channel(draft_chat_channel_id)
-        sign_up_tags = ' '.join([interaction.guild.get_member(user_id).mention for user_id in session.sign_ups.keys() if interaction.guild.get_member(user_id)])
-        await draft_chat_channel.send(f"Pairings in Progress. This takes about 20 seconds. Standby. {sign_up_tags}")
-
-        original_message_id = session.message_id
-        original_channel_id = interaction.channel.id  
-        self.pairings = session.calculate_pairings()
-        await session.move_message_to_draft_channel(bot, original_channel_id, original_message_id, draft_chat_channel_id)
     
-        # Post pairings in the draft chat channel
-        await session.post_pairings(interaction.guild, self.pairings)
-    
-    # async def sign_up(self, button: discord.ui.Button, interaction: discord.Interaction):
-    #     await self.sign_up_callback(interaction, interaction.user.id)
-
-    # async def cancel_sign_up(self, button: discord.ui.Button, interaction: discord.Interaction):
-    #     await self.cancel_sign_up_callback(interaction, interaction.user.id)
-        
-    # async def draft_complete(self, button: discord.ui.Button, interaction: discord.Interaction):
-    #     await self.draft_complete_callback(interaction)
-
-    # async def cancel_draft(self, button: discord.ui.Button, interaction: discord.Interaction):
-    #     await self.cancel_draft_callback(interaction)
-
-    # async def randomize_teams(self, button: discord.ui.Button, interaction: discord.Interaction):
-    #     await self.randomize_teams_callback(interaction)
-
-    # async def post_pairings(self, button: discord.ui.Button, interaction: discord.Interaction):
-    #     await self.post_pairings_callback(interaction)
-    
-    # async def Team_A(self, button: discord.ui.Button, interaction: discord.Interaction):
-    #     await self.team_assignment_callback(interaction)
-
-    # async def Team_B(self, button: discord.ui.Button, interaction: discord.Interaction):
-    #     await self.team_assignment_callback(interaction)
-
-    # async def generate_seating(self, button: discord.ui.Button, interaction: discord.Interaction):
-    #     await self.generate_seating_callback(interaction)
 
 class UserRemovalSelect(Select):
     def __init__(self, options: list[SelectOption], session_id: str, *args, **kwargs):
@@ -1143,8 +948,6 @@ class UserRemovalSelect(Select):
             # After removing a user, update the original message with the new sign-up list
             await session.update_draft_message(interaction)
 
-            # Optionally, after sending a response, you may want to update or remove the select menu
-            # This line will edit the message to only show the text, removing the select menu.
             await interaction.edit_original_response(content=f"Removed {removed_user_name} from the draft.", view=None)
         else:
             await interaction.response.send_message("User not found in sign-ups.", ephemeral=True)
