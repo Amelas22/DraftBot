@@ -1,7 +1,7 @@
 DraftBot Documentation
 ======================
 
-DraftBot is a Discord bot designed to automate and enhance the experience of organizing and conducting Magic: The Gathering (MTG) draft sessions on Discord, particularly focusing on team drafts with either random or premade teams. This bot integrates with Draftmancer, an online tool for simulating MTG drafts, to provide a seamless drafting experience.
+DraftBot is a Discord bot designed to automate and enhance the experience of organizing and conducting Magic: The Gathering (MTG) draft sessions on Discord, particularly focusing on team drafts with either random or premade teams. This bot utilizes Draftmancer, an online tool for simulating MTG drafts, to provide a seamless drafting organization experience.
 
 Features
 --------
