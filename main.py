@@ -42,6 +42,7 @@ class DraftSession:
         self.pairings = {}
         self.team_a = []
         self.team_b = []
+        self.victory_message_id = None
         self.draft_summary_message_id = None
         self.matches = {}  
         self.match_results = {}
@@ -349,18 +350,29 @@ class DraftSession:
         if team_a_wins > half_matches or team_b_wins > half_matches or (team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0):
             # Generate the victory or draw embed
             embed = self.generate_draft_summary_embed()
-            # Calculate "3-0 Drafters"
             three_zero_drafters = self.calculate_three_zero_drafters(guild)
             embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
             
-            # Fetch the draft chat channel
             draft_chat_channel = guild.get_channel(self.draft_chat_channel)
             if not draft_chat_channel:
                 print("Draft chat channel not found.")
                 return
             
-            # Post the victory or draw message
-            await draft_chat_channel.send(embed=embed)
+            if not hasattr(self, 'victory_message_id') or self.victory_message_id is None:
+                # Post the victory or draw message if it doesn't exist
+                message = await draft_chat_channel.send(embed=embed)
+                self.victory_message_id = message.id  # Store the ID of the newly posted message
+                message.pin()
+            else:
+                # Fetch and edit the existing message
+                try:
+                    message = await draft_chat_channel.fetch_message(self.victory_message_id)
+                    await message.edit(embed=embed)  # Edit the existing message with the updated embed
+                except discord.NotFound:
+                    print(f"Victory message with ID {self.victory_message_id} not found.")
+                except Exception as e:
+                    print(f"Failed to update victory message: {e}")
+
     
     def generate_draft_summary_embed(self):
         guild = bot.get_guild(self.guild_id)
@@ -375,7 +387,7 @@ class DraftSession:
         title, description = self.determine_draft_outcome(team_a_wins, team_b_wins, half_matches, total_matches)
 
         # Prepare the embed
-        embed = discord.Embed(title=title, description=description, color=discord.Color.random())
+        embed = discord.Embed(title=title, description=description, color=discord.Color.yellow())
         embed.add_field(name="Team A", value="\n".join([guild.get_member(user_id).display_name for user_id in self.team_a]), inline=True)
         embed.add_field(name="Team B", value="\n".join([guild.get_member(user_id).display_name for user_id in self.team_b]), inline=True)
         embed.add_field(name="**Draft Standings**", value=f"**Team A Wins:** {team_a_wins}\n**Team B Wins:** {team_b_wins}", inline=False)
