@@ -21,6 +21,9 @@ intents.members = True
 
 TOKEN = os.getenv("BOT_TOKEN")
 
+is_cleanup_task_running = False
+is_periodic_save_sessions_running = False
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 sessions = {}
@@ -1063,10 +1066,16 @@ class UserRemovalView(View):
 
 @bot.event
 async def on_ready():
-    global sessions
+    global is_cleanup_task_running, is_periodic_save_sessions_running
+    if not is_cleanup_task_running:
+        bot.loop.create_task(cleanup_sessions_task())
+        is_cleanup_task_running = True
+    
+    if not is_periodic_save_sessions_running:
+        bot.loop.create_task(periodic_save_sessions())
+        is_periodic_save_sessions_running = True
+
     sessions = load_sessions_from_file()  # Load sessions from file at startup
-    bot.loop.create_task(periodic_save_sessions())  # Start the periodic save task
-    bot.loop.create_task(cleanup_sessions_task())  # Start any other background tasks you have
     print(f'Logged in as {bot.user}! Loaded {len(sessions)} sessions.')
                
 @bot.slash_command(name='startdraft', description='Start a team draft with random teams', guild_id=None)
