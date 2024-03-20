@@ -335,35 +335,80 @@ class DraftSession:
         else:
             print("Draft chat channel not found.")
 
+    async def check_and_post_victory_or_draw(self):
+        guild = bot.get_guild(self.guild_id)
+        if not guild:
+            print("Guild not found.")
+            return
+
+        team_a_wins, team_b_wins = self.calculate_team_wins()
+        total_matches = len(self.match_results)
+        half_matches = total_matches // 2
+
+        # Check victory or draw conditions
+        if team_a_wins > half_matches or team_b_wins > half_matches or (team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0):
+            # Generate the victory or draw embed
+            embed = self.generate_draft_summary_embed()
+            # Calculate "3-0 Drafters"
+            three_zero_drafters = self.calculate_three_zero_drafters(guild)
+            embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
+            
+            # Fetch the draft chat channel
+            draft_chat_channel = guild.get_channel(self.draft_chat_channel)
+            if not draft_chat_channel:
+                print("Draft chat channel not found.")
+                return
+            
+            # Post the victory or draw message
+            await draft_chat_channel.send(embed=embed)
     
     def generate_draft_summary_embed(self):
         guild = bot.get_guild(self.guild_id)
         if not guild:
-            print("Guild not found.")
             return None
 
         team_a_wins, team_b_wins = self.calculate_team_wins()
-        embed = discord.Embed(title=f"Team Results for Draft-{self.draft_id}", 
-                              description="Note: If a player is missing from this chat or your team chat, \n" +
-                              "they probably have the Discord Invisible setting on. Tag them to make sure they see the channel.", 
-                              color=discord.Color.blue())
-        embed.add_field(name="Team A", value="\n".join([guild.get_member(player_id).display_name for player_id in self.team_a]), inline=True)
-        embed.add_field(name="Team B", value="\n".join([guild.get_member(player_id).display_name for player_id in self.team_b]), inline=True)
-        embed.add_field(name="\u200b", value="\u200b", inline=False)  # Spacer
+        total_matches = len(self.match_results)
+        half_matches = total_matches // 2
+
+        # Determine the title and description based on the winning conditions
+        title, description = self.determine_draft_outcome(team_a_wins, team_b_wins, half_matches, total_matches)
+
+        # Prepare the embed
+        embed = discord.Embed(title=title, description=description, color=discord.Color.random())
+        embed.add_field(name="Team A", value="\n".join([guild.get_member(user_id).display_name for user_id in self.team_a]), inline=True)
+        embed.add_field(name="Team B", value="\n".join([guild.get_member(user_id).display_name for user_id in self.team_b]), inline=True)
         embed.add_field(name="**Draft Standings**", value=f"**Team A Wins:** {team_a_wins}\n**Team B Wins:** {team_b_wins}", inline=False)
 
-        # Add match results by round
-        for round_number, round_pairings in self.pairings.items():
-            round_results = f"**Round {round_number} Results**\n"
-            for player_a, player_b, match_id in round_pairings:
-                player_a_name = guild.get_member(player_a).display_name if guild.get_member(player_a) else "Unknown"
-                player_b_name = guild.get_member(player_b).display_name if guild.get_member(player_b) else "Unknown"
-                player_a_wins = self.match_results[match_id]['player1_wins'] or 0
-                player_b_wins = self.match_results[match_id]['player2_wins'] or 0
-                round_results += f"__Match {match_id}__\n{player_a_name}: {player_a_wins} wins\n{player_b_name}: {player_b_wins} wins\n"
-            embed.add_field(name=f"Round {round_number}", value=round_results, inline=True)
-        
         return embed
+
+    def calculate_three_zero_drafters(self, guild):
+        # Count wins for each player
+        win_counts = {}
+        for match_details in self.match_results.values():
+            winner_id = match_details.get("winner_id")
+            if winner_id:
+                win_counts[winner_id] = win_counts.get(winner_id, 0) + 1
+        
+        # Identify players with 3 wins
+        three_zero_drafters = [player_id for player_id, win_count in win_counts.items() if win_count == 3]
+        three_zero_names = ", ".join([guild.get_member(player_id).display_name for player_id in three_zero_drafters])
+        return three_zero_names
+
+    def determine_draft_outcome(self, team_a_wins, team_b_wins, half_matches, total_matches):
+        guild = bot.get_guild(self.guild_id)
+        if team_a_wins > half_matches or team_b_wins > half_matches:
+            winner_team = self.team_a if team_a_wins > team_b_wins else self.team_b
+            title = "Team A has won the draft!" if team_a_wins > team_b_wins else "Team B has won the draft!"
+            description = "Congratulations to "  + ", ".join([guild.get_member(member_id).display_name for member_id in winner_team])
+        elif team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0:
+            title = "The Draft is a Draw!"
+            description = "Great effort from both teams!"
+        else:
+            title = f"Draft-{self.draft_id} Standings"
+            description = "If a drafter is missing from this channel, they likely can still see the channel but have the Discord invisible setting on."
+        return title, description
+
 
     def create_updated_view_for_pairings_message(self, pairings_message_id):
         view = discord.ui.View(timeout=None)
@@ -591,7 +636,8 @@ class DraftSession:
                 message = f"Match result recorded: {player1_wins}-{player2_wins}"
                 await interaction.response.send_message(message, ephemeral=True)
                 save_sessions_to_file(sessions)
-                await self.session.update_draft_summary()  # Update the draft summary as before
+                await self.session.check_and_post_victory_or_draw() #check winner
+                await self.session.update_draft_summary()  # Update the draft summary 
                 await self.session.update_pairings_posting(self.match_number)  # Update the pairings message
             else:
                 await interaction.response.send_message("Error: Match result could not be found.", ephemeral=True)
@@ -740,10 +786,7 @@ class PersistentView(View):
                 # Disable the "Create Chat Rooms" button after use
                 if item.custom_id == f"{self.session_id}_draft_complete":
                     item.disabled = True
-                # Enable the "Post Pairings" button
-                elif item.custom_id == f"{self.session_id}_post_pairings":
-                    item.disabled = False
-
+ 
         await interaction.edit_original_response(view=self)
         guild = interaction.guild
 
@@ -761,6 +804,14 @@ class PersistentView(View):
         ]
         await asyncio.gather(*tasks)
 
+        await asyncio.sleep(2)
+        for item in self.children:
+            if isinstance(item, discord.ui.Button) and item.custom_id == f"{self.session_id}_post_pairings":
+                item.disabled = False
+                break  
+
+        # Enabling the "Post Pairings" button
+        await interaction.edit_original_response(view=self)
         
         await session.update_draft_complete_message(interaction)
     
