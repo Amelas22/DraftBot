@@ -919,15 +919,16 @@ class PersistentView(View):
         embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
 
         # Iterate over the view's children (buttons) to update their disabled status
+        # Iterate over the view's children (buttons) to update their disabled status
         for item in self.children:
             if isinstance(item, discord.ui.Button):
-                # Enable "Post Pairings" and "Draft Complete" buttons
-                # if item.custom_id == f"{self.session_id}_draft_complete":
-                if item.custom_id == f"{self.session_id}_create_rooms_pairings":
+                # Enable "Create Rooms" and "Cancel Draft" buttons
+                if item.custom_id == f"{self.session_id}_create_rooms_pairings" or item.custom_id == f"{self.session_id}_cancel_draft":
                     item.disabled = False
                 else:
                     # Disable all other buttons
                     item.disabled = True
+
 
         # Respond with the embed and updated view
         await interaction.response.edit_message(embed=embed, view=self)
