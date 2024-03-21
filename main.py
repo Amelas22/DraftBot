@@ -421,7 +421,7 @@ class DraftSession:
             winner_team = self.team_a if team_a_wins > team_b_wins else self.team_b
             if self.session_type == "random":
                 title = "Congratulations to " + ", ".join([guild.get_member(member_id).display_name for member_id in winner_team]) + " on winning the draft!"
-                description = f"Draft Start: <t:{int(self.team)}:F>"
+                description = f"Draft Start: <t:{int(self.draft_start_time)}:F>"
             elif self.session_type == "premade":
                 title = f"{self.team_a_name} has won the match!" if winner_team == self.team_a else f"{self.team_b_name} has won the match!"
                 description = f"Congratulations to " + ", ".join([guild.get_member(member_id).display_name for member_id in winner_team]) + f" on winning the draft!\nDraft Start: <t:{int(self.draft_start_time)}:F>"
