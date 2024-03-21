@@ -417,17 +417,20 @@ class DraftSession:
 
     def determine_draft_outcome(self, team_a_wins, team_b_wins, half_matches, total_matches):
         guild = bot.get_guild(self.guild_id)
+        # determine if a team has more wins than half the total matches
         if team_a_wins > half_matches or team_b_wins > half_matches:
             winner_team = self.team_a if team_a_wins > team_b_wins else self.team_b
+            # set victory message based on random teams or premade teams
             if self.session_type == "random":
                 title = "Congratulations to " + ", ".join([guild.get_member(member_id).display_name for member_id in winner_team]) + " on winning the draft!"
                 description = f"Draft Start: <t:{int(self.draft_start_time)}:F>"
             elif self.session_type == "premade":
                 title = f"{self.team_a_name} has won the match!" if winner_team == self.team_a else f"{self.team_b_name} has won the match!"
                 description = f"Congratulations to " + ", ".join([guild.get_member(member_id).display_name for member_id in winner_team]) + f" on winning the draft!\nDraft Start: <t:{int(self.draft_start_time)}:F>"
+        # determine if a draw was acheieved. 
         elif team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0:
             title = "The Draft is a Draw!"
-            description = "Great effort from both teams!"
+            description = f"Draft Start: <t:{int(self.draft_start_time)}:F>"
         else:
             title = f"Draft-{self.draft_id} Standings"
             description = "If a drafter is missing from this channel, they likely can still see the channel but have the Discord invisible setting on."
@@ -455,7 +458,7 @@ class DraftSession:
         message = await interaction.channel.fetch_message(self.message_id)
         embed = message.embeds[0]  # Assuming there's only one embed attached to the message
 
-        # Fetch member display names for each team
+        # Fetch  display names for each team
         guild = interaction.guild
         team_a_names = [guild.get_member(user_id).display_name for user_id in self.team_a]
         team_b_names = [guild.get_member(user_id).display_name for user_id in self.team_b]
@@ -559,9 +562,8 @@ class DraftSession:
             if session:
                 guild = bot.get_guild(session.guild_id)  # Use bot instance to fetch guild
                 if guild:
-                    # Instantiate MatchResultSelect
                     select = DraftSession.MatchResultSelect(self.match_number, session, guild)
-                    # Create a new View and add the Select to it
+                    # Create a new View
                     view = discord.ui.View()
                     view.add_item(select)
                     # Use the View in send_message
@@ -1028,7 +1030,7 @@ class CubeSelectionModal(discord.ui.Modal):
                             "4. After the draft, come back to this message (it'll be in pins) and click Create Rooms and Post Pairings. This will create a shared draft-chat and private team chats. Pairings will post in the draft-chat.\n" +
                             "5. After each match, you can select the Match Results buttons to report results. Once a winner is determined, it will be announced to the channel and to team-draft-results\n" +
                             "6. Chat channels will automatically close around five hours after the /startdraft command was used." +
-                            f"\n\n**Chosen Cube**: {cube_option} \n**Draftmancer Session**: **[Join Here]({draft_link})**",
+                            f"\n\n**Chosen Cube: [{cube_option}](https://cubecobra.com/cube/list/{cube_option})** \n**Draftmancer Session**: **[Join Here]({draft_link})**",
             color=discord.Color.dark_magenta()
         )
             embed.add_field(name="Sign-Ups", value="No players yet.", inline=False)
@@ -1076,88 +1078,11 @@ class CubeSelectionModal(discord.ui.Modal):
 async def start_draft(interaction: discord.Interaction):
     await interaction.response.send_modal(CubeSelectionModal(session_type="random", title="Select Cube"))
 
-    
-    # session_id = f"{interaction.user.id}-{int(draft_start_time)}"
-    # draft_id = ''.join(secrets.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
-    # draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
-
-    # session = DraftSession(session_id)
-    # session.guild_id = interaction.guild_id
-    # session.draft_link = draft_link
-    # session.draft_id = draft_id
-    # session.draft_start_time = draft_start_time
-    # session.session_type = "random"
-
-    # add_session(session_id, session)
-
-    # cube_drafter_role = discord.utils.get(interaction.guild.roles, name="Cube Drafter")
-    # ping_message = f"{cube_drafter_role.mention if cube_drafter_role else 'Cube Drafter'} Vintage Cube Draft Queue Open!"
-    # await interaction.followup.send(ping_message, ephemeral=False)
-
-    # embed = discord.Embed(
-    #     title=f"{embed_title}",
-    #     description="\n**How to use bot**:\n1. Click sign up and click the draftmancer link. Draftmancer host still has to update settings and  from CubeCobra.\n" +
-    #                     "2. When enough people join (6 or 8), Push Ready Check. Once everyone is ready, push Create Teams\n" +
-    #                     "3. Create Teams will create randoms teams and a corresponding seating order. Draftmancer host needs to adjust table to match seating order. **TURN OFF RANDOM SEATING IN DRAFTMANCER** \n" +
-    #                     "4. After the draft, come back to this message (it'll be in pins) and click Create Chat Rooms. After 5 seconds chat rooms will be ready and you can press Post Pairings. This takes 10 seconds to process.\n" +
-    #                     "5. You will now have a private team chat with just your team and a shared draft chat that has pairings and match results. You can select the Match Results buttons to report results.\n" +
-    #                     "6. Chat channels will automatically close around five hours after the /startdraft command was used." +
-    #                     f"\n\n**Draftmancer Session**: **[Join Here]({draft_link})**",
-    #     color=discord.Color.dark_magenta()
-    # )
-    # embed.add_field(name="Sign-Ups", value="No players yet.", inline=False)
-    # embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1186757246936424558/1217295353972527176/131.png")
-
-    # view = PersistentView(session_id)
-  
-    # message = await interaction.followup.send(embed=embed, view=view)
-    # print(f"Random Draft: {session_id} has been created.")
-    # session.draft_message_id = message.id
-    # session.message_id = message.id
-    # # Pin the message to the channel
-    # await message.pin()
 
 @bot.slash_command(name='premadedraft', description='Start a team draft with premade teams', guild_id=None)
 async def premade_draft(interaction: discord.Interaction):
     await interaction.response.send_modal(CubeSelectionModal(session_type="premade", title="Select Cube"))
 
-    # draft_start_time = datetime.now().timestamp()
-    # session_id = f"{interaction.user.id}-{int(draft_start_time)}"
-    # draft_id = ''.join(secrets.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
-    # draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
-
-    # session = DraftSession(session_id)
-    # session.guild_id = interaction.guild_id
-    # session.draft_link = draft_link
-    # session.draft_id = draft_id
-    # session.draft_start_time = draft_start_time
-    # session.session_stage = 'sign-up'
-    # session.session_type = "premade"
-
-    # add_session(session_id, session)
-
-    # embed = discord.Embed(
-    #     title=f"MTG Premade Team Draft Queue - Started <t:{int(draft_start_time)}:R>",
-    #     description="\n**How to use bot**:\n1. Click Team A or Team B to join that team. Enter the draftmancer link. Draftmancer host still has to update settings and  from CubeCobra.\n" +
-    #                     "2. When all teams are joined, Push Ready Check. Once everyone is ready, push Generate Seating Order\n" +
-    #                     "3. Draftmancer host needs to adjust table to match seating order. **TURN OFF RANDOM SEATING IN DRAFTMANCER** \n" +
-    #                     "4. After the draft, come back to this message (it'll be in pins) and click Create Chat Rooms. After 5 seconds chat rooms will be ready and you can press Post Pairings. This takes 10 seconds to process.\n" +
-    #                     "5. You will now have a private team chat with just your team and a shared draft chat that has pairings and match results. You can select the Match Results buttons to report results.\n" +
-    #                     "6. Chat channels will automatically close around five hours after the /startdraft command was used." +
-    #                     f"\n\n**Draftmancer Session**: **[Join Here]({draft_link})**",
-    #     color=discord.Color.blue()
-    # )
-    # embed.add_field(name="Team A", value="No players yet.", inline=False)
-    # embed.add_field(name="Team B", value="No players yet.", inline=False)
-    # embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1219018393471025242/1219410709440495746/image.png?ex=660b33b8&is=65f8beb8&hm=b7e40e9b872d8e04dd70a30c5abc15917379f9acb7dce74ca0372105ec98b468&")
-    # print(f"Premade Draft: {session_id} has been created.")
-
-    # view = PersistentView(session_id)
-    
-    # message = await interaction.followup.send(embed=embed, view=view)
-    
-    # session.draft_message_id = message.id
-    # session.message_id = message.id
 
 def save_sessions_to_file(sessions, filename='sessions.json'):
     sessions_data = {session_id: session.to_dict() for session_id, session in sessions.items()}
