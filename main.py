@@ -55,6 +55,8 @@ class DraftSession:
         self.channel_ids = []
         self.session_type = None
         self.session_stage = None
+        self.team_a_name = None
+        self.team_b_name = None
 
     async def update_draft_message(self, interaction):
         message = await interaction.channel.fetch_message(self.message_id)
@@ -357,7 +359,7 @@ class DraftSession:
             await self.post_or_update_victory_message(draft_chat_channel, embed, 'victory_message_id_draft_chat')
 
             # Post or update in the team-draft-results channel
-            results_channel = discord.utils.get(guild.text_channels, name="team-draft-results")
+            results_channel = discord.utils.get(guild.text_channels, name="team-draft-results") if self.session_type == "random" else discord.utils.get(guild.text_channels, name="league-draft-results")
             await self.post_or_update_victory_message(results_channel, embed, 'victory_message_id_results_channel')
 
     async def post_or_update_victory_message(self, channel, embed, victory_message_attr):
@@ -394,8 +396,8 @@ class DraftSession:
 
         # Prepare the embed
         embed = discord.Embed(title=title, description=description, color=discord.Color.yellow())
-        embed.add_field(name="Team A", value="\n".join([guild.get_member(user_id).display_name for user_id in self.team_a]), inline=True)
-        embed.add_field(name="Team B", value="\n".join([guild.get_member(user_id).display_name for user_id in self.team_b]), inline=True)
+        embed.add_field(name="Team A" if self.session_type == "random" else f"{self.team_a_name}", value="\n".join([guild.get_member(user_id).display_name for user_id in self.team_a]), inline=True)
+        embed.add_field(name="Team B" if self.session_type == "random" else f"{self.team_b_name}", value="\n".join([guild.get_member(user_id).display_name for user_id in self.team_b]), inline=True)
         embed.add_field(name="**Draft Standings**", value=f"**Team A Wins:** {team_a_wins}\n**Team B Wins:** {team_b_wins}", inline=False)
 
         return embed
@@ -417,8 +419,12 @@ class DraftSession:
         guild = bot.get_guild(self.guild_id)
         if team_a_wins > half_matches or team_b_wins > half_matches:
             winner_team = self.team_a if team_a_wins > team_b_wins else self.team_b
-            title = "Congratulations to " + ", ".join([guild.get_member(member_id).display_name for member_id in winner_team]) + " on winning the draft!"
-            description = f"Draft Start: <t:{int(self.team)}:F>"
+            if self.session_type == "random":
+                title = "Congratulations to " + ", ".join([guild.get_member(member_id).display_name for member_id in winner_team]) + " on winning the draft!"
+                description = f"Draft Start: <t:{int(self.team)}:F>"
+            elif self.session_type == "premade":
+                title = f"{self.team_a_name} has won the match!" if winner_team == self.team_a else f"{self.team_b_name} has won the match!"
+                description = f"Congratulations to " + ", ".join([guild.get_member(member_id).display_name for member_id in winner_team]) + f" on winning the draft!\nDraft Start: <t:{int(self.draft_start_time)}:F>"
         elif team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0:
             title = "The Draft is a Draw!"
             description = "Great effort from both teams!"
@@ -456,14 +462,16 @@ class DraftSession:
 
         # Update the fields for Team A and Team B with new compositions and counts
         # Find the index of the Team A and Team B fields
-        team_a_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith("Team A")), None)
-        team_b_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith("Team B")), None)
+        team_a_name = str(self.team_a_name)
+        team_b_name = str(self.team_b_name)
+        team_a_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith(team_a_name)), None)
+        team_b_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith(team_b_name)), None)
 
         # Update the fields if found
         if team_a_index is not None:
-            embed.set_field_at(team_a_index, name=f"Team A ({len(self.team_a)}):", value="\n".join(team_a_names) if team_a_names else "No players yet.", inline=False)
+            embed.set_field_at(team_a_index, name=f"{self.team_a_name} ({len(self.team_a)}):", value="\n".join(team_a_names) if team_a_names else "No players yet.", inline=False)
         if team_b_index is not None:
-            embed.set_field_at(team_b_index, name=f"Team B ({len(self.team_b)}):", value="\n".join(team_b_names) if team_b_names else "No players yet.", inline=False)
+            embed.set_field_at(team_b_index, name=f"{self.team_b_name} ({len(self.team_b)}):", value="\n".join(team_b_names) if team_b_names else "No players yet.", inline=False)
 
         # Edit the original message with the updated embed
         await message.edit(embed=embed)
@@ -649,8 +657,8 @@ class PersistentView(View):
 
         
         if session.session_type == 'premade':
-            self.add_item(discord.ui.Button(label="Team A", style=discord.ButtonStyle.green, custom_id=f"{session_id}_Team_A"))
-            self.add_item(discord.ui.Button(label="Team B", style=discord.ButtonStyle.red, custom_id=f"{session_id}_Team_B"))
+            self.add_item(discord.ui.Button(label=f"{session.team_a_name}", style=discord.ButtonStyle.green, custom_id=f"{session_id}_Team_A"))
+            self.add_item(discord.ui.Button(label=f"{session.team_b_name}", style=discord.ButtonStyle.red, custom_id=f"{session_id}_Team_B"))
             self.add_item(discord.ui.Button(label="Generate Seating Order", style=discord.ButtonStyle.blurple, custom_id=f"{session_id}_generate_seating"))
         elif session.session_type == 'random':
             self.add_item(discord.ui.Button(label="Sign Up", style=discord.ButtonStyle.green, custom_id=f"{session_id}_sign_up"))
@@ -912,8 +920,8 @@ class PersistentView(View):
                         "\nPost Pairings will take about 10 seconds to process. Only press once.",
             color=discord.Color.blue()
         )
-        embed.add_field(name="Team A", value="\n".join(team_a_display_names), inline=True)
-        embed.add_field(name="Team B", value="\n".join(team_b_display_names), inline=True)
+        embed.add_field(name="Team A" if session.session_type == "random" else f"{session.team_a_name}", value="\n".join(team_a_display_names), inline=True)
+        embed.add_field(name="Team B" if session.session_type == "random" else f"{session.team_b_name}", value="\n".join(team_b_display_names), inline=True)
         embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
 
         # Iterate over the view's children (buttons) to update their disabled status
@@ -978,8 +986,12 @@ async def on_ready():
 class CubeSelectionModal(discord.ui.Modal):
     def __init__(self, session_type, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.add_item(discord.ui.InputText(label="Cube Name", placeholder="LSVCube, AlphaFrog, mtgovintage, or your choice", custom_id="cube_name_input"))
         self.session_type = session_type
+        self.add_item(discord.ui.InputText(label="Cube Name", placeholder="LSVCube, AlphaFrog, mtgovintage, or your choice", custom_id="cube_name_input"))
+        if self.session_type == "premade":
+            self.add_item(discord.ui.InputText(label="Team A Name", placeholder="Team A Name", custom_id="team_a_input"))
+            self.add_item(discord.ui.InputText(label="Team B Name", placeholder="Team B Name", custom_id="team_b_input"))
+        
 
     async def callback(self, interaction: discord.Interaction):
         cube_name_input = self.children[0]
@@ -1026,6 +1038,12 @@ class CubeSelectionModal(discord.ui.Modal):
             
             
         elif session.session_type == "premade":
+            team_a_input = self.children[1]
+            team_b_input = self.children[2]
+            team_a_name = team_a_input.value
+            team_b_name = team_b_input.value
+            team_a_option = "Team A" if not team_a_name else team_a_name
+            team_b_option = "Team B" if not team_b_name else team_b_name
             embed = discord.Embed(
                 title=f"{cube_option} Premade Team Draft Queue - Started <t:{int(draft_start_time)}:R>",
                 description="\n**How to use bot**:\n1. Click Team A or Team B to join that team. Enter the draftmancer link. Draftmancer host still has to update settings and import from CubeCobra.\n" +
@@ -1037,9 +1055,11 @@ class CubeSelectionModal(discord.ui.Modal):
                                 f"\n\n**Draftmancer Session**: **[Join Here]({draft_link})**",
                 color=discord.Color.blue()
             )
-            embed.add_field(name="Team A", value="No players yet.", inline=False)
-            embed.add_field(name="Team B", value="No players yet.", inline=False)
+            embed.add_field(name=f"{team_a_option}", value="No players yet.", inline=False)
+            embed.add_field(name=f"{team_b_option}", value="No players yet.", inline=False)
             embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1219018393471025242/1219410709440495746/image.png?ex=660b33b8&is=65f8beb8&hm=b7e40e9b872d8e04dd70a30c5abc15917379f9acb7dce74ca0372105ec98b468&")
+            session.team_a_name = team_a_option
+            session.team_b_name = team_b_option
             print(f"Premade Draft: {session_id} has been created.")
 
 
