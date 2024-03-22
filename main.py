@@ -57,6 +57,7 @@ class DraftSession:
         self.session_stage = None
         self.team_a_name = None
         self.team_b_name = None
+        self.are_rooms_processing = False
 
     async def update_draft_message(self, interaction):
         message = await interaction.channel.fetch_message(self.message_id)
@@ -708,6 +709,16 @@ class PersistentView(View):
         if not session:
             await interaction.followup.send("The draft session could not be found.", ephemeral=True)
             return
+        
+        # Check if the process is already running
+        if session.are_rooms_processing:
+        # Process is already running, so we inform the user and do nothing else
+            await interaction.response.send_message("The rooms and pairings are currently being created. Please wait.", ephemeral=True)
+            return
+
+        # Set the flag to indicate the process is running
+        session.are_rooms_processing = True
+
         session.session_stage = 'pairings'
 
         guild = interaction.guild
