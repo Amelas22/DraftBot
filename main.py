@@ -399,8 +399,12 @@ class DraftSession:
         embed = discord.Embed(title=title, description=description, color=discord.Color.yellow())
         embed.add_field(name="Team A" if self.session_type == "random" else f"{self.team_a_name}", value="\n".join([guild.get_member(user_id).display_name for user_id in self.team_a]), inline=True)
         embed.add_field(name="Team B" if self.session_type == "random" else f"{self.team_b_name}", value="\n".join([guild.get_member(user_id).display_name for user_id in self.team_b]), inline=True)
-        embed.add_field(name="**Draft Standings**", value=f"**Team A Wins:** {team_a_wins}" if self.session_type == "random" else f"**{self.team_a_name} Wins:** {team_a_wins}" + 
-                        f"\n**Team B Wins:** {team_b_wins}" if self.session_type == "random" else f"\n**{self.team_b_name} Wins:** {team_b_wins}"  , inline=False)
+        embed.add_field(
+            name="**Draft Standings**", 
+            value=(f"**Team A Wins:** {team_a_wins}" if self.session_type == "random" else f"**{self.team_a_name} Wins:** {team_a_wins}") + 
+                (f"\n**Team B Wins:** {team_b_wins}" if self.session_type == "random" else f"\n**{self.team_b_name} Wins:** {team_b_wins}"), 
+            inline=False)
+
 
         return embed
 
@@ -1066,7 +1070,7 @@ class CubeSelectionModal(discord.ui.Modal):
                                 "4. After the draft, come back to this message (it'll be in pins) and push Create Rooms and Post Pairings.\n" +
                                 "5. You will now have a private team chat with just your team and a shared draft-chat that has pairings and match results. You can select the Match Results buttons to report results.\n" +
                                 "6. Chat channels will automatically close around five hours after the /startdraft command was used." +
-                                f"\n\n**Draftmancer Session**: **[Join Here]({draft_link})**",
+                                f"\n\n**Chosen Cube: [{cube_option}](https://cubecobra.com/cube/list/{cube_option})** \n**Draftmancer Session**: **[Join Here]({draft_link})**",
                 color=discord.Color.blue()
             )
             embed.add_field(name=f"{team_a_option}", value="No players yet.", inline=False)
