@@ -184,7 +184,7 @@ class DraftSession:
         channel = await guild.create_text_channel(name=channel_name, overwrites=overwrites, category=draft_category)
         self.channel_ids.append(channel.id)
 
-        if team_name == "Draft-chat":
+        if team_name == "Draft":
             self.draft_chat_channel = channel.id
 
            
@@ -399,7 +399,8 @@ class DraftSession:
         embed = discord.Embed(title=title, description=description, color=discord.Color.yellow())
         embed.add_field(name="Team A" if self.session_type == "random" else f"{self.team_a_name}", value="\n".join([guild.get_member(user_id).display_name for user_id in self.team_a]), inline=True)
         embed.add_field(name="Team B" if self.session_type == "random" else f"{self.team_b_name}", value="\n".join([guild.get_member(user_id).display_name for user_id in self.team_b]), inline=True)
-        embed.add_field(name="**Draft Standings**", value=f"**Team A Wins:** {team_a_wins}\n**Team B Wins:** {team_b_wins}", inline=False)
+        embed.add_field(name="**Draft Standings**", value=f"**Team A Wins:** {team_a_wins}" if self.session_type == "random" else f"**{self.team_a_name} Wins:** {team_a_wins}" + 
+                        f"\n**Team B Wins:** {team_b_wins}" if self.session_type == "random" else f"\n**{self.team_b_name} Wins:** {team_b_wins}"  , inline=False)
 
         return embed
 
@@ -737,7 +738,7 @@ class PersistentView(View):
         all_members = team_a_members + team_b_members
 
         tasks = [
-            session.create_team_channel(guild, "Draft-chat", all_members, session.team_a, session.team_b), 
+            session.create_team_channel(guild, "Draft", all_members, session.team_a, session.team_b), 
             session.create_team_channel(guild, "Team-A", team_a_members, session.team_a, session.team_b),
             session.create_team_channel(guild, "Team-B", team_b_members, session.team_a, session.team_b)
         ]
