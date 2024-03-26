@@ -374,21 +374,15 @@ class PersistentView(discord.ui.View):
         ]
         
         # Execute channel creation tasks
-        channels_created = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Filter out successfully created channels
-        created_channel_ids = [channel.id for channel in channels_created if isinstance(channel, discord.TextChannel)]
-        draft_chat_channel_id = session.draft_chat_channel
-        # Update the session in the database
-        async with AsyncSessionLocal() as db_session:
-            async with db_session.begin():
-                await db_session.execute(update(DraftSession)
-                                        .where(DraftSession.session_id == session.session_id)
-                                        .values(channel_ids=created_channel_ids, session_stage='pairings', draft_channel_id=draft_chat_channel_id))
-                await db_session.commit()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        session = await get_draft_session(self.draft_session_id)      
         
-        await interaction.followup.send("Chat rooms created and pairings posted.")
+        await interaction.followup.send("Chat rooms created and pairings posted.", ephemeral=True)
         # Post a sign-up ping in the draft chat channel
+        # Ensure draft_chat_channel_id is an integer, as it might be stored as a string
+        draft_chat_channel_id = int(session.draft_chat_channel)
+
+        # Fetch the channel object using the ID
         draft_chat_channel = guild.get_channel(draft_chat_channel_id)
         if draft_chat_channel:
             sign_up_tags = ' '.join([f"<@{user_id}>" for user_id in session.sign_ups.keys()])
@@ -397,13 +391,6 @@ class PersistentView(discord.ui.View):
         #original_message_id = session.message_id
         #original_channel_id = interaction.channel.id  
         #session.pairings = session.calculate_pairings()
-
-        async with AsyncSessionLocal() as db_session:
-            async with db_session.begin():
-                await db_session.execute(update(DraftSession)
-                                        .where(DraftSession.session_id == self.draft_session_id)
-                                        .values(pairings=session.pairings))
-                await db_session.commit()
 
         # await session.move_message_to_draft_channel(bot, original_channel_id, original_message_id, draft_chat_channel_id)
     
@@ -457,7 +444,7 @@ class PersistentView(discord.ui.View):
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
                 update_values = {
-                    'channel_ids': self.channel_ids,  # Assuming you have a way to store these IDs in your session model
+                    'channel_ids': self.channel_ids,
                     'draft_chat_channel': self.draft_chat_channel,
                     'session_stage': 'pairings'
                 }
