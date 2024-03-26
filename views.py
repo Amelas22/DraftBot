@@ -24,7 +24,7 @@ class PersistentView(discord.ui.View):
             self.add_item(self.create_button(self.team_a_name, "green", f"Team_A_{self.draft_session_id}", self.team_assignment_callback))
             self.add_item(self.create_button(self.team_b_name, "red", f"Team_B_{self.draft_session_id}", self.team_assignment_callback))
             self.add_item(self.create_button("Generate Seating Order", "blurple", f"generate_seating_{self.draft_session_id}", self.randomize_teams_callback))
-        # self.add_item(self.create_button("Cancel Draft", "grey", "cancel_draft", self.cancel_draft_callback))
+        self.add_item(self.create_button("Cancel Draft", "grey", f"cancel_draft_{self.draft_session_id}", self.cancel_draft_callback))
         # self.add_item(self.create_button("Remove User", "grey", "remove_user", self.remove_user_button_callback))
         # self.add_item(self.create_button("Ready Check", "green", "ready_check", self.ready_check_callback))
         # self.add_item(self.create_button("Create Rooms & Post Pairings", "primary", "create_rooms_pairings", self.create_rooms_pairings_callback, disabled=True))
@@ -233,6 +233,41 @@ class PersistentView(discord.ui.View):
 
         # Optionally update the message view to reflect the new team compositions
         await self.update_team_view(interaction)
+    
+
+    async def cancel_draft_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+
+        session = await get_draft_session(self.draft_session_id)
+        if not session:
+            await interaction.followup.send("The draft session could not be found.", ephemeral=True)
+            return
+        user_id = str(interaction.user.id)
+        sign_ups = session.sign_ups or {}  # Ensure we have a dictionary
+
+        # Check if the user is in the sign-up list or if the sign-up list is empty
+        if sign_ups and user_id not in sign_ups.keys():
+            await interaction.followup.send("You do not have permissions to cancel this draft.", ephemeral=True)
+            return
+
+        # Delete the draft message if it exists
+        channel = self.bot.get_channel(int(session.draft_channel_id))
+        if channel:
+            try:
+                message = await channel.fetch_message(int(session.message_id))
+                await message.delete()
+            except Exception as e:
+                print(f"Failed to delete draft message: {e}")
+
+        # Remove the session from the database
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                await db_session.delete(session)
+                await db_session.commit()
+
+        # Send a confirmation message using followup.send
+        await interaction.followup.send("The draft has been canceled.", ephemeral=True)
+
 
     async def update_team_view(self, interaction: discord.Interaction):
         session = await get_draft_session(self.draft_session_id)
@@ -425,22 +460,7 @@ class CallbackButton(discord.ui.Button):
 
     
 
-    # async def cancel_draft_callback(self, interaction: discord.Interaction):
-    #     session = sessions.get(self.session_id)
-    #     if not session:
-    #         await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
-    #         return
 
-    #     user_id = interaction.user.id
-    #     # Check if the user is in session.sign_ups or if session.sign_ups is empty
-    #     if user_id in session.sign_ups or not session.sign_ups:
-    #         # Delete the draft message and remove the session
-    #         await interaction.message.delete()
-    #         sessions.pop(self.session_id, None)
-    #         await interaction.response.send_message("The draft has been canceled.", ephemeral=True)
-    #     else:
-    #         # If the user is not signed up and there are sign-ups present, inform the user
-    #         await interaction.response.send_message("You cannot cancel this draft because you are not signed up.", ephemeral=True)
     
     # async def remove_user_button_callback(self, interaction: discord.Interaction):
     #     session = sessions.get(self.session_id)
