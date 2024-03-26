@@ -1,5 +1,8 @@
 import discord
+import asyncio
 from datetime import datetime
+from discord import SelectOption
+from discord.ui import Select
 from sqlalchemy import update
 from session import AsyncSessionLocal, get_draft_session, DraftSession
 
@@ -12,6 +15,7 @@ class PersistentView(discord.ui.View):
         self.session_type = session_type
         self.team_a_name = team_a_name
         self.team_b_name = team_b_name
+        self.channel_ids = []
         self.add_buttons()
 
 
@@ -25,9 +29,9 @@ class PersistentView(discord.ui.View):
             self.add_item(self.create_button(self.team_b_name, "red", f"Team_B_{self.draft_session_id}", self.team_assignment_callback))
             self.add_item(self.create_button("Generate Seating Order", "blurple", f"generate_seating_{self.draft_session_id}", self.randomize_teams_callback))
         self.add_item(self.create_button("Cancel Draft", "grey", f"cancel_draft_{self.draft_session_id}", self.cancel_draft_callback))
-        # self.add_item(self.create_button("Remove User", "grey", "remove_user", self.remove_user_button_callback))
+        self.add_item(self.create_button("Remove User", "grey", f"remove_user_{self.draft_session_id}", self.remove_user_button_callback))
         # self.add_item(self.create_button("Ready Check", "green", "ready_check", self.ready_check_callback))
-        # self.add_item(self.create_button("Create Rooms & Post Pairings", "primary", "create_rooms_pairings", self.create_rooms_pairings_callback, disabled=True))
+        self.add_item(self.create_button("Create Rooms & Post Pairings", "primary", f"create_rooms_pairings_{self.draft_session_id}", self.create_rooms_pairings_callback, disabled=True))
 
 
     def create_button(self, label, style, custom_id, custom_callback, disabled=False):
@@ -140,7 +144,7 @@ class PersistentView(discord.ui.View):
         session.session_stage = 'teams'
         # Check session type and prepare teams if necessary
         if session.session_type == 'random':
-            from methods import split_into_teams
+            from utils import split_into_teams
             await split_into_teams(session.session_id)
             session = await get_draft_session(self.draft_session_id)
 
@@ -148,7 +152,7 @@ class PersistentView(discord.ui.View):
         team_a_display_names = [session.sign_ups[user_id] for user_id in session.team_a]
         team_b_display_names = [session.sign_ups[user_id] for user_id in session.team_b]
         
-        from methods import generate_seating_order
+        from utils import generate_seating_order
         seating_order = await generate_seating_order(bot, session)
 
         # Create the embed message for displaying the teams and seating order
@@ -168,7 +172,7 @@ class PersistentView(discord.ui.View):
         for item in self.children:
             if isinstance(item, discord.ui.Button):
                 # Enable "Create Rooms" and "Cancel Draft" buttons
-                if item.custom_id == f"{self.draft_session_id}_create_rooms_pairings" or item.custom_id == f"{self.draft_session_id}_cancel_draft":
+                if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}" or item.custom_id == f"cancel_draft_{self.draft_session_id}":
                     item.disabled = False
                 else:
                     # Disable all other buttons
@@ -299,6 +303,205 @@ class PersistentView(discord.ui.View):
 
         # Edit the original message with the updated embed
         await message.edit(embed=embed)
+    
+
+    async def remove_user_button_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        session = await get_draft_session(self.draft_session_id)
+        if not session:
+            print("Draft session not found.")
+            return
+
+        # Check if the user initiating the remove action is in the sign_ups
+        if str(interaction.user.id) not in session.sign_ups:
+            await interaction.response.send_message("You are not authorized to remove users.", ephemeral=True)
+            return
+
+        # If the session exists and has sign-ups, and the user is authorized, proceed
+        if session.sign_ups:
+            options = [discord.SelectOption(label=user_name, value=user_id) for user_id, user_name in session.sign_ups.items()]
+            view = UserRemovalView(session_id=session.session_id, options=options)
+            await interaction.response.send_message("Select a user to remove:", view=view, ephemeral=True)
+        else:
+            await interaction.response.send_message("No users to remove.", ephemeral=True)
+        
+    async def create_rooms_pairings_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Defer the response to ensure there's enough time for operations
+        await interaction.response.defer()
+        bot = interaction.client
+
+        session = await get_draft_session(self.draft_session_id)
+        if not session:
+            print("Draft session not found.")
+            return
+        
+        # Check if the process is already running
+        if session.are_rooms_processing:
+            # Process is already running, so we inform the user and do nothing else
+            await interaction.followup.send("The rooms and pairings are currently being created. Please wait.", ephemeral=True)
+            return
+
+        # Set the flag to indicate the process is running and update session stage
+        session.are_rooms_processing = True
+        session.session_stage = 'pairings'
+
+        # Update the session in the database to reflect these changes
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                await db_session.execute(update(DraftSession)
+                                        .where(DraftSession.session_id == self.draft_session_id)
+                                        .values(are_rooms_processing=True, session_stage='pairings'))
+                await db_session.commit()
+
+        guild = interaction.guild
+
+        # Immediately disable the "Create Rooms & Post Pairings" button to prevent multiple presses
+        for child in self.children:
+            if isinstance(child, discord.ui.Button) and child.label == "Create Rooms & Post Pairings":
+                child.disabled = True
+                break
+
+        await interaction.edit_original_response(view=self)
+
+        # Execute tasks to create chat channels
+        team_a_members = [guild.get_member(int(user_id)) for user_id in session.team_a if guild.get_member(int(user_id))]
+        team_b_members = [guild.get_member(int(user_id)) for user_id in session.team_b if guild.get_member(int(user_id))]
+        all_members = team_a_members + team_b_members
+
+        tasks = [
+            self.create_team_channel(guild, "Draft", all_members, session.team_a, session.team_b), 
+            self.create_team_channel(guild, "Team-A", team_a_members, session.team_a, session.team_b),
+            self.create_team_channel(guild, "Team-B", team_b_members, session.team_a, session.team_b)
+        ]
+        
+        # Execute channel creation tasks
+        channels_created = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Filter out successfully created channels
+        created_channel_ids = [channel.id for channel in channels_created if isinstance(channel, discord.TextChannel)]
+        draft_chat_channel_id = session.draft_chat_channel
+        # Update the session in the database
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                await db_session.execute(update(DraftSession)
+                                        .where(DraftSession.session_id == session.session_id)
+                                        .values(channel_ids=created_channel_ids, session_stage='pairings', draft_channel_id=draft_chat_channel_id))
+                await db_session.commit()
+        
+        await interaction.followup.send("Chat rooms created and pairings posted.")
+        # Post a sign-up ping in the draft chat channel
+        draft_chat_channel = guild.get_channel(draft_chat_channel_id)
+        if draft_chat_channel:
+            sign_up_tags = ' '.join([f"<@{user_id}>" for user_id in session.sign_ups.keys()])
+            await draft_chat_channel.send(f"Pairing posted below. Good luck in your matches! {sign_up_tags}")
+
+        #original_message_id = session.message_id
+        #original_channel_id = interaction.channel.id  
+        #session.pairings = session.calculate_pairings()
+
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                await db_session.execute(update(DraftSession)
+                                        .where(DraftSession.session_id == self.draft_session_id)
+                                        .values(pairings=session.pairings))
+                await db_session.commit()
+
+        # await session.move_message_to_draft_channel(bot, original_channel_id, original_message_id, draft_chat_channel_id)
+    
+        # Execute Post Pairings
+
+        #await session.post_pairings(guild, session.pairings)
+
+    async def create_team_channel(self, guild, team_name, team_members, team_a, team_b):
+        draft_category = discord.utils.get(guild.categories, name="Draft Channels")
+        session = await get_draft_session(self.draft_session_id)
+        if not session:
+            print("Draft session not found.")
+            return
+        channel_name = f"{team_name}-Chat-{session.draft_id}"
+
+        # Retrieve the "Cube Overseer" role
+        overseer_role = discord.utils.get(guild.roles, name="Cube Overseer")
+        
+        # Basic permissions overwrites for the channel
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            guild.me: discord.PermissionOverwrite(read_messages=True)
+        }
+
+        if team_name in ["Team-A", "Team-B"]:
+            # Add all overseers with read permission initially, if it's a team-specific channel
+            if overseer_role:
+                for overseer in overseer_role.members:
+                    # Check if the overseer is part of the current team or not
+                    if overseer.id not in team_a and overseer.id not in team_b:
+                        overwrites[overseer] = discord.PermissionOverwrite(read_messages=True)
+                    elif (team_name == "Team-A" and overseer.id in team_b) or (team_name == "Team-B" and overseer.id in team_a):
+                        # Remove access for overseers who are part of the other team
+                        overwrites[overseer] = discord.PermissionOverwrite(read_messages=False)
+        else:
+            # For the "Draft-chat" channel, add all overseers
+            if overseer_role:
+                overwrites[overseer_role] = discord.PermissionOverwrite(read_messages=True)
+
+        # Add team members with read permission. This specifically allows these members, overriding role-based permissions if needed.
+        for member in team_members:
+            overwrites[member] = discord.PermissionOverwrite(read_messages=True)
+        
+        # Create the channel with the specified overwrites
+        channel = await guild.create_text_channel(name=channel_name, overwrites=overwrites, category=draft_category)
+        self.channel_ids.append(channel.id)
+
+        if team_name == "Draft":
+            self.draft_chat_channel = channel.id
+
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                update_values = {
+                    'channel_ids': self.channel_ids,  # Assuming you have a way to store these IDs in your session model
+                    'draft_chat_channel': self.draft_chat_channel,
+                    'session_stage': 'pairings'
+                }
+                await db_session.execute(update(DraftSession)
+                                        .where(DraftSession.session_id == self.draft_session_id)
+                                        .values(**update_values))
+                await db_session.commit()
+
+
+class UserRemovalSelect(Select):
+    def __init__(self, options: list[SelectOption], session_id: str, *args, **kwargs):
+        super().__init__(*args, **kwargs, placeholder="Choose a user to remove...", min_values=1, max_values=1, options=options)
+        self.session_id = session_id
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        bot = interaction.client
+        session = await get_draft_session(self.session_id)
+
+        user_id_to_remove = self.values[0]  
+        if user_id_to_remove in session.sign_ups:
+            removed_user_name = session.sign_ups.pop(user_id_to_remove)
+            
+            async with AsyncSessionLocal() as db_session:
+                async with db_session.begin():
+                    # Update the session in the database
+                    await db_session.execute(update(DraftSession)
+                                            .where(DraftSession.session_id == session.session_id)
+                                            .values(sign_ups=session.sign_ups))
+                    await db_session.commit()
+            # After removing a user, update the original message with the new sign-up list
+            if session.session_type == "random":
+                await update_draft_message(bot, session_id=session.session_id)
+            else:
+                await self.update_team_view(interaction)
+
+            await interaction.followup.send(f"Removed {removed_user_name} from the draft.")
+        else:
+            await interaction.response.send_message("User not found in sign-ups.", ephemeral=True)
+
+class UserRemovalView(discord.ui.View):
+    def __init__(self, session_id: str, options: list[discord.SelectOption]):
+        super().__init__()
+        self.add_item(UserRemovalSelect(options=options, session_id=session_id))
 
 
 class CallbackButton(discord.ui.Button):
@@ -309,6 +512,30 @@ class CallbackButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         await self.custom_callback(interaction, self)
 
+
+async def update_draft_message(bot, session_id):
+    draft_session = await get_draft_session(session_id)
+    if not draft_session:
+        print("Failed to fetch draft session for updating the message.")
+        return
+
+    channel_id = int(draft_session.draft_channel_id)
+    message_id = int(draft_session.message_id)
+    channel = bot.get_channel(channel_id)
+
+    if not channel:
+        print(f"Channel with ID {channel_id} not found.")
+        return
+
+    try:
+        message = await channel.fetch_message(message_id)
+        embed = message.embeds[0]  # Assuming there's at least one embed in the message
+        sign_ups_field_name = "Sign-Ups:"
+        sign_ups_str = '\n'.join([f"{name}" for name in draft_session.sign_ups.values()]) if draft_session.sign_ups else 'No players yet.'
+        embed.set_field_at(0, name=sign_ups_field_name, value=sign_ups_str, inline=False)
+        await message.edit(embed=embed)
+    except Exception as e:
+        print(f"Failed to update message for session {session_id}. Error: {e}")
 
 # class PersistentView(discord.ui.View):
 #     def __init__(self, draft_session):
@@ -334,62 +561,6 @@ class CallbackButton(discord.ui.Button):
 #             # If none of the conditions match, the interaction is not recognized and you might want to log this case.
 #             return False
 
-    # async def create_rooms_pairings_callback(self, interaction: discord.Interaction):
-    #     # Defer the response to ensure there's enough time for operations
-    #     await interaction.response.defer()
-
-    #     session = sessions.get(self.session_id)
-    #     if not session:
-    #         await interaction.followup.send("The draft session could not be found.", ephemeral=True)
-    #         return
-        
-    #     # Check if the process is already running
-    #     if session.are_rooms_processing:
-    #     # Process is already running, so we inform the user and do nothing else
-    #         await interaction.response.send_message("The rooms and pairings are currently being created. Please wait.", ephemeral=True)
-    #         return
-
-    #     # Set the flag to indicate the process is running
-    #     session.are_rooms_processing = True
-
-    #     session.session_stage = 'pairings'
-
-    #     guild = interaction.guild
-
-    #     # Immediately disable the "Create Rooms & Post Pairings" button to prevent multiple presses
-    #     for child in self.children:
-    #         if isinstance(child, discord.ui.Button) and child.label == "Create Rooms & Post Pairings":
-    #             child.disabled = True
-    #             break
-
-    #     await interaction.edit_original_response(view=self)  # Now correctly referring to 'self'
-
-    #     # Execute tasks to create chat channels
-    #     team_a_members = [guild.get_member(user_id) for user_id in session.team_a]
-    #     team_b_members = [guild.get_member(user_id) for user_id in session.team_b]
-    #     all_members = team_a_members + team_b_members
-
-    #     tasks = [
-    #         session.create_team_channel(guild, "Draft", all_members, session.team_a, session.team_b), 
-    #         session.create_team_channel(guild, "Team-A", team_a_members, session.team_a, session.team_b),
-    #         session.create_team_channel(guild, "Team-B", team_b_members, session.team_a, session.team_b)
-    #     ]
-    #     await asyncio.gather(*tasks)
-    #     draft_chat_channel_id = session.draft_chat_channel
-    #     # Post a sign-up ping in the draft chat channel
-    #     draft_chat_channel = guild.get_channel(draft_chat_channel_id)
-    #     if draft_chat_channel:
-    #         sign_up_tags = ' '.join([f"<@{user_id}>" for user_id in session.sign_ups.keys()])
-    #         await draft_chat_channel.send(f"Pairing posted below. Good luck in your matches! {sign_up_tags}")
-
-    #     original_message_id = session.message_id
-    #     original_channel_id = interaction.channel.id  
-    #     session.pairings = session.calculate_pairings()
-    #     await session.move_message_to_draft_channel(bot, original_channel_id, original_message_id, draft_chat_channel_id)
-    
-    #     # Execute Post Pairings
-
-    #     await session.post_pairings(guild, session.pairings)
         
     
     # async def ready_check_callback(self, interaction: discord.Interaction):
@@ -459,50 +630,5 @@ class CallbackButton(discord.ui.Button):
     #     await session.update_team_view(interaction)
 
     
-
-
-    
-    # async def remove_user_button_callback(self, interaction: discord.Interaction):
-    #     session = sessions.get(self.session_id)
-    #     if not session:
-    #         await interaction.response.send_message("Session not found.", ephemeral=True)
-    #         return
-
-    #     # Check if the user initiating the remove action is in the sign_ups
-    #     if interaction.user.id not in session.sign_ups:
-    #         await interaction.response.send_message("You are not authorized to remove users.", ephemeral=True)
-    #         return
-
-    #     # If the session exists and has sign-ups, and the user is authorized, proceed
-    #     if session.sign_ups:
-    #         options = [SelectOption(label=user_name, value=str(user_id)) for user_id, user_name in session.sign_ups.items()]
-    #         view = UserRemovalView(session_id=self.session_id)
-    #         await interaction.response.send_message("Select a user to remove:", view=view, ephemeral=True)
-    #     else:
-    #         await interaction.response.send_message("No users to remove.", ephemeral=True)
-
-    
             
-async def update_draft_message(bot, session_id):
-    draft_session = await get_draft_session(session_id)
-    if not draft_session:
-        print("Failed to fetch draft session for updating the message.")
-        return
 
-    channel_id = int(draft_session.draft_channel_id)
-    message_id = int(draft_session.message_id)
-    channel = bot.get_channel(channel_id)
-
-    if not channel:
-        print(f"Channel with ID {channel_id} not found.")
-        return
-
-    try:
-        message = await channel.fetch_message(message_id)
-        embed = message.embeds[0]  # Assuming there's at least one embed in the message
-        sign_ups_field_name = "Sign-Ups:"
-        sign_ups_str = '\n'.join([f"{name}" for name in draft_session.sign_ups.values()]) if draft_session.sign_ups else 'No players yet.'
-        embed.set_field_at(0, name=sign_ups_field_name, value=sign_ups_str, inline=False)
-        await message.edit(embed=embed)
-    except Exception as e:
-        print(f"Failed to update message for session {session_id}. Error: {e}")
