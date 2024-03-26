@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
 
-DATABASE_URL = "sqlite+aiosqlite:///drafts.db"  # Use aiosqlite for async operations with SQLite
+DATABASE_URL = "sqlite+aiosqlite:///drafts.db" 
 
 engine = create_async_engine(DATABASE_URL, echo=True)
 
@@ -83,7 +83,11 @@ async def re_register_views(bot):
                 try:
                     message = await channel.fetch_message(draft_session.message_id)
                     from views import PersistentView
-                    view = PersistentView(draft_session)  # Recreate the PersistentView for this session
+                    view = PersistentView(bot=bot,
+                                          draft_session_id=draft_session.session_id,
+                                          session_type=draft_session.session_type,
+                                          team_a_name=draft_session.team_a_name,
+                                          team_b_name=draft_session.team_b_name)
                     await message.edit(view=view)  # Reattach the view
                 except discord.NotFound:
                     # Handle cases where the message or channel might have been deleted

@@ -15,6 +15,7 @@ class CubeSelectionModal(discord.ui.Modal):
             self.add_item(discord.ui.InputText(label="Team B Name", placeholder="Team B Name", custom_id="team_b_input"))
 
     async def callback(self, interaction: discord.Interaction):
+        bot = interaction.client
         cube_name = self.children[0].value
         cube_option = "MTG" if not cube_name else cube_name
 
@@ -89,10 +90,15 @@ class CubeSelectionModal(discord.ui.Modal):
 
         draft_session = await get_draft_session(session_id)
         if draft_session:
-            view = PersistentView(draft_session)
+            # Pass required details directly
+            view = PersistentView(
+                bot=bot,
+                draft_session_id=draft_session.session_id,
+                session_type=self.session_type,
+                team_a_name=getattr(draft_session, 'team_a_name', None),
+                team_b_name=getattr(draft_session, 'team_b_name', None)
+            )
             message = await interaction.followup.send(embed=embed, view=view)
-        else:
-            await interaction.response.send_message("Draft session not found.", ephemeral=True)
         
         if new_draft_session:
             async with AsyncSessionLocal() as session:

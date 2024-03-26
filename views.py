@@ -1,53 +1,215 @@
 import discord
+from datetime import datetime
 from sqlalchemy import update
 from session import AsyncSessionLocal, get_draft_session, DraftSession
 
 
 class PersistentView(discord.ui.View):
-    def __init__(self, draft_session):
+    def __init__(self, bot, draft_session_id, session_type, team_a_name=None, team_b_name=None):
         super().__init__(timeout=None)
-        self.draft_session = draft_session
-        
-        if self.draft_session.session_type == 'premade':
-            self.add_item(discord.ui.Button(label=f"{self.draft_session.team_a_name}", style=discord.ButtonStyle.green, custom_id=f"{self.draft_session.session_id}_Team_A"))
-            self.add_item(discord.ui.Button(label=f"{self.draft_session.team_b_name}", style=discord.ButtonStyle.red, custom_id=f"{self.draft_session.session_id}_Team_B"))
-            self.add_item(discord.ui.Button(label="Generate Seating Order", style=discord.ButtonStyle.blurple, custom_id=f"{self.draft_session.session_id}_generate_seating"))
-        elif self.draft_session.session_type == 'random':
-            self.add_item(discord.ui.Button(label="Sign Up", style=discord.ButtonStyle.green, custom_id=f"{self.draft_session.session_id}_sign_up"))
-            self.add_item(discord.ui.Button(label="Cancel Sign Up", style=discord.ButtonStyle.red, custom_id=f"{self.draft_session.session_id}_cancel_sign_up"))
-            self.add_item(discord.ui.Button(label="Create Teams", style=discord.ButtonStyle.blurple, custom_id=f"{self.draft_session.session_id}_randomize_teams"))
-                
-        self.add_item(discord.ui.Button(label="Cancel Draft", style=discord.ButtonStyle.grey, custom_id=f"{self.draft_session.session_id}_cancel_draft"))
-        self.add_item(discord.ui.Button(label="Remove User", style=discord.ButtonStyle.grey, custom_id=f"{self.draft_session.session_id}_remove_user"))
-        self.add_item(discord.ui.Button(label="Ready Check", style=discord.ButtonStyle.green, custom_id=f"{self.draft_session.session_id}_ready_check"))
-        self.add_item(discord.ui.Button(label="Create Rooms & Post Pairings", style=discord.ButtonStyle.primary, custom_id=f"{self.draft_session.session_id}_create_rooms_pairings", disabled=True))
+        self.bot = bot
+        self.draft_session_id = draft_session_id
+        self.session_type = session_type
+        self.team_a_name = team_a_name
+        self.team_b_name = team_b_name
+        self.add_buttons()
+
+
+    def add_buttons(self):
+        if self.session_type == "random":
+            self.add_item(self.create_button("Sign Up", "green", f"sign_up_{self.draft_session_id}", self.sign_up_callback))
+            self.add_item(self.create_button("Cancel Sign Up", "red", f"cancel_sign_up_{self.draft_session_id}", self.cancel_sign_up_callback))
+            self.add_item(self.create_button("Create Teams", "blurple", f"randomize_teams_{self.draft_session_id}", self.randomize_teams_callback))
+        # elif self.session_type == "premade":
+        #     self.add_item(self.create_button(self.draft_session.team_a_name, "green", "Team_A", self.team_assignment_callback))
+        #     self.add_item(self.create_button(self.draft_session.team_b_name, "red", "Team_B", self.team_assignment_callback))
+        #     self.add_item(self.create_button("Generate Seating Order", "blurple", "generate_seating", self.randomize_teams_callback))
+        # self.add_item(self.create_button("Cancel Draft", "grey", "cancel_draft", self.cancel_draft_callback))
+        # self.add_item(self.create_button("Remove User", "grey", "remove_user", self.remove_user_button_callback))
+        # self.add_item(self.create_button("Ready Check", "green", "ready_check", self.ready_check_callback))
+        # self.add_item(self.create_button("Create Rooms & Post Pairings", "primary", "create_rooms_pairings", self.create_rooms_pairings_callback, disabled=True))
+
+
+    def create_button(self, label, style, custom_id, custom_callback, disabled=False):
+        style = getattr(discord.ButtonStyle, style)
+        button = CallbackButton(label=label, style=style, custom_id=custom_id, custom_callback=custom_callback, disabled=disabled)
+        return button
+
+
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        custom_id = interaction.data['custom_id']
+        session_exists = await get_draft_session(self.draft_session_id) is not None
+        if not session_exists:
+            await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
+        return session_exists
+    
+ 
+    async def sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Fetch the current draft session to ensure it's up to date
+        draft_session = await get_draft_session(self.draft_session_id)
+        if not draft_session:
+            await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
+            return
+        
+        sign_ups = draft_session.sign_ups or {}
 
-        if custom_id.endswith("_sign_up"):
-            return await self.sign_up_callback(interaction)
-        elif custom_id.endswith("_cancel_sign_up"):
-            return await self.cancel_sign_up_callback(interaction)
-        elif custom_id.endswith("_cancel_draft"):
-            return await self.cancel_draft_callback(interaction)
-        elif custom_id.endswith("_randomize_teams"):
-            return await self.randomize_teams_callback(interaction)
-        elif custom_id.endswith("_ready_check"):
-            return await self.ready_check_callback(interaction)
-        elif custom_id.endswith("_Team_A"):
-            return await self.team_assignment_callback(interaction)
-        elif custom_id.endswith("_Team_B"):
-            return await self.team_assignment_callback(interaction)
-        elif custom_id.endswith("_generate_seating"):
-            return await self.randomize_teams_callback(interaction)
-        elif custom_id.endswith("_create_rooms_pairings"):
-            return await self.create_rooms_pairings_callback(interaction)
-        elif custom_id.endswith("_remove_user"):
-            return await self.remove_user_button_callback(interaction)
+        # Check if the sign-up list is already full
+        if len(sign_ups) >= 8:
+            await interaction.response.send_message("The sign-up list is already full. No more players can sign up.", ephemeral=True)
+            return
+
+        user_id = str(interaction.user.id)
+        if user_id in sign_ups:
+            # User is already signed up; inform them
+            await interaction.response.send_message("You are already signed up!", ephemeral=True)
         else:
-            # If none of the conditions match, the interaction is not recognized and you might want to log this case.
-            return False
+            # User is signing up
+            sign_ups[user_id] = interaction.user.display_name
+
+            # Start an asynchronous database session
+            async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    # Directly update the 'sign_ups' of the draft session
+                    await session.execute(
+                        update(DraftSession).
+                        where(DraftSession.session_id == self.draft_session_id).
+                        values(sign_ups=sign_ups)
+                    )
+                    await session.commit()
+
+            # After committing, re-fetch the draft session to work with updated data
+            draft_session_updated = await get_draft_session(self.draft_session_id)
+            if not draft_session_updated:
+                print("Failed to fetch updated draft session after sign-up.")
+                return
+
+            # Confirm signup with draft link
+            draft_link = draft_session_updated.draft_link
+            signup_confirmation_message = f"You are now signed up. Join Here: {draft_link}"
+            await interaction.response.send_message(signup_confirmation_message, ephemeral=True)
+
+            # Update the draft message to reflect the new list of sign-ups
+            await update_draft_message(interaction.client, self.draft_session_id)
+
+
+    async def cancel_sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        draft_session = await get_draft_session(self.draft_session_id)
+        if not draft_session:
+            await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
+            return
+        
+        sign_ups = draft_session.sign_ups or {}
+        user_id = str(interaction.user.id)
+        if user_id not in sign_ups:
+            # User is not signed up; inform them
+            await interaction.response.send_message("You are not signed up!", ephemeral=True)
+        else:
+            # User is canceling their sign-up
+            del draft_session.sign_ups[user_id]
+
+            # Start an asynchronous database session
+            async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    # Directly update the 'sign_ups' of the draft session
+                    await session.execute(
+                        update(DraftSession).
+                        where(DraftSession.session_id == self.draft_session_id).
+                        values(sign_ups=sign_ups)
+                    )
+                    await session.commit()
+            cancel_message = "You're sign up has been canceled!"
+            await interaction.response.send_message(cancel_message, ephemeral=True)
+
+            # After committing, re-fetch the draft session to work with updated data
+            draft_session_updated = await get_draft_session(self.draft_session_id)
+            if not draft_session_updated:
+                print("Failed to fetch updated draft session after sign-up.")
+                return
+            
+            # Update the draft message to reflect the new list of sign-ups
+            await update_draft_message(interaction.client, self.draft_session_id)
+    
+
+    async def randomize_teams_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        bot = interaction.client
+        session = await get_draft_session(self.draft_session_id)
+        if not session:
+            await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
+            return
+        session.teams_start_time = datetime.now().timestamp()
+        session.session_stage = 'teams'
+        # Check session type and prepare teams if necessary
+        if session.session_type == 'random':
+            from methods import split_into_teams
+            await split_into_teams(session.session_id)
+            session = await get_draft_session(self.draft_session_id)
+
+        # Generate names for display using the session's sign_ups dictionary
+        team_a_display_names = [session.sign_ups[user_id] for user_id in session.team_a]
+        team_b_display_names = [session.sign_ups[user_id] for user_id in session.team_b]
+        
+        from methods import generate_seating_order
+        seating_order = await generate_seating_order(bot, session)
+
+        # Create the embed message for displaying the teams and seating order
+        embed = discord.Embed(
+            title=f"Draft-{session.draft_id} is Ready!",
+            description=f"**Draftmancer Session**: **[Join Here]({session.draft_link})** \n" +
+                        "Host of Draftmancer must manually adjust seating as per below. **TURN OFF RANDOM SEATING SETTING IN DRAFMANCER**" +
+                        "\n\n**AFTER THE DRAFT**, select Create Chat Rooms (give it five seconds to generate rooms) then select Post Pairings" +
+                        "\nPost Pairings will take about 10 seconds to process. Only press once.",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Team A" if session.session_type == "random" else f"{session.team_a_name}", value="\n".join(team_a_display_names), inline=True)
+        embed.add_field(name="Team B" if session.session_type == "random" else f"{session.team_b_name}", value="\n".join(team_b_display_names), inline=True)
+        embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+
+        # Iterate over the view's children (buttons) to update their disabled status
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                # Enable "Create Rooms" and "Cancel Draft" buttons
+                if item.custom_id == f"{self.draft_session_id}_create_rooms_pairings" or item.custom_id == f"{self.draft_session_id}_cancel_draft":
+                    item.disabled = False
+                else:
+                    # Disable all other buttons
+                    item.disabled = True
+
+
+        # Respond with the embed and updated view
+        await interaction.response.edit_message(embed=embed, view=self)
+
+class CallbackButton(discord.ui.Button):
+    def __init__(self, *, label, style, custom_id, custom_callback, disabled=False):
+        super().__init__(label=label, style=style, custom_id=custom_id, disabled=disabled)
+        self.custom_callback = custom_callback  
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.custom_callback(interaction, self)
+
+
+# class PersistentView(discord.ui.View):
+#     def __init__(self, draft_session):
+#         super().__init__(timeout=None)
+#         self.draft_session = draft_session
+        
+#         if self.draft_session.session_type == 'premade':
+#             self.add_item(discord.ui.Button(label=f"{self.draft_session.team_a_name}", style=discord.ButtonStyle.green, custom_id=f"{self.draft_session.session_id}_Team_A"))
+#             self.add_item(discord.ui.Button(label=f"{self.draft_session.team_b_name}", style=discord.ButtonStyle.red, custom_id=f"{self.draft_session.session_id}_Team_B"))
+#             self.add_item(discord.ui.Button(label="Generate Seating Order", style=discord.ButtonStyle.blurple, custom_id=f"{self.draft_session.session_id}_generate_seating"))
+#         elif self.draft_session.session_type == 'random':
+#             self.add_item(discord.ui.Button(label="Sign Up", style=discord.ButtonStyle.green, custom_id=f"{self.draft_session.session_id}_sign_up"))
+#             self.add_item(discord.ui.Button(label="Cancel Sign Up", style=discord.ButtonStyle.red, custom_id=f"{self.draft_session.session_id}_cancel_sign_up"))
+#             self.add_item(discord.ui.Button(label="Create Teams", style=discord.ButtonStyle.blurple, custom_id=f"{self.draft_session.session_id}_randomize_teams"))
+                
+#         self.add_item(discord.ui.Button(label="Cancel Draft", style=discord.ButtonStyle.grey, custom_id=f"{self.draft_session.session_id}_cancel_draft"))
+#         self.add_item(discord.ui.Button(label="Remove User", style=discord.ButtonStyle.grey, custom_id=f"{self.draft_session.session_id}_remove_user"))
+#         self.add_item(discord.ui.Button(label="Ready Check", style=discord.ButtonStyle.green, custom_id=f"{self.draft_session.session_id}_ready_check"))
+#         self.add_item(discord.ui.Button(label="Create Rooms & Post Pairings", style=discord.ButtonStyle.primary, custom_id=f"{self.draft_session.session_id}_create_rooms_pairings", disabled=True))
+
+#     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+#         custom_id = interaction.data['custom_id']
+#             # If none of the conditions match, the interaction is not recognized and you might want to log this case.
+#             return False
 
     # async def create_rooms_pairings_callback(self, interaction: discord.Interaction):
     #     # Defer the response to ensure there's enough time for operations
@@ -105,77 +267,6 @@ class PersistentView(discord.ui.View):
     #     # Execute Post Pairings
 
     #     await session.post_pairings(guild, session.pairings)
-
-
-    async def sign_up_callback(self, interaction: discord.Interaction):
-        # Fetch the current draft session to ensure it's up to date
-        draft_session = await get_draft_session(self.draft_session.session_id)
-        if not draft_session:
-            await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
-            return
-        
-        sign_ups = draft_session.sign_ups or {}
-
-        # Check if the sign-up list is already full
-        if len(sign_ups) >= 8:
-            await interaction.response.send_message("The sign-up list is already full. No more players can sign up.", ephemeral=True)
-            return
-
-        user_id = str(interaction.user.id)
-        if user_id in sign_ups:
-            # User is already signed up; inform them
-            await interaction.response.send_message("You are already signed up!", ephemeral=True)
-        else:
-            # User is signing up
-            sign_ups[user_id] = interaction.user.display_name
-
-            # Start an asynchronous database session
-            async with AsyncSessionLocal() as session:
-                async with session.begin():
-                    # Directly update the 'sign_ups' of the draft session
-                    await session.execute(
-                        update(DraftSession).
-                        where(DraftSession.session_id == draft_session.session_id).
-                        values(sign_ups=sign_ups)
-                    )
-                    await session.commit()
-
-            # After committing, re-fetch the draft session to work with updated data
-            draft_session_updated = await get_draft_session(draft_session.session_id)
-            if not draft_session_updated:
-                print("Failed to fetch updated draft session after sign-up.")
-                return
-
-            # Confirm signup with draft link
-            draft_link = draft_session_updated.draft_link
-            signup_confirmation_message = f"You are now signed up. Join Here: {draft_link}"
-            await interaction.response.send_message(signup_confirmation_message, ephemeral=True)
-
-            # Update the draft message to reflect the new list of sign-ups
-            await update_draft_message(interaction.client, draft_session.session_id)
-
-
-
-    async def cancel_sign_up_callback(self, interaction: discord.Interaction):
-        draft_session = await get_draft_session(self.draft_session.session_id)
-        if not draft_session:
-            await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
-            return
-
-        user_id = interaction.user.id
-        if user_id not in draft_session.sign_ups:
-            # User is not signed up; inform them
-            await interaction.response.send_message("You are not signed up!", ephemeral=True)
-        else:
-            # User is canceling their sign-up
-            del draft_session.sign_ups[user_id]
-            await interaction.response.send_message("Your sign-up has been canceled.", ephemeral=True)
-            # Update the draft message to reflect the change in sign-ups
-            draft_session = await get_draft_session(self.draft_session.session_id)
-            if draft_session:
-                await update_draft_message(interaction, draft_session)
-            else:
-                pass
         
     
     # async def ready_check_callback(self, interaction: discord.Interaction):
@@ -282,50 +373,7 @@ class PersistentView(discord.ui.View):
     #     else:
     #         await interaction.response.send_message("No users to remove.", ephemeral=True)
 
-    # async def randomize_teams_callback(self, interaction: discord.Interaction):
-    #     session = sessions.get(self.session_id)
-    #     if not session:
-    #         await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
-    #         return
-    #     session.teams_start_time = datetime.now().timestamp()
-    #     session.session_stage = 'teams'
-    #     # Check session type and prepare teams if necessary
-    #     if session.session_type == 'random':
-    #         session.split_into_teams()
-
-    #     # Generate names for display using the session's sign_ups dictionary
-    #     team_a_display_names = [session.sign_ups[user_id] for user_id in session.team_a]
-    #     team_b_display_names = [session.sign_ups[user_id] for user_id in session.team_b]
-        
-    #     seating_order = await session.generate_seating_order()
-
-    #     # Create the embed message for displaying the teams and seating order
-    #     embed = discord.Embed(
-    #         title=f"Draft-{session.draft_id} is Ready!",
-    #         description=f"**Draftmancer Session**: **[Join Here]({session.draft_link})** \n" +
-    #                     "Host of Draftmancer must manually adjust seating as per below. **TURN OFF RANDOM SEATING SETTING IN DRAFMANCER**" +
-    #                     "\n\n**AFTER THE DRAFT**, select Create Chat Rooms (give it five seconds to generate rooms) then select Post Pairings" +
-    #                     "\nPost Pairings will take about 10 seconds to process. Only press once.",
-    #         color=discord.Color.blue()
-    #     )
-    #     embed.add_field(name="Team A" if session.session_type == "random" else f"{session.team_a_name}", value="\n".join(team_a_display_names), inline=True)
-    #     embed.add_field(name="Team B" if session.session_type == "random" else f"{session.team_b_name}", value="\n".join(team_b_display_names), inline=True)
-    #     embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
-
-    #     # Iterate over the view's children (buttons) to update their disabled status
-    #     # Iterate over the view's children (buttons) to update their disabled status
-    #     for item in self.children:
-    #         if isinstance(item, discord.ui.Button):
-    #             # Enable "Create Rooms" and "Cancel Draft" buttons
-    #             if item.custom_id == f"{self.session_id}_create_rooms_pairings" or item.custom_id == f"{self.session_id}_cancel_draft":
-    #                 item.disabled = False
-    #             else:
-    #                 # Disable all other buttons
-    #                 item.disabled = True
-
-
-    #     # Respond with the embed and updated view
-    #     await interaction.response.edit_message(embed=embed, view=self)
+    
             
 async def update_draft_message(bot, session_id):
     draft_session = await get_draft_session(session_id)
