@@ -90,7 +90,6 @@ class CubeSelectionModal(discord.ui.Modal):
 
         draft_session = await get_draft_session(session_id)
         if draft_session:
-            # Pass required details directly
             view = PersistentView(
                 bot=bot,
                 draft_session_id=draft_session.session_id,

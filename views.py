@@ -20,10 +20,10 @@ class PersistentView(discord.ui.View):
             self.add_item(self.create_button("Sign Up", "green", f"sign_up_{self.draft_session_id}", self.sign_up_callback))
             self.add_item(self.create_button("Cancel Sign Up", "red", f"cancel_sign_up_{self.draft_session_id}", self.cancel_sign_up_callback))
             self.add_item(self.create_button("Create Teams", "blurple", f"randomize_teams_{self.draft_session_id}", self.randomize_teams_callback))
-        # elif self.session_type == "premade":
-        #     self.add_item(self.create_button(self.draft_session.team_a_name, "green", "Team_A", self.team_assignment_callback))
-        #     self.add_item(self.create_button(self.draft_session.team_b_name, "red", "Team_B", self.team_assignment_callback))
-        #     self.add_item(self.create_button("Generate Seating Order", "blurple", "generate_seating", self.randomize_teams_callback))
+        elif self.session_type == "premade":
+            self.add_item(self.create_button(self.team_a_name, "green", f"Team_A_{self.draft_session_id}", self.team_assignment_callback))
+            self.add_item(self.create_button(self.team_b_name, "red", f"Team_B_{self.draft_session_id}", self.team_assignment_callback))
+            self.add_item(self.create_button("Generate Seating Order", "blurple", f"generate_seating_{self.draft_session_id}", self.randomize_teams_callback))
         # self.add_item(self.create_button("Cancel Draft", "grey", "cancel_draft", self.cancel_draft_callback))
         # self.add_item(self.create_button("Remove User", "grey", "remove_user", self.remove_user_button_callback))
         # self.add_item(self.create_button("Ready Check", "green", "ready_check", self.ready_check_callback))
@@ -177,6 +177,94 @@ class PersistentView(discord.ui.View):
 
         # Respond with the embed and updated view
         await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def team_assignment_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        session = await get_draft_session(self.draft_session_id)
+        if not session:
+            await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
+            return
+
+        user_id = str(interaction.user.id)  # Ensure string format for consistency
+        custom_id = button.custom_id
+        user_name = interaction.user.display_name
+
+        # Initialize variables to avoid UnboundLocalError
+        primary_team = secondary_team = primary_key = secondary_key = None
+
+        # Determine which team the user is trying to interact with
+        if "Team_A" in custom_id:
+            primary_team, secondary_team = session.team_a or [], session.team_b or []
+            primary_key, secondary_key = "team_a", "team_b"
+        elif "Team_B" in custom_id:
+            primary_team, secondary_team = session.team_b or [], session.team_a or []
+            primary_key, secondary_key = "team_b", "team_a"
+
+        # Safety check if the button custom_id doesn't correctly specify a team
+        if primary_team is None or secondary_team is None:
+            await interaction.response.send_message("An error occurred. Unable to determine the team.", ephemeral=True)
+            return
+
+        sign_ups = session.sign_ups or {}
+
+        # Process the team assignment
+        if user_id in primary_team:
+            # User wants to leave the primary team
+            primary_team.remove(user_id)
+            action_message = f"You have been removed from {getattr(session, primary_key + '_name', primary_key)}."
+        else:
+            if user_id in secondary_team:
+                # User switches teams
+                secondary_team.remove(user_id)
+            primary_team.append(user_id)
+            action_message = f"You have been added to {getattr(session, primary_key + '_name', primary_key)}."
+
+        # Update or add user in the sign-ups dictionary
+        sign_ups[user_id] = user_name
+
+        # Persist changes to the database
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                await db_session.execute(update(DraftSession)
+                                        .where(DraftSession.session_id == session.session_id)
+                                        .values({primary_key: primary_team, secondary_key: secondary_team, 'sign_ups': sign_ups}))
+                await db_session.commit()
+
+        await interaction.response.send_message(action_message, ephemeral=True)
+
+        # Optionally update the message view to reflect the new team compositions
+        await self.update_team_view(interaction)
+
+    async def update_team_view(self, interaction: discord.Interaction):
+        session = await get_draft_session(self.draft_session_id)
+        if not session:
+            print("Draft session not found.")
+            return
+
+        channel = self.bot.get_channel(int(session.draft_channel_id))
+        if channel is None:
+            print(f"Channel not found for draft session ID {self.draft_session_id}.")
+            return
+
+        message = await channel.fetch_message(int(session.message_id))
+        embed = message.embeds[0]  # Assuming there's only one embed attached to the message
+
+        # Assume team_a_names and team_b_names are prepared earlier in the method
+        team_a_names = [session.sign_ups.get(str(user_id), "Unknown User") for user_id in (session.team_a or [])]
+        team_b_names = [session.sign_ups.get(str(user_id), "Unknown User") for user_id in (session.team_b or [])]
+
+        # Find the index of the Team A and Team B fields in the embed
+        team_a_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith(session.team_a_name or "Team A")), None)
+        team_b_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith(session.team_b_name or "Team B")), None)
+
+        # Update the fields if found
+        if team_a_index is not None:
+            embed.set_field_at(team_a_index, name=f"{session.team_a_name} ({len(session.team_a or [])}):", value="\n".join(team_a_names) if team_a_names else "No players yet.", inline=True)
+        if team_b_index is not None:
+            embed.set_field_at(team_b_index, name=f"{session.team_b_name} ({len(session.team_b or [])}):", value="\n".join(team_b_names) if team_b_names else "No players yet.", inline=True)
+
+        # Edit the original message with the updated embed
+        await message.edit(embed=embed)
+
 
 class CallbackButton(discord.ui.Button):
     def __init__(self, *, label, style, custom_id, custom_callback, disabled=False):
