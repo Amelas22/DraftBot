@@ -1,15 +1,14 @@
 import discord
-from sqlalchemy import Column, Integer, String, DateTime, JSON, select, Boolean
+from sqlalchemy import Column, Integer, String, DateTime, JSON, select, Boolean, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
 
 DATABASE_URL = "sqlite+aiosqlite:///drafts.db" 
 
 engine = create_async_engine(DATABASE_URL, echo=True)
 
-# AsyncSession class
 AsyncSessionLocal = sessionmaker(
     engine,
     expire_on_commit=False,
@@ -46,7 +45,6 @@ class DraftSession(Base):
     victory_message_id = Column(String(64))
     draft_summary_message_id = Column(String(64))
     matches = Column(JSON)
-    match_results = Column(JSON)
     match_counter = Column(Integer, default=1)
     sign_ups = Column(JSON)
     channel_ids = Column(JSON)
@@ -55,9 +53,22 @@ class DraftSession(Base):
     team_a_name = Column(String(128))
     team_b_name = Column(String(128))
     are_rooms_processing = Column(Boolean, default=False)
-
+    match_results = relationship("MatchResult", back_populates="draft_session")
     def __repr__(self):
         return f"<DraftSession(session_id={self.session_id}, guild_id={self.guild_id})>"
+
+class MatchResult(Base):
+    __tablename__ = 'match_results'
+
+    id = Column(Integer, primary_key=True)
+    session_id = Column(Integer, ForeignKey('draft_sessions.id'))
+    match_number = Column(Integer)
+    player1_id = Column(String(64))
+    player1_wins = Column(Integer, default=0)
+    player2_id = Column(String(64))
+    player2_wins = Column(Integer, default=0)
+    winner_id = Column(String(64), nullable=True)
+    draft_session = relationship("DraftSession", back_populates="match_results")
 
 async def get_draft_session(session_id: str):
     async with AsyncSessionLocal() as session:

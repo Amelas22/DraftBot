@@ -379,7 +379,6 @@ class PersistentView(discord.ui.View):
         
         await interaction.followup.send("Chat rooms created and pairings posted.", ephemeral=True)
         # Post a sign-up ping in the draft chat channel
-        # Ensure draft_chat_channel_id is an integer, as it might be stored as a string
         draft_chat_channel_id = int(session.draft_chat_channel)
 
         # Fetch the channel object using the ID
@@ -389,10 +388,11 @@ class PersistentView(discord.ui.View):
             await draft_chat_channel.send(f"Pairing posted below. Good luck in your matches! {sign_up_tags}")
 
         #original_message_id = session.message_id
-        #original_channel_id = interaction.channel.id  
-        #session.pairings = session.calculate_pairings()
-
-        # await session.move_message_to_draft_channel(bot, original_channel_id, original_message_id, draft_chat_channel_id)
+        #original_channel_id = session.channel.id
+        from utils import calculate_pairings
+        session.pairings = await calculate_pairings(session.session_id)
+        print(session.pairings)
+        #await session.move_message_to_draft_channel(bot, original_channel_id, original_message_id, draft_chat_channel_id)
     
         # Execute Post Pairings
 

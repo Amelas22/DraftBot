@@ -43,3 +43,49 @@ async def generate_seating_order(bot, draft_session):
             seating_order.append(team_b_members[i].display_name)
 
     return seating_order
+
+
+async def calculate_pairings(self, session_id):
+        session = await get_draft_session(session_id)
+        if not session:
+            print("Draft session not found.")
+            return
+        num_players = len(session.team_a) + len(session.team_b)
+        print(f"Number of players {num_players}")
+        if num_players not in [6, 8]:
+            raise ValueError("Unsupported number of players. Only 6 or 8 players are supported.")
+
+        assert len(self.team_a) == len(self.team_b), "Teams must be of equal size."
+        
+        session.match_results = {}  
+        pairings = {1: [], 2: [], 3: []}
+
+         # Generate pairings
+        for round in range(1, 4):
+            round_pairings = []
+            for i, player_a in enumerate(session.team_a):
+                player_b_index = (i + round - 1) % len(session.team_b)
+                player_b = session.team_b[player_b_index]
+
+                match_number = session.match_counter
+                session.matches[match_number] = {"players": (player_a, player_b), "results": None}
+                session.match_results[match_number] = {
+                    "player1_id": player_a, "player1_wins": 0, 
+                    "player2_id": player_b, "player2_wins": 0,
+                    "winner_id": None  
+                }
+                
+                round_pairings.append((player_a, player_b, match_number))
+                session.match_counter += 1
+
+            session.pairings[round] = round_pairings
+
+        async with AsyncSessionLocal() as db_session:
+                async with db_session.begin():
+                    # Update the session in the database
+                    await db_session.execute(update(DraftSession)
+                                            .where(DraftSession.session_id == session.session_id)
+                                            .values(matches=session.matches, match_results=session.match_results,
+                                                    pairings=session.pairings, match_counter=session.match_counter))
+                    await db_session.commit()
+        return pairings
