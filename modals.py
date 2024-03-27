@@ -102,7 +102,6 @@ class CubeSelectionModal(discord.ui.Modal):
         if new_draft_session:
             async with AsyncSessionLocal() as session:
                 async with session.begin():
-                    # Make sure to fetch the session again to avoid stale state issues
                     result = await session.execute(select(DraftSession).filter_by(session_id=new_draft_session.session_id))
                     updated_session = result.scalars().first()
                     if updated_session:

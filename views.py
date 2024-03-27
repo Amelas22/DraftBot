@@ -3,8 +3,9 @@ import asyncio
 from datetime import datetime
 from discord import SelectOption
 from discord.ui import Select
-from sqlalchemy import update
+from sqlalchemy import update, select
 from session import AsyncSessionLocal, get_draft_session, DraftSession
+from sqlalchemy.orm import selectinload
 
 
 class PersistentView(discord.ui.View):
@@ -325,78 +326,64 @@ class PersistentView(discord.ui.View):
             await interaction.response.send_message("No users to remove.", ephemeral=True)
         
     async def create_rooms_pairings_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Defer the response to ensure there's enough time for operations
         await interaction.response.defer()
-        bot = interaction.client
+        from utils import calculate_pairings
 
-        session = await get_draft_session(self.draft_session_id)
-        if not session:
-            print("Draft session not found.")
-            return
-        
-        # Check if the process is already running
-        if session.are_rooms_processing:
-            # Process is already running, so we inform the user and do nothing else
-            await interaction.followup.send("The rooms and pairings are currently being created. Please wait.", ephemeral=True)
-            return
-
-        # Set the flag to indicate the process is running and update session stage
-        session.are_rooms_processing = True
-        session.session_stage = 'pairings'
-
-        # Update the session in the database to reflect these changes
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
-                await db_session.execute(update(DraftSession)
-                                        .where(DraftSession.session_id == self.draft_session_id)
-                                        .values(are_rooms_processing=True, session_stage='pairings'))
+                stmt = select(DraftSession).options(selectinload(DraftSession.match_results)).filter(DraftSession.session_id == self.draft_session_id)
+                session = await db_session.scalar(stmt)
+
+                if not session:
+                    print("Draft session not found.")
+                    await interaction.followup.send("Draft session not found.", ephemeral=True)
+                    return
+
+                if session.are_rooms_processing:
+                    await interaction.followup.send("The rooms and pairings are currently being created. Please wait.", ephemeral=True)
+                    return
+
+                session.are_rooms_processing = True
+                session.session_stage = 'pairings'
+
+                await calculate_pairings(session, db_session)
+
+                guild = interaction.guild
+
+                # Immediately disable the "Create Rooms & Post Pairings" button to prevent multiple presses
+                for child in self.children:
+                    if isinstance(child, discord.ui.Button) and child.label == "Create Rooms & Post Pairings":
+                        child.disabled = True
+                        break
+
+                await interaction.edit_original_response(view=self)
+
+                # Execute tasks to create chat channels
+                team_a_members = [guild.get_member(int(user_id)) for user_id in session.team_a if guild.get_member(int(user_id))]
+                team_b_members = [guild.get_member(int(user_id)) for user_id in session.team_b if guild.get_member(int(user_id))]
+                all_members = team_a_members + team_b_members
+
+                session.draft_chat_channel = str(await self.create_team_channel(guild, "Draft", all_members, session.team_a, session.team_b))
+                await self.create_team_channel(guild, "Team-A", team_a_members, session.team_a, session.team_b)
+                await self.create_team_channel(guild, "Team-B", team_b_members, session.team_a, session.team_b)
+                
                 await db_session.commit()
 
-        guild = interaction.guild
+                # Fetch the channel object using the ID
+                draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
+                if draft_chat_channel:
+                    sign_up_tags = ' '.join([f"<@{user_id}>" for user_id in session.sign_ups.keys()])
+                    await draft_chat_channel.send(f"Pairing posted below. Good luck in your matches! {sign_up_tags}")
 
-        # Immediately disable the "Create Rooms & Post Pairings" button to prevent multiple presses
-        for child in self.children:
-            if isinstance(child, discord.ui.Button) and child.label == "Create Rooms & Post Pairings":
-                child.disabled = True
-                break
-
-        await interaction.edit_original_response(view=self)
-
-        # Execute tasks to create chat channels
-        team_a_members = [guild.get_member(int(user_id)) for user_id in session.team_a if guild.get_member(int(user_id))]
-        team_b_members = [guild.get_member(int(user_id)) for user_id in session.team_b if guild.get_member(int(user_id))]
-        all_members = team_a_members + team_b_members
-
-        tasks = [
-            self.create_team_channel(guild, "Draft", all_members, session.team_a, session.team_b), 
-            self.create_team_channel(guild, "Team-A", team_a_members, session.team_a, session.team_b),
-            self.create_team_channel(guild, "Team-B", team_b_members, session.team_a, session.team_b)
-        ]
-        
-        # Execute channel creation tasks
-        await asyncio.gather(*tasks, return_exceptions=True)
-        session = await get_draft_session(self.draft_session_id)      
-        
-        await interaction.followup.send("Chat rooms created and pairings posted.", ephemeral=True)
-        # Post a sign-up ping in the draft chat channel
-        draft_chat_channel_id = int(session.draft_chat_channel)
-
-        # Fetch the channel object using the ID
-        draft_chat_channel = guild.get_channel(draft_chat_channel_id)
-        if draft_chat_channel:
-            sign_up_tags = ' '.join([f"<@{user_id}>" for user_id in session.sign_ups.keys()])
-            await draft_chat_channel.send(f"Pairing posted below. Good luck in your matches! {sign_up_tags}")
-
-        #original_message_id = session.message_id
-        #original_channel_id = session.channel.id
-        from utils import calculate_pairings
-        session.pairings = await calculate_pairings(session.session_id)
-        print(session.pairings)
-        #await session.move_message_to_draft_channel(bot, original_channel_id, original_message_id, draft_chat_channel_id)
-    
-        # Execute Post Pairings
-
-        #await session.post_pairings(guild, session.pairings)
+                #original_message_id = session.message_id
+                #original_channel_id = session.channel.id
+                
+                #await session.move_message_to_draft_channel(bot, original_channel_id, original_message_id, draft_chat_channel_id)
+            
+                # Execute Post Pairings
+                from utils import post_pairings 
+                await post_pairings(guild, db_session, session.session_id)
+                await interaction.followup.send("Chat rooms created and pairings posted.", ephemeral=True)
 
     async def create_team_channel(self, guild, team_name, team_members, team_a, team_b):
         draft_category = discord.utils.get(guild.categories, name="Draft Channels")
@@ -453,6 +440,7 @@ class PersistentView(discord.ui.View):
                                         .values(**update_values))
                 await db_session.commit()
 
+        return channel.id
 
 class UserRemovalSelect(Select):
     def __init__(self, options: list[SelectOption], session_id: str, *args, **kwargs):
