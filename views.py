@@ -527,7 +527,8 @@ async def update_draft_message(bot, session_id):
     try:
         message = await channel.fetch_message(message_id)
         embed = message.embeds[0]  # Assuming there's at least one embed in the message
-        sign_ups_field_name = "Sign-Ups:"
+        sign_up_count = len(draft_session.sign_ups)
+        sign_ups_field_name = f"Sign-Ups ({sign_up_count}):"
         sign_ups_str = '\n'.join([f"{name}" for name in draft_session.sign_ups.values()]) if draft_session.sign_ups else 'No players yet.'
         embed.set_field_at(0, name=sign_ups_field_name, value=sign_ups_str, inline=False)
         await message.edit(embed=embed)
