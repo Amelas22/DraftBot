@@ -118,3 +118,69 @@ async def post_pairings(guild, db_session, session_id):
 
         await draft_chat_channel_obj.send(embed=embed)
 
+
+async def calculate_team_wins(draft_session_id: str):
+    async with AsyncSessionLocal() as session:
+        stmt = select(MatchResult).filter_by(session_id=draft_session_id)
+        results = await session.execute(stmt)
+        match_results = results.scalars().all()
+
+        team_a_wins = sum(1 for result in match_results if result.winner_id in session.team_a)
+        team_b_wins = sum(1 for result in match_results if result.winner_id in session.team_b)
+
+    return team_a_wins, team_b_wins
+
+
+async def generate_draft_summary_embed(bot, draft_session_id: str):
+    async with AsyncSessionLocal() as session:
+        draft_session = await get_draft_session(draft_session_id)
+        if not draft_session:
+            print("Draft session not found.")
+            return None
+
+        guild = bot.get_guild(int(draft_session.guild_id))
+        team_a_names = [guild.get_member(int(user_id)).display_name for user_id in draft_session.team_a]
+        team_b_names = [guild.get_member(int(user_id)).display_name for user_id in draft_session.team_b]
+
+        team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
+        half_matches = draft_session.match_counter // 2
+        total_matches = draft_session.match_counter
+        title, description = await determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, half_matches, total_matches)
+
+        embed = discord.Embed(title=title, description=description, color=discord.Color.blue())
+        team_a_display = f"Team A wins: {team_a_wins}"
+        team_b_display = f"Team B wins: {team_b_wins}"
+        embed.add_field(name="Team A", value="\n".join(team_a_names), inline=True)
+        embed.add_field(name="Team B", value="\n".join(team_b_names), inline=True)
+        embed.add_field(name="\u200B", value=team_a_display, inline=False)
+        embed.add_field(name="\u200B", value=team_b_display, inline=False)
+
+        return embed
+
+async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, half_matches, total_matches):
+    guild = bot.get_guild(int(draft_session.guild_id))
+    if not guild:
+        print("Guild not found")
+        return "Error", "Guild not found"
+    if team_a_wins > half_matches or team_b_wins > half_matches:
+        winner_team_ids = draft_session.team_a if team_a_wins > team_b_wins else draft_session.team_b
+        winner_team = [guild.get_member(int(member_id)) for member_id in winner_team_ids]
+
+        if draft_session.session_type == "random":
+            title = "Congratulations to " + ", ".join(member.display_name for member in winner_team if member) + " on winning the draft!"
+        elif draft_session.session_type == "premade":
+            team_name = draft_session.team_a_name if winner_team_ids == draft_session.team_a else draft_session.team_b_name
+            title = f"{team_name} has won the match!"
+        else:
+            title = "Draft Outcome"
+        
+        description = f"Congratulations to " + ", ".join(member.display_name for member in winner_team if member) + f" on winning the draft!\nDraft Start: <t:{int(draft_session.draft_start_time.timestamp())}:F>"
+    # determine if a draw was achieved
+    elif team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0:
+        title = "The Draft is a Draw!"
+        description = f"Draft Start: <t:{int(draft_session.draft_start_time.timestamp())}:F>"
+    else:
+        title = f"Draft-{draft_session.draft_id} Standings"
+        description = "If a drafter is missing from this channel, they likely can still see the channel but have the Discord invisible setting on."
+
+    return title, description
