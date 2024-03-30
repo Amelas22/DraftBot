@@ -1,12 +1,12 @@
 import discord
 import asyncio
 from datetime import datetime
-from discord import SelectOption
-from discord.ui import Select
+from discord import SelectOption, ButtonStyle
+from discord.ui import Button, View, Modal, Select, select
 from sqlalchemy import update, select
-from session import AsyncSessionLocal, get_draft_session, DraftSession
+from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
 from sqlalchemy.orm import selectinload
-from utils import calculate_pairings, generate_draft_summary_embed ,post_pairings, generate_seating_order
+from utils import calculate_pairings, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details
 
 
 PROCESSING_ROOMS_PAIRINGS = {}
@@ -403,7 +403,7 @@ class PersistentView(discord.ui.View):
 
                 await db_session.commit()
             # Execute Post Pairings
-            await post_pairings(guild, db_session, session.session_id)
+            await post_pairings(bot, guild, session.session_id)
             del PROCESSING_ROOMS_PAIRINGS[session_id]
             await interaction.followup.send("Chat rooms created and pairings posted.", ephemeral=True)
 
@@ -494,6 +494,95 @@ class UserRemovalSelect(Select):
             await interaction.followup.send(f"Removed {removed_user_name} from the draft.")
         else:
             await interaction.response.send_message("User not found in sign-ups.", ephemeral=True)
+
+
+async def create_pairings_view(bot, guild, session_id, match_results):
+    view = View(timeout=None)
+    for match_result in match_results:
+        # Fetch player names for the button labels
+        player1 = guild.get_member(int(match_result.player1_id))
+        player2 = guild.get_member(int(match_result.player2_id))
+        player1_name = player1.display_name if player1 else 'Unknown Player'
+        player2_name = player2.display_name if player2 else 'Unknown Player'
+        
+        # Initialize a MatchResultButton for each match
+        button = MatchResultButton(
+            bot=bot,
+            session_id=session_id,
+            match_id=match_result.id,  # Assuming match_result has an id attribute
+            match_number=match_result.match_number,
+            label=f"Match {match_result.match_number} Results",
+            style=discord.ButtonStyle.primary,
+            row=None  # Optionally, specify a row for button placement
+        )
+        view.add_item(button)
+    return view
+
+
+class MatchResultButton(Button):
+    def __init__(self, bot, session_id, match_id, match_number, label, *args, **kwargs):
+        super().__init__(label=label, *args, **kwargs)
+        self.bot = bot
+        self.session_id = session_id
+        self.match_id = match_id
+        self.match_number = match_number
+
+    async def callback(self, interaction):
+        # Fetch player names and IDs
+        player1_name, player2_name = await fetch_match_details(self.bot, self.session_id, self.match_number)
+        
+        # Create a Select menu for reporting the result
+        match_result_select = MatchResultSelect(
+            match_number=self.match_number, 
+            session_id=self.session_id, 
+            player1_name=player1_name, 
+            player2_name=player2_name
+        )
+
+        # Create and send a new View containing the Select menu
+        view = View()
+        view.add_item(match_result_select)
+        await interaction.response.send_message("Please select the match result:", view=view, ephemeral=True)
+
+
+class MatchResultSelect(Select):
+    def __init__(self, match_number, session_id, player1_name, player2_name, *args, **kwargs):
+        self.match_number = match_number
+        self.session_id = session_id
+
+        options = [
+            SelectOption(label=f"{player1_name} wins: 2-0", value="2-0-1"),
+            SelectOption(label=f"{player1_name} wins: 2-1", value="2-1-1"),
+            SelectOption(label=f"{player2_name} wins: 2-0", value="0-2-2"),
+            SelectOption(label=f"{player2_name} wins: 2-1", value="1-2-2"),
+            SelectOption(label="No Match Played", value="0-0-0"),
+        ]
+        super().__init__(placeholder=f"{player1_name} v. {player2_name}", min_values=1, max_values=1, options=options, *args, **kwargs)
+
+    async def callback(self, interaction):
+        # Splitting the selected value to get the result details
+        player1_wins, player2_wins, winner_indicator = self.values[0].split('-')
+        player1_wins = int(player1_wins)
+        player2_wins = int(player2_wins)
+        winner_id = None  # Default to None in case of a draw
+
+        async with AsyncSessionLocal() as session:  # Use your session creation method here
+            async with session.begin():
+                # Fetch the match result entry from the database
+                match_result = await session.get(MatchResult, self.match_number)
+                if match_result:
+                    # Update the match result based on the selection
+                    match_result.player1_wins = player1_wins
+                    match_result.player2_wins = player2_wins
+                    if winner_indicator != '0':  # Determine the winner_id if there's a clear winner
+                        winner_id = match_result.player1_id if winner_indicator == '1' else match_result.player2_id
+                    match_result.winner_id = winner_id
+
+                    await session.commit()  # Commit the changes to the database
+
+        # Send confirmation message
+        await interaction.response.send_message("Match result updated.", ephemeral=True)
+
 
 class UserRemovalView(discord.ui.View):
     def __init__(self, session_id: str, options: list[discord.SelectOption]):
