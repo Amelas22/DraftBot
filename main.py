@@ -152,12 +152,21 @@ class DraftSession:
         draft_category = discord.utils.get(guild.categories, name="Draft Channels")
         channel_name = f"{team_name}-Chat-{self.draft_id}"
 
-        # Retrieve the roles
+        # Retrieve the roles if they exist
         overseer_role = discord.utils.get(guild.roles, name="Cube Overseer")
         development_role = discord.utils.get(guild.roles, name="Development")
         
-        # Combine members of both roles into a single list, ensuring no duplicates
-        all_special_role_members = list(set(overseer_role.members + development_role.members))
+        # Initialize an empty list to hold all special role members
+        all_special_role_members = []
+
+        # If the roles exist, add their members to the list, avoiding duplicates
+        if overseer_role:
+            all_special_role_members.extend(overseer_role.members)
+        if development_role:
+            all_special_role_members.extend(development_role.members)
+        
+        # Remove duplicates by converting the list to a set and back to a list
+        all_special_role_members = list(set(all_special_role_members))
 
         # Basic permissions overwrites for the channel
         overwrites = {
@@ -175,9 +184,11 @@ class DraftSession:
                     # Remove access for members who are part of the other team
                     overwrites[member] = discord.PermissionOverwrite(read_messages=False)
         else:
-            # For the "Draft-chat" channel, add all members of both roles
-            overwrites[overseer_role] = discord.PermissionOverwrite(read_messages=True)
-            overwrites[development_role] = discord.PermissionOverwrite(read_messages=True)
+            # For the "Draft-chat" channel, add read permissions for both roles if they exist
+            if overseer_role:
+                overwrites[overseer_role] = discord.PermissionOverwrite(read_messages=True)
+            if development_role:
+                overwrites[development_role] = discord.PermissionOverwrite(read_messages=True)
 
         # Add team members with read permission. This specifically allows these members, overriding role-based permissions if needed.
         for member in team_members:
