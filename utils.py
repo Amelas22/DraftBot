@@ -156,8 +156,9 @@ async def generate_draft_summary_embed(bot, draft_session_id):
         team_b_names = [guild.get_member(int(user_id)).display_name for user_id in draft_session.team_b]
 
         team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
-        half_matches = draft_session.match_counter // 2
-        total_matches = draft_session.match_counter
+        total_matches = draft_session.match_counter - 1
+        half_matches = total_matches // 2
+        print(f"total_matches: {total_matches}, half_matches: {half_matches}")
         title, description = await determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, half_matches, total_matches)
 
         embed = discord.Embed(title=title, description=description, color=discord.Color.blue())
@@ -181,13 +182,15 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
 
         if draft_session.session_type == "random":
             title = "Congratulations to " + ", ".join(member.display_name for member in winner_team if member) + " on winning the draft!"
+            description = f"Draft Start: <t:{int(draft_session.draft_start_time.timestamp())}:F>"
         elif draft_session.session_type == "premade":
             team_name = draft_session.team_a_name if winner_team_ids == draft_session.team_a else draft_session.team_b_name
             title = f"{team_name} has won the match!"
+            description = f"Congratulations to " + ", ".join(member.display_name for member in winner_team if member) + f" on winning the draft!\nDraft Start: <t:{int(draft_session.draft_start_time.timestamp())}:F>"
         else:
             title = "Draft Outcome"
         
-        description = f"Congratulations to " + ", ".join(member.display_name for member in winner_team if member) + f" on winning the draft!\nDraft Start: <t:{int(draft_session.draft_start_time.timestamp())}:F>"
+        
     # determine if a draw was achieved
     elif team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0:
         title = "The Draft is a Draw!"
