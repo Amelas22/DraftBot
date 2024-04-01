@@ -73,7 +73,7 @@ async def calculate_pairings(session, db_session):
             player_b_index = (i + round_number - 1) % len(session.team_b)
             player_b = session.team_b[player_b_index]
             match_result = MatchResult(
-                session_id=session.id,
+                session_id=session.session_id,
                 match_number=session.match_counter,
                 player1_id=player_a,
                 player1_wins=0,
@@ -86,6 +86,7 @@ async def calculate_pairings(session, db_session):
 
 
 async def post_pairings(bot, guild, session_id):
+
     async with AsyncSessionLocal() as db_session:
         stmt = select(DraftSession).options(selectinload(DraftSession.match_results)).filter(DraftSession.session_id == session_id)
         session = await db_session.scalar(stmt)
@@ -121,23 +122,33 @@ async def post_pairings(bot, guild, session_id):
         await draft_chat_channel_obj.send(embed=embed, view=view)
 
 
-async def calculate_team_wins(draft_session_id: str):
+async def calculate_team_wins(draft_session_id):
+    team_a_wins = 0
+    team_b_wins = 0
     async with AsyncSessionLocal() as session:
-        stmt = select(MatchResult).filter_by(session_id=draft_session_id)
-        results = await session.execute(stmt)
-        match_results = results.scalars().all()
+        draft_session = await get_draft_session(draft_session_id)
+        if draft_session:
+            stmt = select(MatchResult).filter_by(session_id=draft_session_id)
+            results = await session.execute(stmt)
+            match_results = results.scalars().all()
 
-        team_a_wins = sum(1 for result in match_results if result.winner_id in session.team_a)
-        team_b_wins = sum(1 for result in match_results if result.winner_id in session.team_b)
+            team_a_ids = set(draft_session.team_a)
+            team_b_ids = set(draft_session.team_b)
 
-    return team_a_wins, team_b_wins
+            for result in match_results:
+                if result.winner_id in team_a_ids:
+                    team_a_wins += 1
+                elif result.winner_id in team_b_ids:
+                    team_b_wins += 1
+        print(f"Team A wins: {team_a_wins}, Team B Wins: {team_b_wins}")
+        return team_a_wins, team_b_wins
 
 
-async def generate_draft_summary_embed(bot, draft_session_id: str):
+async def generate_draft_summary_embed(bot, draft_session_id):
     async with AsyncSessionLocal() as session:
         draft_session = await get_draft_session(draft_session_id)
         if not draft_session:
-            print("Draft session not found.")
+            print("Draft session not found. Generate Draft Summary")
             return None
 
         guild = bot.get_guild(int(draft_session.guild_id))
@@ -221,3 +232,32 @@ async def fetch_match_details(bot, session_id: str, match_number: int):
     return player1_name, player2_name
 
 
+async def update_draft_summary_message(bot, draft_session_id):
+    async with AsyncSessionLocal() as session:
+        draft_session = await get_draft_session(draft_session_id)
+        if not draft_session:
+            print("The draft session could not be found.")
+            return
+
+        # Assuming you have already calculated and updated team wins in the database
+
+        updated_embed = await generate_draft_summary_embed(bot, draft_session_id)
+        guild = bot.get_guild(int(draft_session.guild_id))
+        channel = guild.get_channel(int(draft_session.draft_chat_channel))
+        
+        try:
+            summary_message = await channel.fetch_message(int(draft_session.draft_summary_message_id))
+            await summary_message.edit(embed=updated_embed)
+            print("Draft summary message updated successfully.")
+        except Exception as e:
+            print(f"Failed to update draft summary message: {e}")
+
+
+
+async def create_updated_view_for_pairings_message(session_id, match_number):
+    view = discord.ui.View(timeout=None)
+    # Generate buttons for each match, similar to before, 
+    # but ensure they reflect the current state (e.g., disabling the button if the result has been reported)
+    # This might involve fetching the current state of all matches in the session
+
+    return view

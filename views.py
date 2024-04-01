@@ -6,8 +6,11 @@ from discord.ui import Button, View, Modal, Select, select
 from sqlalchemy import update, select
 from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
 from sqlalchemy.orm import selectinload
-from utils import calculate_pairings, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details
+from utils import calculate_pairings, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, update_draft_summary_message
+import logging
 
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 PROCESSING_ROOMS_PAIRINGS = {}
 
@@ -528,12 +531,15 @@ class MatchResultButton(Button):
         self.match_number = match_number
 
     async def callback(self, interaction):
+        await interaction.response.defer()
+
         # Fetch player names and IDs
         player1_name, player2_name = await fetch_match_details(self.bot, self.session_id, self.match_number)
         
         # Create a Select menu for reporting the result
         match_result_select = MatchResultSelect(
-            match_number=self.match_number, 
+            match_number=self.match_number,
+            bot = self.bot,
             session_id=self.session_id, 
             player1_name=player1_name, 
             player2_name=player2_name
@@ -542,11 +548,12 @@ class MatchResultButton(Button):
         # Create and send a new View containing the Select menu
         view = View()
         view.add_item(match_result_select)
-        await interaction.response.send_message("Please select the match result:", view=view, ephemeral=True)
+        await interaction.followup.send("Please select the match result:", view=view, ephemeral=True)
 
 
 class MatchResultSelect(Select):
-    def __init__(self, match_number, session_id, player1_name, player2_name, *args, **kwargs):
+    def __init__(self, bot, match_number, session_id, player1_name, player2_name, *args, **kwargs):
+        self.bot = bot
         self.match_number = match_number
         self.session_id = session_id
 
@@ -561,6 +568,7 @@ class MatchResultSelect(Select):
 
     async def callback(self, interaction):
         # Splitting the selected value to get the result details
+        await interaction.response.defer()
         player1_wins, player2_wins, winner_indicator = self.values[0].split('-')
         player1_wins = int(player1_wins)
         player2_wins = int(player2_wins)
@@ -569,7 +577,12 @@ class MatchResultSelect(Select):
         async with AsyncSessionLocal() as session:  # Use your session creation method here
             async with session.begin():
                 # Fetch the match result entry from the database
-                match_result = await session.get(MatchResult, self.match_number)
+                stmt = select(MatchResult).where(
+                    MatchResult.session_id == self.session_id,
+                    MatchResult.match_number == self.match_number
+                )
+                result = await session.execute(stmt)
+                match_result = result.scalars().first()
                 if match_result:
                     # Update the match result based on the selection
                     match_result.player1_wins = player1_wins
@@ -579,9 +592,10 @@ class MatchResultSelect(Select):
                     match_result.winner_id = winner_id
 
                     await session.commit()  # Commit the changes to the database
+                    logger.info(f"Updating match {self.match_number} result: {player1_wins}-{player2_wins}, winner: {winner_id}")
 
-        # Send confirmation message
-        await interaction.response.send_message("Match result updated.", ephemeral=True)
+        await update_draft_summary_message(self.bot, self.session_id)
+                    
 
 
 class UserRemovalView(discord.ui.View):

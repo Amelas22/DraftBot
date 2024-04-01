@@ -53,7 +53,7 @@ class DraftSession(Base):
     team_a_name = Column(String(128))
     team_b_name = Column(String(128))
     are_rooms_processing = Column(Boolean, default=False)
-    match_results = relationship("MatchResult", back_populates="draft_session")
+    match_results = relationship("MatchResult", back_populates="draft_session", foreign_keys="[MatchResult.session_id]")
     def __repr__(self):
         return f"<DraftSession(session_id={self.session_id}, guild_id={self.guild_id})>"
 
@@ -61,7 +61,7 @@ class MatchResult(Base):
     __tablename__ = 'match_results'
 
     id = Column(Integer, primary_key=True)
-    session_id = Column(Integer, ForeignKey('draft_sessions.id'))
+    session_id = Column(String(64), ForeignKey('draft_sessions.session_id'))
     match_number = Column(Integer)
     player1_id = Column(String(64))
     player1_wins = Column(Integer, default=0)
