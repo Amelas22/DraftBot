@@ -6,7 +6,7 @@ from discord.ui import Button, View, Modal, Select, select
 from sqlalchemy import update, select
 from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
 from sqlalchemy.orm import selectinload
-from utils import calculate_pairings, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, update_draft_summary_message
+from utils import calculate_pairings, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, update_draft_summary_message, check_and_post_victory_or_draw
 import logging
 
 logger = logging.getLogger(__name__)
@@ -592,9 +592,10 @@ class MatchResultSelect(Select):
                     match_result.winner_id = winner_id
 
                     await session.commit()  # Commit the changes to the database
-                    logger.info(f"Updating match {self.match_number} result: {player1_wins}-{player2_wins}, winner: {winner_id}")
 
+                   
         await update_draft_summary_message(self.bot, self.session_id)
+        await check_and_post_victory_or_draw(self.bot, self.session_id) 
                     
 
 

@@ -4,10 +4,6 @@ from sqlalchemy import update, select
 from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
 from sqlalchemy.orm import selectinload
 
-import logging
-
-
-logging.basicConfig(level=logging.INFO)
 
 async def split_into_teams(draft_session_id):
     # Fetch the current draft session to ensure it's up to date.
@@ -158,16 +154,20 @@ async def generate_draft_summary_embed(bot, draft_session_id):
         team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
         total_matches = draft_session.match_counter - 1
         half_matches = total_matches // 2
-        print(f"total_matches: {total_matches}, half_matches: {half_matches}")
         title, description = await determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, half_matches, total_matches)
 
         embed = discord.Embed(title=title, description=description, color=discord.Color.blue())
-        team_a_display = f"Team A wins: {team_a_wins}"
-        team_b_display = f"Team B wins: {team_b_wins}"
+        # team_a_display = f"Team A wins: {team_a_wins}"
+        # team_b_display = f"Team B wins: {team_b_wins}"
         embed.add_field(name="Team A", value="\n".join(team_a_names), inline=True)
         embed.add_field(name="Team B", value="\n".join(team_b_names), inline=True)
-        embed.add_field(name="\u200B", value=team_a_display, inline=False)
-        embed.add_field(name="\u200B", value=team_b_display, inline=False)
+        embed.add_field(
+            name="**Draft Standings**", 
+            value=(f"**Team A Wins:** {team_a_wins}" if draft_session.session_type == "random" else f"**{draft_session.team_a_name} Wins:** {team_a_wins}") + 
+                (f"\n**Team B Wins:** {team_b_wins}" if draft_session.session_type == "random" else f"\n**{draft_session.team_b_name} Wins:** {team_b_wins}"), 
+            inline=False)
+        # embed.add_field(name="\u200B", value=team_a_display, inline=False)
+        # embed.add_field(name="\u200B", value=team_b_display, inline=False)
 
         return embed
 
@@ -212,19 +212,19 @@ async def fetch_match_details(bot, session_id: str, match_number: int):
         result = await session.execute(stmt)
         draft_session = result.scalars().first()
         if not draft_session:
-            logging.error(f"Draft session not found for session_id: {session_id}")
+            print(f"Draft session not found for session_id: {session_id}")
             return None, None  # Draft session not found
 
     match_result = next((match for match in draft_session.match_results if match.match_number == match_number), None)
     if not match_result:
-        logging.error(f"Match result not found within the session for match_number: {match_number}")
+        print(f"Match result not found within the session for match_number: {match_number}")
         return None, None  # Match not found within the session
 
-    logging.info(f"Fetching details for player1_id: {match_result.player1_id}, player2_id: {match_result.player2_id}")
+    print(f"Fetching details for player1_id: {match_result.player1_id}, player2_id: {match_result.player2_id}")
 
     guild = bot.get_guild(int(draft_session.guild_id))
     if not guild:
-        logging.error("Guild not found.")
+        print("Guild not found.")
         return "Unknown Player", "Unknown Player"
 
     player1 = guild.get_member(int(match_result.player1_id))
@@ -264,3 +264,63 @@ async def create_updated_view_for_pairings_message(session_id, match_number):
     # This might involve fetching the current state of all matches in the session
 
     return view
+
+
+async def check_and_post_victory_or_draw(bot, draft_session_id):
+    print("check and post victory")
+    async with AsyncSessionLocal() as session:
+        draft_session = await get_draft_session(draft_session_id)
+        if not draft_session:
+            print("Draft session not found.")
+            return
+
+        guild = bot.get_guild(int(draft_session.guild_id))
+        if not guild:
+            print("Guild not found.")
+            return
+
+        team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
+        total_matches = draft_session.match_counter - 1
+        half_matches = total_matches // 2
+        print(f"Team A Wins: {team_a_wins}, Team B Wins: {team_b_wins}, Total Matches: {total_matches}, Half Matches: {half_matches}")
+
+        # Check victory or draw conditions
+        if team_a_wins > half_matches or team_b_wins > half_matches or (team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0):
+            embed = await generate_draft_summary_embed(bot, draft_session_id)
+            
+            # Handle the draft-chat channel message
+            draft_chat_channel = guild.get_channel(int(draft_session.draft_chat_channel))
+            if draft_chat_channel:
+                await post_or_update_victory_message(session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat')
+
+            # Determine the correct results channel
+            results_channel_name = "team-draft-results" if draft_session.session_type == "random" else "league-draft-results"
+            results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
+            if results_channel:
+                await post_or_update_victory_message(session, results_channel, embed, draft_session, 'victory_message_id_results_channel')
+            else:
+                print(f"Results channel '{results_channel_name}' not found.")
+
+            await session.commit()
+
+
+async def post_or_update_victory_message(session, channel, embed, draft_session, victory_message_attr):
+    if not channel:
+        print("Channel not found.")
+        return
+
+    victory_message_id = getattr(draft_session, victory_message_attr, None)
+    if victory_message_id:
+        try:
+            message = await channel.fetch_message(int(victory_message_id))
+            await message.edit(embed=embed)
+            print(f"Updated victory message in {channel.name}.")
+        except discord.NotFound:
+            print(f"Message ID {victory_message_id} not found in {channel.name}. Posting a new message.")
+            victory_message_id = None
+
+    if not victory_message_id:
+        message = await channel.send(embed=embed)
+        setattr(draft_session, victory_message_attr, str(message.id))
+        session.add(draft_session)  # Make sure the session knows to update this object
+        print(f"Posted new victory message in {channel.name}.")
