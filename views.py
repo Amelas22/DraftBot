@@ -5,7 +5,7 @@ from discord.ui import Button, View, Select, select
 from sqlalchemy import update, select
 from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
 from sqlalchemy.orm import selectinload
-from utils import calculate_pairings, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, update_draft_summary_message, check_and_post_victory_or_draw
+from utils import calculate_pairings, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, update_draft_summary_message, check_and_post_victory_or_draw, update_player_stats_and_elo, update_player_stats_for_draft
 
 PROCESSING_ROOMS_PAIRINGS = {}
 
@@ -363,11 +363,12 @@ class PersistentView(discord.ui.View):
 
                 session.are_rooms_processing = True
                 session.session_stage = 'pairings'
-
-                await calculate_pairings(session, db_session)
-
                 guild = interaction.guild
                 bot = interaction.client
+                
+                await calculate_pairings(session, db_session)
+                await update_player_stats_for_draft(session.session_id, guild)
+                
                 # Immediately disable the "Create Rooms & Post Pairings" button to prevent multiple presses
                 for child in self.children:
                     if isinstance(child, discord.ui.Button) and child.label == "Create Rooms & Post Pairings":
@@ -591,12 +592,12 @@ class MatchResultSelect(Select):
                     # Update the match result based on the selection
                     match_result.player1_wins = player1_wins
                     match_result.player2_wins = player2_wins
-                    if winner_indicator != '0':  # Determine the winner_id if there's a clear winner
+                    if winner_indicator != '0':  
                         winner_id = match_result.player1_id if winner_indicator == '1' else match_result.player2_id
                     match_result.winner_id = winner_id
 
                     await session.commit()  # Commit the changes to the database
-
+                    await update_player_stats_and_elo(match_result)
                    
         await update_draft_summary_message(self.bot, self.session_id)
         await check_and_post_victory_or_draw(self.bot, self.session_id)

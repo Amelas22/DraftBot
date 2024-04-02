@@ -1,5 +1,5 @@
 import discord
-from sqlalchemy import Column, Integer, String, DateTime, JSON, select, Boolean, ForeignKey, desc
+from sqlalchemy import Column, Integer, String, DateTime, JSON, select, Boolean, ForeignKey, desc, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, relationship
@@ -71,6 +71,20 @@ class MatchResult(Base):
     pairing_message_id = Column(String(64))
     draft_session = relationship("DraftSession", back_populates="match_results")
 
+
+class PlayerStats(Base):
+    __tablename__ = 'player_stats'
+    
+    player_id = Column(String(64), primary_key=True)
+    display_name = Column(String(128))  
+    drafts_participated = Column(Integer, default=0)
+    games_won = Column(Integer, default=0)
+    games_lost = Column(Integer, default=0)
+    elo_rating = Column(Float, default=1200)
+    
+    def __repr__(self):
+        return f"<PlayerStats(player_id={self.player_id}, display_name={self.display_name}, drafts_participated={self.drafts_participated}, games_won={self.games_won}, games_lost={self.games_lost}, elo_rating={self.elo_rating})>"
+    
 async def get_draft_session(session_id: str):
     async with AsyncSessionLocal() as session:
         async with session.begin():

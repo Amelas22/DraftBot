@@ -3,7 +3,7 @@ import discord
 import asyncio
 from sqlalchemy import update, select
 from datetime import datetime
-from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
+from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult, PlayerStats
 from sqlalchemy.orm import selectinload
 
 
@@ -357,11 +357,12 @@ async def calculate_three_zero_drafters(session, draft_session_id, guild):
 async def cleanup_sessions_task(bot):
     while True:
         current_time = datetime.now()
-        async with AsyncSessionLocal as db: 
-            async with db.begin():
+        # Assuming AsyncSessionLocal is your sessionmaker factory
+        async with AsyncSessionLocal() as session:  # Creating a session instance correctly
+            async with session.begin():
                 # Fetch sessions that are past their deletion time
                 stmt = select(DraftSession).where(DraftSession.deletion_time <= current_time)
-                results = await db.execute(stmt)
+                results = await session.execute(stmt)
                 sessions_to_cleanup = results.scalars().all()
 
                 for session in sessions_to_cleanup:
@@ -389,3 +390,64 @@ async def cleanup_sessions_task(bot):
 
         # Sleep for a certain amount of time before running again
         await asyncio.sleep(3600)  # Sleep for 1 hour
+
+
+async def update_player_stats_for_draft(session_id, guild):
+    async with AsyncSessionLocal() as db_session: 
+        async with db_session.begin():
+            stmt = select(DraftSession).where(DraftSession.session_id == session_id)
+            draft_session = await db_session.scalar(stmt)
+            if not draft_session:
+                print("Draft session not found.")
+                return
+            
+            player_ids = draft_session.team_a + draft_session.team_b  # Combine both teams' player IDs
+            
+            for player_id in player_ids:
+                stmt = select(PlayerStats).where(PlayerStats.player_id == player_id)
+                player_stat = await db_session.scalar(stmt)
+                
+                if player_stat:
+                    # Update existing player stats
+                    player_stat.drafts_participated += 1
+                else:
+                    # Create new player stats record
+                    player_stat = PlayerStats(
+                        player_id=player_id,
+                        drafts_participated=1,
+                        games_won=0,
+                        games_lost=0,
+                        elo_rating=1200,  # Default ELO score
+                        display_name=guild.get_member(int(player_id)).display_name if guild.get_member(int(player_id)) else "Unknown"
+                    )
+                    db_session.add(player_stat)
+
+            await db_session.commit()
+
+async def update_player_stats_and_elo(match_result):
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            player1 = await session.get(PlayerStats, match_result.player1_id)
+            player2 = await session.get(PlayerStats, match_result.player2_id)
+            
+            if match_result.winner_id:
+                if match_result.winner_id == match_result.player1_id:
+                    player1.games_won += 1
+                    player2.games_lost += 1
+                    winner = player1
+                    loser = player2
+                else:
+                    player2.games_won += 1
+                    player1.games_lost += 1
+                    winner = player2
+                    loser = player1
+                
+                # Calculate and update Elo ratings
+                elo_diff = calculate_elo_diff(winner.elo_rating, loser.elo_rating)
+                winner.elo_rating += elo_diff
+                loser.elo_rating -= elo_diff
+
+def calculate_elo_diff(winner_elo, loser_elo, k=20):
+    """Calculate Elo rating difference after a game."""
+    expected_win = 1 / (1 + 10 ** ((loser_elo - winner_elo) / 400))
+    return k * (1 - expected_win)
