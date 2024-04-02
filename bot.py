@@ -2,7 +2,7 @@ import discord
 import os
 from discord.ext import commands
 from dotenv import load_dotenv
-from session import init_db, re_register_views
+from session import init_db, register_team_to_db
 from modals import CubeSelectionModal
 from utils import cleanup_sessions_task
 
@@ -37,7 +37,11 @@ async def main():
     async def premade_draft(interaction: discord.Interaction):
         await interaction.response.send_modal(CubeSelectionModal(session_type="premade", title="Select Cube"))
 
-    # Initialize the database before starting the bot
+    @bot.slash_command(name="registerteam", description="Register a new team in the league")
+    async def register_team(ctx, team_name: str):
+        response = await register_team_to_db(team_name)
+        await ctx.respond(response)
+
     await init_db()
 
     # Run the bot

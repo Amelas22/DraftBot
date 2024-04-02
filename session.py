@@ -84,7 +84,40 @@ class PlayerStats(Base):
     
     def __repr__(self):
         return f"<PlayerStats(player_id={self.player_id}, display_name={self.display_name}, drafts_participated={self.drafts_participated}, games_won={self.games_won}, games_lost={self.games_lost}, elo_rating={self.elo_rating})>"
-    
+
+
+class Team(Base):
+    __tablename__ = 'teams'
+
+    TeamID = Column(Integer, primary_key=True)
+    TeamName = Column(String(128), unique=True, nullable=False)
+    MatchesCompleted = Column(Integer, default=0)
+    MatchWins = Column(Integer, default=0)
+    PointsEarned = Column(Integer, default=0)
+
+class Match(Base):
+    __tablename__ = 'matches'
+
+    MatchID = Column(Integer, primary_key=True)
+    TeamAID = Column(Integer)
+    TeamBID = Column(Integer)
+    TeamAWins = Column(Integer, default=0)
+    TeamBWins = Column(Integer, default=0)
+    DraftWinnerID = Column(Integer, default=None)
+    MatchDate = Column(DateTime, default=datetime.now())
+    TeamAName = Column(String(128))
+    TeamBName = Column(String(128))
+
+class WeeklyLimit(Base):
+    __tablename__ = 'weekly_limits'
+
+    ID = Column(Integer, primary_key=True)
+    TeamID = Column(Integer, ForeignKey('teams.TeamID'))
+    WeekStartDate = Column(DateTime, nullable=False)
+    MatchesPlayed = Column(Integer, default=0)
+    PointsEarned = Column(Integer, default=0)
+
+
 async def get_draft_session(session_id: str):
     async with AsyncSessionLocal() as session:
         async with session.begin():
@@ -124,3 +157,21 @@ async def re_register_views(bot):
         else:
             # Log or handle sessions without a valid channel or message ID
             print(f"Session {draft_session.session_id} does not have a valid channel and/or message ID.")
+
+
+async def register_team_to_db(team_name: str):
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            # Check if the team already exists
+            query = select(Team).filter_by(TeamName=team_name)
+            result = await session.execute(query)
+            existing_team = result.scalars().first()
+
+            if existing_team:
+                return "Team already registered."
+
+            new_team = Team(TeamName=team_name)
+            session.add(new_team)
+            await session.commit()
+
+    return "Team registered successfully."
