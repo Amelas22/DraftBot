@@ -170,8 +170,8 @@ async def generate_draft_summary_embed(bot, draft_session_id):
         embed = discord.Embed(title=title, description=description, color=discord.Color.blue())
         # team_a_display = f"Team A wins: {team_a_wins}"
         # team_b_display = f"Team B wins: {team_b_wins}"
-        embed.add_field(name="Team A", value="\n".join(team_a_names), inline=True)
-        embed.add_field(name="Team B", value="\n".join(team_b_names), inline=True)
+        embed.add_field(name="Team A" if draft_session.session_type == "random" else f"{draft_session.team_a_name}", value="\n".join(team_a_names), inline=True)
+        embed.add_field(name="Team B" if draft_session.session_type == "random" else f"{draft_session.team_b_name}", value="\n".join(team_b_names), inline=True)
         embed.add_field(
             name="**Draft Standings**", 
             value=(f"**Team A Wins:** {team_a_wins}" if draft_session.session_type == "random" else f"**{draft_session.team_a_name} Wins:** {team_a_wins}") + 
@@ -323,6 +323,7 @@ async def post_or_update_victory_message(session, channel, embed, draft_session,
         print("Channel not found.")
         return
 
+    # Fetch the existing victory message ID from the draft_session
     victory_message_id = getattr(draft_session, victory_message_attr, None)
     if victory_message_id:
         try:
@@ -336,5 +337,6 @@ async def post_or_update_victory_message(session, channel, embed, draft_session,
     if not victory_message_id:
         message = await channel.send(embed=embed)
         setattr(draft_session, victory_message_attr, str(message.id))
-        session.add(draft_session)  # Make sure the session knows to update this object
-        print(f"Posted new victory message in {channel.name}.")
+        session.add(draft_session)
+
+    print(f"Posted new victory message in {channel.name}.")
