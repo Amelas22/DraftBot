@@ -82,40 +82,51 @@ async def calculate_pairings(session, db_session):
 
 
 async def post_pairings(bot, guild, session_id):
-
     async with AsyncSessionLocal() as db_session:
-        stmt = select(DraftSession).options(selectinload(DraftSession.match_results)).filter(DraftSession.session_id == session_id)
-        session = await db_session.scalar(stmt)
-        if not session:
+        # Fetch the draft session
+        result = await db_session.execute(
+            select(DraftSession).options(selectinload(DraftSession.match_results))
+            .filter(DraftSession.session_id == session_id)
+        )
+        draft_session = result.scalar_one_or_none()
+
+        if not draft_session:
             print("Draft session not found.")
             return
-    
-    draft_chat_channel_obj = guild.get_channel(int(session.draft_chat_channel))
-    if not draft_chat_channel_obj:
-        print("Draft chat channel not found.")
-        return
 
-    # Group match results by round number
-    match_results_by_round = {}
-    for match_result in session.match_results:
-        round_number = (match_result.match_number - 1) // (len(session.team_a) or 1) + 1
-        match_results_by_round.setdefault(round_number, []).append(match_result)
+        draft_chat_channel_obj = guild.get_channel(int(draft_session.draft_chat_channel))
+        if not draft_chat_channel_obj:
+            print("Draft chat channel not found.")
+            return
 
-    # Post pairings for each round
-    for round_number, match_results in match_results_by_round.items():
-        embed = discord.Embed(title=f"Round {round_number} Pairings", color=discord.Color.blue())
-        from views import create_pairings_view
-        view = await create_pairings_view(bot, guild, session_id, match_results)
+        # Organize match results by round
+        match_results_by_round = {}
+        for match_result in draft_session.match_results:
+            round_number = (match_result.match_number - 1) // (len(draft_session.team_a) or 1) + 1
+            match_results_by_round.setdefault(round_number, []).append(match_result)
 
-        for match_result in match_results:
-            player_name = guild.get_member(int(match_result.player1_id)).display_name if guild.get_member(int(match_result.player1_id)) else 'Unknown'
-            opponent_name = guild.get_member(int(match_result.player2_id)).display_name if guild.get_member(int(match_result.player2_id)) else 'Unknown'
+        for round_number, match_results in match_results_by_round.items():
+            embed = discord.Embed(title=f"Round {round_number} Pairings", color=discord.Color.blue())
+            from views import create_pairings_view  # Ensure create_pairings_view is correctly implemented
+            view = await create_pairings_view(bot, guild, session_id, match_results)
 
-            # Formatting the pairings without wins
-            match_info = f"**Match {match_result.match_number}**\n{player_name} v.\n{opponent_name}"
-            embed.add_field(name="\u200b", value=match_info, inline=False)
+            for match_result in match_results:
+                player_name = guild.get_member(int(match_result.player1_id)).display_name if guild.get_member(int(match_result.player1_id)) else 'Unknown'
+                opponent_name = guild.get_member(int(match_result.player2_id)).display_name if guild.get_member(int(match_result.player2_id)) else 'Unknown'
 
-        await draft_chat_channel_obj.send(embed=embed, view=view)
+                # Formatting the pairings without wins
+                match_info = f"**Match {match_result.match_number}**\n{player_name} v.\n{opponent_name}"
+                embed.add_field(name="\u200b", value=match_info, inline=False)
+            # Post the pairings message for the current round
+            pairings_message = await draft_chat_channel_obj.send(embed=embed, view=view)
+
+            # Update the pairing_message_id for each MatchResult in the round
+            for match_result in match_results:
+                match_result.pairing_message_id = str(pairings_message.id)
+                db_session.add(match_result)
+
+        # Commit the transaction to save the updates to the database
+        await db_session.commit()
 
 
 async def calculate_team_wins(draft_session_id):
@@ -192,6 +203,9 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
         
         
     # determine if a draw was achieved
+    elif team_a_wins == 0 and team_b_wins == 0:
+        title = f"Draft-{draft_session.draft_id} Standings"
+        description = "If a drafter is missing from this channel, they likely can still see the channel but have the Discord invisible setting on."
     elif team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0:
         title = "The Draft is a Draw!"
         description = f"Draft Start: <t:{int(draft_session.draft_start_time.timestamp())}:F>"

@@ -68,6 +68,7 @@ class MatchResult(Base):
     player2_id = Column(String(64))
     player2_wins = Column(Integer, default=0)
     winner_id = Column(String(64), nullable=True)
+    pairing_message_id = Column(String(64))
     draft_session = relationship("DraftSession", back_populates="match_results")
 
 async def get_draft_session(session_id: str):

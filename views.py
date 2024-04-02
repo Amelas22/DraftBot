@@ -595,9 +595,119 @@ class MatchResultSelect(Select):
 
                    
         await update_draft_summary_message(self.bot, self.session_id)
-        await check_and_post_victory_or_draw(self.bot, self.session_id) 
+        await check_and_post_victory_or_draw(self.bot, self.session_id)
+        await self.update_pairings_posting(interaction, self.bot, self.session_id, self.match_number) 
                     
+    async def update_pairings_posting(self, interaction, bot, draft_session_id, match_number):
+        guild = bot.get_guild(int(interaction.guild_id))
 
+        if not guild:
+            print("Guild not found.")
+            return
+
+        async with AsyncSessionLocal() as session:
+            # Fetch the MatchResult to get the pairing_message_id
+            stmt = select(MatchResult).where(
+                MatchResult.session_id == draft_session_id,
+                MatchResult.match_number == match_number
+            )
+            result = await session.execute(stmt)
+            match_result = result.scalar_one_or_none()
+
+            if not match_result:
+                print(f"No match result found for match number {match_number} in session {draft_session_id}.")
+                return
+
+            pairing_message_id = match_result.pairing_message_id
+            if not pairing_message_id:
+                print(f"No pairing message ID found for match number {match_number}.")
+                return
+
+            # Fetch the DraftSession to get the channel ID
+            draft_session_result = await session.execute(select(DraftSession).filter_by(session_id=draft_session_id))
+            draft_session = draft_session_result.scalar_one_or_none()
+
+            if not draft_session:
+                print("Draft session not found.")
+                return
+
+            channel = guild.get_channel(int(draft_session.draft_chat_channel))
+            if not channel:
+                print("Channel not found.")
+                return
+
+            # Fetch the specific message using the pairing_message_id
+            try:
+                message = await channel.fetch_message(int(pairing_message_id))
+            except Exception as e:
+                print(f"Failed to fetch message with ID {pairing_message_id}: {e}")
+                return
+
+            # Now you can proceed with updating the message as previously outlined
+            embed = message.embeds[0] if message.embeds else None
+            if not embed:
+                print("No embed found in the pairings message.")
+                return
+
+            # Fetch MatchResults for the specific draft session
+            stmt = select(MatchResult).where(MatchResult.session_id == draft_session_id, MatchResult.pairing_message_id == pairing_message_id)
+            result = await session.execute(stmt)
+            match_results_for_this_message = result.scalars().all()
+
+            # Update the embed with new match results
+            for match_result in match_results_for_this_message:
+                if match_result.match_number == match_number:
+                    player1, player2 = guild.get_member(int(match_result.player1_id)), guild.get_member(int(match_result.player2_id))
+                    player1_name, player2_name = player1.display_name if player1 else 'Unknown', player2.display_name if player2 else 'Unknown'
+                    updated_value = f"**Match {match_result.match_number}**\n{player1_name}: {match_result.player1_wins} wins\n{player2_name}: {match_result.player2_wins} wins"
+                    
+                    for i, field in enumerate(embed.fields):
+                        if f"**Match {match_result.match_number}**" in field.value:
+                            embed.set_field_at(i, name=field.name, value=updated_value, inline=field.inline)
+                            break
+
+            new_view = await self.create_updated_view_for_pairings_message(bot, guild.id, draft_session_id, pairing_message_id)
+
+            # Edit the message with the updated embed and view
+            await message.edit(embed=embed, view=new_view)
+
+    async def create_updated_view_for_pairings_message(self, bot, guild_id, draft_session_id, pairing_message_id):
+        guild = bot.get_guild(guild_id)
+        if not guild:
+            print("Guild not found.")
+            return discord.ui.View()  # Return an empty view if the guild is not found.
+
+        view = discord.ui.View(timeout=None)
+        async with AsyncSessionLocal() as session:
+            # Fetch MatchResults associated with this specific pairing_message_id
+            stmt = select(MatchResult).where(
+                MatchResult.session_id == draft_session_id,
+                MatchResult.pairing_message_id == pairing_message_id
+            )
+            result = await session.execute(stmt)
+            match_results = result.scalars().all()
+
+            for match_result in match_results:
+                # Check if a winner has been reported for this match.
+                has_winner_reported = match_result.winner_id is not None
+
+                # Determine the button style: grey if a winner has been reported, otherwise primary.
+                button_style = discord.ButtonStyle.grey if has_winner_reported else discord.ButtonStyle.primary
+
+                # Create a button for each match. Assume MatchResultButton class exists and works as intended.
+                button = MatchResultButton(
+                    bot=bot,
+                    session_id=draft_session_id,
+                    match_id=match_result.id,  # Ensure this correctly targets the unique identifier for the MatchResult.
+                    match_number=match_result.match_number,
+                    label=f"Match {match_result.match_number} Results",
+                    style=button_style
+                )
+
+                # Add the newly created button to the view.
+                view.add_item(button)
+
+        return view
 
 class UserRemovalView(discord.ui.View):
     def __init__(self, session_id: str, options: list[discord.SelectOption]):
