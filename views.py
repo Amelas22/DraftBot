@@ -1,8 +1,7 @@
 import discord
-import asyncio
-from datetime import datetime
-from discord import SelectOption, ButtonStyle
-from discord.ui import Button, View, Modal, Select, select
+from datetime import datetime, timedelta
+from discord import SelectOption
+from discord.ui import Button, View, Select, select
 from sqlalchemy import update, select
 from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
 from sqlalchemy.orm import selectinload
@@ -143,47 +142,57 @@ class PersistentView(discord.ui.View):
 
     async def randomize_teams_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         bot = interaction.client
-        session = await get_draft_session(self.draft_session_id)
-        if not session:
-            await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
-            return
-        session.teams_start_time = datetime.now().timestamp()
-        session.session_stage = 'teams'
-        # Check session type and prepare teams if necessary
-        if session.session_type == 'random':
-            from utils import split_into_teams
-            await split_into_teams(session.session_id)
-            session = await get_draft_session(self.draft_session_id)
+        session_id = self.draft_session_id
 
-        # Generate names for display using the session's sign_ups dictionary
-        team_a_display_names = [session.sign_ups[user_id] for user_id in session.team_a]
-        team_b_display_names = [session.sign_ups[user_id] for user_id in session.team_b]
-        
-        seating_order = await generate_seating_order(bot, session)
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                stmt = select(DraftSession).where(DraftSession.session_id == session_id)
+                result = await db_session.execute(stmt)
+                session = result.scalars().first()
 
-        # Create the embed message for displaying the teams and seating order
-        embed = discord.Embed(
-            title=f"Draft-{session.draft_id} is Ready!",
-            description=f"**Draftmancer Session**: **[Join Here]({session.draft_link})** \n" +
-                        "Host of Draftmancer must manually adjust seating as per below. **TURN OFF RANDOM SEATING SETTING IN DRAFMANCER**" +
-                        "\n\n**AFTER THE DRAFT**, select Create Chat Rooms (give it five seconds to generate rooms) then select Post Pairings" +
-                        "\nPost Pairings will take about 10 seconds to process. Only press once.",
-            color=discord.Color.blue()
-        )
-        embed.add_field(name="Team A" if session.session_type == "random" else f"{session.team_a_name}", value="\n".join(team_a_display_names), inline=True)
-        embed.add_field(name="Team B" if session.session_type == "random" else f"{session.team_b_name}", value="\n".join(team_b_display_names), inline=True)
-        embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+                if not session:
+                    await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
+                    return
 
-        # Iterate over the view's children (buttons) to update their disabled status
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                # Enable "Create Rooms" and "Cancel Draft" buttons
-                if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}" or item.custom_id == f"cancel_draft_{self.draft_session_id}":
-                    item.disabled = False
-                else:
-                    # Disable all other buttons
-                    item.disabled = True
+                # Update the session object
+                session.teams_start_time = datetime.now()
+                session.deletion_time = datetime.now() + timedelta(hours=4)
+                session.session_stage = 'teams'
+                # Check session type and prepare teams if necessary
+                if session.session_type == 'random':
+                    from utils import split_into_teams
+                    await split_into_teams(session.session_id)
+                    session = await get_draft_session(self.draft_session_id)
 
+                # Generate names for display using the session's sign_ups dictionary
+                team_a_display_names = [session.sign_ups[user_id] for user_id in session.team_a]
+                team_b_display_names = [session.sign_ups[user_id] for user_id in session.team_b]
+                
+                seating_order = await generate_seating_order(bot, session)
+
+                # Create the embed message for displaying the teams and seating order
+                embed = discord.Embed(
+                    title=f"Draft-{session.draft_id} is Ready!",
+                    description=f"**Draftmancer Session**: **[Join Here]({session.draft_link})** \n" +
+                                "Host of Draftmancer must manually adjust seating as per below. **TURN OFF RANDOM SEATING SETTING IN DRAFMANCER**" +
+                                "\n\n**AFTER THE DRAFT**, select Create Chat Rooms (give it five seconds to generate rooms) then select Post Pairings" +
+                                "\nPost Pairings will take about 10 seconds to process. Only press once.",
+                    color=discord.Color.blue()
+                )
+                embed.add_field(name="Team A" if session.session_type == "random" else f"{session.team_a_name}", value="\n".join(team_a_display_names), inline=True)
+                embed.add_field(name="Team B" if session.session_type == "random" else f"{session.team_b_name}", value="\n".join(team_b_display_names), inline=True)
+                embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+
+                # Iterate over the view's children (buttons) to update their disabled status
+                for item in self.children:
+                    if isinstance(item, discord.ui.Button):
+                        # Enable "Create Rooms" and "Cancel Draft" buttons
+                        if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}" or item.custom_id == f"cancel_draft_{self.draft_session_id}":
+                            item.disabled = False
+                        else:
+                            # Disable all other buttons
+                            item.disabled = True
+                await db_session.commit()
 
         # Respond with the embed and updated view
         await interaction.response.edit_message(embed=embed, view=self)

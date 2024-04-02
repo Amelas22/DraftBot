@@ -1,6 +1,8 @@
 import random
 import discord
+import asyncio
 from sqlalchemy import update, select
+from datetime import datetime
 from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
 from sqlalchemy.orm import selectinload
 
@@ -165,9 +167,9 @@ async def generate_draft_summary_embed(bot, draft_session_id):
         team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
         total_matches = draft_session.match_counter - 1
         half_matches = total_matches // 2
-        title, description = await determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, half_matches, total_matches)
+        title, description, discord_color = await determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, half_matches, total_matches)
 
-        embed = discord.Embed(title=title, description=description, color=discord.Color.blue())
+        embed = discord.Embed(title=title, description=description, color=discord_color)
         # team_a_display = f"Team A wins: {team_a_wins}"
         # team_b_display = f"Team B wins: {team_b_wins}"
         embed.add_field(name="Team A" if draft_session.session_type == "random" else f"{draft_session.team_a_name}", value="\n".join(team_a_names), inline=True)
@@ -194,10 +196,12 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
         if draft_session.session_type == "random":
             title = "Congratulations to " + ", ".join(member.display_name for member in winner_team if member) + " on winning the draft!"
             description = f"Draft Start: <t:{int(draft_session.draft_start_time.timestamp())}:F>"
+            discord_color = discord.Color.gold()
         elif draft_session.session_type == "premade":
             team_name = draft_session.team_a_name if winner_team_ids == draft_session.team_a else draft_session.team_b_name
             title = f"{team_name} has won the match!"
             description = f"Congratulations to " + ", ".join(member.display_name for member in winner_team if member) + f" on winning the draft!\nDraft Start: <t:{int(draft_session.draft_start_time.timestamp())}:F>"
+            discord_color = discord.Color.gold()
         else:
             title = "Draft Outcome"
         
@@ -206,14 +210,16 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
     elif team_a_wins == 0 and team_b_wins == 0:
         title = f"Draft-{draft_session.draft_id} Standings"
         description = "If a drafter is missing from this channel, they likely can still see the channel but have the Discord invisible setting on."
+        discord_color = discord.Color.dark_blue()
     elif team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0:
         title = "The Draft is a Draw!"
         description = f"Draft Start: <t:{int(draft_session.draft_start_time.timestamp())}:F>"
+        discord_color = discord.Color.light_grey()
     else:
         title = f"Draft-{draft_session.draft_id} Standings"
         description = "If a drafter is missing from this channel, they likely can still see the channel but have the Discord invisible setting on."
-
-    return title, description
+        discord_color = discord.Color.dark_blue()
+    return title, description, discord_color
 
 
 async def fetch_match_details(bot, session_id: str, match_number: int):
@@ -301,7 +307,9 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
         # Check victory or draw conditions
         if team_a_wins > half_matches or team_b_wins > half_matches or (team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0):
             embed = await generate_draft_summary_embed(bot, draft_session_id)
-            
+            three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
+            embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
+
             # Handle the draft-chat channel message
             draft_chat_channel = guild.get_channel(int(draft_session.draft_chat_channel))
             if draft_chat_channel:
@@ -340,3 +348,61 @@ async def post_or_update_victory_message(session, channel, embed, draft_session,
         session.add(draft_session)
 
     print(f"Posted new victory message in {channel.name}.")
+
+
+async def calculate_three_zero_drafters(session, draft_session_id, guild):
+    # Query MatchResults for the given draft session
+    stmt = select(MatchResult).where(MatchResult.session_id == draft_session_id)
+    results = await session.execute(stmt)
+    match_results = results.scalars().all()
+
+    # Count wins for each player
+    win_counts = {}
+    for match in match_results:
+        winner_id = match.winner_id
+        if winner_id:
+            win_counts[winner_id] = win_counts.get(winner_id, 0) + 1
+
+    # Identify players with 3 wins
+    three_zero_drafters = [player_id for player_id, win_count in win_counts.items() if win_count == 3]
+
+    # Convert player IDs to names using the guild object
+    three_zero_names = ", ".join([guild.get_member(int(player_id)).display_name for player_id in three_zero_drafters])
+    return three_zero_names
+
+
+async def cleanup_sessions_task(bot):
+    while True:
+        current_time = datetime.now()
+        async with AsyncSessionLocal as db:  # async_session should be a coroutine that returns a session
+            async with db.begin():
+                # Fetch sessions that are past their deletion time
+                stmt = select(DraftSession).where(DraftSession.deletion_time <= current_time)
+                results = await db.execute(stmt)
+                sessions_to_cleanup = results.scalars().all()
+
+                for session in sessions_to_cleanup:
+                    # Attempt to delete each channel associated with the session
+                    for channel_id in session.channel_ids:
+                        channel = bot.get_channel(int(channel_id))
+                        if channel:  # Check if channel was found
+                            try:
+                                await channel.delete(reason="Session expired.")
+                                print(f"Deleted channel: {channel.name}")
+                            except discord.HTTPException as e:
+                                print(f"Failed to delete channel: {channel.name}. Reason: {e}")
+
+                    # Attempt to delete the message associated with the session from the draft channel
+                    draft_channel = bot.get_channel(int(session.draft_channel_id))
+                    if draft_channel and session.message_id:
+                        try:
+                            msg = await draft_channel.fetch_message(int(session.message_id))
+                            await msg.delete()
+                            print(f"Deleted message ID: {session.message_id} in draft channel.")
+                        except discord.NotFound:
+                            print(f"Message ID {session.message_id} not found in draft channel.")
+                        except discord.HTTPException as e:
+                            print(f"Failed to delete message ID {session.message_id} in draft channel. Reason: {e}")
+
+        # Sleep for a certain amount of time before running again
+        await asyncio.sleep(3600)  # Sleep for 1 hour

@@ -4,6 +4,9 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from session import init_db, re_register_views
 from modals import CubeSelectionModal
+from utils import cleanup_sessions_task
+
+is_cleanup_task_running = False
 
 async def main():
     load_dotenv()
@@ -21,6 +24,12 @@ async def main():
 
     @bot.event
     async def on_ready():
+        global is_cleanup_task_running
+        if not is_cleanup_task_running:
+            bot.loop.create_task(cleanup_sessions_task(bot))
+            is_cleanup_task_running = True
+            print("Cleanup task started.")
+
         print(f'Logged in as {bot.user}!')
         # Call re_register_views here and pass the bot instance
         #await re_register_views(bot)

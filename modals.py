@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import select
 import discord
 import random
@@ -32,6 +32,7 @@ class CubeSelectionModal(discord.ui.Modal):
                     draft_link=draft_link,
                     draft_id=draft_id,
                     draft_start_time=datetime.now(),
+                    deletion_time=datetime.now() + timedelta(hours=3),
                     session_type=self.session_type,
                     team_a_name=None if self.session_type != "premade" else self.children[1].value,
                     team_b_name=None if self.session_type != "premade" else self.children[2].value
