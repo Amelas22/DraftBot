@@ -6,10 +6,6 @@ from sqlalchemy import update, select
 from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
 from sqlalchemy.orm import selectinload
 from utils import calculate_pairings, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, update_draft_summary_message, check_and_post_victory_or_draw
-import logging
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 PROCESSING_ROOMS_PAIRINGS = {}
 
@@ -203,11 +199,10 @@ class PersistentView(discord.ui.View):
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
             return
 
-        user_id = str(interaction.user.id)  # Ensure string format for consistency
+        user_id = str(interaction.user.id)  
         custom_id = button.custom_id
         user_name = interaction.user.display_name
 
-        # Initialize variables to avoid UnboundLocalError
         primary_team = secondary_team = primary_key = secondary_key = None
 
         # Determine which team the user is trying to interact with
@@ -757,99 +752,3 @@ async def update_draft_message(bot, session_id):
         await message.edit(embed=embed)
     except Exception as e:
         print(f"Failed to update message for session {session_id}. Error: {e}")
-
-# class PersistentView(discord.ui.View):
-#     def __init__(self, draft_session):
-#         super().__init__(timeout=None)
-#         self.draft_session = draft_session
-        
-#         if self.draft_session.session_type == 'premade':
-#             self.add_item(discord.ui.Button(label=f"{self.draft_session.team_a_name}", style=discord.ButtonStyle.green, custom_id=f"{self.draft_session.session_id}_Team_A"))
-#             self.add_item(discord.ui.Button(label=f"{self.draft_session.team_b_name}", style=discord.ButtonStyle.red, custom_id=f"{self.draft_session.session_id}_Team_B"))
-#             self.add_item(discord.ui.Button(label="Generate Seating Order", style=discord.ButtonStyle.blurple, custom_id=f"{self.draft_session.session_id}_generate_seating"))
-#         elif self.draft_session.session_type == 'random':
-#             self.add_item(discord.ui.Button(label="Sign Up", style=discord.ButtonStyle.green, custom_id=f"{self.draft_session.session_id}_sign_up"))
-#             self.add_item(discord.ui.Button(label="Cancel Sign Up", style=discord.ButtonStyle.red, custom_id=f"{self.draft_session.session_id}_cancel_sign_up"))
-#             self.add_item(discord.ui.Button(label="Create Teams", style=discord.ButtonStyle.blurple, custom_id=f"{self.draft_session.session_id}_randomize_teams"))
-                
-#         self.add_item(discord.ui.Button(label="Cancel Draft", style=discord.ButtonStyle.grey, custom_id=f"{self.draft_session.session_id}_cancel_draft"))
-#         self.add_item(discord.ui.Button(label="Remove User", style=discord.ButtonStyle.grey, custom_id=f"{self.draft_session.session_id}_remove_user"))
-#         self.add_item(discord.ui.Button(label="Ready Check", style=discord.ButtonStyle.green, custom_id=f"{self.draft_session.session_id}_ready_check"))
-#         self.add_item(discord.ui.Button(label="Create Rooms & Post Pairings", style=discord.ButtonStyle.primary, custom_id=f"{self.draft_session.session_id}_create_rooms_pairings", disabled=True))
-
-#     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-#         custom_id = interaction.data['custom_id']
-#             # If none of the conditions match, the interaction is not recognized and you might want to log this case.
-#             return False
-
-        
-    
-    # async def ready_check_callback(self, interaction: discord.Interaction):
-    #     session = sessions.get(self.session_id)
-    #     if session:
-    #         # Check if the user is in the sign-up list
-    #         if interaction.user.id in session.sign_ups:
-    #             # Proceed with the ready check
-    #             await session.initiate_ready_check(interaction)
-
-    #             # Disable the "Ready Check" button after use
-    #             for item in self.children:
-    #                 if isinstance(item, discord.ui.Button) and item.custom_id == f"{self.session_id}_ready_check":
-    #                     item.disabled = True
-    #                     break  # Stop the loop once the button is found and modified
-
-    #             # Ensure the view reflects the updated state with the button disabled
-    #             await interaction.edit_original_response(view=self)
-    #         else:
-    #             # Inform the user they're not in the sign-up list, hence can't initiate a ready check
-    #             await interaction.response.send_message("You must be signed up to initiate a ready check.", ephemeral=True)
-    #     else:
-    #         await interaction.response.send_message("Session not found.", ephemeral=True)
-
-
-    # async def team_assignment_callback(self, interaction: discord.Interaction):
-    #     session = sessions.get(self.session_id)
-    #     if not session:
-    #         await interaction.response.send_message("Session not found.", ephemeral=True)
-    #         return
-
-    #     user_id = interaction.user.id
-    #     custom_id = interaction.data["custom_id"]
-    #     user_name = interaction.user.display_name
-
-    #     if "_Team_A" in custom_id:
-    #         primary_team_key = "team_a"
-    #         secondary_team_key = "team_b"
-    #     elif "_Team_B" in custom_id:
-    #         primary_team_key = "team_b"
-    #         secondary_team_key = "team_a"
-    #     else:
-    #         await interaction.response.send_message("An error occurred.", ephemeral=True)
-    #         return
-
-    #     primary_team = getattr(session, primary_team_key, [])
-    #     secondary_team = getattr(session, secondary_team_key, [])
-
-    #     # Add or remove the user from the team lists
-    #     if user_id in primary_team:
-    #         primary_team.remove(user_id)
-    #         del session.sign_ups[user_id]  # Remove from sign-ups dictionary
-    #         action_message = f"You have been removed from a team."
-    #     else:
-    #         if user_id in secondary_team:
-    #             secondary_team.remove(user_id)
-    #             del session.sign_ups[user_id]  # Remove from sign-ups dictionary before re-adding to correct team
-    #         primary_team.append(user_id)
-    #         session.sign_ups[user_id] = user_name  # Add/update in sign-ups dictionary
-    #         action_message = f"You have been added to a team."
-
-    #     # Update session attribute to reflect changes
-    #     setattr(session, primary_team_key, primary_team)
-    #     setattr(session, secondary_team_key, secondary_team)
-
-    #     await interaction.response.send_message(action_message, ephemeral=True)
-    #     await session.update_team_view(interaction)
-
-    
-            
-

@@ -17,7 +17,6 @@ AsyncSessionLocal = sessionmaker(
 
 async def init_db():
     async with engine.begin() as conn:
-        # This is the correct place for initializing your tables
         await conn.run_sync(Base.metadata.create_all)
 
 Base = declarative_base()

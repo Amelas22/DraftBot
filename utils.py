@@ -109,7 +109,7 @@ async def post_pairings(bot, guild, session_id):
 
         for round_number, match_results in match_results_by_round.items():
             embed = discord.Embed(title=f"Round {round_number} Pairings", color=discord.Color.blue())
-            from views import create_pairings_view  # Ensure create_pairings_view is correctly implemented
+            from views import create_pairings_view  
             view = await create_pairings_view(bot, guild, session_id, match_results)
 
             for match_result in match_results:
@@ -170,8 +170,6 @@ async def generate_draft_summary_embed(bot, draft_session_id):
         title, description, discord_color = await determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, half_matches, total_matches)
 
         embed = discord.Embed(title=title, description=description, color=discord_color)
-        # team_a_display = f"Team A wins: {team_a_wins}"
-        # team_b_display = f"Team B wins: {team_b_wins}"
         embed.add_field(name="Team A" if draft_session.session_type == "random" else f"{draft_session.team_a_name}", value="\n".join(team_a_names), inline=True)
         embed.add_field(name="Team B" if draft_session.session_type == "random" else f"{draft_session.team_b_name}", value="\n".join(team_b_names), inline=True)
         embed.add_field(
@@ -179,8 +177,7 @@ async def generate_draft_summary_embed(bot, draft_session_id):
             value=(f"**Team A Wins:** {team_a_wins}" if draft_session.session_type == "random" else f"**{draft_session.team_a_name} Wins:** {team_a_wins}") + 
                 (f"\n**Team B Wins:** {team_b_wins}" if draft_session.session_type == "random" else f"\n**{draft_session.team_b_name} Wins:** {team_b_wins}"), 
             inline=False)
-        # embed.add_field(name="\u200B", value=team_a_display, inline=False)
-        # embed.add_field(name="\u200B", value=team_b_display, inline=False)
+
 
         return embed
 
@@ -204,9 +201,7 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
             discord_color = discord.Color.gold()
         else:
             title = "Draft Outcome"
-        
-        
-    # determine if a draw was achieved
+
     elif team_a_wins == 0 and team_b_wins == 0:
         title = f"Draft-{draft_session.draft_id} Standings"
         description = "If a drafter is missing from this channel, they likely can still see the channel but have the Discord invisible setting on."
@@ -262,8 +257,6 @@ async def update_draft_summary_message(bot, draft_session_id):
             print("The draft session could not be found.")
             return
 
-        # Assuming you have already calculated and updated team wins in the database
-
         updated_embed = await generate_draft_summary_embed(bot, draft_session_id)
         guild = bot.get_guild(int(draft_session.guild_id))
         channel = guild.get_channel(int(draft_session.draft_chat_channel))
@@ -274,16 +267,6 @@ async def update_draft_summary_message(bot, draft_session_id):
             print("Draft summary message updated successfully.")
         except Exception as e:
             print(f"Failed to update draft summary message: {e}")
-
-
-
-async def create_updated_view_for_pairings_message(session_id, match_number):
-    view = discord.ui.View(timeout=None)
-    # Generate buttons for each match, similar to before, 
-    # but ensure they reflect the current state (e.g., disabling the button if the result has been reported)
-    # This might involve fetching the current state of all matches in the session
-
-    return view
 
 
 async def check_and_post_victory_or_draw(bot, draft_session_id):
@@ -374,7 +357,7 @@ async def calculate_three_zero_drafters(session, draft_session_id, guild):
 async def cleanup_sessions_task(bot):
     while True:
         current_time = datetime.now()
-        async with AsyncSessionLocal as db:  # async_session should be a coroutine that returns a session
+        async with AsyncSessionLocal as db: 
             async with db.begin():
                 # Fetch sessions that are past their deletion time
                 stmt = select(DraftSession).where(DraftSession.deletion_time <= current_time)

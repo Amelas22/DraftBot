@@ -43,9 +43,9 @@ class CubeSelectionModal(discord.ui.Modal):
         if self.session_type == "random":
             cube_drafter_role = discord.utils.get(interaction.guild.roles, name="Cube Drafter")
             ping_message = f"{cube_drafter_role.mention if cube_drafter_role else 'Cube Drafter'} {cube_option} Cube Draft Queue Open!"
-            await interaction.followup.send(ping_message)  # No need to mark as ephemeral=False, as it's the default behavior
+            await interaction.followup.send(ping_message)
 
-            # Now create the embed with cube_option in the title
+            # Create the embed with cube_option in the title
             embed_title = f"Looking for Players! {cube_option} Random Team Draft - Queue Opened <t:{int(draft_start_time)}:R>"
             embed = discord.Embed(title=embed_title,
             description="\n**How to use bot**:\n1. Click sign up and click the draftmancer link. Draftmancer host still has to update settings and import from CubeCobra.\n" +
@@ -58,7 +58,7 @@ class CubeSelectionModal(discord.ui.Modal):
             color=discord.Color.dark_magenta()
         )
             embed.add_field(name="Sign-Ups", value="No players yet.", inline=False)
-            #thumbnail by chosen cube?
+            # thumbnail by chosen cube?
             embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1186757246936424558/1217295353972527176/131.png")
             print(f"Random Draft: {session_id} has been created.")
             
