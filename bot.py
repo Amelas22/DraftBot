@@ -38,7 +38,7 @@ async def main():
     async def premade_draft(interaction: discord.Interaction):
         await interaction.response.send_modal(CubeSelectionModal(session_type="premade", title="Select Cube"))
 
-    #await register_team_command(bot)
+    await register_team_command(bot)
     await init_db()
 
     # Run the bot
