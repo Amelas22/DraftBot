@@ -53,6 +53,7 @@ class DraftSession(Base):
     team_a_name = Column(String(128))
     team_b_name = Column(String(128))
     are_rooms_processing = Column(Boolean, default=False)
+    premade_match_id = Column(String(128))
     match_results = relationship("MatchResult", back_populates="draft_session", foreign_keys="[MatchResult.session_id]")
     def __repr__(self):
         return f"<DraftSession(session_id={self.session_id}, guild_id={self.guild_id})>"
@@ -162,19 +163,17 @@ async def re_register_views(bot):
 async def register_team_to_db(team_name: str):
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            # Normalize the input team name and compare it case-insensitively
-            normalized_team_name = team_name.strip().title()  # Normalize input
-            query = select(Team).filter(func.lower(Team.TeamName) == func.lower(normalized_team_name))
+            # Normalize the team name for comparison
+            normalized_team_name = team_name.strip().lower()
+            query = select(Team).filter(func.lower(Team.TeamName) == normalized_team_name)
             result = await session.execute(query)
             existing_team = result.scalars().first()
 
             if existing_team:
-                # If the team already exists, you might want to return the existing team's info or a specific message
-                return f"Team '{existing_team.TeamName}' is a registered team."
+                return existing_team  # Return the existing team instance
 
-            # If not found, register the new team
-            new_team = Team(TeamName=normalized_team_name)  # Use normalized name for consistency
+            # Create and add new team if not found
+            new_team = Team(TeamName=team_name.title())  # Store in title case for consistency
             session.add(new_team)
             await session.commit()
-
-    return f"New Team Registered: '{team_name}' registered successfully."
+            return new_team  # Return the new team instance

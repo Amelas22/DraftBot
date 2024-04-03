@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select, func
 import discord
 import random
-from session import DraftSession, AsyncSessionLocal, get_draft_session, Team, register_team_to_db
+from session import DraftSession, AsyncSessionLocal, get_draft_session, register_team_to_db, Match
 from views import PersistentView
 
 class CubeSelectionModal(discord.ui.Modal):
@@ -22,9 +22,9 @@ class CubeSelectionModal(discord.ui.Modal):
             team_b_name = self.children[2].value
 
             # Register Team A if not present
-            team_a_response = await register_team_to_db(team_a_name)
+            team_a = await register_team_to_db(team_a_name)
             # Register Team B if not present
-            team_b_response = await register_team_to_db(team_b_name)
+            team_b = await register_team_to_db(team_b_name)
 
         cube_option = "MTG" if not cube_name else cube_name
         draft_start_time = datetime.now().timestamp()
@@ -42,6 +42,7 @@ class CubeSelectionModal(discord.ui.Modal):
                     draft_start_time=datetime.now(),
                     deletion_time=datetime.now() + timedelta(hours=3),
                     session_type=self.session_type,
+                    premade_match_id=None,
                     team_a_name=None if self.session_type != "premade" else team_a_name,
                     team_b_name=None if self.session_type != "premade" else team_b_name
                 )
@@ -71,11 +72,7 @@ class CubeSelectionModal(discord.ui.Modal):
             print(f"Random Draft: {session_id} has been created.")
             
             
-        elif self.session_type == "premade" or "league":
-            team_a_input = self.children[1]
-            team_b_input = self.children[2]
-            team_a_name = team_a_input.value
-            team_b_name = team_b_input.value
+        elif self.session_type == "premade":
             team_a_option = "Team A" if not team_a_name else team_a_name
             team_b_option = "Team B" if not team_b_name else team_b_name
             embed = discord.Embed(
@@ -94,9 +91,24 @@ class CubeSelectionModal(discord.ui.Modal):
             embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1219018393471025242/1219410709440495746/image.png?ex=660b33b8&is=65f8beb8&hm=b7e40e9b872d8e04dd70a30c5abc15917379f9acb7dce74ca0372105ec98b468&")
             self.team_a_name = team_a_option
             self.team_b_name = team_b_option
+            async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    new_match = Match(
+                        TeamAID=team_a.TeamID,
+                        TeamBID=team_b.TeamID,
+                        TeamAWins=0,
+                        TeamBWins=0,
+                        DraftWinnerID=None,
+                        MatchDate=datetime.now(),
+                        TeamAName=team_a_name,
+                        TeamBName=team_b_name
+                    )
+                    session.add(new_match)
+                    await session.commit()
+                    match_id = new_match.MatchID
             print(f"Premade Draft: {session_id} has been created.")
 
-
+        
         draft_session = await get_draft_session(session_id)
         if draft_session:
             view = PersistentView(
@@ -116,6 +128,8 @@ class CubeSelectionModal(discord.ui.Modal):
                     if updated_session:
                         updated_session.message_id = str(message.id)
                         updated_session.draft_channel_id = str(message.channel.id)
+                        if updated_session.session_type == "premade":
+                            updated_session.premade_match_id = str(match_id)
                         session.add(updated_session)
                         await session.commit()
 

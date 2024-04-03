@@ -2,8 +2,8 @@ import random
 import discord
 import asyncio
 from sqlalchemy import update, select
-from datetime import datetime
-from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult, PlayerStats
+from datetime import datetime, timedelta
+from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult, PlayerStats, Match, Team, WeeklyLimit
 from sqlalchemy.orm import selectinload
 
 
@@ -289,10 +289,11 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
 
         # Check victory or draw conditions
         if team_a_wins > half_matches or team_b_wins > half_matches or (team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0):
+            if draft_session.premade_match_id: 
+                await update_match_db_with_wins_winner(draft_session.premade_match_id, team_a_wins, team_b_wins)
             embed = await generate_draft_summary_embed(bot, draft_session_id)
             three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
             embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
-
             # Handle the draft-chat channel message
             draft_chat_channel = guild.get_channel(int(draft_session.draft_chat_channel))
             if draft_chat_channel:
@@ -423,6 +424,94 @@ async def update_player_stats_for_draft(session_id, guild):
                     db_session.add(player_stat)
 
             await db_session.commit()
+
+
+async def update_match_db_with_wins_winner(match_id, team_a_wins, team_b_wins):
+    today = datetime.now().date()
+    start_of_week = today - timedelta(days=today.weekday())
+    async with AsyncSessionLocal() as db_session: 
+        async with db_session.begin():
+            stmt = select(Match).where(Match.MatchID == match_id)
+            match = await db_session.scalar(stmt)
+            if not match:
+                print("Match not found.")
+                return
+
+            initial_winner = match.DraftWinnerID
+            new_winner = match.TeamAID if team_a_wins > team_b_wins else match.TeamBID if team_a_wins < team_b_wins else None
+            
+            match.DraftWinnerID = new_winner
+            match.TeamAWins = team_a_wins
+            match.TeamBWins = team_b_wins
+            
+            teams_to_update = []
+            if initial_winner != new_winner:
+                if initial_winner is None:
+                    teams_to_update = [match.TeamAID, match.TeamBID]
+                
+                # Update Team MatchesCompleted
+                for team_id in teams_to_update:
+                    team_stmt = select(Team).where(Team.TeamID == team_id)
+                    team = await db_session.scalar(team_stmt)
+                    if not team:
+                        print(f"Team ID {team_id} not found.")
+                        continue
+                    
+                    team.MatchesCompleted += 1  # Increment matches completed for both teams on first determination
+                    
+                if new_winner:
+                    # Update winning team
+                    winner_team_stmt = select(Team).where(Team.TeamID == new_winner)
+                    winner_team = await db_session.scalar(winner_team_stmt)
+                    if winner_team:
+                        winner_team.MatchWins += 1  # Increment match wins for the new winner
+                        winner_team.PointsEarned += 1
+                    if initial_winner:
+                        # Decrement wins from initially incorrect winner
+                        initial_winner_team_stmt = select(Team).where(Team.TeamID == initial_winner)
+                        initial_winner_team = await db_session.scalar(initial_winner_team_stmt)
+                        if initial_winner_team:
+                            initial_winner_team.MatchWins -= 1  # Correct match wins if initial winner was wrong
+                            initial_winner_team.PointsEarned -= 1
+                # Update WeeklyLimit records
+                if teams_to_update:
+                    for team_id in teams_to_update:
+                        team = int(team_id)
+                        weekly_limit = await get_or_create_weekly_limit(db_session, team, start_of_week)
+                        weekly_limit.MatchesPlayed += 1  # Increment matches played for both teams on first determination
+                        
+                if new_winner:
+                    team = int(new_winner)
+                    winner_weekly_limit = await get_or_create_weekly_limit(db_session, team, start_of_week)
+                    winner_weekly_limit.PointsEarned += 1  # Increment points for the winner
+                    
+                    if initial_winner:
+                        # Correct points if initially incorrect winner was declared
+                        initial_winner_weekly_limit = await get_or_create_weekly_limit(db_session, initial_winner, start_of_week)
+                        initial_winner_weekly_limit.PointsEarned -= 1
+
+                await db_session.commit()
+
+
+async def get_or_create_weekly_limit(db_session, team_id, start_of_week):
+    # Try to find an existing WeeklyLimit for the team and current week
+    weekly_limit_stmt = select(WeeklyLimit).where(
+        WeeklyLimit.TeamID == int(team_id)
+    )
+    weekly_limit = await db_session.scalar(weekly_limit_stmt)
+
+    # If it does not exist, create a new one
+    if not weekly_limit:
+        weekly_limit = WeeklyLimit(
+            TeamID=int(team_id),
+            WeekStartDate=start_of_week,
+            MatchesPlayed=0,
+            PointsEarned=0
+        )
+        db_session.add(weekly_limit)
+        await db_session.flush()  # Ensure weekly_limit gets an ID assigned before returning
+
+    return weekly_limit
 
 async def update_player_stats_and_elo(match_result):
     async with AsyncSessionLocal() as session:
