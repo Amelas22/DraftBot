@@ -4,10 +4,15 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.WARNING)  # Adjust the application-wide logging level
+logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)  # Specifically reduce SQLAlchemy logging verbosity
 
 DATABASE_URL = "sqlite+aiosqlite:///drafts.db" 
 
-engine = create_async_engine(DATABASE_URL, echo=True)
+engine = create_async_engine(DATABASE_URL, echo=False)
 
 AsyncSessionLocal = sessionmaker(
     engine,
@@ -16,6 +21,7 @@ AsyncSessionLocal = sessionmaker(
 )
 
 async def init_db():
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -114,6 +120,7 @@ class WeeklyLimit(Base):
 
     ID = Column(Integer, primary_key=True)
     TeamID = Column(Integer, ForeignKey('teams.TeamID'))
+    TeamName = Column(String(128), unique=True, nullable=False)
     WeekStartDate = Column(DateTime, nullable=False)
     MatchesPlayed = Column(Integer, default=0)
     PointsEarned = Column(Integer, default=0)
@@ -171,11 +178,11 @@ async def register_team_to_db(team_name: str):
             existing_team = result.scalars().first()
 
             if existing_team:
-                return f"Team '{existing_team.TeamName}' is already registered."
+                return existing_team, f"Team '{existing_team.TeamName}' is already registered."
 
             # If not exists, create and register the new team
             new_team = Team(TeamName=team_name)
             session.add(new_team)
             await session.commit()
 
-            return f"Team '{team_name}' has been registered successfully."
+            return new_team, f"Team '{team_name}' has been registered successfully."

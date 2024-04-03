@@ -1,13 +1,15 @@
 import discord
 from session import register_team_to_db, Team, AsyncSessionLocal
 from sqlalchemy import select
+from utils import post_daily_results
 
 
 async def league_commands(bot):
+    
     @bot.slash_command(name="registerteam", description="Register a new team in the league")
     async def register_team(interaction: discord.Interaction, team_name: str):
-        response = await register_team_to_db(team_name)
-        await interaction.response.send_message(response, ephemeral=True)
+        team, response_message = await register_team_to_db(team_name)
+        await interaction.response.send_message(response_message, ephemeral=True)
     
     @bot.slash_command(name='listteams', description='List all registered teams')
     async def list_teams(interaction: discord.Interaction):
@@ -31,3 +33,7 @@ async def league_commands(bot):
                 embed.description += f"- {team.TeamName}\n"
 
             await interaction.response.send_message(embed=embed)
+
+    @bot.slash_command(name="dailyresults", description="Results in the last 24 Hours")
+    async def daily_results(interaction: discord.Interaction):
+        await post_daily_results(interaction)

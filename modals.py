@@ -22,9 +22,9 @@ class CubeSelectionModal(discord.ui.Modal):
             team_b_name = self.children[2].value
 
             # Register Team A if not present
-            team_a = await register_team_to_db(team_a_name)
+            team_a, team_a_msg = await register_team_to_db(team_a_name)
             # Register Team B if not present
-            team_b = await register_team_to_db(team_b_name)
+            team_b, team_b_msg = await register_team_to_db(team_b_name)
 
         cube_option = "MTG" if not cube_name else cube_name
         draft_start_time = datetime.now().timestamp()

@@ -3,9 +3,9 @@ from datetime import datetime, timedelta
 from discord import SelectOption
 from discord.ui import Button, View, Select, select
 from sqlalchemy import update, select
-from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
+from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult, Match
 from sqlalchemy.orm import selectinload
-from utils import calculate_pairings, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, update_draft_summary_message, check_and_post_victory_or_draw, update_player_stats_and_elo, update_player_stats_for_draft
+from utils import calculate_pairings, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, update_draft_summary_message, check_and_post_victory_or_draw, update_player_stats_and_elo, check_weekly_limits, update_player_stats_for_draft
 
 PROCESSING_ROOMS_PAIRINGS = {}
 
@@ -192,7 +192,9 @@ class PersistentView(discord.ui.View):
 
         # Respond with the embed and updated view
         await interaction.response.edit_message(embed=embed, view=self)
-    
+        if session.premade_match_id:
+            await check_weekly_limits(interaction, session.premade_match_id)
+            
     async def team_assignment_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         session = await get_draft_session(self.draft_session_id)
         if not session:

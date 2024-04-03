@@ -1,7 +1,7 @@
 import random
 import discord
 import asyncio
-from sqlalchemy import update, select
+from sqlalchemy import update, select, func, not_
 from datetime import datetime, timedelta
 from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult, PlayerStats, Match, Team, WeeklyLimit
 from sqlalchemy.orm import selectinload
@@ -149,7 +149,6 @@ async def calculate_team_wins(draft_session_id):
                     team_a_wins += 1
                 elif result.winner_id in team_b_ids:
                     team_b_wins += 1
-        print(f"Team A wins: {team_a_wins}, Team B Wins: {team_b_wins}")
         return team_a_wins, team_b_wins
 
 
@@ -270,7 +269,6 @@ async def update_draft_summary_message(bot, draft_session_id):
 
 
 async def check_and_post_victory_or_draw(bot, draft_session_id):
-    print("check and post victory")
     async with AsyncSessionLocal() as session:
         draft_session = await get_draft_session(draft_session_id)
         if not draft_session:
@@ -285,7 +283,6 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
         team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
         total_matches = draft_session.match_counter - 1
         half_matches = total_matches // 2
-        print(f"Team A Wins: {team_a_wins}, Team B Wins: {team_b_wins}, Total Matches: {total_matches}, Half Matches: {half_matches}")
 
         # Check victory or draw conditions
         if team_a_wins > half_matches or team_b_wins > half_matches or (team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0):
@@ -476,27 +473,38 @@ async def update_match_db_with_wins_winner(match_id, team_a_wins, team_b_wins):
                 # Update WeeklyLimit records
                 if teams_to_update:
                     for team_id in teams_to_update:
+                        team_stmt = select(Team).where(Team.TeamID == team_id)
+                        team_update = await db_session.scalar(team_stmt)
                         team = int(team_id)
-                        weekly_limit = await get_or_create_weekly_limit(db_session, team, start_of_week)
+                        team_name = team_update.TeamName
+                        weekly_limit = await get_or_create_weekly_limit(db_session, team, team_name, start_of_week)
                         weekly_limit.MatchesPlayed += 1  # Increment matches played for both teams on first determination
                         
                 if new_winner:
+                    team_stmt = select(Team).where(Team.TeamID == new_winner)
+                    team_update = await db_session.scalar(team_stmt)
                     team = int(new_winner)
-                    winner_weekly_limit = await get_or_create_weekly_limit(db_session, team, start_of_week)
+                    team_name = team_update.TeamName
+                    winner_weekly_limit = await get_or_create_weekly_limit(db_session, team, team_name, start_of_week)
                     winner_weekly_limit.PointsEarned += 1  # Increment points for the winner
                     
                     if initial_winner:
+                        team_stmt = select(Team).where(Team.TeamID == initial_winner)
+                        team_update = await db_session.scalar(team_stmt)
+                        team_name = team_update.TeamName
                         # Correct points if initially incorrect winner was declared
-                        initial_winner_weekly_limit = await get_or_create_weekly_limit(db_session, initial_winner, start_of_week)
+                        initial_winner_weekly_limit = await get_or_create_weekly_limit(db_session, initial_winner, team_name, start_of_week)
                         initial_winner_weekly_limit.PointsEarned -= 1
 
                 await db_session.commit()
 
 
-async def get_or_create_weekly_limit(db_session, team_id, start_of_week):
+async def get_or_create_weekly_limit(db_session, team_id, team_name, start_of_week):
     # Try to find an existing WeeklyLimit for the team and current week
+    start_of_week_date = start_of_week.date() if isinstance(start_of_week, datetime) else start_of_week
     weekly_limit_stmt = select(WeeklyLimit).where(
-        WeeklyLimit.TeamID == int(team_id)
+        WeeklyLimit.TeamID == int(team_id),
+        func.date(WeeklyLimit.WeekStartDate) == start_of_week_date
     )
     weekly_limit = await db_session.scalar(weekly_limit_stmt)
 
@@ -504,6 +512,7 @@ async def get_or_create_weekly_limit(db_session, team_id, start_of_week):
     if not weekly_limit:
         weekly_limit = WeeklyLimit(
             TeamID=int(team_id),
+            TeamName=team_name,
             WeekStartDate=start_of_week,
             MatchesPlayed=0,
             PointsEarned=0
@@ -512,6 +521,65 @@ async def get_or_create_weekly_limit(db_session, team_id, start_of_week):
         await db_session.flush()  # Ensure weekly_limit gets an ID assigned before returning
 
     return weekly_limit
+
+async def check_weekly_limits(interaction, match_id):
+    today = datetime.now().date()
+    start_of_week = today - timedelta(days=today.weekday())
+    limit_messages = []
+    async with AsyncSessionLocal() as db_session: 
+        async with db_session.begin():
+            stmt = select(Match).where(Match.MatchID == match_id)
+            match = await db_session.scalar(stmt)
+            if not match:
+                print("Match not found.")
+                return
+            
+            teams_to_update = [match.TeamAID, match.TeamBID]
+
+            for team_id in teams_to_update:
+                    team_weekly_limit_stmt = select(WeeklyLimit).where(
+                    WeeklyLimit.TeamID == team_id,
+                    func.date(WeeklyLimit.WeekStartDate) == start_of_week
+                    )
+                    team_weekly_limit = await db_session.scalar(team_weekly_limit_stmt)
+
+                    if not team_weekly_limit:
+                        print(f"Weekly limit not found for Team ID {team_id}.")
+                        continue
+
+                    if team_weekly_limit.MatchesPlayed >= 5:
+                        limit_messages.append(f"{team_weekly_limit.TeamName} has played the maximum matches this week.")
+                    if team_weekly_limit.PointsEarned >= 3:
+                        limit_messages.append(f"{team_weekly_limit.TeamName} has earned the maximum points this week.")
+    
+    if limit_messages:
+        await interaction.followup.send("\n".join(limit_messages))
+    else:
+        # If no limits are exceeded, proceed with your draft creation or next steps here.
+        pass
+
+
+async def post_daily_results(interaction):
+    now = datetime.now()
+    twenty_four_hours_ago = now - timedelta(hours=24)
+    async with AsyncSessionLocal() as db_session:
+        async with db_session.begin():
+            stmt = select(Match).where(Match.MatchDate.between(twenty_four_hours_ago, now),
+                                       not_(Match.DraftWinnerID == None))
+            results = await db_session.execute(stmt)
+            matches = results.scalars().all()
+            
+            if not matches:
+                await interaction.response.send_message("No matches found in the last 24 hours.", ephemeral=True)
+                return
+            
+            embed = discord.Embed(title="Daily League Results", description="", color=discord.Color.blue())
+            for match in matches:
+                    result_line = f"{match.TeamAName} defeated {match.TeamBName} ({match.TeamAWins} - {match.TeamBWins})" if match.TeamAWins > match.TeamBWins else f"{match.TeamBName} defeated {match.TeamAName} ({match.TeamBWins} - {match.TeamAWins})" ,
+                    embed.description += result_line + "\n"
+            
+            await interaction.response.send_message(embed=embed)
+            
 
 async def update_player_stats_and_elo(match_result):
     async with AsyncSessionLocal() as session:
@@ -540,3 +608,4 @@ def calculate_elo_diff(winner_elo, loser_elo, k=20):
     """Calculate Elo rating difference after a game."""
     expected_win = 1 / (1 + 10 ** ((loser_elo - winner_elo) / 400))
     return k * (1 - expected_win)
+

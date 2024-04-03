@@ -8,6 +8,7 @@ from utils import cleanup_sessions_task
 from commands import league_commands
 
 
+
 async def main():
     load_dotenv()
 
