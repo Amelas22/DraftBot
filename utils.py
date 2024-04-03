@@ -1,10 +1,12 @@
 import random
 import discord
 import asyncio
+import json
 from sqlalchemy import update, select, func, not_
 from datetime import datetime, timedelta
 from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult, PlayerStats, Match, Team, WeeklyLimit
 from sqlalchemy.orm import selectinload
+
 
 
 async def split_into_teams(draft_session_id):
@@ -332,24 +334,40 @@ async def post_or_update_victory_message(session, channel, embed, draft_session,
 
 
 async def calculate_three_zero_drafters(session, draft_session_id, guild):
-    # Query MatchResults for the given draft session
-    stmt = select(MatchResult).where(MatchResult.session_id == draft_session_id)
-    results = await session.execute(stmt)
-    match_results = results.scalars().all()
+    async with session.begin():
+        # Fetch match results within the transaction
+        stmt = select(MatchResult).where(MatchResult.session_id == draft_session_id)
+        results = await session.execute(stmt)
+        match_results = results.scalars().all()
 
-    # Count wins for each player
-    win_counts = {}
-    for match in match_results:
-        winner_id = match.winner_id
-        if winner_id:
-            win_counts[winner_id] = win_counts.get(winner_id, 0) + 1
+        # Count wins for each player
+        win_counts = {}
+        for match in match_results:
+            winner_id = match.winner_id
+            if winner_id:
+                win_counts[winner_id] = win_counts.get(winner_id, 0) + 1
 
-    # Identify players with 3 wins
-    three_zero_drafters = [player_id for player_id, win_count in win_counts.items() if win_count == 3]
+        # Identify players with 3 wins
+        three_zero_drafters = [player_id for player_id, win_count in win_counts.items() if win_count == 3]
 
-    # Convert player IDs to names using the guild object
-    three_zero_names = ", ".join([guild.get_member(int(player_id)).display_name for player_id in three_zero_drafters])
-    return three_zero_names
+        # Convert player IDs to names using the guild object
+        three_zero_names = [guild.get_member(int(player_id)).display_name for player_id in three_zero_drafters if guild.get_member(int(player_id))]
+
+        if three_zero_names:
+            draft_session_stmt = select(DraftSession).where(DraftSession.session_id == draft_session_id)
+            result = await session.execute(draft_session_stmt)
+            draft_session = result.scalars().first()
+
+            if draft_session:
+                # Update the pairings column with the list of three zero names
+                draft_session.pairings = three_zero_names
+            else:
+                print("Draft session not found.")
+
+        # Commit the transaction including the update to the draft session
+        await session.commit()
+
+    return ", ".join(three_zero_names)
 
 
 async def cleanup_sessions_task(bot):
@@ -559,26 +577,26 @@ async def check_weekly_limits(interaction, match_id):
         pass
 
 
-async def post_daily_results(interaction):
-    now = datetime.now()
-    twenty_four_hours_ago = now - timedelta(hours=24)
-    async with AsyncSessionLocal() as db_session:
-        async with db_session.begin():
-            stmt = select(Match).where(Match.MatchDate.between(twenty_four_hours_ago, now),
-                                       not_(Match.DraftWinnerID == None))
-            results = await db_session.execute(stmt)
-            matches = results.scalars().all()
+# async def post_daily_results(interaction):
+#     now = datetime.now()
+#     twenty_four_hours_ago = now - timedelta(hours=24)
+#     async with AsyncSessionLocal() as db_session:
+#         async with db_session.begin():
+#             stmt = select(Match).where(Match.MatchDate.between(twenty_four_hours_ago, now),
+#                                        not_(Match.DraftWinnerID == None))
+#             results = await db_session.execute(stmt)
+#             matches = results.scalars().all()
             
-            if not matches:
-                await interaction.response.send_message("No matches found in the last 24 hours.", ephemeral=True)
-                return
+#             if not matches:
+#                 await interaction.response.send_message("No matches found in the last 24 hours.", ephemeral=True)
+#                 return
             
-            embed = discord.Embed(title="Daily League Results", description="", color=discord.Color.blue())
-            for match in matches:
-                    result_line = f"{match.TeamAName} defeated {match.TeamBName} ({match.TeamAWins} - {match.TeamBWins})" if match.TeamAWins > match.TeamBWins else f"{match.TeamBName} defeated {match.TeamAName} ({match.TeamBWins} - {match.TeamAWins})" ,
-                    embed.description += result_line + "\n"
+#             embed = discord.Embed(title="Daily League Results", description="", color=discord.Color.blue())
+#             for match in matches:
+#                     result_line = f"{match.TeamAName} defeated {match.TeamBName} ({match.TeamAWins} - {match.TeamBWins})" if match.TeamAWins > match.TeamBWins else f"{match.TeamBName} defeated {match.TeamAName} ({match.TeamBWins} - {match.TeamAWins})" ,
+#                     embed.description += result_line + "\n"
             
-            await interaction.response.send_message(embed=embed)
+#             await interaction.response.send_message(embed=embed)
             
 
 async def update_player_stats_and_elo(match_result):

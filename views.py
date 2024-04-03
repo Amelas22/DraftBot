@@ -194,7 +194,7 @@ class PersistentView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
         if session.premade_match_id:
             await check_weekly_limits(interaction, session.premade_match_id)
-            
+
     async def team_assignment_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         session = await get_draft_session(self.draft_session_id)
         if not session:
@@ -369,7 +369,8 @@ class PersistentView(discord.ui.View):
                 bot = interaction.client
                 
                 await calculate_pairings(session, db_session)
-                await update_player_stats_for_draft(session.session_id, guild)
+                if session.session_type == "random":
+                    await update_player_stats_for_draft(session.session_id, guild)
                 
                 # Immediately disable the "Create Rooms & Post Pairings" button to prevent multiple presses
                 for child in self.children:
@@ -584,12 +585,12 @@ class MatchResultSelect(Select):
         async with AsyncSessionLocal() as session:  # Use your session creation method here
             async with session.begin():
                 # Fetch the match result entry from the database
-                stmt = select(MatchResult).where(
+                stmt = select(MatchResult, DraftSession).join(DraftSession).where(
                     MatchResult.session_id == self.session_id,
                     MatchResult.match_number == self.match_number
                 )
                 result = await session.execute(stmt)
-                match_result = result.scalars().first()
+                match_result, draft_session = result.first()
                 if match_result:
                     # Update the match result based on the selection
                     match_result.player1_wins = player1_wins
@@ -599,7 +600,9 @@ class MatchResultSelect(Select):
                     match_result.winner_id = winner_id
 
                     await session.commit()  # Commit the changes to the database
-                    await update_player_stats_and_elo(match_result)
+                    
+                    if draft_session and draft_session.session_type == "random":
+                        await update_player_stats_and_elo(match_result)
                    
         await update_draft_summary_message(self.bot, self.session_id)
         await check_and_post_victory_or_draw(self.bot, self.session_id)
