@@ -1,5 +1,5 @@
 import discord
-from sqlalchemy import Column, Integer, String, DateTime, JSON, select, Boolean, ForeignKey, desc, Float
+from sqlalchemy import Column, Integer, String, DateTime, JSON, select, Boolean, ForeignKey, desc, Float, func
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, relationship
@@ -162,16 +162,19 @@ async def re_register_views(bot):
 async def register_team_to_db(team_name: str):
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            # Check if the team already exists
-            query = select(Team).filter_by(TeamName=team_name)
+            # Normalize the input team name and compare it case-insensitively
+            normalized_team_name = team_name.strip().title()  # Normalize input
+            query = select(Team).filter(func.lower(Team.TeamName) == func.lower(normalized_team_name))
             result = await session.execute(query)
             existing_team = result.scalars().first()
 
             if existing_team:
-                return "Team already registered."
+                # If the team already exists, you might want to return the existing team's info or a specific message
+                return f"Team '{existing_team.TeamName}' is a registered team."
 
-            new_team = Team(TeamName=team_name)
+            # If not found, register the new team
+            new_team = Team(TeamName=normalized_team_name)  # Use normalized name for consistency
             session.add(new_team)
             await session.commit()
 
-    return "Team registered successfully."
+    return f"New Team Registered: '{team_name}' registered successfully."

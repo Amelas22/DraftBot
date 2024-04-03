@@ -1,8 +1,8 @@
 from datetime import datetime, timedelta
-from sqlalchemy import select
+from sqlalchemy import select, func
 import discord
 import random
-from session import DraftSession, AsyncSessionLocal, get_draft_session
+from session import DraftSession, AsyncSessionLocal, get_draft_session, Team, register_team_to_db
 from views import PersistentView
 
 class CubeSelectionModal(discord.ui.Modal):
@@ -17,8 +17,16 @@ class CubeSelectionModal(discord.ui.Modal):
     async def callback(self, interaction: discord.Interaction):
         bot = interaction.client
         cube_name = self.children[0].value
-        cube_option = "MTG" if not cube_name else cube_name
+        if self.session_type == "premade":
+            team_a_name = self.children[1].value
+            team_b_name = self.children[2].value
 
+            # Register Team A if not present
+            team_a_response = await register_team_to_db(team_a_name)
+            # Register Team B if not present
+            team_b_response = await register_team_to_db(team_b_name)
+
+        cube_option = "MTG" if not cube_name else cube_name
         draft_start_time = datetime.now().timestamp()
         session_id = f"{interaction.user.id}-{int(draft_start_time)}"
         draft_id = ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
@@ -34,8 +42,8 @@ class CubeSelectionModal(discord.ui.Modal):
                     draft_start_time=datetime.now(),
                     deletion_time=datetime.now() + timedelta(hours=3),
                     session_type=self.session_type,
-                    team_a_name=None if self.session_type != "premade" else self.children[1].value,
-                    team_b_name=None if self.session_type != "premade" else self.children[2].value
+                    team_a_name=None if self.session_type != "premade" else team_a_name,
+                    team_b_name=None if self.session_type != "premade" else team_b_name
                 )
                 session.add(new_draft_session)
 
@@ -63,7 +71,7 @@ class CubeSelectionModal(discord.ui.Modal):
             print(f"Random Draft: {session_id} has been created.")
             
             
-        elif self.session_type == "premade":
+        elif self.session_type == "premade" or "league":
             team_a_input = self.children[1]
             team_b_input = self.children[2]
             team_a_name = team_a_input.value
