@@ -163,17 +163,19 @@ async def re_register_views(bot):
 async def register_team_to_db(team_name: str):
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            # Normalize the team name for comparison
+            # Normalize the team name for case-insensitive comparison
             normalized_team_name = team_name.strip().lower()
+            # Check if the team already exists
             query = select(Team).filter(func.lower(Team.TeamName) == normalized_team_name)
             result = await session.execute(query)
             existing_team = result.scalars().first()
 
             if existing_team:
-                return existing_team  # Return the existing team instance
+                return f"Team '{existing_team.TeamName}' is already registered."
 
-            # Create and add new team if not found
-            new_team = Team(TeamName=team_name.title())  # Store in title case for consistency
+            # If not exists, create and register the new team
+            new_team = Team(TeamName=team_name)
             session.add(new_team)
             await session.commit()
-            return new_team  # Return the new team instance
+
+            return f"Team '{team_name}' has been registered successfully."
