@@ -74,7 +74,7 @@ async def league_commands(bot):
 
         eastern_tz = pytz.timezone('US/Eastern')
         now = datetime.now(eastern_tz)
-        start_time = eastern_tz.localize(datetime(now.year, now.month, now.day, 3, 0)) - timedelta(days=1)  # 3 AM previous day
+        start_time = eastern_tz.localize(datetime(now.year, now.month, now.day, 1, 0)) - timedelta(days=1)  # 3 AM previous day
         end_time = start_time + timedelta(hours=24)  # 3 AM current day
 
         async with AsyncSessionLocal() as db_session:
@@ -87,12 +87,27 @@ async def league_commands(bot):
                 if not matches:
                     await channel.send("No matches found in the last 24 hours.")
                     return
+                
+                trophy_drafter_stmt = select(DraftSession).where(DraftSession.teams_start_time.between(start_time, end_time),
+                                                                 not_(DraftSession.premade_match_id),
+                                                                 DraftSession.tracked_draft==1)
+                trophy_results = await db_session.execute(trophy_drafter_stmt)
+                trophy_sessions = trophy_results.scalars().all()
+
+                drafter_counts = Counter()
+                for session in trophy_sessions:
+                    undefeated_drafters = list(session.trophy_drafters) if session.trophy_drafters else []
+                    drafter_counts.update(undefeated_drafters)
+
+                undefeated_drafters_field_value = "\n".join([f"{drafter} x{count}" if count > 1 else drafter for drafter, count in drafter_counts.items()])
+
+
                 date_str = start_time.strftime("%B %d, %Y")
                 embed = discord.Embed(title=f"Daily League Results - {date_str}", description="", color=discord.Color.blue())
                 for match in matches:
                     result_line = f"**{match.TeamAName}** defeated **{match.TeamBName}** ({match.TeamAWins} - {match.TeamBWins})" if match.TeamAWins > match.TeamBWins else f"**{match.TeamBName}** defeated **{match.TeamAName}** ({match.TeamBWins} - {match.TeamAWins})"
                     embed.description += result_line + "\n"
-
+                embed.add_field(name="**Trophy Drafters**", value=undefeated_drafters_field_value or "None", inline=False)
                 await channel.send(embed=embed)
 
     @aiocron.crontab('15 09 * * *', tz=pytz.timezone('US/Eastern'))
