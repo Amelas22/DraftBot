@@ -34,7 +34,7 @@ class DraftSession(Base):
     session_id = Column(String(64), nullable=False, unique=True)
     message_id = Column(String(64))
     draft_channel_id = Column(String(64))
-    draft_message_id = Column(String(64))
+    true_skill_draft = Column(Boolean, default=True)
     ready_check_message_id = Column(String(64))
     draft_link = Column(String(256))
     ready_check_status = Column(JSON)
@@ -49,6 +49,7 @@ class DraftSession(Base):
     team_b = Column(JSON)
     victory_message_id_draft_chat = Column(String(64))
     victory_message_id_results_channel = Column(String(64))
+    winning_gap = Column(Integer)
     draft_summary_message_id = Column(String(64))
     matches = Column(JSON)
     match_counter = Column(Integer, default=1)
@@ -89,7 +90,9 @@ class PlayerStats(Base):
     games_won = Column(Integer, default=0)
     games_lost = Column(Integer, default=0)
     elo_rating = Column(Float, default=1200)
-    
+    true_skill_mu = Column(Float, default=25)
+    true_skill_sigma = Column(Float, default=8.333)
+
     def __repr__(self):
         return f"<PlayerStats(player_id={self.player_id}, display_name={self.display_name}, drafts_participated={self.drafts_participated}, games_won={self.games_won}, games_lost={self.games_lost}, elo_rating={self.elo_rating})>"
 

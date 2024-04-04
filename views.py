@@ -184,7 +184,7 @@ class PersistentView(discord.ui.View):
                 # Check session type and prepare teams if necessary
                 if session.session_type == 'random':
                     from utils import split_into_teams
-                    await split_into_teams(session.session_id)
+                    await split_into_teams(bot, session.session_id)
                     session = await get_draft_session(self.draft_session_id)
 
                 # Generate names for display using the session's sign_ups dictionary

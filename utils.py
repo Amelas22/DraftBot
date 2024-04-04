@@ -6,10 +6,11 @@ from sqlalchemy import update, select, func, not_
 from datetime import datetime, timedelta
 from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult, PlayerStats, Match, Team, WeeklyLimit
 from sqlalchemy.orm import selectinload
+from trueskill import Rating, rate_1vs1
 
 
 
-async def split_into_teams(draft_session_id):
+async def split_into_teams(bot, draft_session_id):
     # Fetch the current draft session to ensure it's up to date.
     draft_session = await get_draft_session(draft_session_id)
     if not draft_session:
@@ -18,19 +19,29 @@ async def split_into_teams(draft_session_id):
     
     # Check if there are any sign-ups to split into teams.
     sign_ups = draft_session.sign_ups
+    variable = random.randint (61, 100)
+    if variable > 60:
+        draft_session.true_skill_draft = False
+    else:
+        draft_session.true_skill_draft = True
+
     if sign_ups:
         sign_ups_list = list(sign_ups.keys())
-        random.shuffle(sign_ups_list)
-        mid_point = len(sign_ups_list) // 2
-        team_a = sign_ups_list[:mid_point]
-        team_b = sign_ups_list[mid_point:]
+        if draft_session.true_skill_draft == False:
+            random.shuffle(sign_ups_list)
+            mid_point = len(sign_ups_list) // 2
+            team_a = sign_ups_list[:mid_point]
+            team_b = sign_ups_list[mid_point:]
+        else:
+            guild = bot.get_guild(int(draft_session.guild_id))
+            team_a, team_b = await balance_teams(sign_ups_list, guild)
 
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
                 # Update the draft session with the new teams.
                 await db_session.execute(update(DraftSession)
                                          .where(DraftSession.session_id == draft_session_id)
-                                         .values(team_a=team_a, team_b=team_b))
+                                         .values(team_a=team_a, team_b=team_b, true_skill_draft=draft_session.true_skill_draft))
                 await db_session.commit()
 
 
@@ -269,41 +280,48 @@ async def update_draft_summary_message(bot, draft_session_id):
 
 async def check_and_post_victory_or_draw(bot, draft_session_id):
     async with AsyncSessionLocal() as session:
-        draft_session = await get_draft_session(draft_session_id)
-        if not draft_session:
-            print("Draft session not found.")
-            return
+        async with session.begin():
+            draft_session = await get_draft_session(draft_session_id)
+            if not draft_session:
+                print("Draft session not found.")
+                return
 
-        guild = bot.get_guild(int(draft_session.guild_id))
-        if not guild:
-            print("Guild not found.")
-            return
+            guild = bot.get_guild(int(draft_session.guild_id))
+            if not guild:
+                print("Guild not found.")
+                return
 
-        team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
-        total_matches = draft_session.match_counter - 1
-        half_matches = total_matches // 2
+            team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
+            total_matches = draft_session.match_counter - 1
+            half_matches = total_matches // 2
 
-        # Check victory or draw conditions
-        if team_a_wins > half_matches or team_b_wins > half_matches or (team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0):
-            if draft_session.tracked_draft and draft_session.premade_match_id is not None:
-                await update_match_db_with_wins_winner(draft_session.premade_match_id, team_a_wins, team_b_wins)
-            embed = await generate_draft_summary_embed(bot, draft_session_id)
-            three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
-            embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
-            # Handle the draft-chat channel message
-            draft_chat_channel = guild.get_channel(int(draft_session.draft_chat_channel))
-            if draft_chat_channel:
-                await post_or_update_victory_message(session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat')
+            # Check victory or draw conditions
+            if team_a_wins > half_matches or team_b_wins > half_matches or (team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0):
+                if draft_session.tracked_draft and draft_session.premade_match_id is not None:
+                    await update_match_db_with_wins_winner(draft_session.premade_match_id, team_a_wins, team_b_wins)
+                gap = abs(team_a_wins - team_b_wins)
 
-            # Determine the correct results channel
-            results_channel_name = "team-draft-results" if draft_session.session_type == "random" else "league-draft-results"
-            results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
-            if results_channel:
-                await post_or_update_victory_message(session, results_channel, embed, draft_session, 'victory_message_id_results_channel')
-            else:
-                print(f"Results channel '{results_channel_name}' not found.")
+                embed = await generate_draft_summary_embed(bot, draft_session_id)
+                three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
+                embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
+                
+                # Handle the draft-chat channel message
+                draft_chat_channel = guild.get_channel(int(draft_session.draft_chat_channel))
+                if draft_chat_channel:
+                    await post_or_update_victory_message(session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat')
 
-            await session.commit()
+                # Determine the correct results channel
+                results_channel_name = "team-draft-results" if draft_session.session_type == "random" else "league-draft-results"
+                results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
+                if results_channel:
+                    await post_or_update_victory_message(session, results_channel, embed, draft_session, 'victory_message_id_results_channel')
+                else:
+                    print(f"Results channel '{results_channel_name}' not found.")
+                await session.execute(update(DraftSession)
+                                         .where(DraftSession.session_id == draft_session_id)
+                                         .values(winning_gap=gap))
+                
+                await session.commit()
 
 
 async def post_or_update_victory_message(session, channel, embed, draft_session, victory_message_attr):
@@ -328,40 +346,40 @@ async def post_or_update_victory_message(session, channel, embed, draft_session,
 
 
 async def calculate_three_zero_drafters(session, draft_session_id, guild):
-    async with session.begin():
-        # Fetch match results within the transaction
-        stmt = select(MatchResult).where(MatchResult.session_id == draft_session_id)
-        results = await session.execute(stmt)
-        match_results = results.scalars().all()
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            stmt = select(MatchResult).where(MatchResult.session_id == draft_session_id)
+            results = await session.execute(stmt)
+            match_results = results.scalars().all()
 
-        # Count wins for each player
-        win_counts = {}
-        for match in match_results:
-            winner_id = match.winner_id
-            if winner_id:
-                win_counts[winner_id] = win_counts.get(winner_id, 0) + 1
+            # Count wins for each player
+            win_counts = {}
+            for match in match_results:
+                winner_id = match.winner_id
+                if winner_id:
+                    win_counts[winner_id] = win_counts.get(winner_id, 0) + 1
 
-        # Identify players with 3 wins
-        three_zero_drafters = [player_id for player_id, win_count in win_counts.items() if win_count == 3]
+            # Identify players with 3 wins
+            three_zero_drafters = [player_id for player_id, win_count in win_counts.items() if win_count == 3]
 
-        # Convert player IDs to names using the guild object
-        three_zero_names = [guild.get_member(int(player_id)).display_name for player_id in three_zero_drafters if guild.get_member(int(player_id))]
+            # Convert player IDs to names using the guild object
+            three_zero_names = [guild.get_member(int(player_id)).display_name for player_id in three_zero_drafters if guild.get_member(int(player_id))]
 
-        if three_zero_names:
-            draft_session_stmt = select(DraftSession).where(DraftSession.session_id == draft_session_id)
-            result = await session.execute(draft_session_stmt)
-            draft_session = result.scalars().first()
+            if three_zero_names:
+                draft_session_stmt = select(DraftSession).where(DraftSession.session_id == draft_session_id)
+                result = await session.execute(draft_session_stmt)
+                draft_session = result.scalars().first()
 
-            if draft_session:
-                # Update the pairings column with the list of three zero names
-                draft_session.trophy_drafters = three_zero_names
-            else:
-                print("Draft session not found.")
+                if draft_session:
+                    # Update the pairings column with the list of three zero names
+                    draft_session.trophy_drafters = three_zero_names
+                else:
+                    print("Draft session not found.")
 
-        # Commit the transaction including the update to the draft session
-        await session.commit()
+            # Commit the transaction including the update to the draft session
+            await session.commit()
 
-    return ", ".join(three_zero_names)
+            return ", ".join(three_zero_names)
 
 
 async def cleanup_sessions_task(bot):
@@ -610,26 +628,82 @@ async def update_player_stats_and_elo(match_result):
         async with session.begin():
             player1 = await session.get(PlayerStats, match_result.player1_id)
             player2 = await session.get(PlayerStats, match_result.player2_id)
-            
+
             if match_result.winner_id:
+                # Determine winner and loser based on match_result
                 if match_result.winner_id == match_result.player1_id:
-                    player1.games_won += 1
-                    player2.games_lost += 1
-                    winner = player1
-                    loser = player2
+                    winner, loser = player1, player2
                 else:
-                    player2.games_won += 1
-                    player1.games_lost += 1
-                    winner = player2
-                    loser = player1
-                
-                # Calculate and update Elo ratings
+                    winner, loser = player2, player1
+
+                # Update ELO ratings
                 elo_diff = calculate_elo_diff(winner.elo_rating, loser.elo_rating)
                 winner.elo_rating += elo_diff
                 loser.elo_rating -= elo_diff
 
+                # Create TrueSkill Rating objects for winner and loser
+                winner_rating = Rating(mu=winner.true_skill_mu, sigma=winner.true_skill_sigma)
+                loser_rating = Rating(mu=loser.true_skill_mu, sigma=loser.true_skill_sigma)
+
+                # Update TrueSkill ratings based on the match outcome
+                new_winner_rating, new_loser_rating = rate_1vs1(winner_rating, loser_rating)
+
+                # Update player stats with new TrueSkill ratings
+                winner.true_skill_mu = new_winner_rating.mu
+                loser.true_skill_mu = new_loser_rating.mu
+                winner.true_skill_sigma = new_winner_rating.sigma
+                loser.true_skill_sigma = new_loser_rating.sigma
+
+                # Update games won and lost
+                winner.games_won += 1
+                loser.games_lost += 1
+
+                await session.commit()
+
 def calculate_elo_diff(winner_elo, loser_elo, k=20):
     """Calculate Elo rating difference after a game."""
-    expected_win = 1 / (1 + 10 ** ((loser_elo - winner_elo) / 400))
+    expected_win = 1 / (1 + 10 ** ((winner_elo - loser_elo) / 400))
     return k * (1 - expected_win)
 
+async def balance_teams(player_ids, guild):
+    async with AsyncSessionLocal() as db_session:
+        # Ensure PlayerStats for each player
+        for player_id in player_ids:
+            player_stat = await db_session.get(PlayerStats, player_id)
+            if not player_stat:
+                player_stat = PlayerStats(
+                    player_id=player_id,
+                    drafts_participated=0,
+                    games_won=0,
+                    games_lost=0,
+                    display_name=guild.get_member(int(player_id)).display_name if guild.get_member(int(player_id)) else "Unknown",
+                    elo_rating=1200,
+                )
+                db_session.add(player_stat)
+        await db_session.commit()
+
+        stmt = select(PlayerStats).where(PlayerStats.player_id.in_(player_ids)).order_by(PlayerStats.true_skill_mu.desc())
+        result = await db_session.execute(stmt)
+        ordered_players = result.scalars().all()
+
+        team_a, team_b = [], []
+
+        is_team_a_turn = True
+
+        for index, player_stat in enumerate(ordered_players):
+            if index == 0:
+                # Assign the first player to team A
+                team_a.append(player_stat.player_id)
+            elif is_team_a_turn:
+                # Next two players go to team B
+                team_b.append(player_stat.player_id)
+                if len(team_b) % 2 == 0:  # Check if it's time to switch back to team A
+                    is_team_a_turn = False
+            else:
+                # Following two players back to team A
+                team_a.append(player_stat.player_id)
+                if len(team_a) % 2 == 1:  # Check if it's time to switch back to team B
+                    is_team_a_turn = True
+
+    return team_a, team_b
+    
