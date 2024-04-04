@@ -37,6 +37,25 @@ async def league_commands(bot):
 
             await interaction.response.send_message(embed=embed)
 
+    @bot.slash_command(name='list_commands', description='Lists all available slash commands')
+    async def list_commands(ctx):
+        # Manually creating a list of commands and descriptions
+        commands_list = {
+            "/list_commands": "Lists all available slash commands.",
+            "/startdraft": "Opens an open-play queue for a team draft using randomized teams",
+            "/premadedraft": "Opens a team draft queue for premade teams and league drafts",
+            "/registerteam": "Registers a team for the league draft",
+            "/listteams": "Provides a list of currently registered team in alphabetical order",
+        }
+        
+        # Formatting the list for display
+        commands_description = "\n".join([f"{cmd}: {desc}" for cmd, desc in commands_list.items()])
+        
+        # Creating an embed to nicely format the list of commands
+        embed = discord.Embed(title="Available Commands", description=commands_description, color=discord.Color.blue())
+        
+        await ctx.respond(embed=embed)
+
     @aiocron.crontab('00 09 * * *', tz=pytz.timezone('US/Eastern'))
     async def daily_league_results():
         # Fetch all guilds the bot is in and look for the "league-summary" channel

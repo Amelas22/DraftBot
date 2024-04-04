@@ -60,6 +60,7 @@ class DraftSession(Base):
     team_b_name = Column(String(128))
     are_rooms_processing = Column(Boolean, default=False)
     premade_match_id = Column(String(128))
+    tracked_draft = Column(Boolean, default=True)
     match_results = relationship("MatchResult", back_populates="draft_session", foreign_keys="[MatchResult.session_id]")
     def __repr__(self):
         return f"<DraftSession(session_id={self.session_id}, guild_id={self.guild_id})>"

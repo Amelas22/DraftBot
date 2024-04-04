@@ -29,6 +29,9 @@ class PersistentView(discord.ui.View):
         elif self.session_type == "premade":
             self.add_item(self.create_button(self.team_a_name, "green", f"Team_A_{self.draft_session_id}", self.team_assignment_callback))
             self.add_item(self.create_button(self.team_b_name, "red", f"Team_B_{self.draft_session_id}", self.team_assignment_callback))
+            draft_button_label = "League Draft: ON"
+            draft_button_style = "green"
+            self.add_item(self.create_button(draft_button_label, draft_button_style, f"track_draft_{self.draft_session_id}", self.track_draft_callback))
             self.add_item(self.create_button("Generate Seating Order", "blurple", f"generate_seating_{self.draft_session_id}", self.randomize_teams_callback))
         self.add_item(self.create_button("Cancel Draft", "grey", f"cancel_draft_{self.draft_session_id}", self.cancel_draft_callback))
         self.add_item(self.create_button("Remove User", "grey", f"remove_user_{self.draft_session_id}", self.remove_user_button_callback))
@@ -49,7 +52,31 @@ class PersistentView(discord.ui.View):
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
         return session_exists
     
- 
+    async def track_draft_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    draft_session = await get_draft_session(self.draft_session_id)
+                    # Directly update the 'sign_ups' of the draft session
+                    await session.execute(
+                        update(DraftSession).
+                        where(DraftSession.session_id == self.draft_session_id).
+                        values(tracked_draft = not draft_session.tracked_draft)
+                    )
+                    await session.commit()
+        
+        draft_session = await get_draft_session(self.draft_session_id)
+        # update the button's label and style directly based on the new tracked_draft state
+        # Find the specific button to update
+        track_draft_button = next((btn for btn in self.children if btn.custom_id == f"track_draft_{self.draft_session_id}"), None)
+        if track_draft_button:
+            track_draft_button.label = "League Draft: ON" if draft_session.tracked_draft else "League Draft: OFF"
+            track_draft_button.style = discord.ButtonStyle.green if draft_session.tracked_draft else discord.ButtonStyle.red
+            await interaction.response.edit_message(view=self)  # Reflect these changes in the message
+
+            # Optionally, confirm the update to the user
+            await interaction.followup.send(f"League draft status updated: {'ON' if draft_session.tracked_draft else 'OFF'}", ephemeral=True)
+
+
     async def sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Fetch the current draft session to ensure it's up to date
         draft_session = await get_draft_session(self.draft_session_id)
@@ -192,7 +219,7 @@ class PersistentView(discord.ui.View):
 
         # Respond with the embed and updated view
         await interaction.response.edit_message(embed=embed, view=self)
-        if session.premade_match_id:
+        if session.tracked_draft and session.premade_match_id is not None:
             await check_weekly_limits(interaction, session.premade_match_id)
 
     async def team_assignment_callback(self, interaction: discord.Interaction, button: discord.ui.Button):

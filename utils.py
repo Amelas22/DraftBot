@@ -288,7 +288,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
 
         # Check victory or draw conditions
         if team_a_wins > half_matches or team_b_wins > half_matches or (team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0):
-            if draft_session.premade_match_id: 
+            if draft_session.tracked_draft and draft_session.premade_match_id is not None:
                 await update_match_db_with_wins_winner(draft_session.premade_match_id, team_a_wins, team_b_wins)
             embed = await generate_draft_summary_embed(bot, draft_session_id)
             three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)

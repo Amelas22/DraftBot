@@ -44,7 +44,8 @@ class CubeSelectionModal(discord.ui.Modal):
                     session_type=self.session_type,
                     premade_match_id=None,
                     team_a_name=None if self.session_type != "premade" else team_a_name,
-                    team_b_name=None if self.session_type != "premade" else team_b_name
+                    team_b_name=None if self.session_type != "premade" else team_b_name,
+                    tracked_draft = True
                 )
                 session.add(new_draft_session)
 
