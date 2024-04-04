@@ -44,7 +44,7 @@ class DraftSession(Base):
     draft_chat_channel = Column(String(64))
     guild_id = Column(String(64))
     draft_id = Column(String(64))
-    pairings = Column(JSON)
+    trophy_drafters = Column(JSON)
     team_a = Column(JSON)
     team_b = Column(JSON)
     victory_message_id_draft_chat = Column(String(64))

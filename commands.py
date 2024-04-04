@@ -135,7 +135,7 @@ async def league_commands(bot):
 
                 drafter_counts = Counter()
                 for session in sessions:
-                    undefeated_drafters = list(session.pairings) if session.pairings else []
+                    undefeated_drafters = list(session.trophy_drafters) if session.trophy_drafters else []
                     drafter_counts.update(undefeated_drafters)
 
                 # Format the drafter names and their counts for display

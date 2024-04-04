@@ -1,7 +1,7 @@
 import random
 import discord
 import asyncio
-import json
+import pytz
 from sqlalchemy import update, select, func, not_
 from datetime import datetime, timedelta
 from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult, PlayerStats, Match, Team, WeeklyLimit
@@ -236,8 +236,6 @@ async def fetch_match_details(bot, session_id: str, match_number: int):
         print(f"Match result not found within the session for match_number: {match_number}")
         return None, None  # Match not found within the session
 
-    print(f"Fetching details for player1_id: {match_result.player1_id}, player2_id: {match_result.player2_id}")
-
     guild = bot.get_guild(int(draft_session.guild_id))
     if not guild:
         print("Guild not found.")
@@ -265,7 +263,6 @@ async def update_draft_summary_message(bot, draft_session_id):
         try:
             summary_message = await channel.fetch_message(int(draft_session.draft_summary_message_id))
             await summary_message.edit(embed=updated_embed)
-            print("Draft summary message updated successfully.")
         except Exception as e:
             print(f"Failed to update draft summary message: {e}")
 
@@ -320,7 +317,6 @@ async def post_or_update_victory_message(session, channel, embed, draft_session,
         try:
             message = await channel.fetch_message(int(victory_message_id))
             await message.edit(embed=embed)
-            print(f"Updated victory message in {channel.name}.")
         except discord.NotFound:
             print(f"Message ID {victory_message_id} not found in {channel.name}. Posting a new message.")
             victory_message_id = None
@@ -329,8 +325,6 @@ async def post_or_update_victory_message(session, channel, embed, draft_session,
         message = await channel.send(embed=embed)
         setattr(draft_session, victory_message_attr, str(message.id))
         session.add(draft_session)
-
-    print(f"Posted new victory message in {channel.name}.")
 
 
 async def calculate_three_zero_drafters(session, draft_session_id, guild):
@@ -360,7 +354,7 @@ async def calculate_three_zero_drafters(session, draft_session_id, guild):
 
             if draft_session:
                 # Update the pairings column with the list of three zero names
-                draft_session.pairings = three_zero_names
+                draft_session.trophy_drafters = three_zero_names
             else:
                 print("Draft session not found.")
 
@@ -388,7 +382,6 @@ async def cleanup_sessions_task(bot):
                         if channel:  # Check if channel was found
                             try:
                                 await channel.delete(reason="Session expired.")
-                                print(f"Deleted channel: {channel.name}")
                             except discord.HTTPException as e:
                                 print(f"Failed to delete channel: {channel.name}. Reason: {e}")
 
@@ -398,7 +391,6 @@ async def cleanup_sessions_task(bot):
                         try:
                             msg = await draft_channel.fetch_message(int(session.message_id))
                             await msg.delete()
-                            print(f"Deleted message ID: {session.message_id} in draft channel.")
                         except discord.NotFound:
                             print(f"Message ID {session.message_id} not found in draft channel.")
                         except discord.HTTPException as e:
@@ -442,8 +434,15 @@ async def update_player_stats_for_draft(session_id, guild):
 
 
 async def update_match_db_with_wins_winner(match_id, team_a_wins, team_b_wins):
-    today = datetime.now().date()
-    start_of_week = today - timedelta(days=today.weekday())
+    eastern = pytz.timezone('US/Eastern')
+    today = datetime.now(eastern)
+
+    # Calculate start of the week (Monday)
+    start_of_week_date = today - timedelta(days=today.weekday())
+
+    # Set the time to 1:00 AM
+    start_of_week = eastern.localize(datetime(start_of_week_date.year, start_of_week_date.month, start_of_week_date.day, 1, 0))
+
     async with AsyncSessionLocal() as db_session: 
         async with db_session.begin():
             stmt = select(Match).where(Match.MatchID == match_id)
@@ -541,8 +540,15 @@ async def get_or_create_weekly_limit(db_session, team_id, team_name, start_of_we
     return weekly_limit
 
 async def check_weekly_limits(interaction, match_id):
-    today = datetime.now().date()
-    start_of_week = today - timedelta(days=today.weekday())
+    eastern = pytz.timezone('US/Eastern')
+    today = datetime.now(eastern)
+
+    # Calculate start of the week (Monday)
+    start_of_week_date = today - timedelta(days=today.weekday())
+
+    # Set the time to 1:00 AM
+    start_of_week = eastern.localize(datetime(start_of_week_date.year, start_of_week_date.month, start_of_week_date.day, 1, 0))
+
     limit_messages = []
     async with AsyncSessionLocal() as db_session: 
         async with db_session.begin():
