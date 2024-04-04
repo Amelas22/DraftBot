@@ -1,94 +1,154 @@
 import discord
-from datetime import datetime
-import secrets
-from discord.ext import commands
-from draft_session import DraftSession
-from views import PersistentView
-from sessions import add_session
+from session import register_team_to_db, Team, AsyncSessionLocal, Match, MatchResult, DraftSession
+from sqlalchemy import select, not_
+import aiocron
+import pytz
+import json
+from datetime import datetime, timedelta
+from collections import Counter
 
+async def league_commands(bot):
 
-def setup_commands(bot: commands.Bot):
-    @bot.slash_command(name='startdraft', description="Start a draft with random teams! Do not use for premade teams.")
-    async def start_draft(interaction: discord.Interaction):
-        await interaction.response.defer()
-
-        draft_start_time = datetime.now().timestamp()
-        session_id = f"{interaction.user.id}-{int(draft_start_time)}"
-        draft_id = ''.join(secrets.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
-        draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
-
-        session = DraftSession(session_id, bot=bot)
-        session.guild_id = interaction.guild_id
-        session.draft_link = draft_link
-        session.draft_id = draft_id
-        session.draft_start_time = draft_start_time
-
-        add_session(session_id, session)
-
-        cube_drafter_role = discord.utils.get(interaction.guild.roles, name="Cube Drafter")
-        ping_message = f"{cube_drafter_role.mention if cube_drafter_role else 'Cube Drafter'} Vintage Cube Draft Queue Open!"
-        await interaction.followup.send(ping_message, ephemeral=False)
-
-        embed = discord.Embed(
-            title=f"MTGO Team Draft Queue - Started <t:{int(draft_start_time)}:R>",
-            description="\n**How to use bot**:\n1. Click sign up and click the draftmancer link. Draftmancer host still has to update settings and  from CubeCobra.\n" +
-                            "2. When enough people join (6 or 8), Push Ready Check. Once everyone is ready, push Create Teams\n" +
-                            "3. Create Teams will create randoms teams and a corresponding seating order. Draftmancer host needs to adjust table to match seating order. **TURN OFF RANDOM SEATING IN DRAFTMANCER** \n" +
-                            "4. After the draft, come back to this message (it'll be in pins) and click Create Chat Rooms. After 5 seconds chat rooms will be ready and you can press Post Pairings. This takes 10 seconds to process.\n" +
-                            "5. You will now have a private team chat with just your team and a shared draft chat that has pairings and match results. You can select the Match Results buttons to report results.\n" +
-                            "6. Chat channels will automatically close around five hours after the /startdraft command was used." +
-                            f"\n\n**Draftmancer Session**: **[Join Here]({draft_link})**",
-            color=discord.Color.dark_magenta()
-        )
-        embed.add_field(name="Sign-Ups", value="No players yet.", inline=False)
-        embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1186757246936424558/1217295353972527176/131.png")
-
-
-        view = PersistentView(session_id)
+    @bot.slash_command(name="registerteam", description="Register a new team in the league")
+    async def register_team(interaction: discord.Interaction, team_name: str):
+        team, response_message = await register_team_to_db(team_name)
+        await interaction.response.send_message(response_message, ephemeral=True)
     
-        message = await interaction.followup.send(embed=embed, view=view)
-        print(f"Session {session_id} has been created.")
-        session.draft_message_id = message.id
-        session.message_id = message.id
-        # Pin the message to the channel
-        await message.pin()
-    
-    @bot.slash_command(name='premadedraft', description='Start a team draft with premade teams', guild_id=None)
-    async def premade_draft(interaction: discord.Interaction):
-        await interaction.response.defer()
+    @bot.slash_command(name='listteams', description='List all registered teams')
+    async def list_teams(interaction: discord.Interaction):
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                # Fetch all teams sorted by their name
+                stmt = select(Team).order_by(Team.TeamName.asc())
+                result = await session.execute(stmt)
+                teams = result.scalars().all()
 
-        draft_start_time = datetime.now().timestamp()
-        session_id = f"{interaction.user.id}-{int(draft_start_time)}"
-        draft_id = ''.join(secrets.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
-        draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
+            # If there are no teams registered
+            if not teams:
+                await interaction.response.send_message("No teams have been registered yet.", ephemeral=True)
+                return
 
-        session = DraftSession(session_id)
-        session.guild_id = interaction.guild_id
-        session.draft_link = draft_link
-        session.draft_id = draft_id
-        session.draft_start_time = draft_start_time
-        session.session_type = "premade"
+            # Create an embed to list all teams
+            embed = discord.Embed(title="Registered Teams", description="", color=discord.Color.blue())
+            
+            # Adding each team to the embed description
+            for team in teams:
+                embed.description += f"- {team.TeamName}\n"
 
-        add_session(session_id, session)
+            await interaction.response.send_message(embed=embed)
 
-        embed = discord.Embed(
-            title=f"MTGO Premade Team Draft Queue - Started <t:{int(draft_start_time)}:R>",
-            description="\n**How to use bot**:\n1. Click Team A or Team B to join that team. Enter the draftmancer link. Draftmancer host still has to update settings and  from CubeCobra.\n" +
-                            "2. When all teams are joined, Push Ready Check. Once everyone is ready, push Generate Seating Order\n" +
-                            "3. Draftmancer host needs to adjust table to match seating order. **TURN OFF RANDOM SEATING IN DRAFTMANCER** \n" +
-                            "4. After the draft, come back to this message (it'll be in pins) and click Create Chat Rooms. After 5 seconds chat rooms will be ready and you can press Post Pairings. This takes 10 seconds to process.\n" +
-                            "5. You will now have a private team chat with just your team and a shared draft chat that has pairings and match results. You can select the Match Results buttons to report results.\n" +
-                            "6. Chat channels will automatically close around five hours after the /startdraft command was used." +
-                            f"\n\n**Draftmancer Session**: **[Join Here]({draft_link})**",
-            color=discord.Color.blue()
-        )
-        embed.add_field(name="Team A", value="No players yet.", inline=False)
-        embed.add_field(name="Team B", value="No players yet.", inline=False)
-        embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1219018393471025242/1219410709440495746/image.png?ex=660b33b8&is=65f8beb8&hm=b7e40e9b872d8e04dd70a30c5abc15917379f9acb7dce74ca0372105ec98b468&")
+    @bot.slash_command(name='list_commands', description='Lists all available slash commands')
+    async def list_commands(ctx):
+        # Manually creating a list of commands and descriptions
+        commands_list = {
+            "/list_commands": "Lists all available slash commands.",
+            "/startdraft": "Opens an open-play queue for a team draft using randomized teams",
+            "/premadedraft": "Opens a team draft queue for premade teams and league drafts",
+            "/registerteam": "Registers a team for the league draft",
+            "/listteams": "Provides a list of currently registered team in alphabetical order",
+        }
+        
+        # Formatting the list for display
+        commands_description = "\n".join([f"{cmd}: {desc}" for cmd, desc in commands_list.items()])
+        
+        # Creating an embed to nicely format the list of commands
+        embed = discord.Embed(title="Available Commands", description=commands_description, color=discord.Color.blue())
+        
+        await ctx.respond(embed=embed)
 
-        view = PersistentView(session_id)
-    
-        message = await interaction.followup.send(embed=embed, view=view)
-        print(f"Premade Draft: {session_id} has been created.")
-        session.draft_message_id = message.id
-        session.message_id = message.id
+    @aiocron.crontab('00 09 * * *', tz=pytz.timezone('US/Eastern'))
+    async def daily_league_results():
+        # Fetch all guilds the bot is in and look for the "league-summary" channel
+        for guild in bot.guilds:
+            channel = discord.utils.get(guild.text_channels, name="league-summary")
+            if channel:
+                break  # If we find the channel, we exit the loop
+        
+        if not channel:  # If the bot cannot find the channel in any guild, log an error and return
+            print("Error: 'league-summary' channel not found.")
+            return
+
+        eastern_tz = pytz.timezone('US/Eastern')
+        now = datetime.now(eastern_tz)
+        start_time = eastern_tz.localize(datetime(now.year, now.month, now.day, 3, 0)) - timedelta(days=1)  # 3 AM previous day
+        end_time = start_time + timedelta(hours=24)  # 3 AM current day
+
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                stmt = select(Match).where(Match.MatchDate.between(start_time, end_time),
+                                        not_(Match.DraftWinnerID == None))
+                results = await db_session.execute(stmt)
+                matches = results.scalars().all()
+
+                if not matches:
+                    await channel.send("No matches found in the last 24 hours.")
+                    return
+                date_str = start_time.strftime("%B %d, %Y")
+                embed = discord.Embed(title=f"Daily League Results - {date_str}", description="", color=discord.Color.blue())
+                for match in matches:
+                    result_line = f"**{match.TeamAName}** defeated **{match.TeamBName}** ({match.TeamAWins} - {match.TeamBWins})" if match.TeamAWins > match.TeamBWins else f"**{match.TeamBName}** defeated **{match.TeamAName}** ({match.TeamBWins} - {match.TeamAWins})"
+                    embed.description += result_line + "\n"
+
+                await channel.send(embed=embed)
+
+    @aiocron.crontab('15 09 * * *', tz=pytz.timezone('US/Eastern'))
+    async def daily_random_results():
+        # Fetch all guilds the bot is in and look for the "league-summary" channel
+        for guild in bot.guilds:
+            channel = discord.utils.get(guild.text_channels, name="daily-summary-open-queue")
+            if channel:
+                break  # If we find the channel, we exit the loop
+        
+        if not channel:  # If the bot cannot find the channel in any guild, log an error and return
+            print("Error: 'daily-summary-open-queue' channel not found.")
+            return
+
+        eastern_tz = pytz.timezone('US/Eastern')
+        now = datetime.now(eastern_tz)
+        start_time = eastern_tz.localize(datetime(now.year, now.month, now.day, 3, 0)) - timedelta(days=1)  # 3 AM previous day
+        end_time = start_time + timedelta(hours=24)  # 3 AM current day
+
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                # Query for DraftSessions within the time range
+                stmt = select(DraftSession).where(
+                    DraftSession.teams_start_time.between(start_time, end_time),
+                    not_(DraftSession.victory_message_id_draft_chat == None),
+                    DraftSession.session_type == "random"
+                )
+                result = await db_session.execute(stmt)
+                sessions = result.scalars().all()
+
+                if not sessions:
+                    await channel.send("No matches found in the last 24 hours.")
+                    return
+                
+                all_usernames = []
+                for session in sessions:
+                    # Directly use the sign_ups dictionary
+                    usernames = list(session.sign_ups.values())
+                    all_usernames.extend(usernames)
+
+                username_counts = Counter(all_usernames)
+                top_five_drafters = username_counts.most_common(5)
+
+
+                drafter_counts = Counter()
+                for session in sessions:
+                    undefeated_drafters = list(session.trophy_drafters) if session.trophy_drafters else []
+                    drafter_counts.update(undefeated_drafters)
+
+                # Format the drafter names and their counts for display
+                undefeated_drafters_field_value = "\n".join([f"{drafter} x{count}" if count > 1 else drafter for drafter, count in drafter_counts.items()])
+
+
+                total_drafts = len(sessions)
+
+                date_str = start_time.strftime("%B %d, %Y")
+                top_drafters_field_value = "\n".join([f"**{name}:** {count} drafts" for name, count in top_five_drafters])
+                embed = discord.Embed(title=f"Open Queue Daily Results - {date_str}", description="", color=discord.Color.blue())
+                embed.add_field(name="**Completed Drafts**", value=total_drafts, inline=False)
+                embed.add_field(name="**Top 5 Drafters**\n", value=top_drafters_field_value, inline=False)
+                embed.add_field(name="**Trophy Drafters**", value=undefeated_drafters_field_value or "No trophies :(", inline=False)
+
+                await channel.send(embed=embed)
