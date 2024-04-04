@@ -55,8 +55,12 @@ async def league_commands(bot):
         embed = discord.Embed(title="Available Commands", description=commands_description, color=discord.Color.blue())
         
         await ctx.respond(embed=embed)
+    
+    @bot.slash_command(name='standings', description='Display the team standings by points earned')
+    async def standings(interaction: discord.Interaction):
+        await post_standings(interaction)
 
-    @aiocron.crontab('00 09 * * *', tz=pytz.timezone('US/Eastern'))
+    @aiocron.crontab('01 09 * * *', tz=pytz.timezone('US/Eastern'))
     async def daily_league_results():
         # Fetch all guilds the bot is in and look for the "league-summary" channel
         for guild in bot.guilds:
@@ -152,3 +156,63 @@ async def league_commands(bot):
                 embed.add_field(name="**Trophy Drafters**", value=undefeated_drafters_field_value or "No trophies :(", inline=False)
 
                 await channel.send(embed=embed)
+        
+    @aiocron.crontab('00 09 * * *', tz=pytz.timezone('US/Eastern'))
+    async def post_league_standings():
+        # Fetch all guilds the bot is in and look for the "league-summary" channel
+        for guild in bot.guilds:
+            channel = discord.utils.get(guild.text_channels, name="league-summary")
+            if channel:
+                break  # If we find the channel, we exit the loop
+        
+        if not channel:  # If the bot cannot find the channel in any guild, log an error and return
+            print("Error: 'league-summary' channel not found.")
+            return
+        
+        time = datetime.now()
+        count = 1
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                # Fetch teams ordered by PointsEarned (DESC) and MatchesCompleted (ASC)
+                stmt = (select(Team)
+                    .where(Team.MatchesCompleted >= 1)
+                    .order_by(Team.PointsEarned.desc(), Team.MatchesCompleted.asc()))
+                results = await session.execute(stmt)
+                teams = results.scalars().all()
+                
+                # Check if teams exist
+                if not teams:
+                    await channel.send("No teams have been registered yet.", ephemeral=True)
+                    return
+
+                # Format the standings as an embed
+                embed = discord.Embed(title="Team Standings", description=f"Standings as of <t:{int(time.timestamp())}:F>", color=discord.Color.gold())
+                for team in teams:
+                    embed.add_field(name=f"{count}. {team.TeamName}", value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}", inline=False)
+                    count += 1
+                await channel.send(embed=embed)
+
+                
+async def post_standings(interaction):
+    time = datetime.now()
+    count = 1
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            # Fetch teams ordered by PointsEarned (DESC) and MatchesCompleted (ASC)
+            stmt = (select(Team)
+                .where(Team.MatchesCompleted >= 1)
+                .order_by(Team.PointsEarned.desc(), Team.MatchesCompleted.asc()))
+            results = await session.execute(stmt)
+            teams = results.scalars().all()
+            
+            # Check if teams exist
+            if not teams:
+                await interaction.response.send_message("No teams have been registered yet.", ephemeral=True)
+                return
+
+            # Format the standings as an embed
+            embed = discord.Embed(title="Team Standings", description=f"Standings as of <t:{int(time.timestamp())}:F>", color=discord.Color.gold())
+            for team in teams:
+                embed.add_field(name=f"{count}. {team.TeamName}", value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}", inline=False)
+                count += 1
+            await interaction.response.send_message(embed=embed)
