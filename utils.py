@@ -2,7 +2,7 @@ import random
 import discord
 import asyncio
 import pytz
-from sqlalchemy import update, select, func, not_
+from sqlalchemy import update, select, func, not_, desc
 from datetime import datetime, timedelta
 from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult, PlayerStats, Match, Team, WeeklyLimit
 from sqlalchemy.orm import selectinload
@@ -682,7 +682,11 @@ async def balance_teams(player_ids, guild):
                 db_session.add(player_stat)
         await db_session.commit()
 
-        stmt = select(PlayerStats).where(PlayerStats.player_id.in_(player_ids)).order_by(PlayerStats.true_skill_mu.desc())
+        stmt = select(PlayerStats).where(
+            PlayerStats.player_id.in_(player_ids)
+        ).order_by(
+            desc(PlayerStats.true_skill_mu - PlayerStats.true_skill_sigma)
+        )
         result = await db_session.execute(stmt)
         ordered_players = result.scalars().all()
 
