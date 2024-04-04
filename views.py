@@ -422,6 +422,7 @@ class PersistentView(discord.ui.View):
                     sign_up_tags = ' '.join([f"<@{user_id}>" for user_id in session.sign_ups.keys()])
                     await draft_chat_channel.send(f"Pairing posted below. Good luck in your matches! {sign_up_tags}")
                     draft_summary_message = await draft_chat_channel.send(embed=draft_summary_embed)
+                    await draft_summary_message.pin()
                     session.draft_summary_message_id = str(draft_summary_message.id)
                 
                 draft_channel_id = int(session.draft_channel_id)  # Ensure this is where the message exists

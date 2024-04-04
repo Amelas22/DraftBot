@@ -367,23 +367,23 @@ async def calculate_three_zero_drafters(session, draft_session_id, guild):
 async def cleanup_sessions_task(bot):
     while True:
         current_time = datetime.now()
-        # Assuming AsyncSessionLocal is your sessionmaker factory
-        async with AsyncSessionLocal() as session:  # Creating a session instance correctly
-            async with session.begin():
+        async with AsyncSessionLocal() as db_session:  # Use a different variable name to avoid confusion with the session object
+            async with db_session.begin():
                 # Fetch sessions that are past their deletion time
                 stmt = select(DraftSession).where(DraftSession.deletion_time <= current_time)
-                results = await session.execute(stmt)
+                results = await db_session.execute(stmt)
                 sessions_to_cleanup = results.scalars().all()
 
                 for session in sessions_to_cleanup:
-                    # Attempt to delete each channel associated with the session
-                    for channel_id in session.channel_ids:
-                        channel = bot.get_channel(int(channel_id))
-                        if channel:  # Check if channel was found
-                            try:
-                                await channel.delete(reason="Session expired.")
-                            except discord.HTTPException as e:
-                                print(f"Failed to delete channel: {channel.name}. Reason: {e}")
+                    # Check if channel_ids is not None and is iterable before attempting to iterate
+                    if session.channel_ids:
+                        for channel_id in session.channel_ids:
+                            channel = bot.get_channel(int(channel_id))
+                            if channel:  # Check if channel was found
+                                try:
+                                    await channel.delete(reason="Session expired.")
+                                except discord.HTTPException as e:
+                                    print(f"Failed to delete channel: {channel.name}. Reason: {e}")
 
                     # Attempt to delete the message associated with the session from the draft channel
                     draft_channel = bot.get_channel(int(session.draft_channel_id))
