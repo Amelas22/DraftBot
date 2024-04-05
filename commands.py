@@ -3,7 +3,6 @@ from session import register_team_to_db, Team, AsyncSessionLocal, Match, MatchRe
 from sqlalchemy import select, not_
 import aiocron
 import pytz
-import json
 from datetime import datetime, timedelta
 from collections import Counter
 
@@ -41,11 +40,15 @@ async def league_commands(bot):
     async def list_commands(ctx):
         # Manually creating a list of commands and descriptions
         commands_list = {
-            "/list_commands": "Lists all available slash commands.",
-            "/startdraft": "Opens an open-play queue for a team draft using randomized teams",
-            "/premadedraft": "Opens a team draft queue for premade teams and league drafts",
-            "/registerteam": "Registers a team for the league draft",
-            "/listteams": "Provides a list of currently registered team in alphabetical order",
+            "/list_commands": "Lists all available slash commands.\n",
+            "**Lobby Commands**" : "\n",
+            "**/startdraft**": "Opens an open-play lobby for a team draft using randomized teams",
+            "**/leaguedraft**": "Opens a lobby for League Drafts (results tracked)",
+            "**/premadedraft**": "Opens a lobby for premade teams (results NOT tracked)\n",
+            "**League Commands**": "\n",
+            "**/registerteam**": "Registers a team for the league draft",
+            "**/listteams**": "Displays a list of currently registered teams in alphabetical order",
+            "**/standings**": "Displays current league standings"
         }
         
         # Formatting the list for display
@@ -56,6 +59,14 @@ async def league_commands(bot):
         
         await ctx.respond(embed=embed)
     
+
+    @bot.slash_command(name="post_challenge", description="Post a challenge for your team")
+    async def postchallenge(interaction: discord.Interaction):
+
+            from league import InitialPostView
+            initial_view = InitialPostView()
+            await interaction.response.send_message("Please select the range for your team", view=initial_view, ephemeral=True)
+
     @bot.slash_command(name='standings', description='Display the team standings by points earned')
     async def standings(interaction: discord.Interaction):
         await post_standings(interaction)
@@ -68,18 +79,6 @@ async def league_commands(bot):
         initial_view = InitialRangeView()
         await interaction.response.send_message("Step 1 of 2: Please select the range for your team and the opposing team:", view=initial_view, ephemeral=True)
         
-    # @bot.slash_command(name="leaguedraft", description="Start a league draft with chosen teams and cube.")
-    # async def leaguedraft(interaction: discord.Interaction):
-
-
-    #     from league import LeagueDraftView
-    #     view = LeagueDraftView()
-    #     # Populate team selects asynchronously
-    #     await view.your_team_select.populate()
-    #     await view.opponent_team_select.populate()
-        
-    #     await interaction.response.send_message("Please select the cube and teams for the league draft:", view=view, ephemeral=True)
-
 
     @aiocron.crontab('01 09 * * *', tz=pytz.timezone('US/Eastern'))
     async def daily_league_results():

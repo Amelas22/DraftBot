@@ -54,15 +54,15 @@ class PersistentView(discord.ui.View):
     
     async def track_draft_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with AsyncSessionLocal() as session:
-                async with session.begin():
-                    draft_session = await get_draft_session(self.draft_session_id)
-                    # Directly update the 'sign_ups' of the draft session
-                    await session.execute(
-                        update(DraftSession).
-                        where(DraftSession.session_id == self.draft_session_id).
-                        values(tracked_draft = not draft_session.tracked_draft)
-                    )
-                    await session.commit()
+            async with session.begin():
+                draft_session = await get_draft_session(self.draft_session_id)
+                # Directly update the 'sign_ups' of the draft session
+                await session.execute(
+                    update(DraftSession).
+                    where(DraftSession.session_id == self.draft_session_id).
+                    values(tracked_draft = not draft_session.tracked_draft)
+                )
+                await session.commit()
         
         draft_session = await get_draft_session(self.draft_session_id)
         # update the button's label and style directly based on the new tracked_draft state

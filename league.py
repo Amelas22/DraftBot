@@ -4,10 +4,11 @@ WIP Code
 
 import discord
 #from discord.ext import commands
-from discord.ui import Select, View #Modal, InputText
+from discord.ui import Select, View, Modal, InputText, Button
+from discord import ButtonStyle, Embed, Interaction
 from datetime import datetime, timedelta
-from session import AsyncSessionLocal, Team, DraftSession, Match
-from sqlalchemy import select
+from session import AsyncSessionLocal, Team, DraftSession, Match, Challenge
+from sqlalchemy import select, update
 import random
 
 
@@ -221,115 +222,243 @@ class LeagueDraftView(discord.ui.View):
 
 
 
+class InitialPostView(View):
+    def __init__(self):
+        super().__init__()
+        self.your_team_range = None
+        self.add_item(RangeSelect("Your Team Range", "your_team_range"))
+    
+    async def check_and_send_team_cube(self, interaction: discord.Interaction):
+        if self.your_team_range:
+            new_view = PostTeamView()
+            await new_view.your_team_select.populate(self.your_team_range)
+            await interaction.followup.send("Choose your team", view=new_view, ephemeral=True)
+
+class PostTeamView(View):
+    def __init__(self):
+        super().__init__()
+        self.your_team_select = None
+        self.your_team_select = PostTeamSelect("Your Team", "your_team_choice")
+        self.add_item(self.your_team_select)
+
+class ChallengeTimeModal(Modal):
+    def __init__(self, team_name, *args, **kwargs):
+        super().__init__(title="Schedule Your Match", *args, **kwargs)
+        self.team_name = team_name
+        # Update the placeholder to reflect the desired format
+        self.add_item(InputText(label="MM/DD/YY HH:MM. Use Local Time & 24HR Clock", placeholder="MM/DD/YY HH:MM", custom_id="start_time"))
+
+    async def callback(self, interaction: discord.Interaction):
+        # Update the parsing to match the new format
+        try:
+            await interaction.response.defer()
+            async with AsyncSessionLocal() as db_session: 
+                async with db_session.begin():
+                    team_stmt = select(Team).where(Team.TeamName == self.team_name)
+                    team_update = await db_session.scalar(team_stmt)
+
+                    start_time = datetime.strptime(self.children[0].value, "%m/%d/%y %H:%M")
+                    formatted_time = f"<t:{int(start_time.timestamp())}:F>"  # Markdown format for dynamic time display
+                    
+                    async with AsyncSessionLocal() as session:
+                            async with session.begin():
+                                new_challenge = Challenge(
+                                    team_a_id = team_update.TeamID,
+                                    guild_id = str(interaction.guild_id),
+                                    team_b_id = None,
+                                    start_time = start_time,
+                                    team_a = team_update.TeamName,
+                                    team_b = None,
+                                    message_id = None,
+                                    channel_id = None,
+
+                                )
+                                session.add(new_challenge)
+                                await db_session.commit()
+                    # Post the challenge with the selected team and formatted time
+                    embed = discord.Embed(title=f"{self.team_name} is looking for a match!", description=f"Proposed Time: {formatted_time}\n\nNo Opponent Yet. Sign Up below!", color=discord.Color.blue())
+
+                    view = ChallengeView(new_challenge.id, new_challenge.team_b)
+                    
+                    message = await interaction.followup.send(embed=embed, view=view)
+                    async with AsyncSessionLocal() as db_session:
+                        async with db_session.begin():
+                            challenge_to_update = await db_session.get(Challenge, new_challenge.id)
+                            challenge_to_update.message_id = str(message.id)
+                            challenge_to_update.channel_id = str(message.channel.id)
+                            await db_session.commit()
+              
+                    #message.pin()
+        except ValueError:
+            # Handle the case where the date format is incorrect
+            await interaction.response.send_message("The date format is incorrect. Please use MM/DD/YY HH:MM format.", ephemeral=True)
 
 
+class PostTeamSelect(Select):
+    def __init__(self, placeholder, attribute_name):
+        self.attribute_name = attribute_name
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=[])
 
 
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            await interaction.response.send_modal(ChallengeTimeModal(team_name=self.values[0]))
+        except Exception as e:
+            print(f"Error in Team Select callback: {e}")
 
 
+    async def populate(self, team_range):
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                if team_range == "A-M":
+                    stmt = select(Team).where(Team.TeamName.ilike("a%") |
+                                            Team.TeamName.ilike("b%") |
+                                            Team.TeamName.ilike("c%") |
+                                            Team.TeamName.ilike("d%") |
+                                            Team.TeamName.ilike("e%") |
+                                            Team.TeamName.ilike("f%") |
+                                            Team.TeamName.ilike("g%") |
+                                            Team.TeamName.ilike("h%") |
+                                            Team.TeamName.ilike("i%") |
+                                            Team.TeamName.ilike("j%") |
+                                            Team.TeamName.ilike("k%") |
+                                            Team.TeamName.ilike("l%") |
+                                            Team.TeamName.ilike("m%")).order_by(Team.TeamName.asc())
+                else:  # N-Z
+                    stmt = select(Team).where(Team.TeamName.ilike("n%") |
+                                            Team.TeamName.ilike("o%") |
+                                            Team.TeamName.ilike("p%") |
+                                            Team.TeamName.ilike("q%") |
+                                            Team.TeamName.ilike("r%") |
+                                            Team.TeamName.ilike("s%") |
+                                            Team.TeamName.ilike("t%") |
+                                            Team.TeamName.ilike("u%") |
+                                            Team.TeamName.ilike("v%") |
+                                            Team.TeamName.ilike("w%") |
+                                            Team.TeamName.ilike("x%") |
+                                            Team.TeamName.ilike("y%") |
+                                            Team.TeamName.ilike("z%")).order_by(Team.TeamName.asc())
+
+                result = await session.execute(stmt)
+                teams = result.scalars().all()
+                self.options = [discord.SelectOption(label=team.TeamName, value=str(team.TeamName)) for team in teams]
 
 
-# class TeamSelectView(discord.ui.View):
-#     def __init__(self, teams, *args, **kwargs):
-#         super().__init__(timeout=None, *args, **kwargs)
-#         # Dynamically add the team select dropdown based on registered teams
-#         self.add_item(TeamSelect(teams))
+class ChallengeView(View):
+    def __init__(self, challenge_id, team_b):
+        self.challenge_id = challenge_id
+        self.team_b = team_b
+        super().__init__(timeout=None)
+        # Add the "Sign Up" button on initialization
+        self.add_buttons()
 
-# class OpponentSelectView(discord.ui.View):
-#     def __init__(self, teams, *args, **kwargs):
-#         super().__init__(timeout=None, *args, **kwargs)
-#         # Dynamically add the team select dropdown based on registered teams
-#         self.add_item(TeamSelect(teams, is_signup=True))
+    def add_buttons(self):
+        self.add_item(self.create_button("Sign Up", "green", f"sign_up_{self.challenge_id}", self.sign_up_callback))
+        # self.add_item(self.create_button("Change Time", "primary", f"sign_up_{self.challenge_id}", self.sign_up_callback))
 
-# class TeamSelect(discord.ui.Select):
-#     def __init__(self, teams, is_signup=False):
-#         self.is_signup = is_signup
-#         options = [
-#             discord.SelectOption(label=team.TeamName, value=str(team.TeamName)) 
-#             for team in teams
-#         ]
-#         super().__init__(placeholder="Choose your team", min_values=1, max_values=1, options=options)
+    def create_button(self, label, style, custom_id, custom_callback, disabled=False):
+        style = getattr(discord.ButtonStyle, style)
+        from views import CallbackButton
+        button = CallbackButton(label=label, style=style, custom_id=custom_id, custom_callback=custom_callback, disabled=disabled)
+        return button
 
-#     async def callback(self, interaction: discord.Interaction):
-#         if self.is_signup:
-#             # If it's for sign-up, do something else, like simply sending a message
-#             team_name=self.values[0]
-#             return team_name
-#         else:
-#             await interaction.response.send_modal(ChallengeTimeModal(team_name=self.values[0]))
-
-# class ChallengeTimeModal(Modal):
-#     def __init__(self, team_name, *args, **kwargs):
-#         super().__init__(title="Schedule Your Match", *args, **kwargs)
-#         self.team_name = team_name
-#         # Update the placeholder to reflect the desired format
-#         self.add_item(InputText(label="Use your local time & 24 hour clock", placeholder="MM/DD/YY HH:MM", custom_id="start_time"))
-
-#     async def callback(self, interaction: discord.Interaction):
-#         await interaction.response.defer()
-#         async with AsyncSessionLocal() as db_session: 
-#             async with db_session.begin():
-#                 team_stmt = select(Team).where(Team.TeamName == self.team_name)
-#                 team_update = await db_session.scalar(team_stmt)
-
-#                 start_time = datetime.strptime(self.children[0].value, "%m/%d/%y %H:%M")
-#                 formatted_time = f"<t:{int(start_time.timestamp())}:F>"  # Markdown format for dynamic time display
-#                 # Post the challenge with the selected team and formatted time
-#                 embed = discord.Embed(title=f"{self.team_name} is looking for a match!", description=f"Start Time: {formatted_time}\n\nNo Opponent Yet. Sign Up below!", color=discord.Color.blue())
-#                 message = await interaction.followup.send(embed=embed)
-#                 async with AsyncSessionLocal() as session:
-#                         async with session.begin():
-#                             new_challenge = Challenge(
-#                                 message_id = str(message.id),
-#                                 guild_id = str(interaction.guild_id),
-#                                 channel_id = str(message.channel.id),
-#                                 team_a_id = team_update.TeamID,
-#                                 team_b_id = None,
-#                                 start_time = start_time,
-#                                 team_a = team_update.TeamName,
-#                                 team_b = None
-#                             )
-#                             session.add(new_challenge)
-#                             await db_session.commit()
-#                 #message.pin()
+    async def sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.team_b:
+            initial_view = OpponentPostView(self.challenge_id)
+            await interaction.response.send_message("Please select the range for your team", view=initial_view, ephemeral=True)
 
 
-# class SignUpView(discord.ui.View):
-#     def __init__(self, team, start_time, *args, **kwargs):
-#         super().__init__(timeout=None, *args, **kwargs)
-#         self.team = team
-#         self.start_time = start_time
+class OpponentPostView(View):
+    def __init__(self, challenge_id):
+        super().__init__()
+        self.challenge_id = challenge_id
+        self.your_team_range = None
+        self.add_item(RangeSelect("Your Team Range", "your_team_range"))
+    
+    async def check_and_send_team_cube(self, interaction: discord.Interaction):
+        if self.your_team_range:
+            new_view = OpponentTeamView(self.challenge_id)
+            await new_view.your_team_select.populate(self.your_team_range)
+            await interaction.followup.send("Choose your team", view=new_view, ephemeral=True)
 
-#         self.add_item(discord.ui.Button(label="Sign Up", style=discord.ButtonStyle.green, custom_id=f"{self.start_time}_sign_up_button", callback=self.sign_up))
+class OpponentTeamView(View):
+    def __init__(self, challenge_id):
+        super().__init__()
+        self.challenge_id = challenge_id
+        self.your_team_select = None
+        self.your_team_select = OpponentTeamSelect("Your Team", "your_team_choice")
+        self.add_item(self.your_team_select)
 
-#     async def sign_up(self, interaction: discord.Interaction, button: discord.ui.Button):
-#         message_id = interaction.message.id
-#         async with AsyncSessionLocal() as session:
-#             async with session.begin():
-#                 # Fetch all teams sorted by their name
-#                 stmt = select(Team).order_by(Team.TeamName.asc())
-#                 result = await session.execute(stmt)
-#                 teams = result.scalars().all()
+    async def check_and_update_embed(self, interaction: discord.Interaction, selected_team_name):
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                team_stmt = select(Team).where(Team.TeamName == selected_team_name)
+                team_update = await db_session.scalar(team_stmt)
 
-#             # If there are no teams registered
-#             if not teams:
-#                 await interaction.response.send_message("No teams have been registered yet.", ephemeral=True)
-#                 return
-#             opponent = interaction.response.send_message("Choose your team to sign up:", view=OpponentSelectView(teams), ephemeral=True)
-#             team_stmt = select(Team).where(Team.TeamName == str(opponent))
-#             team_result = await session.execute(team_stmt)
-#             opposing_team = team_result.scalars().first()
+                async with AsyncSessionLocal() as session:
+                    challenge_to_update = await db_session.get(Challenge, self.challenge_id)
+                    challenge_to_update.team_b = str(selected_team_name)
+                    challenge_to_update.team_b_id = team_update.TeamID
+                    await db_session.commit()
+                bot = interaction.client
+                channel = bot.get_channel(int(challenge_to_update.channel_id))
+                message = await channel.fetch_message(int(challenge_to_update.message_id))
+                formatted_time=f"<t:{int(challenge_to_update.start_time.timestamp())}:F>"
+                updated_embed = discord.Embed(title=f"{challenge_to_update.team_a} v. {challenge_to_update.team_b} is scheduled!", description=f"Proposed Time: {formatted_time}", color=discord.Color.gold())
 
-#             challenge_stmt = select(Challenge).where(Challenge.message_id == str(message_id))
-#             challenge_result = await session.execute(challenge_stmt)
-#             challenge = challenge_result.scalars().first()
-            
-#             challenge.team_b_id = opposing_team.TeamID
-#             challenge.team_b = opponent
-            
-#             bot = interaction.client
-#             guild = bot.get_guild(int(challenge.guild_id))
-#             channel = guild.get_channel(int(challenge.channel_id))
-#             challenge_message = await channel.fetch_message(int(challenge.message_id))
-#             updated_embed = discord.Embed(title=f"{challenge.team_a} v. {challenge.team_b}", description=f"Scheduled Start Time: {challenge.start_time}", color=discord.Color.green())
-#             await challenge_message.edit(embed=updated_embed)
+
+                await message.edit(embed=updated_embed)
+
+class OpponentTeamSelect(Select):
+    def __init__(self, placeholder, attribute_name):
+        self.attribute_name = attribute_name
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=[])
+
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_team_name = self.values[0]
+        try:
+            setattr(self.view, self.attribute_name, selected_team_name)
+            await interaction.response.defer(ephemeral=True)
+            await self.view.check_and_update_embed(interaction, selected_team_name) 
+        
+        except Exception as e:
+            print(f"Error in Opponent Select callback: {e}")
+
+
+    async def populate(self, team_range):
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                if team_range == "A-M":
+                    stmt = select(Team).where(Team.TeamName.ilike("a%") |
+                                            Team.TeamName.ilike("b%") |
+                                            Team.TeamName.ilike("c%") |
+                                            Team.TeamName.ilike("d%") |
+                                            Team.TeamName.ilike("e%") |
+                                            Team.TeamName.ilike("f%") |
+                                            Team.TeamName.ilike("g%") |
+                                            Team.TeamName.ilike("h%") |
+                                            Team.TeamName.ilike("i%") |
+                                            Team.TeamName.ilike("j%") |
+                                            Team.TeamName.ilike("k%") |
+                                            Team.TeamName.ilike("l%") |
+                                            Team.TeamName.ilike("m%")).order_by(Team.TeamName.asc())
+                else:  # N-Z
+                    stmt = select(Team).where(Team.TeamName.ilike("n%") |
+                                            Team.TeamName.ilike("o%") |
+                                            Team.TeamName.ilike("p%") |
+                                            Team.TeamName.ilike("q%") |
+                                            Team.TeamName.ilike("r%") |
+                                            Team.TeamName.ilike("s%") |
+                                            Team.TeamName.ilike("t%") |
+                                            Team.TeamName.ilike("u%") |
+                                            Team.TeamName.ilike("v%") |
+                                            Team.TeamName.ilike("w%") |
+                                            Team.TeamName.ilike("x%") |
+                                            Team.TeamName.ilike("y%") |
+                                            Team.TeamName.ilike("z%")).order_by(Team.TeamName.asc())
+
+                result = await session.execute(stmt)
+                teams = result.scalars().all()
+                self.options = [discord.SelectOption(label=team.TeamName, value=str(team.TeamName)) for team in teams]
+
