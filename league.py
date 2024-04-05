@@ -241,6 +241,29 @@ class PostTeamView(View):
         self.your_team_select = PostTeamSelect("Your Team", "your_team_choice")
         self.add_item(self.your_team_select)
 
+
+class AdjustTimeModal(Modal):
+    def __init__(self, match_id, *args, **kwargs):
+        self.match_id = match_id
+        super().__init__(title="Change the time of your match", *args, **kwargs)
+        # Update the placeholder to reflect the desired format
+        self.add_item(InputText(label="MM/DD/YY HH:MM. Use Local Time & 24HR Clock", placeholder="MM/DD/YY HH:MM", custom_id="start_time"))
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                challenge_to_update = await db_session.get(Challenge, self.match_id)
+                challenge_to_update.start_time = datetime.strptime(self.children[0].value, "%m/%d/%y %H:%M")
+                await db_session.commit()
+            bot = interaction.client
+            channel = bot.get_channel(int(challenge_to_update.channel_id))
+            message = await channel.fetch_message(int(challenge_to_update.message_id))
+            formatted_time = f"<t:{int(challenge_to_update.start_time.timestamp())}:F>"
+            updated_embed = discord.Embed(title=f"{challenge_to_update.team_a} v. {challenge_to_update.team_b} is scheduled!" if challenge_to_update.team_b else f"{challenge_to_update.team_a} is looking for a match!\n\nNo Opponent Yet. Sign Up below!", 
+                                          description=f"Proposed Time: {formatted_time}", color=discord.Color.gold() if challenge_to_update.team_b else discord.Color.blue())
+
+            await message.edit(embed=updated_embed)
+
 class ChallengeTimeModal(Modal):
     def __init__(self, team_name, *args, **kwargs):
         super().__init__(title="Schedule Your Match", *args, **kwargs)
@@ -354,7 +377,7 @@ class ChallengeView(View):
 
     def add_buttons(self):
         self.add_item(self.create_button("Sign Up", "green", f"sign_up_{self.challenge_id}", self.sign_up_callback))
-        # self.add_item(self.create_button("Change Time", "primary", f"sign_up_{self.challenge_id}", self.sign_up_callback))
+        self.add_item(self.create_button("Change Time", "primary", f"change_time_{self.challenge_id}", self.change_time_callback))
 
     def create_button(self, label, style, custom_id, custom_callback, disabled=False):
         style = getattr(discord.ButtonStyle, style)
@@ -366,7 +389,14 @@ class ChallengeView(View):
         if not self.team_b:
             initial_view = OpponentPostView(self.challenge_id)
             await interaction.response.send_message("Please select the range for your team", view=initial_view, ephemeral=True)
+        else:
+            await interaction.response.send_message("Two Teams are already signed up!")
 
+    async def change_time_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.response.send_modal(AdjustTimeModal(self.challenge_id))
+        except Exception as e:
+            print(f"Error in Team Select callback: {e}")
 
 class OpponentPostView(View):
     def __init__(self, challenge_id):
