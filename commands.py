@@ -60,6 +60,19 @@ async def league_commands(bot):
     async def standings(interaction: discord.Interaction):
         await post_standings(interaction)
 
+    @bot.slash_command(name="leaguedraft", description="Start a league draft with chosen teams and cube.")
+    async def leaguedraft(interaction: discord.Interaction):
+
+
+        from league import LeagueDraftView
+        view = LeagueDraftView()
+        # Populate team selects asynchronously
+        await view.your_team_select.populate()
+        await view.opponent_team_select.populate()
+        
+        await interaction.response.send_message("Please select the cube and teams for the league draft:", view=view, ephemeral=True)
+
+
     @aiocron.crontab('01 09 * * *', tz=pytz.timezone('US/Eastern'))
     async def daily_league_results():
         # Fetch all guilds the bot is in and look for the "league-summary" channel

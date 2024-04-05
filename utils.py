@@ -19,22 +19,21 @@ async def split_into_teams(bot, draft_session_id):
     
     # Check if there are any sign-ups to split into teams.
     sign_ups = draft_session.sign_ups
-    variable = random.randint (61, 100)
-    if variable > 60:
+    if random.randint(1, 100) > 60:
         draft_session.true_skill_draft = False
     else:
         draft_session.true_skill_draft = True
 
     if sign_ups:
         sign_ups_list = list(sign_ups.keys())
-        if draft_session.true_skill_draft == False:
+        if draft_session.true_skill_draft:
+            guild = bot.get_guild(int(draft_session.guild_id))
+            team_a, team_b = await balance_teams(sign_ups_list, guild)
+        else:
             random.shuffle(sign_ups_list)
             mid_point = len(sign_ups_list) // 2
             team_a = sign_ups_list[:mid_point]
             team_b = sign_ups_list[mid_point:]
-        else:
-            guild = bot.get_guild(int(draft_session.guild_id))
-            team_a, team_b = await balance_teams(sign_ups_list, guild)
 
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
@@ -215,7 +214,7 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
             title = "Draft Outcome"
 
     elif team_a_wins == 0 and team_b_wins == 0:
-        title = f"Draft-{draft_session.draft_id} Standings"
+        title = f"Draft-{draft_session.draft_id} Standings" if draft_session.session_type == "random" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
         description = "If a drafter is missing from this channel, they likely can still see the channel but have the Discord invisible setting on."
         discord_color = discord.Color.dark_blue()
     elif team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0:
@@ -223,7 +222,7 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
         description = f"Draft Start: <t:{int(draft_session.draft_start_time.timestamp())}:F>"
         discord_color = discord.Color.light_grey()
     else:
-        title = f"Draft-{draft_session.draft_id} Standings"
+        title = f"Draft-{draft_session.draft_id} Standings" if draft_session.session_type == "random" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
         description = "If a drafter is missing from this channel, they likely can still see the channel but have the Discord invisible setting on."
         discord_color = discord.Color.dark_blue()
     return title, description, discord_color
