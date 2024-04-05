@@ -20,20 +20,18 @@ class InitialRangeView(View):
         self.add_item(RangeSelect("Opposing Team Range", "opponent_team_range"))
 
     async def check_and_send_team_cube(self, interaction: discord.Interaction):
-        print("entering check and send team cube")
-        print(f"team ranges: {self.your_team_range} and {self.opponent_team_range}")
         if self.your_team_range and self.opponent_team_range:
             new_view = LeagueDraftView()
             await new_view.your_team_select.populate(self.your_team_range)
             await new_view.opponent_team_select.populate(self.opponent_team_range)
-            await interaction.followup.send("Please select the cube and specific teams:", view=new_view, ephemeral=True)
+            await interaction.followup.send("Step 2 of 2: Please select the cube and specific teams:", view=new_view, ephemeral=True)
 
 class RangeSelect(Select):
     def __init__(self, placeholder, attribute_name):
         self.attribute_name = attribute_name
         range_choices = [
-            discord.SelectOption(label="Team Name: A-M", value="A-M"),
-            discord.SelectOption(label="Team Name: N-Z", value="N-Z"),
+            discord.SelectOption(label="Team Name: Starts with (A-M)", value="A-M"),
+            discord.SelectOption(label="Team Name: Starts with (N-Z)", value="N-Z"),
         ]
         super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=range_choices)
 
@@ -76,7 +74,6 @@ class TeamSelect(Select):
 
 
     async def populate(self, team_range):
-        print(f"team range: {team_range}")
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 if team_range == "A-M":
@@ -176,7 +173,7 @@ class LeagueDraftView(discord.ui.View):
                 )
             embed.add_field(name=f"{team_a_name}", value="No players yet.", inline=False)
             embed.add_field(name=f"{team_b_name}", value="No players yet.", inline=False)
-            embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1219018393471025242/1219410709440495746/image.png?ex=660b33b8&is=65f8beb8&hm=b7e40e9b872d8e04dd70a30c5abc15917379f9acb7dce74ca0372105ec98b468&")
+            embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1186757246936424558/1217295353972527176/131.png")
             async with AsyncSessionLocal() as session:
                 async with session.begin():
                     new_match = Match(

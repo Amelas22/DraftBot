@@ -66,7 +66,7 @@ async def league_commands(bot):
     async def leaguedraft(interaction: discord.Interaction):
         from league import InitialRangeView   
         initial_view = InitialRangeView()
-        await interaction.response.send_message("Please select the range for your team and the opposing team:", view=initial_view, ephemeral=True)
+        await interaction.response.send_message("Step 1 of 2: Please select the range for your team and the opposing team:", view=initial_view, ephemeral=True)
         
     # @bot.slash_command(name="leaguedraft", description="Start a league draft with chosen teams and cube.")
     # async def leaguedraft(interaction: discord.Interaction):
