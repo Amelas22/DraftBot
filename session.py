@@ -143,6 +143,7 @@ class Challenge(Base):
     start_time = Column(DateTime, nullable=False)
     team_a = Column(String(128))
     team_b = Column(String(128))
+    cube = Column(String(128))
 
 
 async def get_draft_session(session_id: str):
