@@ -384,10 +384,11 @@ async def calculate_three_zero_drafters(session, draft_session_id, guild):
 async def cleanup_sessions_task(bot):
     while True:
         current_time = datetime.now()
-        async with AsyncSessionLocal() as db_session:  # Use a different variable name to avoid confusion with the session object
+        window_time = current_time - timedelta(hours=5)
+        async with AsyncSessionLocal() as db_session:  
             async with db_session.begin():
-                # Fetch sessions that are past their deletion time
-                stmt = select(DraftSession).where(DraftSession.deletion_time <= current_time)
+                # Fetch sessions that are past their deletion time and in the deletion window
+                stmt = select(DraftSession).where(DraftSession.deletion_time.between(window_time, current_time))
                 results = await db_session.execute(stmt)
                 sessions_to_cleanup = results.scalars().all()
 
