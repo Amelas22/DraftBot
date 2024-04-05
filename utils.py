@@ -408,8 +408,6 @@ async def cleanup_sessions_task(bot):
                         try:
                             msg = await draft_channel.fetch_message(int(session.message_id))
                             await msg.delete()
-                        except discord.NotFound:
-                            print(f"Message ID {session.message_id} not found in draft channel.")
                         except discord.HTTPException as e:
                             print(f"Failed to delete message ID {session.message_id} in draft channel. Reason: {e}")
 
