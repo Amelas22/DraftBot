@@ -21,11 +21,6 @@ class CubeSelectionModal(discord.ui.Modal):
             team_a_name = self.children[1].value
             team_b_name = self.children[2].value
 
-            # Register Team A if not present
-            team_a, team_a_msg = await register_team_to_db(team_a_name)
-            # Register Team B if not present
-            team_b, team_b_msg = await register_team_to_db(team_b_name)
-
         cube_option = "MTG" if not cube_name else cube_name
         draft_start_time = datetime.now().timestamp()
         session_id = f"{interaction.user.id}-{int(draft_start_time)}"
@@ -92,21 +87,7 @@ class CubeSelectionModal(discord.ui.Modal):
             embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1219018393471025242/1219410709440495746/image.png?ex=660b33b8&is=65f8beb8&hm=b7e40e9b872d8e04dd70a30c5abc15917379f9acb7dce74ca0372105ec98b468&")
             self.team_a_name = team_a_option
             self.team_b_name = team_b_option
-            async with AsyncSessionLocal() as session:
-                async with session.begin():
-                    new_match = Match(
-                        TeamAID=team_a.TeamID,
-                        TeamBID=team_b.TeamID,
-                        TeamAWins=0,
-                        TeamBWins=0,
-                        DraftWinnerID=None,
-                        MatchDate=datetime.now(),
-                        TeamAName=team_a_name,
-                        TeamBName=team_b_name
-                    )
-                    session.add(new_match)
-                    await session.commit()
-                    match_id = new_match.MatchID
+
             print(f"Premade Draft: {session_id} has been created.")
 
         
@@ -129,8 +110,6 @@ class CubeSelectionModal(discord.ui.Modal):
                     if updated_session:
                         updated_session.message_id = str(message.id)
                         updated_session.draft_channel_id = str(message.channel.id)
-                        if updated_session.session_type == "premade":
-                            updated_session.premade_match_id = str(match_id)
                         session.add(updated_session)
                         await session.commit()
 

@@ -29,9 +29,9 @@ class PersistentView(discord.ui.View):
         elif self.session_type == "premade":
             self.add_item(self.create_button(self.team_a_name, "green", f"Team_A_{self.draft_session_id}", self.team_assignment_callback))
             self.add_item(self.create_button(self.team_b_name, "red", f"Team_B_{self.draft_session_id}", self.team_assignment_callback))
-            draft_button_label = "League Draft: ON"
-            draft_button_style = "green"
-            self.add_item(self.create_button(draft_button_label, draft_button_style, f"track_draft_{self.draft_session_id}", self.track_draft_callback))
+            # draft_button_label = "League Draft: ON"
+            # draft_button_style = "green"
+            # self.add_item(self.create_button(draft_button_label, draft_button_style, f"track_draft_{self.draft_session_id}", self.track_draft_callback))
             self.add_item(self.create_button("Generate Seating Order", "blurple", f"generate_seating_{self.draft_session_id}", self.randomize_teams_callback))
         self.add_item(self.create_button("Cancel Draft", "grey", f"cancel_draft_{self.draft_session_id}", self.cancel_draft_callback))
         self.add_item(self.create_button("Remove User", "grey", f"remove_user_{self.draft_session_id}", self.remove_user_button_callback))
