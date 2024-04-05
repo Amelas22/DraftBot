@@ -5,35 +5,40 @@ WIP Code
 import discord
 #from discord.ext import commands
 from discord.ui import Select, View #Modal, InputText
-#from datetime import datetime
-from session import AsyncSessionLocal, Team
+from datetime import datetime, timedelta
+from session import AsyncSessionLocal, Team, DraftSession, Match
 from sqlalchemy import select
+import random
 
 
 class CubeSelect(discord.ui.Select):
-    def __init__(self, view):
-        self.view = view
+    def __init__(self):
         options = [
-            discord.SelectOption(label="LSVCube", description="The LSVCube"),
-            discord.SelectOption(label="AlphaFrog", description="The AlphaFrog Cube"),
-            discord.SelectOption(label="mtgovintage", description="The MTGO Vintage Cube"),
+            discord.SelectOption(label="LSVCube", description="Curated by Luis Scott Vargas"),
+            discord.SelectOption(label="AlphaFrog", description="Curated by Gavin Thompson"),
+            discord.SelectOption(label="mtgovintage", description="Curated by Ryan Spain and Chris Wolf"),
         ]
         super().__init__(placeholder="Choose Cube", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         self.view.cube_choice = self.values[0]
-        await self.view.check_and_send_summary(interaction)
+        await self.view.check_and_send_summary(interaction)        
 
 class TeamSelect(Select):
-    def __init__(self, placeholder, view, attribute_name):
-        self.view = view
+    def __init__(self, placeholder, attribute_name):
         self.attribute_name = attribute_name
         super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=[])
 
 
     async def callback(self, interaction: discord.Interaction):
-        setattr(self.view, self.attribute_name, self.values[0])
-        await self.view.check_and_send_summary(interaction)
+        try:
+            setattr(self.view, self.attribute_name, self.values[0])
+            await interaction.response.defer(ephemeral=True)
+            await self.view.check_and_send_summary(interaction)
+        except Exception as e:
+            print(f"Error in Team Select callback: {e}")
+
 
     async def populate(self):
         async with AsyncSessionLocal() as session:
@@ -41,7 +46,7 @@ class TeamSelect(Select):
                 stmt = select(Team).order_by(Team.TeamName.asc())
                 result = await session.execute(stmt)
                 teams = result.scalars().all()
-                self.options = [discord.SelectOption(label=team.TeamName, value=str(team.TeamID)) for team in teams]
+                self.options = [discord.SelectOption(label=team.TeamName, value=str(team.TeamName)) for team in teams]
 
             
 class LeagueDraftView(discord.ui.View):
@@ -50,22 +55,107 @@ class LeagueDraftView(discord.ui.View):
         self.cube_choice = None
         self.your_team_choice = None
         self.opponent_team_choice = None
-        self.cube_select = CubeSelect(self)
-        self.your_team_select = TeamSelect("Your Team", self, "your_team_choice")
-        self.opponent_team_select = TeamSelect("Opposing Team", self, "opponent_team_choice")
+        self.session_type = "premade"
+        self.cube_select = CubeSelect()
+        self.your_team_select = TeamSelect("Your Team", "your_team_choice")
+        self.opponent_team_select = TeamSelect("Opposing Team", "opponent_team_choice")
         self.add_item(self.cube_select)
         self.add_item(self.your_team_select)
         self.add_item(self.opponent_team_select)
 
     async def check_and_send_summary(self, interaction: discord.Interaction):
         if self.cube_choice and self.your_team_choice and self.opponent_team_choice:
+            bot = interaction.client
+            team_a_name = self.your_team_choice
+            team_b_name = self.opponent_team_choice
+            
+            from session import register_team_to_db
+            # Register Team A if not present
+            team_a, team_a_msg = await register_team_to_db(team_a_name)
+            # Register Team B if not present
+            team_b, team_b_msg = await register_team_to_db(team_b_name)
+
+            draft_start_time = datetime.now().timestamp()
+            session_id = f"{interaction.user.id}-{int(draft_start_time)}"
+            draft_id = ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
+            draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
+            
+            async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    new_draft_session = DraftSession(
+                        session_id=session_id,
+                        guild_id=str(interaction.guild_id),
+                        draft_link=draft_link,
+                        draft_id=draft_id,
+                        draft_start_time=datetime.now(),
+                        deletion_time=datetime.now() + timedelta(hours=3),
+                        session_type="premade",
+                        premade_match_id=None,
+                        team_a_name=team_a_name,
+                        team_b_name=team_b_name,
+                        tracked_draft = True,
+                        true_skill_draft = False
+                    )
+                    session.add(new_draft_session)
+                    
             # Generate and send the embed message
-            embed = discord.Embed(title=f"{self.your_team_choice} vs. {self.opponent_team_choice}",
-                                  description=f"Chosen Cube: {self.cube_choice}",
-                                  color=discord.Color.blue())
-            await interaction.followup.send(embed=embed, ephemeral=False)
+            embed = discord.Embed(title=f"League Match: {team_a_name} vs. {team_b_name}",
+                                  description=f"\n\nDraft Start Time: <t:{int(draft_start_time)}:F> \n\n**How to use bot**:\n1. Click your team name to join that team. Enter the draftmancer link. Draftmancer host still has to update settings and import from CubeCobra.\n" +
+                                "2. When all teams are joined, Push Ready Check. Once everyone is ready, push Generate Seating Order\n" +
+                                "3. Draftmancer host needs to adjust table to match seating order. **TURN OFF RANDOM SEATING IN DRAFTMANCER** \n" +
+                                "4. After the draft, come back to this message (it'll be in pins) and push Create Rooms and Post Pairings.\n" +
+                                "5. You will now have a private team chat with just your team and a shared draft-chat that has pairings and match results. You can select the Match Results buttons to report results.\n" +
+                                "6. Chat channels will automatically close around five hours after the /leaguedraft command was used." +
+                                f"\n\n**Chosen Cube: [{self.cube_choice}](https://cubecobra.com/cube/list/{self.cube_choice})** \n**Draftmancer Session**: **[Join Here]({draft_link})**",
+                color=discord.Color.blue()
+                )
+            embed.add_field(name=f"{team_a_name}", value="No players yet.", inline=False)
+            embed.add_field(name=f"{team_b_name}", value="No players yet.", inline=False)
+            embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1219018393471025242/1219410709440495746/image.png?ex=660b33b8&is=65f8beb8&hm=b7e40e9b872d8e04dd70a30c5abc15917379f9acb7dce74ca0372105ec98b468&")
+            async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    new_match = Match(
+                        TeamAID=team_a.TeamID,
+                        TeamBID=team_b.TeamID,
+                        TeamAWins=0,
+                        TeamBWins=0,
+                        DraftWinnerID=None,
+                        MatchDate=datetime.now(),
+                        TeamAName=team_a_name,
+                        TeamBName=team_b_name
+                    )
+                    session.add(new_match)
+                    await session.commit()
+                    match_id = new_match.MatchID
+            print(f"League Draft: {session_id} has been created.")
+            
+            from session import get_draft_session
+            draft_session = await get_draft_session(session_id)
+            if draft_session:
+                from views import PersistentView
+                view = PersistentView(
+                    bot=bot,
+                    draft_session_id=draft_session.session_id,
+                    session_type=self.session_type,
+                    team_a_name=team_a_name,
+                    team_b_name=team_b_name
+                )
+            message = await interaction.followup.send(embed=embed, view=view)
 
+            if new_draft_session:
+                async with AsyncSessionLocal() as session:
+                    async with session.begin():
+                        result = await session.execute(select(DraftSession).filter_by(session_id=new_draft_session.session_id))
+                        updated_session = result.scalars().first()
+                        if updated_session:
+                            updated_session.message_id = str(message.id)
+                            updated_session.draft_channel_id = str(message.channel.id)
+                            updated_session.premade_match_id = str(match_id)
+                            session.add(updated_session)
+                            await session.commit()
 
+            # Pin the message to the channel
+            await message.pin()
 
 
 

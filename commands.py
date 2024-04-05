@@ -62,6 +62,8 @@ async def league_commands(bot):
 
     @bot.slash_command(name="leaguedraft", description="Start a league draft with chosen teams and cube.")
     async def leaguedraft(interaction: discord.Interaction):
+
+
         from league import LeagueDraftView
         view = LeagueDraftView()
         # Populate team selects asynchronously
