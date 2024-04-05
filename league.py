@@ -11,6 +11,41 @@ from sqlalchemy import select
 import random
 
 
+class InitialRangeView(View):
+    def __init__(self):
+        super().__init__()
+        self.your_team_range = None
+        self.opponent_team_range = None
+        self.add_item(RangeSelect("Your Team Range", "your_team_range"))
+        self.add_item(RangeSelect("Opposing Team Range", "opponent_team_range"))
+
+    async def check_and_send_team_cube(self, interaction: discord.Interaction):
+        print("entering check and send team cube")
+        print(f"team ranges: {self.your_team_range} and {self.opponent_team_range}")
+        if self.your_team_range and self.opponent_team_range:
+            new_view = LeagueDraftView()
+            await new_view.your_team_select.populate(self.your_team_range)
+            await new_view.opponent_team_select.populate(self.opponent_team_range)
+            await interaction.followup.send("Please select the cube and specific teams:", view=new_view, ephemeral=True)
+
+class RangeSelect(Select):
+    def __init__(self, placeholder, attribute_name):
+        self.attribute_name = attribute_name
+        range_choices = [
+            discord.SelectOption(label="Team Name: A-M", value="A-M"),
+            discord.SelectOption(label="Team Name: N-Z", value="N-Z"),
+        ]
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=range_choices)
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            setattr(self.view, self.attribute_name, self.values[0])
+            await interaction.response.defer(ephemeral=True)
+            await self.view.check_and_send_team_cube(interaction)
+        except Exception as e:
+            print(f"Error in Team Select callback: {e}")
+            
+
 class CubeSelect(discord.ui.Select):
     def __init__(self):
         options = [
@@ -40,10 +75,39 @@ class TeamSelect(Select):
             print(f"Error in Team Select callback: {e}")
 
 
-    async def populate(self):
+    async def populate(self, team_range):
+        print(f"team range: {team_range}")
         async with AsyncSessionLocal() as session:
             async with session.begin():
-                stmt = select(Team).order_by(Team.TeamName.asc())
+                if team_range == "A-M":
+                    stmt = select(Team).where(Team.TeamName.ilike("a%") |
+                                            Team.TeamName.ilike("b%") |
+                                            Team.TeamName.ilike("c%") |
+                                            Team.TeamName.ilike("d%") |
+                                            Team.TeamName.ilike("e%") |
+                                            Team.TeamName.ilike("f%") |
+                                            Team.TeamName.ilike("g%") |
+                                            Team.TeamName.ilike("h%") |
+                                            Team.TeamName.ilike("i%") |
+                                            Team.TeamName.ilike("j%") |
+                                            Team.TeamName.ilike("k%") |
+                                            Team.TeamName.ilike("l%") |
+                                            Team.TeamName.ilike("m%")).order_by(Team.TeamName.asc())
+                else:  # N-Z
+                    stmt = select(Team).where(Team.TeamName.ilike("n%") |
+                                            Team.TeamName.ilike("o%") |
+                                            Team.TeamName.ilike("p%") |
+                                            Team.TeamName.ilike("q%") |
+                                            Team.TeamName.ilike("r%") |
+                                            Team.TeamName.ilike("s%") |
+                                            Team.TeamName.ilike("t%") |
+                                            Team.TeamName.ilike("u%") |
+                                            Team.TeamName.ilike("v%") |
+                                            Team.TeamName.ilike("w%") |
+                                            Team.TeamName.ilike("x%") |
+                                            Team.TeamName.ilike("y%") |
+                                            Team.TeamName.ilike("z%")).order_by(Team.TeamName.asc())
+
                 result = await session.execute(stmt)
                 teams = result.scalars().all()
                 self.options = [discord.SelectOption(label=team.TeamName, value=str(team.TeamName)) for team in teams]
@@ -65,6 +129,7 @@ class LeagueDraftView(discord.ui.View):
 
     async def check_and_send_summary(self, interaction: discord.Interaction):
         if self.cube_choice and self.your_team_choice and self.opponent_team_choice:
+            await interaction.followup.send("Lobby creation in progress. Standby", ephemeral=True)
             bot = interaction.client
             team_a_name = self.your_team_choice
             team_b_name = self.opponent_team_choice
