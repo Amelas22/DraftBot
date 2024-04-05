@@ -135,6 +135,8 @@ class Challenge(Base):
     __tablename__ = 'challenges'
     
     id = Column(Integer, primary_key=True)
+    initial_user = Column(String(64))
+    opponent_user = Column(String(64))
     message_id = Column(String(64), nullable=True)
     channel_id = Column(String(64), nullable=True)
     guild_id = Column(String(64))

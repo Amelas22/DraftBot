@@ -268,7 +268,7 @@ class AdjustTimeModal(Modal):
             channel = bot.get_channel(int(challenge_to_update.channel_id))
             message = await channel.fetch_message(int(challenge_to_update.message_id))
             formatted_time = f"<t:{int(challenge_to_update.start_time.timestamp())}:F>"
-            updated_embed = discord.Embed(title=f"{challenge_to_update.team_a} v. {challenge_to_update.team_b} is scheduled!" if challenge_to_update.team_b else f"{challenge_to_update.team_a} is looking for a match!\n\nNo Opponent Yet. Sign Up below!", 
+            updated_embed = discord.Embed(title=f"{challenge_to_update.team_a} v. {challenge_to_update.team_b} is scheduled!" if challenge_to_update.team_b else f"{challenge_to_update.team_a} is looking for a match!", 
                                           description=f"Proposed Time: {formatted_time}\nChosen Cube: {challenge_to_update.cube}", color=discord.Color.gold() if challenge_to_update.team_b else discord.Color.blue())
 
             await message.edit(embed=updated_embed)
@@ -296,6 +296,7 @@ class ChallengeTimeModal(Modal):
                             async with session.begin():
                                 new_challenge = Challenge(
                                     team_a_id = team_update.TeamID,
+                                    initial_user=str(interaction.user.id),
                                     guild_id = str(interaction.guild_id),
                                     team_b_id = None,
                                     start_time = start_time,
@@ -553,6 +554,7 @@ class OpponentTeamView(View):
                     challenge_to_update = await db_session.get(Challenge, self.challenge_id)
                     challenge_to_update.team_b = str(selected_team_name)
                     challenge_to_update.team_b_id = team_update.TeamID
+                    challenge_to_update.opponent_user = str(interaction.user.id)
                     await db_session.commit()
                 bot = interaction.client
                 channel = bot.get_channel(int(challenge_to_update.channel_id))
