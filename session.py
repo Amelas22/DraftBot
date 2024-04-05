@@ -34,7 +34,7 @@ class DraftSession(Base):
     session_id = Column(String(64), nullable=False, unique=True)
     message_id = Column(String(64))
     draft_channel_id = Column(String(64))
-    true_skill_draft = Column(Boolean, default=True)
+    true_skill_draft = Column(Boolean, default=False)
     ready_check_message_id = Column(String(64))
     draft_link = Column(String(256))
     ready_check_status = Column(JSON)
@@ -61,7 +61,7 @@ class DraftSession(Base):
     team_b_name = Column(String(128))
     are_rooms_processing = Column(Boolean, default=False)
     premade_match_id = Column(String(128))
-    tracked_draft = Column(Boolean, default=True)
+    tracked_draft = Column(Boolean, default=False)
     match_results = relationship("MatchResult", back_populates="draft_session", foreign_keys="[MatchResult.session_id]")
     def __repr__(self):
         return f"<DraftSession(session_id={self.session_id}, guild_id={self.guild_id})>"
