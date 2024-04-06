@@ -130,6 +130,24 @@ class WeeklyLimit(Base):
     PointsEarned = Column(Integer, default=0)
 
 
+
+class Challenge(Base):
+    __tablename__ = 'challenges'
+    
+    id = Column(Integer, primary_key=True)
+    initial_user = Column(String(64))
+    opponent_user = Column(String(64))
+    message_id = Column(String(64), nullable=True)
+    channel_id = Column(String(64), nullable=True)
+    guild_id = Column(String(64))
+    team_a_id = Column(Integer, nullable=False)
+    team_b_id = Column(Integer, nullable=True)
+    start_time = Column(DateTime, nullable=False)
+    team_a = Column(String(128))
+    team_b = Column(String(128))
+    cube = Column(String(128))
+
+
 async def get_draft_session(session_id: str):
     async with AsyncSessionLocal() as session:
         async with session.begin():
