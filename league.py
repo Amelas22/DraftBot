@@ -1,10 +1,8 @@
 '''
-Code for league draft structure
+WIP Code
 '''
 
 import discord
-import asyncio
-import pytz
 #from discord.ext import commands
 from discord.ui import Select, View, Modal, InputText, Button
 from discord import ButtonStyle, Embed, Interaction
@@ -564,15 +562,10 @@ class OpponentTeamView(View):
                 formatted_time=f"<t:{int(challenge_to_update.start_time.timestamp())}:F>"
                 updated_embed = discord.Embed(title=f"{challenge_to_update.team_a} v. {challenge_to_update.team_b} is scheduled!", description=f"Proposed Time: {formatted_time}\nChosen Cube: {challenge_to_update.cube}", color=discord.Color.gold())
 
-                await notify_poster(bot=bot, challenge_id=challenge_to_update.id, guild_id=challenge_to_update.guild_id, 
+                await notify_users(bot=bot, challenge_id=challenge_to_update.id, guild_id=challenge_to_update.guild_id, 
                                    channel_id=challenge_to_update.channel_id, initial_user_id=challenge_to_update.initial_user, 
                                    opponent_user_id=challenge_to_update.opponent_user, team_a=challenge_to_update.team_a, 
                                    team_b=challenge_to_update.team_b, start_time=challenge_to_update.start_time)
-                
-                await asyncio.create_task(schedule_notification(bot=bot, challenge_id=challenge_to_update.id, guild_id=challenge_to_update.guild_id, 
-                                   channel_id=challenge_to_update.channel_id, initial_user_id=challenge_to_update.initial_user, 
-                                   opponent_user_id=challenge_to_update.opponent_user, team_a=challenge_to_update.team_a, 
-                                   team_b=challenge_to_update.team_b, start_time=challenge_to_update.start_time))
 
                 await message.edit(embed=updated_embed)
 
@@ -629,7 +622,7 @@ class OpponentTeamSelect(Select):
                 teams = result.scalars().all()
                 self.options = [discord.SelectOption(label=team.TeamName, value=str(team.TeamName)) for team in teams]
 
-async def notify_poster(bot, challenge_id, guild_id, channel_id, initial_user_id, opponent_user_id, team_a, team_b, start_time):
+async def notify_users(bot, challenge_id, guild_id, channel_id, initial_user_id, opponent_user_id, team_a, team_b, start_time):
     guild = bot.get_guild(int(guild_id))
     if not guild:
         print(f"Guild {guild_id} not found")
@@ -648,46 +641,3 @@ async def notify_poster(bot, challenge_id, guild_id, channel_id, initial_user_id
 
     # Ping the users
     await channel.send(f"{initial_user.mention}, a challenger approaches to take on {team_a}! {opponent_user.mention} and {team_b} have signed up for your match at {formatted_time} ")
-
-async def notify_teams(bot, guild_id, channel_id, initial_user_id, opponent_user_id, team_a, team_b):
-    guild = bot.get_guild(int(guild_id))
-    if not guild:
-        print(f"Guild {guild_id} not found")
-        return
-
-    channel = guild.get_channel(int(channel_id))
-    if not channel:
-        print(f"Channel {channel_id} not found in guild {guild_id}")
-        return
-
-    initial_user = await bot.fetch_user(int(initial_user_id))
-    opponent_user = await bot.fetch_user(int(opponent_user_id))
-    if not initial_user or not opponent_user:
-        print(f"Users not found: Initial User ID: {initial_user_id}, Opponent User ID: {opponent_user_id}")
-        return
-
-    # Ping the users with the updated message format
-    await channel.send(f"{team_a} vs. {team_b} is scheduled to start in 15 minutes. Gather your teams {initial_user.mention} and {opponent_user.mention}")
-
-
-async def schedule_notification(bot, challenge_id, guild_id, channel_id, initial_user_id, opponent_user_id, team_a, team_b, start_time):
-    eastern = pytz.timezone('US/Eastern')
-    utc = pytz.utc
-
-    # Convert start_time to a timezone-aware datetime object in Eastern Time
-    start_time_naive = datetime.strptime(str(start_time), "%Y-%m-%d %H:%M:%S")
-    start_time_eastern = eastern.localize(start_time_naive)
-
-    # Convert the start time to UTC, as your server's timezone might be different
-    start_time_utc = start_time_eastern.astimezone(utc)
-
-    # Calculate the delay until 15 minutes before the start time in UTC
-    now_utc = datetime.now(utc)
-    notification_time_utc = start_time_utc - timedelta(minutes=15)
-    delay = (notification_time_utc - now_utc).total_seconds()
-
-    if delay > 0:
-        await asyncio.sleep(delay)
-        await notify_teams(bot, guild_id, channel_id, initial_user_id, opponent_user_id, team_a, team_b)
-    else:
-        print("The scheduled time for notification has already passed.")

@@ -88,7 +88,7 @@ class PersistentView(discord.ui.View):
         sign_ups = draft_session.sign_ups or {}
 
         # Check if the sign-up list is already full
-        if len(sign_ups) >= 10:
+        if len(sign_ups) >= 8:
             await interaction.response.send_message("The sign-up list is already full. No more players can sign up.", ephemeral=True)
             return
 
