@@ -135,12 +135,12 @@ async def league_commands(bot):
     async def daily_random_results():
         # Fetch all guilds the bot is in and look for the "league-summary" channel
         for guild in bot.guilds:
-            channel = discord.utils.get(guild.text_channels, name="daily-summary-open-queue")
+            channel = discord.utils.get(guild.text_channels, name="team-draft-results")
             if channel:
                 break  # If we find the channel, we exit the loop
         
         if not channel:  # If the bot cannot find the channel in any guild, log an error and return
-            print("Error: 'daily-summary-open-queue' channel not found.")
+            print("Error: 'team-draft-results' channel not found.")
             return
 
         eastern_tz = pytz.timezone('US/Eastern')
@@ -186,7 +186,7 @@ async def league_commands(bot):
 
                 date_str = start_time.strftime("%B %d, %Y")
                 top_drafters_field_value = "\n".join([f"**{name}:** {count} drafts" for name, count in top_five_drafters])
-                embed = discord.Embed(title=f"Open Queue Daily Results - {date_str}", description="", color=discord.Color.blue())
+                embed = discord.Embed(title=f"Open Queue Daily Results - {date_str}", description="", color=discord.Color.dark_purple())
                 embed.add_field(name="**Completed Drafts**", value=total_drafts, inline=False)
                 embed.add_field(name="**Top 5 Drafters**\n", value=top_drafters_field_value, inline=False)
                 embed.add_field(name="**Trophy Drafters**", value=undefeated_drafters_field_value or "No trophies :(", inline=False)
