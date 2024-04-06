@@ -234,24 +234,60 @@ class InitialPostView(View):
         if self.your_team_range:
             new_view = PostTeamView()
             await new_view.your_team_select.populate(self.your_team_range)
-            await interaction.followup.send("Choose your team", view=new_view, ephemeral=True)
+            await interaction.followup.send("Choose your team, cube, and timezone", view=new_view, ephemeral=True)
 
 class PostTeamView(View):
     def __init__(self):
         super().__init__()
         self.team_selection = None  # Holds the selected team name
         self.cube_selection = None  # Holds the selected cube
+        self.time_zone = None
         self.your_team_select = PostTeamSelect("Your Team", "team_selection")
         self.cube_select = ChallengeCubeSelect("cube_selection")
+        self.time_zone_select = TimezoneSelect("time_zone")
         self.add_item(self.cube_select)
         self.add_item(self.your_team_select)
+        self.add_item(self.time_zone_select)
 
     async def try_send_modal(self, interaction: discord.Interaction):
-        if self.team_selection and self.cube_selection:
+        if self.team_selection and self.cube_selection and self.time_zone:
             # When both selections are made, send the modal
-            await interaction.response.send_modal(ChallengeTimeModal(self.team_selection, self.cube_selection))
+            await interaction.response.send_modal(ChallengeTimeModal(self.team_selection, self.cube_selection, self.time_zone))
         else:
             await interaction.response.defer()
+
+class TimezoneSelect(Select):
+    def __init__(self, attribute_name):
+        # Manually curated list of common timezones
+        options = [
+            discord.SelectOption(label="UTC-12:00 International Date Line West", value="Etc/GMT+12"),
+            discord.SelectOption(label="UTC-08:00 Pacific Time (US & Canada)", value="America/Los_Angeles"),
+            discord.SelectOption(label="UTC-07:00 Mountain Time (US & Canada)", value="America/Denver"),
+            discord.SelectOption(label="UTC-06:00 Central Time (US & Canada)", value="America/Chicago"),
+            discord.SelectOption(label="UTC-05:00 Eastern Time (US & Canada)", value="America/New_York"),
+            discord.SelectOption(label="UTC-04:00 Atlantic Time (Canada)", value="America/Halifax"),
+            discord.SelectOption(label="UTC+00:00 Greenwich Mean Time", value="GMT"),
+            discord.SelectOption(label="UTC+01:00 Central European Time", value="Europe/Berlin"),
+            discord.SelectOption(label="UTC+02:00 Eastern European Time", value="Europe/Athens"),
+            discord.SelectOption(label="UTC+03:00 Moscow Time", value="Europe/Moscow"),
+            discord.SelectOption(label="UTC+04:00 Gulf Standard Time", value="Asia/Dubai"),
+            discord.SelectOption(label="UTC+05:00 Pakistan Standard Time", value="Asia/Karachi"),
+            discord.SelectOption(label="UTC+05:30 Indian Standard Time", value="Asia/Kolkata"),
+            discord.SelectOption(label="UTC+08:00 China Standard Time", value="Asia/Shanghai"),
+            discord.SelectOption(label="UTC+09:00 Japan Standard Time", value="Asia/Tokyo"),
+            discord.SelectOption(label="UTC+10:00 Australian Eastern Standard Time", value="Australia/Sydney"),
+            discord.SelectOption(label="UTC+12:00 New Zealand Standard Time", value="Pacific/Auckland"),
+            discord.SelectOption(label="UTC-03:00 Brasilia Time", value="America/Sao_Paulo"),
+            discord.SelectOption(label="UTC+07:00 Indochina Time", value="Asia/Bangkok"),
+            discord.SelectOption(label="UTC-02:00 Fernando de Noronha Time", value="America/Noronha"),
+        ]
+
+        super().__init__(placeholder="Choose your timezone", min_values=1, max_values=1, options=options)
+        self.attribute_name = attribute_name
+
+    async def callback(self, interaction: discord.Interaction):
+        setattr(self.view, self.attribute_name ,self.values[0])
+        await self.view.try_send_modal(interaction)
 
 class AdjustTimeModal(Modal):
     def __init__(self, match_id, *args, **kwargs):
@@ -276,24 +312,32 @@ class AdjustTimeModal(Modal):
             await message.edit(embed=updated_embed)
 
 class ChallengeTimeModal(Modal):
-    def __init__(self, team_name, cube, *args, **kwargs):
+    def __init__(self, team_name, cube, time_zone, *args, **kwargs):
         super().__init__(title="Schedule Your Match", *args, **kwargs)
         self.team_name = team_name
         self.cube_choice = cube
+        self.time_zone = time_zone
         # Update the placeholder to reflect the desired format
         self.add_item(InputText(label="MM/DD/YYYY HH:MM. Use Local Time & 24HR Clock", placeholder="MM/DD/YYYY HH:MM", custom_id="start_time"))
 
     async def callback(self, interaction: discord.Interaction):
         # Update the parsing to match the new format
         try:
+
             await interaction.response.defer()
             async with AsyncSessionLocal() as db_session: 
                 async with db_session.begin():
                     team_stmt = select(Team).where(Team.TeamName == self.team_name)
                     team_update = await db_session.scalar(team_stmt)
-                    start_time = datetime.strptime(self.children[0].value, "%m/%d/%Y %H:%M")
-                    formatted_time = f"<t:{int(start_time.timestamp())}:F>"  # Markdown format for dynamic time display
+
+                    user_time_zone = pytz.timezone(self.time_zone)  # Convert the selected timezone string to a pytz timezone
+                    local_time = datetime.strptime(self.children[0].value, "%m/%d/%Y %H:%M")
+                    local_dt_with_tz = user_time_zone.localize(local_time)  # Localize the datetime
+                    utc_dt = local_dt_with_tz.astimezone(pytz.utc)  # Convert to UTC
+
+                    formatted_time = f"<t:{int(utc_dt.timestamp())}:F>"  # Markdown format for dynamic time display
                     
+
                     async with AsyncSessionLocal() as session:
                             async with session.begin():
                                 new_challenge = Challenge(
@@ -301,7 +345,7 @@ class ChallengeTimeModal(Modal):
                                     initial_user=str(interaction.user.id),
                                     guild_id = str(interaction.guild_id),
                                     team_b_id = None,
-                                    start_time = start_time,
+                                    start_time = utc_dt,
                                     team_a = team_update.TeamName,
                                     team_b = None,
                                     message_id = None,
@@ -671,15 +715,13 @@ async def notify_teams(bot, guild_id, channel_id, initial_user_id, opponent_user
 
 
 async def schedule_notification(bot, challenge_id, guild_id, channel_id, initial_user_id, opponent_user_id, team_a, team_b, start_time):
-    eastern = pytz.timezone('US/Eastern')
     utc = pytz.utc
 
     # Convert start_time to a timezone-aware datetime object in Eastern Time
     start_time_naive = datetime.strptime(str(start_time), "%Y-%m-%d %H:%M:%S")
-    start_time_eastern = eastern.localize(start_time_naive)
 
     # Convert the start time to UTC, as your server's timezone might be different
-    start_time_utc = start_time_eastern.astimezone(utc)
+    start_time_utc = start_time_naive.astimezone(utc)
 
     # Calculate the delay until 15 minutes before the start time in UTC
     now_utc = datetime.now(utc)
