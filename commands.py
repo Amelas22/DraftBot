@@ -16,7 +16,9 @@ async def league_commands(bot):
     
     @bot.slash_command(name="delete_team", description="Mod Only: Remove a new team from the league")
     async def deleteteam(ctx, *, team_name: str):
-        await remove_team_from_db(ctx, team_name)
+        await ctx.defer()  # Acknowledge the interaction immediately to prevent timeout
+        response_message = await remove_team_from_db(ctx, team_name)
+        await ctx.followup.send(response_message)
 
     @bot.slash_command(name='listteams', description='List all registered teams')
     async def list_teams(interaction: discord.Interaction):

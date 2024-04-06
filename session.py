@@ -229,6 +229,6 @@ async def remove_team_from_db(ctx, team_name: str):
                 await session.delete(existing_team)
                 await session.commit()
 
-                await ctx.send(f"Team '{team_name}' has been removed successfully.")
+                return f"Team '{team_name}' has been removed"
     else:
-        await ctx.send("You do not have permission to remove a team. This action requires the 'cube overseer' role.")
+        return "You do not have permission to remove a team. This action requires the 'cube overseer' role."
