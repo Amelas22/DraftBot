@@ -400,6 +400,9 @@ async def cleanup_sessions_task(bot):
                             if channel:  # Check if channel was found
                                 try:
                                     await channel.delete(reason="Session expired.")
+                                except discord.NotFound:
+                                    # If the message is not found, silently continue
+                                    continue
                                 except discord.HTTPException as e:
                                     print(f"Failed to delete channel: {channel.name}. Reason: {e}")
 
@@ -409,6 +412,9 @@ async def cleanup_sessions_task(bot):
                         try:
                             msg = await draft_channel.fetch_message(int(session.message_id))
                             await msg.delete()
+                        except discord.NotFound:
+                            # If the message is not found, silently continue
+                            continue
                         except discord.HTTPException as e:
                             print(f"Failed to delete message ID {session.message_id} in draft channel. Reason: {e}")
 
