@@ -256,13 +256,13 @@ class AdjustTimeModal(Modal):
         self.match_id = match_id
         super().__init__(title="Change the time of your match", *args, **kwargs)
         # Update the placeholder to reflect the desired format
-        self.add_item(InputText(label="MM/DD/YY HH:MM. Use Local Time & 24HR Clock", placeholder="MM/DD/YY HH:MM", custom_id="start_time"))
+        self.add_item(InputText(label="MM/DD/YYYY HH:MM. Use Local Time & 24HR Clock", placeholder="MM/DD/YYYY HH:MM", custom_id="start_time"))
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
                 challenge_to_update = await db_session.get(Challenge, self.match_id)
-                challenge_to_update.start_time = datetime.strptime(self.children[0].value, "%m/%d/%y %H:%M")
+                challenge_to_update.start_time = datetime.strptime(self.children[0].value, "%m/%d/%Y %H:%M")
                 await db_session.commit()
             bot = interaction.client
             channel = bot.get_channel(int(challenge_to_update.channel_id))
@@ -279,7 +279,7 @@ class ChallengeTimeModal(Modal):
         self.team_name = team_name
         self.cube_choice = cube
         # Update the placeholder to reflect the desired format
-        self.add_item(InputText(label="MM/DD/YY HH:MM. Use Local Time & 24HR Clock", placeholder="MM/DD/YY HH:MM", custom_id="start_time"))
+        self.add_item(InputText(label="MM/DD/YYYY HH:MM. Use Local Time & 24HR Clock", placeholder="MM/DD/YYYY HH:MM", custom_id="start_time"))
 
     async def callback(self, interaction: discord.Interaction):
         # Update the parsing to match the new format
@@ -289,7 +289,7 @@ class ChallengeTimeModal(Modal):
                 async with db_session.begin():
                     team_stmt = select(Team).where(Team.TeamName == self.team_name)
                     team_update = await db_session.scalar(team_stmt)
-                    start_time = datetime.strptime(self.children[0].value, "%m/%d/%y %H:%M")
+                    start_time = datetime.strptime(self.children[0].value, "%m/%d/%Y %H:%M")
                     formatted_time = f"<t:{int(start_time.timestamp())}:F>"  # Markdown format for dynamic time display
                     
                     async with AsyncSessionLocal() as session:
@@ -325,7 +325,7 @@ class ChallengeTimeModal(Modal):
                     #message.pin()
         except ValueError:
             # Handle the case where the date format is incorrect
-            await interaction.response.send_message("The date format is incorrect. Please use MM/DD/YY HH:MM format.", ephemeral=True)
+            await interaction.response.send_message("The date format is incorrect. Please use MM/DD/YYYY HH:MM format.", ephemeral=True)
 
 
 class PostTeamSelect(Select):
@@ -562,6 +562,10 @@ class OpponentTeamView(View):
                 formatted_time=f"<t:{int(challenge_to_update.start_time.timestamp())}:F>"
                 updated_embed = discord.Embed(title=f"{challenge_to_update.team_a} v. {challenge_to_update.team_b} is scheduled!", description=f"Proposed Time: {formatted_time}\nChosen Cube: {challenge_to_update.cube}", color=discord.Color.gold())
 
+                await notify_users(bot=bot, challenge_id=challenge_to_update.id, guild_id=challenge_to_update.guild_id, 
+                                   channel_id=challenge_to_update.channel_id, initial_user_id=challenge_to_update.initial_user, 
+                                   opponent_user_id=challenge_to_update.opponent_user, team_a=challenge_to_update.team_a, 
+                                   team_b=challenge_to_update.team_b, start_time=challenge_to_update.start_time)
 
                 await message.edit(embed=updated_embed)
 
@@ -618,3 +622,22 @@ class OpponentTeamSelect(Select):
                 teams = result.scalars().all()
                 self.options = [discord.SelectOption(label=team.TeamName, value=str(team.TeamName)) for team in teams]
 
+async def notify_users(bot, challenge_id, guild_id, channel_id, initial_user_id, opponent_user_id, team_a, team_b, start_time):
+    guild = bot.get_guild(int(guild_id))
+    if not guild:
+        print(f"Guild {guild_id} not found")
+        return
+
+    channel = guild.get_channel(int(channel_id))
+    if not channel:
+        print(f"Channel {channel_id} not found in guild {guild_id}")
+        return
+    formatted_time = f"<t:{int(start_time.timestamp())}:F>"
+    initial_user = await bot.fetch_user(int(initial_user_id))
+    opponent_user = await bot.fetch_user(int(opponent_user_id))
+    if not initial_user or not opponent_user:
+        print(f"Users not found: Initial User ID: {initial_user_id}, Opponent User ID: {opponent_user_id}")
+        return
+
+    # Ping the users
+    await channel.send(f"{initial_user.mention}, a challenger approaches to take on {team_a}! {opponent_user.mention} and {team_b} have signed up for your match at {formatted_time} ")

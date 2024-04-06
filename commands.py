@@ -40,15 +40,16 @@ async def league_commands(bot):
     async def list_commands(ctx):
         # Manually creating a list of commands and descriptions
         commands_list = {
-            "/list_commands": "Lists all available slash commands.\n",
-            "**Lobby Commands**" : "\n",
-            "**/startdraft**": "Opens an open-play lobby for a team draft using randomized teams",
-            "**/leaguedraft**": "Opens a lobby for League Drafts (results tracked)",
-            "**/premadedraft**": "Opens a lobby for premade teams (results NOT tracked)\n",
-            "**League Commands**": "\n",
-            "**/registerteam**": "Registers a team for the league draft",
-            "**/listteams**": "Displays a list of currently registered teams in alphabetical order",
-            "**/standings**": "Displays current league standings"
+            "`/list_commands`": "Lists all available slash commands.\n",
+            "**Lobby Commands**" : "",
+            "**`/startdraft`**": "Launch a lobby for randomized team drafts.",
+            "**`/leaguedraft`**": "Launch a lobby for League Drafts (results tracked)",
+            "**`/premadedraft`**": "Launch a lobby for premade teams (untracked)\n",
+            "**League Commands**": "",
+            "**`/post_challenge`**": "Set a draft time for other teams to challenge your team.",
+            "**`/registerteam`**": "Register your team for the league",
+            "**`/listteams`**": "Displays registered teams",
+            "**`/standings`**": "Displays current league standings"
         }
         
         # Formatting the list for display

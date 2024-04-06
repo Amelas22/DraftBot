@@ -78,6 +78,7 @@ class PersistentView(discord.ui.View):
 
 
     async def sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
         # Fetch the current draft session to ensure it's up to date
         draft_session = await get_draft_session(self.draft_session_id)
         if not draft_session:
@@ -126,6 +127,7 @@ class PersistentView(discord.ui.View):
 
 
     async def cancel_sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
         draft_session = await get_draft_session(self.draft_session_id)
         if not draft_session:
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
@@ -164,6 +166,7 @@ class PersistentView(discord.ui.View):
     
 
     async def randomize_teams_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
         bot = interaction.client
         session_id = self.draft_session_id
 
@@ -223,6 +226,7 @@ class PersistentView(discord.ui.View):
             await check_weekly_limits(interaction, session.premade_match_id)
 
     async def team_assignment_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
         session = await get_draft_session(self.draft_session_id)
         if not session:
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
@@ -345,6 +349,7 @@ class PersistentView(discord.ui.View):
     
 
     async def remove_user_button_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
         session = await get_draft_session(self.draft_session_id)
         if not session:
             print("Draft session not found.")
