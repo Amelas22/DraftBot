@@ -433,7 +433,7 @@ class ChallengeView(View):
         self.add_item(self.create_button("Sign Up", "green", f"sign_up_{self.challenge_id}", self.sign_up_callback))
         self.add_item(self.create_button("Change Time", "grey", f"change_time_{self.challenge_id}", self.change_time_callback))
         self.add_item(self.create_button("Open Lobby", "primary", f"open_lobby_{self.challenge_id}", self.open_lobby_callback))
-
+        self.add_item(self.create_button("Remove Challenge Post", "red", f"close_{self.challenge_id}", self.close_challenge_callback))
 
     def create_button(self, label, style, custom_id, custom_callback, disabled=False):
         style = getattr(discord.ButtonStyle, style)
@@ -454,6 +454,24 @@ class ChallengeView(View):
         except Exception as e:
             print(f"Error in Team Select callback: {e}")
     
+    async def close_challenge_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        bot = interaction.client
+        
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                team_stmt = select(Challenge).where(Challenge.id == self.challenge_id)
+                challenge = await db_session.scalar(team_stmt)
+                if interaction.user.id == int(challenge.initial_user):
+
+                    channel = bot.get_channel(int(challenge.channel_id))
+                    message = await channel.fetch_message(int(challenge.message_id))
+                    await message.delete()
+
+                    await db_session.delete(challenge)
+                else:
+                    await interaction.response.send_message("You are not authorized to close this challenge", ephemeral=True)
+
+
     async def open_lobby_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():

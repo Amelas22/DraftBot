@@ -1,6 +1,7 @@
 import discord
-from session import register_team_to_db, Team, AsyncSessionLocal, Match, MatchResult, DraftSession
-from sqlalchemy import select, not_
+from session import register_team_to_db, Team, AsyncSessionLocal, Match, MatchResult, DraftSession, remove_team_from_db
+from sqlalchemy import select, not_, func
+from discord.ext import commands
 import aiocron
 import pytz
 from datetime import datetime, timedelta
@@ -13,6 +14,12 @@ async def league_commands(bot):
         team, response_message = await register_team_to_db(team_name)
         await interaction.response.send_message(response_message, ephemeral=True)
     
+    @bot.slash_command(name="delete_team", description="Mod Only: Remove a new team from the league")
+    async def deleteteam(ctx, *, team_name: str):
+        await ctx.defer()  # Acknowledge the interaction immediately to prevent timeout
+        response_message = await remove_team_from_db(ctx, team_name)
+        await ctx.followup.send(response_message)
+
     @bot.slash_command(name='listteams', description='List all registered teams')
     async def list_teams(interaction: discord.Interaction):
         async with AsyncSessionLocal() as session:
@@ -49,7 +56,9 @@ async def league_commands(bot):
             "**`/post_challenge`**": "Set a draft time for other teams to challenge your team.",
             "**`/registerteam`**": "Register your team for the league",
             "**`/listteams`**": "Displays registered teams",
-            "**`/standings`**": "Displays current league standings"
+            "**`/standings`**": "Displays current league standings\n",
+            "**Mod Commands**": "",
+            "**`/delete_team`**": "Removes a registered team",
         }
         
         # Formatting the list for display
