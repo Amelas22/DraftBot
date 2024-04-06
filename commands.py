@@ -56,7 +56,9 @@ async def league_commands(bot):
             "**`/post_challenge`**": "Set a draft time for other teams to challenge your team.",
             "**`/registerteam`**": "Register your team for the league",
             "**`/listteams`**": "Displays registered teams",
-            "**`/standings`**": "Displays current league standings"
+            "**`/standings`**": "Displays current league standings\n",
+            "**Mod Commands**": "",
+            "**`/delete_team`**": "Removes a registered team",
         }
         
         # Formatting the list for display
