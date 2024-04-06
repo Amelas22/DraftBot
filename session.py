@@ -208,3 +208,27 @@ async def register_team_to_db(team_name: str):
             await session.commit()
 
             return new_team, f"Team '{team_name}' has been registered successfully."
+
+async def remove_team_from_db(ctx, team_name: str):
+    # Check if the user has the "cube overseer" role
+    if any(role.name == "Cube Overseer" for role in ctx.author.roles):
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                # Normalize the team name for case-insensitive comparison
+                normalized_team_name = team_name.strip().lower()
+                # Check if the team exists
+                query = select(Team).filter(func.lower(Team.TeamName) == normalized_team_name)
+                result = await session.execute(query)
+                existing_team = result.scalars().first()
+
+                if not existing_team:
+                    await ctx.send(f"Team '{team_name}' does not exist.")
+                    return
+
+                # If exists, delete the team
+                await session.delete(existing_team)
+                await session.commit()
+
+                await ctx.send(f"Team '{team_name}' has been removed successfully.")
+    else:
+        await ctx.send("You do not have permission to remove a team. This action requires the 'cube overseer' role.")
