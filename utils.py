@@ -398,16 +398,20 @@ async def cleanup_sessions_task(bot):
                         for channel_id in session.channel_ids:
                             channel = bot.get_channel(int(channel_id))
                             if channel:  # Check if channel was found
-                                await channel.delete(reason="Session expired.")
-            
+                                try:
+                                    await channel.delete(reason="Session expired.")
+                                except discord.HTTPException as e:
+                                    print(f"Failed to delete channel: {channel.name}. Reason: {e}")
 
                     # Attempt to delete the message associated with the session from the draft channel
                     draft_channel = bot.get_channel(int(session.draft_channel_id))
                     if draft_channel and session.message_id:
-                        
-                        msg = await draft_channel.fetch_message(int(session.message_id))
-                        await msg.delete()
-                        
+                        try:
+                            msg = await draft_channel.fetch_message(int(session.message_id))
+                            await msg.delete()
+                        except discord.HTTPException as e:
+                            print(f"Failed to delete message ID {session.message_id} in draft channel. Reason: {e}")
+
         # Sleep for a certain amount of time before running again
         await asyncio.sleep(3600)  # Sleep for 1 hour
 
