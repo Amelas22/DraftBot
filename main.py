@@ -176,7 +176,7 @@ class DraftSession:
 
         if team_name in ["Team-A", "Team-B"]:
             # Apply logic to both "Cube Overseer" and "Development" role members
-            for member in all_special_role_members:
+            for member in all_special_role_members.members:
                 # Check if the member is part of the current team or not
                 if member.id not in team_a and member.id not in team_b:
                     overwrites[member] = discord.PermissionOverwrite(read_messages=True)

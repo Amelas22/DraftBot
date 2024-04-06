@@ -218,7 +218,7 @@ async def league_commands(bot):
                 
                 # Check if teams exist
                 if not teams:
-                    await channel.send("No results posted yet.", ephemeral=True)
+                    await channel.send("No results posted yet.")
                     return
 
                 # Format the standings as an embed
