@@ -82,20 +82,20 @@ class PersistentView(discord.ui.View):
         # Fetch the current draft session to ensure it's up to date
         draft_session = await get_draft_session(self.draft_session_id)
         if not draft_session:
-            await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
+            await interaction.followup.send("The draft session could not be found.", ephemeral=True)
             return
         
         sign_ups = draft_session.sign_ups or {}
 
         # Check if the sign-up list is already full
-        if len(sign_ups) >= 8:
-            await interaction.response.send_message("The sign-up list is already full. No more players can sign up.", ephemeral=True)
+        if len(sign_ups) >= 10:
+            await interaction.followup.send("The sign-up list is already full. No more players can sign up.", ephemeral=True)
             return
 
         user_id = str(interaction.user.id)
         if user_id in sign_ups:
             # User is already signed up; inform them
-            await interaction.response.send_message("You are already signed up!", ephemeral=True)
+            await interaction.followup.send("You are already signed up!", ephemeral=True)
         else:
             # User is signing up
             sign_ups[user_id] = interaction.user.display_name
@@ -120,14 +120,14 @@ class PersistentView(discord.ui.View):
             # Confirm signup with draft link
             draft_link = draft_session_updated.draft_link
             signup_confirmation_message = f"You are now signed up. Join Here: {draft_link}"
-            await interaction.response.send_message(signup_confirmation_message, ephemeral=True)
+            await interaction.followup.send(signup_confirmation_message, ephemeral=True)
 
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
 
 
     async def cancel_sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+       
         draft_session = await get_draft_session(self.draft_session_id)
         if not draft_session:
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
@@ -166,7 +166,7 @@ class PersistentView(discord.ui.View):
     
 
     async def randomize_teams_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+       
         bot = interaction.client
         session_id = self.draft_session_id
 
@@ -226,7 +226,7 @@ class PersistentView(discord.ui.View):
             await check_weekly_limits(interaction, session.premade_match_id)
 
     async def team_assignment_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+        
         session = await get_draft_session(self.draft_session_id)
         if not session:
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
@@ -349,7 +349,7 @@ class PersistentView(discord.ui.View):
     
 
     async def remove_user_button_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+   
         session = await get_draft_session(self.draft_session_id)
         if not session:
             print("Draft session not found.")
