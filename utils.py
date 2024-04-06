@@ -398,19 +398,41 @@ async def cleanup_sessions_task(bot):
                         for channel_id in session.channel_ids:
                             channel = bot.get_channel(int(channel_id))
                             if channel:  # Check if channel was found
-                                try:
-                                    await channel.delete(reason="Session expired.")
-                                except discord.HTTPException as e:
-                                    print(f"Failed to delete channel: {channel.name}. Reason: {e}")
+                                await channel.delete(reason="Session expired.")
+                                
 
                     # Attempt to delete the message associated with the session from the draft channel
                     draft_channel = bot.get_channel(int(session.draft_channel_id))
                     if draft_channel and session.message_id:
+                        msg = await draft_channel.fetch_message(int(session.message_id))
+                        await msg.delete()
+      
+                from session import Challenge
+                challenge_stmt = select(Challenge)
+                challenge_results = await db_session.execute(challenge_stmt)
+                challenges_to_cleanup = challenge_results.scalars().all()
+
+                for challenge in challenges_to_cleanup:
+                    eastern = pytz.timezone('US/Eastern')
+                    start_time_eastern = eastern.localize(challenge.start_time)
+                    # Convert start_time to UTC to compare with window_time_utc
+                    start_time_utc = start_time_eastern.astimezone(pytz.utc)
+
+                    if start_time_utc < window_time:
                         try:
-                            msg = await draft_channel.fetch_message(int(session.message_id))
-                            await msg.delete()
-                        except discord.HTTPException as e:
-                            print(f"Failed to delete message ID {session.message_id} in draft channel. Reason: {e}")
+                            channel = bot.get_channel(int(challenge.channel_id))
+                            if channel:
+                                message = await channel.fetch_message(int(challenge.message_id))
+                                await message.delete()
+                        except discord.NotFound:
+                            print(f"Message {challenge.message_id} not found, may have been already deleted.")
+                        except Exception as e:
+                            print(f"Error deleting message {challenge.message_id}: {e}")
+                        
+                        # Delete the challenge from the database
+                        db_session.delete(challenge)
+
+                await db_session.commit()
 
         # Sleep for a certain amount of time before running again
         await asyncio.sleep(3600)  # Sleep for 1 hour
