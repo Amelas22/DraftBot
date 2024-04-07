@@ -5,8 +5,9 @@ import pytz
 from sqlalchemy import update, select, func, not_, desc
 from datetime import datetime, timedelta
 from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult, PlayerStats, Match, Team, WeeklyLimit
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, joinedload
 from trueskill import Rating, rate_1vs1
+from discord.ui import View
 
 
 
@@ -715,3 +716,91 @@ async def balance_teams(player_ids, guild):
 
     return team_a, team_b
     
+async def re_register_views(bot):
+    async with AsyncSessionLocal() as db_session:
+        async with db_session.begin():
+            stmt = select(DraftSession).options(joinedload(DraftSession.match_results)).order_by(desc(DraftSession.id)).limit(10)
+            result = await db_session.execute(stmt)
+            draft_sessions = result.scalars().unique()
+
+        for draft_session in draft_sessions:
+            if not draft_session.session_stage:
+                channel_id = int(draft_session.draft_channel_id)
+                channel = bot.get_channel(channel_id)
+                if channel:
+                    try:
+                        message = await channel.fetch_message(int(draft_session.message_id))
+                        from views import PersistentView
+                        view = PersistentView(bot=bot,
+                                            draft_session_id=draft_session.session_id,
+                                            session_type=draft_session.session_type,
+                                            team_a_name=draft_session.team_a_name,
+                                            team_b_name=draft_session.team_b_name,
+                                            session_stage=None)
+                        await message.edit(view=view)  # Reattach the view
+                    except discord.NotFound:
+                        # Handle cases where the message or channel might have been deleted
+                        print(f"Message or channel not found for session: {draft_session.session_id}")
+                    except Exception as e:
+                        # Log or handle any other exceptions
+                        print(f"Failed to re-register view for session: {draft_session.session_id}, error: {e}")
+            elif draft_session.session_stage == "teams":
+                channel_id = int(draft_session.draft_channel_id)
+                channel = bot.get_channel(channel_id)
+                if channel:
+                    try:
+                        message = await channel.fetch_message(int(draft_session.message_id))
+                        from views import PersistentView
+                        view = PersistentView(bot=bot,
+                                            draft_session_id=draft_session.session_id,
+                                            session_type=draft_session.session_type,
+                                            team_a_name=draft_session.team_a_name,
+                                            team_b_name=draft_session.team_b_name,
+                                            session_stage="teams")
+                        await message.edit(view=view)  # Reattach the view
+                    except discord.NotFound:
+                        # Handle cases where the message or channel might have been deleted
+                        print(f"Message or channel not found for session: {draft_session.session_id}")
+                    except Exception as e:
+                        # Log or handle any other exceptions
+                        print(f"Failed to re-register view for session: {draft_session.session_id}, error: {e}")
+            elif draft_session.session_stage == "pairings":
+                # Group match results by pairing_message_id
+                matches_by_pairing_msg = {}
+                for match_result in draft_session.match_results:
+                    pairing_msg_id = match_result.pairing_message_id
+                    if pairing_msg_id not in matches_by_pairing_msg:
+                        matches_by_pairing_msg[pairing_msg_id] = []
+                    matches_by_pairing_msg[pairing_msg_id].append(match_result)
+                
+                # Iterate over each group of match results by their pairing message
+                for pairing_message_id, match_results in matches_by_pairing_msg.items():
+                    channel_id = int(draft_session.draft_chat_channel)
+                    channel = bot.get_channel(channel_id)
+                    if channel:
+                        try:
+                            message = await channel.fetch_message(int(pairing_message_id))
+                            view = View(timeout=None)  # Initialize a new view for this set of match results
+                            
+                            # Add a button for each match result in this group
+                            for match_result in match_results:
+                                from views import MatchResultButton
+                                button = MatchResultButton(
+                                    bot=bot,
+                                    session_id=draft_session.session_id,
+                                    match_id=match_result.id,
+                                    match_number=match_result.match_number,
+                                    label=f"Match {match_result.match_number} Results",
+                                    style=discord.ButtonStyle.primary
+                                    # row parameter is optional
+                                )
+                                view.add_item(button)
+                            
+                            # Now, view contains all buttons for the matches associated with this pairing message
+                            await message.edit(view=view)
+                        except discord.NotFound:
+                            print(f"Pairing message or channel not found for pairing message ID: {pairing_message_id}")
+                        except Exception as e:
+                            print(f"Failed to re-register view for pairing message ID: {pairing_message_id}, error: {e}")
+
+
