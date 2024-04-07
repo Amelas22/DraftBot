@@ -89,7 +89,41 @@ async def league_commands(bot):
         initial_view = InitialRangeView()
         await interaction.response.send_message("Step 1 of 2: Please select the range for your team and the opposing team:", view=initial_view, ephemeral=True)
         
+        
+    @bot.slash_command(name="trophies", description="Display the Trophy Leaderboard for the current month.")
+    async def trophies(ctx):
+        eastern_tz = pytz.timezone('US/Eastern')
+        now = datetime.now(eastern_tz)
+        # Get the first day of the current month at 00:00 hours
+        first_day_of_month = eastern_tz.localize(datetime(now.year, now.month, 1))
 
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                # Select DraftSessions within the current month that have trophy drafters
+                stmt = select(DraftSession).where(DraftSession.teams_start_time.between(first_day_of_month, now),
+                                                not_(DraftSession.trophy_drafters == None),
+                                                not_(DraftSession.premade_match_id),
+                                                DraftSession.tracked_draft == 1)
+                results = await db_session.execute(stmt)
+                trophy_sessions = results.scalars().all()
+
+                drafter_counts = Counter()
+                for session in trophy_sessions:
+                    undefeated_drafters = session.trophy_drafters if session.trophy_drafters else []
+                    drafter_counts.update(undefeated_drafters)
+
+                # Sort drafters by their trophy counts in descending order
+                sorted_drafters = drafter_counts.most_common()
+                formatted_time = f"<t:{int(now.timestamp())}:F>"
+                embed = discord.Embed(title=f"{now.strftime('%B')} Trophy Leaderboard",
+                                    description=f"Rankings as of {formatted_time}",
+                                    color=discord.Color.dark_purple())
+                for drafter, count in sorted_drafters:
+                    embed.add_field(name=f"{drafter}", value=f"Trophies: {count}", inline=False)
+                
+                await ctx.respond(embed=embed)
+
+                
     @aiocron.crontab('01 09 * * *', tz=pytz.timezone('US/Eastern'))
     async def daily_league_results():
         # Fetch all guilds the bot is in and look for the "league-summary" channel
