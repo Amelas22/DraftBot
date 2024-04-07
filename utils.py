@@ -8,6 +8,7 @@ from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchRes
 from sqlalchemy.orm import selectinload, joinedload
 from trueskill import Rating, rate_1vs1
 from discord.ui import View
+from league import ChallengeView
 
 
 
@@ -715,7 +716,32 @@ async def balance_teams(player_ids, guild):
                     is_team_a_turn = True
 
     return team_a, team_b
-    
+
+async def re_register_challenges(bot):
+    async with AsyncSessionLocal() as db_session:
+        async with db_session.begin():
+            from session import Challenge
+            stmt = select(Challenge)
+            result = await db_session.execute(stmt)
+            challenge_to_update = result.scalars().all()
+
+            for challenge in challenge_to_update:
+                if challenge.channel_id:
+                    channel_id = int(challenge.channel_id)
+                    channel = bot.get_channel(channel_id)
+                    if channel:
+                        try:
+                            message = await channel.fetch_message(int(challenge.message_id))
+                            view = ChallengeView(challenge_id=challenge.id, 
+                                                team_b=challenge.team_b)
+                            await message.edit(view=view)
+                        except discord.NotFound:
+                            # Handle cases where the message or channel might have been deleted
+                            print(f"Message or channel not found for session: {challenge.id}")
+                        except Exception as e:
+                            # Log or handle any other exceptions
+                            print(f"Failed to re-register view for challenge: {challenge.id}, error: {e}")
+
 async def re_register_views(bot):
     async with AsyncSessionLocal() as db_session:
         async with db_session.begin():

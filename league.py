@@ -625,7 +625,7 @@ class OpponentTeamView(View):
                 message = await channel.fetch_message(int(challenge_to_update.message_id))
                 formatted_time=f"<t:{int(challenge_to_update.start_time.timestamp())}:F>"
                 updated_embed = discord.Embed(title=f"{challenge_to_update.team_a} v. {challenge_to_update.team_b} is scheduled!", description=f"Proposed Time: {formatted_time}\nChosen Cube: {challenge_to_update.cube}", color=discord.Color.gold())
-
+                await message.edit(embed=updated_embed)
                 await notify_poster(bot=bot, challenge_id=challenge_to_update.id, guild_id=challenge_to_update.guild_id, 
                                    channel_id=challenge_to_update.channel_id, initial_user_id=challenge_to_update.initial_user, 
                                    opponent_user_id=challenge_to_update.opponent_user, team_a=challenge_to_update.team_a, 
@@ -636,7 +636,7 @@ class OpponentTeamView(View):
                                    opponent_user_id=challenge_to_update.opponent_user, team_a=challenge_to_update.team_a, 
                                    team_b=challenge_to_update.team_b, start_time=challenge_to_update.start_time))
 
-                await message.edit(embed=updated_embed)
+                
 
 class OpponentTeamSelect(Select):
     def __init__(self, placeholder, attribute_name):
