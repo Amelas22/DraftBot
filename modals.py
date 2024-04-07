@@ -1,8 +1,8 @@
 from datetime import datetime, timedelta
-from sqlalchemy import select, func
+from sqlalchemy import select
 import discord
 import random
-from session import DraftSession, AsyncSessionLocal, get_draft_session, register_team_to_db, Match
+from session import DraftSession, AsyncSessionLocal, get_draft_session
 from views import PersistentView
 
 class CubeSelectionModal(discord.ui.Modal):

@@ -205,12 +205,12 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
 
         if draft_session.session_type == "random":
             title = "Congratulations to " + ", ".join(member.display_name for member in winner_team if member) + " on winning the draft!"
-            description = f"Draft Start: <t:{int(draft_session.draft_start_time.timestamp())}:F>"
+            description = f"Draft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
             discord_color = discord.Color.gold()
         elif draft_session.session_type == "premade":
             team_name = draft_session.team_a_name if winner_team_ids == draft_session.team_a else draft_session.team_b_name
             title = f"{team_name} has won the match!"
-            description = f"Congratulations to " + ", ".join(member.display_name for member in winner_team if member) + f" on winning the draft!\nDraft Start: <t:{int(draft_session.draft_start_time.timestamp())}:F>"
+            description = f"Congratulations to " + ", ".join(member.display_name for member in winner_team if member) + f" on winning the draft!\nDraft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
             discord_color = discord.Color.gold()
         else:
             title = "Draft Outcome"

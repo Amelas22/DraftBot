@@ -2,7 +2,7 @@ import discord
 import os
 from discord.ext import commands
 from dotenv import load_dotenv
-from session import init_db, register_team_to_db
+from session import init_db
 from modals import CubeSelectionModal
 from utils import cleanup_sessions_task
 from commands import league_commands
@@ -26,7 +26,6 @@ async def main():
     @bot.event
     async def on_ready():
         bot.loop.create_task(cleanup_sessions_task(bot))
-        print("Cleanup task started.")
         print(f'Logged in as {bot.user}!')
         # Call re_register_views here and pass the bot instance
         from utils import re_register_views, re_register_challenges

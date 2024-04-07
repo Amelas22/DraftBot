@@ -1,7 +1,6 @@
 import discord
-from session import register_team_to_db, Team, AsyncSessionLocal, Match, MatchResult, DraftSession, remove_team_from_db
-from sqlalchemy import select, not_, func
-from discord.ext import commands
+from session import register_team_to_db, Team, AsyncSessionLocal, Match, DraftSession, remove_team_from_db
+from sqlalchemy import select, not_
 import aiocron
 import pytz
 from datetime import datetime, timedelta
@@ -54,11 +53,13 @@ async def league_commands(bot):
             "**`/premadedraft`**": "Launch a lobby for premade teams (untracked)\n",
             "**League Commands**": "",
             "**`/post_challenge`**": "Set a draft time for other teams to challenge your team.",
-            "**`/registerteam`**": "Register your team for the league",
+            "**`/list_challenge`**": "Lists all open challenges with a link to sign up.",
+            "**`/find_a_match`**": "Choose a time to find challenges within 2 hours of chosen time.",
             "**`/list_teams`**": "Displays registered teams",
             "**`/standings`**": "Displays current league standings\n",
             "**Mod Commands**": "",
             "**`/delete_team`**": "Removes a registered team",
+            "**`/registerteam`**": "Register your team for the league",
         }
         
         # Formatting the list for display
@@ -122,7 +123,39 @@ async def league_commands(bot):
     async def standings(interaction: discord.Interaction):
         await post_standings(interaction)
 
+    @bot.slash_command(name="trophies", description="Display the Trophy Leaderboard for the current month.")
+    async def trophies(ctx):
+        eastern_tz = pytz.timezone('US/Eastern')
+        now = datetime.now(eastern_tz)
+        # Get the first day of the current month at 00:00 hours
+        first_day_of_month = eastern_tz.localize(datetime(now.year, now.month, 1))
 
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                # Select DraftSessions within the current month that have trophy drafters
+                stmt = select(DraftSession).where(
+                    DraftSession.teams_start_time.between(first_day_of_month, now),
+                    not_(DraftSession.trophy_drafters == None),
+                    DraftSession.session_type == "random"
+                )
+                results = await db_session.execute(stmt)
+                trophy_sessions = results.scalars().all()
+
+                drafter_counts = Counter()
+                for session in trophy_sessions:
+                    undefeated_drafters = session.trophy_drafters if session.trophy_drafters else []
+                    drafter_counts.update(undefeated_drafters)
+
+                # Sort drafters by their trophy counts in descending order
+                sorted_drafters = drafter_counts.most_common()
+
+                embed = discord.Embed(title=f"{now.strftime('%B')} Trophy Leaderboard",
+                                    description="",
+                                    color=discord.Color.blue())
+                for drafter, count in sorted_drafters:
+                    embed.add_field(name=f"{drafter}", value=f"Trophies: {count}", inline=False)
+                
+                await ctx.respond(embed=embed)
 
     @bot.slash_command(name="leaguedraft", description="Start a league draft with chosen teams and cube.")
     async def leaguedraft(interaction: discord.Interaction):

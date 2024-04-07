@@ -5,12 +5,10 @@ Code for league draft structure
 import discord
 import asyncio
 import pytz
-#from discord.ext import commands
-from discord.ui import Select, View, Modal, InputText, Button
-from discord import ButtonStyle, Embed, Interaction
+from discord.ui import Select, View, Modal, InputText
 from datetime import datetime, timedelta
 from session import AsyncSessionLocal, Team, DraftSession, Match, Challenge
-from sqlalchemy import select, update, not_
+from sqlalchemy import select
 import random
 
 
