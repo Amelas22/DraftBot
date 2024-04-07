@@ -581,25 +581,28 @@ async def check_weekly_limits(interaction, match_id):
             if not match:
                 print("Match not found.")
                 return
-            
-            teams_to_update = [match.TeamAID, match.TeamBID]
 
-            for team_id in teams_to_update:
-                    team_weekly_limit_stmt = select(WeeklyLimit).where(
+            teams_to_check = [match.TeamAID, match.TeamBID]
+            for team_id in teams_to_check:
+                team_weekly_limit_stmt = select(WeeklyLimit).where(
                     WeeklyLimit.TeamID == team_id,
-                    func.date(WeeklyLimit.WeekStartDate) == start_of_week
+                    WeeklyLimit.WeekStartDate == start_of_week.date()
+                )
+                team_weekly_limit = await db_session.scalar(team_weekly_limit_stmt)
+
+                if team_weekly_limit and (team_weekly_limit.MatchesPlayed >= 5 or team_weekly_limit.PointsEarned >= 3):
+                    # Update DraftSession to untrack match
+                    await db_session.execute(
+                        update(DraftSession).
+                        where(DraftSession.premade_match_id == str(match_id)).
+                        values(tracked_draft=False)
                     )
-                    team_weekly_limit = await db_session.scalar(team_weekly_limit_stmt)
 
-                    if not team_weekly_limit:
-                        print(f"Weekly limit not found for Team ID {team_id}.")
-                        continue
+                    condition = "matches" if team_weekly_limit.MatchesPlayed >= 5 else "points"
+                    limit_messages.append(f"{team_weekly_limit.TeamName} has exceeded the weekly limit for {condition}. This match will not be tracked.")
 
-                    if team_weekly_limit.MatchesPlayed >= 5:
-                        limit_messages.append(f"{team_weekly_limit.TeamName} has played the maximum matches this week.")
-                    if team_weekly_limit.PointsEarned >= 3:
-                        limit_messages.append(f"{team_weekly_limit.TeamName} has earned the maximum points this week.")
-    
+            await db_session.commit()
+
     if limit_messages:
         await interaction.followup.send("\n".join(limit_messages))
     else:
