@@ -10,13 +10,14 @@ from utils import calculate_pairings, generate_draft_summary_embed ,post_pairing
 PROCESSING_ROOMS_PAIRINGS = {}
 
 class PersistentView(discord.ui.View):
-    def __init__(self, bot, draft_session_id, session_type, team_a_name=None, team_b_name=None):
+    def __init__(self, bot, draft_session_id, session_type, team_a_name=None, team_b_name=None, session_stage=None):
         super().__init__(timeout=None)
         self.bot = bot
         self.draft_session_id = draft_session_id
         self.session_type = session_type
         self.team_a_name = team_a_name
         self.team_b_name = team_b_name
+        self.session_stage = session_stage
         self.channel_ids = []
         self.add_buttons()
 
@@ -38,7 +39,14 @@ class PersistentView(discord.ui.View):
         # self.add_item(self.create_button("Ready Check", "green", "ready_check", self.ready_check_callback))
         self.add_item(self.create_button("Create Rooms & Post Pairings", "primary", f"create_rooms_pairings_{self.draft_session_id}", self.create_rooms_pairings_callback, disabled=True))
 
-
+        # Logic to enable/disable based on session_stage
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                if self.session_stage == "teams":
+                    if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}" or item.custom_id == f"cancel_draft_{self.draft_session_id}":
+                        item.disabled = False
+                    else:
+                        item.disabled = True
     def create_button(self, label, style, custom_id, custom_callback, disabled=False):
         style = getattr(discord.ButtonStyle, style)
         button = CallbackButton(label=label, style=style, custom_id=custom_id, custom_callback=custom_callback, disabled=disabled)
@@ -399,7 +407,6 @@ class PersistentView(discord.ui.View):
                 if session.session_type == "random":
                     await update_player_stats_for_draft(session.session_id, guild)
                 
-                # Immediately disable the "Create Rooms & Post Pairings" button to prevent multiple presses
                 for child in self.children:
                     if isinstance(child, discord.ui.Button) and child.label == "Create Rooms & Post Pairings":
                         child.disabled = True

@@ -29,7 +29,8 @@ async def main():
         print("Cleanup task started.")
         print(f'Logged in as {bot.user}!')
         # Call re_register_views here and pass the bot instance
-        #await re_register_views(bot)
+        from utils import re_register_views
+        await re_register_views(bot)
 
     @bot.slash_command(name='startdraft', description='Start a team draft with random teams', guild_id=None)
     async def start_draft(interaction: discord.Interaction):
