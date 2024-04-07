@@ -2,9 +2,9 @@ import random
 import discord
 import asyncio
 import pytz
-from sqlalchemy import update, select, func, not_, desc
+from sqlalchemy import update, select, func, or_, desc
 from datetime import datetime, timedelta
-from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult, PlayerStats, Match, Team, WeeklyLimit
+from session import AsyncSessionLocal, get_draft_session, Challenge, DraftSession, MatchResult, PlayerStats, Match, Team, WeeklyLimit
 from sqlalchemy.orm import selectinload, joinedload
 from trueskill import Rating, rate_1vs1
 from discord.ui import View
@@ -386,7 +386,7 @@ async def calculate_three_zero_drafters(session, draft_session_id, guild):
 async def cleanup_sessions_task(bot):
     while True:
         current_time = datetime.now()
-        window_time = current_time - timedelta(hours=5)
+        window_time = current_time - timedelta(hours=4)
         async with AsyncSessionLocal() as db_session:  
             async with db_session.begin():
                 # Fetch sessions that are past their deletion time and in the deletion window
@@ -420,6 +420,28 @@ async def cleanup_sessions_task(bot):
                         except discord.HTTPException as e:
                             print(f"Failed to delete message ID {session.message_id} in draft channel. Reason: {e}")
 
+                challenge_stmt = select(Challenge).where(
+                    or_(
+                        Challenge.start_time < window_time,
+                        Challenge.message_id == None  
+                    )
+                )
+                challenge_results = await db_session.execute(challenge_stmt)
+                challenges_to_cleanup = challenge_results.scalars().all()
+
+                for challenge in challenges_to_cleanup:
+                    if challenge.channel_id:
+                        channel = bot.get_channel(int(challenge.channel_id))
+                        if channel:  # Check if channel was found
+                            try:
+                                await channel.delete(reason="Session expired.")
+                            except discord.NotFound:
+                                # If the message is not found, silently continue
+                                continue
+                            except discord.HTTPException as e:
+                                print(f"Failed to delete channel: {channel.name}. Reason: {e}")
+                    await db_session.delete(challenge)
+                await db_session.commit()
         # Sleep for a certain amount of time before running again
         await asyncio.sleep(3600)  # Sleep for 1 hour
 

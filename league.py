@@ -10,7 +10,7 @@ from discord.ui import Select, View, Modal, InputText, Button
 from discord import ButtonStyle, Embed, Interaction
 from datetime import datetime, timedelta
 from session import AsyncSessionLocal, Team, DraftSession, Match, Challenge
-from sqlalchemy import select, update
+from sqlalchemy import select, update, not_
 import random
 
 
@@ -225,23 +225,25 @@ class LeagueDraftView(discord.ui.View):
 
 
 class InitialPostView(View):
-    def __init__(self):
+    def __init__(self, command_type=None):
         super().__init__()
         self.your_team_range = None
+        self.command_type = command_type
         self.add_item(RangeSelect("Your Team Range", "your_team_range"))
     
     async def check_and_send_team_cube(self, interaction: discord.Interaction):
         if self.your_team_range:
-            new_view = PostTeamView()
+            new_view = PostTeamView(command_type=self.command_type)
             await new_view.your_team_select.populate(self.your_team_range)
             await interaction.followup.send("Choose your team, cube, and timezone", view=new_view, ephemeral=True)
 
 class PostTeamView(View):
-    def __init__(self):
+    def __init__(self, command_type):
         super().__init__()
         self.team_selection = None  # Holds the selected team name
         self.cube_selection = None  # Holds the selected cube
         self.time_zone = None
+        self.command_type = command_type
         self.your_team_select = PostTeamSelect("Your Team", "team_selection")
         self.cube_select = ChallengeCubeSelect("cube_selection")
         self.time_zone_select = TimezoneSelect("time_zone")
@@ -252,7 +254,7 @@ class PostTeamView(View):
     async def try_send_modal(self, interaction: discord.Interaction):
         if self.team_selection and self.cube_selection and self.time_zone:
             # When both selections are made, send the modal
-            await interaction.response.send_modal(ChallengeTimeModal(self.team_selection, self.cube_selection, self.time_zone))
+            await interaction.response.send_modal(ChallengeTimeModal(self.team_selection, self.cube_selection, self.time_zone, self.command_type))
         else:
             await interaction.response.defer()
 
@@ -312,67 +314,109 @@ class AdjustTimeModal(Modal):
             await message.edit(embed=updated_embed)
 
 class ChallengeTimeModal(Modal):
-    def __init__(self, team_name, cube, time_zone, *args, **kwargs):
-        super().__init__(title="Schedule Your Match", *args, **kwargs)
+    def __init__(self, team_name, cube, time_zone, command_type, *args, **kwargs):
+        super().__init__(title="Enter a Date & Time", *args, **kwargs)
         self.team_name = team_name
         self.cube_choice = cube
         self.time_zone = time_zone
+        self.command_type = command_type
         # Update the placeholder to reflect the desired format
         self.add_item(InputText(label="MM/DD/YYYY HH:MM. Use Local Time & 24HR Clock", placeholder="MM/DD/YYYY HH:MM", custom_id="start_time"))
 
     async def callback(self, interaction: discord.Interaction):
-        # Update the parsing to match the new format
-        try:
+        if self.command_type == "post":
+            try:
+                await interaction.response.defer()
+                async with AsyncSessionLocal() as db_session: 
+                    async with db_session.begin():
+                        team_stmt = select(Team).where(Team.TeamName == self.team_name)
+                        team_update = await db_session.scalar(team_stmt)
 
-            await interaction.response.defer()
-            async with AsyncSessionLocal() as db_session: 
-                async with db_session.begin():
-                    team_stmt = select(Team).where(Team.TeamName == self.team_name)
-                    team_update = await db_session.scalar(team_stmt)
+                        user_time_zone = pytz.timezone(self.time_zone)  # Convert the selected timezone string to a pytz timezone
+                        local_time = datetime.strptime(self.children[0].value, "%m/%d/%Y %H:%M")
+                        local_dt_with_tz = user_time_zone.localize(local_time)  # Localize the datetime
+                        utc_dt = local_dt_with_tz.astimezone(pytz.utc)  # Convert to UTC
 
-                    user_time_zone = pytz.timezone(self.time_zone)  # Convert the selected timezone string to a pytz timezone
-                    local_time = datetime.strptime(self.children[0].value, "%m/%d/%Y %H:%M")
-                    local_dt_with_tz = user_time_zone.localize(local_time)  # Localize the datetime
-                    utc_dt = local_dt_with_tz.astimezone(pytz.utc)  # Convert to UTC
+                        formatted_time = f"<t:{int(utc_dt.timestamp())}:F>"  # Markdown format for dynamic time display
+                        
 
-                    formatted_time = f"<t:{int(utc_dt.timestamp())}:F>"  # Markdown format for dynamic time display
-                    
+                        async with AsyncSessionLocal() as session:
+                                async with session.begin():
+                                    new_challenge = Challenge(
+                                        team_a_id = team_update.TeamID,
+                                        initial_user=str(interaction.user.id),
+                                        guild_id = str(interaction.guild_id),
+                                        team_b_id = None,
+                                        start_time = utc_dt,
+                                        team_a = team_update.TeamName,
+                                        team_b = None,
+                                        message_id = None,
+                                        channel_id = None,
+                                        cube = str(self.cube_choice)
 
-                    async with AsyncSessionLocal() as session:
-                            async with session.begin():
-                                new_challenge = Challenge(
-                                    team_a_id = team_update.TeamID,
-                                    initial_user=str(interaction.user.id),
-                                    guild_id = str(interaction.guild_id),
-                                    team_b_id = None,
-                                    start_time = utc_dt,
-                                    team_a = team_update.TeamName,
-                                    team_b = None,
-                                    message_id = None,
-                                    channel_id = None,
-                                    cube = str(self.cube_choice)
+                                    )
+                                    session.add(new_challenge)
+                                    await db_session.commit()
+                        # Post the challenge with the selected team and formatted time
+                        embed = discord.Embed(title=f"{self.team_name} is looking for a match!", description=f"Proposed Time: {formatted_time}\nChosen Cube: {self.cube_choice}\nNo Opponent Yet. Sign Up below!", color=discord.Color.blue())
 
-                                )
-                                session.add(new_challenge)
+                        view = ChallengeView(new_challenge.id, new_challenge.team_b)
+                        
+                        message = await interaction.followup.send(embed=embed, view=view)
+                        async with AsyncSessionLocal() as db_session:
+                            async with db_session.begin():
+                                challenge_to_update = await db_session.get(Challenge, new_challenge.id)
+                                challenge_to_update.message_id = str(message.id)
+                                challenge_to_update.channel_id = str(message.channel.id)
                                 await db_session.commit()
-                    # Post the challenge with the selected team and formatted time
-                    embed = discord.Embed(title=f"{self.team_name} is looking for a match!", description=f"Proposed Time: {formatted_time}\nChosen Cube: {self.cube_choice}\nNo Opponent Yet. Sign Up below!", color=discord.Color.blue())
+                
+                        #message.pin()
+            except ValueError:
+                # Handle the case where the date format is incorrect
+                await interaction.response.send_message("The date format is incorrect. Please use MM/DD/YYYY HH:MM format.", ephemeral=True)
+        elif self.command_type == "find":
+            try:
+                await interaction.response.defer()
+                user_time_zone = pytz.timezone(self.time_zone)  # Convert the selected timezone string to a pytz timezone
+                local_time = datetime.strptime(self.children[0].value, "%m/%d/%Y %H:%M")
+                local_dt_with_tz = user_time_zone.localize(local_time)  # Localize the datetime
+                utc_dt = local_dt_with_tz.astimezone(pytz.utc)  # Convert to UTC
+                begin_range = utc_dt - timedelta(hours=2)
+                end_range = utc_dt + timedelta(hours=2)
+                async with AsyncSessionLocal() as db_session: 
+                    async with db_session.begin():
+                        range_stmt = select(Challenge).where(Challenge.start_time.between(begin_range, end_range),
+                                                             Challenge.team_b == None,
+                                                             Challenge.message_id != None
+                                                             )
+                                                                
+                        results = await db_session.execute(range_stmt)
+                        challenges = results.scalars().all()
 
-                    view = ChallengeView(new_challenge.id, new_challenge.team_b)
-                    
-                    message = await interaction.followup.send(embed=embed, view=view)
-                    async with AsyncSessionLocal() as db_session:
-                        async with db_session.begin():
-                            challenge_to_update = await db_session.get(Challenge, new_challenge.id)
-                            challenge_to_update.message_id = str(message.id)
-                            challenge_to_update.channel_id = str(message.channel.id)
-                            await db_session.commit()
-              
-                    #message.pin()
-        except ValueError:
-            # Handle the case where the date format is incorrect
-            await interaction.response.send_message("The date format is incorrect. Please use MM/DD/YYYY HH:MM format.", ephemeral=True)
+                        if not challenges:
+                        # No challenges found within the range
+                            await interaction.followup.send("No open challenges found within 2 hours of the selected time. Consider using /post_challenge to open a challenge yourself!", ephemeral=True)
+                            return
+                        # Construct the link to the original challenge message
+                        
+                        embed = discord.Embed(title="Open Challenges", description="Here are the open challenges within 2 hours of the selected time:", color=discord.Color.blue())
 
+                        for challenge in challenges:
+                            for challenge in challenges:
+                                message_link = f"https://discord.com/channels/{challenge.guild_id}/{challenge.channel_id}/{challenge.message_id}"
+                                # Mention the initial user who posted the challenge
+                                initial_user_mention = f"<@{challenge.initial_user}>"
+                                # Format the start time of each challenge to display in the embed
+                                time = datetime.strptime(str(challenge.start_time), "%Y-%m-%d %H:%M:%S")
+                                utc_zone = pytz.timezone("UTC")
+                                start_time = utc_zone.localize(time)
+                                formatted_time = f"<t:{int(start_time.timestamp())}:F>"
+                                embed.add_field(name=f"Team: {challenge.team_a}", value=f"Time: {formatted_time}\nCube: {challenge.cube}\nPosted by: {initial_user_mention}\n[Sign Up Here!]({message_link})", inline=False)
+                        await interaction.followup.send(embed=embed, ephemeral=True)
+                        
+            except ValueError:
+                # Handle the case where the date format is incorrect
+                await interaction.response.send_message("The date format is incorrect. Please use MM/DD/YYYY HH:MM format.", ephemeral=True)  
 
 class PostTeamSelect(Select):
     def __init__(self, placeholder, attribute_name):

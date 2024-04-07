@@ -20,7 +20,7 @@ async def league_commands(bot):
         response_message = await remove_team_from_db(ctx, team_name)
         await ctx.followup.send(response_message)
 
-    @bot.slash_command(name='listteams', description='List all registered teams')
+    @bot.slash_command(name='list_teams', description='List all registered teams')
     async def list_teams(interaction: discord.Interaction):
         async with AsyncSessionLocal() as session:
             async with session.begin():
@@ -43,11 +43,11 @@ async def league_commands(bot):
 
             await interaction.response.send_message(embed=embed)
 
-    @bot.slash_command(name='list_commands', description='Lists all available slash commands')
+    @bot.slash_command(name='commands', description='Lists all available slash commands')
     async def list_commands(ctx):
         # Manually creating a list of commands and descriptions
         commands_list = {
-            "`/list_commands`": "Lists all available slash commands.\n",
+            "`/commands`": "Lists all available slash commands.\n",
             "**Lobby Commands**" : "",
             "**`/startdraft`**": "Launch a lobby for randomized team drafts.",
             "**`/leaguedraft`**": "Launch a lobby for League Drafts (results tracked)",
@@ -55,7 +55,7 @@ async def league_commands(bot):
             "**League Commands**": "",
             "**`/post_challenge`**": "Set a draft time for other teams to challenge your team.",
             "**`/registerteam`**": "Register your team for the league",
-            "**`/listteams`**": "Displays registered teams",
+            "**`/list_teams`**": "Displays registered teams",
             "**`/standings`**": "Displays current league standings\n",
             "**Mod Commands**": "",
             "**`/delete_team`**": "Removes a registered team",
@@ -74,8 +74,49 @@ async def league_commands(bot):
     async def postchallenge(interaction: discord.Interaction):
 
             from league import InitialPostView
-            initial_view = InitialPostView()
+            initial_view = InitialPostView(command_type="post")
             await interaction.response.send_message("Please select the range for your team", view=initial_view, ephemeral=True)
+
+    @bot.slash_command(name="find_a_match", description="Find an open challenge based on a given time.")
+    async def postchallenge(interaction: discord.Interaction):
+
+            from league import InitialPostView
+            initial_view = InitialPostView(command_type="find")
+            await interaction.response.send_message("Please select the range for your team", view=initial_view, ephemeral=True)
+
+
+    @bot.slash_command(name="list_challenges", description="Find an open challenge based on a given time.")
+    async def list_challenge(interaction: discord.Interaction):
+        async with AsyncSessionLocal() as db_session: 
+            async with db_session.begin():
+                from session import Challenge
+                range_stmt = select(Challenge).where(Challenge.team_b == None,
+                                                    Challenge.message_id != None
+                                                    ).order_by(Challenge.start_time.asc())
+                                                
+                results = await db_session.execute(range_stmt)
+                challenges = results.scalars().all()
+
+                if not challenges:
+                # No challenges found within the range
+                    await interaction.followup.send("No open challenges. Consider using /post_challenge to open a challenge yourself!", ephemeral=True)
+                    return
+                # Construct the link to the original challenge message
+                
+                embed = discord.Embed(title="Open Challenges", description="Here are all open challenges", color=discord.Color.blue())
+
+                for challenge in challenges:
+                    message_link = f"https://discord.com/channels/{challenge.guild_id}/{challenge.channel_id}/{challenge.message_id}"
+                    # Mention the initial user who posted the challenge
+                    initial_user_mention = f"<@{challenge.initial_user}>"
+                    # Format the start time of each challenge to display in the embed
+                    time = datetime.strptime(str(challenge.start_time), "%Y-%m-%d %H:%M:%S")
+                    utc_zone = pytz.timezone("UTC")
+                    start_time = utc_zone.localize(time)
+                    formatted_time = f"<t:{int(start_time.timestamp())}:F>"
+                    embed.add_field(name=f"Team: {challenge.team_a}", value=f"Time: {formatted_time}\nCube: {challenge.cube}\nPosted by: {initial_user_mention}\n[Sign Up Here!]({message_link})", inline=False)
+                await interaction.response.send_message(embed=embed)
+
 
     @bot.slash_command(name='standings', description='Display the team standings by points earned')
     async def standings(interaction: discord.Interaction):
