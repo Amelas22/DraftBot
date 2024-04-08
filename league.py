@@ -314,16 +314,21 @@ class RegisterPlayerModal(Modal):
                         # If the team is not found in Team either
                         await interaction.followup.send("Team not found. Please ensure the team name is correct.", ephemeral=True)
                 else:
-                    # If the team is already registered, update the TeamMembers JSON
+                    # If the team is already registered, attempt to update the TeamMembers JSON
                     member = interaction.guild.get_member(int(user_id))
                     display_name = member.display_name if member else "Unknown User"
-                    if user_id not in team_registration.TeamMembers:
-                        team_registration.TeamMembers[user_id] = display_name
-                        db_session.add(team_registration)
+                    updated_team_members = dict(team_registration.TeamMembers)  # Make a copy of the current dictionary
+
+                    if user_id not in updated_team_members:
+                        updated_team_members[user_id] = display_name
+                        team_registration.TeamMembers = updated_team_members  # Assign the modified copy back, forcing a change
                         await db_session.commit()
                         await interaction.followup.send(f"User {display_name} added to {self.team_selection} successfully.", ephemeral=True)
                     else:
                         await interaction.followup.send(f"User {display_name} is already registered in the team {self.team_selection}.", ephemeral=True)
+
+
+
 class TimezoneSelect(Select):
     def __init__(self, attribute_name):
         # Manually curated list of common timezones
