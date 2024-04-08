@@ -304,7 +304,7 @@ async def league_commands(bot):
                         message_link = f"https://discord.com/channels/{match.guild_id}/{match.channel_id}/{match.message_id}"
                         # Mention the initial user who posted the challenge
                         initial_user_mention = f"<@{match.initial_user}>"
-                        opponent_user_mention = f"<@{match.initial_user}>"
+                        opponent_user_mention = f"<@{match.opponent_user}>"
                         # Format the start time of each challenge to display in the embed
                         time = datetime.strptime(str(match.start_time), "%Y-%m-%d %H:%M:%S")
                         utc_zone = pytz.timezone("UTC")
@@ -313,7 +313,7 @@ async def league_commands(bot):
                         embed.add_field(name=f"{sch_count}. {match.team_a} v. {match.team_b}", value=f"Draft Start Time: {formatted_time}\nCube: {match.cube}\nTeam Leads: {initial_user_mention} {opponent_user_mention}\n[Challenge Link]({message_link})", inline=False)
                         sch_count += 1
 
-                embed.add_field(name="Open Challenges", value="No Open Challenges" if not open_challenges else "", inline=False)
+                embed.add_field(name="\n\nOpen Challenges", value="No Open Challenges" if not open_challenges else "", inline=False)
                 if open_challenges:
                     open_count = 1
                     for match in open_challenges:
