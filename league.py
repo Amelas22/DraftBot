@@ -432,7 +432,8 @@ class ChallengeTimeModal(Modal):
                                     session.add(new_challenge)
                                     await db_session.commit()
                         # Post the challenge with the selected team and formatted time
-                        embed = discord.Embed(title=f"{self.team_name} is looking for a match!", description=f"Proposed Time: {formatted_time}\nChosen Cube: {self.cube_choice}\nNo Opponent Yet. Sign Up below!", color=discord.Color.blue())
+                        user_mention = f"<@{new_challenge.initial_user}>"
+                        embed = discord.Embed(title=f"{self.team_name} is looking for a match!", description=f"Proposed Time: {formatted_time}\nChosen Cube: {self.cube_choice}\nPosted by: {user_mention}\n\nNo Opponent Yet. Sign Up below!", color=discord.Color.blue())
 
                         view = ChallengeView(new_challenge.id, new_challenge.team_b)
                         
