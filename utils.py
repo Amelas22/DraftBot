@@ -716,7 +716,7 @@ async def balance_teams(player_ids, guild):
         stmt = select(PlayerStats).where(
             PlayerStats.player_id.in_(player_ids)
         ).order_by(
-            desc(PlayerStats.true_skill_mu - PlayerStats.true_skill_sigma)
+            desc(PlayerStats.true_skill_mu - (2 * PlayerStats.true_skill_sigma))
         )
         result = await db_session.execute(stmt)
         ordered_players = result.scalars().all()
