@@ -325,10 +325,13 @@ class ChallengeTimeModal(Modal):
         if self.command_type == "post":
             try:
                 await interaction.response.defer()
+                bot = interaction.client
                 async with AsyncSessionLocal() as db_session: 
                     async with db_session.begin():
                         team_stmt = select(Team).where(Team.TeamName == self.team_name)
                         team_update = await db_session.scalar(team_stmt)
+                        guild = bot.get_guild(int(interaction.guild_id))
+                        challenge_channel = discord.utils.get(guild.text_channels, name="league-challenges")
 
                         user_time_zone = pytz.timezone(self.time_zone)  # Convert the selected timezone string to a pytz timezone
                         local_time = datetime.strptime(self.children[0].value, "%m/%d/%Y %H:%M")
@@ -349,7 +352,7 @@ class ChallengeTimeModal(Modal):
                                         team_a = team_update.TeamName,
                                         team_b = None,
                                         message_id = None,
-                                        channel_id = None,
+                                        channel_id = str(challenge_channel),
                                         cube = str(self.cube_choice)
 
                                     )
@@ -360,15 +363,15 @@ class ChallengeTimeModal(Modal):
 
                         view = ChallengeView(new_challenge.id, new_challenge.team_b)
                         
-                        message = await interaction.followup.send(embed=embed, view=view)
+                        message = await challenge_channel.send(embed=embed, view=view)
+                        await interaction.followup.send("Challenge posted in league-challenges. Good luck in your match!", ephemeral=True)
                         async with AsyncSessionLocal() as db_session:
                             async with db_session.begin():
                                 challenge_to_update = await db_session.get(Challenge, new_challenge.id)
                                 challenge_to_update.message_id = str(message.id)
                                 challenge_to_update.channel_id = str(message.channel.id)
                                 await db_session.commit()
-                
-                        #message.pin()
+
             except ValueError:
                 # Handle the case where the date format is incorrect
                 await interaction.response.send_message("The date format is incorrect. Please use MM/DD/YYYY HH:MM format.", ephemeral=True)
@@ -523,14 +526,16 @@ class ChallengeView(View):
                 if challenge.team_a and challenge.team_b:
                     await interaction.response.defer()
 
-                    await interaction.followup.send("Lobby creation in progress. Standby", ephemeral=True)
+                    await interaction.followup.send("Lobby creation in progress. Bot will post in league-play-draft-room", ephemeral=True)
                     bot = interaction.client
-                    
+                    guild = bot.get_guild(int(interaction.guild_id))
+                    lobby_channel = discord.utils.get(guild.text_channels, name="league-play-draft-room")
+
                     from session import register_team_to_db
                     # Register Team A if not present
-                    team_a, team_a_msg = await register_team_to_db(challenge.team_a)
+                    await register_team_to_db(challenge.team_a)
                     # Register Team B if not present
-                    team_b, team_b_msg = await register_team_to_db(challenge.team_b)
+                    await register_team_to_db(challenge.team_b)
 
                     draft_start_time = datetime.now().timestamp()
                     session_id = f"{interaction.user.id}-{int(draft_start_time)}"
@@ -551,7 +556,7 @@ class ChallengeView(View):
                                 team_a_name=challenge.team_a,
                                 team_b_name=challenge.team_b,
                                 tracked_draft = True,
-                                true_skill_draft = False
+                                true_skill_draft = False,
                             )
                             session.add(new_draft_session)
                             
@@ -564,7 +569,7 @@ class ChallengeView(View):
                                         "5. You will now have a private team chat with just your team and a shared draft-chat that has pairings and match results. You can select the Match Results buttons to report results.\n" +
                                         "6. Chat channels will automatically close around five hours after the /leaguedraft command was used." +
                                         f"\n\n**Chosen Cube: [{challenge.cube}](https://cubecobra.com/cube/list/{challenge.cube})** \n**Draftmancer Session**: **[Join Here]({draft_link})**",
-                        color=discord.Color.blue()
+                        color=discord.Color.dark_red()
                         )
                     embed.add_field(name=f"{challenge.team_a}", value="No players yet.", inline=False)
                     embed.add_field(name=f"{challenge.team_b}", value="No players yet.", inline=False)
@@ -597,7 +602,7 @@ class ChallengeView(View):
                             team_a_name=challenge.team_a,
                             team_b_name=challenge.team_b
                         )
-                    message = await interaction.followup.send(embed=embed, view=view)
+                    message = await lobby_channel.send(embed=embed, view=view)
 
                     if new_draft_session:
                         async with AsyncSessionLocal() as session:
@@ -668,7 +673,7 @@ class OpponentTeamView(View):
                 formatted_time=f"<t:{int(challenge_to_update.start_time.timestamp())}:F>"
                 updated_embed = discord.Embed(title=f"{challenge_to_update.team_a} v. {challenge_to_update.team_b} is scheduled!", description=f"Proposed Time: {formatted_time}\nChosen Cube: {challenge_to_update.cube}", color=discord.Color.gold())
                 await message.edit(embed=updated_embed)
-                await notify_poster(bot=bot, challenge_id=challenge_to_update.id, guild_id=challenge_to_update.guild_id, 
+                await notify_poster(bot=bot, message_id=challenge_to_update.message_id, guild_id=challenge_to_update.guild_id, 
                                    channel_id=challenge_to_update.channel_id, initial_user_id=challenge_to_update.initial_user, 
                                    opponent_user_id=challenge_to_update.opponent_user, team_a=challenge_to_update.team_a, 
                                    team_b=challenge_to_update.team_b, start_time=challenge_to_update.start_time)
@@ -676,7 +681,7 @@ class OpponentTeamView(View):
                 await asyncio.create_task(schedule_notification(bot=bot, challenge_id=challenge_to_update.id, guild_id=challenge_to_update.guild_id, 
                                    channel_id=challenge_to_update.channel_id, initial_user_id=challenge_to_update.initial_user, 
                                    opponent_user_id=challenge_to_update.opponent_user, team_a=challenge_to_update.team_a, 
-                                   team_b=challenge_to_update.team_b, start_time=challenge_to_update.start_time))
+                                   team_b=challenge_to_update.team_b, start_time=challenge_to_update.start_time, message_id=challenge_to_update.message_id))
 
                 
 
@@ -733,13 +738,13 @@ class OpponentTeamSelect(Select):
                 teams = result.scalars().all()
                 self.options = [discord.SelectOption(label=team.TeamName, value=str(team.TeamName)) for team in teams]
 
-async def notify_poster(bot, challenge_id, guild_id, channel_id, initial_user_id, opponent_user_id, team_a, team_b, start_time):
+async def notify_poster(bot, message_id, guild_id, channel_id, initial_user_id, opponent_user_id, team_a, team_b, start_time):
     guild = bot.get_guild(int(guild_id))
     if not guild:
         print(f"Guild {guild_id} not found")
         return
-
-    channel = guild.get_channel(int(channel_id))
+    channel = discord.utils.get(guild.text_channels, name="league-play-coordination")
+    
     if not channel:
         print(f"Channel {channel_id} not found in guild {guild_id}")
         return
@@ -749,32 +754,32 @@ async def notify_poster(bot, challenge_id, guild_id, channel_id, initial_user_id
     if not initial_user or not opponent_user:
         print(f"Users not found: Initial User ID: {initial_user_id}, Opponent User ID: {opponent_user_id}")
         return
-
+    message_link = f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
     # Ping the users
-    await channel.send(f"{initial_user.mention}, a challenger approaches to take on {team_a}! {opponent_user.mention} and {team_b} have signed up for your match at {formatted_time} ")
+    await channel.send(f"{initial_user.mention}, a challenger approaches to take on {team_a}! {opponent_user.mention} and {team_b} have signed up for your match at {formatted_time}. [Open Lobby Here]({message_link}) ")
 
-async def notify_teams(bot, guild_id, channel_id, initial_user_id, opponent_user_id, team_a, team_b):
+async def notify_teams(bot, guild_id, channel_id, message_id, initial_user_id, opponent_user_id, team_a, team_b):
     guild = bot.get_guild(int(guild_id))
     if not guild:
         print(f"Guild {guild_id} not found")
         return
 
-    channel = guild.get_channel(int(channel_id))
+    channel = discord.utils.get(guild.text_channels, name="league-play-coordination")
     if not channel:
         print(f"Channel {channel_id} not found in guild {guild_id}")
         return
-
+    
     initial_user = await bot.fetch_user(int(initial_user_id))
     opponent_user = await bot.fetch_user(int(opponent_user_id))
     if not initial_user or not opponent_user:
         print(f"Users not found: Initial User ID: {initial_user_id}, Opponent User ID: {opponent_user_id}")
         return
-
+    message_link = f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
     # Ping the users with the updated message format
-    await channel.send(f"{team_a} vs. {team_b} is scheduled to start in 15 minutes. Gather your teams {initial_user.mention} and {opponent_user.mention}")
+    await channel.send(f"{team_a} vs. {team_b} is scheduled to start in 15 minutes. Gather your teams {initial_user.mention} and {opponent_user.mention}. [Click Here to Open Lobby!]({message_link}")
 
 
-async def schedule_notification(bot, challenge_id, guild_id, channel_id, initial_user_id, opponent_user_id, team_a, team_b, start_time):
+async def schedule_notification(bot, challenge_id, guild_id, channel_id, initial_user_id, opponent_user_id, team_a, team_b, start_time, message_id):
     utc = pytz.utc
 
     # Convert start_time to a timezone-aware datetime object in Eastern Time
@@ -790,6 +795,6 @@ async def schedule_notification(bot, challenge_id, guild_id, channel_id, initial
 
     if delay > 0:
         await asyncio.sleep(delay)
-        await notify_teams(bot, guild_id, channel_id, initial_user_id, opponent_user_id, team_a, team_b)
+        await notify_teams(bot, guild_id, channel_id, message_id, initial_user_id, opponent_user_id, team_a, team_b)
     else:
         print("The scheduled time for notification has already passed.")

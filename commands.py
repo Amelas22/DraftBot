@@ -53,10 +53,12 @@ async def league_commands(bot):
             "**`/premadedraft`**": "Launch a lobby for premade teams (untracked)\n",
             "**League Commands**": "",
             "**`/post_challenge`**": "Set a draft time for other teams to challenge your team.",
-            "**`/list_challenge`**": "Lists all open challenges with a link to sign up.",
+            "**`/list_challenges`**": "Lists all open challenges with a link to sign up.",
             "**`/find_a_match`**": "Choose a time to find challenges within 2 hours of chosen time.",
             "**`/list_teams`**": "Displays registered teams",
             "**`/standings`**": "Displays current league standings\n",
+            "**Open Queue Commands**": "",
+            "**`/trophies`**": "Displays this month's trophy leaderboard",
             "**Mod Commands**": "",
             "**`/delete_team`**": "Removes a registered team",
             "**`/registerteam`**": "Register your team for the league",
@@ -132,7 +134,6 @@ async def league_commands(bot):
 
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
-                # Select DraftSessions within the current month that have trophy drafters
                 stmt = select(DraftSession).where(
                     DraftSession.teams_start_time.between(first_day_of_month, now),
                     not_(DraftSession.trophy_drafters == None),
@@ -146,14 +147,28 @@ async def league_commands(bot):
                     undefeated_drafters = session.trophy_drafters if session.trophy_drafters else []
                     drafter_counts.update(undefeated_drafters)
 
-                # Sort drafters by their trophy counts in descending order
                 sorted_drafters = drafter_counts.most_common()
 
                 embed = discord.Embed(title=f"{now.strftime('%B')} Trophy Leaderboard",
-                                    description="",
+                                    description="Earn Trophies in Open-Queue",
                                     color=discord.Color.blue())
+
+                last_count = None
+                rank = 0
+                skip_next_rank = 0
+
                 for drafter, count in sorted_drafters:
-                    embed.add_field(name=f"{drafter}", value=f"Trophies: {count}", inline=False)
+                    if count == last_count:  # If this user has the same trophy count as the last one
+                        skip_next_rank += 1  # Increase skip for the next unique trophy count
+                        display_rank = f"T{rank}"  # Display rank with a "T" for tie
+                    else:
+                        rank += 1 + skip_next_rank  # Increment rank, accounting for any skipped ranks
+                        skip_next_rank = 0  # Reset skip rank counter
+                        display_rank = str(rank)  # Display rank as usual
+                        last_count = count  # Update the last_count to the current user's trophy count
+
+                    rank_title = f"{display_rank}. {drafter}"
+                    embed.add_field(name=rank_title, value=f"Trophies: {count}", inline=False)
                 
                 await ctx.respond(embed=embed)
 
