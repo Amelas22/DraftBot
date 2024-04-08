@@ -1,5 +1,5 @@
 import discord
-from session import register_team_to_db, Team, AsyncSessionLocal, Match, DraftSession, remove_team_from_db
+from session import register_team_to_db, Team, AsyncSessionLocal, Match, DraftSession, remove_team_from_db, TeamRegistration
 from sqlalchemy import select, not_
 import aiocron
 import pytz
@@ -75,11 +75,38 @@ async def league_commands(bot):
 
     @bot.slash_command(name="post_challenge", description="Post a challenge for your team")
     async def postchallenge(interaction: discord.Interaction):
+        user_id_str = str(interaction.user.id)
+        async with AsyncSessionLocal() as session:  # Assuming AsyncSessionLocal is your session maker
+            async with session.begin():
+                # Query for any team registration entries that include the user ID in their TeamMembers
+                stmt = select(TeamRegistration).where(TeamRegistration.TeamMembers.contains(user_id_str))
+                result = await session.execute(stmt)
+                team_registration = result.scalars().first()
 
+                if team_registration:
+                    # Extracting user details
+                    team_id = team_registration.TeamID
+                    team_name = team_registration.TeamName
+                    user_display_name = team_registration.TeamMembers.get(user_id_str)
+                    from league import InitialPostView
+                    initial_view = InitialPostView(command_type="post", team_id=team_id, team_name=team_name, user_display_name=user_display_name)
+                    await interaction.response.send_message(f"Post a Challenge for {team_name}. Select Cube and Timezone.", view=initial_view, ephemeral=True)
+                else:
+                    await interaction.response.send_message(f"You are not registered to a team. Contact a Cube Overseer if this is an error.", ephemeral=True)
+
+    @bot.slash_command(name="register_player", description="Post a challenge for your team")
+    async def postchallenge(interaction: discord.Interaction):
+        cube_overseer_role = discord.utils.get(interaction.guild.roles, name="Cube Overseer")
+    
+        if cube_overseer_role in interaction.user.roles:
             from league import InitialPostView
-            initial_view = InitialPostView(command_type="post")
-            await interaction.response.send_message("Please select the range for your team", view=initial_view, ephemeral=True)
+            initial_view = InitialPostView(command_type="register")
+            await interaction.response.send_message("Please select the range for the team", view=initial_view, ephemeral=True)
+        else:
+            # Responding with a message indicating lack of permission
+            await interaction.response.send_message("You do not have permission to register players, please tag Cube Overseer if you need to make changes.", ephemeral=True)
 
+            
     @bot.slash_command(name="find_a_match", description="Find an open challenge based on a given time.")
     async def postchallenge(interaction: discord.Interaction):
 

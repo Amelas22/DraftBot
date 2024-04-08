@@ -129,6 +129,13 @@ class WeeklyLimit(Base):
     MatchesPlayed = Column(Integer, default=0)
     PointsEarned = Column(Integer, default=0)
 
+class TeamRegistration(Base):
+    __tablename__ = 'team_registration'
+
+    ID = Column(Integer, primary_key=True)
+    TeamID = Column(Integer, ForeignKey('teams.TeamID'))
+    TeamName = Column(String(128), unique=True, nullable=False)
+    TeamMembers = Column(JSON)
 
 
 class Challenge(Base):

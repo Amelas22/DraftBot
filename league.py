@@ -7,8 +7,8 @@ import asyncio
 import pytz
 from discord.ui import Select, View, Modal, InputText
 from datetime import datetime, timedelta
-from session import AsyncSessionLocal, Team, DraftSession, Match, Challenge
-from sqlalchemy import select
+from session import AsyncSessionLocal, Team, DraftSession, Match, Challenge, TeamRegistration
+from sqlalchemy import select, update
 import random
 
 
@@ -223,39 +223,107 @@ class LeagueDraftView(discord.ui.View):
 
 
 class InitialPostView(View):
-    def __init__(self, command_type=None):
+    def __init__(self, command_type=None, team_id=None, team_name=None, user_display_name=None):
         super().__init__()
         self.your_team_range = None
         self.command_type = command_type
-        self.add_item(RangeSelect("Your Team Range", "your_team_range"))
+        self.team_id = team_id
+        self.team_name = team_name
+        self.user_display_name = user_display_name
+        self.cube_choice = None 
+        self.time_zone = None
+        if not self.team_id:
+            self.add_item(RangeSelect("Your Team Range", "your_team_range"))
+        elif self.team_id:
+            self.time_zone_select = TimezoneSelect("time_zone")
+            self.cube_select = ChallengeCubeSelect("cube_choice")
+            self.add_item(self.cube_select)
+            self.add_item(self.time_zone_select)
     
     async def check_and_send_team_cube(self, interaction: discord.Interaction):
         if self.your_team_range:
             new_view = PostTeamView(command_type=self.command_type)
             await new_view.your_team_select.populate(self.your_team_range)
-            await interaction.followup.send("Choose your team, cube, and timezone", view=new_view, ephemeral=True)
+            await interaction.followup.send("Choose the team", view=new_view, ephemeral=True)
 
+    async def try_send_modal(self, interaction: discord.Interaction):
+        if self.team_name and self.cube_choice and self.time_zone:
+            # When both selections are made, send the modal
+            await interaction.response.send_modal(ChallengeTimeModal(self.team_name, self.cube_choice, self.time_zone, self.command_type))
+        else:
+            await interaction.response.defer()
 class PostTeamView(View):
     def __init__(self, command_type):
         super().__init__()
         self.team_selection = None  # Holds the selected team name
-        self.cube_selection = None  # Holds the selected cube
+        #self.cube_selection = None  # Holds the selected cube
         self.time_zone = None
         self.command_type = command_type
         self.your_team_select = PostTeamSelect("Your Team", "team_selection")
-        self.cube_select = ChallengeCubeSelect("cube_selection")
-        self.time_zone_select = TimezoneSelect("time_zone")
-        self.add_item(self.cube_select)
+        #self.cube_select = ChallengeCubeSelect("cube_selection")
+        #self.time_zone_select = TimezoneSelect("time_zone")
+        #self.add_item(self.cube_select)
         self.add_item(self.your_team_select)
-        self.add_item(self.time_zone_select)
+        #self.add_item(self.time_zone_select)
 
     async def try_send_modal(self, interaction: discord.Interaction):
-        if self.team_selection and self.cube_selection and self.time_zone:
+        if self.team_selection:
             # When both selections are made, send the modal
-            await interaction.response.send_modal(ChallengeTimeModal(self.team_selection, self.cube_selection, self.time_zone, self.command_type))
+            await interaction.response.send_modal(RegisterPlayerModal(self.team_selection, self.command_type))
         else:
             await interaction.response.defer()
 
+
+class RegisterPlayerModal(Modal):
+    def __init__(self, team_selection, command_type, *args, **kwargs):
+        self.team_selection = team_selection
+        self.command_type = command_type
+        super().__init__(title="Register Player with PlayerID", *args, **kwargs)
+        # Update the placeholder to reflect the desired format
+        self.add_item(InputText(label="Integer", placeholder="UserID", custom_id="register_player"))
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        user_id = self.children[0].value 
+
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                # Check if the team is already registered in TeamRegistration
+                team_registration_stmt = select(TeamRegistration).where(TeamRegistration.TeamName == self.team_selection)
+                team_registration_result = await db_session.execute(team_registration_stmt)
+                team_registration = team_registration_result.scalars().first()
+
+                if not team_registration:
+                    # If not found in TeamRegistration, look up in Team by TeamName
+                    team_stmt = select(Team).where(Team.TeamName == self.team_selection)
+                    team_result = await db_session.execute(team_stmt)
+                    team = team_result.scalars().first()
+
+                    if team:
+                        member = interaction.guild.get_member(int(user_id))
+                        display_name = member.display_name if member else "Unknown User"
+                        # If found, create a new entry in TeamRegistration
+                        new_team_registration = TeamRegistration(
+                            TeamID=team.TeamID,
+                            TeamName=team.TeamName,
+                            TeamMembers={user_id: display_name}  # Include the registering user
+                        )
+                        db_session.add(new_team_registration)
+                        await db_session.commit()
+                        await interaction.followup.send("Team registration completed successfully.", ephemeral=True)
+                    else:
+                        # If the team is not found in Team either
+                        await interaction.followup.send("Team not found. Please ensure the team name is correct.", ephemeral=True)
+                else:
+                    # If the team is already registered, update the TeamMembers JSON
+                    member = interaction.guild.get_member(int(user_id))
+                    display_name = member.display_name if member else "Unknown User"
+                    if user_id not in team_registration.TeamMembers:
+                        team_registration.TeamMembers[user_id] = display_name
+                        db_session.add(team_registration)
+                        await db_session.commit()
+                        await interaction.followup.send(f"User {display_name} added to {self.team_selection} successfully.", ephemeral=True)
+                    else:
+                        await interaction.followup.send(f"User {display_name} is already registered in the team {self.team_selection}.", ephemeral=True)
 class TimezoneSelect(Select):
     def __init__(self, attribute_name):
         # Manually curated list of common timezones
@@ -488,8 +556,53 @@ class ChallengeView(View):
 
     async def sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self.team_b:
-            initial_view = OpponentPostView(self.challenge_id)
-            await interaction.response.send_message("Please select the range for your team", view=initial_view, ephemeral=True)
+            user_id_str = str(interaction.user.id)
+            async with AsyncSessionLocal() as session:  # Assuming AsyncSessionLocal is your session maker
+                async with session.begin():
+                    # Query for any team registration entries that include the user ID in their TeamMembers
+                    stmt = select(TeamRegistration).where(TeamRegistration.TeamMembers.contains(user_id_str))
+                    result = await session.execute(stmt)
+                    team_registration = result.scalars().first()
+
+                    if team_registration:
+                        # Extracting user details
+                        team_id = team_registration.TeamID
+                        team_name = team_registration.TeamName
+                        
+                        challenge_stmt = select(Challenge).where(Challenge.id == self.challenge_id)
+                        challenge_result = await session.execute(challenge_stmt)
+                        challenge_to_update = challenge_result.scalars().first()
+                        challenge_to_update.team_b_id = team_id
+                        challenge_to_update.team_b = team_name
+                        challenge_to_update.opponent_user = user_id_str
+                        
+                        # challenge_to_update = await session.execute(update(Challenge)
+                        #                  .where(Challenge.id == self.challenge_id)
+                        #                  .values(opponent_user=user_id_str,
+                        #                          team_b_id=team_id,
+                        #                          team_b=team_name))
+                        bot = interaction.client
+                        channel = bot.get_channel(int(challenge_to_update.channel_id))
+                        message = await channel.fetch_message(int(challenge_to_update.message_id))
+                        formatted_time=f"<t:{int(challenge_to_update.start_time.timestamp())}:F>"
+                        updated_embed = discord.Embed(title=f"{challenge_to_update.team_a} v. {challenge_to_update.team_b} is scheduled!", description=f"Proposed Time: {formatted_time}\nChosen Cube: {challenge_to_update.cube}", color=discord.Color.gold())
+                        
+                        await message.edit(embed=updated_embed)
+                        await interaction.response.send_message("Your team has signed up!", ephemeral=True)
+                        await notify_poster(bot=bot, message_id=challenge_to_update.message_id, guild_id=challenge_to_update.guild_id, 
+                                   channel_id=challenge_to_update.channel_id, initial_user_id=challenge_to_update.initial_user, 
+                                   opponent_user_id=challenge_to_update.opponent_user, team_a=challenge_to_update.team_a, 
+                                   team_b=challenge_to_update.team_b, start_time=challenge_to_update.start_time)
+                        await session.commit()
+                        await asyncio.create_task(schedule_notification(bot=bot, challenge_id=challenge_to_update.id, guild_id=challenge_to_update.guild_id, 
+                                   channel_id=challenge_to_update.channel_id, initial_user_id=challenge_to_update.initial_user, 
+                                   opponent_user_id=challenge_to_update.opponent_user, team_a=challenge_to_update.team_a, 
+                                   team_b=challenge_to_update.team_b, start_time=challenge_to_update.start_time, message_id=challenge_to_update.message_id))
+                       
+                    else:
+                        await interaction.response.send_message("You are not registered to a team! Contact a Cube Overseer", ephemeral=True)
+                
+            
         else:
             await interaction.response.send_message("Two Teams are already signed up!")
 
