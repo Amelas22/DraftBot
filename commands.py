@@ -144,7 +144,8 @@ async def league_commands(bot):
                     utc_zone = pytz.timezone("UTC")
                     start_time = utc_zone.localize(time)
                     formatted_time = f"<t:{int(start_time.timestamp())}:F>"
-                    embed.add_field(name=f"Team: {challenge.team_a}", value=f"Time: {formatted_time}\nCube: {challenge.cube}\nPosted by: {initial_user_mention}\n[Sign Up Here!]({message_link})", inline=False)
+                    relative_time = f"<t:{int(start_time.timestamp())}:R>"
+                    embed.add_field(name=f"Team: {challenge.team_a}", value=f"Time: {formatted_time} ({relative_time})\nCube: {challenge.cube}\nPosted by: {initial_user_mention}\n[Sign Up Here!]({message_link})", inline=False)
                 await interaction.response.send_message(embed=embed)
 
 
@@ -310,7 +311,8 @@ async def league_commands(bot):
                         utc_zone = pytz.timezone("UTC")
                         start_time = utc_zone.localize(time)
                         formatted_time = f"<t:{int(start_time.timestamp())}:F>"
-                        embed.add_field(name=f"{sch_count}. {match.team_a} v. {match.team_b}", value=f"Draft Start Time: {formatted_time}\nCube: {match.cube}\nTeam Leads: {initial_user_mention} {opponent_user_mention}\n[Challenge Link]({message_link})", inline=False)
+                        relative_time = f"<t:{int(start_time.timestamp())}:R>"
+                        embed.add_field(name=f"{sch_count}. {match.team_a} v. {match.team_b}", value=f"Draft Start Time: {formatted_time} ({relative_time})\nCube: {match.cube}\nTeam Leads: {initial_user_mention} {opponent_user_mention}\n[Challenge Link]({message_link})", inline=False)
                         sch_count += 1
 
                 embed.add_field(name="\n\nOpen Challenges", value="No Open Challenges" if not open_challenges else "", inline=False)
@@ -326,7 +328,8 @@ async def league_commands(bot):
                         utc_zone = pytz.timezone("UTC")
                         start_time = utc_zone.localize(time)
                         formatted_time = f"<t:{int(start_time.timestamp())}:F>"
-                        embed.add_field(name=f"{open_count}. Team: {match.team_a}", value=f"Proposed Start Time: {formatted_time}\nCube: {match.cube}\nPosted by: {initial_user_mention}\n[Sign Up Here!]({message_link})", inline=False)
+                        relative_time = f"<t:{int(start_time.timestamp())}:R>"
+                        embed.add_field(name=f"{open_count}. Team: {match.team_a}", value=f"Proposed Start Time: {formatted_time} ({relative_time})\nCube: {match.cube}\nPosted by: {initial_user_mention}\n[Sign Up Here!]({message_link})", inline=False)
                         open_count += 1
                 await channel.send(embed=embed)
 
