@@ -581,7 +581,7 @@ class ChallengeView(View):
                         challenge_to_update.team_b_id = team_id
                         challenge_to_update.team_b = team_name
                         challenge_to_update.opponent_user = user_id_str
-                        
+                        self.team_b=team_name
                         # challenge_to_update = await session.execute(update(Challenge)
                         #                  .where(Challenge.id == self.challenge_id)
                         #                  .values(opponent_user=user_id_str,
