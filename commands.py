@@ -256,6 +256,80 @@ async def league_commands(bot):
                 embed.add_field(name="**Trophy Drafters**", value=undefeated_drafters_field_value or "None", inline=False)
                 await channel.send(embed=embed)
 
+    @aiocron.crontab('00 11 * * *', tz=pytz.timezone('US/Eastern'))  
+    async def post_todays_matches():
+        for guild in bot.guilds:
+            channel = discord.utils.get(guild.text_channels, name="league-summary")
+            if channel:
+                break  # If we find the channel, we exit the loop
+        
+        if not channel:  # If the bot cannot find the channel in any guild, log an error and return
+            print("Error: 'league-summary' channel not found.")
+            return
+        
+        eastern = pytz.timezone('US/Eastern')
+        now = datetime.now(eastern).replace(hour=11, minute=0, second=0, microsecond=0)
+        tomorrow = now + timedelta(days=1)
+
+        # Convert times to UTC as your database stores times in UTC
+        now_utc = now.astimezone(pytz.utc)
+        tomorrow_utc = tomorrow.astimezone(pytz.utc)
+
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                # Scheduled Matches
+                from session import Challenge
+                scheduled_stmt = select(Challenge).where(
+                    Challenge.start_time.between(now_utc, tomorrow_utc),
+                    Challenge.team_b_id.isnot(None)
+                ).order_by(Challenge.start_time.asc())
+                scheduled_result = await session.execute(scheduled_stmt)
+                scheduled_matches = scheduled_result.scalars().all()
+
+                # Open Challenges
+                open_stmt = select(Challenge).where(
+                    Challenge.start_time.between(now_utc, tomorrow_utc),
+                    Challenge.team_b_id.is_(None)
+                ).order_by(Challenge.start_time.asc())
+                open_result = await session.execute(open_stmt)
+                open_challenges = open_result.scalars().all()
+
+                embed = discord.Embed(title="Today's Matches", color=discord.Color.blue())
+                # Add fields or descriptions to embed based on scheduled_matches and open_challenges
+                embed.add_field(name="Scheduled Matches", value="No Matches Scheduled" if not scheduled_matches else "", inline=False)
+                if scheduled_matches:
+                    for match in scheduled_matches:
+                        sch_count = 1
+                        #print(match.guild_id)
+                        message_link = f"https://discord.com/channels/{match.guild_id}/{match.channel_id}/{match.message_id}"
+                        # Mention the initial user who posted the challenge
+                        initial_user_mention = f"<@{match.initial_user}>"
+                        opponent_user_mention = f"<@{match.initial_user}>"
+                        # Format the start time of each challenge to display in the embed
+                        time = datetime.strptime(str(match.start_time), "%Y-%m-%d %H:%M:%S")
+                        utc_zone = pytz.timezone("UTC")
+                        start_time = utc_zone.localize(time)
+                        formatted_time = f"<t:{int(start_time.timestamp())}:F>"
+                        embed.add_field(name=f"{sch_count}. {match.team_a} v. {match.team_b}", value=f"Draft Start Time: {formatted_time}\nCube: {match.cube}\nTeam Leads: {initial_user_mention} {opponent_user_mention}\n[Challenge Link]({message_link})", inline=False)
+                        sch_count += 1
+
+                embed.add_field(name="Open Challenges", value="No Open Challenges" if not open_challenges else "", inline=False)
+                if open_challenges:
+                    open_count = 1
+                    for match in open_challenges:
+                        #print(match.guild_id)
+                        message_link = f"https://discord.com/channels/{match.guild_id}/{match.channel_id}/{match.message_id}"
+                        # Mention the initial user who posted the challenge
+                        initial_user_mention = f"<@{match.initial_user}>"
+                        # Format the start time of each challenge to display in the embed
+                        time = datetime.strptime(str(match.start_time), "%Y-%m-%d %H:%M:%S")
+                        utc_zone = pytz.timezone("UTC")
+                        start_time = utc_zone.localize(time)
+                        formatted_time = f"<t:{int(start_time.timestamp())}:F>"
+                        embed.add_field(name=f"{open_count}. Team: {match.team_a}", value=f"Proposed Start Time: {formatted_time}\nCube: {match.cube}\nPosted by: {initial_user_mention}\n[Sign Up Here!]({message_link})", inline=False)
+                        open_count += 1
+                await channel.send(embed=embed)
+
     @aiocron.crontab('15 09 * * *', tz=pytz.timezone('US/Eastern'))
     async def daily_random_results():
         # Fetch all guilds the bot is in and look for the "league-summary" channel
