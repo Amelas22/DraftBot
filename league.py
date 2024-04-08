@@ -309,7 +309,7 @@ class RegisterPlayerModal(Modal):
                         )
                         db_session.add(new_team_registration)
                         await db_session.commit()
-                        await interaction.followup.send("Team registration completed successfully.", ephemeral=True)
+                        await interaction.followup.send(f"Team registration completed successfully. User {display_name} has been added.", ephemeral=True)
                     else:
                         # If the team is not found in Team either
                         await interaction.followup.send("Team not found. Please ensure the team name is correct.", ephemeral=True)
@@ -333,26 +333,26 @@ class TimezoneSelect(Select):
     def __init__(self, attribute_name):
         # Manually curated list of common timezones
         options = [
-            discord.SelectOption(label="UTC-12:00 International Date Line West", value="Etc/GMT+12"),
+            discord.SelectOption(label="UTC+00:00 Greenwich Mean Time", value="GMT"),
             discord.SelectOption(label="UTC-08:00 Pacific Time (US & Canada)", value="America/Los_Angeles"),
             discord.SelectOption(label="UTC-07:00 Mountain Time (US & Canada)", value="America/Denver"),
             discord.SelectOption(label="UTC-06:00 Central Time (US & Canada)", value="America/Chicago"),
             discord.SelectOption(label="UTC-05:00 Eastern Time (US & Canada)", value="America/New_York"),
             discord.SelectOption(label="UTC-04:00 Atlantic Time (Canada)", value="America/Halifax"),
-            discord.SelectOption(label="UTC+00:00 Greenwich Mean Time", value="GMT"),
             discord.SelectOption(label="UTC+01:00 Central European Time", value="Europe/Berlin"),
             discord.SelectOption(label="UTC+02:00 Eastern European Time", value="Europe/Athens"),
             discord.SelectOption(label="UTC+03:00 Moscow Time", value="Europe/Moscow"),
             discord.SelectOption(label="UTC+04:00 Gulf Standard Time", value="Asia/Dubai"),
             discord.SelectOption(label="UTC+05:00 Pakistan Standard Time", value="Asia/Karachi"),
             discord.SelectOption(label="UTC+05:30 Indian Standard Time", value="Asia/Kolkata"),
+            discord.SelectOption(label="UTC+07:00 Indochina Time", value="Asia/Bangkok"),
             discord.SelectOption(label="UTC+08:00 China Standard Time", value="Asia/Shanghai"),
             discord.SelectOption(label="UTC+09:00 Japan Standard Time", value="Asia/Tokyo"),
             discord.SelectOption(label="UTC+10:00 Australian Eastern Standard Time", value="Australia/Sydney"),
             discord.SelectOption(label="UTC+12:00 New Zealand Standard Time", value="Pacific/Auckland"),
-            discord.SelectOption(label="UTC-03:00 Brasilia Time", value="America/Sao_Paulo"),
-            discord.SelectOption(label="UTC+07:00 Indochina Time", value="Asia/Bangkok"),
+            discord.SelectOption(label="UTC-12:00 International Date Line West", value="Etc/GMT+12"),
             discord.SelectOption(label="UTC-02:00 Fernando de Noronha Time", value="America/Noronha"),
+            discord.SelectOption(label="UTC-03:00 Brasilia Time", value="America/Sao_Paulo")                     
         ]
 
         super().__init__(placeholder="Choose your timezone", min_values=1, max_values=1, options=options)
@@ -678,21 +678,7 @@ class ChallengeView(View):
                                 true_skill_draft = False,
                             )
                             session.add(new_draft_session)
-                            
-                    # Generate and send the embed message
-                    embed = discord.Embed(title=f"League Match: {challenge.team_a} vs. {challenge.team_b}",
-                                        description=f"\n\nDraft Start Time: <t:{int(draft_start_time)}:F> \n\n**How to use bot**:\n1. Click your team name to join that team. Enter the draftmancer link. Draftmancer host still has to update settings and import from CubeCobra.\n" +
-                                        "2. When all teams are joined, Push Ready Check. Once everyone is ready, push Generate Seating Order\n" +
-                                        "3. Draftmancer host needs to adjust table to match seating order. **TURN OFF RANDOM SEATING IN DRAFTMANCER** \n" +
-                                        "4. After the draft, come back to this message (it'll be in pins) and push Create Rooms and Post Pairings.\n" +
-                                        "5. You will now have a private team chat with just your team and a shared draft-chat that has pairings and match results. You can select the Match Results buttons to report results.\n" +
-                                        "6. Chat channels will automatically close around five hours after the /leaguedraft command was used." +
-                                        f"\n\n**Chosen Cube: [{challenge.cube}](https://cubecobra.com/cube/list/{challenge.cube})** \n**Draftmancer Session**: **[Join Here]({draft_link})**",
-                        color=discord.Color.dark_red()
-                        )
-                    embed.add_field(name=f"{challenge.team_a}", value="No players yet.", inline=False)
-                    embed.add_field(name=f"{challenge.team_b}", value="No players yet.", inline=False)
-                    embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1186757246936424558/1217295353972527176/131.png")
+
                     async with AsyncSessionLocal() as session:
                         async with session.begin():
                             new_match = Match(
@@ -707,7 +693,36 @@ class ChallengeView(View):
                             )
                             session.add(new_match)
                             await session.commit()
-                            match_id = new_match.MatchID
+                            match_id = new_match.MatchID        
+                    # Generate and send the embed message
+                    embed = discord.Embed(title=f"League Match #{match_id}: {challenge.team_a} vs. {challenge.team_b}",
+                                        description=f"\n\nDraft Start Time: <t:{int(draft_start_time)}:F> \n\n**How to use bot**:\n1. Click your team name to join that team. Enter the draftmancer link. Draftmancer host still has to update settings and import from CubeCobra.\n" +
+                                        "2. When all teams are joined, Push Ready Check. Once everyone is ready, push Generate Seating Order\n" +
+                                        "3. Draftmancer host needs to adjust table to match seating order. **TURN OFF RANDOM SEATING IN DRAFTMANCER** \n" +
+                                        "4. After the draft, come back to this message (it'll be in pins) and push Create Rooms and Post Pairings.\n" +
+                                        "5. You will now have a private team chat with just your team and a shared draft-chat that has pairings and match results. You can select the Match Results buttons to report results.\n" +
+                                        "6. Chat channels will automatically close around five hours after the /leaguedraft command was used." +
+                                        f"\n\n**Chosen Cube: [{challenge.cube}](https://cubecobra.com/cube/list/{challenge.cube})** \n**Draftmancer Session**: **[Join Here]({draft_link})**",
+                        color=discord.Color.dark_red()
+                        )
+                    embed.add_field(name=f"{challenge.team_a}", value="No players yet.", inline=False)
+                    embed.add_field(name=f"{challenge.team_b}", value="No players yet.", inline=False)
+                    embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1186757246936424558/1217295353972527176/131.png")
+                    # async with AsyncSessionLocal() as session:
+                    #     async with session.begin():
+                    #         new_match = Match(
+                    #             TeamAID=challenge.team_a_id,
+                    #             TeamBID=challenge.team_b_id,
+                    #             TeamAWins=0,
+                    #             TeamBWins=0,
+                    #             DraftWinnerID=None,
+                    #             MatchDate=datetime.now(),
+                    #             TeamAName=challenge.team_a,
+                    #             TeamBName=challenge.team_b
+                    #         )
+                    #         session.add(new_match)
+                    #         await session.commit()
+                    #         match_id = new_match.MatchID
                     print(f"League Draft: {session_id} has been created.")
                     
                     from session import get_draft_session
