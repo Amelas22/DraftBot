@@ -256,7 +256,7 @@ async def league_commands(bot):
                 embed.add_field(name="**Trophy Drafters**", value=undefeated_drafters_field_value or "None", inline=False)
                 await channel.send(embed=embed)
 
-    @aiocron.crontab('00 11 * * *', tz=pytz.timezone('US/Eastern'))  
+    @aiocron.crontab('00 16 * * *', tz=pytz.timezone('US/Eastern'))  
     async def post_todays_matches():
         for guild in bot.guilds:
             channel = discord.utils.get(guild.text_channels, name="league-summary")
@@ -268,7 +268,7 @@ async def league_commands(bot):
             return
         
         eastern = pytz.timezone('US/Eastern')
-        now = datetime.now(eastern).replace(hour=11, minute=0, second=0, microsecond=0)
+        now = datetime.now(eastern).replace(hour=16, minute=0, second=0, microsecond=0)
         tomorrow = now + timedelta(days=1)
 
         # Convert times to UTC as your database stores times in UTC
