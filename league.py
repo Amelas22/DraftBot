@@ -379,8 +379,11 @@ class AdjustTimeModal(Modal):
             channel = bot.get_channel(int(challenge_to_update.channel_id))
             message = await channel.fetch_message(int(challenge_to_update.message_id))
             formatted_time = f"<t:{int(challenge_to_update.start_time.timestamp())}:F>"
+            relative_time = f"<t:{int(challenge_to_update.start_time.timestamp())}:R>"
+            user_mention = f"<@{challenge_to_update.initial_user}>"
             updated_embed = discord.Embed(title=f"{challenge_to_update.team_a} v. {challenge_to_update.team_b} is scheduled!" if challenge_to_update.team_b else f"{challenge_to_update.team_a} is looking for a match!", 
-                                          description=f"Proposed Time: {formatted_time}\nChosen Cube: {challenge_to_update.cube}", color=discord.Color.gold() if challenge_to_update.team_b else discord.Color.blue())
+                                          description=f"Proposed Time: {formatted_time}  ({relative_time})\nChosen Cube: {challenge_to_update.cube}\nPosted by: {user_mention}", color=discord.Color.blue())
+
 
             await message.edit(embed=updated_embed)
 
@@ -412,7 +415,7 @@ class ChallengeTimeModal(Modal):
                         utc_dt = local_dt_with_tz.astimezone(pytz.utc)  # Convert to UTC
 
                         formatted_time = f"<t:{int(utc_dt.timestamp())}:F>"  # Markdown format for dynamic time display
-                        
+                        relative_time = f"<t:{int(utc_dt.timestamp())}:R>"
 
                         async with AsyncSessionLocal() as session:
                                 async with session.begin():
@@ -433,7 +436,7 @@ class ChallengeTimeModal(Modal):
                                     await db_session.commit()
                         # Post the challenge with the selected team and formatted time
                         user_mention = f"<@{new_challenge.initial_user}>"
-                        embed = discord.Embed(title=f"{self.team_name} is looking for a match!", description=f"Proposed Time: {formatted_time}\nChosen Cube: {self.cube_choice}\nPosted by: {user_mention}\n\nNo Opponent Yet. Sign Up below!", color=discord.Color.blue())
+                        embed = discord.Embed(title=f"{self.team_name} is looking for a match!", description=f"Proposed Time: {formatted_time} ({relative_time})\nChosen Cube: {self.cube_choice}\nPosted by: {user_mention}\n\nNo Opponent Yet. Sign Up below!", color=discord.Color.blue())
 
                         view = ChallengeView(new_challenge.id, new_challenge.team_b)
                         
