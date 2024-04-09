@@ -8,7 +8,7 @@ import pytz
 from discord.ui import Select, View, Modal, InputText
 from datetime import datetime, timedelta
 from session import AsyncSessionLocal, Team, DraftSession, Match, Challenge, TeamRegistration
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 import random
 
 
@@ -404,7 +404,8 @@ class ChallengeTimeModal(Modal):
                 bot = interaction.client
                 async with AsyncSessionLocal() as db_session: 
                     async with db_session.begin():
-                        team_stmt = select(Team).where(Team.TeamName == self.team_name)
+
+                        team_stmt = select(Team).where(func.lower(func.trim(Team.TeamName)) == func.lower(func.trim(self.team_name)))
                         team_update = await db_session.scalar(team_stmt)
                         guild = bot.get_guild(int(interaction.guild_id))
                         challenge_channel = discord.utils.get(guild.text_channels, name="league-challenges")
