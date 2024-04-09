@@ -1,6 +1,7 @@
 import discord
 from session import register_team_to_db, Team, AsyncSessionLocal, Match, DraftSession, remove_team_from_db, TeamRegistration
 from sqlalchemy import select, not_
+from sqlalchemy.orm.attributes import flag_modified
 import aiocron
 import pytz
 from datetime import datetime, timedelta
@@ -93,6 +94,49 @@ async def league_commands(bot):
                     await interaction.response.send_message(f"Post a Challenge for {team_name}. Select Cube and Timezone.", view=initial_view, ephemeral=True)
                 else:
                     await interaction.response.send_message(f"You are not registered to a team. Contact a Cube Overseer if this is an error.", ephemeral=True)
+
+
+    @bot.slash_command(
+    name="remove_user_from_team",
+    description="Remove a user from all teams they are assigned to"
+    )
+    @discord.option(
+        "user_id",
+        description="The Discord user ID of the member to remove from teams",
+        required=True
+    )
+    async def remove_user_from_team(interaction: discord.Interaction, user_id: str):
+        # Check if the user has the "Cube Overseer" role
+        cube_overseer_role_name = "Cube Overseer"
+        if cube_overseer_role_name not in [role.name for role in interaction.user.roles]:
+            await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                # Convert user_id to str if not already to ensure consistency in comparison
+                user_id_str = str(user_id)
+                # Query for any team registration entries that include the user ID in their TeamMembers
+                stmt = select(TeamRegistration)
+                all_team_registrations = await session.execute(stmt)
+                teams_updated = 0
+
+                for team_registration in all_team_registrations.scalars().all():
+                    if user_id_str in team_registration.TeamMembers:
+                        # Remove the user from the TeamMembers dictionary
+                        print(team_registration.TeamMembers[user_id_str])
+                        del team_registration.TeamMembers[user_id_str]
+                        flag_modified(team_registration, "TeamMembers")
+                        session.add(team_registration)
+                        teams_updated += 1
+
+                await session.commit()
+
+        if teams_updated > 0:
+            await interaction.response.send_message(f"User {user_id} was successfully removed from {teams_updated} teams.", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"User {user_id} was not found in any teams.", ephemeral=True)
+
 
     @bot.slash_command(name="register_player", description="Post a challenge for your team")
     async def postchallenge(interaction: discord.Interaction):
