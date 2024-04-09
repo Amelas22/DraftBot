@@ -223,7 +223,7 @@ class LeagueDraftView(discord.ui.View):
 
 
 class InitialPostView(View):
-    def __init__(self, command_type=None, team_id=None, team_name=None, user_display_name=None):
+    def __init__(self, command_type=None, team_id=None, team_name=None, user_display_name=None, match_id=None):
         super().__init__()
         self.your_team_range = None
         self.command_type = command_type
@@ -232,6 +232,7 @@ class InitialPostView(View):
         self.user_display_name = user_display_name
         self.cube_choice = None 
         self.time_zone = None
+        self.match_id = match_id
         if not self.team_id:
             self.add_item(RangeSelect("Your Team Range", "your_team_range"))
         elif self.team_id:
@@ -248,10 +249,14 @@ class InitialPostView(View):
 
     async def try_send_modal(self, interaction: discord.Interaction):
         if self.team_name and self.cube_choice and self.time_zone:
-            # When both selections are made, send the modal
-            await interaction.response.send_modal(ChallengeTimeModal(self.team_name, self.cube_choice, self.time_zone, self.command_type))
+            if self.command_type == "time":
+                await interaction.response.send_modal(AdjustTimeModal(self.team_name, self.cube_choice, self.time_zone, self.match_id))
+            else:    
+                await interaction.response.send_modal(ChallengeTimeModal(self.team_name, self.cube_choice, self.time_zone, self.command_type))
         else:
             await interaction.response.defer()
+
+
 class PostTeamView(View):
     def __init__(self, command_type):
         super().__init__()
@@ -363,27 +368,40 @@ class TimezoneSelect(Select):
         await self.view.try_send_modal(interaction)
 
 class AdjustTimeModal(Modal):
-    def __init__(self, match_id, *args, **kwargs):
+    def __init__(self, team_name, cube, time_zone, match_id, *args, **kwargs):
+        self.team_name = team_name
+        self.cube_choice = cube
+        self.time_zone = time_zone
         self.match_id = match_id
+
         super().__init__(title="Change the time of your match", *args, **kwargs)
         # Update the placeholder to reflect the desired format
         self.add_item(InputText(label="MM/DD/YYYY HH:MM. Use Local Time & 24HR Clock", placeholder="MM/DD/YYYY HH:MM", custom_id="start_time"))
+    
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
                 challenge_to_update = await db_session.get(Challenge, self.match_id)
                 challenge_to_update.start_time = datetime.strptime(self.children[0].value, "%m/%d/%Y %H:%M")
+                challenge_to_update.cube = self.cube_choice
                 await db_session.commit()
             bot = interaction.client
             channel = bot.get_channel(int(challenge_to_update.channel_id))
+            
+            user_time_zone = pytz.timezone(self.time_zone)  # Convert the selected timezone string to a pytz timezone
+            local_time = datetime.strptime(self.children[0].value, "%m/%d/%Y %H:%M")
+            local_dt_with_tz = user_time_zone.localize(local_time)  # Localize the datetime
+            utc_dt = local_dt_with_tz.astimezone(pytz.utc)  # Convert to UTC
+
+            formatted_time = f"<t:{int(utc_dt.timestamp())}:F>"  # Markdown format for dynamic time display
+            relative_time = f"<t:{int(utc_dt.timestamp())}:R>"
+            
             message = await channel.fetch_message(int(challenge_to_update.message_id))
-            formatted_time = f"<t:{int(challenge_to_update.start_time.timestamp())}:F>"
-            relative_time = f"<t:{int(challenge_to_update.start_time.timestamp())}:R>"
             user_mention = f"<@{challenge_to_update.initial_user}>"
             updated_embed = discord.Embed(title=f"{challenge_to_update.team_a} v. {challenge_to_update.team_b} is scheduled!" if challenge_to_update.team_b else f"{challenge_to_update.team_a} is looking for a match!", 
-                                          description=f"Proposed Time: {formatted_time}  ({relative_time})\nChosen Cube: {challenge_to_update.cube}\nPosted by: {user_mention}", color=discord.Color.blue())
-
+                                          description=f"Proposed Time: {formatted_time}  ({relative_time})\nChosen Cube: {challenge_to_update.cube}\nPosted by: {user_mention}", 
+                                          color=discord.Color.gold() if challenge_to_update.team_b else discord.Color.blue())
 
             await message.edit(embed=updated_embed)
 
@@ -555,7 +573,7 @@ class ChallengeView(View):
 
     def add_buttons(self):
         self.add_item(self.create_button("Sign Up", "green", f"sign_up_{self.challenge_id}", self.sign_up_callback))
-        self.add_item(self.create_button("Change Time", "grey", f"change_time_{self.challenge_id}", self.change_time_callback))
+        self.add_item(self.create_button("Change Time/Cube", "grey", f"change_time_{self.challenge_id}", self.change_time_callback))
         self.add_item(self.create_button("Open Lobby", "primary", f"open_lobby_{self.challenge_id}", self.open_lobby_callback))
         self.add_item(self.create_button("Remove Challenge Post", "red", f"close_{self.challenge_id}", self.close_challenge_callback))
 
@@ -619,9 +637,29 @@ class ChallengeView(View):
 
     async def change_time_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            await interaction.response.send_modal(AdjustTimeModal(self.challenge_id))
+            user_id_str = str(interaction.user.id)
+            async with AsyncSessionLocal() as db_session:
+                async with db_session.begin():
+                    # Fetch all team registrations
+                    team_query = select(TeamRegistration)
+                    teams_result = await db_session.execute(team_query)
+                    user_teams = teams_result.scalars().all()
+                    
+                    # Filter teams where the user ID is in the TeamMembers JSON
+                    user_team = None
+                    for team in user_teams:
+                        if user_id_str in team.TeamMembers.keys():  # Check if user ID is a key in the TeamMembers dictionary
+                            user_team = team
+                            break
+
+                    # Proceed if the user's team matches team_a
+                    if user_team and user_team.TeamName == self.team_a:
+                        initial_view = InitialPostView(command_type="time", team_id=user_team.TeamID, team_name=user_team.TeamName, user_display_name=None, match_id=self.challenge_id)
+                        await interaction.response.send_message(f"Select Cube and Timezone.", view=initial_view, ephemeral=True)
+                    else:
+                        await interaction.response.send_message("You are not part of the specified team.", ephemeral=True)
         except Exception as e:
-            print(f"Error in Team Select callback: {e}")
+            print(f"Error in change time callback: {e}")
     
     async def close_challenge_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         bot = interaction.client
