@@ -46,7 +46,7 @@ async def update_team(session, team_registration_id, new_team_id=None, new_team_
 
 async def main():
     async with AsyncSessionLocal() as session:
-        #await update_team(session, 37, delete=True)
+        await update_team(session, 37, delete=True)
         await update_team(session, 23, new_team_id=43, new_team_name="The Clean Sweep")
         
 
