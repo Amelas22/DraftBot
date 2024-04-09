@@ -506,6 +506,13 @@ class PersistentView(discord.ui.View):
         # Create the channel with the specified overwrites
         channel = await guild.create_text_channel(name=channel_name, overwrites=overwrites, category=draft_category)
         self.channel_ids.append(channel.id)
+        if session.premade_match_id and team_name != "Draft":
+            # Construct voice channel name
+            voice_channel_name = f"{team_name}-Voice-{session.draft_id}"
+            # Create the voice channel with the same permissions as the text channel
+            voice_channel = await guild.create_voice_channel(name=voice_channel_name, overwrites=overwrites, category=draft_category)
+            # Store the voice channel ID
+            self.channel_ids.append(voice_channel.id)
 
         if team_name == "Draft":
             self.draft_chat_channel = channel.id
