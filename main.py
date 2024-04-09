@@ -1,3 +1,8 @@
+'''
+Legacy Code. No longer in use. Kept as reference. 
+'''
+
+
 import discord
 import asyncio
 import os
