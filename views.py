@@ -184,11 +184,13 @@ class PersistentView(discord.ui.View):
                 if not session:
                     await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
                     return
-
+                
+                
                 # Update the session object
                 session.teams_start_time = datetime.now()
                 session.deletion_time = datetime.now() + timedelta(hours=4)
                 session.session_stage = 'teams'
+                
                 # Check session type and prepare teams if necessary
                 if session.session_type == 'random':
                     from utils import split_into_teams
@@ -198,8 +200,8 @@ class PersistentView(discord.ui.View):
                 # Generate names for display using the session's sign_ups dictionary
                 team_a_display_names = [session.sign_ups[user_id] for user_id in session.team_a]
                 team_b_display_names = [session.sign_ups[user_id] for user_id in session.team_b]
-                
                 seating_order = await generate_seating_order(bot, session)
+                seating_order_str = " -> ".join(seating_order)
 
                 # Create the embed message for displaying the teams and seating order
                 embed = discord.Embed(
@@ -212,7 +214,7 @@ class PersistentView(discord.ui.View):
                 )
                 embed.add_field(name="Team A" if session.session_type == "random" else f"{session.team_a_name}", value="\n".join(team_a_display_names), inline=True)
                 embed.add_field(name="Team B" if session.session_type == "random" else f"{session.team_b_name}", value="\n".join(team_b_display_names), inline=True)
-                embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+                embed.add_field(name="Seating Order", value=seating_order_str, inline=False)
 
                 # Iterate over the view's children (buttons) to update their disabled status
                 for item in self.children:
@@ -223,6 +225,7 @@ class PersistentView(discord.ui.View):
                         else:
                             # Disable all other buttons
                             item.disabled = True
+                session.seating_order = seating_order_str
                 await db_session.commit()
 
         # Respond with the embed and updated view
