@@ -758,7 +758,8 @@ async def re_register_challenges(bot):
                         try:
                             message = await channel.fetch_message(int(challenge.message_id))
                             view = ChallengeView(challenge_id=challenge.id, 
-                                                team_b=challenge.team_b)
+                                                team_b=challenge.team_b,
+                                                team_a=challenge.team_a)
                             await message.edit(view=view)
                         except discord.NotFound:
                             # Handle cases where the message or channel might have been deleted
