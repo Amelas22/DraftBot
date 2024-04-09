@@ -675,7 +675,7 @@ class ChallengeView(View):
                                 user_mentions.append(f"<@{user_id}>")
 
                         mentions_str = " ".join(set(user_mentions))
-                        await lobby_channel.send(f"Lobby posted below {mentions_str}")
+                        await lobby_channel.send(f"Lobby for the league match between {challenge.team_a} and {challenge.team_b} is below {mentions_str}")
 
                         from session import register_team_to_db
                         # Register Team A if not present
@@ -723,12 +723,12 @@ class ChallengeView(View):
                                 match_id = new_match.MatchID        
                         # Generate and send the embed message
                         embed = discord.Embed(title=f"League Match #{match_id}: {challenge.team_a} vs. {challenge.team_b}",
-                                            description=f"\n\nDraft Start Time: <t:{int(draft_start_time)}:F> \n\n**How to use bot**:\n1. Click your team name to join that team. Enter the draftmancer link. Draftmancer host still has to update settings and import from CubeCobra.\n" +
-                                            "2. When all teams are joined, Push Ready Check. Once everyone is ready, push Generate Seating Order\n" +
+                                            description=f"\n\nDraft Start Time: <t:{int(draft_start_time)}:F> \n\n**How to use bot**:\n1. Click your team name to join that team. Enter the draftmancer link. Draftmancer host still has to update settings and import from CubeCobra. **TURN OFF COLOR BALANCE**.\n" +
+                                            "2. When all teams are joined and ready, press Generate Seating Order\n" +
                                             "3. Draftmancer host needs to adjust table to match seating order. **TURN OFF RANDOM SEATING IN DRAFTMANCER** \n" +
-                                            "4. After the draft, come back to this message (it'll be in pins) and push Create Rooms and Post Pairings.\n" +
-                                            "5. You will now have a private team chat with just your team and a shared draft-chat that has pairings and match results. You can select the Match Results buttons to report results.\n" +
-                                            "6. Chat channels will automatically close around five hours after the /leaguedraft command was used." +
+                                            "4. After the draft, come back to this message (it'll be in pins) and press Create Rooms and Post Pairings.\n" +
+                                            "5. You will now have a private team chat with just your team and a shared draft-chat that has pairings and match results. Use the Match Results buttons to report results.\n" +
+                                            "6. Chat channels will automatically close around five hours after the lobby was opened." +
                                             f"\n\n**Chosen Cube: [{challenge.cube}](https://cubecobra.com/cube/list/{challenge.cube})** \n**Draftmancer Session**: **[Join Here]({draft_link})**",
                             color=discord.Color.dark_red()
                             )
