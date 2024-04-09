@@ -343,8 +343,8 @@ async def league_commands(bot):
                 # Add fields or descriptions to embed based on scheduled_matches and open_challenges
                 embed.add_field(name="Scheduled Matches", value="No Matches Scheduled" if not scheduled_matches else "", inline=False)
                 if scheduled_matches:
+                    sch_count = 1
                     for match in scheduled_matches:
-                        sch_count = 1
                         #print(match.guild_id)
                         message_link = f"https://discord.com/channels/{match.guild_id}/{match.channel_id}/{match.message_id}"
                         # Mention the initial user who posted the challenge
