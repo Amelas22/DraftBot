@@ -470,7 +470,7 @@ class ChallengeTimeModal(Modal):
 
             except ValueError:
                 # Handle the case where the date format is incorrect
-                await interaction.response.send_message("The date format is incorrect. Please use MM/DD/YYYY HH:MM format.", ephemeral=True)
+                await interaction.followup.send("The date format is incorrect. Please use MM/DD/YYYY HH:MM format.", ephemeral=True)
         elif self.command_type == "find":
             try:
                 await interaction.response.defer()
@@ -513,7 +513,7 @@ class ChallengeTimeModal(Modal):
                         
             except ValueError:
                 # Handle the case where the date format is incorrect
-                await interaction.response.send_message("The date format is incorrect. Please use MM/DD/YYYY HH:MM format.", ephemeral=True)  
+                await interaction.followup.send("The date format is incorrect. Please use MM/DD/YYYY HH:MM format.", ephemeral=True)  
 
 class PostTeamSelect(Select):
     def __init__(self, placeholder, attribute_name):
