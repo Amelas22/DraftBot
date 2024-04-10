@@ -633,7 +633,7 @@ class ChallengeView(View):
                 
             
         else:
-            await interaction.response.send_message("Two Teams are already signed up!")
+            await interaction.response.send_message("Two Teams are already signed up!", ephemeral=True)
 
     async def change_time_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
