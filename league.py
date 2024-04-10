@@ -563,7 +563,7 @@ class PostTeamSelect(Select):
 
 
 class ChallengeView(View):
-    def __init__(self, challenge_id, team_b, team_a):
+    def __init__(self, challenge_id, team_b=None, team_a=None):
         self.challenge_id = challenge_id
         self.team_a = team_a
         self.team_b = team_b
@@ -572,10 +572,11 @@ class ChallengeView(View):
         self.add_buttons()
 
     def add_buttons(self):
-        self.add_item(self.create_button("Sign Up", "green", f"sign_up_{self.challenge_id}", self.sign_up_callback))
+        self.add_item(self.create_button("Sign Up" if not self.team_b else "Cancel Sign Up", "green" if not self.team_b else "red", f"sign_up_{self.challenge_id}", self.sign_up_callback))
         self.add_item(self.create_button("Change Time/Cube", "grey", f"change_time_{self.challenge_id}", self.change_time_callback))
         self.add_item(self.create_button("Open Lobby", "primary", f"open_lobby_{self.challenge_id}", self.open_lobby_callback))
         self.add_item(self.create_button("Remove Challenge Post", "red", f"close_{self.challenge_id}", self.close_challenge_callback))
+
 
     def create_button(self, label, style, custom_id, custom_callback, disabled=False):
         style = getattr(discord.ButtonStyle, style)
@@ -584,27 +585,63 @@ class ChallengeView(View):
         return button
 
     async def sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.team_b:
-            user_id_str = str(interaction.user.id)
-            async with AsyncSessionLocal() as session:  # Assuming AsyncSessionLocal is your session maker
+        
+        async with AsyncSessionLocal() as session:  # Assuming AsyncSessionLocal is your session maker
                 async with session.begin():
                     # Query for any team registration entries that include the user ID in their TeamMembers
+                    user_id_str = str(interaction.user.id)
                     stmt = select(TeamRegistration).where(TeamRegistration.TeamMembers.contains(user_id_str))
                     result = await session.execute(stmt)
                     team_registration = result.scalars().first()
+                    if not self.team_b:
+                        if team_registration:
+                            # Extracting user details
+                            team_id = team_registration.TeamID
+                            team_name = team_registration.TeamName
+                            
+                            challenge_stmt = select(Challenge).where(Challenge.id == self.challenge_id)
+                            challenge_result = await session.execute(challenge_stmt)
+                            challenge_to_update = challenge_result.scalars().first()
+                            challenge_to_update.team_b_id = team_id
+                            challenge_to_update.team_b = team_name
+                            challenge_to_update.opponent_user = user_id_str
+                            self.team_b=team_name
 
-                    if team_registration:
-                        # Extracting user details
+                            bot = interaction.client
+                            channel = bot.get_channel(int(challenge_to_update.channel_id))
+                            message = await channel.fetch_message(int(challenge_to_update.message_id))
+                            relative_time=f"<t:{int(challenge_to_update.start_time.timestamp())}:R>"
+                            formatted_time=f"<t:{int(challenge_to_update.start_time.timestamp())}:F>"
+                            user_mention = f"<@{challenge_to_update.initial_user}>"
+                            opponent_mention = f"<@{challenge_to_update.opponent_user}>"
+                            updated_embed = discord.Embed(title=f"{challenge_to_update.team_a} v. {challenge_to_update.team_b} is scheduled!", description=f"Proposed Time: {formatted_time} ({relative_time})\nChosen Cube: {challenge_to_update.cube}\nTeam Leads: {user_mention} {opponent_mention}", color=discord.Color.gold())
+                            updated_view = ChallengeView(challenge_to_update.id, challenge_to_update.team_b, challenge_to_update.team_a)
+
+                            await message.edit(embed=updated_embed, view=updated_view)
+                            await interaction.response.send_message("Your team has signed up!", ephemeral=True)
+                            await notify_poster(bot=bot, message_id=challenge_to_update.message_id, guild_id=challenge_to_update.guild_id, 
+                                    channel_id=challenge_to_update.channel_id, initial_user_id=challenge_to_update.initial_user, 
+                                    opponent_user_id=challenge_to_update.opponent_user, team_a=challenge_to_update.team_a, 
+                                    team_b=challenge_to_update.team_b, start_time=challenge_to_update.start_time)
+                            
+                            await session.commit()
+
+                        else:
+                            await interaction.response.send_message("You are not registered to a team! Contact a Cube Overseer", ephemeral=True)
+                    
+                    elif self.team_b and team_registration and team_registration.TeamName.lower().strip() == self.team_b.lower().strip():
                         team_id = team_registration.TeamID
                         team_name = team_registration.TeamName
                         
                         challenge_stmt = select(Challenge).where(Challenge.id == self.challenge_id)
                         challenge_result = await session.execute(challenge_stmt)
                         challenge_to_update = challenge_result.scalars().first()
-                        challenge_to_update.team_b_id = team_id
-                        challenge_to_update.team_b = team_name
-                        challenge_to_update.opponent_user = user_id_str
-                        self.team_b=team_name
+
+                        challenge_to_update.team_b_id = None
+                        challenge_to_update.team_b = None
+                        challenge_to_update.opponent_user = None
+                        
+                        self.team_b=None
 
                         bot = interaction.client
                         channel = bot.get_channel(int(challenge_to_update.channel_id))
@@ -612,23 +649,26 @@ class ChallengeView(View):
                         relative_time=f"<t:{int(challenge_to_update.start_time.timestamp())}:R>"
                         formatted_time=f"<t:{int(challenge_to_update.start_time.timestamp())}:F>"
                         user_mention = f"<@{challenge_to_update.initial_user}>"
-                        opponent_mention = f"<@{challenge_to_update.opponent_user}>"
-                        updated_embed = discord.Embed(title=f"{challenge_to_update.team_a} v. {challenge_to_update.team_b} is scheduled!", description=f"Proposed Time: {formatted_time} ({relative_time})\nChosen Cube: {challenge_to_update.cube}\nTeam Leads: {user_mention} {opponent_mention}", color=discord.Color.gold())
+                        updated_embed = discord.Embed(title=f"{challenge_to_update.team_a} is looking for a match!", description=f"Proposed Time: {formatted_time} ({relative_time})\nChosen Cube: {challenge_to_update.cube}\nPosted By: {user_mention}", color=discord.Color.blue())
                         
-                        await message.edit(embed=updated_embed)
-                        await interaction.response.send_message("Your team has signed up!", ephemeral=True)
-                        await notify_poster(bot=bot, message_id=challenge_to_update.message_id, guild_id=challenge_to_update.guild_id, 
-                                   channel_id=challenge_to_update.channel_id, initial_user_id=challenge_to_update.initial_user, 
-                                   opponent_user_id=challenge_to_update.opponent_user, team_a=challenge_to_update.team_a, 
-                                   team_b=challenge_to_update.team_b, start_time=challenge_to_update.start_time)
+
+                        guild = bot.get_guild(int(interaction.guild_id))
+                        lobby_channel = discord.utils.get(guild.text_channels, name="league-play-coordination")
+    
+                        if not channel:
+                            print(f"Channel {lobby_channel} not found in guild {guild}")
+                            return
+                        updated_view = ChallengeView(challenge_to_update.id, challenge_to_update.team_b, challenge_to_update.team_a)
+
+                        await message.edit(embed=updated_embed, view=updated_view)
+                        await interaction.response.send_message("Your team has canceled the signup!", ephemeral=True)
+                        await lobby_channel.send(f"{user_mention} your match opponent at {formatted_time} is no longer sign up. Your challenge has been opened for others to sign up.")
+                        
                         await session.commit()
 
-                    else:
-                        await interaction.response.send_message("You are not registered to a team! Contact a Cube Overseer", ephemeral=True)
-                
-            
-        else:
-            await interaction.response.send_message("Two Teams are already signed up!", ephemeral=True)
+                    elif self.team_b and not (team_registration and team_registration.TeamName.lower().strip() == self.team_b.lower().strip()):
+                        # If self.team_b exists and the interaction user isn't assigned to self.team_b
+                        await interaction.response.send_message("Two Teams are already signed up!", ephemeral=True)
 
     async def change_time_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
