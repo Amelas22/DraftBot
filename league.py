@@ -605,16 +605,15 @@ class ChallengeView(View):
                         challenge_to_update.team_b = team_name
                         challenge_to_update.opponent_user = user_id_str
                         self.team_b=team_name
-                        # challenge_to_update = await session.execute(update(Challenge)
-                        #                  .where(Challenge.id == self.challenge_id)
-                        #                  .values(opponent_user=user_id_str,
-                        #                          team_b_id=team_id,
-                        #                          team_b=team_name))
+
                         bot = interaction.client
                         channel = bot.get_channel(int(challenge_to_update.channel_id))
                         message = await channel.fetch_message(int(challenge_to_update.message_id))
+                        relative_time=f"<t:{int(challenge_to_update.start_time.timestamp())}:R>"
                         formatted_time=f"<t:{int(challenge_to_update.start_time.timestamp())}:F>"
-                        updated_embed = discord.Embed(title=f"{challenge_to_update.team_a} v. {challenge_to_update.team_b} is scheduled!", description=f"Proposed Time: {formatted_time}\nChosen Cube: {challenge_to_update.cube}", color=discord.Color.gold())
+                        user_mention = f"<@{challenge_to_update.initial_user}>"
+                        opponent_mention = f"<@{challenge_to_update.opponent_user}>"
+                        updated_embed = discord.Embed(title=f"{challenge_to_update.team_a} v. {challenge_to_update.team_b} is scheduled!", description=f"Proposed Time: {formatted_time} ({relative_time})\nChosen Cube: {challenge_to_update.cube}\nTeam Leads: {user_mention} {opponent_mention}", color=discord.Color.gold())
                         
                         await message.edit(embed=updated_embed)
                         await interaction.response.send_message("Your team has signed up!", ephemeral=True)
@@ -623,11 +622,7 @@ class ChallengeView(View):
                                    opponent_user_id=challenge_to_update.opponent_user, team_a=challenge_to_update.team_a, 
                                    team_b=challenge_to_update.team_b, start_time=challenge_to_update.start_time)
                         await session.commit()
-                        # await asyncio.create_task(schedule_notification(bot=bot, challenge_id=challenge_to_update.id, guild_id=challenge_to_update.guild_id, 
-                        #            channel_id=challenge_to_update.channel_id, initial_user_id=challenge_to_update.initial_user, 
-                        #            opponent_user_id=challenge_to_update.opponent_user, team_a=challenge_to_update.team_a, 
-                        #            team_b=challenge_to_update.team_b, start_time=challenge_to_update.start_time, message_id=challenge_to_update.message_id))
-                       
+
                     else:
                         await interaction.response.send_message("You are not registered to a team! Contact a Cube Overseer", ephemeral=True)
                 
