@@ -394,17 +394,31 @@ async def cleanup_sessions_task(bot):
                 results = await db_session.execute(stmt)
                 sessions_to_cleanup = results.scalars().all()
 
-                # Attempt to delete the message associated with the session from the draft channel
-                draft_channel = bot.get_channel(int(sessions_to_cleanup.draft_channel_id))
-                if draft_channel and sessions_to_cleanup.message_id:
-                    try:
-                        msg = await draft_channel.fetch_message(int(sessions_to_cleanup.message_id))
-                        await msg.delete()
-                    except discord.NotFound:
-                        # If the message is not found, silently continue
-                        continue
-                    except discord.HTTPException as e:
-                        print(f"Failed to delete message ID {sessions_to_cleanup.message_id} in draft channel. Reason: {e}")
+                for session in sessions_to_cleanup:
+                    # Check if channel_ids is not None and is iterable before attempting to iterate
+                    if session.channel_ids:
+                        for channel_id in session.channel_ids:
+                            channel = bot.get_channel(int(channel_id))
+                            if channel:  # Check if channel was found
+                                try:
+                                    await channel.delete(reason="Session expired.")
+                                except discord.NotFound:
+                                    # If the message is not found, silently continue
+                                    continue
+                                except discord.HTTPException as e:
+                                    print(f"Failed to delete channel: {channel.name}. Reason: {e}")
+
+                    # Attempt to delete the message associated with the session from the draft channel
+                    draft_channel = bot.get_channel(int(session.draft_channel_id))
+                    if draft_channel and session.message_id:
+                        try:
+                            msg = await draft_channel.fetch_message(int(session.message_id))
+                            await msg.delete()
+                        except discord.NotFound:
+                            # If the message is not found, silently continue
+                            continue
+                        except discord.HTTPException as e:
+                            print(f"Failed to delete message ID {session.message_id} in draft channel. Reason: {e}")
 
                 challenge_stmt = select(Challenge).where(
                     or_(
