@@ -470,7 +470,7 @@ class ChallengeTimeModal(Modal):
 
             except ValueError:
                 # Handle the case where the date format is incorrect
-                await interaction.response.send_message("The date format is incorrect. Please use MM/DD/YYYY HH:MM format.", ephemeral=True)
+                await interaction.followup.send("The date format is incorrect. Please use MM/DD/YYYY HH:MM format.", ephemeral=True)
         elif self.command_type == "find":
             try:
                 await interaction.response.defer()
@@ -513,7 +513,7 @@ class ChallengeTimeModal(Modal):
                         
             except ValueError:
                 # Handle the case where the date format is incorrect
-                await interaction.response.send_message("The date format is incorrect. Please use MM/DD/YYYY HH:MM format.", ephemeral=True)  
+                await interaction.followup.send("The date format is incorrect. Please use MM/DD/YYYY HH:MM format.", ephemeral=True)  
 
 class PostTeamSelect(Select):
     def __init__(self, placeholder, attribute_name):
@@ -623,17 +623,17 @@ class ChallengeView(View):
                                    opponent_user_id=challenge_to_update.opponent_user, team_a=challenge_to_update.team_a, 
                                    team_b=challenge_to_update.team_b, start_time=challenge_to_update.start_time)
                         await session.commit()
-                        await asyncio.create_task(schedule_notification(bot=bot, challenge_id=challenge_to_update.id, guild_id=challenge_to_update.guild_id, 
-                                   channel_id=challenge_to_update.channel_id, initial_user_id=challenge_to_update.initial_user, 
-                                   opponent_user_id=challenge_to_update.opponent_user, team_a=challenge_to_update.team_a, 
-                                   team_b=challenge_to_update.team_b, start_time=challenge_to_update.start_time, message_id=challenge_to_update.message_id))
+                        # await asyncio.create_task(schedule_notification(bot=bot, challenge_id=challenge_to_update.id, guild_id=challenge_to_update.guild_id, 
+                        #            channel_id=challenge_to_update.channel_id, initial_user_id=challenge_to_update.initial_user, 
+                        #            opponent_user_id=challenge_to_update.opponent_user, team_a=challenge_to_update.team_a, 
+                        #            team_b=challenge_to_update.team_b, start_time=challenge_to_update.start_time, message_id=challenge_to_update.message_id))
                        
                     else:
                         await interaction.response.send_message("You are not registered to a team! Contact a Cube Overseer", ephemeral=True)
                 
             
         else:
-            await interaction.response.send_message("Two Teams are already signed up!")
+            await interaction.response.send_message("Two Teams are already signed up!", ephemeral=True)
 
     async def change_time_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
@@ -979,7 +979,7 @@ async def notify_teams(bot, guild_id, channel_id, message_id, initial_user_id, o
         return
     message_link = f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
     # Ping the users with the updated message format
-    await channel.send(f"{team_a} vs. {team_b} is scheduled to start in 15 minutes. Gather your teams {initial_user.mention} and {opponent_user.mention}. [Click Here to Open Lobby!]({message_link}")
+    await channel.send(f"{team_a} vs. {team_b} is scheduled to start in 15 minutes. Gather your teams {initial_user.mention} and {opponent_user.mention}. [Click Here to Open Lobby!]({message_link})")
 
 
 async def schedule_notification(bot, challenge_id, guild_id, channel_id, initial_user_id, opponent_user_id, team_a, team_b, start_time, message_id):
