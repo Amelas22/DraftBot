@@ -979,7 +979,7 @@ async def notify_teams(bot, guild_id, channel_id, message_id, initial_user_id, o
         return
     message_link = f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
     # Ping the users with the updated message format
-    await channel.send(f"{team_a} vs. {team_b} is scheduled to start in 15 minutes. Gather your teams {initial_user.mention} and {opponent_user.mention}. [Click Here to Open Lobby!]({message_link}")
+    await channel.send(f"{team_a} vs. {team_b} is scheduled to start in 15 minutes. Gather your teams {initial_user.mention} and {opponent_user.mention}. [Click Here to Open Lobby!]({message_link})")
 
 
 async def schedule_notification(bot, challenge_id, guild_id, channel_id, initial_user_id, opponent_user_id, team_a, team_b, start_time, message_id):
