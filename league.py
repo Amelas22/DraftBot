@@ -623,10 +623,10 @@ class ChallengeView(View):
                                    opponent_user_id=challenge_to_update.opponent_user, team_a=challenge_to_update.team_a, 
                                    team_b=challenge_to_update.team_b, start_time=challenge_to_update.start_time)
                         await session.commit()
-                        await asyncio.create_task(schedule_notification(bot=bot, challenge_id=challenge_to_update.id, guild_id=challenge_to_update.guild_id, 
-                                   channel_id=challenge_to_update.channel_id, initial_user_id=challenge_to_update.initial_user, 
-                                   opponent_user_id=challenge_to_update.opponent_user, team_a=challenge_to_update.team_a, 
-                                   team_b=challenge_to_update.team_b, start_time=challenge_to_update.start_time, message_id=challenge_to_update.message_id))
+                        # await asyncio.create_task(schedule_notification(bot=bot, challenge_id=challenge_to_update.id, guild_id=challenge_to_update.guild_id, 
+                        #            channel_id=challenge_to_update.channel_id, initial_user_id=challenge_to_update.initial_user, 
+                        #            opponent_user_id=challenge_to_update.opponent_user, team_a=challenge_to_update.team_a, 
+                        #            team_b=challenge_to_update.team_b, start_time=challenge_to_update.start_time, message_id=challenge_to_update.message_id))
                        
                     else:
                         await interaction.response.send_message("You are not registered to a team! Contact a Cube Overseer", ephemeral=True)
