@@ -426,7 +426,7 @@ async def cleanup_sessions_task(bot):
                                 # If the message is not found, silently continue
                                 continue
                             except discord.HTTPException as e:
-                                print(f"Failed to delete channel: {channel.name}. Reason: {e}")
+                                print(f"Failed to delete message in {channel.name} Reason: {e}")
                     await db_session.delete(challenge)
                 await db_session.commit()
         # Sleep for a certain amount of time before running again
