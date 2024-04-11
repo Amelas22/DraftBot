@@ -431,7 +431,7 @@ async def cleanup_sessions_task(bot):
                         channel = bot.get_channel(int(challenge.channel_id))
                         if channel:  # Check if channel was found
                             try:
-                                msg = await draft_channel.fetch_message(int(challenge.message_id))
+                                msg = await channel.fetch_message(int(challenge.message_id))
                                 if msg:
                                     await msg.delete(reason="Session expired.")
                             except discord.NotFound:
