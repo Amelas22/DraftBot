@@ -387,6 +387,7 @@ async def cleanup_sessions_task(bot):
     while True:
         current_time = datetime.now()
         window_time = current_time - timedelta(hours=4)
+        challenge_time = current_time - timedelta(hours=2)
         async with AsyncSessionLocal() as db_session:  
             async with db_session.begin():
                 # Fetch sessions that are past their deletion time and in the deletion window
@@ -420,12 +421,8 @@ async def cleanup_sessions_task(bot):
                         except discord.HTTPException as e:
                             print(f"Failed to delete message ID {session.message_id} in draft channel. Reason: {e}")
 
-                challenge_stmt = select(Challenge).where(
-                    or_(
-                        Challenge.start_time < window_time,
-                        Challenge.message_id == None  
-                    )
-                )
+                challenge_stmt = select(Challenge).where(Challenge.start_time < challenge_time)
+                
                 challenge_results = await db_session.execute(challenge_stmt)
                 challenges_to_cleanup = challenge_results.scalars().all()
 
@@ -435,7 +432,8 @@ async def cleanup_sessions_task(bot):
                         if channel:  # Check if channel was found
                             try:
                                 msg = await draft_channel.fetch_message(int(challenge.message_id))
-                                await msg.delete(reason="Session expired.")
+                                if msg:
+                                    await msg.delete(reason="Session expired.")
                             except discord.NotFound:
                                 # If the message is not found, silently continue
                                 continue
