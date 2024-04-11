@@ -394,6 +394,10 @@ async def cleanup_sessions_task(bot):
                 stmt = select(DraftSession).where(DraftSession.deletion_time.between(window_time, current_time))
                 results = await db_session.execute(stmt)
                 sessions_to_cleanup = results.scalars().all()
+                
+                challenge_stmt = select(Challenge).where(Challenge.start_time < challenge_time)
+                challenge_results = await db_session.execute(challenge_stmt)
+                challenges_to_cleanup = challenge_results.scalars().all()
 
                 for session in sessions_to_cleanup:
                     # Check if channel_ids is not None and is iterable before attempting to iterate
@@ -421,26 +425,20 @@ async def cleanup_sessions_task(bot):
                         except discord.HTTPException as e:
                             print(f"Failed to delete message ID {session.message_id} in draft channel. Reason: {e}")
 
-                challenge_stmt = select(Challenge).where(Challenge.start_time < challenge_time)
-                
-                challenge_results = await db_session.execute(challenge_stmt)
-                challenges_to_cleanup = challenge_results.scalars().all()
-
                 for challenge in challenges_to_cleanup:
-                    if challenge.channel_id:
+                    if challenge.channel_id and challenge.message_id:
                         channel = bot.get_channel(int(challenge.channel_id))
-                        if channel:  # Check if channel was found
+                        if channel:
                             try:
                                 msg = await channel.fetch_message(int(challenge.message_id))
-                                if msg:
-                                    await msg.delete(reason="Session expired.")
-                            except discord.NotFound:
-                                # If the message is not found, silently continue
-                                continue
-                            except discord.HTTPException as e:
-                                print(f"Failed to delete message in {channel.name} Reason: {e}")
+                                await msg.delete()
+                            except Exception as e:
+                                print(f"Failed to delete challenge message {challenge.message_id}: {e}")
+
                     await db_session.delete(challenge)
-                await db_session.commit()
+                    # Commit deletion of challenge
+
+                    print(f"{challenge.id} has been removed.")
         # Sleep for a certain amount of time before running again
         await asyncio.sleep(3600)  # Sleep for 1 hour
 
