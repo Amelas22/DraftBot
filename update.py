@@ -150,24 +150,53 @@ class Challenge(Base):
     team_b = Column(String(128))
     cube = Column(String(128))
 
-async def update_team(session, weekly_limit_id, new_matches_played=None):
+async def update_team(session, match_id, team_pr_id, team_wd_id, team_a_wins, team_b_wins, draft_winner, pr_matches, pr_wins, wd_matches, wd_wins):
     async with session.begin():
-        team_registration_stmt = select(WeeklyLimit).where(WeeklyLimit.ID == weekly_limit_id)
+        team_registration_stmt = select(Team).where(Team.TeamID == team_pr_id)
         team_registration_result = await session.execute(team_registration_stmt)
-        team_registration = team_registration_result.scalars().first()
+        team_pr_db = team_registration_result.scalars().first()
         
-        if team_registration:
-            if new_matches_played is not None:
-                team_registration.MatchesPlayed = new_matches_played
-                print(f"Matches Played for {team_registration.TeamName} updated to {new_matches_played}.")
-                await session.commit()
+        if team_pr_db:
+            team_pr_db.MatchesCompleted = pr_matches
+            team_pr_db.MatchWins = pr_wins
+            team_pr_db.PointsEarned = pr_wins
 
-        else:
-            print(f"TeamRegistration with ID {weekly_limit_id} not found.")
+        team_registration_stmt = select(Team).where(Team.TeamID == team_wd_id)
+        team_registration_result = await session.execute(team_registration_stmt)
+        team_wd_db = team_registration_result.scalars().first()
+        
+        if team_wd_db:
+            team_wd_db.MatchesCompleted = wd_matches
+            team_wd_db.MatchWins = wd_wins
+            team_wd_db.PointsEarned = wd_wins
 
+        team_registration_stmt = select(WeeklyLimit).where(WeeklyLimit.TeamID == team_pr_id)
+        team_registration_result = await session.execute(team_registration_stmt)
+        team_pr_wl = team_registration_result.scalars().first()
+        
+        if team_pr_wl:
+            team_pr_wl.MatchesPlayed = pr_matches
+            team_pr_wl.PointsEarned = pr_wins
+
+        team_registration_stmt = select(WeeklyLimit).where(WeeklyLimit.TeamID == team_wd_id)
+        team_registration_result = await session.execute(team_registration_stmt)
+        team_wd_wl = team_registration_result.scalars().first()
+        
+        if team_wd_wl:
+            team_wd_wl.MatchesPlayed = wd_matches
+            team_wd_wl.PointsEarned = wd_wins
+            
+        team_registration_stmt = select(Match).where(Match.MatchID == match_id)
+        team_registration_result = await session.execute(team_registration_stmt)
+        match_db = team_registration_result.scalars().first()
+      
+        if match_db:
+            match_db.TeamAWins = team_a_wins
+            match_db.TeamBWins = team_b_wins
+            match_db.DraftWinnerID = team_pr_id
 async def main():
     async with AsyncSessionLocal() as session:
-        await update_team(session, 3, new_matches_played=2)
+        await update_team(session=session, match_id=51, team_pr_id=34, team_wd_id=33, team_a_wins=6, team_b_wins=3, draft_winner=33, pr_matches=2, pr_wins=2, wd_matches=2, wd_wins=0)
         
 
 if __name__ == "__main__":
