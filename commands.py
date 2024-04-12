@@ -159,7 +159,7 @@ async def league_commands(bot):
             await interaction.response.send_message("Please select the range for your team", view=initial_view, ephemeral=True)
 
 
-    @bot.slash_command(name="list_challenges", description="Find an open challenge based on a given time.")
+    @bot.slash_command(name="list_challenges", description="List all open challenges in chronological order.")
     async def list_challenge(interaction: discord.Interaction):
         async with AsyncSessionLocal() as db_session: 
             async with db_session.begin():
