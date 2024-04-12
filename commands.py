@@ -458,7 +458,7 @@ async def league_commands(bot):
                 # Fetch teams ordered by PointsEarned (DESC) and MatchesCompleted (ASC)
                 stmt = (select(Team)
                     .where(Team.MatchesCompleted >= 1)
-                    .order_by(Team.PointsEarned.desc(), Team.MatchesCompleted.asc()).limit(25))
+                    .order_by(Team.PointsEarned.desc(), Team.MatchesCompleted.asc()))
                 results = await session.execute(stmt)
                 teams = results.scalars().all()
                 

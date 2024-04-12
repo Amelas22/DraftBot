@@ -477,14 +477,14 @@ async def update_player_stats_for_draft(session_id, guild):
 
 
 async def update_match_db_with_wins_winner(match_id, team_a_wins, team_b_wins):
-    eastern = pytz.timezone('US/Eastern')
-    today = datetime.now(eastern)
+    central = pytz.timezone('US/Central')
+    today = datetime.now(central)
 
     # Calculate start of the week (Monday)
     start_of_week_date = today - timedelta(days=today.weekday())
 
     # Set the time to 1:00 AM
-    start_of_week = eastern.localize(datetime(start_of_week_date.year, start_of_week_date.month, start_of_week_date.day, 1, 0))
+    start_of_week = central.localize(datetime(start_of_week_date.year, start_of_week_date.month, start_of_week_date.day, 1, 0))
 
     async with AsyncSessionLocal() as db_session: 
         async with db_session.begin():
