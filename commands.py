@@ -458,7 +458,7 @@ async def league_commands(bot):
                 # Fetch teams ordered by PointsEarned (DESC) and MatchesCompleted (ASC)
                 stmt = (select(Team)
                     .where(Team.MatchesCompleted >= 1)
-                    .order_by(Team.PointsEarned.desc(), Team.MatchesCompleted.asc()))
+                    .order_by(Team.PointsEarned.desc(), Team.MatchesCompleted.asc()).limit(25))
                 results = await session.execute(stmt)
                 teams = results.scalars().all()
                 
@@ -468,7 +468,7 @@ async def league_commands(bot):
                     return
 
                 # Format the standings as an embed
-                embed = discord.Embed(title="Team Standings", description=f"Standings as of <t:{int(time.timestamp())}:F>", color=discord.Color.gold())
+                embed = discord.Embed(title="Team Standings", description=f"Top 25 Standings as of <t:{int(time.timestamp())}:F>", color=discord.Color.gold())
                 for team in teams:
                     embed.add_field(name=f"{count}. {team.TeamName}", value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}", inline=False)
                     count += 1
@@ -483,7 +483,7 @@ async def post_standings(interaction):
             # Fetch teams ordered by PointsEarned (DESC) and MatchesCompleted (ASC)
             stmt = (select(Team)
                 .where(Team.MatchesCompleted >= 1)
-                .order_by(Team.PointsEarned.desc(), Team.MatchesCompleted.asc()))
+                .order_by(Team.PointsEarned.desc(), Team.MatchesCompleted.asc()).limit(25))
             results = await session.execute(stmt)
             teams = results.scalars().all()
             
@@ -493,7 +493,7 @@ async def post_standings(interaction):
                 return
 
             # Format the standings as an embed
-            embed = discord.Embed(title="Team Standings", description=f"Standings as of <t:{int(time.timestamp())}:F>", color=discord.Color.gold())
+            embed = discord.Embed(title="Team Standings", description=f"Top 25 Standings as of <t:{int(time.timestamp())}:F>", color=discord.Color.gold())
             for team in teams:
                 embed.add_field(name=f"{count}. {team.TeamName}", value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}", inline=False)
                 count += 1
