@@ -455,6 +455,7 @@ class PersistentView(discord.ui.View):
 
     async def create_team_channel(self, guild, team_name, team_members, team_a, team_b):
         draft_category = discord.utils.get(guild.categories, name="Draft Channels")
+        voice_category = discord.utils.get(guild.categories, name="Draft Voice")
         session = await get_draft_session(self.draft_session_id)
         if not session:
             print("Draft session not found.")
@@ -510,7 +511,7 @@ class PersistentView(discord.ui.View):
             # Construct voice channel name
             voice_channel_name = f"{team_name}-Voice-{session.draft_id}"
             # Create the voice channel with the same permissions as the text channel
-            voice_channel = await guild.create_voice_channel(name=voice_channel_name, overwrites=overwrites, category=draft_category)
+            voice_channel = await guild.create_voice_channel(name=voice_channel_name, overwrites=overwrites, category=voice_category)
             # Store the voice channel ID
             self.channel_ids.append(voice_channel.id)
 
