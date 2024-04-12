@@ -139,7 +139,7 @@ async def league_commands(bot):
 
 
     @bot.slash_command(name="register_player", description="Post a challenge for your team")
-    async def postchallenge(interaction: discord.Interaction):
+    async def registerplayer(interaction: discord.Interaction):
         cube_overseer_role = discord.utils.get(interaction.guild.roles, name="Cube Overseer")
     
         if cube_overseer_role in interaction.user.roles:
@@ -152,7 +152,7 @@ async def league_commands(bot):
 
             
     @bot.slash_command(name="find_a_match", description="Find an open challenge based on a given time.")
-    async def postchallenge(interaction: discord.Interaction):
+    async def findamatch(interaction: discord.Interaction):
 
             from league import InitialPostView
             initial_view = InitialPostView(command_type="find")
@@ -466,13 +466,22 @@ async def league_commands(bot):
                 if not teams:
                     await channel.send("No results posted yet.")
                     return
+                # Split the results into two sets if necessary
+                first_batch = teams[:25]  # Top 25 teams
+                second_batch = teams[25:50]  # Next 25 teams if more than 25
 
-                # Format the standings as an embed
+                # Send the first batch
                 embed = discord.Embed(title="Team Standings", description=f"Top 25 Standings as of <t:{int(time.timestamp())}:F>", color=discord.Color.gold())
-                for team in teams:
-                    embed.add_field(name=f"{count}. {team.TeamName}", value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}", inline=False)
-                    count += 1
+                for index, team in enumerate(first_batch, 1):
+                    embed.add_field(name=f"{index}. {team.TeamName}", value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}", inline=False)
                 await channel.send(embed=embed)
+
+                # Send the second batch if it exists
+                if second_batch:
+                    embed2 = discord.Embed(title="Team Standings, Continued", description=f"", color=discord.Color.gold())
+                    for index, team in enumerate(second_batch, 26):
+                        embed2.add_field(name=f"{index}. {team.TeamName}", value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}", inline=False)
+                    await channel.send(embed=embed2)
 
                 
 async def post_standings(interaction):
@@ -483,7 +492,7 @@ async def post_standings(interaction):
             # Fetch teams ordered by PointsEarned (DESC) and MatchesCompleted (ASC)
             stmt = (select(Team)
                 .where(Team.MatchesCompleted >= 1)
-                .order_by(Team.PointsEarned.desc(), Team.MatchesCompleted.asc()).limit(25))
+                .order_by(Team.PointsEarned.desc(), Team.MatchesCompleted.asc()))
             results = await session.execute(stmt)
             teams = results.scalars().all()
             
@@ -491,10 +500,20 @@ async def post_standings(interaction):
             if not teams:
                 await interaction.response.send_message("No teams have been registered yet.", ephemeral=True)
                 return
+            
+            # Split the results into two sets if necessary
+            first_batch = teams[:25]  # Top 25 teams
+            second_batch = teams[25:50]  # Next 25 teams if more than 25
 
-            # Format the standings as an embed
+            # Send the first batch
             embed = discord.Embed(title="Team Standings", description=f"Top 25 Standings as of <t:{int(time.timestamp())}:F>", color=discord.Color.gold())
-            for team in teams:
-                embed.add_field(name=f"{count}. {team.TeamName}", value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}", inline=False)
-                count += 1
+            for index, team in enumerate(first_batch, 1):
+                embed.add_field(name=f"{index}. {team.TeamName}", value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}", inline=False)
             await interaction.response.send_message(embed=embed)
+
+            # Send the second batch if it exists
+            if second_batch:
+                embed2 = discord.Embed(title="Team Standings, Continued", description=f"", color=discord.Color.gold())
+                for index, team in enumerate(second_batch, 26):
+                    embed2.add_field(name=f"{index}. {team.TeamName}", value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}", inline=False)
+                await interaction.followup.send(embed=embed2)
