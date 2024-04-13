@@ -193,6 +193,31 @@ async def league_commands(bot):
                 await interaction.response.send_message(embed=embed)
 
 
+    @bot.event
+    async def on_reaction_add(reaction, user):
+        # Check if the reaction is in the role-request channel
+        if reaction.message.channel.name == 'role-request':
+            print("reaction in channel")
+            # Ensure user is a Member object
+            if reaction.message.guild:
+                member = await reaction.message.guild.fetch_member(user.id)
+                # Check if the user has no roles other than @everyone
+                if len(member.roles) == 1:
+                    print("user with one role")
+                    # Find the 'suspected bot' role in the guild
+                    suspected_bot_role = discord.utils.get(member.guild.roles, name='suspected bot')
+                    if suspected_bot_role:
+                        print('suspected bot role found')
+                        try:
+                            await member.add_roles(suspected_bot_role)
+                            print(f"Assigned 'suspected bot' role to {member.name}")
+                        except discord.Forbidden:
+                            print(f"Permission error: Unable to assign roles. Check the bot's role position and permissions.")
+                        except discord.HTTPException as e:
+                            print(f"HTTP exception occurred: {e}")
+
+
+
     @bot.slash_command(name='standings', description='Display the team standings by points earned')
     async def standings(interaction: discord.Interaction):
         await post_standings(interaction)

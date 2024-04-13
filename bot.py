@@ -18,6 +18,7 @@ async def main():
     intents.message_content = True
     intents.guilds = True
     intents.members = True
+    intents.reactions = True
 
     TOKEN = os.getenv("BOT_TOKEN")
 
