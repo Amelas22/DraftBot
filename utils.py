@@ -477,14 +477,6 @@ async def update_player_stats_for_draft(session_id, guild):
 
 
 async def update_match_db_with_wins_winner(match_id, team_a_wins, team_b_wins):
-    central = pytz.timezone('US/Central')
-    today = datetime.now(central)
-
-    # Calculate start of the week (Monday)
-    start_of_week_date = today - timedelta(days=today.weekday())
-
-    # Set the time to 1:00 AM
-    start_of_week = central.localize(datetime(start_of_week_date.year, start_of_week_date.month, start_of_week_date.day, 1, 0))
 
     async with AsyncSessionLocal() as db_session: 
         async with db_session.begin():
@@ -493,6 +485,16 @@ async def update_match_db_with_wins_winner(match_id, team_a_wins, team_b_wins):
             if not match:
                 print("Match not found.")
                 return
+            
+            pacific = pytz.timezone('US/Pacific')
+            utc = pytz.utc
+            # Convert UTC MatchDate to Pacific time and set time to midnight
+            pacific_time = utc.localize(match.MatchDate).astimezone(pacific)
+            midnight_pacific = pacific.localize(datetime(pacific_time.year, pacific_time.month, pacific_time.day))
+
+            # Calculate the start of the week
+            start_of_week = midnight_pacific - timedelta(days=midnight_pacific.weekday())
+
 
             initial_winner = match.DraftWinnerID
             new_winner = match.TeamAID if team_a_wins > team_b_wins else match.TeamBID if team_a_wins < team_b_wins else None
@@ -583,16 +585,10 @@ async def get_or_create_weekly_limit(db_session, team_id, team_name, start_of_we
     return weekly_limit
 
 async def check_weekly_limits(interaction, match_id):
-    eastern = pytz.timezone('US/Eastern')
-    today = datetime.now(eastern)
-
-    # Calculate start of the week (Monday)
-    start_of_week_date = today - timedelta(days=today.weekday())
-
-    # Set the time to 1:00 AM
-    start_of_week = eastern.localize(datetime(start_of_week_date.year, start_of_week_date.month, start_of_week_date.day, 1, 0))
-
+    
     limit_messages = []
+    pacific = pytz.timezone('US/Pacific')
+    utc = pytz.utc
     async with AsyncSessionLocal() as db_session: 
         async with db_session.begin():
             stmt = select(Match).where(Match.MatchID == match_id)
@@ -600,6 +596,13 @@ async def check_weekly_limits(interaction, match_id):
             if not match:
                 print("Match not found.")
                 return
+
+            # Convert UTC MatchDate to Pacific time and set time to midnight
+            pacific_time = utc.localize(match.MatchDate).astimezone(pacific)
+            midnight_pacific = pacific.localize(datetime(pacific_time.year, pacific_time.month, pacific_time.day))
+
+            # Calculate the start of the week
+            start_of_week = midnight_pacific - timedelta(days=midnight_pacific.weekday())
 
             teams_to_check = [match.TeamAID, match.TeamBID]
             for team_id in teams_to_check:
