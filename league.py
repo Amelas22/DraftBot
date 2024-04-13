@@ -704,6 +704,14 @@ class ChallengeView(View):
                 team_stmt = select(Challenge).where(Challenge.id == self.challenge_id)
                 challenge = await db_session.scalar(team_stmt)
                 if interaction.user.id == int(challenge.initial_user):
+                    if self.team_b:
+
+                        guild = bot.get_guild(int(interaction.guild_id))
+                        lobby_channel = discord.utils.get(guild.text_channels, name="league-play-coordination")
+                        user_mention = f"<@{challenge.opponent_user}>"
+                        formatted_time=f"<t:{int(challenge.start_time.timestamp())}:F>"
+                        await lobby_channel.send(f"{user_mention} your match at {formatted_time} has been cancelled by {challenge.team_a}. Please use `/list_challenge` to find a new match or `/post_challenge` to post your own.")
+                        
 
                     channel = bot.get_channel(int(challenge.channel_id))
                     message = await channel.fetch_message(int(challenge.message_id))

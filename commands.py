@@ -55,14 +55,16 @@ async def league_commands(bot):
             "**League Commands**": "",
             "**`/post_challenge`**": "Set a draft time for other teams to challenge your team.",
             "**`/list_challenges`**": "Lists all open challenges with a link to sign up.",
-            "**`/find_a_match`**": "Choose a time to find challenges within 2 hours of chosen time.",
             "**`/list_teams`**": "Displays registered teams",
+            "**`/find_a_match`**": "Choose a time to find challenges within 2 hours of chosen time.",
             "**`/standings`**": "Displays current league standings\n",
             "**Open Queue Commands**": "",
             "**`/trophies`**": "Displays this month's trophy leaderboard",
             "**Mod Commands**": "",
             "**`/delete_team`**": "Removes a registered team",
             "**`/registerteam`**": "Register your team for the league",
+            "**`/register_player`**": "Register a player to a team",
+            "**`/remove_player`**": "Removes a player from all teams",
         }
         
         # Formatting the list for display
