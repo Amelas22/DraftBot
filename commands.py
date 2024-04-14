@@ -186,9 +186,7 @@ async def league_commands(bot):
                     # Mention the initial user who posted the challenge
                     initial_user_mention = f"<@{challenge.initial_user}>"
                     # Format the start time of each challenge to display in the embed
-                    time = datetime.strptime(str(challenge.start_time), "%Y-%m-%d %H:%M:%S")
-                    utc_zone = pytz.timezone("UTC")
-                    start_time = utc_zone.localize(time)
+                    start_time = challenge.start_time
                     formatted_time = f"<t:{int(start_time.timestamp())}:F>"
                     relative_time = f"<t:{int(start_time.timestamp())}:R>"
                     embed.add_field(name=f"Team: {challenge.team_a}", value=f"Time: {formatted_time} ({relative_time})\nCube: {challenge.cube}\nPosted by: {initial_user_mention}\n[Sign Up Here!]({message_link})", inline=False)

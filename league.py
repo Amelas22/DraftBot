@@ -42,7 +42,7 @@ class RangeSelect(Select):
             await interaction.response.defer(ephemeral=True)
             await self.view.check_and_send_team_cube(interaction)
         except Exception as e:
-            print(f"Error in Team Select callback: {e}")
+            print(f"Error in Range Select callback: {e}")
             
 
 class CubeSelect(discord.ui.Select):
@@ -382,9 +382,14 @@ class AdjustTimeModal(Modal):
         await interaction.response.defer()
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
+
                 challenge_to_update = await db_session.get(Challenge, self.match_id)
-                challenge_to_update.start_time = datetime.strptime(self.children[0].value, "%m/%d/%Y %H:%M")
-                challenge_to_update.cube = self.cube_choice
+                # challenge_to_update.start_time = datetime.strptime(self.children[0].value, "%m/%d/%Y %H:%M")
+                # challenge_to_update.cube = self.cube_choice
+                # await db_session.commit()
+                await db_session.execute(update(Challenge)
+                                         .where(Challenge.id == self.match_id)
+                                         .values(start_time = datetime.strptime(self.children[0].value, "%m/%d/%Y %H:%M")))
                 await db_session.commit()
             bot = interaction.client
             channel = bot.get_channel(int(challenge_to_update.channel_id))
@@ -402,7 +407,8 @@ class AdjustTimeModal(Modal):
             updated_embed = discord.Embed(title=f"{challenge_to_update.team_a} v. {challenge_to_update.team_b} is scheduled!" if challenge_to_update.team_b else f"{challenge_to_update.team_a} is looking for a match!", 
                                           description=f"Proposed Time: {formatted_time}  ({relative_time})\nChosen Cube: {challenge_to_update.cube}\nPosted by: {user_mention}", 
                                           color=discord.Color.gold() if challenge_to_update.team_b else discord.Color.blue())
-
+            
+            
             await message.edit(embed=updated_embed)
 
 class ChallengeTimeModal(Modal):
