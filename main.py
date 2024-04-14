@@ -134,7 +134,7 @@ class DraftSession:
 
     class ReadyCheckView(discord.ui.View):
         def __init__(self, session_id, *args, **kwargs):
-            super().__init__(*args, **kwargs)
+            super().__init__(timeout=None, *args, **kwargs)
             self.session_id = session_id
 
         @discord.ui.button(label="Ready", style=discord.ButtonStyle.green, custom_id="ready_check_ready")

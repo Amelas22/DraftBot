@@ -1,4 +1,5 @@
 import discord
+import asyncio
 from datetime import datetime, timedelta
 from discord import SelectOption
 from discord.ui import Button, View, Select, select
@@ -8,6 +9,7 @@ from sqlalchemy.orm import selectinload
 from utils import calculate_pairings, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, update_draft_summary_message, check_and_post_victory_or_draw, update_player_stats_and_elo, check_weekly_limits, update_player_stats_for_draft
 
 PROCESSING_ROOMS_PAIRINGS = {}
+sessions = {}
 
 class PersistentView(discord.ui.View):
     def __init__(self, bot, draft_session_id, session_type, team_a_name=None, team_b_name=None, session_stage=None):
@@ -36,7 +38,7 @@ class PersistentView(discord.ui.View):
             self.add_item(self.create_button("Generate Seating Order", "primary", f"generate_seating_{self.draft_session_id}", self.randomize_teams_callback))
         self.add_item(self.create_button("Cancel Draft", "grey", f"cancel_draft_{self.draft_session_id}", self.cancel_draft_callback))
         self.add_item(self.create_button("Remove User", "grey", f"remove_user_{self.draft_session_id}", self.remove_user_button_callback))
-        # self.add_item(self.create_button("Ready Check", "green", "ready_check", self.ready_check_callback))
+        self.add_item(self.create_button("Ready Check", "green", f"ready_check_{self.draft_session_id}", self.ready_check_callback))
         self.add_item(self.create_button("Create Rooms & Post Pairings", "primary", f"create_rooms_pairings_{self.draft_session_id}", self.create_rooms_pairings_callback, disabled=True))
 
         # Logic to enable/disable based on session_stage
@@ -170,6 +172,64 @@ class PersistentView(discord.ui.View):
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
     
+    async def ready_check_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Fetch the session data from the database
+        session = await get_draft_session(self.draft_session_id)
+        if not session:
+            await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
+            return
+
+        user_id = str(interaction.user.id)
+        if user_id not in session.sign_ups:
+            await interaction.response.send_message("You are not registered in the draft session.", ephemeral=True)
+            return
+        
+        # Create a dictionary to store the initial ready check status
+        ready_check_status = {
+            "ready": [],
+            "not_ready": [],
+            "no_response": list(session.sign_ups.keys())
+        }
+
+        # Save this status in a global sessions dictionary
+        sessions[self.draft_session_id] = ready_check_status
+
+        # Disable the "Ready Check" button
+        for item in self.children:
+            if isinstance(item, discord.ui.Button) and item.custom_id.endswith("ready_check"):
+                item.disabled = True
+                break
+
+        # Generate the initial embed
+        embed = await generate_ready_check_embed(ready_check_status=ready_check_status, sign_ups=session.sign_ups)
+        
+        # Create the view with the buttons
+        view = ReadyCheckView(self.draft_session_id)
+
+        # Send the initial ready check message
+        main_message = await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
+
+        # Construct a message that mentions all users who need to respond to the ready check
+        user_mentions = ' '.join([f"<@{user_id}>" for user_id in session.sign_ups.keys()])
+        mention_message = f"Ready Check Initiated {user_mentions}"
+
+        # Send the mention message as a follow-up to ensure it gets sent after the embed
+        await interaction.followup.send(mention_message, ephemeral=False)
+
+        asyncio.create_task(self.cleanup_ready_check(self.draft_session_id))
+
+
+    async def cleanup_ready_check(self, draft_session_id):
+        await asyncio.sleep(600)  # Wait for 10 minutes
+        try:
+            if draft_session_id in sessions:
+                del sessions[draft_session_id]  # Clean up the session data
+        except discord.NotFound:
+            # The message was already deleted or not found
+            pass
+        except Exception as e:
+            print(f"Failed to delete ready check message: {e}")
+
 
     async def randomize_teams_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         bot = interaction.client
@@ -531,6 +591,64 @@ class PersistentView(discord.ui.View):
                 await db_session.commit()
 
         return channel.id
+
+async def generate_ready_check_embed(ready_check_status, sign_ups):
+    # Define a function to convert user IDs to their names using the sign_ups dictionary
+    def get_names(user_ids):
+        return "\n".join(sign_ups.get(user_id, "Unknown user") for user_id in user_ids) or "None"
+
+    # Generate the embed with fields for "Ready", "Not Ready", and "No Response"
+    embed = discord.Embed(title="Ready Check Initiated", description="Please indicate if you are ready.", color=discord.Color.gold())
+    embed.add_field(name="Ready", value=get_names(ready_check_status['ready']), inline=False)
+    embed.add_field(name="Not Ready", value=get_names(ready_check_status['not_ready']), inline=False)
+    embed.add_field(name="No Response", value=get_names(ready_check_status['no_response']), inline=False)
+    
+    return embed
+
+class ReadyCheckView(discord.ui.View):
+    def __init__(self, draft_session_id):
+        super().__init__(timeout=None)
+        self.draft_session_id = draft_session_id
+        # Append the session ID to each custom_id to make it unique
+        self.ready_button.custom_id = f"ready_check_ready_{self.draft_session_id}"
+        self.not_ready_button.custom_id = f"ready_check_not_ready_{self.draft_session_id}"
+
+    @discord.ui.button(label="Ready", style=discord.ButtonStyle.green, custom_id="placeholder_ready")
+    async def ready_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await self.handle_ready_not_ready_interaction(interaction, "ready")
+
+    @discord.ui.button(label="Not Ready", style=discord.ButtonStyle.red, custom_id="placeholder_not_ready")
+    async def not_ready_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await self.handle_ready_not_ready_interaction(interaction, "not_ready")
+
+    async def handle_ready_not_ready_interaction(self, interaction: discord.Interaction, status):
+        session = sessions.get(self.draft_session_id)
+        if not session:
+            await interaction.response.send_message("Session data is missing.", ephemeral=True)
+            return
+
+        user_id = str(interaction.user.id)
+        if user_id not in session['no_response'] and user_id not in session['ready'] and user_id not in session['not_ready']:
+            await interaction.response.send_message("You are not authorized to interact with this button.", ephemeral=True)
+            return
+
+        # Update the ready check status
+        for state in ['ready', 'not_ready', 'no_response']:
+            if user_id in session[state]:
+                session[state].remove(user_id)
+        session[status].append(user_id)
+
+        # Update the session status in the database if necessary
+        # await update_draft_session(self.draft_session_id, session)
+        draft_session = await get_draft_session(self.draft_session_id)
+        # Generate the updated embed
+        embed = await generate_ready_check_embed(session, draft_session.sign_ups)
+
+        # Update the message
+        await interaction.response.edit_message(embed=embed, view=self)
+        
+
+
 
 class UserRemovalSelect(Select):
     def __init__(self, options: list[SelectOption], session_id: str, *args, **kwargs):
