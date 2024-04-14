@@ -104,6 +104,7 @@ class Team(Base):
     MatchesCompleted = Column(Integer, default=0)
     MatchWins = Column(Integer, default=0)
     PointsEarned = Column(Integer, default=0)
+    PreseasonPoints = Column(Integer, default=0)
 
 class Match(Base):
     __tablename__ = 'matches'

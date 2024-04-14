@@ -516,7 +516,7 @@ async def post_standings(interaction):
             # Fetch teams ordered by PointsEarned (DESC) and MatchesCompleted (ASC)
             stmt = (select(Team)
                 .where(Team.MatchesCompleted >= 1)
-                .order_by(Team.PointsEarned.desc(), Team.MatchesCompleted.asc()))
+                .order_by(Team.PointsEarned.desc(), Team.MatchesCompleted.asc(), Team.PreseasonPoints.desc()))
             results = await session.execute(stmt)
             teams = results.scalars().all()
             
@@ -532,12 +532,22 @@ async def post_standings(interaction):
             # Send the first batch
             embed = discord.Embed(title="Team Standings", description=f"Top 25 Standings as of <t:{int(time.timestamp())}:F>", color=discord.Color.gold())
             for index, team in enumerate(first_batch, 1):
-                embed.add_field(name=f"{index}. {team.TeamName}", value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}", inline=False)
+                preseason_text = f", Preseason Points: {team.PreseasonPoints}" if team.PreseasonPoints > 0 else ""
+                embed.add_field(
+                    name=f"{index}. {team.TeamName}", 
+                    value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}{preseason_text}", 
+                    inline=False
+                )
             await interaction.response.send_message(embed=embed)
 
             # Send the second batch if it exists
             if second_batch:
                 embed2 = discord.Embed(title="Team Standings, Continued", description=f"", color=discord.Color.gold())
                 for index, team in enumerate(second_batch, 26):
-                    embed2.add_field(name=f"{index}. {team.TeamName}", value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}", inline=False)
+                    preseason_text = f", Preseason Points: {team.PreseasonPoints}" if team.PreseasonPoints > 0 else ""
+                    embed2.add_field(
+                        name=f"{index}. {team.TeamName}", 
+                        value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}{preseason_text}", 
+                        inline=False
+                    )
                 await interaction.followup.send(embed=embed2)
