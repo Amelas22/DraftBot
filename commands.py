@@ -225,7 +225,6 @@ async def league_commands(bot):
     async def trophies(ctx):
         eastern_tz = pytz.timezone('US/Eastern')
         now = datetime.now(eastern_tz)
-        # Get the first day of the current month at 00:00 hours
         first_day_of_month = eastern_tz.localize(datetime(now.year, now.month, 1))
 
         async with AsyncSessionLocal() as db_session:
@@ -243,29 +242,41 @@ async def league_commands(bot):
                     undefeated_drafters = session.trophy_drafters if session.trophy_drafters else []
                     drafter_counts.update(undefeated_drafters)
 
-                sorted_drafters = drafter_counts.most_common()
+                # Get only the drafters with more than one trophy
+                sorted_drafters = [drafter for drafter in drafter_counts.items() if drafter[1] > 1]
 
-                embed = discord.Embed(title=f"{now.strftime('%B')} Trophy Leaderboard",
-                                    description="Earn Trophies in Open-Queue",
-                                    color=discord.Color.blue())
+                # Now sort and take only the top 25
+                sorted_drafters = sorted(sorted_drafters, key=lambda x: x[1], reverse=True)[:25]
+
+                embed = discord.Embed(
+                    title=f"{now.strftime('%B')} Trophy Leaderboard",
+                    description="Drafters with multiple trophies in Open-Queue",
+                    color=discord.Color.blue()
+                )
 
                 last_count = None
                 rank = 0
+                actual_rank = 0
                 skip_next_rank = 0
 
                 for drafter, count in sorted_drafters:
-                    if count == last_count:  # If this user has the same trophy count as the last one
-                        skip_next_rank += 1  # Increase skip for the next unique trophy count
-                        display_rank = f"T{rank}"  # Display rank with a "T" for tie
+                    if count != last_count:
+                        rank += 1 + skip_next_rank
+                        display_rank = str(rank)
+                        skip_next_rank = 0
                     else:
-                        rank += 1 + skip_next_rank  # Increment rank, accounting for any skipped ranks
-                        skip_next_rank = 0  # Reset skip rank counter
-                        display_rank = str(rank)  # Display rank as usual
-                        last_count = count  # Update the last_count to the current user's trophy count
+                        display_rank = f"T{rank}"  # Tie rank
+                        skip_next_rank += 1
 
-                    rank_title = f"{display_rank}. {drafter}"
-                    embed.add_field(name=rank_title, value=f"Trophies: {count}", inline=False)
-                
+                    last_count = count
+
+                    if actual_rank < 25:  # Ensure we don't exceed 25 fields
+                        rank_title = f"{display_rank}. {drafter}"
+                        embed.add_field(name=rank_title, value=f"Trophies: {count}", inline=False)
+                        actual_rank += 1
+                    else:
+                        break
+
                 await ctx.respond(embed=embed)
 
     @bot.slash_command(name="leaguedraft", description="Start a league draft with chosen teams and cube.")
@@ -482,7 +493,7 @@ async def league_commands(bot):
                 # Fetch teams ordered by PointsEarned (DESC) and MatchesCompleted (ASC)
                 stmt = (select(Team)
                     .where(Team.MatchesCompleted >= 1)
-                    .order_by(Team.PointsEarned.desc(), Team.MatchesCompleted.asc()))
+                    .order_by(Team.PointsEarned.desc(), Team.MatchesCompleted.asc(), Team.PreseasonPoints.desc()))
                 results = await session.execute(stmt)
                 teams = results.scalars().all()
                 
@@ -497,14 +508,24 @@ async def league_commands(bot):
                 # Send the first batch
                 embed = discord.Embed(title="Team Standings", description=f"Top 25 Standings as of <t:{int(time.timestamp())}:F>", color=discord.Color.gold())
                 for index, team in enumerate(first_batch, 1):
-                    embed.add_field(name=f"{index}. {team.TeamName}", value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}", inline=False)
+                    preseason_text = f", Preseason Points: {team.PreseasonPoints}" if team.PreseasonPoints > 0 else ""
+                    embed.add_field(
+                        name=f"{index}. {team.TeamName}", 
+                        value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}{preseason_text}", 
+                        inline=False
+                    )
                 await channel.send(embed=embed)
 
                 # Send the second batch if it exists
                 if second_batch:
                     embed2 = discord.Embed(title="Team Standings, Continued", description=f"", color=discord.Color.gold())
                     for index, team in enumerate(second_batch, 26):
-                        embed2.add_field(name=f"{index}. {team.TeamName}", value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}", inline=False)
+                        preseason_text = f", Preseason Points: {team.PreseasonPoints}" if team.PreseasonPoints > 0 else ""
+                        embed2.add_field(
+                            name=f"{index}. {team.TeamName}", 
+                            value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}{preseason_text}", 
+                            inline=False
+                        )
                     await channel.send(embed=embed2)
 
                 
