@@ -298,7 +298,7 @@ async def league_commands(bot):
 
         eastern_tz = pytz.timezone('US/Eastern')
         now = datetime.now(eastern_tz)
-        start_time = eastern_tz.localize(datetime(now.year, now.month, now.day, 1, 0)) - timedelta(days=1)  # 3 AM previous day
+        start_time = eastern_tz.localize(datetime(now.year, now.month, now.day, 3, 0)) - timedelta(days=1)  # 3 AM previous day
         end_time = start_time + timedelta(hours=24)  # 3 AM current day
 
         async with AsyncSessionLocal() as db_session:
@@ -472,7 +472,7 @@ async def league_commands(bot):
 
                 await channel.send(embed=embed)
         
-    @aiocron.crontab('00 09 * * *', tz=pytz.timezone('US/Eastern'))
+    @aiocron.crontab('* * * * *', tz=pytz.timezone('US/Eastern'))
     async def post_league_standings():
         # Fetch all guilds the bot is in and look for the "league-summary" channel
         for guild in bot.guilds:
@@ -499,40 +499,51 @@ async def league_commands(bot):
                 if not teams:
                     await channel.send("No results posted yet.")
                     return
-                # Split the results into two sets if necessary
-                first_batch = teams[:25]  # Top 25 teams
-                second_batch = teams[25:50]  # Next 25 teams if more than 25
+                embed = discord.Embed(title="Team Standings", description=f"Standings as of <t:{int(time.timestamp())}:F>", color=discord.Color.gold())
+                last_points = None
+                last_matches = None
+                last_preseason = None
+                actual_rank = 0
+                display_rank = 0
+                
+                # Iterate through teams to build the ranking
+                for team in teams:
+                    # Increase actual_rank each loop, this is the absolute position in the list
+                    actual_rank += 1
+                    # Only increase display_rank if the current team's stats do not match the last team's stats
+                    if (team.PointsEarned, team.MatchesCompleted, team.PreseasonPoints) != (last_points, last_matches, last_preseason):
+                        display_rank = actual_rank
+                    last_points = team.PointsEarned
+                    last_matches = team.MatchesCompleted
+                    last_preseason = team.PreseasonPoints
 
-                # Send the first batch
-                embed = discord.Embed(title="Team Standings", description=f"Top 25 Standings as of <t:{int(time.timestamp())}:F>", color=discord.Color.gold())
-                for index, team in enumerate(first_batch, 1):
+                    # Check if the rank should be displayed as tied
+                    rank_text = f"T{display_rank}" if actual_rank != display_rank else str(display_rank)
+                    
                     preseason_text = f", Preseason Points: {team.PreseasonPoints}" if team.PreseasonPoints > 0 else ""
                     embed.add_field(
-                        name=f"{index}. {team.TeamName}", 
+                        name=f"{rank_text}. {team.TeamName}", 
                         value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}{preseason_text}", 
                         inline=False
                     )
-                await channel.send(embed=embed)
+                    
+                    # Limit to top 50 teams in two batches
+                    if actual_rank == 25:
+                        await channel.send(embed=embed)
+                        embed = discord.Embed(title="Team Standings, Continued", description="", color=discord.Color.gold())
+                    elif actual_rank == 50:
+                        break
 
-                # Send the second batch if it exists
-                if second_batch:
-                    embed2 = discord.Embed(title="Team Standings, Continued", description=f"", color=discord.Color.gold())
-                    for index, team in enumerate(second_batch, 26):
-                        preseason_text = f", Preseason Points: {team.PreseasonPoints}" if team.PreseasonPoints > 0 else ""
-                        embed2.add_field(
-                            name=f"{index}. {team.TeamName}", 
-                            value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}{preseason_text}", 
-                            inline=False
-                        )
-                    await channel.send(embed=embed2)
+                # Send the last batch if it exists
+                if actual_rank > 25:
+                    await channel.send(embed=embed)
 
                 
 async def post_standings(interaction):
     time = datetime.now()
-    count = 1
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            # Fetch teams ordered by PointsEarned (DESC) and MatchesCompleted (ASC)
+            # Fetch teams ordered by PointsEarned (DESC), MatchesCompleted (ASC), and PreseasonPoints (DESC)
             stmt = (select(Team)
                 .where(Team.MatchesCompleted >= 1)
                 .order_by(Team.PointsEarned.desc(), Team.MatchesCompleted.asc(), Team.PreseasonPoints.desc()))
@@ -544,29 +555,41 @@ async def post_standings(interaction):
                 await interaction.response.send_message("No teams have been registered yet.", ephemeral=True)
                 return
             
-            # Split the results into two sets if necessary
-            first_batch = teams[:25]  # Top 25 teams
-            second_batch = teams[25:50]  # Next 25 teams if more than 25
+            embed = discord.Embed(title="Team Standings", description=f"Standings as of <t:{int(time.timestamp())}:F>", color=discord.Color.gold())
+            last_points = None
+            last_matches = None
+            last_preseason = None
+            actual_rank = 0
+            display_rank = 0
+            
+            # Iterate through teams to build the ranking
+            for team in teams:
+                # Increase actual_rank each loop, this is the absolute position in the list
+                actual_rank += 1
+                # Only increase display_rank if the current team's stats do not match the last team's stats
+                if (team.PointsEarned, team.MatchesCompleted, team.PreseasonPoints) != (last_points, last_matches, last_preseason):
+                    display_rank = actual_rank
+                last_points = team.PointsEarned
+                last_matches = team.MatchesCompleted
+                last_preseason = team.PreseasonPoints
 
-            # Send the first batch
-            embed = discord.Embed(title="Team Standings", description=f"Top 25 Standings as of <t:{int(time.timestamp())}:F>", color=discord.Color.gold())
-            for index, team in enumerate(first_batch, 1):
+                # Check if the rank should be displayed as tied
+                rank_text = f"T{display_rank}" if actual_rank != display_rank else str(display_rank)
+                
                 preseason_text = f", Preseason Points: {team.PreseasonPoints}" if team.PreseasonPoints > 0 else ""
                 embed.add_field(
-                    name=f"{index}. {team.TeamName}", 
+                    name=f"{rank_text}. {team.TeamName}", 
                     value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}{preseason_text}", 
                     inline=False
                 )
-            await interaction.response.send_message(embed=embed)
+                
+                # Limit to top 50 teams in two batches
+                if actual_rank == 25:
+                    await interaction.response.send_message(embed=embed)
+                    embed = discord.Embed(title="Team Standings, Continued", description="", color=discord.Color.gold())
+                elif actual_rank == 50:
+                    break
 
-            # Send the second batch if it exists
-            if second_batch:
-                embed2 = discord.Embed(title="Team Standings, Continued", description=f"", color=discord.Color.gold())
-                for index, team in enumerate(second_batch, 26):
-                    preseason_text = f", Preseason Points: {team.PreseasonPoints}" if team.PreseasonPoints > 0 else ""
-                    embed2.add_field(
-                        name=f"{index}. {team.TeamName}", 
-                        value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}{preseason_text}", 
-                        inline=False
-                    )
-                await interaction.followup.send(embed=embed2)
+            # Send the last batch if it exists
+            if actual_rank > 25:
+                await interaction.followup.send(embed=embed)
