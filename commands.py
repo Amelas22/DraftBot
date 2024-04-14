@@ -472,7 +472,7 @@ async def league_commands(bot):
 
                 await channel.send(embed=embed)
         
-    @aiocron.crontab('* * * * *', tz=pytz.timezone('US/Eastern'))
+    @aiocron.crontab('00 09 * * *', tz=pytz.timezone('US/Eastern'))
     async def post_league_standings():
         # Fetch all guilds the bot is in and look for the "league-summary" channel
         for guild in bot.guilds:
