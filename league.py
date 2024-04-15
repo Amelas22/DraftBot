@@ -677,29 +677,39 @@ class ChallengeView(View):
                         # If self.team_b exists and the interaction user isn't assigned to self.team_b
                         await interaction.response.send_message("Two Teams are already signed up!", ephemeral=True)
 
-    async def change_time_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def change_time_callback(self, interaction: discord.Interaction, button: discord.ui.Button):        
         try:
             user_id_str = str(interaction.user.id)
             async with AsyncSessionLocal() as db_session:
                 async with db_session.begin():
                     # Fetch all team registrations
-                    team_query = select(TeamRegistration)
-                    teams_result = await db_session.execute(team_query)
-                    user_teams = teams_result.scalars().all()
+                    team_query = select(TeamRegistration).where(TeamRegistration.TeamName == self.team_a)
+                    team_result = await db_session.execute(team_query)
+                    team_a_record = team_result.scalars().first()
                     
-                    # Filter teams where the user ID is in the TeamMembers JSON
-                    user_team = None
-                    for team in user_teams:
-                        if user_id_str in team.TeamMembers.keys():  # Check if user ID is a key in the TeamMembers dictionary
-                            user_team = team
-                            break
-
-                    # Proceed if the user's team matches team_a
-                    if user_team and user_team.TeamName == self.team_a:
-                        initial_view = InitialPostView(command_type="time", team_id=user_team.TeamID, team_name=user_team.TeamName, user_display_name=None, match_id=self.challenge_id)
+                    # Fetch the Cube Overseer role
+                    cube_overseer_role = discord.utils.get(interaction.guild.roles, name="Cube Overseer")
+                    
+                    # Check if user has the Cube Overseer role
+                    if cube_overseer_role in interaction.user.roles:
+                        # User is a Cube Overseer, so we proceed
+                        initial_view = InitialPostView(command_type="time", team_id=team_a_record.TeamID, team_name=self.team_a, user_display_name=None, match_id=self.challenge_id)
                         await interaction.response.send_message(f"Select Cube and Timezone.", view=initial_view, ephemeral=True)
+                        return   
+                    
+                    if not team_a_record:
+                        await interaction.response.send_message("The specified team does not exist.", ephemeral=True)
+                        return
+                    
+                    # Check if user is part of team_a members
+                    if user_id_str in team_a_record.TeamMembers.keys():
+                        # User is a part of team_a, allow action
+                        initial_view = InitialPostView(command_type="time", team_id=team_a_record.TeamID, team_name=self.team_a, user_display_name=None, match_id=self.challenge_id)
+                        await interaction.response.send_message("Select Cube and Timezone.", view=initial_view, ephemeral=True)
                     else:
-                        await interaction.response.send_message(f"You are not part of {user_team.TeamName}", ephemeral=True)
+                        # User is not part of the team and not an overseer
+                        await interaction.response.send_message(f"You do not have permission to change the time for {self.team_a}.", ephemeral=True)
+
         except Exception as e:
             print(f"Error in change time callback: {e}")
     

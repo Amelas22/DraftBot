@@ -471,8 +471,13 @@ async def league_commands(bot):
                 embed.add_field(name="**Trophy Drafters**", value=undefeated_drafters_field_value or "No trophies :(", inline=False)
 
                 await channel.send(embed=embed)
-        
-    @aiocron.crontab('* * * * *', tz=pytz.timezone('US/Eastern'))
+
+    @aiocron.crontab('00 10 * * 1', tz=pytz.timezone('US/Eastern'))  # At 10:00 on Monday, Eastern Time
+    async def schedule_weekly_summary():
+        await weekly_summary(bot)
+
+
+    @aiocron.crontab('00 09 * * *', tz=pytz.timezone('US/Eastern'))
     async def post_league_standings():
         # Fetch all guilds the bot is in and look for the "league-summary" channel
         for guild in bot.guilds:
@@ -593,3 +598,62 @@ async def post_standings(interaction):
             # Send the last batch if it exists
             if actual_rank > 25:
                 await interaction.followup.send(embed=embed)
+
+
+async def weekly_summary(bot):
+    pacific_tz = pytz.timezone('US/Pacific')
+    now = datetime.now(pacific_tz)
+    start_of_week = pacific_tz.localize(datetime(now.year, now.month, now.day, 0, 0)) - timedelta(days=now.weekday())
+    end_of_week = start_of_week + timedelta(days=7)
+
+    # Define the start date of the league
+    start_date = pacific_tz.localize(datetime(2024, 4, 8))
+    # Calculate the week number
+    week_number = ((start_of_week - start_date).days // 7) + 1
+
+    async with AsyncSessionLocal() as db_session:
+        async with db_session.begin():
+            # Calculate total number of matches
+            match_stmt = select(Match).where(
+                Match.MatchDate.between(start_of_week, end_of_week),
+                Match.DraftWinnerID.isnot(None)
+            )
+            match_results = await db_session.execute(match_stmt)
+            total_matches = len(match_results.scalars().all())
+
+            # Fetch unique players
+            session_stmt = select(DraftSession).where(
+                DraftSession.teams_start_time.between(start_of_week, end_of_week),
+                DraftSession.premade_match_id.isnot(None)
+            )
+            session_results = await db_session.execute(session_stmt)
+            unique_players = set()
+            for session in session_results.scalars():
+                unique_players.update(session.sign_ups.keys())
+            total_unique_players = len(unique_players)
+
+            # Fetch top 10 standings
+            team_stmt = (select(Team)
+                         .where(Team.MatchesCompleted >= 1)
+                         .order_by(Team.PointsEarned.desc(), Team.MatchesCompleted.asc(), Team.PreseasonPoints.desc())
+                         .limit(10))
+            team_results = await db_session.execute(team_stmt)
+            teams = team_results.scalars().all()
+
+            embed = discord.Embed(title=f"Week {week_number} Summary", description="Divination Team Draft League", color=discord.Color.blue())
+            embed.add_field(name="Total Matches", value=str(total_matches), inline=False)
+            embed.add_field(name="Unique Players", value=str(total_unique_players), inline=False)
+
+            if teams:
+                standings_text = ""
+                for index, team in enumerate(teams, 1):
+                    standings_text += f"{index}. {team.TeamName} - Points: {team.PointsEarned}, Matches: {team.MatchesCompleted}\n"
+                embed.add_field(name="Top 10 Standings", value=standings_text, inline=False)
+            else:
+                embed.add_field(name="Top 10 Standings", value="No matches registered.", inline=False)
+
+            # Send the embed to the appropriate channel
+            for guild in bot.guilds:
+                channel = discord.utils.get(guild.text_channels, name="league-summary")
+                if channel:
+                    await channel.send(embed=embed)
