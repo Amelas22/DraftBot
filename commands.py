@@ -472,7 +472,7 @@ async def league_commands(bot):
 
                 await channel.send(embed=embed)
 
-    @aiocron.crontab('00 10 * * 1', tz=pytz.timezone('US/Eastern'))  # At 10:00 on Monday, Eastern Time
+    @aiocron.crontab('30 10 * * 1', tz=pytz.timezone('US/Eastern'))  # At 10:00 on Monday, Eastern Time
     async def schedule_weekly_summary():
         await weekly_summary(bot)
 
@@ -602,10 +602,10 @@ async def post_standings(interaction):
 
 async def weekly_summary(bot):
     pacific_tz = pytz.timezone('US/Pacific')
-    now = datetime.now(pacific_tz)
+    now = datetime.now(pacific_tz) - timedelta(days=1)
     start_of_week = pacific_tz.localize(datetime(now.year, now.month, now.day, 0, 0)) - timedelta(days=now.weekday())
     end_of_week = start_of_week + timedelta(days=7)
-
+    print(start_of_week, end_of_week)
     # Define the start date of the league
     start_date = pacific_tz.localize(datetime(2024, 4, 8))
     # Calculate the week number
