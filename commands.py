@@ -601,13 +601,13 @@ async def post_standings(interaction):
 
 
 async def weekly_summary(bot):
-    eastern_tz = pytz.timezone('US/Pacific')
-    now = datetime.now(eastern_tz)
-    start_of_week = eastern_tz.localize(datetime(now.year, now.month, now.day, 0, 0)) - timedelta(days=now.weekday())
+    pacific_tz = pytz.timezone('US/Pacific')
+    now = datetime.now(pacific_tz)
+    start_of_week = pacific_tz.localize(datetime(now.year, now.month, now.day, 0, 0)) - timedelta(days=now.weekday())
     end_of_week = start_of_week + timedelta(days=7)
 
     # Define the start date of the league
-    start_date = eastern_tz.localize(datetime(2024, 4, 8))
+    start_date = pacific_tz.localize(datetime(2024, 4, 8))
     # Calculate the week number
     week_number = ((start_of_week - start_date).days // 7) + 1
 
