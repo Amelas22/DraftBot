@@ -675,7 +675,7 @@ class UserRemovalSelect(Select):
             if session.session_type == "random":
                 await update_draft_message(bot, session_id=session.session_id)
             else:
-                await self.update_team_view(interaction)
+                await PersistentView.update_team_view(interaction)
 
             await interaction.followup.send(f"Removed {removed_user_name} from the draft.")
         else:
