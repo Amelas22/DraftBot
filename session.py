@@ -124,7 +124,7 @@ class WeeklyLimit(Base):
 
     ID = Column(Integer, primary_key=True)
     TeamID = Column(Integer, ForeignKey('teams.TeamID'))
-    TeamName = Column(String(128), unique=True, nullable=False)
+    TeamName = Column(String(128), nullable=False)
     WeekStartDate = Column(DateTime, nullable=False)
     MatchesPlayed = Column(Integer, default=0)
     PointsEarned = Column(Integer, default=0)
