@@ -869,8 +869,10 @@ class ChallengeView(View):
                             await message.pin()
                         else:
                             await interaction.response.send_message("Unable to open lobby. You are not a member of an involved team.", ephemeral=True)
+                            
                     elif now < lobby_creation_time:
                         await interaction.response.send_message("Unable to open lobby. Lobby can only be opened within 1 hour of proposed start time.", ephemeral=True)
+                        print(f"Lobby failed to create for {challenge.id}. Start Time: {challenge.start_time}. Current time: {now}. Lobby Creation Time: {lobby_creation_time}")
                     else:
                         await interaction.response.send_message("Unable to open lobby. Lobby already opened in #league-play-draft-room. Check pins in that channel", ephemeral=True)
 class ChallengeCubeSelect(discord.ui.Select):
