@@ -669,7 +669,7 @@ class ChallengeView(View):
 
                         await message.edit(embed=updated_embed, view=updated_view)
                         await interaction.response.send_message("Your team has canceled the signup!", ephemeral=True)
-                        await lobby_channel.send(f"{user_mention} your match opponent at {formatted_time} is no longer sign up. Your challenge has been opened for others to sign up.")
+                        await lobby_channel.send(f"{user_mention} your match opponent on {formatted_time} is no longer sign up. Your challenge has been opened for others to sign up.")
                         
                         await session.commit()
 
