@@ -21,7 +21,6 @@ class PersistentView(discord.ui.View):
         self.team_b_name = team_b_name
         self.session_stage = session_stage
         self.channel_ids = []
-        self.previous_state = None
         self.add_buttons()
 
 
@@ -41,17 +40,15 @@ class PersistentView(discord.ui.View):
         self.add_item(self.create_button("Remove User", "grey", f"remove_user_{self.draft_session_id}", self.remove_user_button_callback))
         self.add_item(self.create_button("Ready Check", "green", f"ready_check_{self.draft_session_id}", self.ready_check_callback))
         self.add_item(self.create_button("Create Rooms & Post Pairings", "primary", f"create_rooms_pairings_{self.draft_session_id}", self.create_rooms_pairings_callback, disabled=True))
-        self.add_item(self.create_button("Undo", "grey", f"undo_{self.draft_session_id}", self.undo_callback, disabled=True))
 
         # Logic to enable/disable based on session_stage
         for item in self.children:
             if isinstance(item, discord.ui.Button):
                 if self.session_stage == "teams":
-                    if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}" or item.custom_id == f"cancel_draft_{self.draft_session_id}" or item.custom_id == f"undo_{self.draft_session_id}":
+                    if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}" or item.custom_id == f"cancel_draft_{self.draft_session_id}":
                         item.disabled = False
                     else:
                         item.disabled = True
-
     def create_button(self, label, style, custom_id, custom_callback, disabled=False):
         style = getattr(discord.ButtonStyle, style)
         button = CallbackButton(label=label, style=style, custom_id=custom_id, custom_callback=custom_callback, disabled=disabled)
@@ -100,7 +97,7 @@ class PersistentView(discord.ui.View):
         sign_ups = draft_session.sign_ups or {}
 
         # Check if the sign-up list is already full
-        if len(sign_ups) >= 10:
+        if len(sign_ups) >= 8:
             await interaction.response.send_message("The sign-up list is already full. No more players can sign up.", ephemeral=True)
             return
 
@@ -237,27 +234,12 @@ class PersistentView(discord.ui.View):
     async def randomize_teams_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         bot = interaction.client
         session_id = self.draft_session_id
-        draft_session = await get_draft_session(self.draft_session_id)
-        user_id = str(interaction.user.id)
-        if user_id not in draft_session.sign_ups:
-            await interaction.response.send_message("You are not registered in the draft session to perform this action.", ephemeral=True)
-            return
-        
+
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
                 stmt = select(DraftSession).where(DraftSession.session_id == session_id)
                 result = await db_session.execute(stmt)
                 session = result.scalars().first()
-
-                if session:
-                    self.previous_state = {
-                        'team_a': session.team_a if session.team_a else None,  # Make a copy of the list
-                        'team_b': session.team_b if session.team_b else None,
-                        'sign_ups': session.sign_ups.copy(),  # Deep copy of the dictionary
-                        'session_stage': session.session_stage,
-                        'true_skill_draft': session.true_skill_draft,
-                        'teams_start_time': session.teams_start_time
-                    }
 
                 if not session:
                     await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
@@ -296,7 +278,7 @@ class PersistentView(discord.ui.View):
                 for item in self.children:
                     if isinstance(item, discord.ui.Button):
                         # Enable "Create Rooms" and "Cancel Draft" buttons
-                        if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}" or item.custom_id == f"cancel_draft_{self.draft_session_id}" or item.custom_id == f"undo_{self.draft_session_id}":
+                        if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}" or item.custom_id == f"cancel_draft_{self.draft_session_id}":
                             item.disabled = False
                         else:
                             # Disable all other buttons
@@ -307,92 +289,6 @@ class PersistentView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
         if session.tracked_draft and session.premade_match_id is not None:
             await check_weekly_limits(interaction, session.premade_match_id)
-
-
-    async def undo_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.previous_state:
-            await interaction.response.send_message("No previous state to revert to.", ephemeral=True)
-            return
-        bot = interaction.client
-        draft_session = await get_draft_session(self.draft_session_id)
-
-        user_id = str(interaction.user.id)
-        if user_id not in draft_session.sign_ups:
-            await interaction.response.send_message("You are not registered in the draft session to perform this action.", ephemeral=True)
-            return
-        
-        formatted_time=f"<t:{int(draft_session.draft_start_time.timestamp())}:R>"
-        # Restore the previous state
-        async with AsyncSessionLocal() as db_session:
-            async with db_session.begin():
-                await db_session.execute(update(DraftSession)
-                                         .where(DraftSession.session_id == self.draft_session_id)
-                                         .values(**self.previous_state))
-                await db_session.commit()
-        
-
-        if draft_session.session_type == "random":
-            sign_up_count = len(draft_session.sign_ups)
-            sign_ups_field_name = f"Sign-Ups ({sign_up_count}):"
-            sign_ups_str = '\n'.join([f"{name}" for name in draft_session.sign_ups.values()]) if draft_session.sign_ups else 'No players yet.'
-            embed_title = f"Looking for Players! Random Team Draft - Queue Opened {formatted_time}"
-            embed = discord.Embed(title=embed_title,
-            description="\n**How to use bot**:\n1. Click sign up and click the draftmancer link. Draftmancer host still has to update settings and import from CubeCobra.\n" +
-                            "2. When enough people join (6 or 8), Push Ready Check. Once everyone is ready, push Create Teams\n" +
-                            "3. Create Teams will create randoms teams and a corresponding seating order. Draftmancer host needs to adjust table to match seating order. **TURN OFF RANDOM SEATING IN DRAFTMANCER** \n" +
-                            "4. After the draft, come back to this message (it'll be in pins) and click Create Rooms and Post Pairings. This will create a shared draft-chat and private team chats. Pairings will post in the draft-chat.\n" +
-                            "5. After each match, you can select the Match Results buttons to report results. Once a winner is determined, it will be announced to the channel and to team-draft-results\n" +
-                            "6. Chat channels will automatically close around five hours after the /startdraft command was used." +
-                            f"\n\n**Draftmancer Session**: **[Join Here]({draft_session.draft_link})**",
-            color=discord.Color.dark_magenta()
-            )
-            embed.add_field(name=sign_ups_field_name, value=sign_ups_str, inline=False)
-        else:
-            embed_title = f"{draft_session.team_a_name} v. {draft_session.team_b_name} - Queue Opened {formatted_time}"
-            embed = discord.Embed(title=embed_title, 
-                                  description="\n**How to use bot**:\n1. Click the respective team name to join that team. Enter the draftmancer link. Draftmancer host still has to update settings and import from CubeCobra.\n" +
-                                "2. When all teams are joined, Push Ready Check. Once everyone is ready, push Generate Seating Order\n" +
-                                "3. Draftmancer host needs to adjust table to match seating order. **TURN OFF RANDOM SEATING IN DRAFTMANCER** \n" +
-                                "4. After the draft, come back to this message (it'll be in pins) and push Create Rooms and Post Pairings.\n" +
-                                "5. You will now have a private team chat with just your team and a shared draft-chat that has pairings and match results. You can select the Match Results buttons to report results.\n" +
-                                "6. Chat channels will automatically close around five hours after the /startdraft command was used." +
-                                f"\n\n**Draftmancer Session**: **[Join Here]({draft_session.draft_link})**",
-                color=discord.Color.blue()
-            )
-            team_a_names = [draft_session.sign_ups.get(str(user_id), "Unknown User") for user_id in (draft_session.team_a or [])]
-            team_b_names = [draft_session.sign_ups.get(str(user_id), "Unknown User") for user_id in (draft_session.team_b or [])]
-            
-            # Joining names with a newline character
-            team_a_names_formatted = '\n'.join(team_a_names)
-            team_b_names_formatted = '\n'.join(team_b_names)
-            
-            team_a_count = len(draft_session.team_a)
-            team_b_count = len(draft_session.team_b)
-            
-            team_a_field_name = f"{draft_session.team_a_name} ({team_a_count}):"
-            team_b_field_name = f"{draft_session.team_b_name} ({team_b_count}):"
-            
-            # Using formatted strings for team names
-            embed.add_field(name=team_a_field_name, value=team_a_names_formatted if team_a_names_formatted else "No players yet.", inline=False)
-            embed.add_field(name=team_b_field_name, value=team_b_names_formatted if team_b_names_formatted else "No players yet.", inline=True)
-            
-           
-        # Update the message to reflect the reverted state
-        view = PersistentView(
-                bot=bot,
-                draft_session_id=draft_session.session_id,
-                session_type=self.session_type,
-                team_a_name=getattr(draft_session, 'team_a_name', None),
-                team_b_name=getattr(draft_session, 'team_b_name', None)
-            )
-        await interaction.message.edit(view=view, embed=embed)
-        await interaction.response.send_message("Changes have been undone.", ephemeral=True)
-        
-        asyncio.create_task(self.remove_previous_state_after_delay(300))
-
-    async def remove_previous_state_after_delay(self, delay):
-        await asyncio.sleep(delay)
-        self.previous_state = None
 
     async def team_assignment_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         session = await get_draft_session(self.draft_session_id)
