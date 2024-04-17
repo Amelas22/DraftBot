@@ -380,6 +380,16 @@ class AdjustTimeModal(Modal):
     
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
+        bot = interaction.client
+        
+        
+        user_time_zone = pytz.timezone(self.time_zone)  # Convert the selected timezone string to a pytz timezone
+        local_time = datetime.strptime(self.children[0].value, "%m/%d/%Y %H:%M")
+        local_dt_with_tz = user_time_zone.localize(local_time)  # Localize the datetime
+        utc_dt = local_dt_with_tz.astimezone(pytz.utc)  # Convert to UTC
+
+        formatted_time = f"<t:{int(utc_dt.timestamp())}:F>"  # Markdown format for dynamic time display
+        relative_time = f"<t:{int(utc_dt.timestamp())}:R>"
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
 
@@ -389,19 +399,10 @@ class AdjustTimeModal(Modal):
                 # await db_session.commit()
                 await db_session.execute(update(Challenge)
                                          .where(Challenge.id == self.match_id)
-                                         .values(start_time = datetime.strptime(self.children[0].value, "%m/%d/%Y %H:%M")))
+                                         .values(start_time = utc_dt))
                 await db_session.commit()
-            bot = interaction.client
+            
             channel = bot.get_channel(int(challenge_to_update.channel_id))
-            
-            user_time_zone = pytz.timezone(self.time_zone)  # Convert the selected timezone string to a pytz timezone
-            local_time = datetime.strptime(self.children[0].value, "%m/%d/%Y %H:%M")
-            local_dt_with_tz = user_time_zone.localize(local_time)  # Localize the datetime
-            utc_dt = local_dt_with_tz.astimezone(pytz.utc)  # Convert to UTC
-
-            formatted_time = f"<t:{int(utc_dt.timestamp())}:F>"  # Markdown format for dynamic time display
-            relative_time = f"<t:{int(utc_dt.timestamp())}:R>"
-            
             message = await channel.fetch_message(int(challenge_to_update.message_id))
             user_mention = f"<@{challenge_to_update.initial_user}>"
             updated_embed = discord.Embed(title=f"{challenge_to_update.team_a} v. {challenge_to_update.team_b} is scheduled!" if challenge_to_update.team_b else f"{challenge_to_update.team_a} is looking for a match!", 
