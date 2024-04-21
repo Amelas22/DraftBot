@@ -196,7 +196,7 @@ async def update_team(session, match_id=None, team_a_id=None, team_b_id=None, te
         #     match_db.DraftWinnerID = team_pr_id
 async def main():
     async with AsyncSessionLocal() as session:
-        await update_team(session=session, match_id=None, team_a_id=25, team_b_id=45, team_a_wins=3, team_b_wins=1, draft_winner=None, team_a_matches=4, team_b_matches=1)
+        await update_team(session=session, match_id=None, team_a_id=33, team_b_id=36, team_a_wins=3, team_b_wins=5, draft_winner=None, team_a_matches=7, team_b_matches=7)
         
 
 if __name__ == "__main__":
