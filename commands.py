@@ -410,6 +410,75 @@ async def league_commands(bot):
                         open_count += 1
                 await channel.send(embed=embed)
 
+
+    @aiocron.crontab('00 10 * * 1', tz=pytz.timezone('US/Eastern'))
+    async def weekly_random_results():
+        # Fetch all guilds the bot is in and look for the "league-summary" channel
+        for guild in bot.guilds:
+            channel = discord.utils.get(guild.text_channels, name="team-draft-results")
+            if channel:
+                break  # If we find the channel, we exit the loop
+        
+        if not channel:  # If the bot cannot find the channel in any guild, log an error and return
+            print("Error: 'team-draft-results' channel not found.")
+            return
+
+        eastern_tz = pytz.timezone('US/Eastern')
+        now = datetime.now(eastern_tz)
+        start_time = eastern_tz.localize(datetime(now.year, now.month, now.day, 3, 0)) - timedelta(days=7)  # 3 AM previous day
+        end_time = start_time + timedelta(days=7)  # 3 AM current day
+
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                # Query for DraftSessions within the time range
+                stmt = select(DraftSession).where(
+                    DraftSession.teams_start_time.between(start_time, end_time),
+                    not_(DraftSession.victory_message_id_draft_chat == None),
+                    DraftSession.session_type == "random"
+                )
+                result = await db_session.execute(stmt)
+                sessions = result.scalars().all()
+
+                if not sessions:
+                    await channel.send("No matches found in the last 24 hours.")
+                    return
+                
+                all_usernames = []
+                for session in sessions:
+                    # Directly use the sign_ups dictionary
+                    usernames = list(session.sign_ups.values())
+                    all_usernames.extend(usernames)
+
+                username_counts = Counter(all_usernames)
+                top_drafters = username_counts.most_common(10)
+
+
+                drafter_counts = Counter()
+                for session in sessions:
+                    if session.trophy_drafters:
+                        drafter_counts.update(session.trophy_drafters)
+
+                # Filter and sort drafters who have two or more trophies
+                filtered_trophy_drafters = {drafter: count for drafter, count in drafter_counts.items() if count >= 2}
+                sorted_trophy_drafters = sorted(filtered_trophy_drafters.items(), key=lambda item: item[1], reverse=True)
+
+                # Format the drafter names and their counts for display
+                if sorted_trophy_drafters:
+                    undefeated_drafters_field_value = "\n".join([f"{index + 1}. {drafter} x{count}" for index, (drafter, count) in enumerate(sorted_trophy_drafters)])
+                else:
+                    undefeated_drafters_field_value = "No drafters with 2 or more trophies."
+
+                total_drafts = len(sessions)
+
+                date_str = start_time.strftime("%B %d, %Y")
+                top_drafters_field_value = "\n".join([f"{index + 1}. **{name}:** {count} drafts" for index, (name, count) in enumerate(top_drafters)])
+                embed = discord.Embed(title=f"Open Queue Weekly Summary - {date_str}", description="", color=discord.Color.magenta())
+                embed.add_field(name="**Completed Drafts**", value=total_drafts, inline=False)
+                embed.add_field(name="**Top 10 Drafters**\n", value=top_drafters_field_value, inline=False)
+                embed.add_field(name="**Multiple Weekly Trophies**", value=undefeated_drafters_field_value or "No trophies :(", inline=False)
+
+                await channel.send(embed=embed)
+
     @aiocron.crontab('15 09 * * *', tz=pytz.timezone('US/Eastern'))
     async def daily_random_results():
         # Fetch all guilds the bot is in and look for the "league-summary" channel
