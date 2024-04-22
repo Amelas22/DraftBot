@@ -420,7 +420,16 @@ class ChallengeTimeModal(Modal):
         self.time_zone = time_zone
         self.command_type = command_type
         # Update the placeholder to reflect the desired format
-        self.add_item(InputText(label="MM/DD/YYYY HH:MM. Use Local Time & 24HR Clock", placeholder="MM/DD/YYYY HH:MM", custom_id="start_time"))
+        self.add_item(InputText(
+            label="MM/DD/YYYY HH:MM in Local Time/24HR format",
+            placeholder="MM/DD/YYYY HH:MM",
+            custom_id="start_time"
+        ))
+        self.add_item(InputText(
+            label="Start Time Range (in hours)",
+            placeholder="Enter hours (e.g., 1, 2, 3)",
+            custom_id="time_range"
+        ))
 
     async def callback(self, interaction: discord.Interaction):
         if self.command_type == "post":
@@ -434,14 +443,22 @@ class ChallengeTimeModal(Modal):
                         team_update = await db_session.scalar(team_stmt)
                         guild = bot.get_guild(int(interaction.guild_id))
                         challenge_channel = discord.utils.get(guild.text_channels, name="league-challenges")
+                        start_time_str = self.children[0].value
+                        time_range_hours = int(self.children[1].value)
 
                         user_time_zone = pytz.timezone(self.time_zone)  # Convert the selected timezone string to a pytz timezone
-                        local_time = datetime.strptime(self.children[0].value, "%m/%d/%Y %H:%M")
+                        local_time = datetime.strptime(start_time_str, "%m/%d/%Y %H:%M")
+                        
                         local_dt_with_tz = user_time_zone.localize(local_time)  # Localize the datetime
-                        utc_dt = local_dt_with_tz.astimezone(pytz.utc)  # Convert to UTC
+                        
 
-                        formatted_time = f"<t:{int(utc_dt.timestamp())}:F>"  # Markdown format for dynamic time display
-                        relative_time = f"<t:{int(utc_dt.timestamp())}:R>"
+                        utc_start_dt = local_dt_with_tz.astimezone(pytz.utc)
+                        utc_end_dt = utc_start_dt + timedelta(hours=time_range_hours)
+
+                        formatted_start_time = f"<t:{int(utc_start_dt.timestamp())}:F>"
+                        formatted_end_time = f"<t:{int(utc_end_dt.timestamp())}:F>" 
+                        relative_time = f"<t:{int(utc_start_dt.timestamp())}:R>"
+                        #relative_time_end = f"<t:{int(utc_end_dt.timestamp())}:R>"
 
                         async with AsyncSessionLocal() as session:
                                 async with session.begin():
@@ -450,7 +467,7 @@ class ChallengeTimeModal(Modal):
                                         initial_user=str(interaction.user.id),
                                         guild_id = str(interaction.guild_id),
                                         team_b_id = None,
-                                        start_time = utc_dt,
+                                        start_time = utc_start_dt,
                                         team_a = team_update.TeamName,
                                         team_b = None,
                                         message_id = None,
@@ -462,7 +479,7 @@ class ChallengeTimeModal(Modal):
                                     await db_session.commit()
                         # Post the challenge with the selected team and formatted time
                         user_mention = f"<@{new_challenge.initial_user}>"
-                        embed = discord.Embed(title=f"{self.team_name} is looking for a match!", description=f"Proposed Time: {formatted_time} ({relative_time})\nChosen Cube: {self.cube_choice}\nPosted by: {user_mention}\n\nNo Opponent Yet. Sign Up below!", color=discord.Color.blue())
+                        embed = discord.Embed(title=f"{self.team_name} is looking for a match!", description=f"Start Time: Between {formatted_start_time} and {formatted_end_time} (Earliest Start: {relative_time})\nChosen Cube: {self.cube_choice}\nPosted by: {user_mention}\n\nNo Opponent Yet. Sign Up below!", color=discord.Color.blue())
 
                         view = ChallengeView(new_challenge.id, new_challenge.team_b, new_challenge.team_a)
                         
