@@ -8,8 +8,10 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.future import select
 from sqlalchemy.orm import sessionmaker
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncio
+import pytz
+
 
 # Your database setup
 DATABASE_URL = "sqlite+aiosqlite:///drafts.db"
@@ -152,31 +154,40 @@ class Challenge(Base):
 
 async def update_team(session, match_id=None, team_a_id=None, team_b_id=None, team_a_wins=None, team_b_wins=None, draft_winner=None, team_a_matches=None, team_b_matches=None):
     async with session.begin():
-        team_registration_stmt = select(Team).where(Team.TeamID == team_a_id)
-        team_registration_result = await session.execute(team_registration_stmt)
-        team_a_db = team_registration_result.scalars().first()
-        
-        if team_a_db:
-            team_a_db.MatchesCompleted = team_a_matches
-            team_a_db.MatchWins = team_a_wins
-            team_a_db.PointsEarned = team_a_wins
-
-        team_registration_stmt = select(Team).where(Team.TeamID == team_b_id)
-        team_registration_result = await session.execute(team_registration_stmt)
-        team_b_db = team_registration_result.scalars().first()
-        
-        if team_b_db:
-            team_b_db.MatchesCompleted = team_b_matches
-            team_b_db.MatchWins = team_b_wins
-            team_b_db.PointsEarned = team_b_wins
-
-        # team_registration_stmt = select(WeeklyLimit).where(WeeklyLimit.TeamID == team_pr_id)
+        # team_registration_stmt = select(Team).where(Team.TeamID == team_a_id)
         # team_registration_result = await session.execute(team_registration_stmt)
-        # team_pr_wl = team_registration_result.scalars().first()
+        # team_a_db = team_registration_result.scalars().first()
         
-        # if team_pr_wl:
-        #     team_pr_wl.MatchesPlayed = pr_matches
-        #     team_pr_wl.PointsEarned = pr_wins
+        # if team_a_db:
+        #     team_a_db.MatchesCompleted = team_a_matches
+        #     team_a_db.MatchWins = team_a_wins
+        #     team_a_db.PointsEarned = team_a_wins
+
+        # team_registration_stmt = select(Team).where(Team.TeamID == team_b_id)
+        # team_registration_result = await session.execute(team_registration_stmt)
+        # team_b_db = team_registration_result.scalars().first()
+        
+        # if team_b_db:
+        #     team_b_db.MatchesCompleted = team_b_matches
+        #     team_b_db.MatchWins = team_b_wins
+        #     team_b_db.PointsEarned = team_b_wins
+        now = datetime.now()
+        pacific = pytz.timezone('US/Pacific')
+        utc = pytz.utc
+        # Convert UTC MatchDate to Pacific time and set time to midnight
+        pacific_time = utc.localize(now).astimezone(pacific)
+        midnight_pacific = pacific.localize(datetime(pacific_time.year, pacific_time.month, pacific_time.day))
+        
+        # Calculate the start of the week
+        start_of_week = midnight_pacific - timedelta(days=midnight_pacific.weekday())
+        print(start_of_week)
+        team_registration_stmt = select(WeeklyLimit).where(WeeklyLimit.TeamID == team_a_id, WeeklyLimit.WeekStartDate == start_of_week)
+        team_registration_result = await session.execute(team_registration_stmt)
+        team_pr_wl = team_registration_result.scalars().first()
+        
+        if team_pr_wl:
+            team_pr_wl.MatchesPlayed = team_a_matches
+            team_pr_wl.PointsEarned = team_a_wins
 
         # team_registration_stmt = select(WeeklyLimit).where(WeeklyLimit.TeamID == team_wd_id)
         # team_registration_result = await session.execute(team_registration_stmt)
@@ -196,7 +207,7 @@ async def update_team(session, match_id=None, team_a_id=None, team_b_id=None, te
         #     match_db.DraftWinnerID = team_pr_id
 async def main():
     async with AsyncSessionLocal() as session:
-        await update_team(session=session, match_id=None, team_a_id=33, team_b_id=36, team_a_wins=3, team_b_wins=5, draft_winner=None, team_a_matches=7, team_b_matches=7)
+        await update_team(session=session, match_id=None, team_a_id=35, team_b_id=None, team_a_wins=1, team_b_wins=None, draft_winner=None, team_a_matches=4, team_b_matches=None)
         
 
 if __name__ == "__main__":
