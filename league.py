@@ -518,7 +518,7 @@ class ChallengeTimeModal(Modal):
 
             except ValueError:
                 # Handle the case where the date format is incorrect
-                await interaction.followup.send("The date format is incorrect. Please use MM/DD/YYYY HH:MM format.", ephemeral=True)
+                await interaction.followup.send("One of two errors occured, 1) Enter the date as MM/DD/YYYY HH:MM format or 2) You can only enter a whole number integer for the time range", ephemeral=True)
         elif self.command_type == "edit":
             await interaction.response.defer()
             start_time_str = self.children[0].value
