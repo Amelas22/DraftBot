@@ -695,11 +695,11 @@ async def create_pairings_view(bot, guild, session_id, match_results):
         button = MatchResultButton(
             bot=bot,
             session_id=session_id,
-            match_id=match_result.id,  # Assuming match_result has an id attribute
+            match_id=match_result.id,  
             match_number=match_result.match_number,
             label=f"Match {match_result.match_number} Results",
             style=discord.ButtonStyle.primary,
-            row=None  # Optionally, specify a row for button placement
+            row=None  
         )
         view.add_item(button)
     return view
@@ -729,7 +729,7 @@ class MatchResultButton(Button):
         )
 
         # Create and send a new View containing the Select menu
-        view = View()
+        view = View(timeout=None)
         view.add_item(match_result_select)
         await interaction.followup.send("Please select the match result:", view=view, ephemeral=True)
 
@@ -828,7 +828,6 @@ class MatchResultSelect(Select):
                 print(f"Failed to fetch message with ID {pairing_message_id}: {e}")
                 return
 
-            # Now you can proceed with updating the message as previously outlined
             embed = message.embeds[0] if message.embeds else None
             if not embed:
                 print("No embed found in the pairings message.")
