@@ -1,5 +1,5 @@
 import discord
-from session import register_team_to_db, Team, AsyncSessionLocal, Match, DraftSession, remove_team_from_db, TeamRegistration
+from session import register_team_to_db, Team, AsyncSessionLocal, Match, WeeklyLimit, DraftSession, remove_team_from_db, TeamRegistration
 from sqlalchemy import select, not_
 from sqlalchemy.orm.attributes import flag_modified
 import aiocron
@@ -472,7 +472,7 @@ async def league_commands(bot):
 
                 await channel.send(embed=embed)
 
-    @aiocron.crontab('30 10 * * 1', tz=pytz.timezone('US/Eastern'))  # At 10:00 on Monday, Eastern Time
+    @aiocron.crontab('00 10 * * 1', tz=pytz.timezone('US/Eastern'))  # At 10:00 on Monday, Eastern Time
     async def schedule_weekly_summary():
         await weekly_summary(bot)
 
@@ -633,9 +633,9 @@ async def weekly_summary(bot):
             total_unique_players = len(unique_players)
 
             # Fetch top 10 standings
-            team_stmt = (select(Team)
-                         .where(Team.MatchesCompleted >= 1)
-                         .order_by(Team.PointsEarned.desc(), Team.MatchesCompleted.asc(), Team.PreseasonPoints.desc())
+            team_stmt = (select(WeeklyLimit)
+                         .where(WeeklyLimit.WeekStartDate == start_of_week)
+                         .order_by(WeeklyLimit.PointsEarned.desc(), WeeklyLimit.MatchesPlayed.asc())
                          .limit(10))
             team_results = await db_session.execute(team_stmt)
             teams = team_results.scalars().all()
@@ -647,10 +647,10 @@ async def weekly_summary(bot):
             if teams:
                 standings_text = ""
                 for index, team in enumerate(teams, 1):
-                    standings_text += f"{index}. {team.TeamName} - Points: {team.PointsEarned}, Matches: {team.MatchesCompleted}\n"
-                embed.add_field(name="Top 10 Standings", value=standings_text, inline=False)
+                    standings_text += f"{index}. {team.TeamName} - Points: {team.PointsEarned}, Matches: {team.MatchesPlayed}\n"
+                embed.add_field(name="Top 10 Weekly Peformers", value=standings_text, inline=False)
             else:
-                embed.add_field(name="Top 10 Standings", value="No matches registered.", inline=False)
+                embed.add_field(name="Top 10 Weekly Peformers", value="No matches registered.", inline=False)
 
             # Send the embed to the appropriate channel
             for guild in bot.guilds:

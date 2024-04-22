@@ -1,8 +1,13 @@
+'''
+legacy code, not in use.
+'''
+
+
 import discord
 import asyncio
 from datetime import datetime, timedelta
 import random
-from sessions import sessions
+from session import sessions
 
 class DraftSession:
     def __init__(self, session_id):
