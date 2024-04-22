@@ -437,12 +437,12 @@ class ChallengeTimeModal(Modal):
         # Update the placeholder to reflect the desired format
         self.add_item(InputText(
             label="MM/DD/YYYY HH:MM in Local Time/24HR format",
-            placeholder="MM/DD/YYYY HH:MM",
+            placeholder="Earliest Start Time",
             custom_id="start_time"
         ))
         self.add_item(InputText(
             label="Start Time Range (in hours)",
-            placeholder="Enter hours (e.g., 1, 2, 3)",
+            placeholder="Enter hours as a whole number (e.g., 0, 1, 2)",
             custom_id="time_range"
         ))
 
@@ -469,7 +469,6 @@ class ChallengeTimeModal(Modal):
 
                         utc_start_dt = local_dt_with_tz.astimezone(pytz.utc)
                         utc_end_dt = utc_start_dt + timedelta(hours=time_range_hours)
-
                         formatted_start_time = f"<t:{int(utc_start_dt.timestamp())}:F>"
                         formatted_end_time = f"<t:{int(utc_end_dt.timestamp())}:F>" 
                         relative_time = f"<t:{int(utc_start_dt.timestamp())}:R>"
@@ -494,9 +493,18 @@ class ChallengeTimeModal(Modal):
                                     await db_session.commit()
                         # Post the challenge with the selected team and formatted time
                         user_mention = f"<@{new_challenge.initial_user}>"
-                        embed = discord.Embed(title=f"{self.team_name} is looking for a match!", description=f"Proposed Time: Between {formatted_start_time} and {formatted_end_time} (Earliest Start: {relative_time})\n\nChosen Cube: {self.cube_choice}\nPosted by: {user_mention}\n\nNo Opponent Yet. Sign Up below!" +
-                                              f"\n\n\nNote: Clicking 'Sign Up' will set this match up for {formatted_start_time}, once signed up, click 'Change Time/Cube' to update the start time, if required.", color=discord.Color.blue())
-
+                        if utc_start_dt != utc_end_dt:
+                            embed = discord.Embed(title=f"{self.team_name} is looking for a match!", 
+                                                description=f"Flexible Start Range: Between {formatted_start_time} and {formatted_end_time} (Earliest Start: {relative_time})\n\n" + 
+                                                f"Chosen Cube: {self.cube_choice}\nPosted by: {user_mention}\n\nNo Opponent Yet. Sign Up below!" +
+                                                f"\n\n\nNote: Clicking 'Sign Up' will set this match up for {formatted_start_time}, once signed up, click 'Change Time/Cube' to update the start time, if required.", 
+                                                color=discord.Color.blue())
+                        else:
+                            embed = discord.Embed(title=f"{self.team_name} is looking for a match!", 
+                                                description=f"Fixed Start Time: {formatted_start_time} ({relative_time}).\n\n" + 
+                                                f"Chosen Cube: {self.cube_choice}\nPosted by: {user_mention}\n\nNo Opponent Yet. Sign Up below!",
+                                                color=discord.Color.blue())
+                            
                         view = ChallengeView(new_challenge.id, new_challenge.team_b, new_challenge.team_a)
                         
                         message = await challenge_channel.send(embed=embed, view=view)
