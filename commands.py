@@ -78,7 +78,7 @@ async def league_commands(bot):
 
     @bot.slash_command(name="post_challenge", description="Post a challenge for your team")
     async def postchallenge(interaction: discord.Interaction):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         
         user_id_str = str(interaction.user.id)
         
