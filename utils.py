@@ -386,7 +386,7 @@ async def calculate_three_zero_drafters(session, draft_session_id, guild):
 async def cleanup_sessions_task(bot):
     while True:
         current_time = datetime.now()
-        window_time = current_time - timedelta(hours=4)
+        window_time = current_time - timedelta(hours=24)
         challenge_time = current_time - timedelta(hours=2)
         async with AsyncSessionLocal() as db_session:  
             async with db_session.begin():
