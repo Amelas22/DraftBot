@@ -812,7 +812,7 @@ class ChallengeView(View):
                         lobby_channel = discord.utils.get(guild.text_channels, name="league-play-coordination")
                         user_mention = f"<@{challenge.opponent_user}>"
                         formatted_time=f"<t:{int(challenge.start_time.timestamp())}:F>"
-                        await lobby_channel.send(f"{user_mention} your match at {formatted_time} has been cancelled by {challenge.team_a}. Please use `/list_challenge` to find a new match or `/post_challenge` to post your own.")
+                        await lobby_channel.send(f"{user_mention} your match on {formatted_time} has been cancelled by {challenge.team_a}. Please use `/list_challenge` to find a new match or `/post_challenge` to post your own.")
                         
 
                     channel = bot.get_channel(int(challenge.channel_id))
@@ -1097,7 +1097,7 @@ async def notify_poster(bot, message_id, guild_id, channel_id, initial_user_id, 
         return
     message_link = f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
     # Ping the users
-    await channel.send(f"{initial_user.mention}, a challenger approaches to take on {team_a}! {opponent_user.mention} and {team_b} have signed up for your match at {formatted_time}. [Open Lobby Here]({message_link}) ")
+    await channel.send(f"{initial_user.mention}, a challenger approaches to take on {team_a}! {opponent_user.mention} and {team_b} have signed up for your match on {formatted_time}. [Open Lobby Here]({message_link}) ")
 
 async def notify_teams(bot, guild_id, channel_id, message_id, initial_user_id, opponent_user_id, team_a, team_b):
     guild = bot.get_guild(int(guild_id))
