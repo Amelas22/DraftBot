@@ -413,17 +413,17 @@ async def cleanup_sessions_task(bot):
                                 except discord.HTTPException as e:
                                     print(f"Failed to delete channel: {channel.name}. Reason: {e}")
 
-                    # Attempt to delete the message associated with the session from the draft channel
-                    draft_channel = bot.get_channel(int(session.draft_channel_id))
-                    if draft_channel and session.message_id:
-                        try:
-                            msg = await draft_channel.fetch_message(int(session.message_id))
-                            await msg.delete()
-                        except discord.NotFound:
-                            # If the message is not found, silently continue
-                            continue
-                        except discord.HTTPException as e:
-                            print(f"Failed to delete message ID {session.message_id} in draft channel. Reason: {e}")
+                    if session.draft_channel_id:
+                        draft_channel = bot.get_channel(int(session.draft_channel_id))
+                        if draft_channel and session.message_id:
+                            try:
+                                msg = await draft_channel.fetch_message(int(session.message_id))
+                                await msg.delete()
+                            except discord.NotFound:
+                                # If the message is not found, silently continue
+                                continue
+                            except discord.HTTPException as e:
+                                print(f"Failed to delete message ID {session.message_id} in draft channel. Reason: {e}")
 
                 for challenge in challenges_to_cleanup:
                     if challenge.channel_id and challenge.message_id:
