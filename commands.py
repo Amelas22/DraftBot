@@ -78,25 +78,31 @@ async def league_commands(bot):
 
     @bot.slash_command(name="post_challenge", description="Post a challenge for your team")
     async def postchallenge(interaction: discord.Interaction):
+        await interaction.response.defer()
+        
         user_id_str = str(interaction.user.id)
-        async with AsyncSessionLocal() as session:  # Assuming AsyncSessionLocal is your session maker
-            async with session.begin():
-                # Query for any team registration entries that include the user ID in their TeamMembers
-                stmt = select(TeamRegistration).where(TeamRegistration.TeamMembers.contains(user_id_str))
-                result = await session.execute(stmt)
-                team_registration = result.scalars().first()
+        
+        try:
+            async with AsyncSessionLocal() as session:  # Assuming AsyncSessionLocal is your session maker
+                async with session.begin():
+                    # Query for any team registration entries that include the user ID in their TeamMembers
+                    stmt = select(TeamRegistration).where(TeamRegistration.TeamMembers.contains(user_id_str))
+                    result = await session.execute(stmt)
+                    team_registration = result.scalars().first()
 
-                if team_registration:
-                    # Extracting user details
-                    team_id = team_registration.TeamID
-                    team_name = team_registration.TeamName
-                    user_display_name = team_registration.TeamMembers.get(user_id_str)
-                    from league import InitialPostView
-                    initial_view = InitialPostView(command_type="post", team_id=team_id, team_name=team_name, user_display_name=user_display_name)
-                    await interaction.response.send_message(f"Post a Challenge for {team_name}. Select Cube and Timezone.", view=initial_view, ephemeral=True)
-                else:
-                    await interaction.response.send_message(f"You are not registered to a team. Contact a Cube Overseer if this is an error.", ephemeral=True)
-
+                    if team_registration:
+                        # Extracting user details
+                        team_id = team_registration.TeamID
+                        team_name = team_registration.TeamName
+                        user_display_name = team_registration.TeamMembers.get(user_id_str)
+                        from league import InitialPostView
+                        initial_view = InitialPostView(command_type="post", team_id=team_id, team_name=team_name, user_display_name=user_display_name)
+                        await interaction.followup.send(f"Post a Challenge for {team_name}. Select Cube and Timezone.", view=initial_view, ephemeral=True)
+                    else:
+                        await interaction.followup.send(f"You are not registered to a team. Contact a Cube Overseer if this is an error.", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"An error occurred while processing your request: {str(e)}", ephemeral=True)
+            print(f"Error in postchallenge command: {e}")  
 
     @bot.slash_command(
     name="remove_user_from_team",

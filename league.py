@@ -224,7 +224,7 @@ class LeagueDraftView(discord.ui.View):
 
 class InitialPostView(View):
     def __init__(self, command_type=None, team_id=None, team_name=None, user_display_name=None, match_id=None, team_a=None, team_b=None, bot=None):
-        super().__init__()
+        super().__init__(timeout=None)
         self.your_team_range = None
         self.command_type = command_type
         self.team_id = team_id
