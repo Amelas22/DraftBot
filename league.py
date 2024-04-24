@@ -441,8 +441,8 @@ class ChallengeTimeModal(Modal):
             custom_id="start_time"
         ))
         self.add_item(InputText(
-            label="Start Time Range (in hours)",
-            placeholder="Enter hours as a whole number (e.g., 0, 1, 2)",
+            label="Start Time Range (Hours OR Minutes)",
+            placeholder="Enter EITHER hours (e.g., 0, 1, 2) or minutes (e.g., 30, 45, 90)",
             custom_id="time_range"
         ))
 
@@ -459,7 +459,7 @@ class ChallengeTimeModal(Modal):
                         guild = bot.get_guild(int(interaction.guild_id))
                         challenge_channel = discord.utils.get(guild.text_channels, name="league-challenges")
                         start_time_str = self.children[0].value
-                        time_range_hours = int(self.children[1].value)
+                        time_range = int(self.children[1].value)
 
                         user_time_zone = pytz.timezone(self.time_zone)  # Convert the selected timezone string to a pytz timezone
                         local_time = datetime.strptime(start_time_str, "%m/%d/%Y %H:%M")
@@ -468,7 +468,10 @@ class ChallengeTimeModal(Modal):
                         
 
                         utc_start_dt = local_dt_with_tz.astimezone(pytz.utc)
-                        utc_end_dt = utc_start_dt + timedelta(hours=time_range_hours)
+                        if time_range < 13: 
+                            utc_end_dt = utc_start_dt + timedelta(hours=time_range)
+                        else:
+                            utc_end_dt = utc_start_dt + timedelta(minutes=time_range)
                         formatted_start_time = f"<t:{int(utc_start_dt.timestamp())}:F>"
                         formatted_end_time = f"<t:{int(utc_end_dt.timestamp())}:F>" 
                         relative_time = f"<t:{int(utc_start_dt.timestamp())}:R>"
@@ -522,7 +525,7 @@ class ChallengeTimeModal(Modal):
         elif self.command_type == "edit":
             await interaction.response.defer()
             start_time_str = self.children[0].value
-            time_range_hours = int(self.children[1].value)
+            time_range = int(self.children[1].value)
 
             user_time_zone = pytz.timezone(self.time_zone)  # Convert the selected timezone string to a pytz timezone
             local_time = datetime.strptime(start_time_str, "%m/%d/%Y %H:%M")
@@ -530,8 +533,10 @@ class ChallengeTimeModal(Modal):
             local_dt_with_tz = user_time_zone.localize(local_time)  # Localize the datetime
             
             utc_start_dt = local_dt_with_tz.astimezone(pytz.utc)
-            utc_end_dt = utc_start_dt + timedelta(hours=time_range_hours)
-
+            if time_range < 13:
+                utc_end_dt = utc_start_dt + timedelta(hours=time_range)
+            else:
+                utc_end_dt = utc_start_dt + timedelta(minutes=time_range)
             formatted_start_time = f"<t:{int(utc_start_dt.timestamp())}:F>"
             formatted_end_time = f"<t:{int(utc_end_dt.timestamp())}:F>" 
             relative_time = f"<t:{int(utc_start_dt.timestamp())}:R>"
