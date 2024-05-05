@@ -209,7 +209,7 @@ async def league_commands(bot):
 
                 if not challenges:
                 # No challenges found within the range
-                    await interaction.followup.send("No open challenges. Consider using /post_challenge to open a challenge yourself!", ephemeral=True)
+                    await interaction.response.send_message("No open challenges. Consider using /post_challenge to open a challenge yourself!", ephemeral=True)
                     return
                 # Construct the link to the original challenge message
                 
