@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from session import init_db
 from modals import CubeSelectionModal
 from utils import cleanup_sessions_task
-from commands import league_commands
+from commands import league_commands, scheduled_posts
 
 
 
@@ -39,16 +39,11 @@ async def main():
 
     @bot.slash_command(name='premadedraft', description='Start a team draft with premade teams', guild_id=None)
     async def premade_draft(interaction: discord.Interaction):
-        cube_overseer_role = discord.utils.get(interaction.guild.roles, name="Cube Overseer")
-    
-        if cube_overseer_role in interaction.user.roles:
             await interaction.response.send_modal(CubeSelectionModal(session_type="premade", title="Select Cube"))
-        else:
-            # Responding with a message indicating lack of permission
-            await interaction.response.send_message("Use `/leaguedraft` if you're trying to set up a league draft. This will ensure your results are properly tracked. If you need an untracked draft, tag Cube Overseer and they will set up the lobby.", ephemeral=True)
-        
+
     
     await league_commands(bot)
+    await scheduled_posts(bot)
     await init_db()
 
     # Run the bot

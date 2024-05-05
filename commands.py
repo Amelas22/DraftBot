@@ -78,6 +78,16 @@ async def league_commands(bot):
 
     @bot.slash_command(name="post_challenge", description="Post a challenge for your team")
     async def postchallenge(interaction: discord.Interaction):
+        # Define the cutoff time
+        pacific_time_zone = pytz.timezone('America/Los_Angeles')
+        cutoff_datetime = pacific_time_zone.localize(datetime(2024, 5, 6, 0, 0))  # Midnight on May 6, 2024
+
+        # Check if current time is before the cutoff time
+        current_time = datetime.now(pacific_time_zone)
+        if current_time >= cutoff_datetime:
+            await interaction.response.send_message("This season is no longer active. Keep an eye on announcements for future seasons!", ephemeral=True)
+            return
+        
         await interaction.response.defer(ephemeral=True)
         
         user_id_str = str(interaction.user.id)
@@ -161,14 +171,32 @@ async def league_commands(bot):
             
     @bot.slash_command(name="find_a_match", description="Find an open challenge based on a given time.")
     async def findamatch(interaction: discord.Interaction):
+        # Define the cutoff time
+        pacific_time_zone = pytz.timezone('America/Los_Angeles')
+        cutoff_datetime = pacific_time_zone.localize(datetime(2024, 5, 6, 0, 0))  # Midnight on May 6, 2024
 
-            from league import InitialPostView
-            initial_view = InitialPostView(command_type="find")
-            await interaction.response.send_message("Please select the range for your team", view=initial_view, ephemeral=True)
+        # Check if current time is before the cutoff time
+        current_time = datetime.now(pacific_time_zone)
+        if current_time >= cutoff_datetime:
+            await interaction.response.send_message("This season is no longer active. Keep an eye on announcements for future seasons!", ephemeral=True)
+            return            
+        from league import InitialPostView
+        initial_view = InitialPostView(command_type="find")
+        await interaction.response.send_message("Please select the range for your team", view=initial_view, ephemeral=True)
 
 
     @bot.slash_command(name="list_challenges", description="List all open challenges in chronological order.")
     async def list_challenge(interaction: discord.Interaction):
+        # Define the cutoff time
+        pacific_time_zone = pytz.timezone('America/Los_Angeles')
+        cutoff_datetime = pacific_time_zone.localize(datetime(2024, 5, 6, 0, 0))  # Midnight on May 6, 2024
+
+        # Check if current time is before the cutoff time
+        current_time = datetime.now(pacific_time_zone)
+        if current_time >= cutoff_datetime:
+            await interaction.response.send_message("This season is no longer active. Keep an eye on announcements for future seasons!", ephemeral=True)
+            return
+        
         async with AsyncSessionLocal() as db_session: 
             async with db_session.begin():
                 from session import Challenge
@@ -223,6 +251,16 @@ async def league_commands(bot):
 
     @bot.slash_command(name='standings', description='Display the team standings by points earned')
     async def standings(interaction: discord.Interaction):
+        # Define the cutoff time
+        pacific_time_zone = pytz.timezone('America/Los_Angeles')
+        cutoff_datetime = pacific_time_zone.localize(datetime(2024, 5, 6, 0, 0))  # Midnight on May 6, 2024
+
+        # Check if current time is before the cutoff time
+        current_time = datetime.now(pacific_time_zone)
+        if current_time >= cutoff_datetime:
+            await interaction.response.send_message("This season is no longer active. Keep an eye on announcements for future seasons!", ephemeral=True)
+            return
+        
         await post_standings(interaction)
 
     @bot.slash_command(name="trophies", description="Display the Trophy Leaderboard for the current month.")
@@ -285,11 +323,21 @@ async def league_commands(bot):
 
     @bot.slash_command(name="leaguedraft", description="Start a league draft with chosen teams and cube.")
     async def leaguedraft(interaction: discord.Interaction):
+        # Define the cutoff time
+        pacific_time_zone = pytz.timezone('America/Los_Angeles')
+        cutoff_datetime = pacific_time_zone.localize(datetime(2024, 5, 6, 0, 0))  # Midnight on May 6, 2024
+
+        # Check if current time is before the cutoff time
+        current_time = datetime.now(pacific_time_zone)
+        if current_time >= cutoff_datetime:
+            await interaction.response.send_message("This season is no longer active. Keep an eye on announcements for future seasons!", ephemeral=True)
+            return
+        
         from league import InitialRangeView   
         initial_view = InitialRangeView()
         await interaction.response.send_message("Step 1 of 2: Please select the range for your team and the opposing team:", view=initial_view, ephemeral=True)
         
-
+async def scheduled_posts(bot):
     @aiocron.crontab('01 09 * * *', tz=pytz.timezone('US/Eastern'))
     async def daily_league_results():
         # Fetch all guilds the bot is in and look for the "league-summary" channel
