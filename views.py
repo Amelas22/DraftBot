@@ -25,7 +25,7 @@ class PersistentView(discord.ui.View):
 
 
     def add_buttons(self):
-        if self.session_type == "random":
+        if self.session_type == "random" or self.session_type == "test":
             self.add_item(self.create_button("Sign Up", "green", f"sign_up_{self.draft_session_id}", self.sign_up_callback))
             self.add_item(self.create_button("Cancel Sign Up", "red", f"cancel_sign_up_{self.draft_session_id}", self.cancel_sign_up_callback))
             self.add_item(self.create_button("Create Teams", "blurple", f"randomize_teams_{self.draft_session_id}", self.randomize_teams_callback))
@@ -38,8 +38,11 @@ class PersistentView(discord.ui.View):
             self.add_item(self.create_button("Generate Seating Order", "primary", f"generate_seating_{self.draft_session_id}", self.randomize_teams_callback))
         self.add_item(self.create_button("Cancel Draft", "grey", f"cancel_draft_{self.draft_session_id}", self.cancel_draft_callback))
         self.add_item(self.create_button("Remove User", "grey", f"remove_user_{self.draft_session_id}", self.remove_user_button_callback))
-        self.add_item(self.create_button("Ready Check", "green", f"ready_check_{self.draft_session_id}", self.ready_check_callback))
-        self.add_item(self.create_button("Create Rooms & Post Pairings", "primary", f"create_rooms_pairings_{self.draft_session_id}", self.create_rooms_pairings_callback, disabled=True))
+        if self.session_type == "test":
+            self.add_item(self.create_button("Post Pairings", "primary", f"create_rooms_pairings_{self.draft_session_id}", self.create_rooms_pairings_callback, disabled=True))
+        else:
+            self.add_item(self.create_button("Ready Check", "green", f"ready_check_{self.draft_session_id}", self.ready_check_callback))
+            self.add_item(self.create_button("Create Rooms & Post Pairings", "primary", f"create_rooms_pairings_{self.draft_session_id}", self.create_rooms_pairings_callback, disabled=True))
 
         # Logic to enable/disable based on session_stage
         for item in self.children:
@@ -250,7 +253,7 @@ class PersistentView(discord.ui.View):
                 session.deletion_time = datetime.now() + timedelta(hours=4)
                 session.session_stage = 'teams'
                 # Check session type and prepare teams if necessary
-                if session.session_type == 'random':
+                if session.session_type == 'random' or session.session_type == 'test':
                     from utils import split_into_teams
                     await split_into_teams(bot, session.session_id)
                     session = await get_draft_session(self.draft_session_id)
@@ -473,30 +476,36 @@ class PersistentView(discord.ui.View):
                         break
 
                 # Execute tasks to create chat channels
-                team_a_members = [guild.get_member(int(user_id)) for user_id in session.team_a if guild.get_member(int(user_id))]
-                team_b_members = [guild.get_member(int(user_id)) for user_id in session.team_b if guild.get_member(int(user_id))]
-                all_members = team_a_members + team_b_members
+                if self.session_type != "test":
+                    team_a_members = [guild.get_member(int(user_id)) for user_id in session.team_a if guild.get_member(int(user_id))]
+                    team_b_members = [guild.get_member(int(user_id)) for user_id in session.team_b if guild.get_member(int(user_id))]
+                    all_members = team_a_members + team_b_members
 
-                session.draft_chat_channel = str(await self.create_team_channel(guild, "Draft", all_members, session.team_a, session.team_b))
-                await self.create_team_channel(guild, "Team-A", team_a_members, session.team_a, session.team_b)
-                await self.create_team_channel(guild, "Team-B", team_b_members, session.team_a, session.team_b)
+                    session.draft_chat_channel = str(await self.create_team_channel(guild, "Draft", all_members, session.team_a, session.team_b))
+                    await self.create_team_channel(guild, "Team-A", team_a_members, session.team_a, session.team_b)
+                    await self.create_team_channel(guild, "Team-B", team_b_members, session.team_a, session.team_b)
 
-                # Fetch the channel object using the ID
-                draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
+                    # Fetch the channel object using the ID
+                    draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
+                else:
+                    draft_chat_channel = guild.get_channel(int(session.draft_channel_id))
+                    session.draft_chat_channel = session.draft_channel_id
                 draft_summary_embed = await generate_draft_summary_embed(bot, session.session_id)
-
-                if draft_chat_channel and draft_summary_embed:
-                    sign_up_tags = ' '.join([f"<@{user_id}>" for user_id in session.sign_ups.keys()])
-                    await draft_chat_channel.send(f"Pairing posted below. Good luck in your matches! {sign_up_tags}")
-                    draft_summary_message = await draft_chat_channel.send(embed=draft_summary_embed)
-                    await draft_summary_message.pin()
-                    session.draft_summary_message_id = str(draft_summary_message.id)
                 
-                draft_channel_id = int(session.draft_channel_id)  # Ensure this is where the message exists
+
+                sign_up_tags = ' '.join([f"<@{user_id}>" for user_id in session.sign_ups.keys()])
+                await draft_chat_channel.send(f"Pairing posted below. Good luck in your matches! {sign_up_tags}")
+                draft_summary_message = await draft_chat_channel.send(embed=draft_summary_embed)
+                await draft_summary_message.pin()
+                session.draft_summary_message_id = str(draft_summary_message.id)
+
+
+                draft_channel_id = int(session.draft_channel_id) 
                 original_message_id = int(session.message_id)
+                draft_channel = interaction.client.get_channel(draft_channel_id)
 
                 # Fetch the channel and delete the message
-                draft_channel = interaction.client.get_channel(draft_channel_id)
+                
                 if draft_channel:
                     try:
                         original_message = await draft_channel.fetch_message(original_message_id)
@@ -511,7 +520,7 @@ class PersistentView(discord.ui.View):
             # Execute Post Pairings
             await post_pairings(bot, guild, session.session_id)
             del PROCESSING_ROOMS_PAIRINGS[session_id]
-            await interaction.followup.send("Chat rooms created and pairings posted.", ephemeral=True)
+            await interaction.followup.send("Pairings posted.", ephemeral=True)
 
     async def create_team_channel(self, guild, team_name, team_members, team_a, team_b):
         draft_category = discord.utils.get(guild.categories, name="Draft Channels")

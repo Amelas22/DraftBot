@@ -238,6 +238,9 @@ class InitialPostView(View):
         self.bot = bot
         if not self.team_id:
             self.add_item(RangeSelect("Your Team Range", "your_team_range"))
+        elif self.command_type == "test":
+            self.time_zone_select = TimezoneSelect("time_zone")
+            self.add_item(self.time_zone_select)
         elif self.team_id:
             self.time_zone_select = TimezoneSelect("time_zone")
             self.cube_select = ChallengeCubeSelect("cube_choice")
@@ -258,6 +261,8 @@ class InitialPostView(View):
                 await interaction.response.send_modal(ChallengeTimeModal(self.team_name, self.cube_choice, self.time_zone, command_type=self.command_type, match_id=self.match_id))
             else:
                 await interaction.response.send_modal(ChallengeTimeModal(self.team_name, self.cube_choice, self.time_zone, self.command_type))
+        elif self.command_type == "test":
+                await interaction.response.send_modal(ChallengeTimeModal(time_zone=self.time_zone, command_type=self.command_type))
         else:
             await interaction.response.defer()
 
@@ -424,7 +429,7 @@ class AdjustTimeModal(Modal):
             await message.edit(embed=updated_embed)
 
 class ChallengeTimeModal(Modal):
-    def __init__(self, team_name, cube, time_zone, command_type, bot=None, team_a=None, team_b=None, match_id=None, *args, **kwargs):
+    def __init__(self, team_name=None, cube=None, time_zone=None, command_type=None, bot=None, team_a=None, team_b=None, match_id=None, *args, **kwargs):
         super().__init__(title="Enter a Date & Time", *args, **kwargs)
         self.bot = bot
         self.team_name = team_name
@@ -447,7 +452,80 @@ class ChallengeTimeModal(Modal):
         ))
 
     async def callback(self, interaction: discord.Interaction):
-        if self.command_type == "post":
+        if self.command_type == "test":
+            await interaction.response.defer()
+            bot = interaction.client
+            guild = bot.get_guild(int(interaction.guild_id))
+            start_time_str = self.children[0].value
+            time_range = int(self.children[1].value)
+            user_time_zone = pytz.timezone(self.time_zone)  # Convert the selected timezone string to a pytz timezone
+            local_time = datetime.strptime(start_time_str, "%m/%d/%Y %H:%M")
+            
+            local_dt_with_tz = user_time_zone.localize(local_time)  # Localize the datetime
+            
+
+            utc_start_dt = local_dt_with_tz.astimezone(pytz.utc)
+            if time_range < 13: 
+                utc_end_dt = utc_start_dt + timedelta(hours=time_range)
+            else:
+                utc_end_dt = utc_start_dt + timedelta(minutes=time_range)
+            formatted_start_time = f"<t:{int(utc_start_dt.timestamp())}:F>"
+            formatted_end_time = f"<t:{int(utc_end_dt.timestamp())}:F>" 
+            relative_time = f"<t:{int(utc_start_dt.timestamp())}:R>"
+            draft_start_time = datetime.now().timestamp()
+            session_id = f"{interaction.user.id}-{int(draft_start_time)}"
+            draft_id = ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
+            draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
+            async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    new_draft_session = DraftSession(
+                        session_id=session_id,
+                        guild_id=str(interaction.guild_id),
+                        draft_link=draft_link,
+                        draft_id=draft_id,
+                        draft_start_time=datetime.now(),
+                        deletion_time=None,
+                        session_type=self.command_type,
+                        premade_match_id=None,
+                        team_a_name=None,
+                        team_b_name=None,
+                        tracked_draft = True
+                    )
+                    session.add(new_draft_session)
+            embed = discord.Embed(title=f"Looking for Drafters! Draft scheduled to start in {relative_time}", 
+                                                description=f"Start Range: Between {formatted_start_time} and {formatted_end_time}\n\n\n**Draftmancer Session**: **[Join Here]({draft_link})**" +
+                                                f"\nClick 'Sign Up' below. You will be pinged 15 minutes before draft start.\n\n", 
+                                                color=discord.Color.blue())
+            embed.add_field(name="\n\nSign-Ups", value="No players yet.", inline=False)
+            
+            from views import PersistentView
+            from session import get_draft_session
+            draft_session = await get_draft_session(session_id)
+            if draft_session:
+                view = PersistentView(
+                    bot=bot,
+                    draft_session_id=draft_session.session_id,
+                    session_type=self.command_type,
+                    team_a_name=getattr(draft_session, 'team_a_name', None),
+                    team_b_name=getattr(draft_session, 'team_b_name', None)
+                )
+                message = await interaction.followup.send(embed=embed, view=view)
+            
+            if new_draft_session:
+                async with AsyncSessionLocal() as session:
+                    async with session.begin():
+                        result = await session.execute(select(DraftSession).filter_by(session_id=new_draft_session.session_id))
+                        updated_session = result.scalars().first()
+                        if updated_session:
+                            updated_session.message_id = str(message.id)
+                            updated_session.draft_channel_id = str(message.channel.id)
+                            session.add(updated_session)
+                            await session.commit()
+
+            # Pin the message to the channel
+            await message.pin()
+
+        elif self.command_type == "post":
             try:
                 await interaction.response.defer()
                 bot = interaction.client

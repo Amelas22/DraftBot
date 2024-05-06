@@ -21,7 +21,7 @@ async def split_into_teams(bot, draft_session_id):
     
     # Check if there are any sign-ups to split into teams.
     sign_ups = draft_session.sign_ups
-    if random.randint(1, 100) > 60:
+    if random.randint(1, 100) > 60 or draft_session.session_type == "test":
         draft_session.true_skill_draft = False
     else:
         draft_session.true_skill_draft = True
@@ -109,8 +109,10 @@ async def post_pairings(bot, guild, session_id):
         if not draft_session:
             print("Draft session not found.")
             return
-
-        draft_chat_channel_obj = guild.get_channel(int(draft_session.draft_chat_channel))
+        if draft_session.session_type == "test":
+            draft_chat_channel_obj = guild.get_channel(int(draft_session.draft_channel_id))
+        else:
+            draft_chat_channel_obj = guild.get_channel(int(draft_session.draft_chat_channel))
         if not draft_chat_channel_obj:
             print("Draft chat channel not found.")
             return
@@ -183,12 +185,12 @@ async def generate_draft_summary_embed(bot, draft_session_id):
         title, description, discord_color = await determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, half_matches, total_matches)
 
         embed = discord.Embed(title=title, description=description, color=discord_color)
-        embed.add_field(name="Team A" if draft_session.session_type == "random" else f"{draft_session.team_a_name}", value="\n".join(team_a_names), inline=True)
-        embed.add_field(name="Team B" if draft_session.session_type == "random" else f"{draft_session.team_b_name}", value="\n".join(team_b_names), inline=True)
+        embed.add_field(name="Team A" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"{draft_session.team_a_name}", value="\n".join(team_a_names), inline=True)
+        embed.add_field(name="Team B" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"{draft_session.team_b_name}", value="\n".join(team_b_names), inline=True)
         embed.add_field(
             name="**Draft Standings**", 
-            value=(f"**Team A Wins:** {team_a_wins}" if draft_session.session_type == "random" else f"**{draft_session.team_a_name} Wins:** {team_a_wins}") + 
-                (f"\n**Team B Wins:** {team_b_wins}" if draft_session.session_type == "random" else f"\n**{draft_session.team_b_name} Wins:** {team_b_wins}"), 
+            value=(f"**Team A Wins:** {team_a_wins}" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"**{draft_session.team_a_name} Wins:** {team_a_wins}") + 
+                (f"\n**Team B Wins:** {team_b_wins}" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"\n**{draft_session.team_b_name} Wins:** {team_b_wins}"), 
             inline=False)
 
 
@@ -216,7 +218,7 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
             title = "Draft Outcome"
 
     elif team_a_wins == 0 and team_b_wins == 0:
-        title = f"Draft-{draft_session.draft_id} Standings" if draft_session.session_type == "random" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
+        title = f"Draft-{draft_session.draft_id} Standings" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
         description = "If a drafter is missing from this channel, they likely can still see the channel but have the Discord invisible setting on."
         discord_color = discord.Color.dark_blue()
     elif team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0:
@@ -224,7 +226,7 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
         description = f"Draft Start: <t:{int(draft_session.draft_start_time.timestamp())}:F>"
         discord_color = discord.Color.light_grey()
     else:
-        title = f"Draft-{draft_session.draft_id} Standings" if draft_session.session_type == "random" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
+        title = f"Draft-{draft_session.draft_id} Standings" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
         description = "If a drafter is missing from this channel, they likely can still see the channel but have the Discord invisible setting on."
         discord_color = discord.Color.dark_blue()
     return title, description, discord_color
@@ -827,31 +829,33 @@ async def re_register_views(bot):
                 
                 # Iterate over each group of match results by their pairing message
                 for pairing_message_id, match_results in matches_by_pairing_msg.items():
-                    channel_id = int(draft_session.draft_chat_channel)
-                    channel = bot.get_channel(channel_id)
-                    if channel:
-                        try:
-                            message = await channel.fetch_message(int(pairing_message_id))
-                            view = View(timeout=None)  # Initialize a new view for this set of match results
-                            
-                            # Add a button for each match result in this group
-                            for match_result in match_results:
-                                from views import MatchResultButton
-                                button = MatchResultButton(
-                                    bot=bot,
-                                    session_id=draft_session.session_id,
-                                    match_id=match_result.id,
-                                    match_number=match_result.match_number,
-                                    label=f"Match {match_result.match_number} Results",
-                                    style=discord.ButtonStyle.primary
-                                    # row parameter is optional
-                                )
-                                view.add_item(button)
-                            
-                            # Now, view contains all buttons for the matches associated with this pairing message
-                            await message.edit(view=view)
-                        except discord.NotFound:
-                            print(f"Pairing message or channel not found for pairing message ID: {pairing_message_id}")
-                        except Exception as e:
-                            print(f"Failed to re-register view for pairing message ID: {pairing_message_id}, error: {e}")
+                    if draft_session.draft_chat_channel:
+                        channel_id = int(draft_session.draft_chat_channel)
+                        channel = bot.get_channel(channel_id)
+                        if channel:
+                            try:
+                                message = await channel.fetch_message(int(pairing_message_id))
+                                view = View(timeout=None)  # Initialize a new view for this set of match results
+                                
+                                # Add a button for each match result in this group
+                                for match_result in match_results:
+                                    from views import MatchResultButton
+                                    button = MatchResultButton(
+                                        bot=bot,
+                                        session_id=draft_session.session_id,
+                                        match_id=match_result.id,
+                                        match_number=match_result.match_number,
+                                        label=f"Match {match_result.match_number} Results",
+                                        style=discord.ButtonStyle.primary
+                                        # row parameter is optional
+                                    )
+                                    if draft_session.session_type != "test":
+                                        view.add_item(button)
+                                
+                                # Now, view contains all buttons for the matches associated with this pairing message
+                                await message.edit(view=view)
+                            except discord.NotFound:
+                                print(f"Pairing message or channel not found for pairing message ID: {pairing_message_id}")
+                            except Exception as e:
+                                print(f"Failed to re-register view for pairing message ID: {pairing_message_id}, error: {e}")
 
