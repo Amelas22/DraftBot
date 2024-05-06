@@ -115,6 +115,12 @@ async def league_commands(bot):
             await interaction.followup.send(f"An error occurred while processing your request: {str(e)}", ephemeral=True)
             print(f"Error in postchallenge command: {e}")  
 
+    @bot.slash_command(name="schedule_draft", description="Post a scheduled draft")
+    async def scheduledraft(interaction: discord.Interaction):
+        from league import InitialPostView
+        initial_view = InitialPostView(command_type="test", team_id=1)
+        await interaction.response.send_message(f"Post a scheduled draft. Select a Timezone to start.", view=initial_view, ephemeral=True)
+
     @bot.slash_command(
     name="remove_user_from_team",
     description="Remove a user from all teams they are assigned to"
