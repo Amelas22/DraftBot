@@ -612,9 +612,9 @@ async def scheduled_posts(bot):
 
                 total_drafts = len(sessions)
 
-                date_str = start_time.strftime("%B %d, %Y")
+                date_str = end_time.strftime("%B %d, %Y")
                 top_drafters_field_value = "\n".join([f"{index + 1}. **{name}:** {count} drafts" for index, (name, count) in enumerate(top_drafters)])
-                embed = discord.Embed(title=f"Open Queue Weekly Summary - {date_str}", description="", color=discord.Color.magenta())
+                embed = discord.Embed(title=f"Open Queue Weekly Summary - Week Ending {date_str}", description="", color=discord.Color.magenta())
                 embed.add_field(name="**Completed Drafts**", value=total_drafts, inline=False)
                 embed.add_field(name="**Top 10 Drafters**\n", value=top_drafters_field_value, inline=False)
                 embed.add_field(name="**Multiple Weekly Trophies**", value=undefeated_drafters_field_value or "No trophies :(", inline=False)
