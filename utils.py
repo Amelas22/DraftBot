@@ -80,7 +80,11 @@ async def calculate_pairings(session, db_session):
     session.match_results = []
 
     # Generate pairings and create MatchResult instances
-    for round_number in range(1, 4):
+    if num_players == 6 or session.session_type != "test":
+        round_counter = 4
+    else:
+        round_counter = 5
+    for round_number in range(1, round_counter):
         for i, player_a in enumerate(session.team_a):
             player_b_index = (i + round_number - 1) % len(session.team_b)
             player_b = session.team_b[player_b_index]
