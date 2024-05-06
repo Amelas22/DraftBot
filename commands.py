@@ -7,6 +7,9 @@ import pytz
 from datetime import datetime, timedelta
 from collections import Counter
 
+pacific_time_zone = pytz.timezone('America/Los_Angeles')
+cutoff_datetime = pacific_time_zone.localize(datetime(2024, 5, 6, 0, 0))
+
 async def league_commands(bot):
 
     @bot.slash_command(name="registerteam", description="Register a new team in the league")
@@ -78,9 +81,7 @@ async def league_commands(bot):
 
     @bot.slash_command(name="post_challenge", description="Post a challenge for your team")
     async def postchallenge(interaction: discord.Interaction):
-        # Define the cutoff time
-        pacific_time_zone = pytz.timezone('America/Los_Angeles')
-        cutoff_datetime = pacific_time_zone.localize(datetime(2024, 5, 6, 0, 0))  # Midnight on May 6, 2024
+        global cutoff_datetime
 
         # Check if current time is before the cutoff time
         current_time = datetime.now(pacific_time_zone)
@@ -171,9 +172,7 @@ async def league_commands(bot):
             
     @bot.slash_command(name="find_a_match", description="Find an open challenge based on a given time.")
     async def findamatch(interaction: discord.Interaction):
-        # Define the cutoff time
-        pacific_time_zone = pytz.timezone('America/Los_Angeles')
-        cutoff_datetime = pacific_time_zone.localize(datetime(2024, 5, 6, 0, 0))  # Midnight on May 6, 2024
+        global cutoff_datetime
 
         # Check if current time is before the cutoff time
         current_time = datetime.now(pacific_time_zone)
@@ -187,9 +186,7 @@ async def league_commands(bot):
 
     @bot.slash_command(name="list_challenges", description="List all open challenges in chronological order.")
     async def list_challenge(interaction: discord.Interaction):
-        # Define the cutoff time
-        pacific_time_zone = pytz.timezone('America/Los_Angeles')
-        cutoff_datetime = pacific_time_zone.localize(datetime(2024, 5, 6, 0, 0))  # Midnight on May 6, 2024
+        global cutoff_datetime
 
         # Check if current time is before the cutoff time
         current_time = datetime.now(pacific_time_zone)
@@ -251,9 +248,7 @@ async def league_commands(bot):
 
     @bot.slash_command(name='standings', description='Display the team standings by points earned')
     async def standings(interaction: discord.Interaction):
-        # Define the cutoff time
-        pacific_time_zone = pytz.timezone('America/Los_Angeles')
-        cutoff_datetime = pacific_time_zone.localize(datetime(2024, 5, 6, 0, 0))  # Midnight on May 6, 2024
+        global cutoff_datetime
 
         # Check if current time is before the cutoff time
         current_time = datetime.now(pacific_time_zone)
@@ -323,9 +318,7 @@ async def league_commands(bot):
 
     @bot.slash_command(name="leaguedraft", description="Start a league draft with chosen teams and cube.")
     async def leaguedraft(interaction: discord.Interaction):
-        # Define the cutoff time
-        pacific_time_zone = pytz.timezone('America/Los_Angeles')
-        cutoff_datetime = pacific_time_zone.localize(datetime(2024, 5, 6, 0, 0))  # Midnight on May 6, 2024
+        global cutoff_datetime
 
         # Check if current time is before the cutoff time
         current_time = datetime.now(pacific_time_zone)
@@ -337,9 +330,15 @@ async def league_commands(bot):
         initial_view = InitialRangeView()
         await interaction.response.send_message("Step 1 of 2: Please select the range for your team and the opposing team:", view=initial_view, ephemeral=True)
         
-async def scheduled_posts(bot):
     @aiocron.crontab('01 09 * * *', tz=pytz.timezone('US/Eastern'))
     async def daily_league_results():
+        global cutoff_datetime
+
+        # Check if current time is before the cutoff time
+        current_time = datetime.now(pacific_time_zone)
+        if current_time >= cutoff_datetime:
+            return      
+        
         # Fetch all guilds the bot is in and look for the "league-summary" channel
         for guild in bot.guilds:
             channel = discord.utils.get(guild.text_channels, name="league-summary")
@@ -390,6 +389,13 @@ async def scheduled_posts(bot):
 
     @aiocron.crontab('00 13 * * *', tz=pytz.timezone('US/Eastern'))  
     async def post_todays_matches():
+        global cutoff_datetime
+
+        # Check if current time is before the cutoff time
+        current_time = datetime.now(pacific_time_zone)
+        if current_time >= cutoff_datetime:
+            return  
+        
         for guild in bot.guilds:
             channel = discord.utils.get(guild.text_channels, name="league-summary")
             if channel:
@@ -463,8 +469,90 @@ async def scheduled_posts(bot):
                         embed.add_field(name=f"{open_count}. Team: {match.team_a}", value=f"Proposed Start Time: {formatted_time} ({relative_time})\nCube: {match.cube}\nPosted by: {initial_user_mention}\n[Sign Up Here!]({message_link})", inline=False)
                         open_count += 1
                 await channel.send(embed=embed)
+    @aiocron.crontab('00 09 * * *', tz=pytz.timezone('US/Eastern'))
+    async def post_league_standings():
+        global cutoff_datetime
 
+        # Check if current time is before the cutoff time
+        current_time = datetime.now(pacific_time_zone)
+        if current_time >= cutoff_datetime:
+            return  
+        
+        # Fetch all guilds the bot is in and look for the "league-summary" channel
+        for guild in bot.guilds:
+            channel = discord.utils.get(guild.text_channels, name="league-summary")
+            if channel:
+                break  # If we find the channel, we exit the loop
+        
+        if not channel:  # If the bot cannot find the channel in any guild, log an error and return
+            print("Error: 'league-summary' channel not found.")
+            return
+        
+        time = datetime.now()
+        count = 1
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                # Fetch teams ordered by PointsEarned (DESC) and MatchesCompleted (ASC)
+                stmt = (select(Team)
+                    .where(Team.MatchesCompleted >= 1)
+                    .order_by(Team.PointsEarned.desc(), Team.MatchesCompleted.asc(), Team.PreseasonPoints.desc()))
+                results = await session.execute(stmt)
+                teams = results.scalars().all()
+                
+                # Check if teams exist
+                if not teams:
+                    await channel.send("No results posted yet.")
+                    return
+                embed = discord.Embed(title="Team Standings", description=f"Standings as of <t:{int(time.timestamp())}:F>", color=discord.Color.gold())
+                last_points = None
+                last_matches = None
+                last_preseason = None
+                actual_rank = 0
+                display_rank = 0
+                
+                # Iterate through teams to build the ranking
+                for team in teams:
+                    # Increase actual_rank each loop, this is the absolute position in the list
+                    actual_rank += 1
+                    # Only increase display_rank if the current team's stats do not match the last team's stats
+                    if (team.PointsEarned, team.MatchesCompleted, team.PreseasonPoints) != (last_points, last_matches, last_preseason):
+                        display_rank = actual_rank
+                    last_points = team.PointsEarned
+                    last_matches = team.MatchesCompleted
+                    last_preseason = team.PreseasonPoints
 
+                    # Check if the rank should be displayed as tied
+                    rank_text = f"T{display_rank}" if actual_rank != display_rank else str(display_rank)
+                    
+                    preseason_text = f", Preseason Points: {team.PreseasonPoints}" if team.PreseasonPoints > 0 else ""
+                    embed.add_field(
+                        name=f"{rank_text}. {team.TeamName}", 
+                        value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}{preseason_text}", 
+                        inline=False
+                    )
+                    
+                    # Limit to top 50 teams in two batches
+                    if actual_rank == 25:
+                        await channel.send(embed=embed)
+                        embed = discord.Embed(title="Team Standings, Continued", description="", color=discord.Color.gold())
+                    elif actual_rank == 50:
+                        break
+
+                # Send the last batch if it exists
+                if actual_rank > 25:
+                    await channel.send(embed=embed)
+    @aiocron.crontab('00 10 * * 1', tz=pytz.timezone('US/Eastern'))  # At 10:00 on Monday, Eastern Time
+    async def schedule_weekly_summary():
+        global cutoff_datetime
+
+        # Check if current time is before the cutoff time
+        current_time = datetime.now(pacific_time_zone)
+        if current_time >= cutoff_datetime:
+            return  
+        
+        await weekly_summary(bot)   
+
+async def scheduled_posts(bot):
     @aiocron.crontab('00 10 * * 1', tz=pytz.timezone('US/Eastern'))
     async def weekly_random_results():
         # Fetch all guilds the bot is in and look for the "league-summary" channel
@@ -595,76 +683,7 @@ async def scheduled_posts(bot):
 
                 await channel.send(embed=embed)
 
-    @aiocron.crontab('00 10 * * 1', tz=pytz.timezone('US/Eastern'))  # At 10:00 on Monday, Eastern Time
-    async def schedule_weekly_summary():
-        await weekly_summary(bot)
 
-
-    @aiocron.crontab('00 09 * * *', tz=pytz.timezone('US/Eastern'))
-    async def post_league_standings():
-        # Fetch all guilds the bot is in and look for the "league-summary" channel
-        for guild in bot.guilds:
-            channel = discord.utils.get(guild.text_channels, name="league-summary")
-            if channel:
-                break  # If we find the channel, we exit the loop
-        
-        if not channel:  # If the bot cannot find the channel in any guild, log an error and return
-            print("Error: 'league-summary' channel not found.")
-            return
-        
-        time = datetime.now()
-        count = 1
-        async with AsyncSessionLocal() as session:
-            async with session.begin():
-                # Fetch teams ordered by PointsEarned (DESC) and MatchesCompleted (ASC)
-                stmt = (select(Team)
-                    .where(Team.MatchesCompleted >= 1)
-                    .order_by(Team.PointsEarned.desc(), Team.MatchesCompleted.asc(), Team.PreseasonPoints.desc()))
-                results = await session.execute(stmt)
-                teams = results.scalars().all()
-                
-                # Check if teams exist
-                if not teams:
-                    await channel.send("No results posted yet.")
-                    return
-                embed = discord.Embed(title="Team Standings", description=f"Standings as of <t:{int(time.timestamp())}:F>", color=discord.Color.gold())
-                last_points = None
-                last_matches = None
-                last_preseason = None
-                actual_rank = 0
-                display_rank = 0
-                
-                # Iterate through teams to build the ranking
-                for team in teams:
-                    # Increase actual_rank each loop, this is the absolute position in the list
-                    actual_rank += 1
-                    # Only increase display_rank if the current team's stats do not match the last team's stats
-                    if (team.PointsEarned, team.MatchesCompleted, team.PreseasonPoints) != (last_points, last_matches, last_preseason):
-                        display_rank = actual_rank
-                    last_points = team.PointsEarned
-                    last_matches = team.MatchesCompleted
-                    last_preseason = team.PreseasonPoints
-
-                    # Check if the rank should be displayed as tied
-                    rank_text = f"T{display_rank}" if actual_rank != display_rank else str(display_rank)
-                    
-                    preseason_text = f", Preseason Points: {team.PreseasonPoints}" if team.PreseasonPoints > 0 else ""
-                    embed.add_field(
-                        name=f"{rank_text}. {team.TeamName}", 
-                        value=f"Points Earned: {team.PointsEarned}, Matches Completed: {team.MatchesCompleted}{preseason_text}", 
-                        inline=False
-                    )
-                    
-                    # Limit to top 50 teams in two batches
-                    if actual_rank == 25:
-                        await channel.send(embed=embed)
-                        embed = discord.Embed(title="Team Standings, Continued", description="", color=discord.Color.gold())
-                    elif actual_rank == 50:
-                        break
-
-                # Send the last batch if it exists
-                if actual_rank > 25:
-                    await channel.send(embed=embed)
 
                 
 async def post_standings(interaction):
