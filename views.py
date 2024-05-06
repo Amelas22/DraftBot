@@ -495,8 +495,10 @@ class PersistentView(discord.ui.View):
 
                 sign_up_tags = ' '.join([f"<@{user_id}>" for user_id in session.sign_ups.keys()])
                 await draft_chat_channel.send(f"Pairing posted below. Good luck in your matches! {sign_up_tags}")
+                
                 draft_summary_message = await draft_chat_channel.send(embed=draft_summary_embed)
-                await draft_summary_message.pin()
+                if self.session_type != "test":
+                    await draft_summary_message.pin()
                 session.draft_summary_message_id = str(draft_summary_message.id)
 
 
@@ -789,7 +791,8 @@ class MatchResultSelect(Select):
                         await update_player_stats_and_elo(match_result)
                    
         await update_draft_summary_message(self.bot, self.session_id)
-        await check_and_post_victory_or_draw(self.bot, self.session_id)
+        if draft_session.session_type != "test":
+            await check_and_post_victory_or_draw(self.bot, self.session_id)
         await self.update_pairings_posting(interaction, self.bot, self.session_id, self.match_number) 
                     
     async def update_pairings_posting(self, interaction, bot, draft_session_id, match_number):
