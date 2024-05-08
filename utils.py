@@ -21,7 +21,7 @@ async def split_into_teams(bot, draft_session_id):
     
     # Check if there are any sign-ups to split into teams.
     sign_ups = draft_session.sign_ups
-    if random.randint(1, 100) > 60 or draft_session.session_type == "test":
+    if random.randint(1, 100) > 60 or draft_session.session_type == "test" or draft_session.session_type == "swiss":
         draft_session.true_skill_draft = False
     else:
         draft_session.true_skill_draft = True

@@ -25,10 +25,13 @@ class PersistentView(discord.ui.View):
 
 
     def add_buttons(self):
-        if self.session_type == "random" or self.session_type == "test":
+        if self.session_type != "premade":
             self.add_item(self.create_button("Sign Up", "green", f"sign_up_{self.draft_session_id}", self.sign_up_callback))
             self.add_item(self.create_button("Cancel Sign Up", "red", f"cancel_sign_up_{self.draft_session_id}", self.cancel_sign_up_callback))
-            self.add_item(self.create_button("Create Teams", "blurple", f"randomize_teams_{self.draft_session_id}", self.randomize_teams_callback))
+            if self.session_type != "swiss":
+                self.add_item(self.create_button("Create Teams", "blurple", f"randomize_teams_{self.draft_session_id}", self.randomize_teams_callback))
+            else:
+                self.add_item(self.create_button("Generate Seating Order", "blurple", f"randomize_teams_{self.draft_session_id}", self.randomize_teams_callback))
         elif self.session_type == "premade":
             self.add_item(self.create_button(self.team_a_name, "green", f"Team_A_{self.draft_session_id}", self.team_assignment_callback))
             self.add_item(self.create_button(self.team_b_name, "red", f"Team_B_{self.draft_session_id}", self.team_assignment_callback))
@@ -163,7 +166,7 @@ class PersistentView(discord.ui.View):
                         values(sign_ups=sign_ups)
                     )
                     await session.commit()
-            cancel_message = "You're sign up has been canceled!"
+            cancel_message = "Your sign up has been canceled!"
             await interaction.response.send_message(cancel_message, ephemeral=True)
 
             # After committing, re-fetch the draft session to work with updated data
@@ -247,13 +250,16 @@ class PersistentView(discord.ui.View):
                 if not session:
                     await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
                     return
-
+                if session.session_type == "swiss":
+                    if len(session.sign_ups) != 8:
+                        await interaction.response.send_message("There must be eight players to fire.")
+                    return
                 # Update the session object
                 session.teams_start_time = datetime.now()
                 session.deletion_time = datetime.now() + timedelta(hours=4)
                 session.session_stage = 'teams'
                 # Check session type and prepare teams if necessary
-                if session.session_type == 'random' or session.session_type == 'test':
+                if session.session_type == 'random' or session.session_type == 'test' or session.session_type == 'swiss':
                     from utils import split_into_teams
                     await split_into_teams(bot, session.session_id)
                     session = await get_draft_session(self.draft_session_id)
@@ -269,12 +275,13 @@ class PersistentView(discord.ui.View):
                     title=f"Draft-{session.draft_id} is Ready!",
                     description=f"**Draftmancer Session**: **[Join Here]({session.draft_link})** \n" +
                                 "Host of Draftmancer must manually adjust seating as per below. **TURN OFF RANDOM SEATING SETTING IN DRAFMANCER**" +
-                                "\n\n**AFTER THE DRAFT**, select Create Chat Rooms (give it five seconds to generate rooms) then select Post Pairings" +
-                                "\nPost Pairings will take about 10 seconds to process. Only press once.",
-                    color=discord.Color.blue()
+                                "\n\n**AFTER THE DRAFT**, select Create Chat Rooms and Post Pairings" +
+                                "\nPost Pairings will post in the created draft-chat room",
+                    color=discord.Color.dark_gold() if session.session_type == "swiss" else discord.Color.blue()
                 )
-                embed.add_field(name="Team A" if session.session_type == "random" else f"{session.team_a_name}", value="\n".join(team_a_display_names), inline=True)
-                embed.add_field(name="Team B" if session.session_type == "random" else f"{session.team_b_name}", value="\n".join(team_b_display_names), inline=True)
+                if session.session_type != 'swiss':
+                    embed.add_field(name="Team A" if session.session_type == "random" else f"{session.team_a_name}", value="\n".join(team_a_display_names), inline=True)
+                    embed.add_field(name="Team B" if session.session_type == "random" else f"{session.team_b_name}", value="\n".join(team_b_display_names), inline=True)
                 embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
 
                 # Iterate over the view's children (buttons) to update their disabled status
@@ -365,7 +372,8 @@ class PersistentView(discord.ui.View):
             return
 
         # Delete the draft message if it exists
-        channel = self.bot.get_channel(int(session.draft_channel_id))
+        bot = interaction.client
+        channel = bot.get_channel(int(session.draft_channel_id))
         if channel:
             try:
                 message = await channel.fetch_message(int(session.message_id))
