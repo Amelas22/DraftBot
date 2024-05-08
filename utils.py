@@ -46,8 +46,9 @@ async def split_into_teams(bot, draft_session_id):
                 await db_session.commit()
 
 
-async def generate_seating_order(bot, draft_session):
+async def generate_seating_order(bot, draft_session, command_type=None):
     guild = bot.get_guild(int(draft_session.guild_id))
+
     team_a_members = [guild.get_member(int(user_id)) for user_id in draft_session.team_a]
     team_b_members = [guild.get_member(int(user_id)) for user_id in draft_session.team_b]
 
@@ -60,6 +61,7 @@ async def generate_seating_order(bot, draft_session):
             seating_order.append(team_a_members[i].display_name)
         if i < len(team_b_members) and team_b_members[i]:
             seating_order.append(team_b_members[i].display_name)
+
 
     return seating_order
 

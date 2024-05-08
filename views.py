@@ -1,5 +1,6 @@
 import discord
 import asyncio
+import random
 from datetime import datetime, timedelta
 from discord import SelectOption
 from discord.ui import Button, View, Select, select
@@ -250,25 +251,38 @@ class PersistentView(discord.ui.View):
                 if not session:
                     await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
                     return
-                if session.session_type == "swiss":
-                    if len(session.sign_ups) != 8:
-                        await interaction.response.send_message("There must be eight players to fire.")
-                    return
+                # if session.session_type == "swiss":
+                #     if len(session.sign_ups) != 8:
+                #         await interaction.response.send_message("There must be eight players to fire.")
+                #         return
+
                 # Update the session object
                 session.teams_start_time = datetime.now()
                 session.deletion_time = datetime.now() + timedelta(hours=4)
                 session.session_stage = 'teams'
                 # Check session type and prepare teams if necessary
-                if session.session_type == 'random' or session.session_type == 'test' or session.session_type == 'swiss':
+                if session.session_type == 'random' or session.session_type == 'test':
                     from utils import split_into_teams
                     await split_into_teams(bot, session.session_id)
                     session = await get_draft_session(self.draft_session_id)
 
-                # Generate names for display using the session's sign_ups dictionary
-                team_a_display_names = [session.sign_ups[user_id] for user_id in session.team_a]
-                team_b_display_names = [session.sign_ups[user_id] for user_id in session.team_b]
-                
-                seating_order = await generate_seating_order(bot, session)
+                    # Generate names for display using the session's sign_ups dictionary
+                    
+                if session.session_type != "swiss":
+                    team_a_display_names = [session.sign_ups[user_id] for user_id in session.team_a]
+                    team_b_display_names = [session.sign_ups[user_id] for user_id in session.team_b]
+                    seating_order = await generate_seating_order(bot, session)
+                else:
+                    sign_ups_list = list(session.sign_ups.keys())
+                    random.shuffle(sign_ups_list)  # This shuffles the list in-place
+
+                    # Now sign_ups_list is your seating order, with sign_ups_list[0] being the first seat, etc.
+                    seating_order = [session.sign_ups[user_id] for user_id in sign_ups_list]
+                    new_sign_ups = {user_id: session.sign_ups[user_id] for user_id in sign_ups_list}
+                    await db_session.execute(update(DraftSession)
+                                        .where(DraftSession.session_id == session.session_id)
+                                        .values(sign_ups=new_sign_ups))
+
 
                 # Create the embed message for displaying the teams and seating order
                 embed = discord.Embed(
