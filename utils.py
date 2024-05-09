@@ -70,33 +70,50 @@ async def calculate_pairings(session, db_session):
     if not session:
         print("Draft session not found.")
         return
+    if session.session_type != "swiss":
+        num_players = len(session.team_a) + len(session.team_b)
+        if num_players not in [6, 8]:
+            raise ValueError("Unsupported number of players. Only 6 or 8 players are supported.")
 
-    num_players = len(session.team_a) + len(session.team_b)
-    if num_players not in [6, 8]:
-        raise ValueError("Unsupported number of players. Only 6 or 8 players are supported.")
+        assert len(session.team_a) == len(session.team_b), "Teams must be of equal size."
+        
+        for match_result in session.match_results[:]:
+            db_session.delete(match_result)
+        session.match_results = []
 
-    assert len(session.team_a) == len(session.team_b), "Teams must be of equal size."
-    
-    for match_result in session.match_results[:]:
-        db_session.delete(match_result)
-    session.match_results = []
-
-    # Generate pairings and create MatchResult instances
-    for round_number in range(1, 4):
-        for i, player_a in enumerate(session.team_a):
-            player_b_index = (i + round_number - 1) % len(session.team_b)
-            player_b = session.team_b[player_b_index]
-            match_result = MatchResult(
-                session_id=session.session_id,
-                match_number=session.match_counter,
-                player1_id=player_a,
-                player1_wins=0,
-                player2_id=player_b,
-                player2_wins=0,
-                winner_id=None
-            )
-            db_session.add(match_result)
-            session.match_counter += 1
+        # Generate pairings and create MatchResult instances
+        for round_number in range(1, 4):
+            for i, player_a in enumerate(session.team_a):
+                player_b_index = (i + round_number - 1) % len(session.team_b)
+                player_b = session.team_b[player_b_index]
+                match_result = MatchResult(
+                    session_id=session.session_id,
+                    match_number=session.match_counter,
+                    player1_id=player_a,
+                    player1_wins=0,
+                    player2_id=player_b,
+                    player2_wins=0,
+                    winner_id=None
+                )
+                db_session.add(match_result)
+                session.match_counter += 1
+    else:
+        from tournament import Tournament
+        if session.match_counter <= 4:
+            to = Tournament(session.sign_ups)
+            pairings = to.pair_round()
+            for match in pairings:
+                match_result = MatchResult(
+                    session_id=session.session_id,
+                    match_number=session.match_counter,
+                    player1_id=match[0],
+                    player1_wins=0,
+                    player2_id=match[1],
+                    player2_wins=0,
+                    winner_id=None
+                )
+                db_session.add(match_result)
+                session.match_counter += 1
 
 
 async def post_pairings(bot, guild, session_id):
@@ -118,33 +135,57 @@ async def post_pairings(bot, guild, session_id):
         if not draft_chat_channel_obj:
             print("Draft chat channel not found.")
             return
+        if draft_session.session_type != "swiss":
+            # Organize match results by round
+            match_results_by_round = {}
+            for match_result in draft_session.match_results:
+                round_number = (match_result.match_number - 1) // (len(draft_session.team_a) or 1) + 1
+                match_results_by_round.setdefault(round_number, []).append(match_result)
 
-        # Organize match results by round
-        match_results_by_round = {}
-        for match_result in draft_session.match_results:
-            round_number = (match_result.match_number - 1) // (len(draft_session.team_a) or 1) + 1
-            match_results_by_round.setdefault(round_number, []).append(match_result)
+            for round_number, match_results in match_results_by_round.items():
+                embed = discord.Embed(title=f"Round {round_number} Pairings", color=discord.Color.blue())
+                from views import create_pairings_view  
+                view = await create_pairings_view(bot, guild, session_id, match_results)
 
-        for round_number, match_results in match_results_by_round.items():
-            embed = discord.Embed(title=f"Round {round_number} Pairings", color=discord.Color.blue())
-            from views import create_pairings_view  
-            view = await create_pairings_view(bot, guild, session_id, match_results)
+                for match_result in match_results:
+                    player_name = guild.get_member(int(match_result.player1_id)).display_name if guild.get_member(int(match_result.player1_id)) else 'Unknown'
+                    opponent_name = guild.get_member(int(match_result.player2_id)).display_name if guild.get_member(int(match_result.player2_id)) else 'Unknown'
 
-            for match_result in match_results:
-                player_name = guild.get_member(int(match_result.player1_id)).display_name if guild.get_member(int(match_result.player1_id)) else 'Unknown'
-                opponent_name = guild.get_member(int(match_result.player2_id)).display_name if guild.get_member(int(match_result.player2_id)) else 'Unknown'
+                    # Formatting the pairings without wins
+                    match_info = f"**Match {match_result.match_number}**\n{player_name} v.\n{opponent_name}"
+                    embed.add_field(name="\u200b", value=match_info, inline=False)
+                # Post the pairings message for the current round
+                pairings_message = await draft_chat_channel_obj.send(embed=embed, view=view)
 
-                # Formatting the pairings without wins
-                match_info = f"**Match {match_result.match_number}**\n{player_name} v.\n{opponent_name}"
-                embed.add_field(name="\u200b", value=match_info, inline=False)
-            # Post the pairings message for the current round
-            pairings_message = await draft_chat_channel_obj.send(embed=embed, view=view)
+                # Update the pairing_message_id for each MatchResult in the round
+                for match_result in match_results:
+                    match_result.pairing_message_id = str(pairings_message.id)
+                    db_session.add(match_result)
+        else:
+            
+            match_results_by_round = {}
+            round_number = draft_session.match_counter / 5
+            for match_result in draft_session.match_results:
+                match_results_by_round.setdefault(round_number, []).append(match_result)
+            for round_number, match_results in match_results_by_round.items():
+                embed = discord.Embed(title=f"Round {round_number} Pairings", color=discord.Color.blue())
+                from views import create_pairings_view  
+                view = await create_pairings_view(bot, guild, session_id, match_results)
+                
+                for match_result in match_results:
+                    player_name = guild.get_member(int(match_result.player1_id)).display_name if guild.get_member(int(match_result.player1_id)) else 'Unknown'
+                    opponent_name = guild.get_member(int(match_result.player2_id)).display_name if guild.get_member(int(match_result.player2_id)) else 'Unknown'
 
-            # Update the pairing_message_id for each MatchResult in the round
-            for match_result in match_results:
-                match_result.pairing_message_id = str(pairings_message.id)
-                db_session.add(match_result)
+                    # Formatting the pairings without wins
+                    match_info = f"**Match {match_result.match_number}**\n{player_name} v.\n{opponent_name}"
+                    embed.add_field(name="\u200b", value=match_info, inline=False)
+                # Post the pairings message for the current round
+                pairings_message = await draft_chat_channel_obj.send(embed=embed, view=view)
 
+                # Update the pairing_message_id for each MatchResult in the round
+                for match_result in match_results:
+                    match_result.pairing_message_id = str(pairings_message.id)
+                    db_session.add(match_result)
         # Commit the transaction to save the updates to the database
         await db_session.commit()
 
@@ -178,23 +219,31 @@ async def generate_draft_summary_embed(bot, draft_session_id):
             return None
 
         guild = bot.get_guild(int(draft_session.guild_id))
-        team_a_names = [guild.get_member(int(user_id)).display_name for user_id in draft_session.team_a]
-        team_b_names = [guild.get_member(int(user_id)).display_name for user_id in draft_session.team_b]
+        if draft_session.session_type != "swiss":
+            team_a_names = [guild.get_member(int(user_id)).display_name for user_id in draft_session.team_a]
+            team_b_names = [guild.get_member(int(user_id)).display_name for user_id in draft_session.team_b]
 
-        team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
-        total_matches = draft_session.match_counter - 1
-        half_matches = total_matches // 2
-        title, description, discord_color = await determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, half_matches, total_matches)
+            team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
+            total_matches = draft_session.match_counter - 1
+            half_matches = total_matches // 2
+            title, description, discord_color = await determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, half_matches, total_matches)
 
-        embed = discord.Embed(title=title, description=description, color=discord_color)
-        embed.add_field(name="Team A" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"{draft_session.team_a_name}", value="\n".join(team_a_names), inline=True)
-        embed.add_field(name="Team B" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"{draft_session.team_b_name}", value="\n".join(team_b_names), inline=True)
-        embed.add_field(
-            name="**Draft Standings**", 
-            value=(f"**Team A Wins:** {team_a_wins}" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"**{draft_session.team_a_name} Wins:** {team_a_wins}") + 
-                (f"\n**Team B Wins:** {team_b_wins}" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"\n**{draft_session.team_b_name} Wins:** {team_b_wins}"), 
-            inline=False)
-
+            embed = discord.Embed(title=title, description=description, color=discord_color)
+            embed.add_field(name="Team A" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"{draft_session.team_a_name}", value="\n".join(team_a_names), inline=True)
+            embed.add_field(name="Team B" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"{draft_session.team_b_name}", value="\n".join(team_b_names), inline=True)
+            embed.add_field(
+                name="**Draft Standings**", 
+                value=(f"**Team A Wins:** {team_a_wins}" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"**{draft_session.team_a_name} Wins:** {team_a_wins}") + 
+                    (f"\n**Team B Wins:** {team_b_wins}" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"\n**{draft_session.team_b_name} Wins:** {team_b_wins}"), 
+                inline=False)
+        else:
+            sign_ups_list = list(draft_session.sign_ups.keys())
+            title = f"Swiss Draft - Session {draft_session.draft_id}"
+            description = f"Draft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
+            discord_color = discord.Color.dark_magenta()
+            embed = discord.Embed(title=title, description=description, color=discord_color)
+            seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
+            embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
 
         return embed
 

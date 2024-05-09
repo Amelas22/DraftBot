@@ -498,7 +498,13 @@ class PersistentView(discord.ui.View):
                         break
 
                 # Execute tasks to create chat channels
-                if self.session_type != "test":
+                if self.session_type == "swiss":
+                    sign_ups_list = list(session.sign_ups.keys())
+                    all_members = [guild.get_member(int(user_id)) for user_id in sign_ups_list]
+                    #all_members = [session.sign_ups[user_id] for user_id in sign_ups_list]
+                    session.draft_chat_channel = str(await self.create_team_channel(guild, "Draft", all_members))
+                    draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
+                elif self.session_type != "test":
                     team_a_members = [guild.get_member(int(user_id)) for user_id in session.team_a if guild.get_member(int(user_id))]
                     team_b_members = [guild.get_member(int(user_id)) for user_id in session.team_b if guild.get_member(int(user_id))]
                     all_members = team_a_members + team_b_members
@@ -516,7 +522,7 @@ class PersistentView(discord.ui.View):
                 
 
                 sign_up_tags = ' '.join([f"<@{user_id}>" for user_id in session.sign_ups.keys()])
-                await draft_chat_channel.send(f"Pairing posted below. Good luck in your matches! {sign_up_tags}")
+                await draft_chat_channel.send(f"Pairings posted below. Good luck in your matches! {sign_up_tags}")
                 draft_summary_message = await draft_chat_channel.send(embed=draft_summary_embed)
                 await draft_summary_message.pin()
                 session.draft_summary_message_id = str(draft_summary_message.id)
@@ -544,7 +550,7 @@ class PersistentView(discord.ui.View):
             del PROCESSING_ROOMS_PAIRINGS[session_id]
             await interaction.followup.send("Pairings posted.", ephemeral=True)
 
-    async def create_team_channel(self, guild, team_name, team_members, team_a, team_b):
+    async def create_team_channel(self, guild, team_name, team_members, team_a=None, team_b=None):
         draft_category = discord.utils.get(guild.categories, name="Draft Channels")
         voice_category = discord.utils.get(guild.categories, name="Draft Voice")
         session = await get_draft_session(self.draft_session_id)
@@ -598,7 +604,7 @@ class PersistentView(discord.ui.View):
         # Create the channel with the specified overwrites
         channel = await guild.create_text_channel(name=channel_name, overwrites=overwrites, category=draft_category)
         self.channel_ids.append(channel.id)
-        if session.premade_match_id and team_name != "Draft":
+        if session.premade_match_id and team_name != "Draft" and session.session_type == "premade":
             # Construct voice channel name
             voice_channel_name = f"{team_name}-Voice-{session.draft_id}"
             # Create the voice channel with the same permissions as the text channel
