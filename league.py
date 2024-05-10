@@ -483,8 +483,8 @@ class ChallengeTimeModal(Modal):
                         guild_id=str(interaction.guild_id),
                         draft_link=draft_link,
                         draft_id=draft_id,
-                        draft_start_time=datetime.now(),
-                        deletion_time=None,
+                        draft_start_time=utc_start_dt,
+                        deletion_time=utc_start_dt + timedelta(hours=6),
                         session_type=self.command_type,
                         premade_match_id=None,
                         team_a_name=None,
@@ -492,12 +492,12 @@ class ChallengeTimeModal(Modal):
                         tracked_draft = True
                     )
                     session.add(new_draft_session)
-            embed = discord.Embed(title=f"Looking for Drafters! Draft scheduled to start in {relative_time}", 
+            embed = discord.Embed(title=f"Test Draft scheduled to start in {relative_time}. Sign up Below!", 
                                                 description=f"Start Range: Between {formatted_start_time} and {formatted_end_time}\n\n\n**Draftmancer Session**: **[Join Here]({draft_link})**" +
-                                                f"\nClick 'Sign Up' below. You will be pinged 15 minutes before draft start.\n\n", 
+                                                f"\n\nClick 'Sign Up' below if you can make the scheduled draft. You will be pinged 15 minutes before draft start. \n\nUse draftmancer random seating and pairings.\n\n", 
                                                 color=discord.Color.blue())
             embed.add_field(name="\n\nSign-Ups", value="No players yet.", inline=False)
-            
+            embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1218187262488215642/1237195855560183829/image.png?ex=663ac3ed&is=6639726d&hm=3b72a4187732961a2d774534f5ea0d7b644e150303209900afbaf42ebff5db05&")
             from views import PersistentView
             from session import get_draft_session
             draft_session = await get_draft_session(session_id)
@@ -524,6 +524,8 @@ class ChallengeTimeModal(Modal):
 
             # Pin the message to the channel
             await message.pin()
+            from utils import send_channel_reminders
+            asyncio.create_task(send_channel_reminders(bot, updated_session.session_id))
 
         elif self.command_type == "post":
             try:
