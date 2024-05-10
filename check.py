@@ -3,7 +3,7 @@ import asyncio
 
 async def check_table_schema(db_path):
     async with aiosqlite.connect(db_path) as db:
-        cursor = await db.execute("PRAGMA table_info(draft_session);")
+        cursor = await db.execute("PRAGMA table_info(draft_sessions);")
         columns = await cursor.fetchall()
         for col in columns:
             print(col)
