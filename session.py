@@ -131,6 +131,17 @@ class WeeklyLimit(Base):
     MatchesPlayed = Column(Integer, default=0)
     PointsEarned = Column(Integer, default=0)
 
+class PlayerLimit(Base):
+    __tablename__ = 'player_limits'
+
+    player_id = Column(String(64), primary_key=True)
+    display_name = Column(String(128))  
+    drafts_participated = Column(Integer, default=0)
+    WeekStartDate = Column(DateTime, nullable=False)
+    match_one_points = Column(Integer, default=0)
+    match_two_points = Column(Integer, default=0)
+    match_three_points = Column(Integer, default=0)
+
 class TeamRegistration(Base):
     __tablename__ = 'team_registration'
 

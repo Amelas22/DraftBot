@@ -100,7 +100,7 @@ async def league_commands(bot):
                     draft_start_time=datetime.now(),
                     deletion_time=datetime.now() + timedelta(hours=3),
                     session_type="swiss",
-                    premade_match_id=None,
+                    premade_match_id=9000,
                     team_a_name=None,
                     team_b_name=None,
                     tracked_draft = True

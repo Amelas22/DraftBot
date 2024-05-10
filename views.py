@@ -312,7 +312,7 @@ class PersistentView(discord.ui.View):
         # Respond with the embed and updated view
         await interaction.response.edit_message(embed=embed, view=self)
         if session.tracked_draft and session.premade_match_id is not None:
-            await check_weekly_limits(interaction, session.premade_match_id)
+            await check_weekly_limits(interaction, session.premade_match_id, session.session_type, session.session_id)
 
     async def team_assignment_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         session = await get_draft_session(self.draft_session_id)
@@ -487,8 +487,12 @@ class PersistentView(discord.ui.View):
                 session.session_stage = 'pairings'
                 guild = interaction.guild
                 bot = interaction.client
-                
-                await calculate_pairings(session, db_session)
+                if session.session_type != "swiss":
+                    await calculate_pairings(session, db_session)
+                else:
+                    state_to_save, match_counter = await calculate_pairings(session, db_session)
+                    session.match_counter = match_counter
+                    session.swiss_matches = state_to_save
                 if session.session_type == "random":
                     await update_player_stats_for_draft(session.session_id, guild)
                 

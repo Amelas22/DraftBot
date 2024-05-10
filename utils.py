@@ -2,9 +2,9 @@ import random
 import discord
 import asyncio
 import pytz
-from sqlalchemy import update, select, func, or_, desc
+from sqlalchemy import update, select, func, or_, desc, and_
 from datetime import datetime, timedelta
-from session import AsyncSessionLocal, get_draft_session, Challenge, DraftSession, MatchResult, PlayerStats, Match, Team, WeeklyLimit
+from session import AsyncSessionLocal, get_draft_session, Challenge, PlayerLimit, DraftSession, MatchResult, PlayerStats, Match, Team, WeeklyLimit
 from sqlalchemy.orm import selectinload, joinedload
 from trueskill import Rating, rate_1vs1
 from discord.ui import View
@@ -70,7 +70,6 @@ async def calculate_pairings(session, db_session):
     if not session:
         print("Draft session not found.")
         return
-    print(session.match_counter)
     if session.session_type != "swiss":
         num_players = len(session.team_a) + len(session.team_b)
         if num_players not in [6, 8]:
@@ -116,7 +115,7 @@ async def calculate_pairings(session, db_session):
             db_session.add(match_result)
             session.match_counter += 1
         state_to_save = to.get_state()
-        session.swiss_matches = state_to_save
+        return state_to_save, session.match_counter
 
     else:
         from tournament import Tournament
@@ -147,11 +146,8 @@ async def calculate_pairings(session, db_session):
                 match_counter += 1
             
         state_to_save = to.get_state()
-
-        await db_session.execute(update(DraftSession)
-                                        .where(DraftSession.session_id == session.session_id)
-                                        .values(swiss_matches=state_to_save, match_counter=match_counter))
-        
+        return state_to_save, match_counter
+          
 
 
 async def post_pairings(bot, guild, session_id):
@@ -396,36 +392,80 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                     if match.winner_id:
                         completed_matches.append(match.match_number)
                 if len(completed_matches) == 4 and draft_session.match_counter > 12:
-                    players = await calculate_pairings(draft_session, session)
-                    
-                    # Sorting players by win points in descending order and then by name if tied
-                    sorted_players = sorted(players.items(), key=lambda x: (-x[1]['win_points'], x[1]['display_name']))
-                    
-                    # Formatting the sorted list for display
-                    standings = "\n".join(f"{idx + 1}. {player['display_name']} - {player['win_points']} wins" for idx, (_, player) in enumerate(sorted_players))
-                    
-                    sign_ups_list = list(draft_session.sign_ups.keys())
-                    title = f"AlphaFrog Prelim Swiss Draft - Final Results"
-                    description = f"Draft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
-                    discord_color = discord.Color.gold()
-                    embed = discord.Embed(title=title, description=description, color=discord_color)
-                    seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
-                    embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
-                    embed.add_field(name="Standings", value=standings, inline=False)
                     draft_chat_channel = guild.get_channel(int(draft_session.draft_chat_channel))
-                    if draft_chat_channel:
-                        await post_or_update_victory_message(session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat')
+                    if draft_session.victory_message_id_draft_chat:
+                        await draft_chat_channel.send("Results already posted for this draft")
+                        return
+                    else:    
+                        players = await calculate_pairings(draft_session, session)
+                        
+                        # Sorting players by win points in descending order and then by name if tied
+                        sorted_players = sorted(players.items(), key=lambda x: (-x[1]['win_points'], x[1]['display_name']))
+                        
+                        # Formatting the sorted list for display
+                        standings = "\n".join(f"{idx + 1}. {player['display_name']} - {player['win_points']} wins" for idx, (_, player) in enumerate(sorted_players))
+                        
+                        sign_ups_list = list(draft_session.sign_ups.keys())
+                        title = f"AlphaFrog Prelim Swiss Draft - Final Results"
+                        description = f"Draft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
+                        discord_color = discord.Color.gold()
+                        embed = discord.Embed(title=title, description=description, color=discord_color)
+                        seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
+                        embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+                        embed.add_field(name="Standings", value=standings, inline=False)
+                        
+                        if draft_chat_channel:
+                            await post_or_update_victory_message(session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat')
 
-                    # Determine the correct results channel
-                    results_channel_name = "team-draft-results" if draft_session.session_type == "random" else "league-draft-results"
-                    results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
-                    if results_channel:
-                        await post_or_update_victory_message(session, results_channel, embed, draft_session, 'victory_message_id_results_channel')
-                    await session.commit()
+                        # Determine the correct results channel
+                        results_channel_name = "team-draft-results" if draft_session.session_type == "random" else "league-draft-results"
+                        results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
+                        if results_channel:
+                            await post_or_update_victory_message(session, results_channel, embed, draft_session, 'victory_message_id_results_channel')
+                        pacific = pytz.timezone('US/Pacific')
+                        utc = pytz.utc
+                        pacific_time = utc.localize(draft_session.teams_start_time).astimezone(pacific)
+                        midnight_pacific = pacific.localize(datetime(pacific_time.year, pacific_time.month, pacific_time.day))
+                        start_of_week = midnight_pacific - timedelta(days=midnight_pacific.weekday())
+                        for user_id, player in players.items():
+                            # Query to find existing entry for the player this week
+                            player_weekly_limit_stmt = select(PlayerLimit).where(
+                                PlayerLimit.player_id == user_id,
+                                PlayerLimit.WeekStartDate == start_of_week
+                            )
+                            player_weekly_limit_result = await session.execute(player_weekly_limit_stmt)
+                            player_weekly_limit = player_weekly_limit_result.scalars().first()
+
+                            if player_weekly_limit:
+                                if player_weekly_limit.drafts_participated == 1:
+                                    player_weekly_limit.match_one_points = player['win_points']
+                                elif player_weekly_limit.drafts_participated == 2:
+                                    player_weekly_limit.match_two_points = player['win_points']
+                                elif player_weekly_limit.drafts_participated == 3:
+                                    player_weekly_limit.match_three_points = player['win_points']
+                            else:
+                                print("player doesn't exist")
+                                # If not, create a new record
+                                new_player_limit = PlayerLimit(
+                                    player_id=user_id,
+                                    display_name=player['display_name'],
+                                    drafts_participated=1,
+                                    WeekStartDate=start_of_week,
+                                    match_one_points=player['win_points'],
+                                    match_two_points=0,
+                                    match_three_points=0
+                                )
+                                session.add(new_player_limit)
+                        await session.commit()
                 elif len(completed_matches) == 4:
-                    await calculate_pairings(draft_session, session)
-                    await post_pairings(bot, guild, draft_session.session_id)
+                    state_to_save, match_counter = await calculate_pairings(draft_session, session)
+                    await session.execute(update(DraftSession)
+                        .where(DraftSession.session_id == draft_session.session_id)
+                        .values(swiss_matches=state_to_save, match_counter=match_counter))
+            
                     await session.commit()
+                    await post_pairings(bot, guild, draft_session.session_id)
+
                 return
 
             team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
@@ -720,75 +760,81 @@ async def get_or_create_weekly_limit(db_session, team_id, team_name, start_of_we
 
     return weekly_limit
 
-async def check_weekly_limits(interaction, match_id):
+async def check_weekly_limits(interaction, match_id, session_type=None, session_id=None):
     
     limit_messages = []
-    pacific = pytz.timezone('US/Pacific')
-    utc = pytz.utc
-    async with AsyncSessionLocal() as db_session: 
-        async with db_session.begin():
-            stmt = select(Match).where(Match.MatchID == match_id)
-            match = await db_session.scalar(stmt)
-            if not match:
-                print("Match not found.")
-                return
-
-            # Convert UTC MatchDate to Pacific time and set time to midnight
-            pacific_time = utc.localize(match.MatchDate).astimezone(pacific)
-            midnight_pacific = pacific.localize(datetime(pacific_time.year, pacific_time.month, pacific_time.day))
-
-            # Calculate the start of the week
-            start_of_week = midnight_pacific - timedelta(days=midnight_pacific.weekday())
-
-            teams_to_check = [match.TeamAID, match.TeamBID]
-            for team_id in teams_to_check:
-                team_weekly_limit_stmt = select(WeeklyLimit).where(
-                    WeeklyLimit.TeamID == team_id,
-                    WeeklyLimit.WeekStartDate == start_of_week.date()
-                )
-                team_weekly_limit = await db_session.scalar(team_weekly_limit_stmt)
-
-                if team_weekly_limit and (team_weekly_limit.MatchesPlayed >= 5 or team_weekly_limit.PointsEarned >= 3):
-                    # Update DraftSession to untrack match
-                    await db_session.execute(
-                        update(DraftSession).
-                        where(DraftSession.premade_match_id == str(match_id)).
-                        values(tracked_draft=False)
+    if session_type != "swiss":
+        async with AsyncSessionLocal() as db_session: 
+            async with db_session.begin():
+                stmt = select(Match).where(Match.MatchID == match_id)
+                match = await db_session.scalar(stmt)
+                if not match:
+                    print("Match not found.")
+                    return
+                pacific = pytz.timezone('US/Pacific')
+                utc = pytz.utc
+                pacific_time = utc.localize(match.MatchDate).astimezone(pacific)
+                midnight_pacific = pacific.localize(datetime(pacific_time.year, pacific_time.month, pacific_time.day))
+                start_of_week = midnight_pacific - timedelta(days=midnight_pacific.weekday())
+                teams_to_check = [match.TeamAID, match.TeamBID]
+                for team_id in teams_to_check:
+                    team_weekly_limit_stmt = select(WeeklyLimit).where(
+                        WeeklyLimit.TeamID == team_id,
+                        WeeklyLimit.WeekStartDate == start_of_week
                     )
+                    team_weekly_limit = await db_session.scalar(team_weekly_limit_stmt)
 
-                    condition = "matches" if team_weekly_limit.MatchesPlayed >= 5 else "points"
-                    limit_messages.append(f"{team_weekly_limit.TeamName} has exceeded the weekly limit for {condition}. This match will not be tracked.")
+                    if team_weekly_limit and (team_weekly_limit.MatchesPlayed >= 5 or team_weekly_limit.PointsEarned >= 3):
+                        # Update DraftSession to untrack match
+                        await db_session.execute(
+                            update(DraftSession).
+                            where(DraftSession.premade_match_id == str(match_id)).
+                            values(tracked_draft=False)
+                        )
 
-            await db_session.commit()
+                        condition = "matches" if team_weekly_limit.MatchesPlayed >= 5 else "points"
+                        limit_messages.append(f"{team_weekly_limit.TeamName} has exceeded the weekly limit for {condition}. This match will not be tracked.")
 
+                await db_session.commit()
+    else:
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                query = select(DraftSession).filter_by(session_id=session_id)
+                result = await db_session.execute(query)
+                draft_session = result.scalars().first()
+                pacific = pytz.timezone('US/Pacific')
+                utc = pytz.utc
+                pacific_time = utc.localize(draft_session.teams_start_time).astimezone(pacific)
+                midnight_pacific = pacific.localize(datetime(pacific_time.year, pacific_time.month, pacific_time.day))
+                start_of_week = midnight_pacific - timedelta(days=midnight_pacific.weekday())
+                if draft_session:
+                    sign_ups = draft_session.sign_ups  
+                    for user_id, display_name in sign_ups.items():
+                        player_id = str(user_id)
+                        # Query to find existing entry for the player this week
+                        player_weekly_limit_stmt = select(PlayerLimit).where(
+                                PlayerLimit.player_id == player_id,
+                                PlayerLimit.WeekStartDate == start_of_week
+                        )
+                        player_weekly_limit_result = await db_session.execute(player_weekly_limit_stmt)
+                        player_weekly_limit = player_weekly_limit_result.scalars().first()
+
+                        if player_weekly_limit:
+                            # If exists, increment the counter
+                            player_weekly_limit.drafts_participated += 1
+                            if player_weekly_limit.drafts_participated > 3:
+                                condition = "matches" if player_weekly_limit.drafts_participated else "points"
+                                limit_messages.append(f"{player_weekly_limit.display_name} has exceeded the weekly limit for {condition}. This match will not be tracked.")
+
+                    # Commit the changes to the database
+                    await db_session.commit()
+                    
     if limit_messages:
         await interaction.followup.send("\n".join(limit_messages))
     else:
         # If no limits are exceeded, proceed with your draft creation or next steps here.
         pass
 
-
-# async def post_daily_results(interaction):
-#     now = datetime.now()
-#     twenty_four_hours_ago = now - timedelta(hours=24)
-#     async with AsyncSessionLocal() as db_session:
-#         async with db_session.begin():
-#             stmt = select(Match).where(Match.MatchDate.between(twenty_four_hours_ago, now),
-#                                        not_(Match.DraftWinnerID == None))
-#             results = await db_session.execute(stmt)
-#             matches = results.scalars().all()
-            
-#             if not matches:
-#                 await interaction.response.send_message("No matches found in the last 24 hours.", ephemeral=True)
-#                 return
-            
-#             embed = discord.Embed(title="Daily League Results", description="", color=discord.Color.blue())
-#             for match in matches:
-#                     result_line = f"{match.TeamAName} defeated {match.TeamBName} ({match.TeamAWins} - {match.TeamBWins})" if match.TeamAWins > match.TeamBWins else f"{match.TeamBName} defeated {match.TeamAName} ({match.TeamBWins} - {match.TeamAWins})" ,
-#                     embed.description += result_line + "\n"
-            
-#             await interaction.response.send_message(embed=embed)
-            
 
 async def update_player_stats_and_elo(match_result):
     async with AsyncSessionLocal() as session:
