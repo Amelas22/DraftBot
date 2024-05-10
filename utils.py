@@ -130,30 +130,35 @@ async def calculate_pairings(session, db_session):
         for match in match_results:
             winner_id = match.player1_id if match.player1_wins > match.player2_wins else match.player2_id
             to.record_match(player1_id=match.player1_id, player2_id=match.player2_id, winner_id=winner_id)
-        print(to.round_number)
-        pairings = to.pair_round()
-        print(pairings)
-        print(session.match_counter)
         match_counter = session.match_counter
-        for match in pairings:
-            match_result = MatchResult(
-                session_id=session.session_id,
-                match_number=match_counter,
-                player1_id=match[0],
-                player1_wins=0,
-                player2_id=match[1],
-                player2_wins=0,
-                winner_id=None
-            )
-            db_session.add(match_result)
-            match_counter += 1
-        
+        if match_counter > 12:
+            state_to_save = to.get_state()
+            await db_session.execute(update(DraftSession)
+                                        .where(DraftSession.session_id == session.session_id)
+                                        .values(swiss_matches=state_to_save, match_counter=match_counter))
+            await db_session.commit()
+            return to.players
+        elif match_counter < 12:
+            pairings = to.pair_round()
+            
+            for match in pairings:
+                match_result = MatchResult(
+                    session_id=session.session_id,
+                    match_number=match_counter,
+                    player1_id=match[0],
+                    player1_wins=0,
+                    player2_id=match[1],
+                    player2_wins=0,
+                    winner_id=None
+                )
+                db_session.add(match_result)
+                match_counter += 1
+            
         state_to_save = to.get_state()
-        print(state_to_save)
 
         await db_session.execute(update(DraftSession)
-                                         .where(DraftSession.session_id == session.session_id)
-                                         .values(swiss_matches=state_to_save, match_counter=match_counter))
+                                        .where(DraftSession.session_id == session.session_id)
+                                        .values(swiss_matches=state_to_save, match_counter=match_counter))
         await db_session.commit()
 
 
@@ -398,7 +403,33 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 for match in match_results:
                     if match.winner_id:
                         completed_matches.append(match.match_number)
-                if len(completed_matches) == 4:
+                if len(completed_matches) == 4 and draft_session.match_counter > 12:
+                    players = await calculate_pairings(draft_session, session)
+                    
+                    # Sorting players by win points in descending order and then by name if tied
+                    sorted_players = sorted(players.items(), key=lambda x: (-x[1]['win_points'], x[1]['display_name']))
+                    
+                    # Formatting the sorted list for display
+                    standings = "\n".join(f"{idx + 1}. {player['display_name']} - {player['win_points']} wins" for idx, (_, player) in enumerate(sorted_players))
+                    
+                    sign_ups_list = list(draft_session.sign_ups.keys())
+                    title = f"AlphaFrog Prelim Swiss Draft - Final Results"
+                    description = f"Draft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
+                    discord_color = discord.Color.gold()
+                    embed = discord.Embed(title=title, description=description, color=discord_color)
+                    seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
+                    embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+                    embed.add_field(name="Standings", value=standings, inline=False)
+                    draft_chat_channel = guild.get_channel(int(draft_session.draft_chat_channel))
+                    if draft_chat_channel:
+                        await post_or_update_victory_message(session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat')
+
+                    # Determine the correct results channel
+                    results_channel_name = "team-draft-results" if draft_session.session_type == "random" else "league-draft-results"
+                    results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
+                    if results_channel:
+                        await post_or_update_victory_message(session, results_channel, embed, draft_session, 'victory_message_id_results_channel')
+                elif len(completed_matches) == 4:
                     await calculate_pairings(draft_session, session)
                     await post_pairings(bot, guild, draft_session.session_id)
                     
