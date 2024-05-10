@@ -710,63 +710,59 @@ async def scheduled_posts(bot):
     async def daily_random_results():
         # Fetch all guilds the bot is in and look for the "league-summary" channel
         for guild in bot.guilds:
-            channel = discord.utils.get(guild.text_channels, name="team-draft-results")
-            if channel:
-                break  # If we find the channel, we exit the loop
-        
-        if not channel:  # If the bot cannot find the channel in any guild, log an error and return
-            print("Error: 'team-draft-results' channel not found.")
-            return
+            channel = discord.utils.get(guild.text_channels, name="team-draft-results")      
+            if not channel:  # If the bot cannot find the channel in any guild, log an error and return
+                continue
 
-        eastern_tz = pytz.timezone('US/Eastern')
-        now = datetime.now(eastern_tz)
-        start_time = eastern_tz.localize(datetime(now.year, now.month, now.day, 3, 0)) - timedelta(days=1)  # 3 AM previous day
-        end_time = start_time + timedelta(hours=24)  # 3 AM current day
+            eastern_tz = pytz.timezone('US/Eastern')
+            now = datetime.now(eastern_tz)
+            start_time = eastern_tz.localize(datetime(now.year, now.month, now.day, 3, 0)) - timedelta(days=1)  # 3 AM previous day
+            end_time = start_time + timedelta(hours=24)  # 3 AM current day
 
-        async with AsyncSessionLocal() as db_session:
-            async with db_session.begin():
-                # Query for DraftSessions within the time range
-                stmt = select(DraftSession).where(
-                    DraftSession.teams_start_time.between(start_time, end_time),
-                    not_(DraftSession.victory_message_id_draft_chat == None),
-                    DraftSession.session_type == "random"
-                )
-                result = await db_session.execute(stmt)
-                sessions = result.scalars().all()
+            async with AsyncSessionLocal() as db_session:
+                async with db_session.begin():
+                    # Query for DraftSessions within the time range
+                    stmt = select(DraftSession).where(
+                        DraftSession.teams_start_time.between(start_time, end_time),
+                        not_(DraftSession.victory_message_id_draft_chat == None),
+                        DraftSession.session_type == "random"
+                    )
+                    result = await db_session.execute(stmt)
+                    sessions = result.scalars().all()
 
-                if not sessions:
-                    await channel.send("No matches found in the last 24 hours.")
-                    return
-                
-                all_usernames = []
-                for session in sessions:
-                    # Directly use the sign_ups dictionary
-                    usernames = list(session.sign_ups.values())
-                    all_usernames.extend(usernames)
+                    if not sessions:
+                        await channel.send("No matches found in the last 24 hours.")
+                        return
+                    
+                    all_usernames = []
+                    for session in sessions:
+                        # Directly use the sign_ups dictionary
+                        usernames = list(session.sign_ups.values())
+                        all_usernames.extend(usernames)
 
-                username_counts = Counter(all_usernames)
-                top_five_drafters = username_counts.most_common(5)
+                    username_counts = Counter(all_usernames)
+                    top_five_drafters = username_counts.most_common(5)
 
 
-                drafter_counts = Counter()
-                for session in sessions:
-                    undefeated_drafters = list(session.trophy_drafters) if session.trophy_drafters else []
-                    drafter_counts.update(undefeated_drafters)
+                    drafter_counts = Counter()
+                    for session in sessions:
+                        undefeated_drafters = list(session.trophy_drafters) if session.trophy_drafters else []
+                        drafter_counts.update(undefeated_drafters)
 
-                # Format the drafter names and their counts for display
-                undefeated_drafters_field_value = "\n".join([f"{drafter} x{count}" if count > 1 else drafter for drafter, count in drafter_counts.items()])
+                    # Format the drafter names and their counts for display
+                    undefeated_drafters_field_value = "\n".join([f"{drafter} x{count}" if count > 1 else drafter for drafter, count in drafter_counts.items()])
 
 
-                total_drafts = len(sessions)
+                    total_drafts = len(sessions)
 
-                date_str = start_time.strftime("%B %d, %Y")
-                top_drafters_field_value = "\n".join([f"**{name}:** {count} drafts" for name, count in top_five_drafters])
-                embed = discord.Embed(title=f"Open Queue Daily Results - {date_str}", description="", color=discord.Color.dark_purple())
-                embed.add_field(name="**Completed Drafts**", value=total_drafts, inline=False)
-                embed.add_field(name="**Top 5 Drafters**\n", value=top_drafters_field_value, inline=False)
-                embed.add_field(name="**Trophy Drafters**", value=undefeated_drafters_field_value or "No trophies :(", inline=False)
+                    date_str = start_time.strftime("%B %d, %Y")
+                    top_drafters_field_value = "\n".join([f"**{name}:** {count} drafts" for name, count in top_five_drafters])
+                    embed = discord.Embed(title=f"Open Queue Daily Results - {date_str}", description="", color=discord.Color.dark_purple())
+                    embed.add_field(name="**Completed Drafts**", value=total_drafts, inline=False)
+                    embed.add_field(name="**Top 5 Drafters**\n", value=top_drafters_field_value, inline=False)
+                    embed.add_field(name="**Trophy Drafters**", value=undefeated_drafters_field_value or "No trophies :(", inline=False)
 
-                await channel.send(embed=embed)
+                    await channel.send(embed=embed)
 
 
 

@@ -97,12 +97,13 @@ async def calculate_pairings(session, db_session):
                 )
                 db_session.add(match_result)
                 session.match_counter += 1
-    
+
     elif session.session_type == "swiss" and session.match_counter == 1:
         from tournament import Tournament
         to = Tournament(sign_ups=session.sign_ups)
         pairings = to.pair_round()
         for match in pairings:
+
             match_result = MatchResult(
                 session_id=session.session_id,
                 match_number=session.match_counter,
@@ -618,6 +619,42 @@ async def cleanup_sessions_task(bot):
         # Sleep for a certain amount of time before running again
         await asyncio.sleep(3600)  # Sleep for 1 hour
 
+async def send_channel_reminders(bot, session_id):
+    async with AsyncSessionLocal() as db_session:
+        async with db_session.begin():
+            stmt = select(DraftSession).where(DraftSession.session_id == session_id)
+            result = await db_session.execute(stmt)
+            session = result.scalars().first()
+    if session.draft_start_time.tzinfo is None:
+        draft_start_time = pytz.utc.localize(session.draft_start_time)
+    
+    # Calculate the reminder time (15 minutes before the draft start time)
+    reminder_time = draft_start_time - timedelta(minutes=15)
+    current_time = datetime.now(pytz.utc)  # Current time in UTC
+    wait_seconds = (reminder_time - current_time).total_seconds()
+    print(wait_seconds)
+    # Wait until the reminder time
+    if wait_seconds > 0:
+        await asyncio.sleep(wait_seconds)
+        
+    async with AsyncSessionLocal() as db_session:
+        async with db_session.begin():
+            stmt = select(DraftSession).where(DraftSession.session_id == session_id)
+            result = await db_session.execute(stmt)
+            session = result.scalars().first()
+    # Format the mention string and construct the reminder message
+    mentions = " ".join([f"<@{user_id}>" for user_id in session.sign_ups])
+    reminder_message = f"{mentions}\nReminder: Your draft starts in 15 minutes! Join here: {session.draft_link}"
+
+    # Fetch the channel and send the reminder
+    guild = bot.get_guild(int(session.guild_id))
+    if guild:
+        channel = guild.get_channel(int(session.draft_channel_id))
+        if channel:
+            try:
+                await channel.send(reminder_message)
+            except Exception as e:
+                print(f"Failed to send reminder in channel {channel.name}: {e}")
 
 async def update_player_stats_for_draft(session_id, guild):
     async with AsyncSessionLocal() as db_session: 
