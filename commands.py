@@ -328,6 +328,13 @@ async def league_commands(bot):
         
         await post_standings(interaction)
 
+    @bot.slash_command(name='player_standings', description='Display the AlphaFrog standings')
+    async def player_standings(interaction: discord.Interaction):
+        from utils import calculate_player_standings
+        embed = await calculate_player_standings()
+        await interaction.response.send_message(embed=embed)
+
+
     @bot.slash_command(name="trophies", description="Display the Trophy Leaderboard for the current month.")
     async def trophies(ctx):
         eastern_tz = pytz.timezone('US/Eastern')
@@ -623,6 +630,18 @@ async def league_commands(bot):
         await weekly_summary(bot)   
 
 async def scheduled_posts(bot):
+
+    @aiocron.crontab('00 10 * * *', tz=pytz.timezone('US/Eastern'))
+    async def daily_swiss_results():
+        for guild in bot.guilds:
+            channel = discord.utils.get(guild.text_channels, name="league-draft-results")      
+            if not channel:  # If the bot cannot find the channel in any guild, log an error and return
+                continue
+        from utils import calculate_player_standings
+        embed = await calculate_player_standings()
+        await channel.send(embed=embed)
+
+
     @aiocron.crontab('00 10 * * 1', tz=pytz.timezone('US/Eastern'))
     async def weekly_random_results():
         # Fetch all guilds the bot is in and look for the "league-summary" channel

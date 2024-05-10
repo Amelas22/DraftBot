@@ -81,3 +81,4 @@ class Tournament:
             pairings.append((group.pop(), None))  # None signifies a bye
 
         return pairings
+    

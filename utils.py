@@ -1039,3 +1039,35 @@ async def re_register_views(bot):
                             except Exception as e:
                                 print(f"Failed to re-register view for pairing message ID: {pairing_message_id}, error: {e}")
 
+async def calculate_player_standings():
+    time = datetime.now()
+    async with AsyncSessionLocal() as db_session:
+        async with db_session.begin():# Query all records from PlayerLimit
+            stmt = select(PlayerLimit)
+            results = await db_session.execute(stmt)
+            
+            player_scores = {}
+
+            for row in results.scalars().all():
+                player_id = row.player_id
+                display_name = row.display_name
+                week_points = sorted([row.match_one_points, row.match_two_points, row.match_three_points], reverse=True)
+                top_two_week_points = sum(week_points[:2])  # Sum of the top two points
+
+                if player_id not in player_scores:
+                    player_scores[player_id] = {'display_name': display_name, 'total_points': 0}
+                
+                player_scores[player_id]['total_points'] += top_two_week_points
+
+            # Sort players by total points
+            sorted_players = sorted(player_scores.values(), key=lambda x: x['total_points'], reverse=True)
+            
+            # Prepare the embed
+            embed = discord.Embed(title="AlphaFrog Prelim Standings", description=f"Standings as of <t:{int(time.timestamp())}:F>", color=discord.Color.dark_purple())
+            standings_text = ""
+            for idx, player in enumerate(sorted_players, start=1):
+                standings_text += f"\n{idx}. **{player['display_name']}** - {player['total_points']} points"
+            
+            embed.add_field(name="Standings\n ", value=standings_text, inline=False)
+            
+            return embed
