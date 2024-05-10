@@ -44,6 +44,7 @@ async def main():
     
     await league_commands(bot)
     await scheduled_posts(bot)
+    # await swiss_draft_commands(bot)
     await init_db()
 
     # Run the bot

@@ -1,39 +1,32 @@
-import aiosqlite
-
-async def adjust_weekly_limit_table(db_path):
-    async with aiosqlite.connect(db_path) as db:
-        # Create a new table without the UNIQUE constraint on 'TeamName'
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS new_weekly_limits (
-                ID INTEGER PRIMARY KEY,
-                TeamID INTEGER,
-                TeamName TEXT NOT NULL,
-                WeekStartDate DATETIME NOT NULL,
-                MatchesPlayed INTEGER DEFAULT 0,
-                PointsEarned INTEGER DEFAULT 0,
-                FOREIGN KEY (TeamID) REFERENCES teams (TeamID)
-            );
-        """)
-
-        # Copy all data from the old table to the new table
-        await db.execute("""
-            INSERT INTO new_weekly_limits (ID, TeamID, TeamName, WeekStartDate, MatchesPlayed, PointsEarned)
-            SELECT ID, TeamID, TeamName, WeekStartDate, MatchesPlayed, PointsEarned
-            FROM weekly_limits;
-        """)
-
-        # Drop the old table
-        await db.execute("DROP TABLE weekly_limits")
-
-        # Rename the new table
-        await db.execute("ALTER TABLE new_weekly_limits RENAME TO weekly_limits")
-
-        # Commit changes
-        await db.commit()
-
-# Path to your database
-db_path = 'drafts.db'
-
-# Run the function in an asyncio event loop
 import asyncio
-asyncio.run(adjust_weekly_limit_table(db_path))
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.sql import text
+
+DATABASE_URL = "sqlite+aiosqlite:///drafts.db"
+engine = create_async_engine(DATABASE_URL, echo=True)
+
+async def add_column_if_not_exists():
+    async with engine.connect() as conn:
+        # Check if the column already exists
+        exists_query = """
+        PRAGMA table_info(draft_sessions);
+        """
+        result = await conn.execute(text(exists_query))
+        columns = result.fetchall()  # Correct usage without 'await'
+        column_names = [column[1] for column in columns]  # Column names are in the second position
+        
+        if "swiss_matches" not in column_names:
+            # Add the swiss_matches column to the draft_sessions table
+            add_column_query = """
+            ALTER TABLE draft_sessions ADD COLUMN swiss_matches JSON;
+            """
+            await conn.execute(text(add_column_query))
+            print("Column 'swiss_matches' added to 'draft_sessions' table.")
+        else:
+            print("Column 'swiss_matches' already exists in 'draft_sessions' table.")
+
+async def main():
+    await add_column_if_not_exists()
+
+if __name__ == "__main__":
+    asyncio.run(main())
