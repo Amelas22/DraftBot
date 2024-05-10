@@ -62,6 +62,8 @@ class DraftSession(Base):
     premade_match_id = Column(String(128))
     tracked_draft = Column(Boolean, default=False)
     match_results = relationship("MatchResult", back_populates="draft_session", foreign_keys="[MatchResult.session_id]")
+    swiss_matches = Column(JSON)
+    
     def __repr__(self):
         return f"<DraftSession(session_id={self.session_id}, guild_id={self.guild_id})>"
 
@@ -128,6 +130,17 @@ class WeeklyLimit(Base):
     WeekStartDate = Column(DateTime, nullable=False)
     MatchesPlayed = Column(Integer, default=0)
     PointsEarned = Column(Integer, default=0)
+
+class PlayerLimit(Base):
+    __tablename__ = 'player_limits'
+
+    player_id = Column(String(64), primary_key=True)
+    display_name = Column(String(128))  
+    drafts_participated = Column(Integer, default=0)
+    WeekStartDate = Column(DateTime, nullable=False)
+    match_one_points = Column(Integer, default=0)
+    match_two_points = Column(Integer, default=0)
+    match_three_points = Column(Integer, default=0)
 
 class TeamRegistration(Base):
     __tablename__ = 'team_registration'
