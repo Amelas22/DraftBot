@@ -117,10 +117,7 @@ async def calculate_pairings(session, db_session):
             session.match_counter += 1
         state_to_save = to.get_state()
         session.swiss_matches = state_to_save
-        print(session.swiss_matches)
-        # await db_session.execute(update(DraftSession)
-        #                                  .where(DraftSession.session_id == session.session_id)
-        #                                  .values(swiss_matches=state_to_save))
+
     else:
         from tournament import Tournament
         to = Tournament(from_state=session.swiss_matches)
@@ -132,11 +129,6 @@ async def calculate_pairings(session, db_session):
             to.record_match(player1_id=match.player1_id, player2_id=match.player2_id, winner_id=winner_id)
         match_counter = session.match_counter
         if match_counter > 12:
-            state_to_save = to.get_state()
-            await db_session.execute(update(DraftSession)
-                                        .where(DraftSession.session_id == session.session_id)
-                                        .values(swiss_matches=state_to_save, match_counter=match_counter))
-            await db_session.commit()
             return to.players
         elif match_counter < 12:
             pairings = to.pair_round()
@@ -159,7 +151,7 @@ async def calculate_pairings(session, db_session):
         await db_session.execute(update(DraftSession)
                                         .where(DraftSession.session_id == session.session_id)
                                         .values(swiss_matches=state_to_save, match_counter=match_counter))
-        await db_session.commit()
+        
 
 
 async def post_pairings(bot, guild, session_id):
@@ -429,10 +421,11 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                     results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
                     if results_channel:
                         await post_or_update_victory_message(session, results_channel, embed, draft_session, 'victory_message_id_results_channel')
+                    await session.commit()
                 elif len(completed_matches) == 4:
                     await calculate_pairings(draft_session, session)
                     await post_pairings(bot, guild, draft_session.session_id)
-                    
+                    await session.commit()
                 return
 
             team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
