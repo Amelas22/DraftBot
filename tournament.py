@@ -1,29 +1,52 @@
 import random
 
 class Tournament:
-    def __init__(self, sign_ups):
-        self.players = {}
-        self.round_number = 0
-        # Initialize players
-        for user_id, display_name in sign_ups.items():
-            self.players[user_id] = {
-                'name': display_name,
-                'win_points': 0,
-                'opponents': []
+    def __init__(self, sign_ups=None, from_state=None):
+        if from_state:
+            self.__dict__.update(from_state)
+        else:
+            self.players = {}
+            self.round_number = 0
+            self.matches = []
+            self.config = {
+                "total_rounds": 3,
+                "points_for_win": 1,
+                "points_for_loss": 0,
             }
-        self.initial_pairings(sign_ups)
+            for user_id, display_name in sign_ups.items():
+                self.add_player(user_id, display_name)
+            self.initial_pairings(sign_ups)
 
+    def add_player(self, user_id, display_name):
+        self.players[user_id] = {
+            "display_name": display_name,
+            "win_points": 0,
+            "opponents": []
+        }
+
+    def record_match(self, player1_id, player2_id, winner_id):
+        self.players[winner_id]['win_points'] += self.config["points_for_win"]
+        self.players[player1_id]['opponents'].append(player2_id)
+        self.players[player2_id]['opponents'].append(player1_id)
+        self.matches.append({
+            "player1_id": player1_id,
+            "player2_id": player2_id,
+            "winner_id": winner_id
+        })
+
+    def get_state(self):
+        return {
+            "players": self.players,
+            "round_number": self.round_number,
+            "matches": self.matches,
+            "config": self.config
+        }
     def initial_pairings(self, sign_ups):
         # Pair players according to the specific pattern for the first round
         self.pairings = []
         ids = list(sign_ups.keys())
         for i in range(4):  # 4 pairings for 8 players
             self.pairings.append((ids[i], ids[i+4]))
-
-    def record_match(self, winner_id, loser_id):
-        self.players[winner_id]['win_points'] += 1
-        self.players[winner_id]['opponents'].append(loser_id)
-        self.players[loser_id]['opponents'].append(winner_id)
 
     def pair_round(self):
         if self.round_number == 0:

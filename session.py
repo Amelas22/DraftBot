@@ -62,6 +62,8 @@ class DraftSession(Base):
     premade_match_id = Column(String(128))
     tracked_draft = Column(Boolean, default=False)
     match_results = relationship("MatchResult", back_populates="draft_session", foreign_keys="[MatchResult.session_id]")
+    swiss_matches = Column(JSON)
+    
     def __repr__(self):
         return f"<DraftSession(session_id={self.session_id}, guild_id={self.guild_id})>"
 

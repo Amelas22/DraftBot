@@ -70,6 +70,7 @@ async def calculate_pairings(session, db_session):
     if not session:
         print("Draft session not found.")
         return
+    print(session.match_counter)
     if session.session_type != "swiss":
         num_players = len(session.team_a) + len(session.team_b)
         if num_players not in [6, 8]:
@@ -97,23 +98,63 @@ async def calculate_pairings(session, db_session):
                 )
                 db_session.add(match_result)
                 session.match_counter += 1
+    
+    elif session.session_type == "swiss" and session.match_counter == 1:
+        from tournament import Tournament
+        to = Tournament(sign_ups=session.sign_ups)
+        pairings = to.pair_round()
+        for match in pairings:
+            match_result = MatchResult(
+                session_id=session.session_id,
+                match_number=session.match_counter,
+                player1_id=match[0],
+                player1_wins=0,
+                player2_id=match[1],
+                player2_wins=0,
+                winner_id=None
+            )
+            db_session.add(match_result)
+            session.match_counter += 1
+        state_to_save = to.get_state()
+        session.swiss_matches = state_to_save
+        print(session.swiss_matches)
+        # await db_session.execute(update(DraftSession)
+        #                                  .where(DraftSession.session_id == session.session_id)
+        #                                  .values(swiss_matches=state_to_save))
     else:
         from tournament import Tournament
-        if session.match_counter <= 4:
-            to = Tournament(session.sign_ups)
-            pairings = to.pair_round()
-            for match in pairings:
-                match_result = MatchResult(
-                    session_id=session.session_id,
-                    match_number=session.match_counter,
-                    player1_id=match[0],
-                    player1_wins=0,
-                    player2_id=match[1],
-                    player2_wins=0,
-                    winner_id=None
-                )
-                db_session.add(match_result)
-                session.match_counter += 1
+        to = Tournament(from_state=session.swiss_matches)
+        stmt = select(MatchResult).where(MatchResult.session_id == session.session_id).order_by(MatchResult.match_number.desc()).limit(4)
+        results = await db_session.execute(stmt)
+        match_results = results.scalars().all()
+        for match in match_results:
+            winner_id = match.player1_id if match.player1_wins > match.player2_wins else match.player2_id
+            to.record_match(player1_id=match.player1_id, player2_id=match.player2_id, winner_id=winner_id)
+        print(to.round_number)
+        pairings = to.pair_round()
+        print(pairings)
+        print(session.match_counter)
+        match_counter = session.match_counter
+        for match in pairings:
+            match_result = MatchResult(
+                session_id=session.session_id,
+                match_number=match_counter,
+                player1_id=match[0],
+                player1_wins=0,
+                player2_id=match[1],
+                player2_wins=0,
+                winner_id=None
+            )
+            db_session.add(match_result)
+            match_counter += 1
+        
+        state_to_save = to.get_state()
+        print(state_to_save)
+
+        await db_session.execute(update(DraftSession)
+                                         .where(DraftSession.session_id == session.session_id)
+                                         .values(swiss_matches=state_to_save, match_counter=match_counter))
+        await db_session.commit()
 
 
 async def post_pairings(bot, guild, session_id):
@@ -162,10 +203,13 @@ async def post_pairings(bot, guild, session_id):
                     match_result.pairing_message_id = str(pairings_message.id)
                     db_session.add(match_result)
         else:
-            
+            round_number = (draft_session.match_counter - 1) // 4
+            stmt = select(MatchResult).where(MatchResult.session_id == draft_session.session_id, MatchResult.match_number.between((draft_session.match_counter - 4), draft_session.match_counter)).order_by(MatchResult.match_number.asc())
+            results = await db_session.execute(stmt)
+            match_results = results.scalars().all()
             match_results_by_round = {}
-            round_number = draft_session.match_counter / 5
-            for match_result in draft_session.match_results:
+            round_number = (draft_session.match_counter - 1) // 4
+            for match_result in match_results:
                 match_results_by_round.setdefault(round_number, []).append(match_result)
             for round_number, match_results in match_results_by_round.items():
                 embed = discord.Embed(title=f"Round {round_number} Pairings", color=discord.Color.blue())
@@ -320,7 +364,8 @@ async def update_draft_summary_message(bot, draft_session_id):
         if not draft_session:
             print("The draft session could not be found.")
             return
-
+        if draft_session.session_type == "swiss":
+            return
         updated_embed = await generate_draft_summary_embed(bot, draft_session_id)
         guild = bot.get_guild(int(draft_session.guild_id))
         channel = guild.get_channel(int(draft_session.draft_chat_channel))
@@ -343,6 +388,20 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
             guild = bot.get_guild(int(draft_session.guild_id))
             if not guild:
                 print("Guild not found.")
+                return
+            
+            if draft_session.session_type == "swiss":
+                stmt = select(MatchResult).where(MatchResult.session_id == draft_session_id).order_by(MatchResult.match_number.desc()).limit(4)
+                results = await session.execute(stmt)
+                match_results = results.scalars().all()
+                completed_matches = []
+                for match in match_results:
+                    if match.winner_id:
+                        completed_matches.append(match.match_number)
+                if len(completed_matches) == 4:
+                    await calculate_pairings(draft_session, session)
+                    await post_pairings(bot, guild, draft_session.session_id)
+                    
                 return
 
             team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
