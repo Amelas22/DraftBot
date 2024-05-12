@@ -22,10 +22,6 @@ class CubeSelectionModal(discord.ui.Modal):
             team_b_name = self.children[2].value
 
         cube_option = "MTG" if not cube_name else cube_name
-        # draft_start_time = datetime.now().timestamp()
-        # session_id = f"{interaction.user.id}-{int(draft_start_time)}"
-        # draft_id = ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
-        # draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
         draft_start_time, session_id, draft_id, draft_link = await create_draft_link(interaction.user.id)
 
         async with AsyncSessionLocal() as session:

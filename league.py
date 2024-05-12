@@ -138,10 +138,8 @@ class LeagueDraftView(discord.ui.View):
             # Register Team B if not present
             team_b, team_b_msg = await register_team_to_db(team_b_name)
 
-            draft_start_time = datetime.now().timestamp()
-            session_id = f"{interaction.user.id}-{int(draft_start_time)}"
-            draft_id = ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
-            draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
+            from modals import create_draft_link
+            draft_start_time, session_id, draft_id, draft_link = await create_draft_link(interaction.user.id)
             
             async with AsyncSessionLocal() as session:
                 async with session.begin():
@@ -472,10 +470,9 @@ class ChallengeTimeModal(Modal):
             formatted_start_time = f"<t:{int(utc_start_dt.timestamp())}:F>"
             formatted_end_time = f"<t:{int(utc_end_dt.timestamp())}:F>" 
             relative_time = f"<t:{int(utc_start_dt.timestamp())}:R>"
-            draft_start_time = datetime.now().timestamp()
-            session_id = f"{interaction.user.id}-{int(draft_start_time)}"
-            draft_id = ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
-            draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
+            from modals import create_draft_link
+            draft_start_time, session_id, draft_id, draft_link = await create_draft_link(interaction.user.id)
+
             async with AsyncSessionLocal() as session:
                 async with session.begin():
                     new_draft_session = DraftSession(
@@ -954,10 +951,9 @@ class ChallengeView(View):
                             # Register Team B if not present
                             await register_team_to_db(challenge.team_b)
 
-                            draft_start_time = datetime.now().timestamp()
-                            session_id = f"{interaction.user.id}-{int(draft_start_time)}"
-                            draft_id = ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
-                            draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
+                            from modals import create_draft_link
+                            draft_start_time, session_id, draft_id, draft_link = await create_draft_link(interaction.user.id)
+            
                             
                             async with AsyncSessionLocal() as session:
                                 async with session.begin():
