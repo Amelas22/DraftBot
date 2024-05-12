@@ -15,6 +15,7 @@ class CubeSelectionModal(discord.ui.Modal):
             self.add_item(discord.ui.InputText(label="Team B Name", placeholder="Team B Name", custom_id="team_b_input"))
 
     async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         bot = interaction.client
         cube_name = self.children[0].value
         if self.session_type == "premade":
@@ -23,14 +24,14 @@ class CubeSelectionModal(discord.ui.Modal):
 
         cube_option = "MTG" if not cube_name else cube_name
         draft_start_time, session_id, draft_id, draft_link = await create_draft_link(interaction.user.id)
-
+        # await interaction.response.send_message("Setting up Draft")
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 new_draft_session = DraftSession(
-                    session_id=session_id,
+                    session_id=str(session_id),
                     guild_id=str(interaction.guild_id),
-                    draft_link=draft_link,
-                    draft_id=draft_id,
+                    draft_link=str(draft_link),
+                    draft_id=str(draft_id),
                     draft_start_time=datetime.now(),
                     deletion_time=datetime.now() + timedelta(hours=3),
                     session_type=self.session_type,
@@ -96,8 +97,8 @@ class CubeSelectionModal(discord.ui.Modal):
                 team_a_name=getattr(draft_session, 'team_a_name', None),
                 team_b_name=getattr(draft_session, 'team_b_name', None)
             )
-            message = await interaction.response.send_message(embed=embed, view=view)
-        
+            message = await interaction.followup.send(embed=embed, view=view, ephemeral=False)
+            await message.pin()
         if new_draft_session:
             async with AsyncSessionLocal() as session:
                 async with session.begin():
@@ -108,9 +109,6 @@ class CubeSelectionModal(discord.ui.Modal):
                         updated_session.draft_channel_id = str(message.channel.id)
                         session.add(updated_session)
                         await session.commit()
-
-        # Pin the message to the channel
-        await message.pin()
 
 async def create_draft_link(user_id):
         draft_start_time = datetime.now().timestamp()
