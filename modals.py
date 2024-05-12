@@ -22,10 +22,11 @@ class CubeSelectionModal(discord.ui.Modal):
             team_b_name = self.children[2].value
 
         cube_option = "MTG" if not cube_name else cube_name
-        draft_start_time = datetime.now().timestamp()
-        session_id = f"{interaction.user.id}-{int(draft_start_time)}"
-        draft_id = ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
-        draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
+        # draft_start_time = datetime.now().timestamp()
+        # session_id = f"{interaction.user.id}-{int(draft_start_time)}"
+        # draft_id = ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
+        # draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
+        draft_start_time, session_id, draft_id, draft_link = await create_draft_link(interaction.user.id)
 
         async with AsyncSessionLocal() as session:
             async with session.begin():
@@ -44,11 +45,10 @@ class CubeSelectionModal(discord.ui.Modal):
                 )
                 session.add(new_draft_session)
 
-        await interaction.response.send_message("Setting up a draft...")
         if self.session_type == "random":
-            cube_drafter_role = discord.utils.get(interaction.guild.roles, name="Cube Drafter")
-            ping_message = f"{cube_drafter_role.mention if cube_drafter_role else 'Cube Drafter'} {cube_option} Cube Draft Queue Open!"
-            await interaction.followup.send(ping_message)
+            # cube_drafter_role = discord.utils.get(interaction.guild.roles, name="Cube Drafter")
+            # ping_message = f"{cube_drafter_role.mention if cube_drafter_role else 'Cube Drafter'} {cube_option} Cube Draft Queue Open!"
+            # await interaction.followup.send(ping_message)
 
             # Create the embed with cube_option in the title
             embed_title = f"Looking for Players! {cube_option} Random Team Draft - Queue Opened <t:{int(draft_start_time)}:R>"
@@ -100,7 +100,7 @@ class CubeSelectionModal(discord.ui.Modal):
                 team_a_name=getattr(draft_session, 'team_a_name', None),
                 team_b_name=getattr(draft_session, 'team_b_name', None)
             )
-            message = await interaction.followup.send(embed=embed, view=view)
+            message = await interaction.response.send_message(embed=embed, view=view)
         
         if new_draft_session:
             async with AsyncSessionLocal() as session:
@@ -116,5 +116,11 @@ class CubeSelectionModal(discord.ui.Modal):
         # Pin the message to the channel
         await message.pin()
 
+async def create_draft_link(user_id):
+        draft_start_time = datetime.now().timestamp()
+        session_id = f"{user_id}-{int(draft_start_time)}"
+        draft_id = ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
+        draft_link = f"http://beta.draftmancer.com/?session=DB{draft_id}"
 
+        return draft_start_time, session_id, draft_id, draft_link
 
