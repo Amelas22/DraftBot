@@ -18,36 +18,19 @@ class CubeSelectionModal(discord.ui.Modal):
         await interaction.response.defer(ephemeral=True)
         bot = interaction.client
         cube_name = self.children[0].value
-        if self.session_type == "premade":
-            team_a_name = self.children[1].value
-            team_b_name = self.children[2].value
-
+        team_a_name = self.children[1].value if self.session_type == "premade" else "Team A"
+        team_b_name = self.children[2].value if self.session_type == "premade" else "Team B"
         cube_option = "MTG" if not cube_name else cube_name
         draft_start_time, session_id, draft_id, draft_link = await create_draft_link(interaction.user.id)
-        # await interaction.response.send_message("Setting up Draft")
+        guild_id = str(interaction.guild_id)
         async with AsyncSessionLocal() as session:
             async with session.begin():
-                new_draft_session = DraftSession(
-                    session_id=str(session_id),
-                    guild_id=str(interaction.guild_id),
-                    draft_link=str(draft_link),
-                    draft_id=str(draft_id),
-                    draft_start_time=datetime.now(),
-                    deletion_time=datetime.now() + timedelta(hours=3),
-                    session_type=self.session_type,
-                    premade_match_id=None,
-                    team_a_name=None if self.session_type != "premade" else team_a_name,
-                    team_b_name=None if self.session_type != "premade" else team_b_name,
-                    tracked_draft = True
-                )
+                new_draft_session = await create_draft_session(session_id, guild_id, draft_link, draft_id,
+                               self.session_type, team_a_name=None, team_b_name=None)
                 session.add(new_draft_session)
 
         if self.session_type == "random":
-            # cube_drafter_role = discord.utils.get(interaction.guild.roles, name="Cube Drafter")
-            # ping_message = f"{cube_drafter_role.mention if cube_drafter_role else 'Cube Drafter'} {cube_option} Cube Draft Queue Open!"
-            # await interaction.followup.send(ping_message)
 
-            # Create the embed with cube_option in the title
             embed_title = f"Looking for Players! {cube_option} Random Team Draft - Queue Opened <t:{int(draft_start_time)}:R>"
             embed = discord.Embed(title=embed_title,
             description="\n**How to use bot**:\n1. Click sign up and click the draftmancer link. Draftmancer host still has to update settings and import from CubeCobra.\n" +
@@ -114,7 +97,23 @@ async def create_draft_link(user_id):
         draft_start_time = datetime.now().timestamp()
         session_id = f"{user_id}-{int(draft_start_time)}"
         draft_id = ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
-        draft_link = f"http://beta.draftmancer.com/?session=DB{draft_id}"
+        draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
 
         return draft_start_time, session_id, draft_id, draft_link
 
+async def create_draft_session(session_id, guild_id, draft_link, draft_id,
+                               session_type, team_a_name=None, team_b_name=None):
+    session = DraftSession(
+        session_id=str(session_id),
+        guild_id=str(guild_id),
+        draft_link=str(draft_link),
+        draft_id=str(draft_id),
+        draft_start_time=datetime.now(),
+        deletion_time=datetime.now() + timedelta(hours=3),
+        session_type=session_type,
+        premade_match_id=None,
+        team_a_name=None if session_type != "premade" else team_a_name,
+        team_b_name=None if session_type != "premade" else team_b_name,
+        tracked_draft = True
+    )
+    return session
