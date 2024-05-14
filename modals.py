@@ -70,7 +70,16 @@ class CubeSelectionModal(discord.ui.Modal):
 
             print(f"Premade Draft: {session_id} has been created.")
 
-        
+        elif self.session_type == "swiss":
+            embed_title = f"AlphaFrog Prelims: Looking for Players! Queue Opened <t:{int(draft_start_time)}:R>"
+            embed = discord.Embed(title=embed_title,
+                description="Swiss 8 player draft. Draftmancer host must still update the draftmanacer session with the chosen cube. Turn off randomized seating." +
+                f"\n\n**Weekly Cube: [{cube_name}](https://cubecobra.com/cube/list/{cube_name})** \n**Draftmancer Session**: **[Join Here]({draft_link})**",
+                color=discord.Color.dark_gold()
+                )
+            embed.add_field(name="Sign-Ups", value="No players yet.", inline=False)
+            print(f"Swiss Draft session {session_id} has been created.")
+            
         draft_session = await get_draft_session(session_id)
         if draft_session:
             view = PersistentView(
@@ -111,7 +120,7 @@ async def create_draft_session(session_id, guild_id, draft_link, draft_id,
         draft_start_time=datetime.now(),
         deletion_time=datetime.now() + timedelta(hours=3),
         session_type=session_type,
-        premade_match_id=None,
+        premade_match_id=None if session_type != "swiss" else 9000,
         team_a_name=None if session_type != "premade" else team_a_name,
         team_b_name=None if session_type != "premade" else team_b_name,
         tracked_draft = True
