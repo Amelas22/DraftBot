@@ -10,6 +10,7 @@ from collections import Counter
 
 pacific_time_zone = pytz.timezone('America/Los_Angeles')
 cutoff_datetime = pacific_time_zone.localize(datetime(2024, 5, 6, 0, 0))
+league_start_time = pacific_time_zone.localize(datetime(2024, 5, 20, 0, 0))
 
 async def league_commands(bot):
 
@@ -268,13 +269,6 @@ async def league_commands(bot):
             return
         
         await post_standings(interaction)
-
-    @bot.slash_command(name='player_standings', description='Display the AlphaFrog standings')
-    async def player_standings(interaction: discord.Interaction):
-        from utils import calculate_player_standings
-        embed = await calculate_player_standings()
-        await interaction.response.send_message(embed=embed)
-
 
     @bot.slash_command(name="trophies", description="Display the Trophy Leaderboard for the current month.")
     async def trophies(ctx):
@@ -574,6 +568,13 @@ async def swiss_draft_commands(bot):
 
     @aiocron.crontab('00 10 * * *', tz=pytz.timezone('US/Eastern'))
     async def daily_swiss_results():
+        global league_start_time
+
+        # Check if current time is before the cutoff time
+        current_time = datetime.now(pacific_time_zone)
+        if current_time < league_start_time + timedelta(hours=11):
+            return
+        
         for guild in bot.guilds:
             channel = discord.utils.get(guild.text_channels, name="league-draft-results")      
             if not channel:  # If the bot cannot find the channel in any guild, log an error and return
@@ -584,62 +585,30 @@ async def swiss_draft_commands(bot):
 
     @bot.slash_command(name="swiss_draft", description="Post an eight player swiss pod")
     async def swiss(interaction: discord.Interaction):
-        await interaction.defer()
-        # determine chosen cube
-        cube_name = "LSVCube" # determine chosen cube
+        global league_start_time
+
+        # Check if current time is before the cutoff time
+        current_time = datetime.now(pacific_time_zone)
+        if current_time < league_start_time:
+            await interaction.response.send_message("This season is not yet active. Season begins on Monday, May 20th! Please reach out to a Cube Overseer if you believe you received this message in error.", ephemeral=True)
+            return
         
-        from modals import create_draft_link
-        draft_start_time, session_id, draft_id, draft_link = await create_draft_link(interaction.user.id)
-    
+        from modals import CubeSelectionModal
+        await interaction.response.send_modal(CubeSelectionModal(session_type="swiss", title="Select Cube"))
 
-        async with AsyncSessionLocal() as session:
-            async with session.begin():
-                new_draft_session = DraftSession(
-                    session_id=session_id,
-                    guild_id=str(interaction.guild_id),
-                    draft_link=draft_link,
-                    draft_id=draft_id,
-                    draft_start_time=datetime.now(),
-                    deletion_time=datetime.now() + timedelta(hours=3),
-                    session_type="swiss",
-                    premade_match_id=9000,
-                    team_a_name=None,
-                    team_b_name=None,
-                    tracked_draft = True
-                )
-                session.add(new_draft_session)
-        embed_title = f"AlphaFrog Prelims: Looking for Players! Queue Opened <t:{int(draft_start_time)}:R>"
-        embed = discord.Embed(title=embed_title,
-            description="Swiss 8 player draft. Draftmancer host must still update the draftmanacer session with this week's cube. Turn off randomized seating." +
-            f"\n\n**Weekly Cube: [{cube_name}](https://cubecobra.com/cube/list/{cube_name})** \n**Draftmancer Session**: **[Join Here]({draft_link})**",
-            color=discord.Color.dark_gold()
-            )
-        embed.add_field(name="Sign-Ups", value="No players yet.", inline=False)
-        from session import get_draft_session
-        from views import PersistentView
-        draft_session = await get_draft_session(session_id)
-        if draft_session:
-            view = PersistentView(
-                bot=None,
-                draft_session_id=draft_session.session_id,
-                session_type="swiss",
-                team_a_name=None,
-                team_b_name=None
-            )
-            message = await interaction.followup.send(embed=embed, view=view)
-        if new_draft_session:
-            async with AsyncSessionLocal() as session:
-                async with session.begin():
-                    result = await session.execute(select(DraftSession).filter_by(session_id=new_draft_session.session_id))
-                    updated_session = result.scalars().first()
-                    if updated_session:
-                        updated_session.message_id = str(message.id)
-                        updated_session.draft_channel_id = str(message.channel.id)
-                        session.add(updated_session)
-                        await session.commit()
+    @bot.slash_command(name='player_standings', description='Display the AlphaFrog standings')
+    async def player_standings(interaction: discord.Interaction):
+        global league_start_time
 
-        # Pin the message to the channel
-        await message.pin()
+        # Check if current time is before the cutoff time
+        current_time = datetime.now(pacific_time_zone)
+        if current_time < league_start_time:
+            await interaction.response.send_message("This season is not yet active. Season begins on Monday, May 20th! Please reach out to a Cube Overseer if you believe you received this message in error.", ephemeral=True)
+            return
+        
+        from utils import calculate_player_standings
+        embed = await calculate_player_standings()
+        await interaction.response.send_message(embed=embed)
 
 async def scheduled_posts(bot):
 

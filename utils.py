@@ -444,8 +444,9 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                                     player_weekly_limit.match_two_points = player['win_points']
                                 elif player_weekly_limit.drafts_participated == 3:
                                     player_weekly_limit.match_three_points = player['win_points']
+                                elif player_weekly_limit.drafts_participated == 4:
+                                    player_weekly_limit.match_four_points = player['win_points']
                             else:
-                                print("player doesn't exist")
                                 # If not, create a new record
                                 new_player_limit = PlayerLimit(
                                     player_id=user_id,
@@ -454,9 +455,26 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                                     WeekStartDate=start_of_week,
                                     match_one_points=player['win_points'],
                                     match_two_points=0,
-                                    match_three_points=0
+                                    match_three_points=0,
+                                    match_four_points=0
                                 )
                                 session.add(new_player_limit)
+                                try:
+                                    member = await guild.fetch_member(int(user_id))  # Fetch the member
+                                    league_drafter_role = discord.utils.get(guild.roles, name='League Drafter')  # Get the role by name
+                                    
+                                    if league_drafter_role:
+                                        if league_drafter_role not in member.roles:  # Check if the member does not already have the role
+                                            await member.add_roles(league_drafter_role)
+                                            print(f"Assigned 'League Drafter' role to {member.name}")
+                                    else:
+                                        print("Role 'League Drafter' not found in the guild.")
+                                        
+                                except discord.Forbidden:
+                                    print("Permission error: Unable to assign roles. Check the bot's role position and permissions.")
+                                except discord.HTTPException as e:
+                                    print(f"HTTP exception occurred: {e}")
+
                         await session.commit()
                 elif len(completed_matches) == 4:
                     state_to_save, match_counter = await calculate_pairings(draft_session, session)
@@ -859,7 +877,7 @@ async def check_weekly_limits(interaction, match_id, session_type=None, session_
                         if player_weekly_limit:
                             # If exists, increment the counter
                             player_weekly_limit.drafts_participated += 1
-                            if player_weekly_limit.drafts_participated > 3:
+                            if player_weekly_limit.drafts_participated > 4:
                                 condition = "matches" if player_weekly_limit.drafts_participated else "points"
                                 limit_messages.append(f"{player_weekly_limit.display_name} has exceeded the weekly limit for {condition}. This match will not be tracked.")
 
@@ -1079,7 +1097,7 @@ async def re_register_views(bot):
 async def calculate_player_standings():
     time = datetime.now()
     async with AsyncSessionLocal() as db_session:
-        async with db_session.begin():# Query all records from PlayerLimit
+        async with db_session.begin():
             stmt = select(PlayerLimit)
             results = await db_session.execute(stmt)
             
@@ -1088,23 +1106,45 @@ async def calculate_player_standings():
             for row in results.scalars().all():
                 player_id = row.player_id
                 display_name = row.display_name
-                week_points = sorted([row.match_one_points, row.match_two_points, row.match_three_points], reverse=True)
-                top_two_week_points = sum(week_points[:2])  # Sum of the top two points
+                all_points = [row.match_one_points, row.match_two_points, row.match_three_points]
+                total_points = sum(all_points)
+                top_two_week_points = sum(sorted(all_points, reverse=True)[:2])
 
                 if player_id not in player_scores:
-                    player_scores[player_id] = {'display_name': display_name, 'total_points': 0}
-                
-                player_scores[player_id]['total_points'] += top_two_week_points
+                    player_scores[player_id] = {
+                        'display_name': display_name,
+                        'total_points': 0,
+                        'total_all_points': 0,
+                        'drafts_participated': 0
+                    }
 
-            # Sort players by total points
-            sorted_players = sorted(player_scores.values(), key=lambda x: x['total_points'], reverse=True)
-            
+                player_scores[player_id]['total_points'] += top_two_week_points
+                player_scores[player_id]['total_all_points'] += total_points
+                player_scores[player_id]['drafts_participated'] += 1
+
+            # Calculate win percentage and sort
+            for player_id, details in player_scores.items():
+                total_drafts = details['drafts_participated']
+                if total_drafts > 0:
+                    details['win_percentage'] = (details['total_all_points'] / (3 * total_drafts)) * 100  # Multiply by 100 to get percentage
+
+            sorted_players = sorted(
+                player_scores.values(), 
+                key=lambda x: (x['total_points'], x.get('win_percentage', 0)),
+                reverse=True
+            )
+
             # Prepare the embed
-            embed = discord.Embed(title="AlphaFrog Prelim Standings", description=f"Standings as of <t:{int(time.timestamp())}:F>", color=discord.Color.dark_purple())
+            embed = discord.Embed(
+                title="AlphaFrog Prelim Standings",
+                description=f"Standings as of <t:{int(time.timestamp())}:F>",
+                color=discord.Color.dark_purple()
+            )
             standings_text = ""
             for idx, player in enumerate(sorted_players, start=1):
-                standings_text += f"\n{idx}. **{player['display_name']}** - {player['total_points']} points"
+                # Format win percentage to display as an integer percentage
+                standings_text += f"\n{idx}. **{player['display_name']}** - {player['total_points']} points (Win %: {player['win_percentage']:.0f}%)"
             
-            embed.add_field(name="Standings\n ", value=standings_text, inline=False)
+            embed.add_field(name="Standings", value=standings_text, inline=False)
             
             return embed

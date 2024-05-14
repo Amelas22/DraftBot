@@ -141,6 +141,7 @@ class PlayerLimit(Base):
     match_one_points = Column(Integer, default=0)
     match_two_points = Column(Integer, default=0)
     match_three_points = Column(Integer, default=0)
+    match_four_points = Column(Integer, default=0)
 
 class TeamRegistration(Base):
     __tablename__ = 'team_registration'

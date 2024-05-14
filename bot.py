@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from session import init_db
 from modals import CubeSelectionModal
 from utils import cleanup_sessions_task
-from commands import league_commands, scheduled_posts
+from commands import league_commands, scheduled_posts, swiss_draft_commands
 
 
 
@@ -39,12 +39,12 @@ async def main():
 
     @bot.slash_command(name='premadedraft', description='Start a team draft with premade teams', guild_id=None)
     async def premade_draft(interaction: discord.Interaction):
-            await interaction.response.send_modal(CubeSelectionModal(session_type="premade", title="Select Cube"))
+        await interaction.response.send_modal(CubeSelectionModal(session_type="premade", title="Select Cube"))
 
     
     await league_commands(bot)
     await scheduled_posts(bot)
-    # await swiss_draft_commands(bot)
+    await swiss_draft_commands(bot)
     await init_db()
 
     # Run the bot
