@@ -557,6 +557,13 @@ class PersistentView(discord.ui.View):
             await post_pairings(bot, guild, session.session_id)
             del PROCESSING_ROOMS_PAIRINGS[session_id]
             await interaction.followup.send("Pairings posted.", ephemeral=True)
+            
+            draft_link = session.draft_link
+            if draft_link:
+                from datacollections import keep_draft_session_alive
+                asyncio.create_task(keep_draft_session_alive(session.session_id, draft_link, session.draft_id))
+            else:
+                print("Draft link not found in database.")
 
     async def create_team_channel(self, guild, team_name, team_members, team_a=None, team_b=None):
         draft_category = discord.utils.get(guild.categories, name="Draft Channels")

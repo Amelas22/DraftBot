@@ -71,9 +71,9 @@ async def calculate_pairings(session, db_session):
         print("Draft session not found.")
         return
     if session.session_type != "swiss":
-        num_players = len(session.team_a) + len(session.team_b)
-        if num_players not in [6, 8]:
-            raise ValueError("Unsupported number of players. Only 6 or 8 players are supported.")
+        # num_players = len(session.team_a) + len(session.team_b)
+        # if num_players not in [6, 8]:
+        #     raise ValueError("Unsupported number of players. Only 6 or 8 players are supported.")
 
         assert len(session.team_a) == len(session.team_b), "Teams must be of equal size."
         
