@@ -9,21 +9,31 @@ async def add_column_if_not_exists():
     async with engine.connect() as conn:
         # Check if the column already exists
         exists_query = """
-        PRAGMA table_info(player_limits);
+        PRAGMA table_info(draft_sessions);
         """
         result = await conn.execute(text(exists_query))
         columns = result.fetchall()  # Correct usage without 'await'
         column_names = [column[1] for column in columns]  # Column names are in the second position
         
-        if "match_four_points" not in column_names:
-            # Add the swiss_matches column to the player_limits table
+        if "draft_data" not in column_names:
+            # Add the swiss_matches column to the draft_sessions table
             add_column_query = """
-            ALTER TABLE player_limits ADD COLUMN match_four_points INTEGER;
+            ALTER TABLE draft_sessions ADD COLUMN draft_data JSON;
             """
             await conn.execute(text(add_column_query))
-            print("Column 'match_four_points' added to 'player_limits' table.")
+            print("Column 'draft_data' added to 'draft_sessions' table.")
         else:
-            print("Column 'match_four_points' already exists in 'player_limits' table.")
+            print("Column 'draft_data' already exists in 'draft_sessions' table.")
+        
+        if "data_received" not in column_names:
+            # Add the swiss_matches column to the draft_sessions table
+            add_column_query = """
+            ALTER TABLE draft_sessions ADD COLUMN data_received BOOLEAN;
+            """
+            await conn.execute(text(add_column_query))
+            print("Column 'data_received' added to 'draft_sessions' table.")
+        else:
+            print("Column 'data_received' already exists in 'draft_sessions' table.")
 
 async def main():
     await add_column_if_not_exists()
