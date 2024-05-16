@@ -26,7 +26,7 @@ async def connect():
 async def disconnect():
     pass
 
-async def keep_draft_session_alive(session_id, draft_link, draft_id):
+async def keep_draft_session_alive(session_id, draft_link, draft_id, session_type):
     while True:
         try:
             await sio.connect(
@@ -36,7 +36,7 @@ async def keep_draft_session_alive(session_id, draft_link, draft_id):
             print(f"Connected to {draft_link}")
             
             while True:
-                data_fetched = await fetch_draft_log_data(session_id, draft_id)
+                data_fetched = await fetch_draft_log_data(session_id, draft_id, session_type)
                 if data_fetched:
                     print(f"Draft log data fetched and saved for {draft_id}, closing connection.")
                     await sio.disconnect()
@@ -57,14 +57,14 @@ async def keep_draft_session_alive(session_id, draft_link, draft_id):
         
         await asyncio.sleep(120)
 
-async def fetch_draft_log_data(session_id, draft_id):
+async def fetch_draft_log_data(session_id, draft_id, session_type):
     url = f"https://draftmancer.com/getDraftLog/DB{draft_id}"
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url) as response:
                 if response.status == 200:
                     draft_data = await response.json()
-                    await save_draft_log_data(session_id, draft_id, draft_data)
+                    await save_draft_log_data(session_id, draft_id, draft_data, session_type)
                     return True
                 else:
                     print(f"Failed to fetch draft log data: status code {response.status}")
@@ -73,8 +73,8 @@ async def fetch_draft_log_data(session_id, draft_id):
             print(f"Exception while fetching draft log data: {e}")
             return False
 
-async def save_draft_log_data(session_id, draft_id, draft_data):
-    upload_successful = await save_to_digitalocean_spaces(session_id, draft_data)
+async def save_draft_log_data(session_id, draft_id, draft_data, session_type):
+    upload_successful = await save_to_digitalocean_spaces(session_id, session_type, draft_data)
     
     async with AsyncSessionLocal() as db_session:
         async with db_session.begin():
@@ -90,7 +90,7 @@ async def save_draft_log_data(session_id, draft_id, draft_data):
             else:
                 print(f"Draft session {draft_id} not found in the database")
 
-async def save_to_digitalocean_spaces(session_id, draft_data):
+async def save_to_digitalocean_spaces(session_id, session_type, draft_data):
     aio_session = aiobotocore.get_session()
     async with aio_session.create_client(
         's3',
@@ -100,7 +100,8 @@ async def save_to_digitalocean_spaces(session_id, draft_data):
         aws_secret_access_key=DO_SPACES_SECRET
     ) as s3_client:
         try:
-            object_name = f'{session_id}.json'
+            folder = "swiss" if session_type == "swiss" else "team"
+            object_name = f'{folder}/{session_id}.json'
             await s3_client.put_object(
                 Bucket=DO_SPACES_BUCKET,
                 Key=object_name,
