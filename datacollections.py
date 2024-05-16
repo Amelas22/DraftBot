@@ -1,32 +1,59 @@
-import websockets
 import asyncio
 import aiohttp
-from sqlalchemy.future import select
+from sqlalchemy import select
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 from session import AsyncSessionLocal, DraftSession
 
 async def keep_draft_session_alive(session_id, draft_link, draft_id):
-
-    websocket_url = f"wss://draftmancer.com/socket.io/?session=DB{draft_id}&transport=websocket"
-    
     while True:
         try:
-            async with websockets.connect(websocket_url) as websocket:
-                print(f"Connected to {draft_link}")
+            # Set up the Chrome driver
+            service = ChromeService(ChromeDriverManager().install())
+            options = webdriver.ChromeOptions()
+            options.add_argument('--headless')
+            options.add_argument('--disable-gpu')
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            options.add_argument('--remote-debugging-port=9222')
+
+            # Open the browser
+            driver = webdriver.Chrome(service=service, options=options)
+            driver.get(draft_link)
+
+            try:
+                # Wait for the user input element to be present
+                user_input = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.ID, "user-name"))
+                )
+                user_input.clear()
+                user_input.send_keys("DraftBot")
+                user_input.send_keys(Keys.RETURN)
+
+                await asyncio.sleep(3 * 3600)  # 3 hours
+                
                 while True:
-                    data_fetched = await fetch_draft_log_data(draft_id)
+                    data_fetched = await fetch_draft_log_data(session_id, draft_id)
+                    count = 1
                     if data_fetched:
-                        print(f"Draft log data fetched and saved for {draft_id}, closing connection.")
-                        await websocket.close()
+                        print(f"Draft log data fetched and saved for {draft_id} after {count} attempts, closing connection.")
+                        driver.quit()
                         return
                     else:
-                        print(f"Draft log data not available, retrying in 5 minutes...")
+                        print(f"Draft log data for {draft_id} not available, attempt #{count}")
+                        count += 1
                         await asyncio.sleep(300)  # Retry every 5 minutes
-                    try:
-                        await websocket.send('2')  # Send a ping to keep the connection alive
-                        await asyncio.sleep(120)  # Send a ping every 2 minutes
-                    except websockets.ConnectionClosed:
-                        print(f"Connection to {draft_link} closed, retrying...")
-                        break
+
+            except Exception as e:
+                print(f"Exception occurred while interacting with the browser: {e}")
+            finally:
+                driver.quit()
+
         except Exception as e:
             print(f"Error connecting to {draft_link}: {e}")
         
@@ -42,7 +69,6 @@ async def fetch_draft_log_data(session_id, draft_id):
                     await save_draft_log_data(session_id, draft_id, draft_data)
                     return True
                 else:
-                    print(f"Failed to fetch draft log data: status code {response.status}")
                     return False
         except Exception as e:
             print(f"Exception while fetching draft log data: {e}")
@@ -57,6 +83,5 @@ async def save_draft_log_data(session_id, draft_id, draft_data):
                 session.draft_data = draft_data
                 session.data_received = True  
                 await db_session.commit()
-                print(f"Draft log data saved for {draft_id}")
             else:
                 print(f"Draft session {draft_id} not found in the database")
