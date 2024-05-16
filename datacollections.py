@@ -74,16 +74,19 @@ async def fetch_draft_log_data(session_id, draft_id):
             return False
 
 async def save_draft_log_data(session_id, draft_id, draft_data):
+    upload_successful = await save_to_digitalocean_spaces(session_id, draft_data)
+    
     async with AsyncSessionLocal() as db_session:
         async with db_session.begin():
             stmt = select(DraftSession).filter(DraftSession.session_id == session_id)
-            session = await db_session.scalar(stmt)
-            if session:
-                session.draft_data = draft_data
-                session.data_received = True  
+            draft_session = await db_session.scalar(stmt)
+            if draft_session:
+                if upload_successful:
+                    draft_session.data_received = True
+                else:
+                    draft_session.draft_data = draft_data
                 await db_session.commit()
-                print(f"Draft log data saved for {draft_id}")
-                await save_to_digitalocean_spaces(session_id, draft_data)
+                print(f"Draft log data processed for {draft_id}")
             else:
                 print(f"Draft session {draft_id} not found in the database")
 
@@ -106,5 +109,7 @@ async def save_to_digitalocean_spaces(session_id, draft_data):
                 ACL='public-read'
             )
             print(f"Draft log data uploaded to DigitalOcean Space: {object_name}")
+            return True
         except Exception as e:
             print(f"Error uploading to DigitalOcean Space: {e}")
+            return False
