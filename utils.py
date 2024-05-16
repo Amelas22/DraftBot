@@ -1013,7 +1013,7 @@ async def re_register_views(bot):
             draft_sessions = result.scalars().unique()
 
         for draft_session in draft_sessions:
-            if not draft_session.session_stage:
+            if not draft_session.session_stage and draft_session.draft_channel_id:
                 channel_id = int(draft_session.draft_channel_id)
                 channel = bot.get_channel(channel_id)
                 if channel:
