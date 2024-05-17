@@ -7,7 +7,7 @@ import asyncio
 import pytz
 from discord.ui import Select, View, Modal, InputText
 from datetime import datetime, timedelta
-from session import AsyncSessionLocal, Team, DraftSession, Match, Challenge, TeamRegistration
+from session import AsyncSessionLocal, Team, DraftSession, Match, Challenge, TeamRegistration, SwissChallenge
 from sqlalchemy import select, update, func
 import random
 
@@ -234,7 +234,12 @@ class InitialPostView(View):
         self.time_zone = None
         self.match_id = match_id
         self.bot = bot
-        if not self.team_id:
+        if self.command_type == "swiss":
+            self.time_zone_select = TimezoneSelect("time_zone")
+            self.cube_select = ChallengeCubeSelect("cube_choice")
+            self.add_item(self.cube_select)
+            self.add_item(self.time_zone_select)
+        elif not self.team_id:
             self.add_item(RangeSelect("Your Team Range", "your_team_range"))
         elif self.command_type == "test":
             self.time_zone_select = TimezoneSelect("time_zone")
@@ -259,6 +264,8 @@ class InitialPostView(View):
                 await interaction.response.send_modal(ChallengeTimeModal(self.team_name, self.cube_choice, self.time_zone, command_type=self.command_type, match_id=self.match_id))
             else:
                 await interaction.response.send_modal(ChallengeTimeModal(self.team_name, self.cube_choice, self.time_zone, self.command_type))
+        elif self.command_type == "swiss" and self.cube_choice and self.time_zone:
+                await interaction.response.send_modal(ChallengeTimeModal(cube=self.cube_choice, time_zone=self.time_zone, command_type=self.command_type))
         elif self.command_type == "test":
                 await interaction.response.send_modal(ChallengeTimeModal(time_zone=self.time_zone, command_type=self.command_type))
         else:
@@ -437,17 +444,18 @@ class ChallengeTimeModal(Modal):
         self.time_zone = time_zone
         self.command_type = command_type
         self.match_id = match_id
-        # Update the placeholder to reflect the desired format
+
         self.add_item(InputText(
             label="MM/DD/YYYY HH:MM in Local Time/24HR format",
-            placeholder="Earliest Start Time",
+            placeholder="Earliest Start Time" if self.command_type != "swiss" else "Start Time",
             custom_id="start_time"
         ))
-        self.add_item(InputText(
-            label="Start Time Range (Hours OR Minutes)",
-            placeholder="Enter EITHER hours (e.g., 0, 1, 2) or minutes (e.g., 30, 45, 90)",
-            custom_id="time_range"
-        ))
+        if self.command_type != "swiss":
+            self.add_item(InputText(
+                label="Start Time Range (Hours OR Minutes)",
+                placeholder="Enter EITHER hours (e.g., 0, 1, 2) or minutes (e.g., 30, 45, 90)",
+                custom_id="time_range"
+            ))
 
     async def callback(self, interaction: discord.Interaction):
         if self.command_type == "test":
@@ -524,6 +532,48 @@ class ChallengeTimeModal(Modal):
             from utils import send_channel_reminders
             asyncio.create_task(send_channel_reminders(bot, updated_session.session_id))
 
+        elif self.command_type == "swiss":
+            user_id = str(interaction.user.id)
+            bot = interaction.client
+            guild = bot.get_guild(int(interaction.guild_id))
+            challenge_channel = discord.utils.get(guild.text_channels, name="league-challenges")
+            start_time_str = self.children[0].value
+            user_time_zone = pytz.timezone(self.time_zone)  # Convert the selected timezone string to a pytz timezone
+            local_time = datetime.strptime(start_time_str, "%m/%d/%Y %H:%M")
+            local_dt_with_tz = user_time_zone.localize(local_time)  # Localize the datetime
+            utc_start_dt = local_dt_with_tz.astimezone(pytz.utc)
+            formatted_start_time = f"<t:{int(utc_start_dt.timestamp())}:F>"
+            relative_time = f"<t:{int(utc_start_dt.timestamp())}:R>"
+            sign_up_list = {}
+            sign_up_list[user_id] = interaction.user.display_name
+
+            async with AsyncSessionLocal() as db_session:
+                async with db_session.begin():
+                    new_challenge = SwissChallenge(
+                                        initial_user=user_id,
+                                        guild_id = str(interaction.guild_id),
+                                        sign_ups = sign_up_list,
+                                        start_time = utc_start_dt,
+                                        message_id = None,
+                                        channel_id = str(challenge_channel),
+                                        cube = str(self.cube_choice)
+                                    )
+                    db_session.add(new_challenge)
+            embed = discord.Embed(title=f"Scheduled Swiss Draft is looking for drafters!", 
+                                                description=f"Start Time: {formatted_start_time} ({relative_time}).\n\n" + 
+                                                f"Chosen Cube: {self.cube_choice}\n",
+                                                color=discord.Color.blue())
+            embed.add_field(name="Sign-Ups", value=f"\n{new_challenge.sign_ups[user_id]}", inline=False)
+                            
+            view = ChallengeView(challenge_id=new_challenge.id, command_type=self.command_type)
+            message = await challenge_channel.send(embed=embed, view=view)
+            await interaction.response.send_message("Challenge posted in league-challenges. Good luck in your match!", ephemeral=True)
+            async with AsyncSessionLocal() as db_session:
+                async with db_session.begin():
+                    challenge_to_update = await db_session.get(SwissChallenge, new_challenge.id)
+                    challenge_to_update.message_id = str(message.id)
+                    challenge_to_update.channel_id = str(message.channel.id)
+                    await db_session.commit()
         elif self.command_type == "post":
             try:
                 await interaction.response.defer()
@@ -567,7 +617,6 @@ class ChallengeTimeModal(Modal):
                                         message_id = None,
                                         channel_id = str(challenge_channel),
                                         cube = str(self.cube_choice)
-
                                     )
                                     session.add(new_challenge)
                                     await db_session.commit()
@@ -727,11 +776,12 @@ class PostTeamSelect(Select):
 
 
 class ChallengeView(View):
-    def __init__(self, challenge_id, team_b=None, team_a=None, lobby_message=None):
+    def __init__(self, challenge_id, team_b=None, team_a=None, lobby_message=None, command_type=None):
         self.challenge_id = challenge_id
         self.team_a = team_a
         self.team_b = team_b
         self.lobby_message = lobby_message
+        self.command_type = command_type
         super().__init__(timeout=None)
         # Add the "Sign Up" button on initialization
         self.add_buttons()
@@ -750,8 +800,8 @@ class ChallengeView(View):
         return button
 
     async def sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        
-        async with AsyncSessionLocal() as session:  # Assuming AsyncSessionLocal is your session maker
+        if self.command_type != "swiss":
+            async with AsyncSessionLocal() as session:  
                 async with session.begin():
                     # Query for any team registration entries that include the user ID in their TeamMembers
                     user_id_str = str(interaction.user.id)
@@ -834,6 +884,50 @@ class ChallengeView(View):
                     elif self.team_b and not (team_registration and team_registration.TeamName.lower().strip() == self.team_b.lower().strip()):
                         # If self.team_b exists and the interaction user isn't assigned to self.team_b
                         await interaction.response.send_message("Two Teams are already signed up!", ephemeral=True)
+        else:
+            async with AsyncSessionLocal() as db_session:  # Assuming AsyncSessionLocal is your session maker
+                async with db_session.begin():
+                    challenge_stmt = select(SwissChallenge).where(SwissChallenge.id == self.challenge_id)
+                    challenge_result = await db_session.execute(challenge_stmt)
+                    challenge_to_update = challenge_result.scalars().first()
+                    sign_ups = challenge_to_update.sign_ups
+                    if len(sign_ups) >= 8:
+                        await interaction.response.send_message("The sign-up list is already full. No more players can sign up.", ephemeral=True)
+                        return
+                    
+                    user_id = str(interaction.user.id)
+                    if user_id in sign_ups:
+                        # User is already signed up; inform them
+                        await interaction.response.send_message("You are already signed up!", ephemeral=True)
+                        return
+
+                    # User is signing up
+                    sign_ups[user_id] = interaction.user.display_name
+                    await db_session.execute(
+                        update(SwissChallenge).
+                        where(SwissChallenge.id == self.challenge_id).
+                        values(sign_ups=sign_ups)
+                    )
+                    await db_session.commit()
+
+                    signup_confirmation_message = "You are now signed up."
+                    await interaction.response.send_message(signup_confirmation_message, ephemeral=True)
+
+                    bot = interaction.client
+                    channel_id = int(challenge_to_update.channel_id)
+                    message_id = int(challenge_to_update.message_id)
+                    channel = bot.get_channel(channel_id)
+
+                    try:
+                        message = await channel.fetch_message(message_id)
+                        embed = message.embeds[0]  # Assuming there's at least one embed in the message
+                        sign_up_count = len(challenge_to_update.sign_ups)
+                        sign_ups_field_name = f"Sign-Ups ({sign_up_count}):"
+                        sign_ups_str = '\n'.join([f"{name}" for name in challenge_to_update.sign_ups.values()]) if challenge_to_update.sign_ups else 'No players yet.'
+                        embed.set_field_at(0, name=sign_ups_field_name, value=sign_ups_str, inline=False)
+                        await message.edit(embed=embed)
+                    except Exception as e:
+                        print(f"Failed to update message for session {challenge_to_update.id}. Error: {e}")
 
     async def change_time_callback(self, interaction: discord.Interaction, button: discord.ui.Button):        
         try:
@@ -1046,7 +1140,7 @@ class ChallengeCubeSelect(discord.ui.Select):
         options = [
             discord.SelectOption(label="LSVCube", description="Curated by Luis Scott Vargas"),
             discord.SelectOption(label="AlphaFrog", description="Curated by Gavin Thompson"),
-            discord.SelectOption(label="mtgovintage", description="Curated by Ryan Spain and Chris Wolf"),
+            discord.SelectOption(label="MOCS24", description="Curated by Ryan Spain and Chris Wolf"),
         ]
         super().__init__(placeholder="Choose Cube", min_values=1, max_values=1, options=options)
         self.attribute_name = attribute_name

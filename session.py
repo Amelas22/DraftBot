@@ -170,6 +170,17 @@ class Challenge(Base):
     team_b = Column(String(128))
     cube = Column(String(128))
 
+class SwissChallenge(Base):
+    __tablename__ = 'swiss_challenges'
+    
+    id = Column(Integer, primary_key=True)
+    initial_user = Column(String(64))
+    sign_ups = Column(JSON)
+    message_id = Column(String(64), nullable=True)
+    channel_id = Column(String(64), nullable=True)
+    guild_id = Column(String(64))
+    start_time = Column(DateTime, nullable=False)
+    cube = Column(String(128))
 
 async def get_draft_session(session_id: str):
     async with AsyncSessionLocal() as session:

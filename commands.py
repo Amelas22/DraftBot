@@ -80,6 +80,12 @@ async def league_commands(bot):
         
         await ctx.respond(embed=embed)
 
+    @bot.slash_command(name="swiss_scheduled_draft", description="Schedule a forthcoming draft")
+    async def scheduledraft(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        from league import InitialPostView
+        initial_view = InitialPostView(command_type="swiss")
+        await interaction.followup.send(f"Post a scheduled draft. Select Cube and Timezone.", view=initial_view, ephemeral=True)
 
     @bot.slash_command(name="post_challenge", description="Post a challenge for your team")
     async def postchallenge(interaction: discord.Interaction):
