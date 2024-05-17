@@ -91,7 +91,7 @@ async def save_to_digitalocean_spaces(session_id, session_type, draft_data):
     DO_SPACES_SECRET = os.getenv("DO_SPACES_SECRET")
     DO_SPACES_BUCKET = os.getenv("DO_SPACES_BUCKET")
     
-    aio_session = aiobotocore.get_session()
+    aio_session = aiobotocore.session.get_session()
     async with aio_session.create_client(
         's3',
         region_name=DO_SPACES_REGION,
