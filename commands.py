@@ -123,7 +123,7 @@ async def league_commands(bot):
             await interaction.followup.send(f"An error occurred while processing your request: {str(e)}", ephemeral=True)
             print(f"Error in postchallenge command: {e}")  
 
-    @bot.slash_command(name="schedule_draft", description="Post a scheduled draft")
+    @bot.slash_command(name="schedule_test_draft", description="Post a scheduled draft")
     async def scheduledraft(interaction: discord.Interaction):
         guild = interaction.guild_id
         if guild != 336345350535118849:
@@ -201,6 +201,31 @@ async def league_commands(bot):
         initial_view = InitialPostView(command_type="find")
         await interaction.response.send_message("Please select the range for your team", view=initial_view, ephemeral=True)
 
+    @bot.slash_command(name="list_scheduled_drafts", description="List all open scheduled drafts in chronological order.")
+    async def listscheduledswiss(interaction: discord.Interaction):
+        now = datetime.now()
+        async with AsyncSessionLocal() as db_session: 
+            async with db_session.begin():
+                from session import SwissChallenge
+                stmt = select(SwissChallenge).where(SwissChallenge.start_time > now
+                                                ).order_by(SwissChallenge.start_time.asc())
+                results = await db_session.execute(stmt)
+                scheduled_drafts = results.scalars().all()
+
+                if not scheduled_drafts:
+                # No challenges found within the range
+                    await interaction.response.send_message("No scheduled drafts. Use /swiss_scheduled_draft to open a scheduled draft or /swiss_draft to open an on demand draft", ephemeral=True)
+                    return
+
+                embed = discord.Embed(title="Currently Scheduled Drafts", description="", color=discord.Color.blue())
+                for draft in scheduled_drafts:
+                    message_link = f"https://discord.com/channels/{draft.guild_id}/{draft.channel_id}/{draft.message_id}"
+                    start_time = draft.start_time
+                    num_sign_ups = len(draft.sign_ups)
+                    formatted_time = f"<t:{int(start_time.timestamp())}:F>"
+                    relative_time = f"<t:{int(start_time.timestamp())}:R>"
+                    embed.add_field(name=f"Draft Scheduled: {formatted_time} ({relative_time})", value=f"Cube: {draft.cube}\nCurrent Signups: {num_sign_ups} \n[Sign Up Here!]({message_link})", inline=False)
+                await interaction.response.send_message(embed=embed)
 
     @bot.slash_command(name="list_challenges", description="List all open challenges in chronological order.")
     async def list_challenge(interaction: discord.Interaction):
@@ -576,7 +601,7 @@ async def swiss_draft_commands(bot):
     async def daily_swiss_results():
         global league_start_time
 
-        # Check if current time is before the cutoff time
+        # Check if current time is before the cutoff tiie
         current_time = datetime.now(pacific_time_zone)
         if current_time < league_start_time + timedelta(hours=11):
             return

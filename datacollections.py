@@ -6,7 +6,9 @@ import json
 import os
 from dotenv import load_dotenv
 from sqlalchemy.future import select
+from aiobotocore.session import get_session
 from session import AsyncSessionLocal, DraftSession
+
 
 load_dotenv()
 
@@ -91,8 +93,8 @@ async def save_to_digitalocean_spaces(session_id, session_type, draft_data):
     DO_SPACES_SECRET = os.getenv("DO_SPACES_SECRET")
     DO_SPACES_BUCKET = os.getenv("DO_SPACES_BUCKET")
     
-    aio_session = aiobotocore.session.get_session()
-    async with aio_session.create_client(
+    session = get_session()
+    async with session.create_client(
         's3',
         region_name=DO_SPACES_REGION,
         endpoint_url=DO_SPACES_ENDPOINT,
