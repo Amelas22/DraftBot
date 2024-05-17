@@ -10,12 +10,6 @@ from session import AsyncSessionLocal, DraftSession
 
 load_dotenv()
 
-DO_SPACES_REGION = os.getenv("DO_SPACES_REGION")
-DO_SPACES_ENDPOINT = os.getenv("DO_SPACES_ENDPOINT")
-DO_SPACES_KEY = os.getenv("DO_SPACES_KEY")
-DO_SPACES_SECRET = os.getenv("DO_SPACES_SECRET")
-DO_SPACES_BUCKET = os.getenv("DO_SPACES_BUCKET")
-
 sio = socketio.AsyncClient()
 
 @sio.event
@@ -74,23 +68,29 @@ async def fetch_draft_log_data(session_id, draft_id, session_type):
             return False
 
 async def save_draft_log_data(session_id, draft_id, draft_data, session_type):
-    # upload_successful = await save_to_digitalocean_spaces(session_id, session_type, draft_data)
+    upload_successful = await save_to_digitalocean_spaces(session_id, session_type, draft_data)
     
     async with AsyncSessionLocal() as db_session:
         async with db_session.begin():
             stmt = select(DraftSession).filter(DraftSession.session_id == session_id)
             draft_session = await db_session.scalar(stmt)
             if draft_session:
-                #if upload_successful:
-                draft_session.data_received = True
-               # else:
-                draft_session.draft_data = draft_data
+                if upload_successful:
+                    draft_session.data_received = True
+                else:
+                    draft_session.draft_data = draft_data
                 await db_session.commit()
                 print(f"Draft log data processed for {draft_id}")
             else:
                 print(f"Draft session {draft_id} not found in the database")
 
 async def save_to_digitalocean_spaces(session_id, session_type, draft_data):
+    DO_SPACES_REGION = os.getenv("DO_SPACES_REGION")
+    DO_SPACES_ENDPOINT = os.getenv("DO_SPACES_ENDPOINT")
+    DO_SPACES_KEY = os.getenv("DO_SPACES_KEY")
+    DO_SPACES_SECRET = os.getenv("DO_SPACES_SECRET")
+    DO_SPACES_BUCKET = os.getenv("DO_SPACES_BUCKET")
+    
     aio_session = aiobotocore.get_session()
     async with aio_session.create_client(
         's3',
