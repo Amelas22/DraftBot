@@ -74,17 +74,17 @@ async def fetch_draft_log_data(session_id, draft_id, session_type):
             return False
 
 async def save_draft_log_data(session_id, draft_id, draft_data, session_type):
-    upload_successful = await save_to_digitalocean_spaces(session_id, session_type, draft_data)
+    # upload_successful = await save_to_digitalocean_spaces(session_id, session_type, draft_data)
     
     async with AsyncSessionLocal() as db_session:
         async with db_session.begin():
             stmt = select(DraftSession).filter(DraftSession.session_id == session_id)
             draft_session = await db_session.scalar(stmt)
             if draft_session:
-                if upload_successful:
-                    draft_session.data_received = True
-                else:
-                    draft_session.draft_data = draft_data
+                #if upload_successful:
+                draft_session.data_received = True
+               # else:
+                draft_session.draft_data = draft_data
                 await db_session.commit()
                 print(f"Draft log data processed for {draft_id}")
             else:
