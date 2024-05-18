@@ -15,15 +15,15 @@ async def add_column_if_not_exists():
         columns = result.fetchall()  # Correct usage without 'await'
         column_names = [column[1] for column in columns]  # Column names are in the second position
         
-        if "draft_data" not in column_names:
+        if "cube" not in column_names:
             # Add the swiss_matches column to the draft_sessions table
             add_column_query = """
-            ALTER TABLE draft_sessions ADD COLUMN draft_data JSON;
+            ALTER TABLE draft_sessions ADD COLUMN cube VARCHAR(128);
             """
             await conn.execute(text(add_column_query))
-            print("Column 'draft_data' added to 'draft_sessions' table.")
+            print("Column 'cube' added to 'draft_sessions' table.")
         else:
-            print("Column 'draft_data' already exists in 'draft_sessions' table.")
+            print("Column 'cube' already exists in 'draft_sessions' table.")
         
         if "data_received" not in column_names:
             # Add the swiss_matches column to the draft_sessions table

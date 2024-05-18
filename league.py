@@ -7,7 +7,7 @@ import asyncio
 import pytz
 from discord.ui import Select, View, Modal, InputText
 from datetime import datetime, timedelta
-from session import AsyncSessionLocal, Team, DraftSession, Match, Challenge, TeamRegistration
+from session import AsyncSessionLocal, Team, DraftSession, Match, Challenge, TeamRegistration, SwissChallenge
 from sqlalchemy import select, update, func
 import random
 
@@ -155,7 +155,8 @@ class LeagueDraftView(discord.ui.View):
                         team_a_name=team_a_name,
                         team_b_name=team_b_name,
                         tracked_draft = True,
-                        true_skill_draft = False
+                        true_skill_draft = False,
+                        cube = self.cube_choice
                     )
                     session.add(new_draft_session)
                     
@@ -234,7 +235,12 @@ class InitialPostView(View):
         self.time_zone = None
         self.match_id = match_id
         self.bot = bot
-        if not self.team_id:
+        if self.command_type == "swiss":
+            self.time_zone_select = TimezoneSelect("time_zone")
+            self.cube_select = ChallengeCubeSelect("cube_choice")
+            self.add_item(self.cube_select)
+            self.add_item(self.time_zone_select)
+        elif not self.team_id:
             self.add_item(RangeSelect("Your Team Range", "your_team_range"))
         elif self.command_type == "test":
             self.time_zone_select = TimezoneSelect("time_zone")
@@ -259,6 +265,8 @@ class InitialPostView(View):
                 await interaction.response.send_modal(ChallengeTimeModal(self.team_name, self.cube_choice, self.time_zone, command_type=self.command_type, match_id=self.match_id))
             else:
                 await interaction.response.send_modal(ChallengeTimeModal(self.team_name, self.cube_choice, self.time_zone, self.command_type))
+        elif self.command_type == "swiss" and self.cube_choice and self.time_zone:
+                await interaction.response.send_modal(ChallengeTimeModal(cube=self.cube_choice, time_zone=self.time_zone, command_type=self.command_type))
         elif self.command_type == "test":
                 await interaction.response.send_modal(ChallengeTimeModal(time_zone=self.time_zone, command_type=self.command_type))
         else:
@@ -437,93 +445,136 @@ class ChallengeTimeModal(Modal):
         self.time_zone = time_zone
         self.command_type = command_type
         self.match_id = match_id
-        # Update the placeholder to reflect the desired format
+
         self.add_item(InputText(
             label="MM/DD/YYYY HH:MM in Local Time/24HR format",
-            placeholder="Earliest Start Time",
+            placeholder="Earliest Start Time" if self.command_type != "swiss" else "Start Time",
             custom_id="start_time"
         ))
-        self.add_item(InputText(
-            label="Start Time Range (Hours OR Minutes)",
-            placeholder="Enter EITHER hours (e.g., 0, 1, 2) or minutes (e.g., 30, 45, 90)",
-            custom_id="time_range"
-        ))
+        if self.command_type != "swiss":
+            self.add_item(InputText(
+                label="Start Time Range (Hours OR Minutes)",
+                placeholder="Enter EITHER hours (e.g., 0, 1, 2) or minutes (e.g., 30, 45, 90)",
+                custom_id="time_range"
+            ))
 
     async def callback(self, interaction: discord.Interaction):
-        if self.command_type == "test":
-            await interaction.response.defer()
+        # if self.command_type == "test":
+        #     await interaction.response.defer()
+        #     bot = interaction.client
+        #     guild = bot.get_guild(int(interaction.guild_id))
+        #     start_time_str = self.children[0].value
+        #     time_range = int(self.children[1].value)
+        #     user_time_zone = pytz.timezone(self.time_zone)  # Convert the selected timezone string to a pytz timezone
+        #     local_time = datetime.strptime(start_time_str, "%m/%d/%Y %H:%M")
+            
+        #     local_dt_with_tz = user_time_zone.localize(local_time)  # Localize the datetime
+            
+
+        #     utc_start_dt = local_dt_with_tz.astimezone(pytz.utc)
+        #     if time_range < 13: 
+        #         utc_end_dt = utc_start_dt + timedelta(hours=time_range)
+        #     else:
+        #         utc_end_dt = utc_start_dt + timedelta(minutes=time_range)
+        #     formatted_start_time = f"<t:{int(utc_start_dt.timestamp())}:F>"
+        #     formatted_end_time = f"<t:{int(utc_end_dt.timestamp())}:F>" 
+        #     relative_time = f"<t:{int(utc_start_dt.timestamp())}:R>"
+        #     from modals import create_draft_link
+        #     draft_start_time, session_id, draft_id, draft_link = await create_draft_link(interaction.user.id)
+
+        #     async with AsyncSessionLocal() as session:
+        #         async with session.begin():
+        #             new_draft_session = DraftSession(
+        #                 session_id=session_id,
+        #                 guild_id=str(interaction.guild_id),
+        #                 draft_link=draft_link,
+        #                 draft_id=draft_id,
+        #                 draft_start_time=utc_start_dt,
+        #                 deletion_time=utc_start_dt + timedelta(hours=6),
+        #                 session_type=self.command_type,
+        #                 premade_match_id=None,
+        #                 team_a_name=None,
+        #                 team_b_name=None,
+        #                 tracked_draft = True
+        #             )
+        #             session.add(new_draft_session)
+        #     embed = discord.Embed(title=f"Test Draft scheduled to start in {relative_time}. Sign up Below!", 
+        #                                         description=f"Start Range: Between {formatted_start_time} and {formatted_end_time}\n\n\n**Draftmancer Session**: **[Join Here]({draft_link})**" +
+        #                                         f"\n\nClick 'Sign Up' below if you can make the scheduled draft. You will be pinged 15 minutes before draft start. \n\nUse draftmancer random seating and pairings.\n\n", 
+        #                                         color=discord.Color.blue())
+        #     embed.add_field(name="\n\nSign-Ups", value="No players yet.", inline=False)
+        #     embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1218187262488215642/1237195855560183829/image.png?ex=663ac3ed&is=6639726d&hm=3b72a4187732961a2d774534f5ea0d7b644e150303209900afbaf42ebff5db05&")
+        #     from views import PersistentView
+        #     from session import get_draft_session
+        #     draft_session = await get_draft_session(session_id)
+        #     if draft_session:
+        #         view = PersistentView(
+        #             bot=bot,
+        #             draft_session_id=draft_session.session_id,
+        #             session_type=self.command_type,
+        #             team_a_name=getattr(draft_session, 'team_a_name', None),
+        #             team_b_name=getattr(draft_session, 'team_b_name', None)
+        #         )
+        #         message = await interaction.followup.send(embed=embed, view=view)
+            
+        #     if new_draft_session:
+        #         async with AsyncSessionLocal() as session:
+        #             async with session.begin():
+        #                 result = await session.execute(select(DraftSession).filter_by(session_id=new_draft_session.session_id))
+        #                 updated_session = result.scalars().first()
+        #                 if updated_session:
+        #                     updated_session.message_id = str(message.id)
+        #                     updated_session.draft_channel_id = str(message.channel.id)
+        #                     session.add(updated_session)
+        #                     await session.commit()
+
+        #     # Pin the message to the channel
+        #     await message.pin()
+        #     from utils import send_channel_reminders
+        #     asyncio.create_task(send_channel_reminders(bot, updated_session.session_id))
+
+        if self.command_type == "swiss":
+            user_id = str(interaction.user.id)
             bot = interaction.client
             guild = bot.get_guild(int(interaction.guild_id))
+            challenge_channel = discord.utils.get(guild.text_channels, name="league-challenges")
             start_time_str = self.children[0].value
-            time_range = int(self.children[1].value)
             user_time_zone = pytz.timezone(self.time_zone)  # Convert the selected timezone string to a pytz timezone
             local_time = datetime.strptime(start_time_str, "%m/%d/%Y %H:%M")
-            
             local_dt_with_tz = user_time_zone.localize(local_time)  # Localize the datetime
-            
-
             utc_start_dt = local_dt_with_tz.astimezone(pytz.utc)
-            if time_range < 13: 
-                utc_end_dt = utc_start_dt + timedelta(hours=time_range)
-            else:
-                utc_end_dt = utc_start_dt + timedelta(minutes=time_range)
             formatted_start_time = f"<t:{int(utc_start_dt.timestamp())}:F>"
-            formatted_end_time = f"<t:{int(utc_end_dt.timestamp())}:F>" 
             relative_time = f"<t:{int(utc_start_dt.timestamp())}:R>"
-            from modals import create_draft_link
-            draft_start_time, session_id, draft_id, draft_link = await create_draft_link(interaction.user.id)
+            sign_up_list = {}
+            sign_up_list[user_id] = interaction.user.display_name
 
-            async with AsyncSessionLocal() as session:
-                async with session.begin():
-                    new_draft_session = DraftSession(
-                        session_id=session_id,
-                        guild_id=str(interaction.guild_id),
-                        draft_link=draft_link,
-                        draft_id=draft_id,
-                        draft_start_time=utc_start_dt,
-                        deletion_time=utc_start_dt + timedelta(hours=6),
-                        session_type=self.command_type,
-                        premade_match_id=None,
-                        team_a_name=None,
-                        team_b_name=None,
-                        tracked_draft = True
-                    )
-                    session.add(new_draft_session)
-            embed = discord.Embed(title=f"Test Draft scheduled to start in {relative_time}. Sign up Below!", 
-                                                description=f"Start Range: Between {formatted_start_time} and {formatted_end_time}\n\n\n**Draftmancer Session**: **[Join Here]({draft_link})**" +
-                                                f"\n\nClick 'Sign Up' below if you can make the scheduled draft. You will be pinged 15 minutes before draft start. \n\nUse draftmancer random seating and pairings.\n\n", 
+            async with AsyncSessionLocal() as db_session:
+                async with db_session.begin():
+                    new_challenge = SwissChallenge(
+                                        initial_user=user_id,
+                                        guild_id = str(interaction.guild_id),
+                                        sign_ups = sign_up_list,
+                                        start_time = utc_start_dt,
+                                        message_id = None,
+                                        channel_id = str(challenge_channel),
+                                        cube = str(self.cube_choice)
+                                    )
+                    db_session.add(new_challenge)
+            embed = discord.Embed(title=f"Scheduled Swiss Draft is looking for drafters!", 
+                                                description=f"Start Time: {formatted_start_time} ({relative_time}).\n\n" + 
+                                                f"Chosen Cube: {self.cube_choice}\n",
                                                 color=discord.Color.blue())
-            embed.add_field(name="\n\nSign-Ups", value="No players yet.", inline=False)
-            embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1218187262488215642/1237195855560183829/image.png?ex=663ac3ed&is=6639726d&hm=3b72a4187732961a2d774534f5ea0d7b644e150303209900afbaf42ebff5db05&")
-            from views import PersistentView
-            from session import get_draft_session
-            draft_session = await get_draft_session(session_id)
-            if draft_session:
-                view = PersistentView(
-                    bot=bot,
-                    draft_session_id=draft_session.session_id,
-                    session_type=self.command_type,
-                    team_a_name=getattr(draft_session, 'team_a_name', None),
-                    team_b_name=getattr(draft_session, 'team_b_name', None)
-                )
-                message = await interaction.followup.send(embed=embed, view=view)
-            
-            if new_draft_session:
-                async with AsyncSessionLocal() as session:
-                    async with session.begin():
-                        result = await session.execute(select(DraftSession).filter_by(session_id=new_draft_session.session_id))
-                        updated_session = result.scalars().first()
-                        if updated_session:
-                            updated_session.message_id = str(message.id)
-                            updated_session.draft_channel_id = str(message.channel.id)
-                            session.add(updated_session)
-                            await session.commit()
-
-            # Pin the message to the channel
-            await message.pin()
-            from utils import send_channel_reminders
-            asyncio.create_task(send_channel_reminders(bot, updated_session.session_id))
-
+            embed.add_field(name="Sign-Ups", value=f"\n{new_challenge.sign_ups[user_id]}", inline=False)
+                            
+            view = ChallengeView(challenge_id=new_challenge.id, command_type=self.command_type)
+            message = await challenge_channel.send(embed=embed, view=view)
+            await interaction.response.send_message("Challenge posted in league-challenges. Good luck in your match!", ephemeral=True)
+            async with AsyncSessionLocal() as db_session:
+                async with db_session.begin():
+                    challenge_to_update = await db_session.get(SwissChallenge, new_challenge.id)
+                    challenge_to_update.message_id = str(message.id)
+                    challenge_to_update.channel_id = str(message.channel.id)
+                    await db_session.commit()
         elif self.command_type == "post":
             try:
                 await interaction.response.defer()
@@ -567,7 +618,6 @@ class ChallengeTimeModal(Modal):
                                         message_id = None,
                                         channel_id = str(challenge_channel),
                                         cube = str(self.cube_choice)
-
                                     )
                                     session.add(new_challenge)
                                     await db_session.commit()
@@ -727,18 +777,22 @@ class PostTeamSelect(Select):
 
 
 class ChallengeView(View):
-    def __init__(self, challenge_id, team_b=None, team_a=None, lobby_message=None):
+    def __init__(self, challenge_id, team_b=None, team_a=None, lobby_message=None, command_type=None):
         self.challenge_id = challenge_id
         self.team_a = team_a
         self.team_b = team_b
         self.lobby_message = lobby_message
+        self.command_type = command_type
         super().__init__(timeout=None)
         # Add the "Sign Up" button on initialization
         self.add_buttons()
 
     def add_buttons(self):
         self.add_item(self.create_button("Sign Up" if not self.team_b else "Cancel Sign Up", "green" if not self.team_b else "red", f"sign_up_{self.challenge_id}", self.sign_up_callback))
-        self.add_item(self.create_button("Change Time/Cube", "grey", f"change_time_{self.challenge_id}", self.change_time_callback))
+        if self.command_type != "swiss":
+            self.add_item(self.create_button("Change Time/Cube", "grey", f"change_time_{self.challenge_id}", self.change_time_callback))
+        else:
+            self.add_item(self.create_button("Cancel Sign Up", "red", f"cance_sign_up_{self.challenge_id}", self.cancel_sign_up_callback))
         self.add_item(self.create_button("Open Lobby", "primary", f"open_lobby_{self.challenge_id}", self.open_lobby_callback))
         self.add_item(self.create_button("Remove Challenge Post", "red", f"close_{self.challenge_id}", self.close_challenge_callback))
 
@@ -750,8 +804,8 @@ class ChallengeView(View):
         return button
 
     async def sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        
-        async with AsyncSessionLocal() as session:  # Assuming AsyncSessionLocal is your session maker
+        if self.command_type != "swiss":
+            async with AsyncSessionLocal() as session:  
                 async with session.begin():
                     # Query for any team registration entries that include the user ID in their TeamMembers
                     user_id_str = str(interaction.user.id)
@@ -834,6 +888,35 @@ class ChallengeView(View):
                     elif self.team_b and not (team_registration and team_registration.TeamName.lower().strip() == self.team_b.lower().strip()):
                         # If self.team_b exists and the interaction user isn't assigned to self.team_b
                         await interaction.response.send_message("Two Teams are already signed up!", ephemeral=True)
+        else:
+            async with AsyncSessionLocal() as db_session:  # Assuming AsyncSessionLocal is your session maker
+                async with db_session.begin():
+                    challenge_stmt = select(SwissChallenge).where(SwissChallenge.id == self.challenge_id)
+                    challenge_result = await db_session.execute(challenge_stmt)
+                    challenge_to_update = challenge_result.scalars().first()
+                    sign_ups = challenge_to_update.sign_ups
+                    if len(sign_ups) >= 8:
+                        await interaction.response.send_message("The sign-up list is already full. No more players can sign up.", ephemeral=True)
+                        return
+                    
+                    user_id = str(interaction.user.id)
+                    if user_id in sign_ups:
+                        # User is already signed up; inform them
+                        await interaction.response.send_message("You are already signed up!", ephemeral=True)
+                        return
+
+                    # User is signing up
+                    sign_ups[user_id] = interaction.user.display_name
+                    await db_session.execute(
+                        update(SwissChallenge).
+                        where(SwissChallenge.id == self.challenge_id).
+                        values(sign_ups=sign_ups)
+                    )
+                    await db_session.commit()
+
+                    signup_confirmation_message = "You are now signed up."
+                    await interaction.response.send_message(signup_confirmation_message, ephemeral=True)
+                    await update_challenge_message(interaction.client, challenge_to_update)
 
     async def change_time_callback(self, interaction: discord.Interaction, button: discord.ui.Button):        
         try:
@@ -907,146 +990,281 @@ class ChallengeView(View):
 
 
     async def open_lobby_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_id_str = str(interaction.user.id)
-        async with AsyncSessionLocal() as db_session:
-            async with db_session.begin():
-                team_query = select(TeamRegistration).where(TeamRegistration.TeamMembers.contains(user_id_str))
-                teams = await db_session.execute(team_query)
-                user_teams = teams.scalars().all()
-
-                # Check if the user is part of either team_a or team_b
-                user_is_member = any(team.TeamName in [self.team_a, self.team_b] for team in user_teams)
-               
-                if user_is_member:
-                    team_stmt = select(Challenge).where(Challenge.id == self.challenge_id)
-                    challenge = await db_session.scalar(team_stmt)
+        user_id = str(interaction.user.id)
+        if self.command_type == "swiss":
+            async with AsyncSessionLocal() as db_session:
+                async with db_session.begin():
+                    challenge = await db_session.get(SwissChallenge, self.challenge_id)
+                    if user_id not in challenge.sign_ups:
+                        await interaction.response.send_message("You are not signed up!", ephemeral=True)
+                        print("user not signed up")
+                        return
                     now = datetime.now()
                     lobby_creation_time = challenge.start_time - timedelta(hours=1)
-                    if not self.lobby_message and now > lobby_creation_time:
-                        if challenge.team_a and challenge.team_b:
-                            await interaction.response.defer()
+                    if not self.lobby_message: #and now > lobby_creation_time:
+                        await interaction.response.defer()
+                        await interaction.followup.send("Lobby creation in progress. Bot will post in league-play-draft-room", ephemeral=True)
 
-                            await interaction.followup.send("Lobby creation in progress. Bot will post in league-play-draft-room", ephemeral=True)
-                            
-                            
-                            bot = interaction.client
-                            guild = bot.get_guild(int(interaction.guild_id))
-                            lobby_channel = discord.utils.get(guild.text_channels, name="league-play-draft-room")
+                        bot = interaction.client
+                        guild = bot.get_guild(int(interaction.guild_id))
+                        lobby_channel = discord.utils.get(guild.text_channels, name="league-play-draft-room") 
+                        
+                        user_mentions = []
+                        for user_id, user_name in challenge.sign_ups.items():
+                            user_mentions.append(f"<@{user_id}>")
+                        mentions_str = " ".join(set(user_mentions))
+                        await lobby_channel.send(f"Swiss Match is below {mentions_str}")
 
-                            teams_query = select(TeamRegistration).where(TeamRegistration.TeamID.in_([challenge.team_a_id, challenge.team_b_id]))
-                            teams = await db_session.execute(teams_query)
-                            teams_info = teams.scalars().all()
+                        draft_start_time = datetime.now().timestamp()
+                        session_id = f"{interaction.user.id}-{int(draft_start_time)}"
+                        draft_id = ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
+                        draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
 
-                            user_mentions = []
-                            for team in teams_info:
-                                for user_id, user_name in team.TeamMembers.items():
-                                    user_mentions.append(f"<@{user_id}>")
+                        new_draft_session = DraftSession(
+                                            session_id=session_id,
+                                            guild_id=str(interaction.guild_id),
+                                            draft_link=draft_link,
+                                            draft_id=draft_id,
+                                            draft_start_time=datetime.now(),
+                                            deletion_time=datetime.now() + timedelta(hours=3),
+                                            session_type="swiss",
+                                            premade_match_id=9000,
+                                            team_a_name=None,
+                                            team_b_name=None,
+                                            sign_ups=challenge.sign_ups,
+                                            tracked_draft = True,
+                                            true_skill_draft = False,
+                                            cube = challenge.cube
+                                        )
+                        db_session.add(new_draft_session)
+                        embed_title = f"AlphaFrog Prelims: Scheduled Queue Opened <t:{int(draft_start_time)}:R>"
+                        embed = discord.Embed(title=embed_title,
+                            description="Swiss 8 player draft. Draftmancer host must still update the draftmanacer session with the chosen cube. Turn off randomized seating." +
+                            f"\n\n**Weekly Cube: [{challenge.cube}](https://cubecobra.com/cube/list/{challenge.cube})** \n**Draftmancer Session**: **[Join Here]({draft_link})**",
+                            color=discord.Color.dark_gold()
+                            )
+                        sign_up_count = len(new_draft_session.sign_ups)
+                        sign_ups_field_name = f"Sign-Ups ({sign_up_count}):"
+                        sign_ups_str = '\n'.join([f"{name}" for name in new_draft_session.sign_ups.values()]) if new_draft_session.sign_ups else 'No players yet.'
+                        embed.add_field(name=sign_ups_field_name, value=sign_ups_str, inline=False)
+                        print(f"Swiss Draft session {session_id} has been created.")
+                        from views import PersistentView
+                        view = PersistentView(
+                            bot=bot,
+                            draft_session_id=new_draft_session.session_id,
+                            session_type=self.command_type,
+                            team_a_name=getattr(new_draft_session, 'team_a_name', None),
+                            team_b_name=getattr(new_draft_session, 'team_b_name', None)
+                        )
+                        message = await lobby_channel.send(embed=embed, view=view)
+                        self.lobby_message = message
+                        await message.pin()
+                        await db_session.execute(
+                            update(DraftSession).
+                            where(DraftSession.session_id == new_draft_session.session_id).
+                            values(message_id=str(message.id),
+                                   draft_channel_id=str(message.channel.id))
+                        )
+                        await db_session.commit()
+                        challenge_channel_id = int(challenge.channel_id) 
+                        original_message_id = int(challenge.message_id)
+                        challenge_channel = interaction.client.get_channel(challenge_channel_id)
+                        if challenge_channel:
+                            try:
+                                original_message = await challenge_channel.fetch_message(original_message_id)
+                                await original_message.delete()
+                            except discord.NotFound:
+                                print(f"Original message {original_message_id} not found in channel {challenge_channel_id}.")
+                            except discord.HTTPException as e:
+                                print(f"Failed to delete message {original_message_id}: {e}")
 
-                            mentions_str = " ".join(set(user_mentions))
-                            await lobby_channel.send(f"Lobby for the league match between {challenge.team_a} and {challenge.team_b} is below {mentions_str}")
 
-                            from session import register_team_to_db
-                            # Register Team A if not present
-                            await register_team_to_db(challenge.team_a)
-                            # Register Team B if not present
-                            await register_team_to_db(challenge.team_b)
-
-                            from modals import create_draft_link
-                            draft_start_time, session_id, draft_id, draft_link = await create_draft_link(interaction.user.id)
-            
-                            
-                            async with AsyncSessionLocal() as session:
-                                async with session.begin():
-                                    new_draft_session = DraftSession(
-                                        session_id=session_id,
-                                        guild_id=str(interaction.guild_id),
-                                        draft_link=draft_link,
-                                        draft_id=draft_id,
-                                        draft_start_time=datetime.now(),
-                                        deletion_time=datetime.now() + timedelta(hours=3),
-                                        session_type="premade",
-                                        premade_match_id=None,
-                                        team_a_name=challenge.team_a,
-                                        team_b_name=challenge.team_b,
-                                        tracked_draft = True,
-                                        true_skill_draft = False,
-                                    )
-                                    session.add(new_draft_session)
-
-                            async with AsyncSessionLocal() as session:
-                                async with session.begin():
-                                    new_match = Match(
-                                        TeamAID=challenge.team_a_id,
-                                        TeamBID=challenge.team_b_id,
-                                        TeamAWins=0,
-                                        TeamBWins=0,
-                                        DraftWinnerID=None,
-                                        MatchDate=datetime.now(),
-                                        TeamAName=challenge.team_a,
-                                        TeamBName=challenge.team_b
-                                    )
-                                    session.add(new_match)
-                                    await session.commit()
-                                    match_id = new_match.MatchID        
-                            # Generate and send the embed message
-                            embed = discord.Embed(title=f"League Match #{match_id}: {challenge.team_a} vs. {challenge.team_b}",
-                                                description=f"\n\nDraft Start Time: <t:{int(draft_start_time)}:F> \n\n**How to use bot**:\n1. Click your team name to join that team. Enter the draftmancer link. Draftmancer host still has to update settings and import from CubeCobra. **TURN OFF COLOR BALANCE**.\n" +
-                                                "2. When all teams are joined and ready, press Generate Seating Order\n" +
-                                                "3. Draftmancer host needs to adjust table to match seating order. **TURN OFF RANDOM SEATING IN DRAFTMANCER** \n" +
-                                                "4. After the draft, come back to this message (it'll be in pins) and press Create Rooms and Post Pairings.\n" +
-                                                "5. You will now have a private team chat with just your team and a shared draft-chat that has pairings and match results. Use the Match Results buttons to report results.\n" +
-                                                "6. Chat channels will automatically close around five hours after the lobby was opened." +
-                                                f"\n\n**Chosen Cube: [{challenge.cube}](https://cubecobra.com/cube/list/{challenge.cube})** \n**Draftmancer Session**: **[Join Here]({draft_link})**",
-                                color=discord.Color.dark_red()
-                                )
-                            embed.add_field(name=f"{challenge.team_a}", value="No players yet.", inline=False)
-                            embed.add_field(name=f"{challenge.team_b}", value="No players yet.", inline=False)
-                            embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1186757246936424558/1217295353972527176/131.png")
-
-                            print(f"League Draft: {session_id} has been created.")
-                            
-                            from session import get_draft_session
-                            draft_session = await get_draft_session(session_id)
-                            if draft_session:
-                                from views import PersistentView
-                                view = PersistentView(
-                                    bot=bot,
-                                    draft_session_id=draft_session.session_id,
-                                    session_type=draft_session.session_type,
-                                    team_a_name=challenge.team_a,
-                                    team_b_name=challenge.team_b
-                                )
-                            message = await lobby_channel.send(embed=embed, view=view)
-
-                            if new_draft_session:
-                                async with AsyncSessionLocal() as session:
-                                    async with session.begin():
-                                        result = await session.execute(select(DraftSession).filter_by(session_id=new_draft_session.session_id))
-                                        updated_session = result.scalars().first()
-                                        if updated_session:
-                                            updated_session.message_id = str(message.id)
-                                            updated_session.draft_channel_id = str(message.channel.id)
-                                            updated_session.premade_match_id = str(match_id)
-                                            session.add(updated_session)
-                                            await session.commit()
-
-                            # Pin the message to the channel
-                            self.lobby_message = message
-                            await message.pin()
-                        else:
-                            await interaction.response.send_message("Unable to open lobby. You are not a member of an involved team.", ephemeral=True)
-                            
                     elif now < lobby_creation_time:
                         await interaction.response.send_message("Unable to open lobby. Lobby can only be opened within 1 hour of proposed start time.", ephemeral=True)
                         print(f"Lobby failed to create for {challenge.id}. Start Time: {challenge.start_time}. Current time: {now}. Lobby Creation Time: {lobby_creation_time}")
                     else:
                         await interaction.response.send_message("Unable to open lobby. Lobby already opened in #league-play-draft-room. Check pins in that channel", ephemeral=True)
+
+        else:
+            async with AsyncSessionLocal() as db_session:
+                async with db_session.begin():
+                    team_query = select(TeamRegistration).where(TeamRegistration.TeamMembers.contains(user_id))
+                    teams = await db_session.execute(team_query)
+                    user_teams = teams.scalars().all()
+
+                    # Check if the user is part of either team_a or team_b
+                    user_is_member = any(team.TeamName in [self.team_a, self.team_b] for team in user_teams)
+                
+                    if user_is_member:
+                        team_stmt = select(Challenge).where(Challenge.id == self.challenge_id)
+                        challenge = await db_session.scalar(team_stmt)
+                        now = datetime.now()
+                        lobby_creation_time = challenge.start_time - timedelta(hours=1)
+                        if not self.lobby_message and now > lobby_creation_time:
+                            if challenge.team_a and challenge.team_b:
+                                await interaction.response.defer()
+
+                                await interaction.followup.send("Lobby creation in progress. Bot will post in league-play-draft-room", ephemeral=True)
+                                
+                                
+                                bot = interaction.client
+                                guild = bot.get_guild(int(interaction.guild_id))
+                                lobby_channel = discord.utils.get(guild.text_channels, name="league-play-draft-room")
+
+                                teams_query = select(TeamRegistration).where(TeamRegistration.TeamID.in_([challenge.team_a_id, challenge.team_b_id]))
+                                teams = await db_session.execute(teams_query)
+                                teams_info = teams.scalars().all()
+
+                                user_mentions = []
+                                for team in teams_info:
+                                    for user_id, user_name in team.TeamMembers.items():
+                                        user_mentions.append(f"<@{user_id}>")
+
+                                mentions_str = " ".join(set(user_mentions))
+                                await lobby_channel.send(f"Lobby for the league match between {challenge.team_a} and {challenge.team_b} is below {mentions_str}")
+
+                                from session import register_team_to_db
+                                # Register Team A if not present
+                                await register_team_to_db(challenge.team_a)
+                                # Register Team B if not present
+                                await register_team_to_db(challenge.team_b)
+
+                                from modals import create_draft_link
+                                draft_start_time, session_id, draft_id, draft_link = await create_draft_link(interaction.user.id)
+                
+                                
+                                async with AsyncSessionLocal() as session:
+                                    async with session.begin():
+                                        new_draft_session = DraftSession(
+                                            session_id=session_id,
+                                            guild_id=str(interaction.guild_id),
+                                            draft_link=draft_link,
+                                            draft_id=draft_id,
+                                            draft_start_time=datetime.now(),
+                                            deletion_time=datetime.now() + timedelta(hours=3),
+                                            session_type="premade",
+                                            premade_match_id=None,
+                                            team_a_name=challenge.team_a,
+                                            team_b_name=challenge.team_b,
+                                            tracked_draft = True,
+                                            true_skill_draft = False,
+                                            cube = challenge.cube
+                                        )
+                                        session.add(new_draft_session)
+
+                                async with AsyncSessionLocal() as session:
+                                    async with session.begin():
+                                        new_match = Match(
+                                            TeamAID=challenge.team_a_id,
+                                            TeamBID=challenge.team_b_id,
+                                            TeamAWins=0,
+                                            TeamBWins=0,
+                                            DraftWinnerID=None,
+                                            MatchDate=datetime.now(),
+                                            TeamAName=challenge.team_a,
+                                            TeamBName=challenge.team_b
+                                        )
+                                        session.add(new_match)
+                                        await session.commit()
+                                        match_id = new_match.MatchID        
+                                # Generate and send the embed message
+                                embed = discord.Embed(title=f"League Match #{match_id}: {challenge.team_a} vs. {challenge.team_b}",
+                                                    description=f"\n\nDraft Start Time: <t:{int(draft_start_time)}:F> \n\n**How to use bot**:\n1. Click your team name to join that team. Enter the draftmancer link. Draftmancer host still has to update settings and import from CubeCobra. **TURN OFF COLOR BALANCE**.\n" +
+                                                    "2. When all teams are joined and ready, press Generate Seating Order\n" +
+                                                    "3. Draftmancer host needs to adjust table to match seating order. **TURN OFF RANDOM SEATING IN DRAFTMANCER** \n" +
+                                                    "4. After the draft, come back to this message (it'll be in pins) and press Create Rooms and Post Pairings.\n" +
+                                                    "5. You will now have a private team chat with just your team and a shared draft-chat that has pairings and match results. Use the Match Results buttons to report results.\n" +
+                                                    "6. Chat channels will automatically close around five hours after the lobby was opened." +
+                                                    f"\n\n**Chosen Cube: [{challenge.cube}](https://cubecobra.com/cube/list/{challenge.cube})** \n**Draftmancer Session**: **[Join Here]({draft_link})**",
+                                    color=discord.Color.dark_red()
+                                    )
+                                embed.add_field(name=f"{challenge.team_a}", value="No players yet.", inline=False)
+                                embed.add_field(name=f"{challenge.team_b}", value="No players yet.", inline=False)
+                                embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1186757246936424558/1217295353972527176/131.png")
+
+                                print(f"League Draft: {session_id} has been created.")
+                                
+                                from session import get_draft_session
+                                draft_session = await get_draft_session(session_id)
+                                if draft_session:
+                                    from views import PersistentView
+                                    view = PersistentView(
+                                        bot=bot,
+                                        draft_session_id=draft_session.session_id,
+                                        session_type=draft_session.session_type,
+                                        team_a_name=challenge.team_a,
+                                        team_b_name=challenge.team_b
+                                    )
+                                message = await lobby_channel.send(embed=embed, view=view)
+
+                                if new_draft_session:
+                                    async with AsyncSessionLocal() as session:
+                                        async with session.begin():
+                                            result = await session.execute(select(DraftSession).filter_by(session_id=new_draft_session.session_id))
+                                            updated_session = result.scalars().first()
+                                            if updated_session:
+                                                updated_session.message_id = str(message.id)
+                                                updated_session.draft_channel_id = str(message.channel.id)
+                                                updated_session.premade_match_id = str(match_id)
+                                                session.add(updated_session)
+                                                await session.commit()
+
+                                # Pin the message to the channel
+                                self.lobby_message = message
+                                await message.pin()
+                            else:
+                                await interaction.response.send_message("Unable to open lobby. You are not a member of an involved team.", ephemeral=True)
+                                
+                        elif now < lobby_creation_time:
+                            await interaction.response.send_message("Unable to open lobby. Lobby can only be opened within 1 hour of proposed start time.", ephemeral=True)
+                            print(f"Lobby failed to create for {challenge.id}. Start Time: {challenge.start_time}. Current time: {now}. Lobby Creation Time: {lobby_creation_time}")
+                        else:
+                            await interaction.response.send_message("Unable to open lobby. Lobby already opened in #league-play-draft-room. Check pins in that channel", ephemeral=True)
+
+    async def cancel_sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = str(interaction.user.id)
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                challenge = await db_session.get(SwissChallenge, self.challenge_id)
+                sign_ups = challenge.sign_ups
+                if user_id not in sign_ups:
+                    # User is not signed up; inform them
+                    await interaction.response.send_message("You are not signed up!", ephemeral=True)
+                else:
+                    # User is canceling their sign-up
+                    del challenge.sign_ups[user_id]
+                    await db_session.execute(
+                        update(SwissChallenge).
+                        where(SwissChallenge.id == self.challenge_id).
+                        values(sign_ups=sign_ups)
+                    )
+                    await db_session.commit()
+                    await update_challenge_message(interaction.client, challenge)
+                    
+
+                    await interaction.response.send_message("You are no longer signed up!", ephemeral=True)
+
+async def update_challenge_message(bot, query):
+    channel_id = int(query.channel_id)
+    message_id = int(query.message_id)
+    channel = bot.get_channel(channel_id)
+    try:
+        message = await channel.fetch_message(message_id)
+        embed = message.embeds[0]
+        sign_up_count = len(query.sign_ups)
+        sign_ups_field_name = f"Sign-Ups ({sign_up_count}):"
+        sign_ups_str = '\n'.join([f"{name}" for name in query.sign_ups.values()]) if query.sign_ups else 'No players yet.'
+        embed.set_field_at(0, name=sign_ups_field_name, value=sign_ups_str, inline=False)
+        await message.edit(embed=embed)
+    except Exception as e:
+        print(f"Failed to update message for session {query.id}. Error: {e}")
+
 class ChallengeCubeSelect(discord.ui.Select):
     def __init__(self, attribute_name):
         options = [
             discord.SelectOption(label="LSVCube", description="Curated by Luis Scott Vargas"),
             discord.SelectOption(label="AlphaFrog", description="Curated by Gavin Thompson"),
-            discord.SelectOption(label="mtgovintage", description="Curated by Ryan Spain and Chris Wolf"),
+            discord.SelectOption(label="MOCS24", description="Curated by Ryan Spain and Chris Wolf"),
         ]
         super().__init__(placeholder="Choose Cube", min_values=1, max_values=1, options=options)
         self.attribute_name = attribute_name
