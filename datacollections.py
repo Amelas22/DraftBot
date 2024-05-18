@@ -74,7 +74,7 @@ async def save_draft_log_data(session_id, draft_id, draft_data, session_type):
         async with db_session.begin():
             stmt = select(DraftSession).filter(DraftSession.session_id == session_id)
             draft_session = await db_session.scalar(stmt)
-            upload_successful = await save_to_digitalocean_spaces(draft_id, session_type, draft_data, draft_session.draft_start_time, draft_session.cube)
+            upload_successful = await save_to_digitalocean_spaces(draft_id, session_type, draft_data, session_id, draft_session.cube)
             if draft_session:
                 if upload_successful:
                     draft_session.data_received = True
@@ -85,13 +85,13 @@ async def save_draft_log_data(session_id, draft_id, draft_data, session_type):
             else:
                 print(f"Draft session {draft_id} not found in the database")
 
-async def save_to_digitalocean_spaces(draft_id, session_type, draft_data, start_time, cube):
+async def save_to_digitalocean_spaces(draft_id, session_type, draft_data, session_id, cube):
     DO_SPACES_REGION = os.getenv("DO_SPACES_REGION")
     DO_SPACES_ENDPOINT = os.getenv("DO_SPACES_ENDPOINT")
     DO_SPACES_KEY = os.getenv("DO_SPACES_KEY")
     DO_SPACES_SECRET = os.getenv("DO_SPACES_SECRET")
     DO_SPACES_BUCKET = os.getenv("DO_SPACES_BUCKET")
-    
+    start_time = session_id.split("-")[1]
     session = get_session()
     async with session.create_client(
         's3',
@@ -102,7 +102,7 @@ async def save_to_digitalocean_spaces(draft_id, session_type, draft_data, start_
     ) as s3_client:
         try:
             folder = "swiss" if session_type == "swiss" else "team"
-            object_name = f'{folder}/{cube}-{int(start_time)}-DB{draft_id}.json'
+            object_name = f'{folder}/{cube}-{start_time}-DB{draft_id}.json'
             await s3_client.put_object(
                 Bucket=DO_SPACES_BUCKET,
                 Key=object_name,
