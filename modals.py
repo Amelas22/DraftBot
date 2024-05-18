@@ -24,6 +24,8 @@ class CubeSelectionModal(discord.ui.Modal):
         cube_option = "MTG" if not cube_name else cube_name
         draft_start_time = datetime.now().timestamp()
         session_id = f"{interaction.user.id}-{int(draft_start_time)}"
+        print(draft_start_time)
+        print(int(draft_start_time))
         draft_id = ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
         draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
 
@@ -40,7 +42,8 @@ class CubeSelectionModal(discord.ui.Modal):
                     premade_match_id=None if self.session_type != "swiss" else 9000,
                     team_a_name=None if self.session_type != "premade" else team_a_name,
                     team_b_name=None if self.session_type != "premade" else team_b_name,
-                    tracked_draft = True
+                    tracked_draft = True,
+                    cube = cube_option
                 )
                 session.add(new_draft_session)
 

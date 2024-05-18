@@ -155,7 +155,8 @@ class LeagueDraftView(discord.ui.View):
                         team_a_name=team_a_name,
                         team_b_name=team_b_name,
                         tracked_draft = True,
-                        true_skill_draft = False
+                        true_skill_draft = False,
+                        cube = self.cube_choice
                     )
                     session.add(new_draft_session)
                     
@@ -458,81 +459,81 @@ class ChallengeTimeModal(Modal):
             ))
 
     async def callback(self, interaction: discord.Interaction):
-        if self.command_type == "test":
-            await interaction.response.defer()
-            bot = interaction.client
-            guild = bot.get_guild(int(interaction.guild_id))
-            start_time_str = self.children[0].value
-            time_range = int(self.children[1].value)
-            user_time_zone = pytz.timezone(self.time_zone)  # Convert the selected timezone string to a pytz timezone
-            local_time = datetime.strptime(start_time_str, "%m/%d/%Y %H:%M")
+        # if self.command_type == "test":
+        #     await interaction.response.defer()
+        #     bot = interaction.client
+        #     guild = bot.get_guild(int(interaction.guild_id))
+        #     start_time_str = self.children[0].value
+        #     time_range = int(self.children[1].value)
+        #     user_time_zone = pytz.timezone(self.time_zone)  # Convert the selected timezone string to a pytz timezone
+        #     local_time = datetime.strptime(start_time_str, "%m/%d/%Y %H:%M")
             
-            local_dt_with_tz = user_time_zone.localize(local_time)  # Localize the datetime
+        #     local_dt_with_tz = user_time_zone.localize(local_time)  # Localize the datetime
             
 
-            utc_start_dt = local_dt_with_tz.astimezone(pytz.utc)
-            if time_range < 13: 
-                utc_end_dt = utc_start_dt + timedelta(hours=time_range)
-            else:
-                utc_end_dt = utc_start_dt + timedelta(minutes=time_range)
-            formatted_start_time = f"<t:{int(utc_start_dt.timestamp())}:F>"
-            formatted_end_time = f"<t:{int(utc_end_dt.timestamp())}:F>" 
-            relative_time = f"<t:{int(utc_start_dt.timestamp())}:R>"
-            from modals import create_draft_link
-            draft_start_time, session_id, draft_id, draft_link = await create_draft_link(interaction.user.id)
+        #     utc_start_dt = local_dt_with_tz.astimezone(pytz.utc)
+        #     if time_range < 13: 
+        #         utc_end_dt = utc_start_dt + timedelta(hours=time_range)
+        #     else:
+        #         utc_end_dt = utc_start_dt + timedelta(minutes=time_range)
+        #     formatted_start_time = f"<t:{int(utc_start_dt.timestamp())}:F>"
+        #     formatted_end_time = f"<t:{int(utc_end_dt.timestamp())}:F>" 
+        #     relative_time = f"<t:{int(utc_start_dt.timestamp())}:R>"
+        #     from modals import create_draft_link
+        #     draft_start_time, session_id, draft_id, draft_link = await create_draft_link(interaction.user.id)
 
-            async with AsyncSessionLocal() as session:
-                async with session.begin():
-                    new_draft_session = DraftSession(
-                        session_id=session_id,
-                        guild_id=str(interaction.guild_id),
-                        draft_link=draft_link,
-                        draft_id=draft_id,
-                        draft_start_time=utc_start_dt,
-                        deletion_time=utc_start_dt + timedelta(hours=6),
-                        session_type=self.command_type,
-                        premade_match_id=None,
-                        team_a_name=None,
-                        team_b_name=None,
-                        tracked_draft = True
-                    )
-                    session.add(new_draft_session)
-            embed = discord.Embed(title=f"Test Draft scheduled to start in {relative_time}. Sign up Below!", 
-                                                description=f"Start Range: Between {formatted_start_time} and {formatted_end_time}\n\n\n**Draftmancer Session**: **[Join Here]({draft_link})**" +
-                                                f"\n\nClick 'Sign Up' below if you can make the scheduled draft. You will be pinged 15 minutes before draft start. \n\nUse draftmancer random seating and pairings.\n\n", 
-                                                color=discord.Color.blue())
-            embed.add_field(name="\n\nSign-Ups", value="No players yet.", inline=False)
-            embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1218187262488215642/1237195855560183829/image.png?ex=663ac3ed&is=6639726d&hm=3b72a4187732961a2d774534f5ea0d7b644e150303209900afbaf42ebff5db05&")
-            from views import PersistentView
-            from session import get_draft_session
-            draft_session = await get_draft_session(session_id)
-            if draft_session:
-                view = PersistentView(
-                    bot=bot,
-                    draft_session_id=draft_session.session_id,
-                    session_type=self.command_type,
-                    team_a_name=getattr(draft_session, 'team_a_name', None),
-                    team_b_name=getattr(draft_session, 'team_b_name', None)
-                )
-                message = await interaction.followup.send(embed=embed, view=view)
+        #     async with AsyncSessionLocal() as session:
+        #         async with session.begin():
+        #             new_draft_session = DraftSession(
+        #                 session_id=session_id,
+        #                 guild_id=str(interaction.guild_id),
+        #                 draft_link=draft_link,
+        #                 draft_id=draft_id,
+        #                 draft_start_time=utc_start_dt,
+        #                 deletion_time=utc_start_dt + timedelta(hours=6),
+        #                 session_type=self.command_type,
+        #                 premade_match_id=None,
+        #                 team_a_name=None,
+        #                 team_b_name=None,
+        #                 tracked_draft = True
+        #             )
+        #             session.add(new_draft_session)
+        #     embed = discord.Embed(title=f"Test Draft scheduled to start in {relative_time}. Sign up Below!", 
+        #                                         description=f"Start Range: Between {formatted_start_time} and {formatted_end_time}\n\n\n**Draftmancer Session**: **[Join Here]({draft_link})**" +
+        #                                         f"\n\nClick 'Sign Up' below if you can make the scheduled draft. You will be pinged 15 minutes before draft start. \n\nUse draftmancer random seating and pairings.\n\n", 
+        #                                         color=discord.Color.blue())
+        #     embed.add_field(name="\n\nSign-Ups", value="No players yet.", inline=False)
+        #     embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1218187262488215642/1237195855560183829/image.png?ex=663ac3ed&is=6639726d&hm=3b72a4187732961a2d774534f5ea0d7b644e150303209900afbaf42ebff5db05&")
+        #     from views import PersistentView
+        #     from session import get_draft_session
+        #     draft_session = await get_draft_session(session_id)
+        #     if draft_session:
+        #         view = PersistentView(
+        #             bot=bot,
+        #             draft_session_id=draft_session.session_id,
+        #             session_type=self.command_type,
+        #             team_a_name=getattr(draft_session, 'team_a_name', None),
+        #             team_b_name=getattr(draft_session, 'team_b_name', None)
+        #         )
+        #         message = await interaction.followup.send(embed=embed, view=view)
             
-            if new_draft_session:
-                async with AsyncSessionLocal() as session:
-                    async with session.begin():
-                        result = await session.execute(select(DraftSession).filter_by(session_id=new_draft_session.session_id))
-                        updated_session = result.scalars().first()
-                        if updated_session:
-                            updated_session.message_id = str(message.id)
-                            updated_session.draft_channel_id = str(message.channel.id)
-                            session.add(updated_session)
-                            await session.commit()
+        #     if new_draft_session:
+        #         async with AsyncSessionLocal() as session:
+        #             async with session.begin():
+        #                 result = await session.execute(select(DraftSession).filter_by(session_id=new_draft_session.session_id))
+        #                 updated_session = result.scalars().first()
+        #                 if updated_session:
+        #                     updated_session.message_id = str(message.id)
+        #                     updated_session.draft_channel_id = str(message.channel.id)
+        #                     session.add(updated_session)
+        #                     await session.commit()
 
-            # Pin the message to the channel
-            await message.pin()
-            from utils import send_channel_reminders
-            asyncio.create_task(send_channel_reminders(bot, updated_session.session_id))
+        #     # Pin the message to the channel
+        #     await message.pin()
+        #     from utils import send_channel_reminders
+        #     asyncio.create_task(send_channel_reminders(bot, updated_session.session_id))
 
-        elif self.command_type == "swiss":
+        if self.command_type == "swiss":
             user_id = str(interaction.user.id)
             bot = interaction.client
             guild = bot.get_guild(int(interaction.guild_id))
@@ -1033,6 +1034,7 @@ class ChallengeView(View):
                                             sign_ups=challenge.sign_ups,
                                             tracked_draft = True,
                                             true_skill_draft = False,
+                                            cube = challenge.cube
                                         )
                         db_session.add(new_draft_session)
                         embed_title = f"AlphaFrog Prelims: Scheduled Queue Opened <t:{int(draft_start_time)}:R>"
@@ -1146,6 +1148,7 @@ class ChallengeView(View):
                                             team_b_name=challenge.team_b,
                                             tracked_draft = True,
                                             true_skill_draft = False,
+                                            cube = challenge.cube
                                         )
                                         session.add(new_draft_session)
 

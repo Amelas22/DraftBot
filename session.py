@@ -65,6 +65,7 @@ class DraftSession(Base):
     swiss_matches = Column(JSON)
     draft_data = Column(JSON)
     data_received = Column(Boolean, default=False)
+    cube = Column(String(128))
     
     def __repr__(self):
         return f"<DraftSession(session_id={self.session_id}, guild_id={self.guild_id})>"
