@@ -23,6 +23,7 @@ async def disconnect():
     pass
 
 async def keep_draft_session_alive(session_id, draft_link, draft_id, session_type):
+    delay_handled = False
     while True:
         try:
             await sio.connect(
@@ -32,7 +33,7 @@ async def keep_draft_session_alive(session_id, draft_link, draft_id, session_typ
             print(f"Connected to {draft_link}")
             
             while True:
-                data_fetched = await fetch_draft_log_data(session_id, draft_id, session_type)
+                data_fetched = await fetch_draft_log_data(session_id, draft_id, session_type, delay_handled)
                 if data_fetched:
                     print(f"Draft log data fetched and saved for {draft_id}, closing connection.")
                     await sio.disconnect()
@@ -53,15 +54,21 @@ async def keep_draft_session_alive(session_id, draft_link, draft_id, session_typ
         
         await asyncio.sleep(120)
 
-async def fetch_draft_log_data(session_id, draft_id, session_type):
+async def fetch_draft_log_data(session_id, draft_id, session_type, delay_handled):
     url = f"https://draftmancer.com/getDraftLog/DB{draft_id}"
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url) as response:
                 if response.status == 200:
                     draft_data = await response.json()
-                    await save_draft_log_data(session_id, draft_id, draft_data, session_type)
-                    return True
+                    if draft_data.get("delayed") is True and not delay_handled:
+                        print(f"Draft log data for {draft_id} is delayed, retrying in 3 hours and 15 minutes...")
+                        await asyncio.sleep(11700)  # Wait for 3 hours and 15 minutes
+                        delay_handled = True  # Set the flag to True after handling the delay
+                        return await fetch_draft_log_data(session_id, draft_id, session_type, delay_handled)  # Retry fetching the data
+                    else:
+                        await save_draft_log_data(session_id, draft_id, draft_data, session_type)
+                        return True
                 else:
                     print(f"Failed to fetch draft log data: status code {response.status}")
                     return False
