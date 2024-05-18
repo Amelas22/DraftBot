@@ -24,8 +24,6 @@ class CubeSelectionModal(discord.ui.Modal):
         cube_option = "MTG" if not cube_name else cube_name
         draft_start_time = datetime.now().timestamp()
         session_id = f"{interaction.user.id}-{int(draft_start_time)}"
-        print(draft_start_time)
-        print(int(draft_start_time))
         draft_id = ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
         draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
 
