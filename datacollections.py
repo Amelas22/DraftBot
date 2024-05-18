@@ -26,7 +26,7 @@ async def keep_draft_session_alive(session_id, draft_link, draft_id, session_typ
     while True:
         try:
             await sio.connect(
-            f'wss://draftmancer.com?userID=DRAFTLOGBOT&sessionID=DB{draft_id}&userName=DraftLogBot',
+            f'wss://draftmancer.com?userID=DraftBot&sessionID=DB{draft_id}&userName=DraftBot',
             transports='websocket',
             wait_timeout=10)
             print(f"Connected to {draft_link}")
