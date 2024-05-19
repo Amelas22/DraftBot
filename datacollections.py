@@ -22,9 +22,7 @@ class DraftLogManager:
         self.fetch_attempts = 0
         self.connection_attempts = 0
         self.sio = socketio.AsyncClient()
-        self.register_events()
-
-    def register_events(self):
+        
         @self.sio.event
         async def connect():
             print(f"Successfully connected to the websocket for draft_id: DB{self.draft_id}")
