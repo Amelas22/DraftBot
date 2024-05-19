@@ -18,9 +18,13 @@ class DraftLogManager:
         self.draft_id = draft_id
         self.session_type = session_type
         self.cube = cube
-        self.delay_handled = False
-        self.sio = socketio.AsyncClient()  # Create a new sio client instance
+        self.first_delay = False
+        self.fetch_attempts = 0
+        self.connection_attempts = 0
+        self.sio = socketio.AsyncClient()
+        self.register_events()
 
+    def register_events(self):
         @self.sio.event
         async def connect():
             print(f"Successfully connected to the websocket for draft_id: DB{self.draft_id}")
@@ -34,7 +38,8 @@ class DraftLogManager:
             print(f"Disconnected from the websocket for draft_id: DB{self.draft_id}")
 
     async def keep_draft_session_alive(self):
-        while True:
+        keep_running = True
+        while keep_running:
             try:
                 await self.sio.connect(
                     f'wss://draftmancer.com?userID=DraftBot&sessionID=DB{self.draft_id}&userName=DraftBot',
@@ -42,13 +47,18 @@ class DraftLogManager:
                     wait_timeout=10)
                 
                 while True:
+                    if self.attempts >= 15 or self.connection_attempts >= 15:
+                        print(f"Exceeded maximum attempts for {self.draft_id}, stopping attempts and disconnecting.")
+                        keep_running = False
+                        break
+
                     data_fetched = await self.fetch_draft_log_data()
                     if data_fetched:
                         print(f"Draft log data fetched and saved for {self.draft_id}, closing connection.")
                         await self.sio.disconnect()
                         return
                     else:
-                        print(f"Draft log data not available, retrying in 5 minutes...")
+                        print(f"{self.draft_id} log data not available attempt {self.attempts}, retrying in 5 minutes...")
                         await asyncio.sleep(300)  # Retry every 5 minutes
 
                     try:
@@ -61,7 +71,11 @@ class DraftLogManager:
             except Exception as e:
                 print(f"Error connecting to {self.draft_link}: {e}")
             
-            await asyncio.sleep(120)
+            if keep_running:
+                self.connection_attempts += 1
+                await asyncio.sleep(120)
+            else:
+                await self.sio.disconnect()
 
     async def fetch_draft_log_data(self):
         url = f"https://draftmancer.com/getDraftLog/DB{self.draft_id}"
@@ -70,12 +84,20 @@ class DraftLogManager:
                 async with session.get(url) as response:
                     if response.status == 200:
                         draft_data = await response.json()
-                        if draft_data.get("delayed") is True and not self.delay_handled:
-                            print(f"Draft log data for {self.draft_id} is delayed, retrying in 3 hours and 15 minutes...")
+                        first_user_picks = next(iter(draft_data["users"].values()))["picks"]
+
+                        if not self.first_delay and not first_user_picks:
+                            print(f"Draft log data for {self.draft_id} has no picks, retrying in 3 hours and 15 minutes...")
                             await asyncio.sleep(11700)  # Wait for 3 hours and 15 minutes
-                            self.delay_handled = True  # Set the flag to True after handling the delay
+                            self.first_delay = True
+                            self.fetch_attempts += 1
                             return await self.fetch_draft_log_data()  # Retry fetching the data
-                        else:
+                        elif self.first_delay and not first_user_picks:
+                            print(f"Draft log data for {self.draft_id} has no picks, retrying in 5 minutes")
+                            await asyncio.sleep(300)  # Wait for 5 minutes
+                            self.fetch_attempts += 1
+                            return await self.fetch_draft_log_data()
+                        elif first_user_picks:
                             await self.save_draft_log_data(draft_data)
                             return True
                     else:
