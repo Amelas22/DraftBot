@@ -13,14 +13,6 @@ load_dotenv()
 
 sio = socketio.AsyncClient()
 
-@sio.event
-async def connect():
-    pass
-
-@sio.event
-async def disconnect():
-    pass
-
 class DraftLogManager:
     def __init__(self, session_id, draft_link, draft_id, session_type):
         self.session_id = session_id
@@ -30,13 +22,13 @@ class DraftLogManager:
         self.delay_handled = False
 
     async def keep_draft_session_alive(self):
+        sio.manager = self  # Store the DraftLogManager instance in the sio client
         while True:
             try:
                 await sio.connect(
                     f'wss://draftmancer.com?userID=DraftBot&sessionID=DB{self.draft_id}&userName=DraftBot',
                     transports='websocket',
                     wait_timeout=10)
-                print(f"Connected to {self.draft_link}")
                 
                 while True:
                     data_fetched = await self.fetch_draft_log_data()
@@ -128,3 +120,18 @@ class DraftLogManager:
             except Exception as e:
                 print(f"Error uploading to DigitalOcean Space: {e}")
                 return False
+
+@sio.event
+async def connect():
+    manager = sio.manager  # Retrieve the DraftLogManager instance
+    print(f"Successfully connected to the websocket for draft_id: DB{manager.draft_id}")
+
+@sio.event
+async def connect_error(data):
+    manager = sio.manager  # Retrieve the DraftLogManager instance
+    print(f"Connection to the websocket failed for draft_id: DB{manager.draft_id}")
+
+@sio.event
+async def disconnect():
+    manager = sio.manager  # Retrieve the DraftLogManager instance
+    print(f"Disconnected from the websocket for draft_id: DB{manager.draft_id}")
