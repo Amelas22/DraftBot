@@ -14,11 +14,12 @@ load_dotenv()
 sio = socketio.AsyncClient()
 
 class DraftLogManager:
-    def __init__(self, session_id, draft_link, draft_id, session_type):
+    def __init__(self, session_id, draft_link, draft_id, session_type, cube):
         self.session_id = session_id
         self.draft_link = draft_link
         self.draft_id = draft_id
         self.session_type = session_type
+        self.cube = cube
         self.delay_handled = False
 
     async def keep_draft_session_alive(self):
@@ -77,26 +78,28 @@ class DraftLogManager:
     async def save_draft_log_data(self, draft_data):    
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
+                upload_successful = await self.save_to_digitalocean_spaces(draft_data)
                 stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
                 draft_session = await db_session.scalar(stmt)
-                upload_successful = await self.save_to_digitalocean_spaces(draft_data, draft_session.cube)
-                if draft_session:
-                    if upload_successful:
-                        draft_session.data_received = True
-                    else:
-                        draft_session.draft_data = draft_data
-                    await db_session.commit()
-                    print(f"Draft log data processed for {self.draft_id}")
+                if upload_successful and draft_session:
+                    draft_session.data_received = True
+                elif draft_session:
+                    draft_session.draft_data = draft_data
+                    print(f"Draft log data saved in database for {self.draft_id}; SessionID: {self.session_id}")
                 else:
-                    print(f"Draft session {self.draft_id} not found in the database")
+                    print(f"Draft session {self.session_id} not found in the database")
+            await db_session.commit()
 
-    async def save_to_digitalocean_spaces(self, draft_data, cube):
+    async def save_to_digitalocean_spaces(self, draft_data):
         DO_SPACES_REGION = os.getenv("DO_SPACES_REGION")
         DO_SPACES_ENDPOINT = os.getenv("DO_SPACES_ENDPOINT")
         DO_SPACES_KEY = os.getenv("DO_SPACES_KEY")
         DO_SPACES_SECRET = os.getenv("DO_SPACES_SECRET")
         DO_SPACES_BUCKET = os.getenv("DO_SPACES_BUCKET")
-        start_time = self.session_id.split("-")[1]
+        
+        start_time = draft_data.get("time")
+        draft_id = draft_data.get("sessionID")
+        
         session = get_session()
         async with session.create_client(
             's3',
@@ -107,7 +110,7 @@ class DraftLogManager:
         ) as s3_client:
             try:
                 folder = "swiss" if self.session_type == "swiss" else "team"
-                object_name = f'{folder}/{cube}-{start_time}-DB{self.draft_id}.json'
+                object_name = f'{folder}/{self.cube}-{start_time}-{draft_id}.json'
                 await s3_client.put_object(
                     Bucket=DO_SPACES_BUCKET,
                     Key=object_name,

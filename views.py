@@ -561,7 +561,7 @@ class PersistentView(discord.ui.View):
             draft_link = session.draft_link
             if draft_link:      
                 from datacollections import DraftLogManager
-                manager = DraftLogManager(session.session_id, draft_link, session.draft_id, session.session_type)
+                manager = DraftLogManager(session.session_id, draft_link, session.draft_id, session.session_type, session.cube)
                 asyncio.create_task(manager.keep_draft_session_alive())
             else:
                 print("Draft link not found in database.")
