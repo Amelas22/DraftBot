@@ -47,7 +47,7 @@ class DraftLogManager:
                     wait_timeout=10)
                 
                 while True:
-                    if self.attempts >= 15 or self.connection_attempts >= 15:
+                    if self.fetch_attempts >= 20 or self.connection_attempts >= 20:
                         print(f"Exceeded maximum attempts for {self.draft_id}, stopping attempts and disconnecting.")
                         keep_running = False
                         break
@@ -58,7 +58,7 @@ class DraftLogManager:
                         await self.sio.disconnect()
                         return
                     else:
-                        print(f"{self.draft_id} log data not available attempt {self.attempts}, retrying in 5 minutes...")
+                        print(f"{self.draft_id} log data not available attempt {self.fetch_attempts}, retrying in 5 minutes...")
                         await asyncio.sleep(300)  # Retry every 5 minutes
 
                     try:
@@ -66,16 +66,15 @@ class DraftLogManager:
                         await asyncio.sleep(120)  # Send a ping every 2 minutes
                     except socketio.exceptions.ConnectionError:
                         print(f"Connection to {self.draft_link} closed, retrying...")
+                        self.connection_attempts += 1
                         break
 
             except Exception as e:
                 print(f"Error connecting to {self.draft_link}: {e}")
+                self.connection_attempts += 1
             
             if keep_running:
-                self.connection_attempts += 1
                 await asyncio.sleep(120)
-            else:
-                await self.sio.disconnect()
 
     async def fetch_draft_log_data(self):
         url = f"https://draftmancer.com/getDraftLog/DB{self.draft_id}"
@@ -102,9 +101,11 @@ class DraftLogManager:
                             return True
                     else:
                         print(f"Failed to fetch draft log data: status code {response.status}")
+                        self.fetch_attempts += 1
                         return False
             except Exception as e:
                 print(f"Exception while fetching draft log data: {e}")
+                self.fetch_attempts += 1
                 return False
 
     async def save_draft_log_data(self, draft_data):    
