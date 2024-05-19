@@ -11,8 +11,6 @@ from session import AsyncSessionLocal, DraftSession
 
 load_dotenv()
 
-sio = socketio.AsyncClient()
-
 class DraftLogManager:
     def __init__(self, session_id, draft_link, draft_id, session_type, cube):
         self.session_id = session_id
@@ -21,12 +19,24 @@ class DraftLogManager:
         self.session_type = session_type
         self.cube = cube
         self.delay_handled = False
+        self.sio = socketio.AsyncClient()  # Create a new sio client instance
+
+        @self.sio.event
+        async def connect():
+            print(f"Successfully connected to the websocket for draft_id: DB{self.draft_id}")
+
+        @self.sio.event
+        async def connect_error(data):
+            print(f"Connection to the websocket failed for draft_id: DB{self.draft_id}")
+
+        @self.sio.event
+        async def disconnect():
+            print(f"Disconnected from the websocket for draft_id: DB{self.draft_id}")
 
     async def keep_draft_session_alive(self):
-        sio.manager = self  # Store the DraftLogManager instance in the sio client
         while True:
             try:
-                await sio.connect(
+                await self.sio.connect(
                     f'wss://draftmancer.com?userID=DraftBot&sessionID=DB{self.draft_id}&userName=DraftBot',
                     transports='websocket',
                     wait_timeout=10)
@@ -35,14 +45,14 @@ class DraftLogManager:
                     data_fetched = await self.fetch_draft_log_data()
                     if data_fetched:
                         print(f"Draft log data fetched and saved for {self.draft_id}, closing connection.")
-                        await sio.disconnect()
+                        await self.sio.disconnect()
                         return
                     else:
                         print(f"Draft log data not available, retrying in 5 minutes...")
                         await asyncio.sleep(300)  # Retry every 5 minutes
 
                     try:
-                        await sio.emit('ping')  # Send a ping to keep the connection alive
+                        await self.sio.emit('ping')  # Send a ping to keep the connection alive
                         await asyncio.sleep(120)  # Send a ping every 2 minutes
                     except socketio.exceptions.ConnectionError:
                         print(f"Connection to {self.draft_link} closed, retrying...")
@@ -123,18 +133,3 @@ class DraftLogManager:
             except Exception as e:
                 print(f"Error uploading to DigitalOcean Space: {e}")
                 return False
-
-@sio.event
-async def connect():
-    manager = sio.manager  # Retrieve the DraftLogManager instance
-    print(f"Successfully connected to the websocket for draft_id: DB{manager.draft_id}")
-
-@sio.event
-async def connect_error(data):
-    manager = sio.manager  # Retrieve the DraftLogManager instance
-    print(f"Connection to the websocket failed for draft_id: DB{manager.draft_id}")
-
-@sio.event
-async def disconnect():
-    manager = sio.manager  # Retrieve the DraftLogManager instance
-    print(f"Disconnected from the websocket for draft_id: DB{manager.draft_id}")
