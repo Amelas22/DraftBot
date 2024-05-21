@@ -1133,17 +1133,37 @@ async def calculate_player_standings():
                 reverse=True
             )
 
-            # Prepare the embed
-            embed = discord.Embed(
-                title="AlphaFrog Prelim Standings",
-                description=f"Standings as of <t:{int(time.timestamp())}:F>",
-                color=discord.Color.dark_purple()
-            )
+            # Prepare the embeds
+            embeds = []
+            embed = None
             standings_text = ""
+            is_first_embed = True
+
             for idx, player in enumerate(sorted_players, start=1):
                 # Format win percentage to display as an integer percentage
-                standings_text += f"\n{idx}. **{player['display_name']}** - {player['total_points']} points (Win %: {player['win_percentage']:.0f}%)"
+                entry = f"\n{idx}. **{player['display_name']}** - {player['total_points']} points (Win %: {player['win_percentage']:.0f}%)"
+                if len(standings_text) + len(entry) > 1000:
+                    embed.add_field(name="Standings", value=standings_text, inline=False)
+                    embeds.append(embed)
+                    is_first_embed = False
+                    standings_text = entry
+                else:
+                    standings_text += entry
+
+                if is_first_embed:
+                    embed = discord.Embed(
+                        title="AlphaFrog Prelim Standings",
+                        description=f"Standings as of <t:{int(time.timestamp())}:F>",
+                        color=discord.Color.dark_purple()
+                    )
+                else:
+                    embed = discord.Embed(
+                        title="Standings, Cont'd",
+                        color=discord.Color.dark_purple()
+                    )
+
+            if standings_text:
+                embed.add_field(name="", value=standings_text, inline=False)
+                embeds.append(embed)
             
-            embed.add_field(name="Standings", value=standings_text, inline=False)
-            
-            return embed
+            return embeds

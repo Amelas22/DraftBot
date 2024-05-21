@@ -630,16 +630,16 @@ async def swiss_draft_commands(bot):
     @bot.slash_command(name='player_standings', description='Display the AlphaFrog standings')
     async def player_standings(interaction: discord.Interaction):
         global league_start_time
-
+        await interaction.response.defer()
         # Check if current time is before the cutoff time
         current_time = datetime.now(pacific_time_zone)
         if current_time < league_start_time:
             await interaction.response.send_message("This season is not yet active. Season begins on Monday, May 20th! Please reach out to a Cube Overseer if you believe you received this message in error.", ephemeral=True)
             return
-        
         from utils import calculate_player_standings
-        embed = await calculate_player_standings()
-        await interaction.response.send_message(embed=embed)
+        embeds = await calculate_player_standings()
+        for embed in embeds:
+            await interaction.followup.send(embed=embed)
 
 async def scheduled_posts(bot):
 
