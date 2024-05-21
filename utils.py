@@ -1105,7 +1105,8 @@ async def calculate_player_standings():
             for row in results.scalars().all():
                 player_id = row.player_id
                 display_name = row.display_name
-                all_points = [row.match_one_points, row.match_two_points, row.match_three_points]
+                drafts_participated = row.drafts_participated
+                all_points = [row.match_one_points, row.match_two_points, row.match_three_points, row.match_four_points]
                 total_points = sum(all_points)
                 top_two_week_points = sum(sorted(all_points, reverse=True)[:2])
 
@@ -1119,7 +1120,7 @@ async def calculate_player_standings():
 
                 player_scores[player_id]['total_points'] += top_two_week_points
                 player_scores[player_id]['total_all_points'] += total_points
-                player_scores[player_id]['drafts_participated'] += 1
+                player_scores[player_id]['drafts_participated'] += drafts_participated
 
             # Calculate win percentage and sort
             for player_id, details in player_scores.items():
@@ -1165,5 +1166,5 @@ async def calculate_player_standings():
             if standings_text:
                 embed.add_field(name="", value=standings_text, inline=False)
                 embeds.append(embed)
-            
+                
             return embeds
