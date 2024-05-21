@@ -438,7 +438,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                             player_weekly_limit = player_weekly_limit_result.scalars().first()
 
                             if player_weekly_limit:
-                                # player_weekly_limit.drafts_participated += 1
+                                player_weekly_limit.drafts_participated += 1
                                 if player_weekly_limit.drafts_participated == 1:
                                     player_weekly_limit.match_one_points = player['win_points']
                                 elif player_weekly_limit.drafts_participated == 2:
