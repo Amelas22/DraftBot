@@ -438,6 +438,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                             player_weekly_limit = player_weekly_limit_result.scalars().first()
 
                             if player_weekly_limit:
+                                player_weekly_limit.drafts_participated += 1
                                 if player_weekly_limit.drafts_participated == 1:
                                     player_weekly_limit.match_one_points = player['win_points']
                                 elif player_weekly_limit.drafts_participated == 2:
@@ -875,8 +876,6 @@ async def check_weekly_limits(interaction, match_id, session_type=None, session_
                         player_weekly_limit = player_weekly_limit_result.scalars().first()
 
                         if player_weekly_limit:
-                            # If exists, increment the counter
-                            player_weekly_limit.drafts_participated += 1
                             if player_weekly_limit.drafts_participated > 4:
                                 condition = "matches" if player_weekly_limit.drafts_participated else "points"
                                 limit_messages.append(f"{player_weekly_limit.display_name} has exceeded the weekly limit for {condition}. This match will not be tracked.")
