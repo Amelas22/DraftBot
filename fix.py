@@ -6,7 +6,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from datetime import datetime
 
 DATABASE_URL = "sqlite+aiosqlite:///drafts.db"
-CSV_FILE_PATH = "completely_overwritten_database.csv"  # Path to your CSV file
+CSV_FILE_PATH = "Completely_Overwritten_Database.csv"  # Path to your CSV file
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 metadata = MetaData()
