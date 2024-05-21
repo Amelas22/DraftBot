@@ -128,9 +128,10 @@ class PersistentView(discord.ui.View):
                     player_weekly_limit_result = await db_session.execute(player_weekly_limit_stmt)
                     player_weekly_limit = player_weekly_limit_result.scalars().first()
                     
-                    if player_weekly_limit.drafts_participated >= 4:
-                        await interaction.response.send_message("You have already participated in four drafts this week! Next week begins Monday at midnight pacific time. If you believe this is an error, please contact a Cube Overseer", ephemeral=True)
-                        return
+                    if player_weekly_limit:
+                        if player_weekly_limit.drafts_participated >= 4:
+                            await interaction.response.send_message("You have already participated in four drafts this week! Next week begins Monday at midnight pacific time. If you believe this is an error, please contact a Cube Overseer", ephemeral=True)
+                            return
         
         if user_id in sign_ups:
             # User is already signed up; inform them

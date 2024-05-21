@@ -968,26 +968,37 @@ class ChallengeView(View):
         
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
-                team_stmt = select(Challenge).where(Challenge.id == self.challenge_id)
-                challenge = await db_session.scalar(team_stmt)
-                if interaction.user.id == int(challenge.initial_user):
-                    if self.team_b:
+                if self.command_type != "swiss":
+                    team_stmt = select(Challenge).where(Challenge.id == self.challenge_id)
+                    challenge = await db_session.scalar(team_stmt)
+                    if interaction.user.id == int(challenge.initial_user):
+                        if self.team_b:
 
-                        guild = bot.get_guild(int(interaction.guild_id))
-                        lobby_channel = discord.utils.get(guild.text_channels, name="league-play-coordination")
-                        user_mention = f"<@{challenge.opponent_user}>"
-                        formatted_time=f"<t:{int(challenge.start_time.timestamp())}:F>"
-                        await lobby_channel.send(f"{user_mention} your match on {formatted_time} has been cancelled by {challenge.team_a}. Please use `/list_challenge` to find a new match or `/post_challenge` to post your own.")
-                        
+                            guild = bot.get_guild(int(interaction.guild_id))
+                            lobby_channel = discord.utils.get(guild.text_channels, name="league-play-coordination")
+                            user_mention = f"<@{challenge.opponent_user}>"
+                            formatted_time=f"<t:{int(challenge.start_time.timestamp())}:F>"
+                            await lobby_channel.send(f"{user_mention} your match on {formatted_time} has been cancelled by {challenge.team_a}. Please use `/list_challenge` to find a new match or `/post_challenge` to post your own.")
+                            
 
+                        channel = bot.get_channel(int(challenge.channel_id))
+                        message = await channel.fetch_message(int(challenge.message_id))
+                        await message.delete()
+
+                        await db_session.delete(challenge)
+                    else:
+                        await interaction.response.send_message("You are not authorized to close this challenge", ephemeral=True)
+                else:
+                    team_stmt = select(SwissChallenge).where(SwissChallenge.id == self.challenge_id)
+                    challenge = await db_session.scalar(team_stmt)
+                    user_id = str(interaction.user.id)
+                    if user_id not in challenge.sign_ups:
+                        await interaction.response.send_message("You are not signed up!", ephemeral=True)
+                        print("user not signed up")
+                        return
                     channel = bot.get_channel(int(challenge.channel_id))
                     message = await channel.fetch_message(int(challenge.message_id))
                     await message.delete()
-
-                    await db_session.delete(challenge)
-                else:
-                    await interaction.response.send_message("You are not authorized to close this challenge", ephemeral=True)
-
 
     async def open_lobby_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = str(interaction.user.id)
