@@ -1,6 +1,7 @@
 import discord
 import asyncio
 import random
+import pytz
 from datetime import datetime, timedelta
 from discord import SelectOption
 from discord.ui import Button, View, Select, select
@@ -108,8 +109,29 @@ class PersistentView(discord.ui.View):
         if len(sign_ups) >= 8:
             await interaction.response.send_message("The sign-up list is already full. No more players can sign up.", ephemeral=True)
             return
-
         user_id = str(interaction.user.id)
+
+        if draft_session.session_type == "swiss":
+            pacific = pytz.timezone('US/Pacific')
+            utc = pytz.utc
+            now = datetime.now()
+            pacific_time = utc.localize(now).astimezone(pacific)
+            midnight_pacific = pacific.localize(datetime(pacific_time.year, pacific_time.month, pacific_time.day))
+            start_of_week = midnight_pacific - timedelta(days=midnight_pacific.weekday())
+            async with AsyncSessionLocal() as db_session:
+                async with db_session.begin():
+                    from session import PlayerLimit
+                    player_weekly_limit_stmt = select(PlayerLimit).where(
+                                PlayerLimit.player_id == user_id,
+                                PlayerLimit.WeekStartDate == start_of_week
+                        )
+                    player_weekly_limit_result = await db_session.execute(player_weekly_limit_stmt)
+                    player_weekly_limit = player_weekly_limit_result.scalars().first()
+                    
+                    if player_weekly_limit.drafts_participated >= 4:
+                        await interaction.response.send_message("You have already participated in four drafts this week! Next week begins Monday at midnight pacific time. If you believe this is an error, please contact a Cube Overseer", ephemeral=True)
+                        return
+        
         if user_id in sign_ups:
             # User is already signed up; inform them
             await interaction.response.send_message("You are already signed up!", ephemeral=True)

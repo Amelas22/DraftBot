@@ -9,7 +9,7 @@ class CubeSelectionModal(discord.ui.Modal):
     def __init__(self, session_type, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.session_type = session_type
-        self.add_item(discord.ui.InputText(label="Cube Name", placeholder="LSVCube, AlphaFrog, mtgovintage, or your choice", custom_id="cube_name_input"))
+        self.add_item(discord.ui.InputText(label="Cube Name", placeholder="LSVCube, AlphaFrog, MOCS24, or your choice" if self.session_type != "swiss" else "LSVCube, AlphaFrog, or MOCS24", custom_id="cube_name_input"))
         if self.session_type == "premade":
             self.add_item(discord.ui.InputText(label="Team A Name", placeholder="Team A Name", custom_id="team_a_input"))
             self.add_item(discord.ui.InputText(label="Team B Name", placeholder="Team B Name", custom_id="team_b_input"))
