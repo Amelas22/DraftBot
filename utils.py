@@ -10,7 +10,8 @@ from trueskill import Rating, rate_1vs1
 from discord.ui import View
 from league import ChallengeView
 
-
+flags = {}
+locks = {}
 
 async def split_into_teams(bot, draft_session_id):
     # Fetch the current draft session to ensure it's up to date.
@@ -383,109 +384,135 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
             if not guild:
                 print("Guild not found.")
                 return
-            
+
             if draft_session.session_type == "swiss":
-                stmt = select(MatchResult).where(MatchResult.session_id == draft_session_id).order_by(MatchResult.match_number.desc()).limit(4)
-                results = await session.execute(stmt)
-                match_results = results.scalars().all()
-                completed_matches = []
-                for match in match_results:
-                    if match.winner_id:
-                        completed_matches.append(match.match_number)
-                if len(completed_matches) == 4 and draft_session.match_counter > 12:
-                    draft_chat_channel = guild.get_channel(int(draft_session.draft_chat_channel))
-                    if draft_session.victory_message_id_draft_chat:
-                        await draft_chat_channel.send("Results already posted for this draft")
-                        return
-                    else:    
-                        players = await calculate_pairings(draft_session, session)
-                        
-                        # Sorting players by win points in descending order and then by name if tied
-                        sorted_players = sorted(players.items(), key=lambda x: (-x[1]['win_points'], x[1]['display_name']))
-                        
-                        # Formatting the sorted list for display
-                        standings = "\n".join(f"{idx + 1}. {player['display_name']} - {player['win_points']} wins" for idx, (_, player) in enumerate(sorted_players))
-                        
-                        sign_ups_list = list(draft_session.sign_ups.keys())
-                        title = f"AlphaFrog Prelim Swiss Draft - Final Results"
-                        description = f"Draft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
-                        discord_color = discord.Color.gold()
-                        embed = discord.Embed(title=title, description=description, color=discord_color)
-                        seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
-                        embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
-                        embed.add_field(name="Standings", value=standings, inline=False)
-                        
-                        if draft_chat_channel:
-                            await post_or_update_victory_message(session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat')
+                if draft_session_id not in locks:
+                    locks[draft_session_id] = asyncio.Lock()
+                if draft_session_id not in flags:
+                    flags[draft_session_id] = {"in_progress": False}
 
-                        # Determine the correct results channel
-                        results_channel_name = "team-draft-results" if draft_session.session_type == "random" else "league-draft-results"
-                        results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
-                        if results_channel:
-                            await post_or_update_victory_message(session, results_channel, embed, draft_session, 'victory_message_id_results_channel')
-                        pacific = pytz.timezone('US/Pacific')
-                        utc = pytz.utc
-                        pacific_time = utc.localize(draft_session.teams_start_time).astimezone(pacific)
-                        midnight_pacific = pacific.localize(datetime(pacific_time.year, pacific_time.month, pacific_time.day))
-                        start_of_week = midnight_pacific - timedelta(days=midnight_pacific.weekday())
-                        for user_id, player in players.items():
-                            # Query to find existing entry for the player this week
-                            player_weekly_limit_stmt = select(PlayerLimit).where(
-                                PlayerLimit.player_id == user_id,
-                                PlayerLimit.WeekStartDate == start_of_week
-                            )
-                            player_weekly_limit_result = await session.execute(player_weekly_limit_stmt)
-                            player_weekly_limit = player_weekly_limit_result.scalars().first()
+                lock = locks[draft_session_id]
+                flag = flags[draft_session_id]
 
-                            if player_weekly_limit:
-                                player_weekly_limit.drafts_participated += 1
-                                if player_weekly_limit.drafts_participated == 1:
-                                    player_weekly_limit.match_one_points = player['win_points']
-                                elif player_weekly_limit.drafts_participated == 2:
-                                    player_weekly_limit.match_two_points = player['win_points']
-                                elif player_weekly_limit.drafts_participated == 3:
-                                    player_weekly_limit.match_three_points = player['win_points']
-                                elif player_weekly_limit.drafts_participated > 3:
-                                    player_weekly_limit.match_four_points = player['win_points']
-                            else:
-                                # If not, create a new record
-                                new_player_limit = PlayerLimit(
-                                    player_id=user_id,
-                                    display_name=player['display_name'],
-                                    drafts_participated=1,
-                                    WeekStartDate=start_of_week,
-                                    match_one_points=player['win_points'],
-                                    match_two_points=0,
-                                    match_three_points=0,
-                                    match_four_points=0
-                                )
-                                session.add(new_player_limit)
-                                try:
-                                    member = await guild.fetch_member(int(user_id))  # Fetch the member
-                                    league_drafter_role = discord.utils.get(guild.roles, name='League Drafter')  # Get the role by name
-                                    
-                                    if league_drafter_role:
-                                        if league_drafter_role not in member.roles:  # Check if the member does not already have the role
-                                            await member.add_roles(league_drafter_role)
-                                            print(f"Assigned 'League Drafter' role to {member.name}")
+                async with lock:
+                    if flag["in_progress"]:
+                        print("Pairings in progress")
+                        return  # Another instance is already processing the pairings
+
+
+                    try:
+                        async with AsyncSessionLocal() as session:
+                            async with session.begin():
+                                stmt = select(MatchResult).where(MatchResult.session_id == draft_session_id).order_by(MatchResult.match_number.desc()).limit(4)
+                                results = await session.execute(stmt)
+                                match_results = results.scalars().all()
+                                completed_matches = []
+                                for match in match_results:
+                                    if match.winner_id:
+                                        completed_matches.append(match.match_number)
+
+                                if len(completed_matches) == 4:
+                                    draft_chat_channel = guild.get_channel(int(draft_session.draft_chat_channel))
+                                    if draft_session.match_counter > 12:
+                                        flag["in_progress"] = True
+                                        if draft_session.victory_message_id_draft_chat:
+                                            await draft_chat_channel.send("Results already posted for this draft")
+                                            flag["in_progress"] = False
+                                            return
+                                        else:
+                                            players = await calculate_pairings(draft_session, session)
+                                            
+                                            # Sorting players by win points in descending order and then by name if tied
+                                            sorted_players = sorted(players.items(), key=lambda x: (-x[1]['win_points'], x[1]['display_name']))
+                                            
+                                            # Formatting the sorted list for display
+                                            standings = "\n".join(f"{idx + 1}. {player['display_name']} - {player['win_points']} wins" for idx, (_, player) in enumerate(sorted_players))
+                                            
+                                            sign_ups_list = list(draft_session.sign_ups.keys())
+                                            title = f"AlphaFrog Prelim Swiss Draft - Final Results"
+                                            description = f"Draft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
+                                            discord_color = discord.Color.gold()
+                                            embed = discord.Embed(title=title, description=description, color=discord_color)
+                                            seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
+                                            embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+                                            embed.add_field(name="Standings", value=standings, inline=False)
+                                            
+                                            if draft_chat_channel:
+                                                await post_or_update_victory_message(session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat')
+
+                                            # Determine the correct results channel
+                                            results_channel_name = "team-draft-results" if draft_session.session_type == "random" else "league-draft-results"
+                                            results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
+                                            if results_channel:
+                                                await post_or_update_victory_message(session, results_channel, embed, draft_session, 'victory_message_id_results_channel')
+
+                                            pacific = pytz.timezone('US/Pacific')
+                                            utc = pytz.utc
+                                            pacific_time = utc.localize(draft_session.teams_start_time).astimezone(pacific)
+                                            midnight_pacific = pacific.localize(datetime(pacific_time.year, pacific_time.month, pacific_time.day))
+                                            start_of_week = midnight_pacific - timedelta(days=midnight_pacific.weekday())
+                                            for user_id, player in players.items():
+                                                # Query to find existing entry for the player this week
+                                                player_weekly_limit_stmt = select(PlayerLimit).where(
+                                                    PlayerLimit.player_id == user_id,
+                                                    PlayerLimit.WeekStartDate == start_of_week
+                                                )
+                                                player_weekly_limit_result = await session.execute(player_weekly_limit_stmt)
+                                                player_weekly_limit = player_weekly_limit_result.scalars().first()
+
+                                                if player_weekly_limit:
+                                                    player_weekly_limit.drafts_participated += 1
+                                                    if player_weekly_limit.drafts_participated == 1:
+                                                        player_weekly_limit.match_one_points = player['win_points']
+                                                    elif player_weekly_limit.drafts_participated == 2:
+                                                        player_weekly_limit.match_two_points = player['win_points']
+                                                    elif player_weekly_limit.drafts_participated == 3:
+                                                        player_weekly_limit.match_three_points = player['win_points']
+                                                    elif player_weekly_limit.drafts_participated > 3:
+                                                        player_weekly_limit.match_four_points = player['win_points']
+                                                else:
+                                                    # If not, create a new record
+                                                    new_player_limit = PlayerLimit(
+                                                        player_id=user_id,
+                                                        display_name=player['display_name'],
+                                                        drafts_participated=1,
+                                                        WeekStartDate=start_of_week,
+                                                        match_one_points=player['win_points'],
+                                                        match_two_points=0,
+                                                        match_three_points=0,
+                                                        match_four_points=0
+                                                    )
+                                                    session.add(new_player_limit)
+                                                    try:
+                                                        member = await guild.fetch_member(int(user_id))  # Fetch the member
+                                                        league_drafter_role = discord.utils.get(guild.roles, name='League Drafter')  # Get the role by name
+
+                                                        if league_drafter_role:
+                                                            if league_drafter_role not in member.roles:  # Check if the member does not already have the role
+                                                                await member.add_roles(league_drafter_role)
+                                                                print(f"Assigned 'League Drafter' role to {member.name}")
+                                                        else:
+                                                            print("Role 'League Drafter' not found in the guild.")
+
+                                                    except discord.Forbidden:
+                                                        print("Permission error: Unable to assign roles. Check the bot's role position and permissions.")
+                                                    except discord.HTTPException as e:
+                                                        print(f"HTTP exception occurred: {e}")
+
+                                            await session.commit()
                                     else:
-                                        print("Role 'League Drafter' not found in the guild.")
-                                        
-                                except discord.Forbidden:
-                                    print("Permission error: Unable to assign roles. Check the bot's role position and permissions.")
-                                except discord.HTTPException as e:
-                                    print(f"HTTP exception occurred: {e}")
+                                        flag["in_progress"] = True
+                                        state_to_save, match_counter = await calculate_pairings(draft_session, session)
+                                        await session.execute(update(DraftSession)
+                                            .where(DraftSession.session_id == draft_session.session_id)
+                                            .values(swiss_matches=state_to_save, match_counter=match_counter))
 
-                        await session.commit()
-                elif len(completed_matches) == 4:
-                    state_to_save, match_counter = await calculate_pairings(draft_session, session)
-                    await session.execute(update(DraftSession)
-                        .where(DraftSession.session_id == draft_session.session_id)
-                        .values(swiss_matches=state_to_save, match_counter=match_counter))
-            
-                    await session.commit()
-                    await post_pairings(bot, guild, draft_session.session_id)
-
+                                        await session.commit()
+                                        await post_pairings(bot, guild, draft_session.session_id)
+                    finally:
+                        # Schedule the removal of the lock after 30 seconds
+                        asyncio.create_task(remove_lock_after_delay(draft_session_id, 30))
+                
                 return
 
             team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
@@ -520,6 +547,12 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 
                 await session.commit()
 
+async def remove_lock_after_delay(draft_session_id, delay):
+    await asyncio.sleep(delay)
+    if draft_session_id in locks:
+        del locks[draft_session_id]
+    if draft_session_id in flags:
+        del flags[draft_session_id]
 
 async def post_or_update_victory_message(session, channel, embed, draft_session, victory_message_attr):
     if not channel:
@@ -1166,5 +1199,5 @@ async def calculate_player_standings():
             if standings_text:
                 embed.add_field(name="", value=standings_text, inline=False)
                 embeds.append(embed)
-                
+
             return embeds
