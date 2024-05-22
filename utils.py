@@ -642,9 +642,11 @@ async def cleanup_sessions_task(bot):
                                 except discord.HTTPException as e:
                                     print(f"Failed to delete channel: {channel.name}. Reason: {e}")
 
-                    if session.draft_channel_id:
+                    if session.draft_channel_id and session.message_id:
+                        if session.session_type == "winston" and len(session.sign_ups) == 0:
+                            continue
                         draft_channel = bot.get_channel(int(session.draft_channel_id))
-                        if draft_channel and session.message_id:
+                        if draft_channel:
                             try:
                                 msg = await draft_channel.fetch_message(int(session.message_id))
                                 await msg.delete()
@@ -1052,12 +1054,20 @@ async def re_register_views(bot):
                     try:
                         message = await channel.fetch_message(int(draft_session.message_id))
                         from views import PersistentView
-                        view = PersistentView(bot=bot,
-                                            draft_session_id=draft_session.session_id,
-                                            session_type=draft_session.session_type,
-                                            team_a_name=draft_session.team_a_name,
-                                            team_b_name=draft_session.team_b_name,
-                                            session_stage=None)
+                        if draft_session.session_type == "winston":
+                            view = PersistentView(
+                                                bot=bot,
+                                                draft_session_id=draft_session.session_id,
+                                                session_type=draft_session.session_type
+                                                )
+                        else:
+                            view = PersistentView(bot=bot,
+                                                draft_session_id=draft_session.session_id,
+                                                session_type=draft_session.session_type,
+                                                team_a_name=draft_session.team_a_name,
+                                                team_b_name=draft_session.team_b_name,
+                                                session_stage=None)
+                            
                         await message.edit(view=view)  # Reattach the view
                     except discord.NotFound:
                         # Handle cases where the message or channel might have been deleted
