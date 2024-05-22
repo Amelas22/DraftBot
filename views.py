@@ -8,13 +8,13 @@ from discord.ui import Button, View, Select, select
 from sqlalchemy import update, select
 from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
 from sqlalchemy.orm import selectinload
-from utils import calculate_pairings, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, update_draft_summary_message, check_and_post_victory_or_draw, update_player_stats_and_elo, check_weekly_limits, update_player_stats_for_draft
+from utils import calculate_pairings, create_winston_draft, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, update_draft_summary_message, check_and_post_victory_or_draw, update_player_stats_and_elo, check_weekly_limits, update_player_stats_for_draft
 
 PROCESSING_ROOMS_PAIRINGS = {}
 sessions = {}
 
 class PersistentView(discord.ui.View):
-    def __init__(self, bot, draft_session_id, session_type, team_a_name=None, team_b_name=None, session_stage=None):
+    def __init__(self, bot, draft_session_id, session_type=None, team_a_name=None, team_b_name=None, session_stage=None):
         super().__init__(timeout=None)
         self.bot = bot
         self.draft_session_id = draft_session_id
@@ -27,37 +27,43 @@ class PersistentView(discord.ui.View):
 
 
     def add_buttons(self):
-        if self.session_type != "premade":
+        if self.session_type == "winston":
             self.add_item(self.create_button("Sign Up", "green", f"sign_up_{self.draft_session_id}", self.sign_up_callback))
             self.add_item(self.create_button("Cancel Sign Up", "red", f"cancel_sign_up_{self.draft_session_id}", self.cancel_sign_up_callback))
-            if self.session_type != "swiss":
-                self.add_item(self.create_button("Create Teams", "blurple", f"randomize_teams_{self.draft_session_id}", self.randomize_teams_callback))
-            else:
-                self.add_item(self.create_button("Generate Seating Order", "blurple", f"randomize_teams_{self.draft_session_id}", self.randomize_teams_callback))
-        elif self.session_type == "premade":
-            self.add_item(self.create_button(self.team_a_name, "green", f"Team_A_{self.draft_session_id}", self.team_assignment_callback))
-            self.add_item(self.create_button(self.team_b_name, "red", f"Team_B_{self.draft_session_id}", self.team_assignment_callback))
-            # draft_button_label = "League Draft: ON"
-            # draft_button_style = "green"
-            # self.add_item(self.create_button(draft_button_label, draft_button_style, f"track_draft_{self.draft_session_id}", self.track_draft_callback))
-            self.add_item(self.create_button("Generate Seating Order", "primary", f"generate_seating_{self.draft_session_id}", self.randomize_teams_callback))
-        self.add_item(self.create_button("Cancel Draft", "grey", f"cancel_draft_{self.draft_session_id}", self.cancel_draft_callback))
-        self.add_item(self.create_button("Remove User", "grey", f"remove_user_{self.draft_session_id}", self.remove_user_button_callback))
-        
-        if self.session_type != "test":
-        #    self.add_item(self.create_button("Post Pairings", "primary", f"create_rooms_pairings_{self.draft_session_id}", self.create_rooms_pairings_callback, disabled=True))
-        #else:
-            self.add_item(self.create_button("Ready Check", "green", f"ready_check_{self.draft_session_id}", self.ready_check_callback))
-            self.add_item(self.create_button("Create Rooms & Post Pairings", "primary", f"create_rooms_pairings_{self.draft_session_id}", self.create_rooms_pairings_callback, disabled=True))
+            self.add_item(self.create_button("Cancel Draft", "grey", f"cancel_draft_{self.draft_session_id}", self.cancel_draft_callback))
+            self.add_item(self.create_button("Remove User", "grey", f"remove_user_{self.draft_session_id}", self.remove_user_button_callback))
+        else:
+            if self.session_type != "premade":
+                self.add_item(self.create_button("Sign Up", "green", f"sign_up_{self.draft_session_id}", self.sign_up_callback))
+                self.add_item(self.create_button("Cancel Sign Up", "red", f"cancel_sign_up_{self.draft_session_id}", self.cancel_sign_up_callback))
+                if self.session_type != "swiss":
+                    self.add_item(self.create_button("Create Teams", "blurple", f"randomize_teams_{self.draft_session_id}", self.randomize_teams_callback))
+                else:
+                    self.add_item(self.create_button("Generate Seating Order", "blurple", f"randomize_teams_{self.draft_session_id}", self.randomize_teams_callback))
+            elif self.session_type == "premade":
+                self.add_item(self.create_button(self.team_a_name, "green", f"Team_A_{self.draft_session_id}", self.team_assignment_callback))
+                self.add_item(self.create_button(self.team_b_name, "red", f"Team_B_{self.draft_session_id}", self.team_assignment_callback))
+                # draft_button_label = "League Draft: ON"
+                # draft_button_style = "green"
+                # self.add_item(self.create_button(draft_button_label, draft_button_style, f"track_draft_{self.draft_session_id}", self.track_draft_callback))
+                self.add_item(self.create_button("Generate Seating Order", "primary", f"generate_seating_{self.draft_session_id}", self.randomize_teams_callback))
+            self.add_item(self.create_button("Cancel Draft", "grey", f"cancel_draft_{self.draft_session_id}", self.cancel_draft_callback))
+            self.add_item(self.create_button("Remove User", "grey", f"remove_user_{self.draft_session_id}", self.remove_user_button_callback))
+            
+            if self.session_type != "test":
+            #    self.add_item(self.create_button("Post Pairings", "primary", f"create_rooms_pairings_{self.draft_session_id}", self.create_rooms_pairings_callback, disabled=True))
+            #else:
+                self.add_item(self.create_button("Ready Check", "green", f"ready_check_{self.draft_session_id}", self.ready_check_callback))
+                self.add_item(self.create_button("Create Rooms & Post Pairings", "primary", f"create_rooms_pairings_{self.draft_session_id}", self.create_rooms_pairings_callback, disabled=True))
 
-        # Logic to enable/disable based on session_stage
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                if self.session_stage == "teams":
-                    if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}" or item.custom_id == f"cancel_draft_{self.draft_session_id}":
-                        item.disabled = False
-                    else:
-                        item.disabled = True
+            # Logic to enable/disable based on session_stage
+            for item in self.children:
+                if isinstance(item, discord.ui.Button):
+                    if self.session_stage == "teams":
+                        if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}" or item.custom_id == f"cancel_draft_{self.draft_session_id}":
+                            item.disabled = False
+                        else:
+                            item.disabled = True
     def create_button(self, label, style, custom_id, custom_callback, disabled=False):
         style = getattr(discord.ButtonStyle, style)
         button = CallbackButton(label=label, style=style, custom_id=custom_id, custom_callback=custom_callback, disabled=disabled)
@@ -97,6 +103,12 @@ class PersistentView(discord.ui.View):
 
 
     async def sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        
+        if self.session_type == "winston":
+            now = datetime.now()
+            deletion_time = now + timedelta(minutes=10)
+            relative_time = f"<t:{int(deletion_time.timestamp())}:R>"
+
         # Fetch the current draft session to ensure it's up to date
         draft_session = await get_draft_session(self.draft_session_id)
         if not draft_session:
@@ -132,7 +144,7 @@ class PersistentView(discord.ui.View):
                         if player_weekly_limit.drafts_participated >= 4:
                             await interaction.response.send_message("You have already participated in four drafts this week! Next week begins Monday at midnight pacific time. If you believe this is an error, please contact a Cube Overseer", ephemeral=True)
                             return
-        
+
         if user_id in sign_ups:
             # User is already signed up; inform them
             await interaction.response.send_message("You are already signed up!", ephemeral=True)
@@ -164,6 +176,14 @@ class PersistentView(discord.ui.View):
 
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
+            if self.session_type == "winston":
+                if len(sign_ups) == 2:
+                    sign_up_tags = ' '.join([f"<@{user_id}>" for user_id in draft_session_updated.sign_ups.keys()])
+                    
+                    guild = self.bot.get_guild(int(interaction.guild_id))
+                    channel = discord.utils.get(guild.text_channels, name="winston-draft")
+                    await channel.send(f"Winston Draft Ready. Good luck in your match! {sign_up_tags}")
+                    await create_winston_draft(self.bot, interaction)
 
 
     async def cancel_sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
