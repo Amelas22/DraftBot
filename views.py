@@ -768,7 +768,7 @@ class UserRemovalSelect(Select):
                                             .values(sign_ups=session.sign_ups))
                     await db_session.commit()
             # After removing a user, update the original message with the new sign-up list
-            if session.session_type == "random":
+            if session.session_type != "premade":
                 await update_draft_message(bot, session_id=session.session_id)
             else:
                 await PersistentView.update_team_view(interaction)
