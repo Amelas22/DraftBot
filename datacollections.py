@@ -4,6 +4,8 @@ import aiohttp
 import aiobotocore
 import json
 import os
+import pytz
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from sqlalchemy.future import select
 from aiobotocore.session import get_session
@@ -84,7 +86,10 @@ class DraftLogManager:
                         first_user_picks = next(iter(draft_data["users"].values()))["picks"]
 
                         if not self.first_delay and not first_user_picks:
-                            print(f"Draft log data for {self.draft_id} has no picks, retrying in 3 hours and 15 minutes...")
+                            eastern = pytz.timezone('US/Eastern')
+                            next_fetch_time = datetime.now(pytz.utc) + timedelta(seconds=11700)
+                            next_fetch_time_eastern = next_fetch_time.astimezone(eastern)
+                            print(f"Draft log data for {self.draft_id} has no picks, retrying at {next_fetch_time_eastern.strftime('%Y-%m-%d %H:%M:%S %Z')}")
                             await asyncio.sleep(11700)  # Wait for 3 hours and 15 minutes
                             self.first_delay = True
                             self.fetch_attempts += 1
