@@ -1015,10 +1015,11 @@ async def balance_teams(player_ids, guild):
     return team_a, team_b
 
 async def re_register_challenges(bot):
+    now = datetime.now()
     async with AsyncSessionLocal() as db_session:
         async with db_session.begin():
             from session import SwissChallenge
-            stmt = select(SwissChallenge)
+            stmt = select(SwissChallenge).where(SwissChallenge.start_time > now)
             result = await db_session.execute(stmt)
             challenge_to_update = result.scalars().all()
 
