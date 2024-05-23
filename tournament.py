@@ -51,10 +51,9 @@ class Tournament:
     def pair_round(self):
         if self.round_number == 0:
             self.round_number += 1
-            return self.pairings  # Return initial pairings for the first round
-        
+            return self.pairings  # Initial pairings
+
         self.round_number += 1
-        # Group players by win points for subsequent rounds
         points_groups = {}
         for player_id, details in self.players.items():
             points = details['win_points']
@@ -62,23 +61,41 @@ class Tournament:
                 points_groups[points] = []
             points_groups[points].append(player_id)
 
-        # Generate pairings for the second and third rounds
         pairings = []
-        for group in sorted(points_groups.values(), key=len, reverse=True):  # Start pairing from the group with the most players
+        print(f"Pairings for Round {self.round_number}")
+        for points, group in sorted(points_groups.items(), key=lambda item: item[0], reverse=True):
             random.shuffle(group)
-            temp_pairings = []
-            while len(group) > 1:
-                player1 = group.pop(0)
-                for idx, player2 in enumerate(group):
-                    if player2 not in self.players[player1]['opponents']:
-                        temp_pairings.append((player1, player2))
-                        group.pop(idx)
-                        break
-            pairings.extend(temp_pairings)
-
-        # Handle any unpaired player (if an odd number exists, which shouldn't happen here)
-        if len(group) == 1:
-            pairings.append((group.pop(), None))  # None signifies a bye
+            group_pairings = []
+            if not self.find_pairings(group, group_pairings, set()):
+                print(f"Failed to find pairings for group with {points} points: {group}")
+            pairings.extend(group_pairings)
 
         return pairings
-    
+
+    def find_pairings(self, group, group_pairings, used):
+        if not group:
+            print("All players paired successfully.")
+            return True  # All players are paired, valid configuration found
+
+        player1 = group[0]
+        print(f"Trying to find pair for {self.players[player1]['display_name']} ({player1})")
+        
+        for i in range(1, len(group)):
+            player2 = group[i]
+            if player2 not in self.players[player1]['opponents'] and player2 not in used:
+                print(f"Pairing {self.players[player1]['display_name']} ({player1}) with {self.players[player2]['display_name']} ({player2})")
+                # Tentatively pair them
+                group_pairings.append((player1, player2))
+                used.add(player1)
+                used.add(player2)
+                # Recursively try to pair the rest
+                if self.find_pairings([p for p in group if p not in used], group_pairings, used):
+                    return True  # Successful pairing configuration
+                # Backtrack if not successful
+                print(f"Backtracking from pairing {self.players[player1]['display_name']} ({player1}) and {self.players[player2]['display_name']} ({player2})")
+                group_pairings.pop()
+                used.remove(player1)
+                used.remove(player2)
+
+        print(f"No valid pairings found for {self.players[player1]['display_name']} ({player1}) at this path.")
+        return False  # No valid pairing configuration found for this entry point
