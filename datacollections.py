@@ -84,9 +84,9 @@ class DraftLogManager:
                     if response.status == 200:
                         draft_data = await response.json()
                         first_user_picks = next(iter(draft_data["users"].values()))["picks"]
-
+                        eastern = pytz.timezone('US/Eastern')
                         if not self.first_delay and not first_user_picks:
-                            eastern = pytz.timezone('US/Eastern')
+                            
                             next_fetch_time = datetime.now(pytz.utc) + timedelta(seconds=11700)
                             next_fetch_time_eastern = next_fetch_time.astimezone(eastern)
                             print(f"Draft log data for {self.draft_id} has no picks, retrying at {next_fetch_time_eastern.strftime('%Y-%m-%d %H:%M:%S %Z')}")
