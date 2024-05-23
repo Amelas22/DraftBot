@@ -179,12 +179,15 @@ class PersistentView(discord.ui.View):
             if self.session_type == "winston":
                 if len(sign_ups) == 2:
                     sign_up_tags = ' '.join([f"<@{user_id}>" for user_id in draft_session_updated.sign_ups.keys()])
-                    
                     guild = self.bot.get_guild(int(interaction.guild_id))
                     channel = discord.utils.get(guild.text_channels, name="winston-draft")
                     await channel.send(f"Winston Draft Ready. Good luck in your match! {sign_up_tags}")
                     await create_winston_draft(self.bot, interaction)
-
+                else:
+                    guild = interaction.guild
+                    message_link = f"https://discord.com/channels/{draft_session_updated.guild_id}/{draft_session_updated.draft_channel_id}/{draft_session_updated.message_id}"
+                    channel = discord.utils.get(guild.text_channels, name="cube-draft-open-play")
+                    await channel.send(f"**{interaction.user.display_name}** is looking for an opponent for a **Winston Draft**. [Join Here!]({message_link}) ")
 
     async def cancel_sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         draft_session = await get_draft_session(self.draft_session_id)

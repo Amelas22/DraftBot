@@ -643,8 +643,9 @@ async def cleanup_sessions_task(bot):
                                     print(f"Failed to delete channel: {channel.name}. Reason: {e}")
 
                     if session.draft_channel_id and session.message_id:
-                        if session.session_type == "winston" and len(session.sign_ups) == 0:
-                            continue
+                        if session.session_type == "winston":
+                            if not session.sign_ups or len(session.sign_ups) < 2:
+                                continue
                         draft_channel = bot.get_channel(int(session.draft_channel_id))
                         if draft_channel:
                             try:
