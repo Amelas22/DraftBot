@@ -23,6 +23,7 @@ class DraftLogManager:
         self.first_delay = False
         self.fetch_attempts = 0
         self.connection_attempts = 0
+        self.first_connection = True
         self.sio = socketio.AsyncClient()
         
         @self.sio.event
@@ -39,6 +40,9 @@ class DraftLogManager:
 
     async def keep_draft_session_alive(self):
         keep_running = True
+        if self.first_connection:
+            await asyncio.sleep(1800)
+            self.first_connection = False
         while keep_running:
             try:
                 await self.sio.connect(
@@ -87,10 +91,10 @@ class DraftLogManager:
                         eastern = pytz.timezone('US/Eastern')
                         if not self.first_delay and not first_user_picks:
                             
-                            next_fetch_time = datetime.now(pytz.utc) + timedelta(seconds=11700)
+                            next_fetch_time = datetime.now(pytz.utc) + timedelta(seconds=7500)
                             next_fetch_time_eastern = next_fetch_time.astimezone(eastern)
                             print(f"Draft log data for {self.draft_id} has no picks, retrying at {next_fetch_time_eastern.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-                            await asyncio.sleep(11700)  # Wait for 3 hours and 15 minutes
+                            await asyncio.sleep(7500)  # Wait for 2 hours and 5 minutes
                             self.first_delay = True
                             self.fetch_attempts += 1
                             return await self.fetch_draft_log_data()  # Retry fetching the data
