@@ -612,7 +612,7 @@ async def swiss_draft_commands(bot):
             return
         
         for guild in bot.guilds:
-            channel = discord.utils.get(guild.text_channels, name="test-channel")      
+            channel = discord.utils.get(guild.text_channels, name="league-draft-results")      
             if not channel:  # If the bot cannot find the channel in any guild, log an error and continue
                 continue
             eastern_tz = pytz.timezone('US/Eastern')
@@ -645,10 +645,6 @@ async def swiss_draft_commands(bot):
                         embed.add_field(name="Top 15 Standings", value=top_15_standings, inline=False)
 
                     await channel.send(embed=embed)
-            from utils import calculate_player_standings
-            embeds = await calculate_player_standings()
-            for embed in embeds:
-                await channel.send(embed=embed)
 
     @bot.slash_command(name="swiss_draft", description="Post an eight player swiss pod")
     async def swiss(interaction: discord.Interaction):
