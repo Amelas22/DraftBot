@@ -1138,7 +1138,7 @@ async def re_register_views(bot):
                             except Exception as e:
                                 print(f"Failed to re-register view for pairing message ID: {pairing_message_id}, error: {e}")
 
-async def calculate_player_standings():
+async def calculate_player_standings(limit=None):
     time = datetime.now()
     async with AsyncSessionLocal() as db_session:
         async with db_session.begin():
@@ -1179,9 +1179,11 @@ async def calculate_player_standings():
                 reverse=True
             )
 
+            if limit:
+                sorted_players = sorted_players[:limit]
+
             # Prepare the embeds
             embeds = []
-            embed = None
             standings_text = ""
             is_first_embed = True
 
@@ -1191,8 +1193,8 @@ async def calculate_player_standings():
                 if len(standings_text) + len(entry) > 1000:
                     embed.add_field(name="Standings", value=standings_text, inline=False)
                     embeds.append(embed)
-                    is_first_embed = False
                     standings_text = entry
+                    is_first_embed = False
                 else:
                     standings_text += entry
 
@@ -1209,7 +1211,7 @@ async def calculate_player_standings():
                     )
 
             if standings_text:
-                embed.add_field(name="", value=standings_text, inline=False)
+                embed.add_field(name="Standings", value=standings_text, inline=False)
                 embeds.append(embed)
 
             return embeds

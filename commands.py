@@ -602,7 +602,7 @@ async def league_commands(bot):
 
 async def swiss_draft_commands(bot):
 
-    @aiocron.crontab('30 13 * * *', tz=pytz.timezone('US/Eastern'))
+    @aiocron.crontab('* * * * *', tz=pytz.timezone('US/Eastern'))
     async def daily_swiss_results():
         global league_start_time
 
@@ -612,9 +612,39 @@ async def swiss_draft_commands(bot):
             return
         
         for guild in bot.guilds:
-            channel = discord.utils.get(guild.text_channels, name="league-draft-results")      
+            channel = discord.utils.get(guild.text_channels, name="test-channel")      
             if not channel:  # If the bot cannot find the channel in any guild, log an error and continue
                 continue
+            eastern_tz = pytz.timezone('US/Eastern')
+            now = datetime.now(eastern_tz)
+            start_time = eastern_tz.localize(datetime(now.year, now.month, now.day, 3, 0)) - timedelta(days=1)  # 3 AM previous day
+            end_time = start_time + timedelta(hours=24)  # 3 AM current day
+
+            async with AsyncSessionLocal() as db_session:
+                async with db_session.begin():
+                    stmt = select(DraftSession).where(DraftSession.teams_start_time.between(start_time, end_time),
+                                            not_(DraftSession.victory_message_id_results_channel == None),
+                                            DraftSession.session_type == "swiss")
+                    results = await db_session.execute(stmt)
+                    matches = results.scalars().all()
+
+                    if not matches:
+                        await channel.send("No matches found in the last 24 hours.")
+                        return
+                    
+
+                    total_drafts = len(matches)
+                    date_str = start_time.strftime("%B %d, %Y")
+                    embed = discord.Embed(title=f"Daily League Results - {date_str}", description="", color=discord.Color.blue())
+                    embed.add_field(name="**Completed Drafts**", value=total_drafts, inline=False)
+                    from utils import calculate_player_standings
+                    top_15_embeds = await calculate_player_standings(limit=15)
+
+                    if top_15_embeds:
+                        top_15_standings = top_15_embeds[0].fields[0].value
+                        embed.add_field(name="Top 15 Standings", value=top_15_standings, inline=False)
+
+                    await channel.send(embed=embed)
             from utils import calculate_player_standings
             embeds = await calculate_player_standings()
             for embed in embeds:
