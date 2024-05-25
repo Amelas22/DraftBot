@@ -602,7 +602,7 @@ async def league_commands(bot):
 
 async def swiss_draft_commands(bot):
 
-    @aiocron.crontab('* * * * *', tz=pytz.timezone('US/Eastern'))
+    @aiocron.crontab('00 14 * * *', tz=pytz.timezone('US/Eastern'))
     async def daily_swiss_results():
         global league_start_time
 
