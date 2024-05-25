@@ -602,22 +602,23 @@ async def league_commands(bot):
 
 async def swiss_draft_commands(bot):
 
-    @aiocron.crontab('00 10 * * *', tz=pytz.timezone('US/Eastern'))
+    @aiocron.crontab('30 13 * * *', tz=pytz.timezone('US/Eastern'))
     async def daily_swiss_results():
         global league_start_time
 
-        # Check if current time is before the cutoff tiie
+        # Check if current time is before the cutoff time
         current_time = datetime.now(pacific_time_zone)
         if current_time < league_start_time + timedelta(hours=11):
             return
         
         for guild in bot.guilds:
             channel = discord.utils.get(guild.text_channels, name="league-draft-results")      
-            if not channel:  # If the bot cannot find the channel in any guild, log an error and return
+            if not channel:  # If the bot cannot find the channel in any guild, log an error and continue
                 continue
-        from utils import calculate_player_standings
-        embed = await calculate_player_standings()
-        await channel.send(embed=embed)
+            from utils import calculate_player_standings
+            embeds = await calculate_player_standings()
+            for embed in embeds:
+                await channel.send(embed=embed)
 
     @bot.slash_command(name="swiss_draft", description="Post an eight player swiss pod")
     async def swiss(interaction: discord.Interaction):
