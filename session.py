@@ -140,7 +140,7 @@ class PlayerLimit(Base):
     player_id = Column(String(64), primary_key=True)
     display_name = Column(String(128))  
     drafts_participated = Column(Integer, default=0)
-    WeekStartDate = Column(DateTime, nullable=False)
+    WeekStartDate = Column(DateTime, nullable=False, primary_key=True)
     match_one_points = Column(Integer, default=0)
     match_two_points = Column(Integer, default=0)
     match_three_points = Column(Integer, default=0)
