@@ -13,16 +13,16 @@ players[user_id] = {
             }
 '''
 players = {
-    "267030949064081408": {"display_name": "sikolio", "win_points": 2},
-    "517383615089475594": {"display_name": "Rutasel", "win_points": 1},
-    "249635186994708480": {"display_name": "Arthur Peck (Darth_Silk)", "win_points": 3},
-    "694262021977276577": {"display_name": "eccelleente", "win_points": 1},
+    "216594497147109376": {"display_name": "Rootofpie", "win_points": 1},
+    "190182896986882049": {"display_name": "RedDog", "win_points": 0},
+    "241050564887183360": {"display_name": "BroccoliRob", "win_points": 2},
     "402977837088505889": {"display_name": "admiral_ace", "win_points": 2},
-    "138964254630871040": {"display_name": "Akulen", "win_points": 0},
+    "733928659001278514": {"display_name": "taylorbehrens", "win_points": 1},
+    "322475575522361355": {"display_name": "Durotan97", "win_points": 3},
     "286797275496316929": {"display_name": "mgoat", "win_points": 1},
     "117223984054927365": {"display_name": "Zrifts", "win_points": 2}
 }
-session_id = "117223984054927365-1716822755"
+session_id = "241050564887183360-1716914676"
 
 async def fix_results(players, session_id):
     async with AsyncSessionLocal() as session:
@@ -43,14 +43,14 @@ async def fix_results(players, session_id):
                 player_weekly_limit = player_weekly_limit_result.scalars().first()
 
                 if player_weekly_limit:
-                    player_weekly_limit.drafts_participated += 1
-                    if player_weekly_limit.drafts_participated == 1:
+                    check = player_weekly_limit.drafts_participated
+                    if check == 1:
                         player_weekly_limit.match_one_points = player['win_points']
-                    elif player_weekly_limit.drafts_participated == 2:
+                    elif check == 2:
                         player_weekly_limit.match_two_points = player['win_points']
-                    elif player_weekly_limit.drafts_participated == 3:
+                    elif check == 3:
                         player_weekly_limit.match_three_points = player['win_points']
-                    elif player_weekly_limit.drafts_participated > 3:
+                    elif check > 3:
                         player_weekly_limit.match_four_points = player['win_points']
                 else:
                     # If not, create a new record
