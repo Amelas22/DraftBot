@@ -13,16 +13,16 @@ players[user_id] = {
             }
 '''
 players = {
-    "440858038669410305": {"display_name": "Blake (EvoPride)", "win_points": 2},
-    "212406460322283521": {"display_name": "GPJedi", "win_points": 1},
-    "216054618403110913": {"display_name": "Njainchill (Firegothim1234)", "win_points": 0},
-    "128600166868582403": {"display_name": "ZWatty", "win_points": 1},
-    "504000365843316763": {"display_name": "harmonywoods", "win_points": 2},
-    "201538181382930432": {"display_name": "JewPCabra666 (Pwnergod411)", "win_points": 2},
-    "106933537659174912": {"display_name": "Muhara", "win_points": 2},
-    "706231900171403324": {"display_name": "shallot", "win_points": 3}
+    "267030949064081408": {"display_name": "sikolio", "win_points": 2},
+    "517383615089475594": {"display_name": "Rutasel", "win_points": 1},
+    "249635186994708480": {"display_name": "Arthur Peck (Darth_Silk)", "win_points": 3},
+    "694262021977276577": {"display_name": "eccelleente", "win_points": 1},
+    "402977837088505889": {"display_name": "admiral_ace", "win_points": 2},
+    "138964254630871040": {"display_name": "Akulen", "win_points": 0},
+    "286797275496316929": {"display_name": "mgoat", "win_points": 1},
+    "117223984054927365": {"display_name": "Zrifts", "win_points": 2}
 }
-session_id = "440858038669410305-1716432833"
+session_id = "117223984054927365-1716822755"
 
 async def fix_results(players, session_id):
     async with AsyncSessionLocal() as session:
