@@ -39,9 +39,10 @@ async def fix_results(players, session_id=None):
                 if player_weekly_limit:
                     player_weekly_limit.drafts_participated = player['drafts_participated']
                     print("Player Limit Updated")
-                    print(players)
+
                     await session.commit()
 
+    print(player_weekly_limit.drafts_participated)
 # Run the script
 if __name__ == "__main__":
     asyncio.run(fix_results(players))
