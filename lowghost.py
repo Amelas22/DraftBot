@@ -42,7 +42,7 @@ async def fix_results(players, session_id=None):
 
                     await session.commit()
 
-    print(player_weekly_limit.drafts_participated)
+    print(player_weekly_limit.drafts_participated, player_weekly_limit.match_one_points, player_weekly_limit.match_two_points, player_weekly_limit.match_three_points, player_weekly_limit.match_four_points, player_weekly_limit.WeekStartDate)
 # Run the script
 if __name__ == "__main__":
     asyncio.run(fix_results(players))
