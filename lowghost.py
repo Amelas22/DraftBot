@@ -13,7 +13,7 @@ players[user_id] = {
             }
 '''
 players = {
-    "642857806822637589": {"display_name": "lowghost1", "drafts_participated": 3},
+    "642857806822637589": {"display_name": "lowghost1", "drafts_participated": 3, "match_one": 1, "match_two": 3, "match_three": 2},
 }
 # session_id = "440858038669410305-1716432833"
 
@@ -38,6 +38,9 @@ async def fix_results(players, session_id=None):
 
                 if player_weekly_limit:
                     player_weekly_limit.drafts_participated = player['drafts_participated']
+                    player_weekly_limit.match_one_points = player['match_one']
+                    player_weekly_limit.match_two_points = player['match_two']
+                    player_weekly_limit.match_three_points = player['match_three']
                     print("Player Limit Updated")
 
                     await session.commit()
