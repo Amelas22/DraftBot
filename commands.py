@@ -14,43 +14,43 @@ league_start_time = pacific_time_zone.localize(datetime(2024, 5, 20, 0, 0))
 
 async def league_commands(bot):
 
-    @bot.slash_command(name="teamfinder", description="Create team finder posts for different regions")
-    async def teamfinder(ctx: discord.ApplicationContext):
-        await ctx.defer()
-        from teamfinder import TIMEZONES_AMERICAS, TIMEZONES_EUROPE, TIMEZONES_ASIA_AUSTRALIA, create_view
+    # @bot.slash_command(name="teamfinder", description="Create team finder posts for different regions")
+    # async def teamfinder(ctx: discord.ApplicationContext):
+    #     await ctx.defer()
+    #     from teamfinder import TIMEZONES_AMERICAS, TIMEZONES_EUROPE, TIMEZONES_ASIA_AUSTRALIA, create_view
         
-        regions = {
-            "Americas": TIMEZONES_AMERICAS,
-            "Europe": TIMEZONES_EUROPE,
-            "Asia/Australia": TIMEZONES_ASIA_AUSTRALIA
-        }
+    #     regions = {
+    #         "Americas": TIMEZONES_AMERICAS,
+    #         "Europe": TIMEZONES_EUROPE,
+    #         "Asia/Australia": TIMEZONES_ASIA_AUSTRALIA
+    #     }
 
-        async with AsyncSessionLocal() as session:
-            async with session.begin():
-                for region, timezones in regions.items():
-                    embed = discord.Embed(title=region, color=discord.Color.blue())
-                    for label, _ in timezones:
-                        embed.add_field(name=label, value="No Sign-ups yet", inline=False)
+    #     async with AsyncSessionLocal() as session:
+    #         async with session.begin():
+    #             for region, timezones in regions.items():
+    #                 embed = discord.Embed(title=region, color=discord.Color.blue())
+    #                 for label, _ in timezones:
+    #                     embed.add_field(name=label, value="No Sign-ups yet", inline=False)
 
-                    message = await ctx.send(embed=embed, view=create_view(timezones, ""))
+    #                 message = await ctx.send(embed=embed, view=create_view(timezones, ""))
                     
-                    # Update the message ID in the view
-                    view = create_view(timezones, str(message.id))
-                    await message.edit(view=view)
+    #                 # Update the message ID in the view
+    #                 view = create_view(timezones, str(message.id))
+    #                 await message.edit(view=view)
 
-                    # Save the message ID, channel ID, and guild ID
-                    new_record = TeamFinder(
-                        user_id="system",  # Placeholder for system-generated record
-                        display_name=f"{region} Post",
-                        timezone="system",
-                        message_id=str(message.id),
-                        channel_id=str(ctx.channel.id),
-                        guild_id=str(ctx.guild.id)
-                    )
-                    session.add(new_record)
+    #                 # Save the message ID, channel ID, and guild ID
+    #                 new_record = TeamFinder(
+    #                     user_id="system",  # Placeholder for system-generated record
+    #                     display_name=f"{region} Post",
+    #                     timezone="system",
+    #                     message_id=str(message.id),
+    #                     channel_id=str(ctx.channel.id),
+    #                     guild_id=str(ctx.guild.id)
+    #                 )
+    #                 session.add(new_record)
 
-                await session.commit()
-        await ctx.followup.send("Click your timezone below to add your name to that timezone. You can click any name to open a DM with that user to coordiante finding teammates. Clicking the timezone again (once signed up) will remove your name from the list.", ephemeral=True)
+    #             await session.commit()
+    #     await ctx.followup.send("Click your timezone below to add your name to that timezone. You can click any name to open a DM with that user to coordiante finding teammates. Clicking the timezone again (once signed up) will remove your name from the list.", ephemeral=True)
 
     @bot.slash_command(name="registerteam", description="Register a new team in the league")
     async def register_team(interaction: discord.Interaction, team_name: str):
