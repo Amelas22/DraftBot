@@ -32,6 +32,8 @@ async def main():
         from utils import re_register_views, re_register_challenges
         await re_register_views(bot)
         await re_register_challenges(bot)
+        from teamfinder import re_register_teamfinder
+        await re_register_teamfinder(bot)
 
     @bot.slash_command(name='startdraft', description='Start a team draft with random teams', guild_id=None)
     async def start_draft(interaction: discord.Interaction):

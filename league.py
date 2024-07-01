@@ -289,7 +289,6 @@ class PostTeamView(View):
 
     async def try_send_modal(self, interaction: discord.Interaction):
         if self.team_selection:
-            # When both selections are made, send the modal
             await interaction.response.send_modal(RegisterPlayerModal(self.team_selection, self.command_type))
         else:
             await interaction.response.defer()
@@ -347,7 +346,14 @@ class RegisterPlayerModal(Modal):
                         await interaction.followup.send(f"User {display_name} added to {self.team_selection} successfully.", ephemeral=True)
                     else:
                         await interaction.followup.send(f"User {display_name} is already registered in the team {self.team_selection}.", ephemeral=True)
-
+    
+                if member:
+                    league_drafter_role = discord.utils.get(interaction.guild.roles, name="League Drafter")
+                    if league_drafter_role:
+                        await member.add_roles(league_drafter_role)
+                        await interaction.followup.send(f"Role 'League Drafter' assigned to {display_name}.", ephemeral=True)
+                    else:
+                        await interaction.followup.send("Role 'League Drafter' not found.", ephemeral=True)
 
 
 class TimezoneSelect(Select):

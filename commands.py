@@ -1,5 +1,5 @@
 import discord
-from session import register_team_to_db, Team, AsyncSessionLocal, Match, WeeklyLimit, DraftSession, remove_team_from_db, TeamRegistration
+from session import register_team_to_db, Team, AsyncSessionLocal, Match, TeamFinder, WeeklyLimit, DraftSession, remove_team_from_db, TeamRegistration
 from sqlalchemy import select, not_
 from sqlalchemy.orm.attributes import flag_modified
 import aiocron
@@ -14,8 +14,51 @@ league_start_time = pacific_time_zone.localize(datetime(2024, 5, 20, 0, 0))
 
 async def league_commands(bot):
 
+    @bot.slash_command(name="teamfinder", description="Create team finder posts for different regions")
+    async def teamfinder(ctx: discord.ApplicationContext):
+        await ctx.defer()
+        from teamfinder import TIMEZONES_AMERICAS, TIMEZONES_EUROPE, TIMEZONES_ASIA_AUSTRALIA, create_view
+        
+        regions = {
+            "Americas": TIMEZONES_AMERICAS,
+            "Europe": TIMEZONES_EUROPE,
+            "Asia/Australia": TIMEZONES_ASIA_AUSTRALIA
+        }
+
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                for region, timezones in regions.items():
+                    embed = discord.Embed(title=region, color=discord.Color.blue())
+                    for label, _ in timezones:
+                        embed.add_field(name=label, value="No Sign-ups yet", inline=False)
+
+                    message = await ctx.send(embed=embed, view=create_view(timezones, ""))
+                    
+                    # Update the message ID in the view
+                    view = create_view(timezones, str(message.id))
+                    await message.edit(view=view)
+
+                    # Save the message ID, channel ID, and guild ID
+                    new_record = TeamFinder(
+                        user_id="system",  # Placeholder for system-generated record
+                        display_name=f"{region} Post",
+                        timezone="system",
+                        message_id=str(message.id),
+                        channel_id=str(ctx.channel.id),
+                        guild_id=str(ctx.guild.id)
+                    )
+                    session.add(new_record)
+
+                await session.commit()
+        await ctx.followup.send("Click your timezone below to add your name to that timezone. You can click any name to open a DM with that user to coordiante finding teammates. Clicking the timezone again (once signed up) will remove your name from the list.", ephemeral=True)
+
     @bot.slash_command(name="registerteam", description="Register a new team in the league")
     async def register_team(interaction: discord.Interaction, team_name: str):
+        cube_overseer_role_name = "Cube Overseer"
+        if cube_overseer_role_name not in [role.name for role in interaction.user.roles]:
+            await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+        
         team, response_message = await register_team_to_db(team_name)
         await interaction.response.send_message(response_message, ephemeral=True)
     
@@ -92,41 +135,41 @@ async def league_commands(bot):
         initial_view = InitialPostView(command_type="swiss")
         await interaction.followup.send(f"Post a scheduled draft. Select Cube and Timezone.", view=initial_view, ephemeral=True)
 
-    @bot.slash_command(name="post_challenge", description="Post a challenge for your team")
-    async def postchallenge(interaction: discord.Interaction):
-        global cutoff_datetime
+    # @bot.slash_command(name="post_challenge", description="Post a challenge for your team")
+    # async def postchallenge(interaction: discord.Interaction):
+    #     global cutoff_datetime
 
-        # Check if current time is before the cutoff time
-        current_time = datetime.now(pacific_time_zone)
-        if current_time >= cutoff_datetime:
-            await interaction.response.send_message("This season is no longer active. Keep an eye on announcements for future seasons!", ephemeral=True)
-            return
+    #     # Check if current time is before the cutoff time
+    #     current_time = datetime.now(pacific_time_zone)
+    #     if current_time >= cutoff_datetime:
+    #         await interaction.response.send_message("This season is no longer active. Keep an eye on announcements for future seasons!", ephemeral=True)
+    #         return
         
-        await interaction.response.defer(ephemeral=True)
+    #     await interaction.response.defer(ephemeral=True)
         
-        user_id_str = str(interaction.user.id)
+    #     user_id_str = str(interaction.user.id)
         
-        try:
-            async with AsyncSessionLocal() as session:  # Assuming AsyncSessionLocal is your session maker
-                async with session.begin():
-                    # Query for any team registration entries that include the user ID in their TeamMembers
-                    stmt = select(TeamRegistration).where(TeamRegistration.TeamMembers.contains(user_id_str))
-                    result = await session.execute(stmt)
-                    team_registration = result.scalars().first()
+    #     try:
+    #         async with AsyncSessionLocal() as session:  # Assuming AsyncSessionLocal is your session maker
+    #             async with session.begin():
+    #                 # Query for any team registration entries that include the user ID in their TeamMembers
+    #                 stmt = select(TeamRegistration).where(TeamRegistration.TeamMembers.contains(user_id_str))
+    #                 result = await session.execute(stmt)
+    #                 team_registration = result.scalars().first()
 
-                    if team_registration:
-                        # Extracting user details
-                        team_id = team_registration.TeamID
-                        team_name = team_registration.TeamName
-                        user_display_name = team_registration.TeamMembers.get(user_id_str)
-                        from league import InitialPostView
-                        initial_view = InitialPostView(command_type="post", team_id=team_id, team_name=team_name, user_display_name=user_display_name)
-                        await interaction.followup.send(f"Post a Challenge for {team_name}. Select Cube and Timezone.", view=initial_view, ephemeral=True)
-                    else:
-                        await interaction.followup.send(f"You are not registered to a team. Contact a Cube Overseer if this is an error.", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"An error occurred while processing your request: {str(e)}", ephemeral=True)
-            print(f"Error in postchallenge command: {e}")  
+    #                 if team_registration:
+    #                     # Extracting user details
+    #                     team_id = team_registration.TeamID
+    #                     team_name = team_registration.TeamName
+    #                     user_display_name = team_registration.TeamMembers.get(user_id_str)
+    #                     from league import InitialPostView
+    #                     initial_view = InitialPostView(command_type="post", team_id=team_id, team_name=team_name, user_display_name=user_display_name)
+    #                     await interaction.followup.send(f"Post a Challenge for {team_name}. Select Cube and Timezone.", view=initial_view, ephemeral=True)
+    #                 else:
+    #                     await interaction.followup.send(f"You are not registered to a team. Contact a Cube Overseer if this is an error.", ephemeral=True)
+    #     except Exception as e:
+    #         await interaction.followup.send(f"An error occurred while processing your request: {str(e)}", ephemeral=True)
+    #         print(f"Error in postchallenge command: {e}")  
 
     @bot.slash_command(name="schedule_test_draft", description="Post a scheduled draft")
     async def scheduledraft(interaction: discord.Interaction):
@@ -192,84 +235,85 @@ async def league_commands(bot):
             # Responding with a message indicating lack of permission
             await interaction.response.send_message("You do not have permission to register players, please tag Cube Overseer if you need to make changes.", ephemeral=True)
 
+    
             
-    @bot.slash_command(name="find_a_match", description="Find an open challenge based on a given time.")
-    async def findamatch(interaction: discord.Interaction):
-        global cutoff_datetime
+    # @bot.slash_command(name="find_a_match", description="Find an open challenge based on a given time.")
+    # async def findamatch(interaction: discord.Interaction):
+    #     global cutoff_datetime
 
-        # Check if current time is before the cutoff time
-        current_time = datetime.now(pacific_time_zone)
-        if current_time >= cutoff_datetime:
-            await interaction.response.send_message("This season is no longer active. Keep an eye on announcements for future seasons!", ephemeral=True)
-            return            
-        from league import InitialPostView
-        initial_view = InitialPostView(command_type="find")
-        await interaction.response.send_message("Please select the range for your team", view=initial_view, ephemeral=True)
+    #     # Check if current time is before the cutoff time
+    #     current_time = datetime.now(pacific_time_zone)
+    #     if current_time >= cutoff_datetime:
+    #         await interaction.response.send_message("This season is no longer active. Keep an eye on announcements for future seasons!", ephemeral=True)
+    #         return            
+    #     from league import InitialPostView
+    #     initial_view = InitialPostView(command_type="find")
+    #     await interaction.response.send_message("Please select the range for your team", view=initial_view, ephemeral=True)
 
-    @bot.slash_command(name="list_scheduled_drafts", description="List all open scheduled drafts in chronological order.")
-    async def listscheduledswiss(interaction: discord.Interaction):
-        now = datetime.now()
-        async with AsyncSessionLocal() as db_session: 
-            async with db_session.begin():
-                from session import SwissChallenge
-                stmt = select(SwissChallenge).where(SwissChallenge.start_time > now
-                                                ).order_by(SwissChallenge.start_time.asc())
-                results = await db_session.execute(stmt)
-                scheduled_drafts = results.scalars().all()
+    # @bot.slash_command(name="list_scheduled_drafts", description="List all open scheduled drafts in chronological order.")
+    # async def listscheduledswiss(interaction: discord.Interaction):
+    #     now = datetime.now()
+    #     async with AsyncSessionLocal() as db_session: 
+    #         async with db_session.begin():
+    #             from session import SwissChallenge
+    #             stmt = select(SwissChallenge).where(SwissChallenge.start_time > now
+    #                                             ).order_by(SwissChallenge.start_time.asc())
+    #             results = await db_session.execute(stmt)
+    #             scheduled_drafts = results.scalars().all()
 
-                if not scheduled_drafts:
-                # No challenges found within the range
-                    await interaction.response.send_message("No scheduled drafts. Use /swiss_scheduled_draft to open a scheduled draft or /swiss_draft to open an on demand draft", ephemeral=True)
-                    return
+    #             if not scheduled_drafts:
+    #             # No challenges found within the range
+    #                 await interaction.response.send_message("No scheduled drafts. Use /swiss_scheduled_draft to open a scheduled draft or /swiss_draft to open an on demand draft", ephemeral=True)
+    #                 return
 
-                embed = discord.Embed(title="Currently Scheduled Drafts", description="", color=discord.Color.blue())
-                for draft in scheduled_drafts:
-                    message_link = f"https://discord.com/channels/{draft.guild_id}/{draft.channel_id}/{draft.message_id}"
-                    start_time = draft.start_time
-                    num_sign_ups = len(draft.sign_ups)
-                    formatted_time = f"<t:{int(start_time.timestamp())}:F>"
-                    relative_time = f"<t:{int(start_time.timestamp())}:R>"
-                    embed.add_field(name=f"Draft Scheduled: {formatted_time} ({relative_time})", value=f"Cube: {draft.cube}\nCurrent Signups: {num_sign_ups} \n[Sign Up Here!]({message_link})", inline=False)
-                await interaction.response.send_message(embed=embed)
+    #             embed = discord.Embed(title="Currently Scheduled Drafts", description="", color=discord.Color.blue())
+    #             for draft in scheduled_drafts:
+    #                 message_link = f"https://discord.com/channels/{draft.guild_id}/{draft.channel_id}/{draft.message_id}"
+    #                 start_time = draft.start_time
+    #                 num_sign_ups = len(draft.sign_ups)
+    #                 formatted_time = f"<t:{int(start_time.timestamp())}:F>"
+    #                 relative_time = f"<t:{int(start_time.timestamp())}:R>"
+    #                 embed.add_field(name=f"Draft Scheduled: {formatted_time} ({relative_time})", value=f"Cube: {draft.cube}\nCurrent Signups: {num_sign_ups} \n[Sign Up Here!]({message_link})", inline=False)
+    #             await interaction.response.send_message(embed=embed)
 
-    @bot.slash_command(name="list_challenges", description="List all open challenges in chronological order.")
-    async def list_challenge(interaction: discord.Interaction):
-        global cutoff_datetime
+    # @bot.slash_command(name="list_challenges", description="List all open challenges in chronological order.")
+    # async def list_challenge(interaction: discord.Interaction):
+    #     global cutoff_datetime
 
-        # Check if current time is before the cutoff time
-        current_time = datetime.now(pacific_time_zone)
-        if current_time >= cutoff_datetime:
-            await interaction.response.send_message("This season is no longer active. Keep an eye on announcements for future seasons!", ephemeral=True)
-            return
+    #     # Check if current time is before the cutoff time
+    #     current_time = datetime.now(pacific_time_zone)
+    #     if current_time >= cutoff_datetime:
+    #         await interaction.response.send_message("This season is no longer active. Keep an eye on announcements for future seasons!", ephemeral=True)
+    #         return
         
-        async with AsyncSessionLocal() as db_session: 
-            async with db_session.begin():
-                from session import Challenge
-                range_stmt = select(Challenge).where(Challenge.team_b == None,
-                                                    Challenge.message_id != None
-                                                    ).order_by(Challenge.start_time.asc())
+    #     async with AsyncSessionLocal() as db_session: 
+    #         async with db_session.begin():
+    #             from session import Challenge
+    #             range_stmt = select(Challenge).where(Challenge.team_b == None,
+    #                                                 Challenge.message_id != None
+    #                                                 ).order_by(Challenge.start_time.asc())
                                                 
-                results = await db_session.execute(range_stmt)
-                challenges = results.scalars().all()
+    #             results = await db_session.execute(range_stmt)
+    #             challenges = results.scalars().all()
 
-                if not challenges:
-                # No challenges found within the range
-                    await interaction.response.send_message("No open challenges. Consider using /post_challenge to open a challenge yourself!", ephemeral=True)
-                    return
-                # Construct the link to the original challenge message
+    #             if not challenges:
+    #             # No challenges found within the range
+    #                 await interaction.response.send_message("No open challenges. Consider using /post_challenge to open a challenge yourself!", ephemeral=True)
+    #                 return
+    #             # Construct the link to the original challenge message
                 
-                embed = discord.Embed(title="Open Challenges", description="Here are all open challenges", color=discord.Color.blue())
+    #             embed = discord.Embed(title="Open Challenges", description="Here are all open challenges", color=discord.Color.blue())
 
-                for challenge in challenges:
-                    message_link = f"https://discord.com/channels/{challenge.guild_id}/{challenge.channel_id}/{challenge.message_id}"
-                    # Mention the initial user who posted the challenge
-                    initial_user_mention = f"<@{challenge.initial_user}>"
-                    # Format the start time of each challenge to display in the embed
-                    start_time = challenge.start_time
-                    formatted_time = f"<t:{int(start_time.timestamp())}:F>"
-                    relative_time = f"<t:{int(start_time.timestamp())}:R>"
-                    embed.add_field(name=f"Team: {challenge.team_a}", value=f"Time: {formatted_time} ({relative_time})\nCube: {challenge.cube}\nPosted by: {initial_user_mention}\n[Sign Up Here!]({message_link})", inline=False)
-                await interaction.response.send_message(embed=embed)
+    #             for challenge in challenges:
+    #                 message_link = f"https://discord.com/channels/{challenge.guild_id}/{challenge.channel_id}/{challenge.message_id}"
+    #                 # Mention the initial user who posted the challenge
+    #                 initial_user_mention = f"<@{challenge.initial_user}>"
+    #                 # Format the start time of each challenge to display in the embed
+    #                 start_time = challenge.start_time
+    #                 formatted_time = f"<t:{int(start_time.timestamp())}:F>"
+    #                 relative_time = f"<t:{int(start_time.timestamp())}:R>"
+    #                 embed.add_field(name=f"Team: {challenge.team_a}", value=f"Time: {formatted_time} ({relative_time})\nCube: {challenge.cube}\nPosted by: {initial_user_mention}\n[Sign Up Here!]({message_link})", inline=False)
+    #             await interaction.response.send_message(embed=embed)
 
 
     @bot.event

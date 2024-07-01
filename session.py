@@ -183,6 +183,17 @@ class SwissChallenge(Base):
     start_time = Column(DateTime, nullable=False)
     cube = Column(String(128))
 
+class TeamFinder(Base):
+    __tablename__ = 'team_finder'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(64), nullable=False)
+    display_name = Column(String(128), nullable=False)
+    timezone = Column(String(64), nullable=False)
+    message_id = Column(String(64))
+    channel_id = Column(String(64))
+    guild_id = Column(String(64))
+
 async def get_draft_session(session_id: str):
     async with AsyncSessionLocal() as session:
         async with session.begin():
