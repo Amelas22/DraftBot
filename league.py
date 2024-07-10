@@ -544,7 +544,7 @@ class ChallengeTimeModal(Modal):
             user_id = str(interaction.user.id)
             bot = interaction.client
             guild = bot.get_guild(int(interaction.guild_id))
-            challenge_channel = discord.utils.get(guild.text_channels, name="league-scheduled-drafts")
+            challenge_channel = discord.utils.get(guild.text_channels, name="preseason-challenges")
             start_time_str = self.children[0].value
             user_time_zone = pytz.timezone(self.time_zone)  # Convert the selected timezone string to a pytz timezone
             local_time = datetime.strptime(start_time_str, "%m/%d/%Y %H:%M")
@@ -575,7 +575,7 @@ class ChallengeTimeModal(Modal):
                             
             view = ChallengeView(challenge_id=new_challenge.id, command_type=self.command_type)
             message = await challenge_channel.send(embed=embed, view=view)
-            await interaction.response.send_message("Challenge posted in league-scheduled-drafts. Good luck in your match!", ephemeral=True)
+            await interaction.response.send_message("Challenge posted in preseason-challenges. Good luck in your match!", ephemeral=True)
             async with AsyncSessionLocal() as db_session:
                 async with db_session.begin():
                     challenge_to_update = await db_session.get(SwissChallenge, new_challenge.id)
