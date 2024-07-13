@@ -38,7 +38,7 @@ class PersistentView(discord.ui.View):
                 self.add_item(self.create_button("Cancel Sign Up", "red", f"cancel_sign_up_{self.draft_session_id}", self.cancel_sign_up_callback))
                 if self.session_type == "swiss":
                     self.add_item(self.create_button("Generate Seating Order", "blurple", f"randomize_teams_{self.draft_session_id}", self.randomize_teams_callback))
-                elif self.session_type == "test":
+                elif self.session_type == "test" or self.session_type == "schedule":
                     self.add_item(self.create_button("Cancel Draft", "grey", f"cancel_draft_{self.draft_session_id}", self.cancel_draft_callback))
                     self.add_item(self.create_button("Remove User", "grey", f"remove_user_{self.draft_session_id}", self.remove_user_button_callback))
                     return
@@ -122,9 +122,10 @@ class PersistentView(discord.ui.View):
         sign_ups = draft_session.sign_ups or {}
 
         # Check if the sign-up list is already full
-        if len(sign_ups) >= 8:
-            await interaction.response.send_message("The sign-up list is already full. No more players can sign up.", ephemeral=True)
-            return
+        if self.session_type != "schedule":
+            if len(sign_ups) >= 8:
+                await interaction.response.send_message("The sign-up list is already full. No more players can sign up.", ephemeral=True)
+                return
         user_id = str(interaction.user.id)
 
         if draft_session.session_type == "swiss":

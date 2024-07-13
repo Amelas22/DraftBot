@@ -181,6 +181,11 @@ async def league_commands(bot):
         else:
             await interaction.response.send_message("This command is only usable on the test server.")
 
+    @bot.slash_command(name="schedule_draft", description="Post a scheduled draft")
+    async def schedule_draft(interaction: discord.Interaction):
+        from modals import CubeSelectionModal
+        await interaction.response.send_modal(CubeSelectionModal(session_type="schedule", title="Select Cube"))
+        
     @bot.slash_command(
     name="remove_user_from_team",
     description="Remove a user from all teams they are assigned to"

@@ -222,7 +222,7 @@ class LeagueDraftView(discord.ui.View):
 
 
 class InitialPostView(View):
-    def __init__(self, command_type=None, team_id=None, team_name=None, user_display_name=None, match_id=None, team_a=None, team_b=None, bot=None):
+    def __init__(self, command_type=None, team_id=None, team_name=None, user_display_name=None, match_id=None, team_a=None, team_b=None, bot=None, cube_choice=None):
         super().__init__(timeout=None)
         self.your_team_range = None
         self.command_type = command_type
@@ -231,7 +231,7 @@ class InitialPostView(View):
         self.team_b = team_b
         self.team_name = team_name
         self.user_display_name = user_display_name
-        self.cube_choice = None 
+        self.cube_choice = cube_choice 
         self.time_zone = None
         self.match_id = match_id
         self.bot = bot
@@ -242,7 +242,7 @@ class InitialPostView(View):
             self.add_item(self.time_zone_select)
         elif not self.team_id:
             self.add_item(RangeSelect("Your Team Range", "your_team_range"))
-        elif self.command_type == "test":
+        elif self.command_type == "test" or self.command_type == "schedule":
             self.time_zone_select = TimezoneSelect("time_zone")
             self.add_item(self.time_zone_select)
         elif self.team_id:
@@ -269,6 +269,8 @@ class InitialPostView(View):
                 await interaction.response.send_modal(ChallengeTimeModal(cube=self.cube_choice, time_zone=self.time_zone, command_type=self.command_type))
         elif self.command_type == "test":
                 await interaction.response.send_modal(ChallengeTimeModal(time_zone=self.time_zone, command_type=self.command_type))
+        elif self.command_type == "schedule":
+            await interaction.response.send_modal(ChallengeTimeModal(time_zone=self.time_zone, command_type=self.command_type, cube=self.cube_choice))
         else:
             await interaction.response.defer()
 
@@ -465,7 +467,7 @@ class ChallengeTimeModal(Modal):
             ))
 
     async def callback(self, interaction: discord.Interaction):
-        if self.command_type == "test":
+        if self.command_type == "test" or self.command_type == "schedule":
             await interaction.response.defer()
             bot = interaction.client
             guild = bot.get_guild(int(interaction.guild_id))
@@ -505,10 +507,19 @@ class ChallengeTimeModal(Modal):
                         tracked_draft = True
                     )
                     session.add(new_draft_session)
-            embed = discord.Embed(title=f"Test Draft scheduled to start in {relative_time}. Sign up Below!", 
-                                                description=f"Start Range: Between {formatted_start_time} and {formatted_end_time}\n\n\n**Draftmancer Session**: **[Join Here]({draft_link})**" +
-                                                f"\n\nClick 'Sign Up' below if you can make the scheduled draft. You will be pinged 15 minutes before draft start. \n\nUse draftmancer random seating and pairings.\n\n", 
-                                                color=discord.Color.blue())
+            
+            if self.command_type == "test":
+                embed = discord.Embed(title=f"Test Draft scheduled to start in {relative_time}. Sign up Below!", 
+                                                    description=f"Start Range: Between {formatted_start_time} and {formatted_end_time}\n\n\n**Draftmancer Session**: **[Join Here]({draft_link})**" +
+                                                    f"\n\nClick 'Sign Up' below if you can make the scheduled draft. You will be pinged 15 minutes before draft start. \n\nUse draftmancer random seating and pairings.\n\n", 
+                                                    color=discord.Color.blue())
+
+            elif self.command_type == "schedule":
+                embed = discord.Embed(title=f"Scheduled Draft scheduled to start in {relative_time}. Sign up Below!", 
+                                    description=f"Start Range: Between {formatted_start_time} and {formatted_end_time}" +
+                                    f"\n\n**Chosen Cube: [{self.cube_choice}](https://cubecobra.com/cube/list/{self.cube_choice})**.\n\n" +
+                                    f"\n\nClick 'Sign Up' below if you can make the scheduled draft. You will be pinged 15 minutes before draft start. \n\nMore than 8 people can sign up, create manual draftmancer links when its time to launch. You can use this room to coordinate matches\n\n", 
+                                    color=discord.Color.blue())
             embed.add_field(name="\n\nSign-Ups", value="No players yet.", inline=False)
             embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1218187262488215642/1237195855560183829/image.png?ex=663ac3ed&is=6639726d&hm=3b72a4187732961a2d774534f5ea0d7b644e150303209900afbaf42ebff5db05&")
             from views import PersistentView

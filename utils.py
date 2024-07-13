@@ -699,7 +699,7 @@ async def send_channel_reminders(bot, session_id):
             session = result.scalars().first()
     # Format the mention string and construct the reminder message
     mentions = " ".join([f"<@{user_id}>" for user_id in session.sign_ups])
-    reminder_message = f"{mentions}\nReminder: Your draft starts in 15 minutes! Join here: {session.draft_link}"
+    reminder_message = f"{mentions}\nReminder: Your scheduled draft starts in 15 minutes! Join here: {session.draft_link}"
 
     # Fetch the channel and send the reminder
     guild = bot.get_guild(int(session.guild_id))
