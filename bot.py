@@ -1,3 +1,4 @@
+from loguru import logger
 import discord
 import os
 from discord.ext import commands
@@ -8,6 +9,9 @@ from utils import cleanup_sessions_task
 from commands import league_commands, scheduled_posts, swiss_draft_commands
 
 
+
+# Configure loguru to handle all logs, and set up optional file logging
+logger.add("discord_bot.log", rotation="500 MB")
 
 async def main():
     load_dotenv()
@@ -34,20 +38,24 @@ async def main():
         await re_register_challenges(bot)
         from teamfinder import re_register_teamfinder
         await re_register_teamfinder(bot)
+        logger.info("Re-registered team finder")
 
     @bot.slash_command(name='startdraft', description='Start a team draft with random teams', guild_id=None)
     async def start_draft(interaction: discord.Interaction):
-        await interaction.response.send_modal(CubeSelectionModal(session_type="random", title="Select Cube"))
+        logger.info("Received startdraft command")
+        await interaction.response.send_modal(CubeSelectionModal(session_type="random"))
 
     @bot.slash_command(name='premadedraft', description='Start a team draft with premade teams', guild_id=None)
     async def premade_draft(interaction: discord.Interaction):
-        await interaction.response.send_modal(CubeSelectionModal(session_type="premade", title="Select Cube"))
+        logger.info("Received premadedraft command")
+        await interaction.response.send_modal(CubeSelectionModal(session_type="premade"))
 
     
     await league_commands(bot)
     await scheduled_posts(bot)
     await swiss_draft_commands(bot)
     await init_db()
+    logger.info("Database initialized")
 
     # Run the bot
     await bot.start(TOKEN)
