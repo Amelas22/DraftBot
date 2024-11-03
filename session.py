@@ -1,7 +1,8 @@
 import discord
 from sqlalchemy import Column, Integer, String, DateTime, JSON, select, Boolean, ForeignKey, desc, Float, func
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker, relationship, declarative_base
+from sqlalchemy.orm import sessionmaker, relationship
+from database.models_base import Base
 from datetime import datetime
 import logging
 
@@ -23,8 +24,6 @@ async def init_db():
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-
-Base = declarative_base()
 
 class DraftSession(Base):
     __tablename__ = 'draft_sessions'

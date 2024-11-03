@@ -9,6 +9,7 @@ from sqlalchemy import update, select
 from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
 from sqlalchemy.orm import selectinload
 from utils import calculate_pairings, create_winston_draft, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, update_draft_summary_message, check_and_post_victory_or_draw, update_player_stats_and_elo, check_weekly_limits, update_player_stats_for_draft
+from loguru import logger
 
 PROCESSING_ROOMS_PAIRINGS = {}
 sessions = {}
@@ -25,6 +26,27 @@ class PersistentView(discord.ui.View):
         self.channel_ids = []
         self.add_buttons()
 
+    def to_metadata(self) -> dict:
+        """Convert view properties to a dictionary for JSON storage."""
+        return {
+            "draft_session_id": self.draft_session_id,
+            "session_type": self.session_type,
+            "team_a_name": self.team_a_name,
+            "team_b_name": self.team_b_name,
+            "session_stage": self.session_stage,
+        }
+
+    @classmethod
+    def from_metadata(cls, bot, metadata: dict):
+        """Recreate a PersistentView from stored metadata."""
+        return cls(
+            bot=bot,
+            draft_session_id=metadata.get("draft_session_id"),
+            session_type=metadata.get("session_type"),
+            team_a_name=metadata.get("team_a_name"),
+            team_b_name=metadata.get("team_b_name"),
+            session_stage=metadata.get("session_stage"),
+        )
 
     def add_buttons(self):
         if self.session_type == "winston":
@@ -1024,26 +1046,38 @@ class CallbackButton(discord.ui.Button):
 
 
 async def update_draft_message(bot, session_id):
+    logger.info(f"Starting update for draft message with session ID: {session_id}")
+
+    # Fetch draft session
     draft_session = await get_draft_session(session_id)
     if not draft_session:
-        print("Failed to fetch draft session for updating the message.")
+        logger.error("Failed to fetch draft session for updating the message.")
         return
 
     channel_id = int(draft_session.draft_channel_id)
     message_id = int(draft_session.message_id)
-    channel = bot.get_channel(channel_id)
+    logger.info(f"Fetched draft session. Channel ID: {channel_id}, Message ID: {message_id}")
 
+    # Fetch channel
+    channel = bot.get_channel(channel_id)
     if not channel:
-        print(f"Channel with ID {channel_id} not found.")
+        logger.error(f"Channel with ID {channel_id} not found.")
         return
 
     try:
+        # Fetch message
         message = await channel.fetch_message(message_id)
+        logger.info(f"Fetched message with ID: {message_id} from channel {channel_id}")
+
+        # Update embed with sign-ups
         embed = message.embeds[0]  # Assuming there's at least one embed in the message
         sign_up_count = len(draft_session.sign_ups)
         sign_ups_field_name = f"Sign-Ups ({sign_up_count}):"
-        sign_ups_str = '\n'.join([f"{name}" for name in draft_session.sign_ups.values()]) if draft_session.sign_ups else 'No players yet.'
+        sign_ups_str = '\n'.join(draft_session.sign_ups.values()) if draft_session.sign_ups else 'No players yet.'
+        
         embed.set_field_at(0, name=sign_ups_field_name, value=sign_ups_str, inline=False)
         await message.edit(embed=embed)
+        logger.info(f"Successfully updated message for session ID: {session_id}")
+
     except Exception as e:
-        print(f"Failed to update message for session {session_id}. Error: {e}")
+        logger.exception(f"Failed to update message for session {session_id}. Error: {e}")

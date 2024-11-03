@@ -1,3 +1,4 @@
+from database.message_management import make_message_sticky
 from models.session_details import SessionDetails
 from session import DraftSession, AsyncSessionLocal
 from datetime import datetime, timedelta
@@ -11,10 +12,11 @@ class BaseSession:
     async def create_draft_session(self, interaction, bot):
         async with AsyncSessionLocal() as session:
             async with session.begin():
+                # Step 1: Set up the draft session
                 new_draft_session = self.setup_draft_session(session)
                 await session.commit()
 
-                # Handling Embed and View
+                # Step 2: Create Embed and Persistent View
                 embed = self.create_embed()
                 view = PersistentView(
                     bot=bot,
@@ -25,12 +27,14 @@ class BaseSession:
                 )
                 await interaction.response.send_message(embed=embed, view=view)
 
-                # Update the draft session with message information
+                # Step 3: Get the original response message to set as sticky
                 message = await interaction.original_response()
+
+                # Step 4: Update the draft session with message information
                 await self.update_message_info(new_draft_session, message)
 
-                # Pin the message to the channel
-                await message.pin()
+                # Step 5: Make the message sticky (replace pinning with sticky logic)
+                await make_message_sticky(interaction.guild.id, message.channel.id, message, view)
 
     def setup_draft_session(self, session):
         new_draft_session = DraftSession(

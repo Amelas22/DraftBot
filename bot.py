@@ -3,6 +3,7 @@ import discord
 import os
 from discord.ext import commands
 from dotenv import load_dotenv
+from database.message_management import setup_sticky_handler
 from session import init_db
 from modals import CubeSelectionModal
 from utils import cleanup_sessions_task
@@ -56,6 +57,8 @@ async def main():
     await swiss_draft_commands(bot)
     await init_db()
     logger.info("Database initialized")
+
+    await setup_sticky_handler(bot)
 
     # Run the bot
     await bot.start(TOKEN)
