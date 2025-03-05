@@ -46,7 +46,7 @@ async def update_draft_session_message(draft_session_id: str, message_id: str, s
 
     draft_session.message_id = message_id
     session.add(draft_session)
-    session.commit()
+    await session.commit()
 
 
 async def handle_sticky_message_update(sticky_message: Message, bot: discord.Client, session: AsyncSession) -> None:
@@ -58,24 +58,38 @@ async def handle_sticky_message_update(sticky_message: Message, bot: discord.Cli
 
     channel = await bot.fetch_channel(int(sticky_message.channel_id))
     try:
-        draft_message = await channel.fetch_message(int(sticky_message.message_id))
-        embed = draft_message.embeds[0] if draft_message.embeds else None
+        old_message = await channel.fetch_message(int(sticky_message.message_id))
+        embed = old_message.embeds[0] if old_message.embeds else None
     except discord.NotFound:
         logger.warning(f"Sticky message with ID {sticky_message.message_id} not found.")
         return
 
     view = PersistentView.from_metadata(bot, sticky_message.view_metadata)
-    old_message = await channel.fetch_message(int(sticky_message.message_id))
     new_message = await channel.send(content=sticky_message.content, embed=embed, view=view)
     await new_message.pin()
     logger.info(f"Pinned new sticky message with ID {new_message.id} in channel {channel.id}")
 
+    # Save the new message ID to the sticky_message record
+    old_message_id = sticky_message.message_id
     sticky_message.message_id = str(new_message.id)
-    await update_draft_session_message(draft_session_id, str(new_message.id), session)
+    
+    # Update the draft session directly without calling update_draft_session_message
+    draft_session = await get_draft_session(draft_session_id)
+    if draft_session:
+        draft_session.message_id = str(new_message.id)
+        session.add(draft_session)
+    else:
+        logger.error(f"DraftSession with ID {draft_session_id} not found in database.")
+    
+    # Commit all changes at once
+    await session.commit()
 
-    if old_message:
+    # Only after all database changes are committed, delete the old message
+    try:
         await old_message.delete()
-        logger.info(f"Deleted old sticky message with ID {old_message.id}")
+        logger.info(f"Deleted old sticky message with ID {old_message_id}")
+    except discord.NotFound:
+        logger.info(f"Old message {old_message_id} was already deleted")
 
 
 async def setup_sticky_handler(bot: discord.Client) -> None:
@@ -91,7 +105,7 @@ async def setup_sticky_handler(bot: discord.Client) -> None:
             async with session.begin():
                 sticky_message = await fetch_sticky_message(str(message.channel.id), session)
                 if not sticky_message:
-                    logger.debug(f"No sticky message found for channel {message.channel.id}")
+                    # logger.debug(f"No sticky message found for channel {message.channel.id}")
                     return
 
                 # Increment message count and check if it meets the buffer limit

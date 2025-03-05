@@ -16,6 +16,8 @@ pytz = "==2024.2"
 sqlalchemy = "==2.0.21"
 trueskill = "==0.4.5"
 loguru = "*"
+win32-setctime = {version = "*", markers = "sys_platform == 'win32'"}
+colorama = "*"
 
 [dev-packages]
 
