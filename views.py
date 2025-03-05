@@ -33,7 +33,7 @@ class PersistentView(discord.ui.View):
             "session_type": self.session_type,
             "team_a_name": self.team_a_name,
             "team_b_name": self.team_b_name,
-            "session_stage": self.session_stage,
+            "session_stage": self.session_stage,  
         }
 
     @classmethod

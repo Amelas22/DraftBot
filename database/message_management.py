@@ -56,6 +56,16 @@ async def handle_sticky_message_update(sticky_message: Message, bot: discord.Cli
         logger.error("Missing draft_session_id in view_metadata.")
         return
 
+    # Fetch the current draft session to get its current state
+    draft_session = await get_draft_session(draft_session_id)
+    if not draft_session:
+        logger.error(f"DraftSession with ID {draft_session_id} not found.")
+        return
+    
+    # Update the view metadata with the current session stage
+    view_metadata = sticky_message.view_metadata.copy()
+    view_metadata["session_stage"] = draft_session.session_stage
+    
     channel = await bot.fetch_channel(int(sticky_message.channel_id))
     try:
         old_message = await channel.fetch_message(int(sticky_message.message_id))
@@ -64,7 +74,8 @@ async def handle_sticky_message_update(sticky_message: Message, bot: discord.Cli
         logger.warning(f"Sticky message with ID {sticky_message.message_id} not found.")
         return
 
-    view = PersistentView.from_metadata(bot, sticky_message.view_metadata)
+    # Create view with updated metadata including the current session stage
+    view = PersistentView.from_metadata(bot, view_metadata)
     new_message = await channel.send(content=sticky_message.content, embed=embed, view=view)
     await new_message.pin()
     logger.info(f"Pinned new sticky message with ID {new_message.id} in channel {channel.id}")
@@ -72,9 +83,9 @@ async def handle_sticky_message_update(sticky_message: Message, bot: discord.Cli
     # Save the new message ID to the sticky_message record
     old_message_id = sticky_message.message_id
     sticky_message.message_id = str(new_message.id)
+    sticky_message.view_metadata = view_metadata  # Save the updated metadata
     
     # Update the draft session directly without calling update_draft_session_message
-    draft_session = await get_draft_session(draft_session_id)
     if draft_session:
         draft_session.message_id = str(new_message.id)
         session.add(draft_session)
