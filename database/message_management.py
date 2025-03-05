@@ -7,7 +7,7 @@ from database.models_base import Base
 from session import AsyncSessionLocal, DraftSession, get_draft_session
 from loguru import logger
 
-STICKY_MESSAGE_BUFFER = 5
+STICKY_MESSAGE_BUFFER = 8
 
 class Message(Base):
     """Represents a message stored in the database, potentially a sticky message."""

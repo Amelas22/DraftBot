@@ -7,6 +7,8 @@ import pytz
 import random
 from datetime import datetime, timedelta
 from collections import Counter
+from player_stats import get_player_statistics, create_stats_embed
+from loguru import logger
 
 pacific_time_zone = pytz.timezone('America/Los_Angeles')
 cutoff_datetime = pacific_time_zone.localize(datetime(2024, 5, 6, 0, 0))
@@ -52,6 +54,28 @@ async def league_commands(bot):
     #             await session.commit()
     #     await ctx.followup.send("Click your timezone below to add your name to that timezone. You can click any name to open a DM with that user to coordiante finding teammates. Clicking the timezone again (once signed up) will remove your name from the list.", ephemeral=True)
 
+    @bot.slash_command(name="stats", description="Display your draft stats or another player's stats")
+    async def stats(ctx, user: discord.User = None):
+        """Display draft statistics for a player."""
+        await ctx.defer()
+        
+        # If no user is specified, use the command user
+        target_user = user or ctx.author
+        user_id = str(target_user.id)
+        
+        try:
+            # Fetch stats for different time frames
+            stats_weekly = await get_player_statistics(user_id, 'week')
+            stats_monthly = await get_player_statistics(user_id, 'month')
+            stats_lifetime = await get_player_statistics(user_id)
+            
+            # Create and send the embed
+            embed = await create_stats_embed(target_user, stats_weekly, stats_monthly, stats_lifetime)
+            await ctx.followup.send(embed=embed)
+        except Exception as e:
+            logger.error(f"Error in stats command: {e}")
+            await ctx.followup.send("An error occurred while fetching stats. Please try again later.")
+        
     @bot.slash_command(name="registerteam", description="Register a new team in the league")
     async def register_team(interaction: discord.Interaction, team_name: str):
         cube_overseer_role_name = "Cube Overseer"
