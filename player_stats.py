@@ -1,4 +1,5 @@
 import discord
+import json
 from datetime import datetime, timedelta
 from sqlalchemy import select, func, and_, or_, text
 from session import AsyncSessionLocal, DraftSession, MatchResult, PlayerStats
@@ -57,43 +58,118 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                 matches_won_result = await session.execute(matches_won_query)
                 matches_won = matches_won_result.scalar() or 0
                 
-                # Get trophies won by display name
-                # First, we need to get the user's display name if not provided
-                if not user_display_name:
-                    # Try to get it from PlayerStats or sign_ups
-                    if player_stats and player_stats.display_name:
-                        user_display_name = player_stats.display_name
-                    else:
-                        # Try to find it in the sign_ups table
-                        sign_ups_query = text("""
-                            SELECT sign_ups FROM draft_sessions 
-                            WHERE json_extract(sign_ups, '$') LIKE :pattern
-                            LIMIT 1
-                        """)
-                        sign_ups_result = await session.execute(
-                            sign_ups_query, 
-                            {"pattern": pattern}
-                        )
-                        sign_ups_data = sign_ups_result.scalar()
-                        if sign_ups_data and isinstance(sign_ups_data, dict) and user_id in sign_ups_data:
-                            user_display_name = sign_ups_data[user_id]
-                        else:
-                            # Fallback to a generic name if we can't find the display name
-                            user_display_name = "Unknown"
+                # First, try to get the display name from any sign_ups entries
+                name_query = text("""
+                    SELECT sign_ups FROM draft_sessions 
+                    WHERE json_extract(sign_ups, '$') LIKE :pattern
+                    ORDER BY draft_start_time DESC LIMIT 1
+                """)
                 
-                # Now search for trophies by display name
+                name_result = await session.execute(name_query, {"pattern": pattern})
+                sign_ups_json = name_result.scalar()
+                
+                # Extract display name from sign_ups JSON
+                display_name = user_display_name or "Unknown"
+                if sign_ups_json:
+                    try:
+                        # Handle string or dict format
+                        if isinstance(sign_ups_json, str):
+                            sign_ups = json.loads(sign_ups_json)
+                        else:
+                            sign_ups = sign_ups_json
+                            
+                        # Find the user's display name
+                        if user_id in sign_ups:
+                            display_name = sign_ups[user_id]
+                            logger.info(f"Found display name '{display_name}' for user {user_id}")
+                    except Exception as e:
+                        logger.error(f"Error parsing sign_ups JSON: {e}")
+                
+                # Get trophies with two approaches
+                
+                # Approach 1: Direct display name matching in trophy_drafters
                 trophies_query = text("""
-                    SELECT COUNT(*) FROM draft_sessions 
-                    WHERE json_extract(trophy_drafters, '$') LIKE :name_pattern
+                    SELECT trophy_drafters FROM draft_sessions 
+                    WHERE trophy_drafters IS NOT NULL
                     AND draft_start_time >= :start_date
                 """)
                 
-                name_pattern = f'%"{user_display_name}"%'  # Pattern to match display name in JSON string
-                trophies_result = await session.execute(
-                    trophies_query, 
-                    {"name_pattern": name_pattern, "start_date": start_date}
-                )
-                trophies_won = trophies_result.scalar() or 0
+                trophies_result = await session.execute(trophies_query, {"start_date": start_date})
+                trophies_entries = trophies_result.fetchall()
+                
+                trophies_won = 0
+                for (trophy_drafters_json,) in trophies_entries:
+                    if not trophy_drafters_json:
+                        continue
+                        
+                    try:
+                        # Parse trophy_drafters - could be a string or already JSON
+                        if isinstance(trophy_drafters_json, str):
+                            trophy_drafters = json.loads(trophy_drafters_json)
+                        elif isinstance(trophy_drafters_json, list):
+                            trophy_drafters = trophy_drafters_json
+                        else:
+                            logger.warning(f"Unexpected trophy_drafters format: {type(trophy_drafters_json)}")
+                            continue
+                            
+                        # Check if display name is in the list
+                        if display_name in trophy_drafters:
+                            trophies_won += 1
+                            logger.info(f"Found trophy for '{display_name}' in {trophy_drafters}")
+                    except Exception as e:
+                        logger.error(f"Error processing trophy_drafters: {e}")
+                
+                # Approach 2: Cross-reference with sign_ups to find all display names
+                if trophies_won == 0:
+                    # Get all display names this user has used
+                    names_query = text("""
+                        SELECT sign_ups FROM draft_sessions 
+                        WHERE json_extract(sign_ups, '$') LIKE :pattern
+                    """)
+                    
+                    names_result = await session.execute(names_query, {"pattern": pattern})
+                    all_sign_ups = names_result.fetchall()
+                    
+                    user_names = set()
+                    for (signup_json,) in all_sign_ups:
+                        if not signup_json:
+                            continue
+                            
+                        try:
+                            # Parse sign_ups
+                            if isinstance(signup_json, str):
+                                sign_ups = json.loads(signup_json)
+                            else:
+                                sign_ups = signup_json
+                                
+                            # Add this display name
+                            if user_id in sign_ups:
+                                user_names.add(sign_ups[user_id])
+                        except Exception as e:
+                            logger.error(f"Error processing sign_ups for names: {e}")
+                    
+                    # Now count trophies again with all user names
+                    for (trophy_drafters_json,) in trophies_entries:
+                        if not trophy_drafters_json:
+                            continue
+                            
+                        try:
+                            # Parse trophy_drafters
+                            if isinstance(trophy_drafters_json, str):
+                                trophy_drafters = json.loads(trophy_drafters_json)
+                            elif isinstance(trophy_drafters_json, list):
+                                trophy_drafters = trophy_drafters_json
+                            else:
+                                continue
+                                
+                            # Check if any of the user's names are in trophy_drafters
+                            for name in user_names:
+                                if name in trophy_drafters:
+                                    trophies_won += 1
+                                    logger.info(f"Found trophy for alternate name '{name}' in {trophy_drafters}")
+                                    break  # Count each trophy only once
+                        except Exception as e:
+                            logger.error(f"Error processing trophy_drafters for alternates: {e}")
                 
                 # Get total matches played
                 matches_played_query = select(func.count(MatchResult.id)).where(
@@ -120,7 +196,6 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                 current_elo = player_stats.elo_rating if player_stats else 1200
                 
                 # Get stats by cube type
-                # First, get all cubes the player has played
                 cube_query = text("""
                     SELECT cube, COUNT(*) as draft_count 
                     FROM draft_sessions 
@@ -204,7 +279,7 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                     "trophies_won": trophies_won,
                     "match_win_percentage": match_win_percentage,
                     "current_elo": current_elo,
-                    "display_name": user_display_name,
+                    "display_name": display_name,
                     "cube_stats": cube_stats
                 }
     except Exception as e:
@@ -223,8 +298,11 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
 
 async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
     """Create a Discord embed with player statistics."""
+    # Use the display name from stats if user object doesn't have a name
+    display_name = user.display_name if hasattr(user, 'display_name') else stats_lifetime['display_name']
+    
     embed = discord.Embed(
-        title=f"Stats for {user.name if hasattr(user, 'name') else stats_lifetime['display_name']}",
+        title=f"Stats for {display_name}",
         color=discord.Color.blue(),
         timestamp=datetime.now()
     )

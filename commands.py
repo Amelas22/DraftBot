@@ -56,7 +56,8 @@ async def league_commands(bot):
     #     await ctx.followup.send("Click your timezone below to add your name to that timezone. You can click any name to open a DM with that user to coordiante finding teammates. Clicking the timezone again (once signed up) will remove your name from the list.", ephemeral=True)
 
     @bot.slash_command(name="stats", description="Display your draft statistics")
-    async def stats(ctx, discord_id: Option(str, "Discord ID for testing (admin only)", required=False) = None):
+    async def stats(ctx, 
+                discord_id: Option(str, "Discord ID for testing (admin only)", required=False) = None):
         """Display draft statistics for a player."""
         await ctx.defer()
         
@@ -82,9 +83,12 @@ async def league_commands(bot):
                 user = await ctx.guild.fetch_member(int(discord_id))
                 user_display_name = user.display_name
             except:
-                # If we can't find the user, just continue with the ID
-                user = None
-                user_display_name = None
+                # If we can't find the user, just use a placeholder
+                class UserPlaceholder:
+                    def __init__(self, display_name=None):
+                        self.display_name = display_name
+                
+                user = UserPlaceholder()
         
         try:
             # Fetch stats for different time frames
@@ -92,9 +96,11 @@ async def league_commands(bot):
             stats_monthly = await get_player_statistics(user_id, 'month', user_display_name)
             stats_lifetime = await get_player_statistics(user_id, None, user_display_name)
             
-            # Log the display name for debugging
-            logger.info(f"Stats for user {user_id} with display name {user_display_name}")
-            logger.info(f"Display name in stats: {stats_lifetime['display_name']}")
+            # Give the user object the most accurate display name
+            user.display_name = stats_lifetime['display_name']
+            
+            # Log for debugging
+            logger.info(f"Stats for user {user_id} with display name {user.display_name}")
             logger.info(f"Trophies: {stats_lifetime['trophies_won']}")
             
             # Create and send the embed
