@@ -18,12 +18,30 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
         else:  # Lifetime stats
             start_date = datetime(2000, 1, 1)  # Far in the past
         
+        # Default values for stats
+        drafts_played = 0
+        matches_played = 0
+        matches_won = 0
+        trophies_won = 0
+        match_win_percentage = 0
+        current_elo = 1200
+        display_name = user_display_name or "Unknown"
+        cube_stats = {}
+        
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 # Get basic player stats if they exist
                 player_stats_query = select(PlayerStats).where(PlayerStats.player_id == user_id)
                 player_stats_result = await session.execute(player_stats_query)
                 player_stats = player_stats_result.scalar_one_or_none()
+                
+                if player_stats:
+                    current_elo = player_stats.elo_rating
+                    if player_stats.display_name:
+                        display_name = player_stats.display_name
+                
+                # Define the pattern for JSON searches
+                pattern = f'%"{user_id}"%'  # Pattern to match user_id in JSON string
                 
                 # For SQLite, we need to use json_extract with LIKE to search for values in JSON
                 # Use direct SQL for the complex JSON conditions
@@ -36,7 +54,6 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                     ) AND draft_start_time >= :start_date
                 """)
                 
-                pattern = f'%"{user_id}"%'  # Pattern to match user_id in JSON string
                 drafts_played_result = await session.execute(
                     drafts_query, 
                     {"pattern": pattern, "start_date": start_date}
@@ -69,7 +86,6 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                 sign_ups_json = name_result.scalar()
                 
                 # Extract display name from sign_ups JSON
-                display_name = user_display_name or "Unknown"
                 if sign_ups_json:
                     try:
                         # Handle string or dict format
@@ -192,8 +208,99 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                 # Calculate match win percentage
                 match_win_percentage = (matches_won / matches_played * 100) if matches_played > 0 else 0
                 
-                # Get current ELO rating (or default)
-                current_elo = player_stats.elo_rating if player_stats else 1200
+                # ==== TEAM DRAFT WINS ====
+                # Get all draft sessions the user participated in
+                drafts_query = text("""
+                    SELECT id, session_id, team_a, team_b, session_type
+                    FROM draft_sessions 
+                    WHERE (
+                        json_extract(sign_ups, '$') LIKE :pattern
+                        OR json_extract(team_a, '$') LIKE :pattern
+                        OR json_extract(team_b, '$') LIKE :pattern
+                    ) 
+                    AND draft_start_time >= :start_date
+                    AND (session_type = 'random' OR session_type = 'premade')
+                """)
+                
+                drafts_result = await session.execute(
+                    drafts_query, 
+                    {"pattern": pattern, "start_date": start_date}
+                )
+                
+                draft_sessions = drafts_result.fetchall()
+                
+                # Initialize counters
+                team_drafts_played = 0
+                team_drafts_won = 0
+                team_drafts_tied = 0
+                
+                # Process each draft
+                for draft_id, session_id, team_a_json, team_b_json, session_type in draft_sessions:
+                    # Skip if not a team draft or missing team data
+                    if session_type not in ['random', 'premade'] or not team_a_json or not team_b_json:
+                        continue
+                    
+                    # Determine which team the user was on
+                    try:
+                        team_a = team_a_json if isinstance(team_a_json, list) else json.loads(team_a_json) if isinstance(team_a_json, str) else []
+                        team_b = team_b_json if isinstance(team_b_json, list) else json.loads(team_b_json) if isinstance(team_b_json, str) else []
+                        
+                        user_team = None
+                        if user_id in team_a:
+                            user_team = 'A'
+                        elif user_id in team_b:
+                            user_team = 'B'
+                        else:
+                            # User not on either team (might be in sign_ups but not teams)
+                            continue
+                            
+                        # Now get all match results for this draft
+                        match_results_query = text("""
+                            SELECT 
+                                player1_id, player2_id, 
+                                player1_wins, player2_wins, 
+                                winner_id
+                            FROM match_results 
+                            WHERE session_id = :session_id
+                        """)
+                        
+                        match_results = await session.execute(
+                            match_results_query, 
+                            {"session_id": session_id}
+                        )
+                        
+                        team_a_wins = 0
+                        team_b_wins = 0
+                        
+                        for p1_id, p2_id, p1_wins, p2_wins, winner_id in match_results.fetchall():
+                            # Determine which team won this match
+                            if winner_id:
+                                if winner_id in team_a:
+                                    team_a_wins += 1
+                                elif winner_id in team_b:
+                                    team_b_wins += 1
+                        
+                        # Count this as a played draft
+                        team_drafts_played += 1
+                        
+                        # Determine the draft winner
+                        if team_a_wins > team_b_wins:
+                            # Team A won
+                            if user_team == 'A':
+                                team_drafts_won += 1
+                        elif team_b_wins > team_a_wins:
+                            # Team B won
+                            if user_team == 'B':
+                                team_drafts_won += 1
+                        else:
+                            # It's a tie
+                            team_drafts_tied += 1
+                            
+                    except Exception as e:
+                        logger.error(f"Error processing draft {draft_id}: {e}")
+                
+                # Calculate team draft win percentage
+                team_draft_win_percentage = (team_drafts_won / team_drafts_played * 100) if team_drafts_played > 0 else 0
                 
                 # Get stats by cube type
                 cube_query = text("""
@@ -280,11 +387,17 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                     "match_win_percentage": match_win_percentage,
                     "current_elo": current_elo,
                     "display_name": display_name,
-                    "cube_stats": cube_stats
+                    "cube_stats": cube_stats,
+                    # Add team draft stats
+                    "team_drafts_played": team_drafts_played,
+                    "team_drafts_won": team_drafts_won,
+                    "team_drafts_tied": team_drafts_tied,
+                    "team_draft_win_percentage": team_draft_win_percentage
                 }
+                
     except Exception as e:
         logger.error(f"Error getting stats for user {user_id}: {e}")
-        # Return default values
+        # Return default values with team draft stats
         return {
             "drafts_played": 0,
             "matches_played": 0,
@@ -293,7 +406,11 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
             "match_win_percentage": 0,
             "current_elo": 1200,
             "display_name": "Unknown",
-            "cube_stats": {}
+            "cube_stats": {},
+            "team_drafts_played": 0,
+            "team_drafts_won": 0,
+            "team_drafts_tied": 0,
+            "team_draft_win_percentage": 0
         }
 
 async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
@@ -311,6 +428,11 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
     if hasattr(user, 'display_avatar'):
         embed.set_thumbnail(url=user.display_avatar.url)
     
+    # Calculate losses for each time frame
+    weekly_losses = stats_weekly['team_drafts_played'] - stats_weekly['team_drafts_won'] - stats_weekly['team_drafts_tied']
+    monthly_losses = stats_monthly['team_drafts_played'] - stats_monthly['team_drafts_won'] - stats_monthly['team_drafts_tied']
+    lifetime_losses = stats_lifetime['team_drafts_played'] - stats_lifetime['team_drafts_won'] - stats_lifetime['team_drafts_tied']
+    
     # Weekly stats
     embed.add_field(
         name="Weekly Stats (Last 7 Days)",
@@ -318,7 +440,9 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
             f"Drafts Played: {stats_weekly['drafts_played']}\n"
             f"Matches Won: {stats_weekly['matches_won']}/{stats_weekly['matches_played']}\n"
             f"Win %: {stats_weekly['match_win_percentage']:.1f}%\n"
-            f"Trophies: {stats_weekly['trophies_won']}"
+            f"Trophies: {stats_weekly['trophies_won']}\n"
+            f"Draft Record: {stats_weekly['team_drafts_won']}-{weekly_losses}-{stats_weekly['team_drafts_tied']}"
+            + (f" (Win %: {stats_weekly['team_draft_win_percentage']:.1f}%)" if stats_weekly['team_drafts_played'] > 0 else "")
         ),
         inline=True
     )
@@ -330,7 +454,9 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
             f"Drafts Played: {stats_monthly['drafts_played']}\n"
             f"Matches Won: {stats_monthly['matches_won']}/{stats_monthly['matches_played']}\n"
             f"Win %: {stats_monthly['match_win_percentage']:.1f}%\n"
-            f"Trophies: {stats_monthly['trophies_won']}"
+            f"Trophies: {stats_monthly['trophies_won']}\n"
+            f"Draft Record: {stats_monthly['team_drafts_won']}-{monthly_losses}-{stats_monthly['team_drafts_tied']}" 
+            + (f" (Win %: {stats_monthly['team_draft_win_percentage']:.1f}%)" if stats_monthly['team_drafts_played'] > 0 else "")
         ),
         inline=True
     )
@@ -343,7 +469,9 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
             f"Matches Won: {stats_lifetime['matches_won']}/{stats_lifetime['matches_played']}\n"
             f"Win %: {stats_lifetime['match_win_percentage']:.1f}%\n"
             f"Trophies: {stats_lifetime['trophies_won']}\n"
-            f"Current ELO: {stats_lifetime['current_elo']:.0f}"
+            f"Current ELO: {stats_lifetime['current_elo']:.0f}\n"
+            f"Draft Record: {stats_lifetime['team_drafts_won']}-{lifetime_losses}-{stats_lifetime['team_drafts_tied']}"
+            + (f" (Win %: {stats_lifetime['team_draft_win_percentage']:.1f}%)" if stats_lifetime['team_drafts_played'] > 0 else "")
         ),
         inline=False
     )
