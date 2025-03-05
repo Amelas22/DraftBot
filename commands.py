@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from collections import Counter
 from player_stats import get_player_statistics, create_stats_embed
 from loguru import logger
+from discord import Option
 
 pacific_time_zone = pytz.timezone('America/Los_Angeles')
 cutoff_datetime = pacific_time_zone.localize(datetime(2024, 5, 6, 0, 0))
@@ -54,28 +55,59 @@ async def league_commands(bot):
     #             await session.commit()
     #     await ctx.followup.send("Click your timezone below to add your name to that timezone. You can click any name to open a DM with that user to coordiante finding teammates. Clicking the timezone again (once signed up) will remove your name from the list.", ephemeral=True)
 
-    @bot.slash_command(name="stats", description="Display your draft stats or another player's stats")
-    async def stats(ctx, user: discord.User = None):
+    @bot.slash_command(name="stats", description="Display your draft statistics")
+    async def stats(ctx, discord_id: Option(str, "Discord ID for testing (admin only)", required=False) = None):
         """Display draft statistics for a player."""
         await ctx.defer()
         
-        # If no user is specified, use the command user
-        target_user = user or ctx.author
-        user_id = str(target_user.id)
+        # Check if discord_id is provided and user has admin permissions
+        is_admin = any(role.name in ["Cube Overseer", "Developer", "Admin", "Moderator"] 
+                    for role in ctx.author.roles)
+        
+        if discord_id and not is_admin:
+            await ctx.followup.send("You don't have permission to view other players' stats.", ephemeral=True)
+            return
+        
+        # Default to the command author
+        user = ctx.author
+        user_id = str(user.id)
+        user_display_name = user.display_name
+        
+        if discord_id and is_admin:
+            # Override for admin testing
+            user_id = discord_id
+            
+            # Try to fetch user object if possible
+            try:
+                user = await ctx.guild.fetch_member(int(discord_id))
+                user_display_name = user.display_name
+            except:
+                # If we can't find the user, just continue with the ID
+                user = None
+                user_display_name = None
         
         try:
             # Fetch stats for different time frames
-            stats_weekly = await get_player_statistics(user_id, 'week')
-            stats_monthly = await get_player_statistics(user_id, 'month')
-            stats_lifetime = await get_player_statistics(user_id)
+            stats_weekly = await get_player_statistics(user_id, 'week', user_display_name)
+            stats_monthly = await get_player_statistics(user_id, 'month', user_display_name)
+            stats_lifetime = await get_player_statistics(user_id, None, user_display_name)
+            
+            # Log the display name for debugging
+            logger.info(f"Stats for user {user_id} with display name {user_display_name}")
+            logger.info(f"Display name in stats: {stats_lifetime['display_name']}")
+            logger.info(f"Trophies: {stats_lifetime['trophies_won']}")
             
             # Create and send the embed
-            embed = await create_stats_embed(target_user, stats_weekly, stats_monthly, stats_lifetime)
-            await ctx.followup.send(embed=embed)
+            embed = await create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime)
+            
+            if discord_id and is_admin:
+                await ctx.followup.send(f"Showing stats for Discord ID: {discord_id}", embed=embed)
+            else:
+                await ctx.followup.send(embed=embed)
         except Exception as e:
             logger.error(f"Error in stats command: {e}")
             await ctx.followup.send("An error occurred while fetching stats. Please try again later.")
-        
+
     @bot.slash_command(name="registerteam", description="Register a new team in the league")
     async def register_team(interaction: discord.Interaction, team_name: str):
         cube_overseer_role_name = "Cube Overseer"
