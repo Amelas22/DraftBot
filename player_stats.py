@@ -482,7 +482,7 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
             f"Matches Won: {stats_lifetime['matches_won']}/{stats_lifetime['matches_played']}\n"
             f"Win %: {stats_lifetime['match_win_percentage']:.1f}%\n"
             f"Trophies: {stats_lifetime['trophies_won']}\n"
-            f"Current ELO: {stats_lifetime['current_elo']:.0f}\n"
+        #    f"Current ELO: {stats_lifetime['current_elo']:.0f}\n"
             f"Draft Record: {stats_lifetime['team_drafts_won']}-{lifetime_losses}-{stats_lifetime['team_drafts_tied']}"
             + (f" (Win %: {stats_lifetime['team_draft_win_percentage']:.1f}%)" if stats_lifetime['team_drafts_played'] > 0 else "")
         ),
