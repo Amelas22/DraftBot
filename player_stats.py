@@ -503,7 +503,7 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
             cube_stats_text += f"**{cube_name}**: {stats['win_percentage']:.1f}% ({stats['drafts_played']} Drafts)\n"
         
         embed.add_field(
-            name="Cube Win Percentage",
+            name="Cube Win Percentage (min 5 drafts)",
             value=cube_stats_text,
             inline=False
         )
