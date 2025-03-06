@@ -7,6 +7,9 @@ import pytz
 import random
 from datetime import datetime, timedelta
 from collections import Counter
+from player_stats import get_player_statistics, create_stats_embed
+from loguru import logger
+from discord import Option
 
 pacific_time_zone = pytz.timezone('America/Los_Angeles')
 cutoff_datetime = pacific_time_zone.localize(datetime(2024, 5, 6, 0, 0))
@@ -51,6 +54,33 @@ async def league_commands(bot):
 
     #             await session.commit()
     #     await ctx.followup.send("Click your timezone below to add your name to that timezone. You can click any name to open a DM with that user to coordiante finding teammates. Clicking the timezone again (once signed up) will remove your name from the list.", ephemeral=True)
+
+    @bot.slash_command(name="stats", description="Display your draft statistics")
+    async def stats(ctx):
+        """Display your personal draft statistics."""
+        await ctx.defer()
+        
+        # Always use the command user (no more discord_id parameter)
+        user = ctx.author
+        user_id = str(user.id)
+        user_display_name = user.display_name
+        
+        try:
+            # Fetch stats for different time frames
+            stats_weekly = await get_player_statistics(user_id, 'week', user_display_name)
+            stats_monthly = await get_player_statistics(user_id, 'month', user_display_name)
+            stats_lifetime = await get_player_statistics(user_id, None, user_display_name)
+            
+            # Log for debugging
+            logger.info(f"Stats for user {user_id} with display name {user.display_name}")
+            logger.info(f"Trophies: {stats_lifetime['trophies_won']}")
+            
+            # Create and send the embed
+            embed = await create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime)
+            await ctx.followup.send(embed=embed)
+        except Exception as e:
+            logger.error(f"Error in stats command: {e}")
+            await ctx.followup.send("An error occurred while fetching your stats. Please try again later.")
 
     @bot.slash_command(name="registerteam", description="Register a new team in the league")
     async def register_team(interaction: discord.Interaction, team_name: str):

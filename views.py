@@ -325,10 +325,9 @@ class PersistentView(discord.ui.View):
                 if not session:
                     await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
                     return
-                # if session.session_type == "swiss":
-                #     if len(session.sign_ups) != 8:
-                #         await interaction.response.send_message("There must be eight players to fire.")
-                #         return
+                if len(session.sign_ups) % 2 != 0:
+                    await interaction.response.send_message("There must be an even number of players to fire.")
+                    return
 
                 # Update the session object
                 session.teams_start_time = datetime.now()
