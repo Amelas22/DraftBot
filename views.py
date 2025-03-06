@@ -331,7 +331,12 @@ class PersistentView(discord.ui.View):
 
                 # Update the session object
                 session.teams_start_time = datetime.now()
-                session.deletion_time = datetime.now() + timedelta(hours=4)
+                if session.session_type == 'premade':
+                    # 7 days for premade drafts (league matches)
+                    session.deletion_time = datetime.now() + timedelta(days=7)
+                else:
+                    # 4 hours for other draft types
+                    session.deletion_time = datetime.now() + timedelta(hours=4)
                 session.session_stage = 'teams'
                 # Check session type and prepare teams if necessary
                 if session.session_type == 'random' or session.session_type == 'test':
