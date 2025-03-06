@@ -56,39 +56,14 @@ async def league_commands(bot):
     #     await ctx.followup.send("Click your timezone below to add your name to that timezone. You can click any name to open a DM with that user to coordiante finding teammates. Clicking the timezone again (once signed up) will remove your name from the list.", ephemeral=True)
 
     @bot.slash_command(name="stats", description="Display your draft statistics")
-    async def stats(ctx, 
-                discord_id: Option(str, "Discord ID for testing (admin only)", required=False) = None):
-        """Display draft statistics for a player."""
+    async def stats(ctx):
+        """Display your personal draft statistics."""
         await ctx.defer()
         
-        # Check if discord_id is provided and user has admin permissions
-        is_admin = any(role.name in ["Cube Overseer", "Developer", "Admin", "Moderator"] 
-                    for role in ctx.author.roles)
-        
-        if discord_id and not is_admin:
-            await ctx.followup.send("You don't have permission to view other players' stats.", ephemeral=True)
-            return
-        
-        # Default to the command author
+        # Always use the command user (no more discord_id parameter)
         user = ctx.author
         user_id = str(user.id)
         user_display_name = user.display_name
-        
-        if discord_id and is_admin:
-            # Override for admin testing
-            user_id = discord_id
-            
-            # Try to fetch user object if possible
-            try:
-                user = await ctx.guild.fetch_member(int(discord_id))
-                user_display_name = user.display_name
-            except:
-                # If we can't find the user, just use a placeholder
-                class UserPlaceholder:
-                    def __init__(self, display_name=None):
-                        self.display_name = display_name
-                
-                user = UserPlaceholder()
         
         try:
             # Fetch stats for different time frames
@@ -96,23 +71,16 @@ async def league_commands(bot):
             stats_monthly = await get_player_statistics(user_id, 'month', user_display_name)
             stats_lifetime = await get_player_statistics(user_id, None, user_display_name)
             
-            # Give the user object the most accurate display name
-            user.display_name = stats_lifetime['display_name']
-            
             # Log for debugging
             logger.info(f"Stats for user {user_id} with display name {user.display_name}")
             logger.info(f"Trophies: {stats_lifetime['trophies_won']}")
             
             # Create and send the embed
             embed = await create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime)
-            
-            if discord_id and is_admin:
-                await ctx.followup.send(f"Showing stats for Discord ID: {discord_id}", embed=embed)
-            else:
-                await ctx.followup.send(embed=embed)
+            await ctx.followup.send(embed=embed)
         except Exception as e:
             logger.error(f"Error in stats command: {e}")
-            await ctx.followup.send("An error occurred while fetching stats. Please try again later.")
+            await ctx.followup.send("An error occurred while fetching your stats. Please try again later.")
 
     @bot.slash_command(name="registerteam", description="Register a new team in the league")
     async def register_team(interaction: discord.Interaction, team_name: str):
