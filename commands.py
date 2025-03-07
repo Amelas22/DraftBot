@@ -82,6 +82,63 @@ async def league_commands(bot):
             logger.error(f"Error in stats command: {e}")
             await ctx.followup.send("An error occurred while fetching your stats. Please try again later.")
 
+    @bot.slash_command(name="record", description="Display your head-to-head record against another player")
+    @discord.option(
+        "opponent_name",
+        description="The display name of the opponent",
+        required=True
+    )
+    async def record(ctx, opponent_name: str):
+        """Display your head-to-head record against another player."""
+        await ctx.defer()
+        
+        user = ctx.author
+        user_id = str(user.id)
+        user_display_name = user.display_name
+        
+        # Check if the user is trying to get their record against themselves
+        if opponent_name.lower() == user_display_name.lower():
+            await ctx.followup.send("You can't get your record against yourself!", ephemeral=True)
+            return
+        
+        try:
+            # Import needed functions from player_stats
+            from player_stats import find_discord_id_by_display_name, get_head_to_head_stats, create_head_to_head_embed
+            
+            # Find opponent's Discord ID from display name
+            opponent_id, opponent_display_name = await find_discord_id_by_display_name(opponent_name)
+            
+            if not opponent_id:
+                await ctx.followup.send(f"Could not find a player with the display name '{opponent_name}'. Please check the spelling or try another name.", ephemeral=True)
+                return
+            
+            # Don't allow getting record against yourself
+            if opponent_id == user_id:
+                await ctx.followup.send("You can't get your record against yourself!", ephemeral=True)
+                return
+            
+            # Get head-to-head statistics
+            h2h_stats = await get_head_to_head_stats(user_id, opponent_id, user_display_name, opponent_display_name)
+            
+            # If no matches played, inform the user
+            if h2h_stats['lifetime']['matches_played'] == 0:
+                await ctx.followup.send(f"No matches found between you and {opponent_display_name}.", ephemeral=True)
+                return
+            
+            # Try to fetch opponent member object
+            try:
+                opponent_member = await ctx.guild.fetch_member(int(opponent_id)) if opponent_id.isdigit() else None
+            except:
+                opponent_member = None
+            
+            # Create and send the embed
+            embed = await create_head_to_head_embed(user, opponent_member, h2h_stats)
+            await ctx.followup.send(embed=embed)
+            
+        except Exception as e:
+            logger.error(f"Error in record command: {e}")
+            await ctx.followup.send("An error occurred while fetching the record. Please try again later.", ephemeral=True)
+            
     @bot.slash_command(name="registerteam", description="Register a new team in the league")
     async def register_team(interaction: discord.Interaction, team_name: str):
         cube_overseer_role_name = "Cube Overseer"
