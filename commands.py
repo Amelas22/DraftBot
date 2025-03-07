@@ -138,6 +138,297 @@ async def league_commands(bot):
         except Exception as e:
             logger.error(f"Error in record command: {e}")
             await ctx.followup.send("An error occurred while fetching the record. Please try again later.", ephemeral=True)
+
+    @bot.slash_command(name="balance", description="Check your betting balance")
+    async def check_balance(ctx):
+        """Check your betting balance and see when you can claim daily coins."""
+        await ctx.defer(ephemeral=True)
+        
+        from betting_utilities import get_or_create_user_wallet
+        
+        try:
+            user_id = str(ctx.author.id)
+            display_name = ctx.author.display_name
+            
+            wallet_info = await get_or_create_user_wallet(user_id, display_name)
+            
+            last_claim = wallet_info.get("last_daily_claim")
+            next_claim_time = None
+            
+            if last_claim:
+                next_claim_time = last_claim + timedelta(days=1)
+                
+            embed = discord.Embed(
+                title="Your Betting Balance",
+                color=discord.Color.green(),
+                description=f"You have **{wallet_info['balance']:,}** coins."
+            )
+            
+            if next_claim_time and next_claim_time > datetime.now():
+                time_left = next_claim_time - datetime.now()
+                hours, remainder = divmod(time_left.seconds, 3600)
+                minutes, _ = divmod(remainder, 60)
+                
+                embed.add_field(
+                    name="Daily Claim",
+                    value=f"Next daily claim available in {hours}h {minutes}m",
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="Daily Claim",
+                    value="You can claim your daily coins now with `/claim`!",
+                    inline=False
+                )
+                
+            embed.add_field(
+                name="How to Bet",
+                value=(
+                    "Look for betting opportunities when drafts start!\n"
+                    "Use `/bets` to see your active bets\n"
+                    "Use `/leaderboard` to see the top bettors"
+                ),
+                inline=False
+            )
+            
+            await ctx.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            logger.error(f"Error checking balance: {e}")
+            await ctx.followup.send("An error occurred while checking your balance. Please try again later.", ephemeral=True)
+
+    @bot.slash_command(name="claim", description="Claim your daily betting coins")
+    async def claim_daily(ctx):
+        """Claim your daily betting coins."""
+        await ctx.defer(ephemeral=True)
+        
+        from betting_utilities import claim_daily_coins
+        
+        try:
+            user_id = str(ctx.author.id)
+            display_name = ctx.author.display_name
+            
+            result = await claim_daily_coins(user_id, display_name)
+            
+            if result["success"]:
+                if result["is_first_claim"]:
+                    embed = discord.Embed(
+                        title="Welcome to Draft Betting!",
+                        color=discord.Color.gold(),
+                        description=f"You've received your first **{result['claimed']:,}** coins!"
+                    )
+                    
+                    embed.add_field(
+                        name="How to Bet",
+                        value=(
+                            "Look for betting opportunities when drafts start!\n"
+                            "Use `/bets` to see your active bets\n"
+                            "Use `/leaderboard` to see the top bettors"
+                        ),
+                        inline=False
+                    )
+                else:
+                    embed = discord.Embed(
+                        title="Daily Coins Claimed!",
+                        color=discord.Color.green(),
+                        description=f"You've claimed **{result['claimed']:,}** coins!"
+                    )
+                    
+                    embed.add_field(
+                        name="Current Balance",
+                        value=f"You now have **{result['balance']:,}** coins.",
+                        inline=False
+                    )
+                
+                await ctx.followup.send(embed=embed, ephemeral=True)
+            else:
+                await ctx.followup.send(result["error"], ephemeral=True)
+        except Exception as e:
+            logger.error(f"Error claiming daily coins: {e}")
+            await ctx.followup.send("An error occurred while claiming your daily coins. Please try again later.", ephemeral=True)
+
+    @bot.slash_command(name="bets", description="View your active bets")
+    async def view_bets(ctx):
+        """View your active bets."""
+        await ctx.defer(ephemeral=True)
+        
+        from session import UserBet, BettingMarket, DraftSession
+        
+        try:
+            user_id = str(ctx.author.id)
+            
+            async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    # Get user's active bets
+                    bets_query = select(UserBet).where(
+                        UserBet.user_id == user_id,
+                        UserBet.status == 'active'
+                    )
+                    bets_result = await session.execute(bets_query)
+                    bets = bets_result.scalars().all()
+                    
+                    if not bets:
+                        # Check if user has any past bets
+                        past_bets_query = select(UserBet).where(
+                            UserBet.user_id == user_id,
+                            UserBet.status.in_(['won', 'lost'])
+                        ).order_by(UserBet.placed_at.desc()).limit(5)
+                        past_bets_result = await session.execute(past_bets_query)
+                        past_bets = past_bets_result.scalars().all()
+                        
+                        if not past_bets:
+                            await ctx.followup.send("You don't have any active or past bets. Look for betting opportunities when drafts start!", ephemeral=True)
+                        else:
+                            embed = discord.Embed(
+                                title="Your Betting History",
+                                color=discord.Color.blue(),
+                                description="You don't have any active bets. Here are your most recent bets:"
+                            )
+                            
+                            for bet in past_bets:
+                                # Get market information
+                                market_query = select(BettingMarket).where(BettingMarket.id == bet.market_id)
+                                market_result = await session.execute(market_query)
+                                market = market_result.scalar_one_or_none()
+                                
+                                if not market:
+                                    continue
+                                
+                                # Format outcome name
+                                outcome_name = {
+                                    'team_a': 'Team A to Win',
+                                    'team_b': 'Team B to Win',
+                                    'draw': 'Match Draw',
+                                    'trophy': 'Player Gets Trophy (3-0)',
+                                    'no_trophy': 'Player Doesn\'t Get Trophy'
+                                }.get(bet.selected_outcome, bet.selected_outcome)
+                                
+                                # Format bet information
+                                bet_info = f"Market ID: {bet.market_id}\n"
+                                bet_info += f"Bet: **{bet.bet_amount:,}** coins on **{outcome_name}**\n"
+                                bet_info += f"Odds: **{bet.odds_at_bet_time:.2f}x**\n"
+                                bet_info += f"Result: **{'Won' if bet.status == 'won' else 'Lost'}**\n"
+                                
+                                if bet.status == 'won':
+                                    bet_info += f"Payout: **{bet.potential_payout:,}** coins\n"
+                                
+                                embed.add_field(
+                                    name=f"Bet ID: {bet.id}",
+                                    value=bet_info,
+                                    inline=False
+                                )
+                            
+                            await ctx.followup.send(embed=embed, ephemeral=True)
+                        
+                        return
+                    
+                    # Get market information for each bet
+                    market_ids = [bet.market_id for bet in bets]
+                    markets_query = select(BettingMarket).where(BettingMarket.id.in_(market_ids))
+                    markets_result = await session.execute(markets_query)
+                    markets = {market.id: market for market in markets_result.scalars().all()}
+                    
+                    # Get draft information for each market
+                    draft_ids = [market.draft_session_id for market in markets.values()]
+                    drafts_query = select(DraftSession).where(DraftSession.session_id.in_(draft_ids))
+                    drafts_result = await session.execute(drafts_query)
+                    drafts = {draft.session_id: draft for draft in drafts_result.scalars().all()}
+                    
+                    # Create embed
+                    embed = discord.Embed(
+                        title="Your Active Bets",
+                        color=discord.Color.gold(),
+                        description=f"You have {len(bets)} active bets."
+                    )
+                    
+                    # Add each bet to the embed
+                    for bet in bets:
+                        market = markets.get(bet.market_id)
+                        if not market:
+                            continue
+                        
+                        draft = drafts.get(market.draft_session_id)
+                        draft_id = draft.draft_id if draft else "Unknown"
+                        
+                        # Format outcome name
+                        outcome_name = {
+                            'team_a': 'Team A to Win',
+                            'team_b': 'Team B to Win',
+                            'draw': 'Match Draw',
+                            'trophy': 'Player Gets Trophy (3-0)',
+                            'no_trophy': 'Player Doesn\'t Get Trophy'
+                        }.get(bet.selected_outcome, bet.selected_outcome)
+                        
+                        # Add extra context based on market type
+                        if market.market_type == 'player_trophy' and market.player_name:
+                            outcome_name = outcome_name.replace('Player', market.player_name)
+                        
+                        # Calculate potential profit (not including the stake)
+                        potential_profit = bet.potential_payout - bet.bet_amount
+                        
+                        # Format bet information using American odds
+                        from american_odds_conversion import convert_to_american_odds
+                        american_odds = convert_to_american_odds(bet.odds_at_bet_time)
+                        
+                        bet_info = f"Draft ID: {draft_id}\n"
+                        bet_info += f"Bet: **{bet.bet_amount:,}** coins on **{outcome_name}**\n"
+                        bet_info += f"Odds: **{american_odds}** ({bet.odds_at_bet_time:.2f}x)\n"
+                        bet_info += f"Potential Profit: **{potential_profit:,}** coins\n"
+                        
+                        embed.add_field(
+                            name=f"Bet ID: {bet.id}",
+                            value=bet_info,
+                            inline=False
+                        )
+                    
+                    await ctx.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            logger.error(f"Error viewing bets: {e}")
+            await ctx.followup.send("An error occurred while fetching your bets. Please try again later.", ephemeral=True)
+
+    @bot.slash_command(name="leaderboard", description="View the betting leaderboard")
+    async def betting_leaderboard(ctx):
+        """View the top bettors by balance."""
+        await ctx.defer()
+        
+        from session import UserWallet
+        
+        try:
+            async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    # Get top 20 users by balance
+                    query = select(UserWallet).order_by(UserWallet.balance.desc()).limit(20)
+                    result = await session.execute(query)
+                    top_wallets = result.scalars().all()
+                    
+                    if not top_wallets:
+                        await ctx.followup.send("No betting users found yet. Be the first to claim coins with `/claim`!", ephemeral=True)
+                        return
+                    
+                    embed = discord.Embed(
+                        title="💰 Betting Leaderboard",
+                        color=discord.Color.gold(),
+                        description="Top 20 bettors by balance"
+                    )
+                    
+                    # Add each user to the leaderboard
+                    leaderboard_text = ""
+                    for i, wallet in enumerate(top_wallets):
+                        rank_emoji = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"{i+1}."
+                        leaderboard_text += f"{rank_emoji} **{wallet.display_name}**: {wallet.balance:,} coins\n"
+                    
+                    embed.add_field(
+                        name="Top Bettors",
+                        value=leaderboard_text,
+                        inline=False
+                    )
+                    
+                    # Footer tips
+                    embed.set_footer(text="Claim daily coins with /claim | Place bets during drafts | Check balance with /balance")
+                    
+                    await ctx.followup.send(embed=embed)
+        except Exception as e:
+            logger.error(f"Error showing leaderboard: {e}")
+            await ctx.followup.send("An error occurred while fetching the leaderboard. Please try again later.")
             
     @bot.slash_command(name="registerteam", description="Register a new team in the league")
     async def register_team(interaction: discord.Interaction, team_name: str):

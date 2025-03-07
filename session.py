@@ -65,6 +65,10 @@ class DraftSession(Base):
     draft_data = Column(JSON)
     data_received = Column(Boolean, default=False)
     cube = Column(String(128))
+    betting_market_ids = Column(JSON)  
+    betting_team_message_id = Column(String(64))  
+    betting_trophy_message_id = Column(String(64))  
+    betting_close_time = Column(DateTime)  
     
     def __repr__(self):
         return f"<DraftSession(session_id={self.session_id}, guild_id={self.guild_id})>"
@@ -193,6 +197,65 @@ class TeamFinder(Base):
     channel_id = Column(String(64))
     guild_id = Column(String(64))
 
+class UserWallet(Base):
+    __tablename__ = 'user_wallets'
+    
+    user_id = Column(String(64), primary_key=True)
+    display_name = Column(String(128))
+    balance = Column(Integer, default=1000)  # Start with 1000 coins
+    last_daily_claim = Column(DateTime, nullable=True)
+    
+    def __repr__(self):
+        return f"<UserWallet(user_id={self.user_id}, display_name={self.display_name}, balance={self.balance})>"
+
+class BettingMarket(Base):
+    __tablename__ = 'betting_markets'
+    
+    id = Column(Integer, primary_key=True)
+    draft_session_id = Column(String(64), ForeignKey('draft_sessions.session_id'))
+    market_type = Column(String(32))  # 'team_win', 'player_trophy'
+    status = Column(String(32), default='open')  # 'open', 'closed', 'resolved'
+    created_at = Column(DateTime, default=datetime.now)
+    
+    # For team win markets
+    team_a_odds = Column(Float)
+    team_b_odds = Column(Float)
+    draw_odds = Column(Float, nullable=True)  # Only for 8-player drafts
+    
+    # For player trophy markets
+    player_id = Column(String(64), nullable=True)
+    player_name = Column(String(128), nullable=True)
+    trophy_odds = Column(Float, nullable=True)
+    
+    # Winner info
+    winning_outcome = Column(String(32), nullable=True)  # 'team_a', 'team_b', 'draw', 'trophy', 'no_trophy'
+    
+    # Relationships
+    bets = relationship("UserBet", back_populates="market")
+    
+    def __repr__(self):
+        return f"<BettingMarket(id={self.id}, draft_session_id={self.draft_session_id}, market_type={self.market_type}, status={self.status})>"
+
+class UserBet(Base):
+    __tablename__ = 'user_bets'
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(String(64))
+    display_name = Column(String(128))
+    market_id = Column(Integer, ForeignKey('betting_markets.id'))
+    bet_amount = Column(Integer)
+    selected_outcome = Column(String(32))  # 'team_a', 'team_b', 'draw', 'trophy', 'no_trophy'
+    odds_at_bet_time = Column(Float)
+    placed_at = Column(DateTime, default=datetime.now)
+    status = Column(String(32), default='active')  # 'active', 'won', 'lost'
+    potential_payout = Column(Integer)
+    
+    # Relationships
+    market = relationship("BettingMarket", back_populates="bets")
+    
+    def __repr__(self):
+        return f"<UserBet(id={self.id}, user_id={self.user_id}, market_id={self.market_id}, bet_amount={self.bet_amount}, selected_outcome={self.selected_outcome})>"
+    
 async def get_draft_session(session_id: str):
     async with AsyncSessionLocal() as session:
         async with session.begin():

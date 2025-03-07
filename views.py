@@ -6,9 +6,9 @@ from datetime import datetime, timedelta
 from discord import SelectOption
 from discord.ui import Button, View, Select, select
 from sqlalchemy import update, select
-from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
+from session import AsyncSessionLocal, get_draft_session, DraftSession, MatchResult, PlayerStats  # Add PlayerStats here
 from sqlalchemy.orm import selectinload
-from utils import calculate_pairings, create_winston_draft, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, update_draft_summary_message, check_and_post_victory_or_draw, update_player_stats_and_elo, check_weekly_limits, update_player_stats_for_draft
+from utils import calculate_pairings, create_winston_draft, generate_draft_summary_embed, post_pairings, generate_seating_order, fetch_match_details, update_draft_summary_message, check_and_post_victory_or_draw, update_player_stats_and_elo, check_weekly_limits, update_player_stats_for_draft
 from loguru import logger
 
 PROCESSING_ROOMS_PAIRINGS = {}
@@ -311,11 +311,14 @@ class PersistentView(discord.ui.View):
         except Exception as e:
             print(f"Failed to delete ready check message: {e}")
 
-
     async def randomize_teams_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         bot = interaction.client
         session_id = self.draft_session_id
 
+        # Initial response to avoid interaction timeout
+        await interaction.response.defer()  # Remove thinking=True
+
+        # STEP 1: Get session and validate
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
                 stmt = select(DraftSession).where(DraftSession.session_id == session_id)
@@ -323,72 +326,172 @@ class PersistentView(discord.ui.View):
                 session = result.scalars().first()
 
                 if not session:
-                    await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
+                    await interaction.followup.send("The draft session could not be found.", ephemeral=True)
                     return
                 if len(session.sign_ups) % 2 != 0:
-                    await interaction.response.send_message("There must be an even number of players to fire.")
+                    await interaction.followup.send("There must be an even number of players to fire.")
                     return
 
+        # STEP 2: Update session basics and create teams (first database operation)
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                # Re-fetch session to avoid staleness
+                stmt = select(DraftSession).where(DraftSession.session_id == session_id)
+                result = await db_session.execute(stmt)
+                session = result.scalars().first()
+                
                 # Update the session object
                 session.teams_start_time = datetime.now()
+                
+                # Set different deletion times based on session type
                 if session.session_type == 'premade':
                     # 7 days for premade drafts (league matches)
                     session.deletion_time = datetime.now() + timedelta(days=7)
                 else:
                     # 4 hours for other draft types
                     session.deletion_time = datetime.now() + timedelta(hours=4)
-                session.session_stage = 'teams'
-                # Check session type and prepare teams if necessary
-                if session.session_type == 'random' or session.session_type == 'test':
-                    from utils import split_into_teams
-                    await split_into_teams(bot, session.session_id)
-                    session = await get_draft_session(self.draft_session_id)
-
-                    # Generate names for display using the session's sign_ups dictionary
                     
-                if session.session_type != "swiss":
-                    team_a_display_names = [session.sign_ups[user_id] for user_id in session.team_a]
-                    team_b_display_names = [session.sign_ups[user_id] for user_id in session.team_b]
-                    seating_order = await generate_seating_order(bot, session)
-                else:
-                    sign_ups_list = list(session.sign_ups.keys())
-                    random.shuffle(sign_ups_list)  # This shuffles the list in-place
+                session.session_stage = 'teams'
 
-                    # Now sign_ups_list is your seating order, with sign_ups_list[0] being the first seat, etc.
-                    seating_order = [session.sign_ups[user_id] for user_id in sign_ups_list]
+                # Commit just the basic updates - important to complete this transaction
+                await db_session.commit()
+        
+        # STEP 3: Split teams (if needed) - separate database operation
+        if session.session_type == 'random' or session.session_type == 'test':
+            from utils import split_into_teams
+            await split_into_teams(bot, session.session_id)
+        
+        # Introducing a small delay to ensure team splitting is complete
+        await asyncio.sleep(0.5)
+        
+        # STEP 4: Re-fetch updated session with teams
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                stmt = select(DraftSession).where(DraftSession.session_id == session_id)
+                result = await db_session.execute(stmt)
+                session = result.scalars().first()
+        
+        # STEP 5: Prepare display information
+        team_a_display_names = []
+        team_b_display_names = []
+        
+        if session.session_type != "swiss":
+            # Get TrueSkill ratings for Team A
+            for user_id in session.team_a:
+                try:
+                    # Make sure player_name is defined first
+                    player_name = session.sign_ups.get(user_id, f"Player {user_id}")
+                    
+                    # Get player stats in a separate connection
+                    async with AsyncSessionLocal() as db_session:
+                        async with db_session.begin():
+                            player_query = select(PlayerStats).where(PlayerStats.player_id == user_id)
+                            player_result = await db_session.execute(player_query)
+                            player_stats = player_result.scalar_one_or_none()
+                            
+                            if player_stats:
+                                # Calculate effective rating
+                                effective_rating = player_stats.true_skill_mu - (2 * player_stats.true_skill_sigma)
+                                team_a_display_names.append(f"{player_name} [Rating: {effective_rating:.1f}]")
+                            else:
+                                team_a_display_names.append(f"{player_name} [Rating: New Player]")
+                except Exception as e:
+                    logger.error(f"Error getting TrueSkill for player {user_id}: {e}")
+                    player_name = session.sign_ups.get(user_id, f"Player {user_id}")
+                    team_a_display_names.append(f"{player_name}")
+            
+            # Get TrueSkill ratings for Team B
+            for user_id in session.team_b:
+                try:
+                    # Make sure player_name is defined first
+                    player_name = session.sign_ups.get(user_id, f"Player {user_id}")
+                    
+                    # Get player stats in a separate connection
+                    async with AsyncSessionLocal() as db_session:
+                        async with db_session.begin():
+                            player_query = select(PlayerStats).where(PlayerStats.player_id == user_id)
+                            player_result = await db_session.execute(player_query)
+                            player_stats = player_result.scalar_one_or_none()
+                            
+                            if player_stats:
+                                # Calculate effective rating
+                                effective_rating = player_stats.true_skill_mu - (2 * player_stats.true_skill_sigma)
+                                team_b_display_names.append(f"{player_name} [Rating: {effective_rating:.1f}]")
+                            else:
+                                team_b_display_names.append(f"{player_name} [Rating: New Player]")
+                except Exception as e:
+                    logger.error(f"Error getting TrueSkill for player {user_id}: {e}")
+                    player_name = session.sign_ups.get(user_id, f"Player {user_id}")
+                    team_b_display_names.append(f"{player_name}")
+        
+            # STEP 6: Prepare and send embed (no database operation)
+            seating_order = await generate_seating_order(bot, session)
+        else:
+            # Handle Swiss draft
+            sign_ups_list = list(session.sign_ups.keys())
+            random.shuffle(sign_ups_list)
+            seating_order = [session.sign_ups[user_id] for user_id in sign_ups_list]
+            
+            # Update sign_ups in a separate transaction
+            async with AsyncSessionLocal() as db_session:
+                async with db_session.begin():
                     new_sign_ups = {user_id: session.sign_ups[user_id] for user_id in sign_ups_list}
                     await db_session.execute(update(DraftSession)
                                         .where(DraftSession.session_id == session.session_id)
                                         .values(sign_ups=new_sign_ups))
+                    await db_session.commit()
 
+        # STEP 7: Create the embed message for displaying teams and seating
+        if session.session_type != "swiss":
+            # For team drafts
+            team_title = "Team A" if session.session_type == "random" or session.session_type == "test" else session.team_a_name
+            team_b_title = "Team B" if session.session_type == "random" or session.session_type == "test" else session.team_b_name
+            
+            embed = discord.Embed(
+                title=f"Draft-{session.draft_id} is Ready!",
+                description=f"**Draftmancer Session**: **[Join Here]({session.draft_link})** \n" +
+                            "Host of Draftmancer must manually adjust seating as per below. **TURN OFF RANDOM SEATING SETTING IN DRAFMANCER**" +
+                            "\n\n**AFTER THE DRAFT**, select Create Chat Rooms and Post Pairings" +
+                            "\nPost Pairings will post in the created draft-chat room",
+                color=discord.Color.blue()
+            )
+            
+            # Add team fields
+            embed.add_field(name=team_title, value="\n".join(team_a_display_names), inline=True)
+            embed.add_field(name=team_b_title, value="\n".join(team_b_display_names), inline=True)
+        else:
+            # For Swiss drafts
+            embed = discord.Embed(
+                title=f"Draft-{session.draft_id} is Ready!",
+                description=f"**Draftmancer Session**: **[Join Here]({session.draft_link})** \n" +
+                            "Host of Draftmancer must manually adjust seating as per below. **TURN OFF RANDOM SEATING SETTING IN DRAFMANCER**" +
+                            "\n\n**AFTER THE DRAFT**, select Create Chat Rooms and Post Pairings" +
+                            "\nPost Pairings will post in the created draft-chat room",
+                color=discord.Color.dark_gold()
+            )
+        
+        # Add seating order
+        embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
 
-                # Create the embed message for displaying the teams and seating order
-                embed = discord.Embed(
-                    title=f"Draft-{session.draft_id} is Ready!",
-                    description=f"**Draftmancer Session**: **[Join Here]({session.draft_link})** \n" +
-                                "Host of Draftmancer must manually adjust seating as per below. **TURN OFF RANDOM SEATING SETTING IN DRAFMANCER**" +
-                                "\n\n**AFTER THE DRAFT**, select Create Chat Rooms and Post Pairings" +
-                                "\nPost Pairings will post in the created draft-chat room",
-                    color=discord.Color.dark_gold() if session.session_type == "swiss" else discord.Color.blue()
-                )
-                if session.session_type != 'swiss':
-                    embed.add_field(name="Team A" if session.session_type == "random" else f"{session.team_a_name}", value="\n".join(team_a_display_names), inline=True)
-                    embed.add_field(name="Team B" if session.session_type == "random" else f"{session.team_b_name}", value="\n".join(team_b_display_names), inline=True)
-                embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+        # Update view buttons
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                # Enable "Create Rooms" and "Cancel Draft" buttons
+                if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}" or item.custom_id == f"cancel_draft_{self.draft_session_id}":
+                    item.disabled = False
+                else:
+                    # Disable all other buttons
+                    item.disabled = True
 
-                # Iterate over the view's children (buttons) to update their disabled status
-                for item in self.children:
-                    if isinstance(item, discord.ui.Button):
-                        # Enable "Create Rooms" and "Cancel Draft" buttons
-                        if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}" or item.custom_id == f"cancel_draft_{self.draft_session_id}":
-                            item.disabled = False
-                        else:
-                            # Disable all other buttons
-                            item.disabled = True
-                await db_session.commit()
-
-        # Respond with the embed and updated view
-        await interaction.response.edit_message(embed=embed, view=self)
+         # STEP 8: Edit the original message with the new embed and view
+        await interaction.edit_original_response(embed=embed, view=self)
+        
+        # STEP 9: After everything else is done, create betting markets in background
+        if session.session_type != "swiss":
+            # Create a background task for betting operations
+            asyncio.create_task(setup_betting_for_draft(bot, session_id, interaction.channel_id))
+        
+        # Final check for tracked drafts
         if session.tracked_draft and session.premade_match_id is not None:
             await check_weekly_limits(interaction, session.premade_match_id, session.session_type, session.session_id)
 
@@ -787,9 +890,6 @@ class ReadyCheckView(discord.ui.View):
         # Update the message
         await interaction.response.edit_message(embed=embed, view=self)
         
-
-
-
 class UserRemovalSelect(Select):
     def __init__(self, options: list[SelectOption], session_id: str, *args, **kwargs):
         super().__init__(*args, **kwargs, placeholder="Choose a user to remove...", min_values=1, max_values=1, options=options)
@@ -1048,7 +1148,6 @@ class CallbackButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         await self.custom_callback(interaction, self)
 
-
 async def update_draft_message(bot, session_id):
     logger.info(f"Starting update for draft message with session ID: {session_id}")
 
@@ -1085,3 +1184,75 @@ async def update_draft_message(bot, session_id):
 
     except Exception as e:
         logger.exception(f"Failed to update message for session {session_id}. Error: {e}")
+
+async def setup_betting_for_draft(bot, draft_session_id, channel_id):
+    """
+    Sets up betting for a draft in sequential steps with proper error handling.
+    This runs as a background task after the main team creation is done.
+    """
+    try:
+        # Add a delay to ensure other database operations have completed
+        await asyncio.sleep(2)
+        
+        # STEP 1: Calculate team win probabilities
+        try:
+            # Fetch the session
+            async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    query = select(DraftSession).where(DraftSession.session_id == draft_session_id)
+                    result = await session.execute(query)
+                    draft_session = result.scalar_one_or_none()
+                    
+                    if not draft_session or not draft_session.team_a or not draft_session.team_b:
+                        logger.error(f"Cannot create betting markets: draft {draft_session_id} not found or teams not set")
+                        return
+            
+            from betting_utilities import calculate_team_win_probability, convert_probability_to_odds
+            from american_odds_conversion import convert_to_american_odds, convert_probability_to_american_odds
+            
+            team_a_prob, team_b_prob, draw_prob = await calculate_team_win_probability(
+                draft_session.team_a, draft_session.team_b
+            )
+            
+            # Convert to odds
+            team_a_odds = convert_probability_to_odds(team_a_prob)
+            team_b_odds = convert_probability_to_odds(team_b_prob)
+            draw_odds = convert_probability_to_odds(draw_prob) if draw_prob is not None else None
+        except Exception as e:
+            logger.error(f"Error calculating odds for draft {draft_session_id}: {e}")
+            return
+        
+        # STEP 2: Create betting markets
+        try:
+            # Create markets in a separate transaction
+            from betting_utilities import create_betting_markets_for_draft
+            market_ids = await create_betting_markets_for_draft(draft_session_id)
+            
+            if not market_ids:
+                logger.error(f"Failed to create betting markets for draft {draft_session_id}")
+                return
+            
+            # Store market IDs
+            async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    await session.execute(
+                        update(DraftSession)
+                        .where(DraftSession.session_id == draft_session_id)
+                        .values(betting_market_ids=market_ids)
+                    )
+                    await session.commit()
+        except Exception as e:
+            logger.error(f"Error creating betting markets: {e}")
+            return
+        
+        # STEP 3: Add a delay before starting the betting UI
+        await asyncio.sleep(1)
+        
+        # STEP 4: Start the betting period
+        try:
+            from betting_views import manage_betting_period
+            await manage_betting_period(bot, draft_session_id, channel_id)
+        except Exception as e:
+            logger.error(f"Error managing betting period: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error in setup_betting_for_draft: {e}")

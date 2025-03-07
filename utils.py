@@ -8,6 +8,7 @@ from session import AsyncSessionLocal, get_draft_session, Challenge, PlayerLimit
 from sqlalchemy.orm import selectinload, joinedload
 from trueskill import Rating, rate_1vs1
 from discord.ui import View
+from loguru import logger
 from league import ChallengeView
 
 flags = {}
@@ -526,8 +527,26 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 gap = abs(team_a_wins - team_b_wins)
 
                 embed = await generate_draft_summary_embed(bot, draft_session_id)
-                three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
-                embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
+                
+                # Get trophy winners (players who went 3-0)
+                trophy_winners, trophy_winners_display = await calculate_trophy_winners(session, draft_session_id, guild)
+                
+                if trophy_winners_display:
+                    embed.add_field(name="🏆 Trophy Winners", value=trophy_winners_display, inline=False)
+                
+                # Resolve betting markets
+                try:
+                    from betting_utilities import resolve_betting_markets
+                    await resolve_betting_markets(draft_session_id, team_a_wins, team_b_wins, trophy_winners=trophy_winners)
+                    
+                    # Add betting results message
+                    embed.add_field(
+                        name="💰 Betting Results",
+                        value="All bets have been settled! Check your balance with `/balance`",
+                        inline=False
+                    )
+                except Exception as e:
+                    logger.error(f"Error resolving betting markets: {e}")
                 
                 # Handle the draft-chat channel message
                 draft_chat_channel = guild.get_channel(int(draft_session.draft_chat_channel))
@@ -541,11 +560,96 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                     await post_or_update_victory_message(session, results_channel, embed, draft_session, 'victory_message_id_results_channel')
                 else:
                     print(f"Results channel '{results_channel_name}' not found.")
+                
+                # Store the gap and winners in the database
                 await session.execute(update(DraftSession)
-                                         .where(DraftSession.session_id == draft_session_id)
-                                         .values(winning_gap=gap))
+                                    .where(DraftSession.session_id == draft_session_id)
+                                    .values(
+                                        winning_gap=gap,
+                                        trophy_winners=trophy_winners,
+                                        trophy_drafters=trophy_winners_display.split(", ") if trophy_winners_display else []
+                                    ))
                 
                 await session.commit()
+
+async def calculate_trophy_winners(session, draft_session_id, guild):
+    """Calculate which players went 3-0 (trophy winners)."""
+    trophy_winners = []
+    trophy_winners_display = ""
+    
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            # Get all match results for this draft
+            stmt = select(MatchResult).where(MatchResult.session_id == draft_session_id)
+            results = await session.execute(stmt)
+            match_results = results.scalars().all()
+            
+            # Get the draft session
+            draft_query = select(DraftSession).where(DraftSession.session_id == draft_session_id)
+            draft_result = await session.execute(draft_query)
+            draft_session = draft_result.scalar_one_or_none()
+            
+            if not draft_session or not match_results:
+                return [], ""
+            
+            # Count wins and matches played for each player
+            win_counts = {}
+            match_counts = {}
+            
+            # Initialize match counts for all players
+            all_players = set()
+            for match in match_results:
+                if match.player1_id:
+                    all_players.add(match.player1_id)
+                if match.player2_id:
+                    all_players.add(match.player2_id)
+            
+            for player_id in all_players:
+                match_counts[player_id] = 0
+                win_counts[player_id] = 0
+            
+            # Count matches and wins
+            for match in match_results:
+                # Count matches played
+                if match.player1_id:
+                    match_counts[match.player1_id] = match_counts.get(match.player1_id, 0) + 1
+                if match.player2_id:
+                    match_counts[match.player2_id] = match_counts.get(match.player2_id, 0) + 1
+                
+                # Count wins
+                if match.winner_id:
+                    win_counts[match.winner_id] = win_counts.get(match.winner_id, 0) + 1
+            
+            # Find players who went 3-0
+            for player_id, wins in win_counts.items():
+                matches_played = match_counts.get(player_id, 0)
+                if wins == 3 and matches_played == 3:
+                    trophy_winners.append(player_id)
+            
+            # Convert trophy winners to display names
+            if trophy_winners:
+                trophy_names = []
+                for player_id in trophy_winners:
+                    player_name = None
+                    
+                    # Try to get from Discord
+                    member = guild.get_member(int(player_id))
+                    if member:
+                        player_name = member.display_name
+                    
+                    # If not found in Discord, try draft sign_ups
+                    if not player_name and player_id in draft_session.sign_ups:
+                        player_name = draft_session.sign_ups[player_id]
+                    
+                    # Fallback
+                    if not player_name:
+                        player_name = f"Player {player_id}"
+                    
+                    trophy_names.append(player_name)
+                
+                trophy_winners_display = ", ".join(trophy_names)
+    
+    return trophy_winners, trophy_winners_display
 
 async def remove_lock_after_delay(draft_session_id, delay):
     await asyncio.sleep(delay)
