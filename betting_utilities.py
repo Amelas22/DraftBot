@@ -73,7 +73,7 @@ def convert_probability_to_odds(probability: float) -> float:
     raw_odds = 1 / probability
     
     # Clamp to min/max range and apply a small margin
-    margin = 1.1  
+    margin = 1.05  
     adjusted_odds = raw_odds * margin
     
     # Round to 2 decimal places and clamp

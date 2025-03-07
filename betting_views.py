@@ -286,10 +286,10 @@ async def manage_betting_period(bot, draft_session_id, channel_id):
         )
         trophy_embed.add_field(
             name="Trophy Bets",
-            value="Click a player's button below to bet on them getting a trophy (going 3-0).",
+            value="Click a player's button below to bet on them getting a trophy. All bets are refunded if no result is determined within 8 hours.",
             inline=False
         )
-        trophy_embed.set_footer(text=f"Betting closes <t:{close_timestamp}:t>")
+        trophy_embed.set_footer(text=f"Claim daily coins with /claim | Check balance with /balance")
         
         # Create views
         team_view = TeamBettingView(markets, team_a_name, team_b_name, has_draw)
