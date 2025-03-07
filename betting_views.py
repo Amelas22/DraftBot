@@ -4,7 +4,7 @@ import asyncio
 from sqlalchemy import select
 from datetime import datetime, timedelta
 from loguru import logger
-from session import AsyncSessionLocal, DraftSession
+from session import AsyncSessionLocal, DraftSession, PlayerStats
 from typing import Dict, List
 
 class TeamBetButton(Button):
@@ -164,6 +164,31 @@ class TrophyBettingView(View):
                     american_odds, market.trophy_odds
                 ))
 
+async def get_player_trueskill_ratings(player_ids):
+    """Get TrueSkill ratings for a list of players."""
+    player_ratings = {}
+    
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            for player_id in player_ids:
+                query = select(PlayerStats).where(PlayerStats.player_id == player_id)
+                result = await session.execute(query)
+                player_stats = result.scalar_one_or_none()
+                
+                if player_stats:
+                    player_ratings[player_id] = {
+                        "mu": player_stats.true_skill_mu,
+                        "sigma": player_stats.true_skill_sigma
+                    }
+                else:
+                    # Default values for new players
+                    player_ratings[player_id] = {
+                        "mu": 25.0,
+                        "sigma": 8.333
+                    }
+                    
+    return player_ratings
+
 async def manage_betting_period(bot, draft_session_id, channel_id):
     """Create and manage the betting period for a draft."""
     from session import BettingMarket
@@ -198,10 +223,30 @@ async def manage_betting_period(bot, draft_session_id, channel_id):
             logger.error(f"Channel {channel_id} not found")
             return
         
-        # Create player ID to name mapping
+        # Get TrueSkill ratings for all players
+        all_player_ids = draft_session.team_a + draft_session.team_b
+        player_ratings = await get_player_trueskill_ratings(all_player_ids)
+        
+        # Create player ID to name mapping with TrueSkill ratings
         player_map = {}
-        for player_id in draft_session.team_a + draft_session.team_b:
-            player_map[player_id] = draft_session.sign_ups.get(player_id, f"Player {player_id}")
+        team_a_display = []
+        team_b_display = []
+        
+        for player_id in draft_session.team_a:
+            display_name = draft_session.sign_ups.get(player_id, f"Player {player_id}")
+            player_map[player_id] = display_name
+            
+            # Add TrueSkill rating to the display
+            mu = player_ratings[player_id]["mu"]
+            team_a_display.append(f"{display_name} [Rating: {mu:.1f}]")
+            
+        for player_id in draft_session.team_b:
+            display_name = draft_session.sign_ups.get(player_id, f"Player {player_id}")
+            player_map[player_id] = display_name
+            
+            # Add TrueSkill rating to the display
+            mu = player_ratings[player_id]["mu"]
+            team_b_display.append(f"{display_name} [Rating: {mu:.1f}]")
         
         # Create team names
         team_a_name = draft_session.team_a_name or "Team A"
@@ -210,17 +255,29 @@ async def manage_betting_period(bot, draft_session_id, channel_id):
         # Create betting embeds
         has_draw = len(draft_session.team_a) == 4 and len(draft_session.team_b) == 4
         
+        # Calculate betting close time (15 minutes from now)
+        close_time = datetime.now() + timedelta(minutes=15)
+        close_timestamp = int(close_time.timestamp())
+        
         team_embed = discord.Embed(
             title="📢 PLACE YOUR BETS - Team Winner",
-            description=f"Betting closes in 15 minutes. Use the buttons below to bet on the match winner.",
+            description=f"Betting closes <t:{close_timestamp}:R>. Use the buttons below to bet on the match winner.",
             color=discord.Color.gold()
         )
+        
+        # Add team fields with TrueSkill ratings
         team_embed.add_field(
-            name=f"{team_a_name} vs {team_b_name}",
-            value="Click a button below to place your bet!",
-            inline=False
+            name=f"{team_a_name}",
+            value="\n".join(team_a_display),
+            inline=True
         )
-        team_embed.set_footer(text="Betting closes in 15 minutes")
+        team_embed.add_field(
+            name=f"{team_b_name}",
+            value="\n".join(team_b_display),
+            inline=True
+        )
+        
+        team_embed.set_footer(text=f"Claim daily coins with /claim | Check balance with /balance")
         
         trophy_embed = discord.Embed(
             title="🏆 PLACE YOUR BETS - Trophy Winners",
@@ -232,7 +289,7 @@ async def manage_betting_period(bot, draft_session_id, channel_id):
             value="Click a player's button below to bet on them getting a trophy (going 3-0).",
             inline=False
         )
-        trophy_embed.set_footer(text="Betting closes in 15 minutes")
+        trophy_embed.set_footer(text=f"Betting closes <t:{close_timestamp}:t>")
         
         # Create views
         team_view = TeamBettingView(markets, team_a_name, team_b_name, has_draw)
@@ -252,7 +309,7 @@ async def manage_betting_period(bot, draft_session_id, channel_id):
                 if draft_to_update:
                     draft_to_update.betting_team_message_id = str(team_message.id)
                     draft_to_update.betting_trophy_message_id = str(trophy_message.id)
-                    draft_to_update.betting_close_time = datetime.now() + timedelta(minutes=15)
+                    draft_to_update.betting_close_time = close_time
                     await session.commit()
         
         # Wait for 15 minutes
@@ -275,8 +332,53 @@ async def manage_betting_period(bot, draft_session_id, channel_id):
         # Close betting markets
         await close_betting_markets(draft_session_id)
         
+        # Schedule a check to refund bets if no result after 8 hours
+        asyncio.create_task(
+            check_and_refund_bets_if_needed(draft_session_id, bot, channel_id)
+        )
+        
     except Exception as e:
         logger.error(f"Error in manage_betting_period: {e}")
+
+async def check_and_refund_bets_if_needed(draft_session_id, bot, channel_id, hours=8):
+    """Check if the draft has a result after specified hours and refund bets if not."""
+    await asyncio.sleep(hours * 60 * 60)  # Wait for specified hours
+    
+    try:
+        # Check if the draft has a result
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                query = select(DraftSession).where(DraftSession.session_id == draft_session_id)
+                result = await session.execute(query)
+                draft_session = result.scalar_one_or_none()
+                
+                if not draft_session:
+                    logger.error(f"Draft session {draft_session_id} not found for refund check")
+                    return
+                
+                # If there's no victory message, refund all bets
+                if not draft_session.victory_message_id_draft_chat:
+                    # Refund all bets
+                    from betting_utilities import refund_all_bets
+                    refund_result = await refund_all_bets(draft_session_id)
+                    
+                    # Send notification to the channel
+                    channel = bot.get_channel(int(channel_id))
+                    if channel:
+                        embed = discord.Embed(
+                            title="⚠️ Betting Refunds Issued",
+                            description=f"The draft didn't complete within {hours} hours. All bets have been refunded.",
+                            color=discord.Color.orange()
+                        )
+                        embed.add_field(
+                            name="Refund Details",
+                            value=f"Refunded {refund_result['bet_count']} bets totaling {refund_result['total_amount']} coins.",
+                            inline=False
+                        )
+                        await channel.send(embed=embed)
+    
+    except Exception as e:
+        logger.error(f"Error in check_and_refund_bets_if_needed: {e}")
 
 async def create_betting_summary(draft_session_id):
     """Create a summary of all bets placed on a draft."""

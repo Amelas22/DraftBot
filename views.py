@@ -376,54 +376,16 @@ class PersistentView(discord.ui.View):
         team_b_display_names = []
         
         if session.session_type != "swiss":
-            # Get TrueSkill ratings for Team A
+            # Get simple display names for Team A without TrueSkill ratings
             for user_id in session.team_a:
-                try:
-                    # Make sure player_name is defined first
-                    player_name = session.sign_ups.get(user_id, f"Player {user_id}")
-                    
-                    # Get player stats in a separate connection
-                    async with AsyncSessionLocal() as db_session:
-                        async with db_session.begin():
-                            player_query = select(PlayerStats).where(PlayerStats.player_id == user_id)
-                            player_result = await db_session.execute(player_query)
-                            player_stats = player_result.scalar_one_or_none()
-                            
-                            if player_stats:
-                                # Calculate effective rating
-                                effective_rating = player_stats.true_skill_mu - (2 * player_stats.true_skill_sigma)
-                                team_a_display_names.append(f"{player_name} [Rating: {effective_rating:.1f}]")
-                            else:
-                                team_a_display_names.append(f"{player_name} [Rating: New Player]")
-                except Exception as e:
-                    logger.error(f"Error getting TrueSkill for player {user_id}: {e}")
-                    player_name = session.sign_ups.get(user_id, f"Player {user_id}")
-                    team_a_display_names.append(f"{player_name}")
-            
-            # Get TrueSkill ratings for Team B
+                player_name = session.sign_ups.get(user_id, f"Player {user_id}")
+                team_a_display_names.append(player_name)
+                
+            # Get simple display names for Team B without TrueSkill ratings
             for user_id in session.team_b:
-                try:
-                    # Make sure player_name is defined first
-                    player_name = session.sign_ups.get(user_id, f"Player {user_id}")
-                    
-                    # Get player stats in a separate connection
-                    async with AsyncSessionLocal() as db_session:
-                        async with db_session.begin():
-                            player_query = select(PlayerStats).where(PlayerStats.player_id == user_id)
-                            player_result = await db_session.execute(player_query)
-                            player_stats = player_result.scalar_one_or_none()
-                            
-                            if player_stats:
-                                # Calculate effective rating
-                                effective_rating = player_stats.true_skill_mu - (2 * player_stats.true_skill_sigma)
-                                team_b_display_names.append(f"{player_name} [Rating: {effective_rating:.1f}]")
-                            else:
-                                team_b_display_names.append(f"{player_name} [Rating: New Player]")
-                except Exception as e:
-                    logger.error(f"Error getting TrueSkill for player {user_id}: {e}")
-                    player_name = session.sign_ups.get(user_id, f"Player {user_id}")
-                    team_b_display_names.append(f"{player_name}")
-        
+                player_name = session.sign_ups.get(user_id, f"Player {user_id}")
+                team_b_display_names.append(player_name)
+            
             # STEP 6: Prepare and send embed (no database operation)
             seating_order = await generate_seating_order(bot, session)
         else:

@@ -403,3 +403,85 @@ async def claim_daily_coins(user_id: str, display_name: str) -> Dict:
                 "balance": wallet.balance,
                 "is_first_claim": False
             }
+
+async def refund_all_bets(draft_session_id: str) -> dict:
+    """Refund all active bets for a draft session that didn't complete."""
+    from session import BettingMarket, UserBet, UserWallet
+    from sqlalchemy import and_, select
+    
+    try:
+        bet_count = 0
+        total_amount = 0
+        
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                # Get all markets for this draft
+                markets_query = select(BettingMarket).where(
+                    BettingMarket.draft_session_id == draft_session_id
+                )
+                markets_result = await session.execute(markets_query)
+                markets = markets_result.scalars().all()
+                
+                if not markets:
+                    return {"success": True, "bet_count": 0, "total_amount": 0, "message": "No markets found"}
+                
+                market_ids = [market.id for market in markets]
+                
+                # Get all active bets for these markets
+                bets_query = select(UserBet).where(
+                    and_(
+                        UserBet.market_id.in_(market_ids),
+                        UserBet.status == 'active'
+                    )
+                )
+                bets_result = await session.execute(bets_query)
+                bets = bets_result.scalars().all()
+                
+                if not bets:
+                    return {"success": True, "bet_count": 0, "total_amount": 0, "message": "No active bets found"}
+                
+                # Process refunds for each bet
+                for bet in bets:
+                    bet_count += 1
+                    total_amount += bet.bet_amount
+                    
+                    # Update bet status
+                    bet.status = 'refunded'
+                    
+                    # Refund the bet amount to the user's wallet
+                    wallet_query = select(UserWallet).where(UserWallet.user_id == bet.user_id)
+                    wallet_result = await session.execute(wallet_query)
+                    wallet = wallet_result.scalar_one_or_none()
+                    
+                    if wallet:
+                        wallet.balance += bet.bet_amount
+                    else:
+                        # If wallet doesn't exist (rare case), create one with the refunded amount
+                        new_wallet = UserWallet(
+                            user_id=bet.user_id,
+                            display_name=bet.display_name,
+                            balance=bet.bet_amount
+                        )
+                        session.add(new_wallet)
+                
+                # Update markets to cancelled status
+                for market in markets:
+                    market.status = 'cancelled'
+                
+                await session.commit()
+                
+                return {
+                    "success": True,
+                    "bet_count": bet_count,
+                    "total_amount": total_amount,
+                    "message": "All bets have been refunded"
+                }
+                
+    except Exception as e:
+        logger.error(f"Error refunding bets: {e}")
+        return {
+            "success": False,
+            "bet_count": 0,
+            "total_amount": 0,
+            "message": f"Error: {str(e)}"
+        }

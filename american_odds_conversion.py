@@ -26,7 +26,7 @@ def convert_probability_to_american_odds(probability):
     raw_odds = 1 / probability
     
     # Apply house edge (reduce payout slightly)
-    margin = 1.1  # 10% margin
+    margin = 1.05  # 10% margin
     adjusted_odds = raw_odds * margin
     
     # Convert to American format
