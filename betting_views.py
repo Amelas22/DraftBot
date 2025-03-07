@@ -515,9 +515,22 @@ async def create_betting_summary(draft_session_id):
                     inline=False
                 )
         
-        # Add total bet amount
-        total_amount = sum(bet.bet_amount for bet in bets)
-        embed.set_footer(text=f"Total bets: {len(bets)} | Total amount: {total_amount} coins")
+        # Count the actual number of bets displayed in the summary
+        displayed_bets_count = 0
+        total_bet_amount = 0
+        
+        # Count team bets
+        for outcome, outcome_bets in team_bets.items():
+            displayed_bets_count += len(outcome_bets)
+            total_bet_amount += sum(bet.bet_amount for bet in outcome_bets)
+            
+        # Count trophy bets
+        for outcome, outcome_bets in trophy_bets.items():
+            displayed_bets_count += len(outcome_bets)
+            total_bet_amount += sum(bet.bet_amount for bet in outcome_bets)
+        
+        # Update footer with totals
+        embed.set_footer(text=f"Total bets: {displayed_bets_count} | Total amount: {total_bet_amount} coins")
         
         return embed
         
