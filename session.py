@@ -246,8 +246,8 @@ class UserBet(Base):
     bet_amount = Column(Integer)
     selected_outcome = Column(String(32))  # 'team_a', 'team_b', 'draw', 'trophy', 'no_trophy'
     odds_at_bet_time = Column(Float)
-    placed_at = Column(DateTime, default=datetime.now)
-    status = Column(String(32), default='active')  # 'active', 'won', 'lost'
+    placed_at = Column(DateTime, default=datetime.now)  
+    status = Column(String(32), default='active')  
     potential_payout = Column(Integer)
     
     # Relationships

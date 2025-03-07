@@ -387,49 +387,167 @@ async def league_commands(bot):
 
     @bot.slash_command(name="leaderboard", description="View the betting leaderboard")
     async def betting_leaderboard(ctx):
-        """View the top bettors by balance."""
+        """View the top bettors by balance for different time periods in a single embed."""
         await ctx.defer()
         
-        from session import UserWallet
+        from session import UserWallet, UserBet
+        from datetime import datetime, timedelta
         
         try:
+            # Get current time
+            now = datetime.now()
+            
+            # Define time periods
+            week_ago = now - timedelta(days=7)
+            month_ago = now - timedelta(days=30)
+            
             async with AsyncSessionLocal() as session:
                 async with session.begin():
-                    # Get top 20 users by balance
-                    query = select(UserWallet).order_by(UserWallet.balance.desc()).limit(20)
-                    result = await session.execute(query)
-                    top_wallets = result.scalars().all()
+                    # Get all wallets for lifetime leaderboard
+                    lifetime_query = select(UserWallet).order_by(UserWallet.balance.desc()).limit(20)
+                    lifetime_result = await session.execute(lifetime_query)
+                    lifetime_wallets = lifetime_result.scalars().all()
                     
-                    if not top_wallets:
+                    if not lifetime_wallets:
                         await ctx.followup.send("No betting users found yet. Be the first to claim coins with `/claim`!", ephemeral=True)
                         return
                     
+                    # Get all wallets and calculate recent profits
+                    all_wallets_query = select(UserWallet)
+                    all_wallets_result = await session.execute(all_wallets_query)
+                    all_wallets = {wallet.user_id: wallet for wallet in all_wallets_result.scalars().all()}
+                    
+                    # Get bets from past week
+                    weekly_bets_query = select(UserBet).where(
+                        UserBet.placed_at >= week_ago,
+                        UserBet.status.in_(['won', 'lost'])
+                    )
+                    weekly_bets_result = await session.execute(weekly_bets_query)
+                    weekly_bets = weekly_bets_result.scalars().all()
+                    
+                    # Get bets from past month
+                    monthly_bets_query = select(UserBet).where(
+                        UserBet.placed_at >= month_ago,
+                        UserBet.status.in_(['won', 'lost'])
+                    )
+                    monthly_bets_result = await session.execute(monthly_bets_query)
+                    monthly_bets = monthly_bets_result.scalars().all()
+                    
+                    # Calculate weekly profits
+                    weekly_profits = {}
+                    for bet in weekly_bets:
+                        user_id = bet.user_id
+                        display_name = bet.display_name
+                        
+                        if user_id not in weekly_profits:
+                            weekly_profits[user_id] = {
+                                "display_name": display_name,
+                                "profit": 0
+                            }
+                        
+                        # Add winnings or subtract losses
+                        if bet.status == 'won':
+                            weekly_profits[user_id]["profit"] += bet.potential_payout - bet.bet_amount
+                        else:
+                            weekly_profits[user_id]["profit"] -= bet.bet_amount
+                    
+                    # Calculate monthly profits
+                    monthly_profits = {}
+                    for bet in monthly_bets:
+                        user_id = bet.user_id
+                        display_name = bet.display_name
+                        
+                        if user_id not in monthly_profits:
+                            monthly_profits[user_id] = {
+                                "display_name": display_name,
+                                "profit": 0
+                            }
+                        
+                        # Add winnings or subtract losses
+                        if bet.status == 'won':
+                            monthly_profits[user_id]["profit"] += bet.potential_payout - bet.bet_amount
+                        else:
+                            monthly_profits[user_id]["profit"] -= bet.bet_amount
+                    
+                    # Sort weekly and monthly profits
+                    sorted_weekly_profits = sorted(
+                        [{"user_id": k, **v} for k, v in weekly_profits.items()],
+                        key=lambda x: x["profit"],
+                        reverse=True
+                    )[:10]  # Limit to top 10 for each section
+                    
+                    sorted_monthly_profits = sorted(
+                        [{"user_id": k, **v} for k, v in monthly_profits.items()],
+                        key=lambda x: x["profit"],
+                        reverse=True
+                    )[:10]  # Limit to top 10 for each section
+                    
+                    # Limit lifetime to top 10 as well
+                    lifetime_wallets = lifetime_wallets[:10]
+                    
+                    # Create consolidated leaderboard embed
                     embed = discord.Embed(
                         title="💰 Betting Leaderboard",
                         color=discord.Color.gold(),
-                        description="Top 20 bettors by balance"
+                        description="Top bettors across different time periods"
                     )
                     
-                    # Add each user to the leaderboard
-                    leaderboard_text = ""
-                    for i, wallet in enumerate(top_wallets):
-                        rank_emoji = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"{i+1}."
-                        leaderboard_text += f"{rank_emoji} **{wallet.display_name}**: {wallet.balance:,} coins\n"
+                    # Add weekly leaderboard (at the top)
+                    weekly_text = ""
+                    if sorted_weekly_profits:
+                        for i, user in enumerate(sorted_weekly_profits):
+                            # Only include positive profits
+                            if user["profit"] <= 0:
+                                continue
+                                
+                            rank_emoji = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"{i+1}."
+                            weekly_text += f"{rank_emoji} **{user['display_name']}**: +{user['profit']:,} coins\n"
                     
                     embed.add_field(
-                        name="Top Bettors",
-                        value=leaderboard_text,
+                        name="📅 Past 7 Days Profits",
+                        value=weekly_text if weekly_text else "No positive profits this week.",
                         inline=False
                     )
                     
-                    # Footer tips
+                    # Add monthly leaderboard (in the middle)
+                    monthly_text = ""
+                    if sorted_monthly_profits:
+                        for i, user in enumerate(sorted_monthly_profits):
+                            # Only include positive profits
+                            if user["profit"] <= 0:
+                                continue
+                                
+                            rank_emoji = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"{i+1}."
+                            monthly_text += f"{rank_emoji} **{user['display_name']}**: +{user['profit']:,} coins\n"
+                    
+                    embed.add_field(
+                        name="📆 Past 30 Days Profits",
+                        value=monthly_text if monthly_text else "No positive profits this month.",
+                        inline=False
+                    )
+                    
+                    # Add lifetime leaderboard (at the bottom)
+                    lifetime_text = ""
+                    for i, wallet in enumerate(lifetime_wallets):
+                        rank_emoji = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"{i+1}."
+                        lifetime_text += f"{rank_emoji} **{wallet.display_name}**: {wallet.balance:,} coins\n"
+                    
+                    embed.add_field(
+                        name="🏆 Lifetime Balances",
+                        value=lifetime_text,
+                        inline=False
+                    )
+                    
+                    # Add footer tips
                     embed.set_footer(text="Claim daily coins with /claim | Place bets during drafts | Check balance with /balance")
                     
+                    # Send the consolidated embed
                     await ctx.followup.send(embed=embed)
+                    
         except Exception as e:
             logger.error(f"Error showing leaderboard: {e}")
             await ctx.followup.send("An error occurred while fetching the leaderboard. Please try again later.")
-            
+                        
     @bot.slash_command(name="registerteam", description="Register a new team in the league")
     async def register_team(interaction: discord.Interaction, team_name: str):
         cube_overseer_role_name = "Cube Overseer"
