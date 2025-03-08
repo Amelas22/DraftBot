@@ -1,6 +1,7 @@
 import discord
 import aiocron
 import pytz
+import asyncio
 from session import  Team, AsyncSessionLocal, Match, WeeklyLimit, DraftSession
 from sqlalchemy import select, not_
 from datetime import datetime, timedelta
@@ -52,123 +53,52 @@ async def league_commands(bot):
 
     #             await session.commit()
     #     await ctx.followup.send("Click your timezone below to add your name to that timezone. You can click any name to open a DM with that user to coordiante finding teammates. Clicking the timezone again (once signed up) will remove your name from the list.", ephemeral=True)
-    @bot.slash_command(
-    name="setup", 
-    description="Set up the bot for this server",
-    default_member_permissions=discord.Permissions(administrator=True)
-    )
-    async def setup(ctx):
-        from config import get_config, is_special_guild
+    @bot.slash_command(name="setup", description="Configure your server with an interactive setup wizard")
+    @commands.has_permissions(administrator=True)
+    async def setup_wizard(ctx):
+        """Start an interactive server setup wizard"""
+        await ctx.respond("Starting server setup wizard...", ephemeral=True)
         
-        guild = ctx.guild
-        config = get_config(guild.id)
-        
-        # Create categories
-        draft_category = discord.utils.get(guild.categories, name=config["categories"]["draft"])
-        if not draft_category:
-            draft_category = await guild.create_category(config["categories"]["draft"])
-        
-        # Only create voice category in your guild
-        if is_special_guild(guild.id) and "voice" in config["categories"]:
-            voice_category = discord.utils.get(guild.categories, name=config["categories"]["voice"])
-            if not voice_category:
-                voice_category = await guild.create_category(config["categories"]["voice"])
-        
-        # Create channels
-        channels_created = []
-        for channel_key, channel_name in config["channels"].items():
-            # Skip special channels in non-special guilds
-            if channel_key in ["winston_draft", "role_request", "open_play"] and not is_special_guild(guild.id):
-                continue
-                
-            if not discord.utils.get(guild.text_channels, name=channel_name):
-                channel = await guild.create_text_channel(
-                    name=channel_name, 
-                    category=draft_category
-                )
-                channels_created.append(channel_name)
-        
-        # Create roles
-        roles_created = []
-        for role_key, role_name in config["roles"].items():
-            # Skip special roles in non-special guilds
-            if role_key == "suspected_bot" and not is_special_guild(guild.id):
-                continue
-                
-            if not discord.utils.get(guild.roles, name=role_name):
-                await guild.create_role(name=role_name)
-                roles_created.append(role_name)
-        
-        response = "Setup complete!\n"
-        if channels_created:
-            response += f"Channels created: {', '.join(channels_created)}\n"
-        if roles_created:
-            response += f"Roles created: {', '.join(roles_created)}\n"
-            
-        await ctx.respond(response)
+        # Launch first step of the wizard
+        view = SetupWelcomeView()
+        await ctx.followup.send(
+            "# Welcome to the Draft Bot Setup Wizard!\n\n"
+            "This wizard will help you configure your server for drafting.\n"
+            "You'll be asked a series of questions about which features you want to enable.\n\n"
+            "At the end, you'll see a summary of all changes before anything is created.",
+            view=view,
+            ephemeral=True
+        )
 
-    @bot.slash_command(
-    name="configure", 
-    description="Configure bot settings",
-    default_member_permissions=discord.Permissions(administrator=True)
-    )
-    async def configure(ctx, setting: str, value: str):
-        """
-        Configure bot settings for this server.
-        Examples:
-        /config channels.draft_results new-channel-name
-        /config categories.draft Draft Rooms
-        /config timezone US/Pacific
-        """
-        try:
-            # Import the config module properly
-            from config import get_config
-            
-            # Get the config for this guild
-            guild_config = get_config(ctx.guild.id)
-            
-            # Call the appropriate update method
-            parts = setting.split('.')
-            current = guild_config
-            for i, part in enumerate(parts):
-                if i == len(parts) - 1:
-                    current[part] = value
-                    success = True
-                else:
-                    if part not in current:
-                        current[part] = {}
-                    current = current[part]
-            
-            # Save the config
-            from config import save_config
-            save_config(ctx.guild.id, guild_config)
-            
-            if success:
-                await ctx.respond(f"Setting `{setting}` updated to `{value}`")
-            else:
-                await ctx.respond(f"Failed to update setting. Check your syntax.")
-        except Exception as e:
-            await ctx.respond(f"Error updating config: {e}")
+    @bot.slash_command(name="configure", description="Configure bot settings with an easy interface")
+    @commands.has_permissions(administrator=True)
+    async def configure_ui(ctx):
+        """Interactive configuration system with dropdowns and modals"""
+        from config import get_config
+        
+        # Get the current config
+        config = get_config(ctx.guild.id)
+        
+        # Create the initial category selection view
+        view = ConfigCategorySelector(config)
+        await ctx.respond("Select a configuration category to modify:", view=view, ephemeral=True)
+
                 
     @bot.slash_command(name="stats", description="Display your draft statistics")
     async def stats(ctx):
         """Display your personal draft statistics."""
         await ctx.defer()
         
-        # Always use the command user (no more discord_id parameter)
         user = ctx.author
         user_id = str(user.id)
         user_display_name = user.display_name
+        guild_id = str(ctx.guild.id)  # Get current guild ID
         
         try:
-            # Fetch stats for different time frames
-            stats_weekly = await get_player_statistics(user_id, 'week', user_display_name)
-            stats_monthly = await get_player_statistics(user_id, 'month', user_display_name)
-            stats_lifetime = await get_player_statistics(user_id, None, user_display_name)
-            
-            # Log for debugging
-            logger.info(f"Stats for user {user_id} with display name {user.display_name}")
-            logger.info(f"Trophies: {stats_lifetime['trophies_won']}")
+            # Pass guild_id to get_player_statistics
+            stats_weekly = await get_player_statistics(user_id, 'week', user_display_name, guild_id)
+            stats_monthly = await get_player_statistics(user_id, 'month', user_display_name, guild_id)
+            stats_lifetime = await get_player_statistics(user_id, None, user_display_name, guild_id)
             
             # Create and send the embed
             embed = await create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime)
@@ -176,64 +106,37 @@ async def league_commands(bot):
         except Exception as e:
             logger.error(f"Error in stats command: {e}")
             await ctx.followup.send("An error occurred while fetching your stats. Please try again later.")
-
-    @bot.slash_command(name="record", description="Display your head-to-head record against another player")
-    @discord.option(
-        "opponent_name",
-        description="The display name of the opponent",
-        required=True
-    )
-    async def record(ctx, opponent_name: str):
-        """Display your head-to-head record against another player."""
-        await ctx.defer()
+            
+    # @bot.slash_command(name="record", description="Display your head-to-head record against another player")
+    # @discord.option("opponent_name", description="The display name of the opponent", required=True)
+    # async def record(ctx, opponent_name: str):
+    #     """Display your head-to-head record against another player."""
+    #     await ctx.defer()
         
-        user = ctx.author
-        user_id = str(user.id)
-        user_display_name = user.display_name
+    #     user = ctx.author
+    #     user_id = str(user.id)
+    #     user_display_name = user.display_name
+    #     guild_id = str(ctx.guild.id)  # Get current guild ID
         
-        # Check if the user is trying to get their record against themselves
-        if opponent_name.lower() == user_display_name.lower():
-            await ctx.followup.send("You can't get your record against yourself!", ephemeral=True)
-            return
-        
-        try:
-            # Import needed functions from player_stats
-            from player_stats import find_discord_id_by_display_name, get_head_to_head_stats, create_head_to_head_embed
+    #     try:
+    #         # Import needed functions from player_stats
+    #         from player_stats import find_discord_id_by_display_name, get_head_to_head_stats
             
-            # Find opponent's Discord ID from display name
-            opponent_id, opponent_display_name = await find_discord_id_by_display_name(opponent_name)
+    #         # Pass guild_id to find_discord_id_by_display_name
+    #         opponent_id, opponent_display_name = await find_discord_id_by_display_name(opponent_name, guild_id)
             
-            if not opponent_id:
-                await ctx.followup.send(f"Could not find a player with the display name '{opponent_name}'. Please check the spelling or try another name.", ephemeral=True)
-                return
+    #         if not opponent_id:
+    #             await ctx.followup.send(f"Could not find a player with the display name '{opponent_name}' in this server.", ephemeral=True)
+    #             return
             
-            # Don't allow getting record against yourself
-            if opponent_id == user_id:
-                await ctx.followup.send("You can't get your record against yourself!", ephemeral=True)
-                return
+    #         # Pass guild_id to get_head_to_head_stats
+    #         h2h_stats = await get_head_to_head_stats(user_id, opponent_id, user_display_name, opponent_display_name, guild_id)
             
-            # Get head-to-head statistics
-            h2h_stats = await get_head_to_head_stats(user_id, opponent_id, user_display_name, opponent_display_name)
-            
-            # If no matches played, inform the user
-            if h2h_stats['lifetime']['matches_played'] == 0:
-                await ctx.followup.send(f"No matches found between you and {opponent_display_name}.", ephemeral=True)
-                return
-            
-            # Try to fetch opponent member object
-            try:
-                opponent_member = await ctx.guild.fetch_member(int(opponent_id)) if opponent_id.isdigit() else None
-            except:
-                opponent_member = None
-            
-            # Create and send the embed
-            embed = await create_head_to_head_embed(user, opponent_member, h2h_stats)
-            await ctx.followup.send(embed=embed)
-            
-        except Exception as e:
-            logger.error(f"Error in record command: {e}")
-            await ctx.followup.send("An error occurred while fetching the record. Please try again later.", ephemeral=True)
-            
+    #         # Rest of the function...
+    #     except Exception as e:
+    #         logger.error(f"Error in record command: {e}")
+    #         await ctx.followup.send("An error occurred while fetching the record. Please try again later.", ephemeral=True)
+                    
     # @bot.slash_command(name="registerteam", description="Register a new team in the league")
     # async def register_team(interaction: discord.Interaction, team_name: str):
     #     cube_overseer_role_name = "Cube Overseer"
@@ -1160,3 +1063,560 @@ async def weekly_summary(bot):
                 channel = discord.utils.get(guild.text_channels, name="league-summary")
                 if channel:
                     await channel.send(embed=embed)
+
+class ConfigCategorySelector(discord.ui.View):
+    def __init__(self, config):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.config = config
+        
+        # Create the category dropdown
+        self.add_item(CategoryDropdown(config))
+
+
+class CategoryDropdown(discord.ui.Select):
+    def __init__(self, config):
+        # Create options for each top-level config category
+        options = []
+        for category in config.keys():
+            if isinstance(config[category], dict):
+                # Only include dictionary items (categories of settings)
+                label = category.replace("_", " ").title()  # Format as readable text
+                options.append(discord.SelectOption(
+                    label=label,
+                    value=category,
+                    description=f"Configure {label} settings"
+                ))
+        
+        super().__init__(
+            placeholder="Select a configuration category",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        # Get the selected category
+        category = self.values[0]
+        
+        # Create a new view to show settings in this category
+        from config import get_config
+        config = get_config(interaction.guild_id)
+        view = SettingSelector(config, category)
+        
+        await interaction.response.edit_message(
+            content=f"Select a {category.replace('_', ' ').title()} setting to modify:",
+            view=view
+        )
+
+
+class SettingSelector(discord.ui.View):
+    def __init__(self, config, category):
+        super().__init__(timeout=300)
+        self.config = config
+        self.category = category
+        
+        # Add a dropdown for specific settings
+        self.add_item(SettingDropdown(config, category))
+        
+        # Add a back button
+        self.add_item(BackButton())
+
+
+class SettingDropdown(discord.ui.Select):
+    def __init__(self, config, category):
+        self.category = category
+        
+        # Create options for each setting in this category
+        options = []
+        for setting, value in config[category].items():
+            # Only include simple values as configurable settings
+            if isinstance(value, (str, int, bool, float)) or value is None:
+                label = setting.replace("_", " ").title()
+                current_value = str(value)
+                # Truncate long values
+                if len(current_value) > 50:
+                    current_value = current_value[:47] + "..."
+                
+                options.append(discord.SelectOption(
+                    label=label,
+                    value=setting,
+                    description=f"Current: {current_value}"
+                ))
+        
+        super().__init__(
+            placeholder=f"Select a {category} setting",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        # Get the selected setting
+        setting = self.values[0]
+        path = f"{self.category}.{setting}"
+        
+        # Create a modal to get the new value
+        modal = ConfigModal(path)
+        await interaction.response.send_modal(modal)
+
+
+class BackButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            style=discord.ButtonStyle.secondary,
+            label="Back to Categories",
+            row=1
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        # Go back to category selection
+        from config import get_config
+        config = get_config(interaction.guild_id)
+        view = ConfigCategorySelector(config)
+        
+        await interaction.response.edit_message(
+            content="Select a configuration category to modify:",
+            view=view
+        )
+
+
+class ConfigModal(discord.ui.Modal):
+    def __init__(self, setting_path):
+        self.setting_path = setting_path
+        setting_name = setting_path.split('.')[-1].replace('_', ' ').title()
+        
+        super().__init__(title=f"Configure {setting_name}")
+        
+        self.value_input = discord.ui.InputText(
+            label=f"New value for {setting_name}",
+            placeholder="Enter the new value",
+            required=True
+        )
+        self.add_item(self.value_input)
+    
+    async def callback(self, interaction: discord.Interaction):
+        # Get the new value
+        new_value = self.value_input.value
+        
+        try:
+            # Try to convert to appropriate type
+            # For booleans
+            if new_value.lower() in ["true", "yes", "1", "on"]:
+                new_value = True
+            elif new_value.lower() in ["false", "no", "0", "off"]:
+                new_value = False
+            # For numbers
+            elif new_value.isdigit():
+                new_value = int(new_value)
+            elif new_value.replace(".", "", 1).isdigit() and new_value.count(".") == 1:
+                new_value = float(new_value)
+            
+            # Update the config
+            from config import update_setting
+            success = update_setting(interaction.guild_id, self.setting_path, new_value)
+            
+            if success:
+                await interaction.response.send_message(
+                    f"✅ Setting `{self.setting_path}` updated to `{new_value}`",
+                    ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    f"❌ Failed to update setting `{self.setting_path}`. This setting may be restricted.",
+                    ephemeral=True
+                )
+        except Exception as e:
+            await interaction.response.send_message(
+                f"❌ Error updating config: {e}",
+                ephemeral=True
+            )
+
+class SetupWelcomeView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=600)  # 10 minute timeout
+    
+    @discord.ui.button(label="Start Setup", style=discord.ButtonStyle.primary)
+    async def start_button(self, button, interaction):
+        # Begin the actual setup process
+        await interaction.response.edit_message(
+            content="## Step 1: Draft Channels Category\n\n"
+                    "Would you like to create a category for draft-related channels?",
+            view=SetupCategoryView()
+        )
+
+
+class SetupCategoryView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=600)
+        self.config = {
+            "categories": {},
+            "channels": {},
+            "roles": {}
+        }
+    
+    @discord.ui.button(label="Yes", style=discord.ButtonStyle.success)
+    async def yes_button(self, button, interaction):
+        # Save this choice
+        self.config["categories"]["draft"] = True
+        
+        # Create the category name modal
+        modal = CategoryNameModal(self.config)
+        await interaction.response.send_modal(modal)
+    
+    @discord.ui.button(label="No", style=discord.ButtonStyle.secondary)
+    async def no_button(self, button, interaction):
+        # Skip creating category
+        self.config["categories"]["draft"] = False
+        
+        # Move to the next step
+        await interaction.response.edit_message(
+            content="## Step 2: Draft Channels\n\n"
+                    "Which draft-related channels would you like to create?",
+            view=SetupChannelsView(self.config)
+        )
+
+
+class CategoryNameModal(discord.ui.Modal):
+    def __init__(self, config):
+        super().__init__(title="Category Name")
+        self.config = config
+        
+        self.category_name = discord.ui.InputText(
+            label="Category Name",
+            placeholder="Draft Channels",
+            required=True,
+            value="Draft Channels"  # Changed from default to value
+        )
+        self.add_item(self.category_name)
+    
+    async def callback(self, interaction):
+        # Save the category name
+        self.config["categories"]["draft_name"] = self.category_name.value
+        
+        # Move to channels setup
+        await interaction.response.edit_message(
+            content="## Step 2: Draft Channels\n\n"
+                    "Which draft-related channels would you like to create?",
+            view=SetupChannelsView(self.config)
+        )
+
+class SetupChannelsView(discord.ui.View):
+    def __init__(self, config):
+        super().__init__(timeout=600)
+        self.config = config
+        
+        # Add channel checkboxes
+        self.add_item(ChannelSelect())
+    
+    @discord.ui.button(label="Continue", style=discord.ButtonStyle.primary)
+    async def continue_button(self, button, interaction):
+        # Save selected channels
+        select = [item for item in self.children if isinstance(item, ChannelSelect)][0]
+        self.config["channels"]["selected"] = select.values
+        
+        # Move to roles setup
+        await interaction.response.edit_message(
+            content="## Step 3: Server Roles\n\n"
+                    "In the next step, you will choose the role that you want to have admin access to draft features",
+            view=SetupRolesView(self.config)
+        )
+
+
+class ChannelSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(
+                label="Team Draft Results",
+                value="team_draft_results",
+                description="Channel for draft results",
+                default=True
+            ),
+            discord.SelectOption(
+                label="Draft Queue",
+                value="draft_queue",
+                description="Channel for active draft queues",
+                default=True
+            )
+        ]
+        
+        super().__init__(
+            placeholder="Select channels to create",
+            min_values=0,
+            max_values=len(options),
+            options=options
+        )
+    
+    async def callback(self, interaction):
+        # This just updates the selection - continue button handles saving
+        await interaction.response.defer()
+
+
+class SetupRolesView(discord.ui.View):
+    def __init__(self, config):
+        super().__init__(timeout=600)
+        self.config = config
+    
+    @discord.ui.button(label="Continue", style=discord.ButtonStyle.primary)
+    async def continue_button(self, button, interaction):
+        # Get guild roles for selection
+        guild_roles = interaction.guild.roles
+        
+        # Filter out @everyone and integration roles
+        selectable_roles = [role for role in guild_roles 
+                        if not role.is_default() and not role.is_integration()]
+        
+        # Create role options (up to 25 which is the Discord limit)
+        options = []
+        for role in selectable_roles[:25]:
+            options.append(
+                discord.SelectOption(
+                    label=role.name,
+                    value=role.name,
+                    description=f"Role ID: {role.id}"
+                )
+            )
+        
+        # If no roles found, skip to matchmaking
+        if not options:
+            await interaction.response.edit_message(
+                content="No custom roles found in this server.\n\nMoving to team balancing...",
+                view=SetupMatchmakingView(self.config)
+            )
+            return
+        
+        # Create a new view with the role select
+        role_view = discord.ui.View(timeout=300)
+        
+        # Create the select
+        role_select = discord.ui.Select(
+            placeholder="Select an admin role",
+            options=options,
+            min_values=0,
+            max_values=1
+        )
+        
+        # Define callback within this scope to capture needed variables
+        async def role_select_callback(role_interaction):
+            if role_select.values:
+                # Save selected role
+                self.config["roles"]["selected"] = role_select.values
+            else:
+                # No role selected
+                self.config["roles"]["selected"] = []
+            
+            # Now move to matchmaking view
+            await role_interaction.response.edit_message(
+                content="## Step 4: Team Balancing\n\n"
+                        "How often should the bot use skill-based team balancing?\n\n"
+                        "0% = Always random teams\n"
+                        "100% = Always balanced teams\n"
+                        "50% = Mix of both",
+                view=SetupMatchmakingView(self.config)
+            )
+        
+        # Assign callback
+        role_select.callback = role_select_callback
+        
+        # Add select to view
+        role_view.add_item(role_select)
+        
+        # Show the role selection - THIS IS THE ONLY RESPONSE TO THE ORIGINAL INTERACTION
+        await interaction.response.edit_message(
+            content="## Step 3: Admin Role\n\n"
+                    "Select a role that should have admin access to draft features:\n"
+                    "(Leave unselected for no special admin role)",
+            view=role_view
+        )
+
+class RoleSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(
+                label="Cube Overseer",
+                value="cube_overseer",
+                description="Admin role for draft management",
+                default=True
+            )
+        ]
+        
+        super().__init__(
+            placeholder="Select roles to create",
+            min_values=0,
+            max_values=len(options),
+            options=options
+        )
+    
+    async def callback(self, interaction):
+        # This just updates the selection - continue button handles saving
+        await interaction.response.defer()
+
+class SetupMatchmakingView(discord.ui.View):
+    def __init__(self, config):
+        super().__init__(timeout=600)
+        self.config = config
+
+    @discord.ui.button(label="Continue", style=discord.ButtonStyle.primary)
+    async def continue_button(self, button, interaction):
+        # Show a modal for inputting TrueSkill percentage
+        modal = MatchmakingModal(self.config)
+        await interaction.response.send_modal(modal)
+
+class MatchmakingModal(discord.ui.Modal):
+    def __init__(self, config):
+        super().__init__(title="Team Balancing Settings")
+        self.config = config
+        
+        self.percentage = discord.ui.InputText(
+            label="TrueSkill Matchmaking Percentage (0-100)",
+            placeholder="0 = always random, 100 = always balanced",
+            required=True,
+            value="0"
+        )
+        self.add_item(self.percentage)
+    
+    async def callback(self, interaction):
+        try:
+            # Parse the percentage value (handle both "50" and "50%")
+            value = self.percentage.value.strip().rstrip('%')
+            percentage = float(value)
+            
+            # Validate the range
+            if percentage < 0 or percentage > 100:
+                await interaction.response.send_message(
+                    "⚠️ Please enter a number between 0 and 100.",
+                    ephemeral=True
+                )
+                return
+            
+            # Save the setting
+            self.config["matchmaking"] = {"trueskill_chance": percentage}
+            
+            # Show confirmation with updated summary
+            await interaction.response.edit_message(
+                content="## Setup Summary\n\n"
+                        "Here's what will be created based on your choices:",
+                view=SetupConfirmView(self.config)
+            )
+            
+        except ValueError:
+            await interaction.response.send_message(
+                "⚠️ Invalid input. Please enter a number between 0 and 100.",
+                ephemeral=True
+            )
+
+class SetupConfirmView(discord.ui.View):
+    def __init__(self, config):
+        super().__init__(timeout=600)
+        self.config = config
+        
+        # Create summary text
+        summary = "# Configuration Summary\n\n"
+        
+        # Category summary
+        if config["categories"].get("draft", False):
+            category_name = config["categories"].get("draft_name", "Draft Channels")
+            summary += f"📁 Category: **{category_name}**\n\n"
+        else:
+            summary += "📁 No new category will be created\n\n"
+        
+        # Channels summary
+        selected_channels = config["channels"].get("selected", [])
+        if selected_channels:
+            summary += "💬 Channels to create:\n"
+            channel_labels = {
+                "team_draft_results": "team-draft-results",
+                "draft_queue": "draft-queue"
+            }
+            for channel in selected_channels:
+                summary += f"- {channel_labels.get(channel, channel)}\n"
+            summary += "\n"
+        else:
+            summary += "💬 No new channels will be created\n\n"
+        
+        # Roles summary
+        selected_roles = config["roles"].get("selected", [])
+        if selected_roles:
+            summary += "🏷️ Admin role to use:\n"
+            for role in selected_roles:
+                summary += f"- {role}\n"
+            summary += "\n"
+        else:
+            summary += "🏷️ No admin role selected\n\n"
+        
+        # Matchmaking summary
+        matchmaking_chance = config.get("matchmaking", {}).get("trueskill_chance", 0)
+        summary += f"⚖️ Team Balancing: **{matchmaking_chance}%** skill-based\n\n"
+        # Set the summary as the message content
+        self.summary = summary
+    
+    @discord.ui.button(label="Confirm & Create", style=discord.ButtonStyle.success)
+    async def confirm_button(self, button, interaction):
+        # Create everything
+        created_items = []
+        guild = interaction.guild
+        
+        # Create category if needed
+        category = None
+        if self.config["categories"].get("draft", False):
+            category_name = self.config["categories"].get("draft_name", "Draft Channels")
+            category = await guild.create_category(category_name)
+            created_items.append(f"📁 Category: {category.name}")
+        
+        # Create channels - ensure selected_channels is a list
+        selected_channels = self.config.get("channels", {}).get("selected", []) or []
+        
+        for channel_key in selected_channels:
+            channel_names = {
+                "team_draft_results": "team-draft-results",
+                "draft_queue": "draft-queue"
+            }
+            channel_name = channel_names.get(channel_key, channel_key)
+            
+            # Create in the category if it exists
+            if category:
+                channel = await guild.create_text_channel(channel_name, category=category)
+            else:
+                channel = await guild.create_text_channel(channel_name)
+                
+            created_items.append(f"💬 Channel: {channel.name}")
+        
+        # Save the configuration
+        from config import get_config, save_config
+        guild_config = get_config(guild.id)
+        
+        # Update with new settings
+        if category:
+            guild_config["categories"]["draft"] = category_name
+        
+        for channel_key in selected_channels:
+            channel_names = {
+                "team_draft_results": "team-draft-results",
+                "draft_queue": "draft-queue"
+            }
+            guild_config["channels"][channel_key] = channel_names.get(channel_key, channel_key)
+        
+        # Ensure selected_roles is a list
+        selected_roles = self.config.get("roles", {}).get("selected", []) or []
+        
+        if selected_roles:
+            guild_config["roles"]["admin"] = selected_roles[0]
+        
+        # Save updated config
+        save_config(guild.id, guild_config)
+        
+        # Show success message
+        created_items_text = "\n".join(created_items) if created_items else "No items needed to be created."
+        await interaction.response.edit_message(
+            content=f"# Setup Complete! 🎉\n\n"
+                f"The following items have been created:\n\n"
+                f"{created_items_text}\n\n"
+                f"Your draft bot is now ready to use!",
+            view=None
+        )
+    
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_button(self, button, interaction):
+        await interaction.response.edit_message(
+            content="Setup wizard cancelled. No changes were made.",
+            view=None
+        )

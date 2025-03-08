@@ -31,6 +31,9 @@ class Config:
                 "winston_draft": False,
                 "voice_channels": False,
                 "bot_detection": False
+            },
+            "matchmaking": {
+                "trueskill_chance": 0  # Default to 0% (always random teams)
             }
         }
         
@@ -59,6 +62,9 @@ class Config:
                 "winston_draft": True,
                 "voice_channels": True,
                 "bot_detection": True
+            },
+            "matchmaking": {
+                "trueskill_chance": 60  
             }
         }
         
@@ -140,3 +146,7 @@ def save_config(guild_id, config=None):
 def is_special_guild(guild_id):
     """Helper function to check if this is your special guild"""
     return str(guild_id) == SPECIAL_GUILD_ID
+
+def update_setting(guild_id, path, value):
+    """Update a specific setting in a guild's config"""
+    return bot_config.update_guild_setting(guild_id, path, value)

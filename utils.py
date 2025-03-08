@@ -20,19 +20,29 @@ async def split_into_teams(bot, draft_session_id):
         print("The draft session could not be found.")
         return
     
-    # Check if there are any sign-ups to split into teams.
+    # Get guild and config
+    guild_id = draft_session.guild_id
+    guild = bot.get_guild(int(guild_id))
+
+    from config import get_config
+    config = get_config(guild_id)
+
+    # Get the TrueSkill chance from config
+    trueskill_chance = config.get("matchmaking", {}).get("trueskill_chance", 0)
+    
+    # Determine whether to use TrueSkill for this draft
+    use_trueskill = random.randint(1, 100) <= trueskill_chance
+    print(f"TrueSkill chance: {trueskill_chance}%. Using TrueSkill: {use_trueskill}")
+    
     sign_ups = draft_session.sign_ups
-    if random.randint(1, 100) > 60 or draft_session.session_type == "test" or draft_session.session_type == "swiss":
-        draft_session.true_skill_draft = False
-    else:
-        draft_session.true_skill_draft = True
 
     if sign_ups:
         sign_ups_list = list(sign_ups.keys())
-        if draft_session.true_skill_draft:
-            guild = bot.get_guild(int(draft_session.guild_id))
+        if use_trueskill:
+            # Use skill-based team balancing
             team_a, team_b = await balance_teams(sign_ups_list, guild)
         else:
+            # Use random teams
             random.shuffle(sign_ups_list)
             mid_point = len(sign_ups_list) // 2
             team_a = sign_ups_list[:mid_point]
@@ -43,7 +53,7 @@ async def split_into_teams(bot, draft_session_id):
                 # Update the draft session with the new teams.
                 await db_session.execute(update(DraftSession)
                                          .where(DraftSession.session_id == draft_session_id)
-                                         .values(team_a=team_a, team_b=team_b, true_skill_draft=draft_session.true_skill_draft))
+                                         .values(team_a=team_a, team_b=team_b, true_skill_draft=use_trueskill))
                 await db_session.commit()
 
 
@@ -712,6 +722,7 @@ async def send_channel_reminders(bot, session_id):
                 print(f"Failed to send reminder in channel {channel.name}: {e}")
 
 async def update_player_stats_for_draft(session_id, guild):
+    guild_id = str(guild.id)
     async with AsyncSessionLocal() as db_session: 
         async with db_session.begin():
             stmt = select(DraftSession).where(DraftSession.session_id == session_id)
@@ -720,23 +731,25 @@ async def update_player_stats_for_draft(session_id, guild):
                 print("Draft session not found.")
                 return
             
-            player_ids = draft_session.team_a + draft_session.team_b  # Combine both teams' player IDs
+            player_ids = draft_session.team_a + draft_session.team_b
             
             for player_id in player_ids:
-                stmt = select(PlayerStats).where(PlayerStats.player_id == player_id)
+                stmt = select(PlayerStats).where(
+                    PlayerStats.player_id == player_id,
+                    PlayerStats.guild_id == guild_id
+                )
                 player_stat = await db_session.scalar(stmt)
                 
                 if player_stat:
-                    # Update existing player stats
                     player_stat.drafts_participated += 1
                 else:
-                    # Create new player stats record
                     player_stat = PlayerStats(
                         player_id=player_id,
+                        guild_id=guild_id,
                         drafts_participated=1,
                         games_won=0,
                         games_lost=0,
-                        elo_rating=1200,  # Default ELO score
+                        elo_rating=1200,
                         display_name=guild.get_member(int(player_id)).display_name if guild.get_member(int(player_id)) else "Unknown"
                     )
                     db_session.add(player_stat)
@@ -929,8 +942,33 @@ async def check_weekly_limits(interaction, match_id, session_type=None, session_
 async def update_player_stats_and_elo(match_result):
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            player1 = await session.get(PlayerStats, match_result.player1_id)
-            player2 = await session.get(PlayerStats, match_result.player2_id)
+            # Get the draft session to determine the guild_id
+            draft_session_stmt = select(DraftSession).where(
+                DraftSession.session_id == match_result.session_id
+            )
+            draft_session_result = await session.execute(draft_session_stmt)
+            draft_session = draft_session_result.scalars().first()
+            
+            if not draft_session:
+                print(f"Draft session not found for match result {match_result.id}")
+                return
+            
+            guild_id = draft_session.guild_id
+            # Get both players with guild_id
+            stmt1 = select(PlayerStats).where(
+                PlayerStats.player_id == match_result.player1_id,
+                PlayerStats.guild_id == guild_id
+            )
+            stmt2 = select(PlayerStats).where(
+                PlayerStats.player_id == match_result.player2_id,
+                PlayerStats.guild_id == guild_id
+            )
+
+            result1 = await session.execute(stmt1)
+            result2 = await session.execute(stmt2)
+
+            player1 = result1.scalars().first()
+            player2 = result2.scalars().first()
 
             if match_result.winner_id:
                 # Determine winner and loser based on match_result
@@ -969,27 +1007,45 @@ def calculate_elo_diff(winner_elo, loser_elo, k=20):
     return k * (1 - expected_win)
 
 async def balance_teams(player_ids, guild):
-    async with AsyncSessionLocal() as db_session:
-        # Ensure PlayerStats for each player
-        for player_id in player_ids:
-            player_stat = await db_session.get(PlayerStats, player_id)
-            if not player_stat:
-                player_stat = PlayerStats(
-                    player_id=player_id,
-                    drafts_participated=0,
-                    games_won=0,
-                    games_lost=0,
-                    display_name=guild.get_member(int(player_id)).display_name if guild.get_member(int(player_id)) else "Unknown",
-                    elo_rating=1200,
-                )
-                db_session.add(player_stat)
-        await db_session.commit()
+    """Balance teams using TrueSkill ratings"""
+    guild_id = str(guild.id)
 
+    async with AsyncSessionLocal() as db_session:
+        # Ensure PlayerStats exist for each player in this guild
+        for player_id in player_ids:
+            try:
+                stmt = select(PlayerStats).where(
+                    PlayerStats.player_id == player_id,
+                    PlayerStats.guild_id == guild_id
+                )
+                result = await db_session.execute(stmt)
+                player_stat = result.scalars().first()
+                
+                if not player_stat:
+                    # Create new player stats for this guild
+                    player_stat = PlayerStats(
+                        player_id=player_id,
+                        guild_id=guild_id,
+                        drafts_participated=0,
+                        games_won=0,
+                        games_lost=0,
+                        elo_rating=1200,
+                        true_skill_mu=25,
+                        true_skill_sigma=8.333,
+                        display_name=guild.get_member(int(player_id)).display_name if guild.get_member(int(player_id)) else "Unknown"
+                    )
+                    db_session.add(player_stat)
+            except Exception as e:
+                print(f"Error ensuring player stats: {e}")
+        
+        await db_session.commit()
+        
+        # Get players ordered by skill
         stmt = select(PlayerStats).where(
-            PlayerStats.player_id.in_(player_ids)
-        ).order_by(
-            desc(PlayerStats.true_skill_mu - (2 * PlayerStats.true_skill_sigma))
-        )
+            PlayerStats.player_id.in_(player_ids),
+            PlayerStats.guild_id == guild_id
+        ).order_by(desc(PlayerStats.true_skill_mu - (2 * PlayerStats.true_skill_sigma)))
+        
         result = await db_session.execute(stmt)
         ordered_players = result.scalars().all()
 

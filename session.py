@@ -1,5 +1,5 @@
 import discord
-from sqlalchemy import Column, Integer, String, DateTime, JSON, select, Boolean, ForeignKey, desc, Float, func
+from sqlalchemy import Column, Integer, String, DateTime, JSON, select, text, Boolean, ForeignKey, desc, Float, func
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, relationship
 from database.models_base import Base
@@ -24,6 +24,9 @@ async def init_db():
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    
+    # Migrate player_stats table
+    await migrate_player_stats()
 
 class DraftSession(Base):
     __tablename__ = 'draft_sessions'
@@ -88,6 +91,7 @@ class PlayerStats(Base):
     __tablename__ = 'player_stats'
     
     player_id = Column(String(64), primary_key=True)
+    guild_id = Column(String(64), primary_key=True)  # Add as part of primary key
     display_name = Column(String(128))  
     drafts_participated = Column(Integer, default=0)
     games_won = Column(Integer, default=0)
@@ -299,3 +303,56 @@ async def remove_team_from_db(ctx, team_name: str):
                 return f"Team '{team_name}' has been removed"
     else:
         return "You do not have permission to remove a team. This action requires the 'cube overseer' role."
+
+async def migrate_player_stats():
+    """Add guild_id column to player_stats and populate existing entries"""
+    async with engine.begin() as conn:
+        # Check if the column already exists
+        try:
+            await conn.execute(text("SELECT guild_id FROM player_stats LIMIT 1"))
+            print("guild_id column already exists in player_stats")
+        except Exception as e:
+            if "no such column: guild_id" in str(e):
+                print("Adding guild_id column to player_stats...")
+                # Add the guild_id column
+                await conn.execute(text("ALTER TABLE player_stats ADD COLUMN guild_id VARCHAR(64)"))
+                
+                # Set all existing entries to the special guild ID
+                special_guild_id = "336345350535118849"
+                await conn.execute(text(f"UPDATE player_stats SET guild_id = '{special_guild_id}'"))
+                print(f"Updated all existing entries with guild_id = {special_guild_id}")
+                
+                # Update primary key constraint
+                try:
+                    # SQLite doesn't support ALTER TABLE ADD CONSTRAINT so we need to recreate the table
+                    # This is simplified - in production you might want to backup and migrate data more carefully
+                    await conn.execute(text("""
+                        CREATE TABLE player_stats_new (
+                            player_id VARCHAR(64) NOT NULL,
+                            guild_id VARCHAR(64) NOT NULL,
+                            display_name VARCHAR(128),
+                            drafts_participated INTEGER DEFAULT 0,
+                            games_won INTEGER DEFAULT 0,
+                            games_lost INTEGER DEFAULT 0,
+                            elo_rating FLOAT DEFAULT 1200.0,
+                            true_skill_mu FLOAT DEFAULT 25.0,
+                            true_skill_sigma FLOAT DEFAULT 8.333,
+                            PRIMARY KEY (player_id, guild_id)
+                        )
+                    """))
+                    
+                    # Copy data
+                    await conn.execute(text("""
+                        INSERT INTO player_stats_new
+                        SELECT player_id, guild_id, display_name, drafts_participated, 
+                               games_won, games_lost, elo_rating, true_skill_mu, true_skill_sigma
+                        FROM player_stats
+                    """))
+                    
+                    # Replace tables
+                    await conn.execute(text("DROP TABLE player_stats"))
+                    await conn.execute(text("ALTER TABLE player_stats_new RENAME TO player_stats"))
+                    
+                    print("Updated primary key constraint for player_stats")
+                except Exception as e:
+                    print(f"Error updating primary key constraint: {e}")
