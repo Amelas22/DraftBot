@@ -11,8 +11,6 @@ MIN_ODDS = 1.1  # Minimum odds (very strong favorite)
 MAX_ODDS = 15.0  # Maximum odds (extreme underdog)
 BASE_TROPHY_ODDS = 5.0  # Base odds for a trophy (going 3-0)
 
-
-
 async def get_trueskill_rating(user_id: str) -> Tuple[float, float]:
     """Get a player's TrueSkill rating from the database."""
     async with AsyncSessionLocal() as session:
@@ -97,7 +95,7 @@ async def calculate_trophy_probability(player_id: str) -> float:
     
     return trophy_probability
 
-async def create_betting_markets_for_draft(draft_session_id: str) -> List[int]:
+async def create_betting_markets_for_draft(draft_session_id: str, guild_id: str) -> List[int]:
     """Create betting markets for a draft session and return market IDs with retry logic."""
     from session import BettingMarket
     from session import AsyncSessionLocal, DraftSession
@@ -125,9 +123,10 @@ async def create_betting_markets_for_draft(draft_session_id: str) -> List[int]:
                 team_b_odds = convert_probability_to_odds(team_b_prob)
                 draw_odds = convert_probability_to_odds(draw_prob) if draw_prob is not None else None
                 
-                # Create team win market
+                # Create team win market - now with guild_id
                 team_win_market = BettingMarket(
                     draft_session_id=draft_session_id,
+                    guild_id=guild_id,  # Add guild_id
                     market_type='team_win',
                     team_a_odds=team_a_odds,
                     team_b_odds=team_b_odds,
@@ -137,7 +136,7 @@ async def create_betting_markets_for_draft(draft_session_id: str) -> List[int]:
                 await session.flush()  # Flush to get the ID
                 market_ids.append(team_win_market.id)
                 
-                # Create individual trophy markets for each player
+                # Create individual trophy markets for each player - now with guild_id
                 all_players = draft.team_a + draft.team_b
                 
                 for player_id in all_players:
@@ -149,6 +148,7 @@ async def create_betting_markets_for_draft(draft_session_id: str) -> List[int]:
                     
                     trophy_market = BettingMarket(
                         draft_session_id=draft_session_id,
+                        guild_id=guild_id,  # Add guild_id
                         market_type='player_trophy',
                         player_id=player_id,
                         player_name=player_name,
@@ -169,20 +169,24 @@ async def create_betting_markets_for_draft(draft_session_id: str) -> List[int]:
     except Exception as e:
         logger.error(f"Error creating betting markets: {e}")
 
-async def get_or_create_user_wallet(user_id: str, display_name: str) -> Dict:
-    """Get or create a user wallet and return wallet info."""
+async def get_or_create_user_wallet(user_id: str, guild_id: str, display_name: str) -> Dict:
+    """Get or create a user wallet for a specific guild and return wallet info."""
     from session import UserWallet
     
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            query = select(UserWallet).where(UserWallet.user_id == user_id)
+            query = select(UserWallet).where(
+                UserWallet.user_id == user_id,
+                UserWallet.guild_id == guild_id  # Add guild filter
+            )
             result = await session.execute(query)
             wallet = result.scalar_one_or_none()
             
             if not wallet:
-                # Create new wallet with default balance
+                # Create new wallet with default balance for this guild
                 wallet = UserWallet(
                     user_id=user_id,
+                    guild_id=guild_id,  # Add guild_id
                     display_name=display_name,
                     balance=1000,  # Starting balance
                     last_daily_claim=None
@@ -192,25 +196,30 @@ async def get_or_create_user_wallet(user_id: str, display_name: str) -> Dict:
                 
             return {
                 "user_id": wallet.user_id,
+                "guild_id": wallet.guild_id,
                 "display_name": wallet.display_name,
                 "balance": wallet.balance,
                 "last_daily_claim": wallet.last_daily_claim
             }
 
-async def place_bet(user_id: str, display_name: str, market_id: int, amount: int, outcome: str) -> Dict:
+async def place_bet(user_id: str, guild_id: str, display_name: str, market_id: int, amount: int, outcome: str) -> Dict:
     """Place a bet on a market outcome and return bet info."""
     from session import UserWallet, BettingMarket, UserBet
     
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            # Get user wallet
-            wallet_query = select(UserWallet).where(UserWallet.user_id == user_id)
+            # Get user wallet for the specific guild
+            wallet_query = select(UserWallet).where(
+                UserWallet.user_id == user_id,
+                UserWallet.guild_id == guild_id  # Add guild filter
+            )
             wallet_result = await session.execute(wallet_query)
             wallet = wallet_result.scalar_one_or_none()
             
             if not wallet:
                 wallet = UserWallet(
                     user_id=user_id,
+                    guild_id=guild_id,  # Add guild_id
                     display_name=display_name,
                     balance=1000
                 )
@@ -228,6 +237,10 @@ async def place_bet(user_id: str, display_name: str, market_id: int, amount: int
             
             if not market:
                 return {"success": False, "error": "Betting market not found"}
+            
+            # Ensure the market is from the same guild
+            if market.guild_id != guild_id:
+                return {"success": False, "error": "Betting market not found in this server"}
             
             if market.status != 'open':
                 return {"success": False, "error": "Betting market is closed"}
@@ -258,9 +271,10 @@ async def place_bet(user_id: str, display_name: str, market_id: int, amount: int
             # Calculate potential payout (bet amount * odds)
             potential_payout = int(amount * odds)
             
-            # Create bet
+            # Create bet with guild_id
             new_bet = UserBet(
                 user_id=user_id,
+                guild_id=guild_id,  # Add guild_id
                 display_name=display_name,
                 market_id=market_id,
                 bet_amount=amount,
@@ -284,16 +298,17 @@ async def place_bet(user_id: str, display_name: str, market_id: int, amount: int
                 "new_balance": wallet.balance
             }
 
-async def resolve_betting_markets(draft_session_id: str, team_a_wins: int, team_b_wins: int, trophy_winners: List[str] = None):
+async def resolve_betting_markets(draft_session_id: str, guild_id: str, team_a_wins: int, team_b_wins: int, trophy_winners: List[str] = None):
     """Resolve all betting markets for a completed draft."""
     from session import BettingMarket, UserBet, UserWallet
     
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            # Get all markets for this draft
+            # Get all markets for this draft and guild
             markets_query = select(BettingMarket).where(
                 and_(
                     BettingMarket.draft_session_id == draft_session_id,
+                    BettingMarket.guild_id == guild_id,  # Add guild filter
                     BettingMarket.status == 'open'
                 )
             )
@@ -322,6 +337,7 @@ async def resolve_betting_markets(draft_session_id: str, team_a_wins: int, team_
                 bets_query = select(UserBet).where(
                     and_(
                         UserBet.market_id == market.id,
+                        UserBet.guild_id == guild_id,  # Add guild filter
                         UserBet.status == 'active'
                     )
                 )
@@ -335,7 +351,10 @@ async def resolve_betting_markets(draft_session_id: str, team_a_wins: int, team_
                         bet.status = 'won'
                         
                         # Get user wallet and add winnings
-                        wallet_query = select(UserWallet).where(UserWallet.user_id == bet.user_id)
+                        wallet_query = select(UserWallet).where(
+                            UserWallet.user_id == bet.user_id,
+                            UserWallet.guild_id == guild_id  # Add guild filter
+                        )
                         wallet_result = await session.execute(wallet_query)
                         wallet = wallet_result.scalar_one_or_none()
                         
@@ -347,20 +366,24 @@ async def resolve_betting_markets(draft_session_id: str, team_a_wins: int, team_
                         
             await session.commit()
 
-async def claim_daily_coins(user_id: str, display_name: str) -> Dict:
-    """Let users claim daily coins to bet with."""
+async def claim_daily_coins(user_id: str, guild_id: str, display_name: str) -> Dict:
+    """Let users claim daily coins to bet with for a specific guild."""
     from session import UserWallet
     
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            # Get or create user wallet
-            wallet_query = select(UserWallet).where(UserWallet.user_id == user_id)
+            # Get or create user wallet for this guild
+            wallet_query = select(UserWallet).where(
+                UserWallet.user_id == user_id,
+                UserWallet.guild_id == guild_id  # Add guild filter
+            )
             wallet_result = await session.execute(wallet_query)
             wallet = wallet_result.scalar_one_or_none()
             
             if not wallet:
                 wallet = UserWallet(
                     user_id=user_id,
+                    guild_id=guild_id,  # Add guild_id
                     display_name=display_name,
                     balance=1000,
                     last_daily_claim=datetime.now()
@@ -404,7 +427,97 @@ async def claim_daily_coins(user_id: str, display_name: str) -> Dict:
                 "is_first_claim": False
             }
 
-async def refund_all_bets(draft_session_id: str) -> dict:
+async def refund_all_bets(draft_session_id: str, guild_id: str) -> dict:
+    """Refund all active bets for a draft session that didn't complete."""
+    from session import BettingMarket, UserBet, UserWallet
+    from sqlalchemy import and_, select
+    
+    try:
+        bet_count = 0
+        total_amount = 0
+        
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                # Get all markets for this draft and guild
+                markets_query = select(BettingMarket).where(
+                    and_(
+                        BettingMarket.draft_session_id == draft_session_id,
+                        BettingMarket.guild_id == guild_id  # Add guild filter
+                    )
+                )
+                markets_result = await session.execute(markets_query)
+                markets = markets_result.scalars().all()
+                
+                if not markets:
+                    return {"success": True, "bet_count": 0, "total_amount": 0, "message": "No markets found"}
+                
+                market_ids = [market.id for market in markets]
+                
+                # Get all active bets for these markets and guild
+                bets_query = select(UserBet).where(
+                    and_(
+                        UserBet.market_id.in_(market_ids),
+                        UserBet.guild_id == guild_id,  # Add guild filter
+                        UserBet.status == 'active'
+                    )
+                )
+                bets_result = await session.execute(bets_query)
+                bets = bets_result.scalars().all()
+                
+                if not bets:
+                    return {"success": True, "bet_count": 0, "total_amount": 0, "message": "No active bets found"}
+                
+                # Process refunds for each bet
+                for bet in bets:
+                    bet_count += 1
+                    total_amount += bet.bet_amount
+                    
+                    # Update bet status
+                    bet.status = 'refunded'
+                    
+                    # Refund the bet amount to the user's wallet
+                    wallet_query = select(UserWallet).where(
+                        and_(
+                            UserWallet.user_id == bet.user_id,
+                            UserWallet.guild_id == guild_id  # Add guild filter
+                        )
+                    )
+                    wallet_result = await session.execute(wallet_query)
+                    wallet = wallet_result.scalar_one_or_none()
+                    
+                    if wallet:
+                        wallet.balance += bet.bet_amount
+                    else:
+                        # If wallet doesn't exist (rare case), create one with the refunded amount
+                        new_wallet = UserWallet(
+                            user_id=bet.user_id,
+                            guild_id=guild_id,  # Add guild_id
+                            display_name=bet.display_name,
+                            balance=bet.bet_amount
+                        )
+                        session.add(new_wallet)
+                
+                # Update markets to cancelled status
+                for market in markets:
+                    market.status = 'cancelled'
+                
+                await session.commit()
+                
+                return {
+                    "success": True,
+                    "bet_count": bet_count,
+                    "total_amount": total_amount,
+                    "message": "All bets have been refunded"
+                }
+                
+    except Exception as e:
+        logger.error(f"Error refunding bets: {e}")
+        return {
+            "success": False,
+            "bet_count": 0,
+            "total_amount": 0,
+            "message": f"Error: {str(e)}"
+        }
     """Refund all active bets for a draft session that didn't complete."""
     from session import BettingMarket, UserBet, UserWallet
     from sqlalchemy import and_, select

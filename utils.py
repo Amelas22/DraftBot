@@ -537,7 +537,8 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 # Resolve betting markets
                 try:
                     from betting_utilities import resolve_betting_markets
-                    await resolve_betting_markets(draft_session_id, team_a_wins, team_b_wins, trophy_winners=trophy_winners)
+                    guild_id = draft_session.guild_id  # Get guild_id from draft session
+                    await resolve_betting_markets(draft_session_id, guild_id, team_a_wins, team_b_wins, trophy_winners=trophy_winners)
                     
                     # Add betting results message
                     embed.add_field(

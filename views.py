@@ -1168,6 +1168,9 @@ async def setup_betting_for_draft(bot, draft_session_id, channel_id):
                     if not draft_session or not draft_session.team_a or not draft_session.team_b:
                         logger.error(f"Cannot create betting markets: draft {draft_session_id} not found or teams not set")
                         return
+                    
+                    # Get guild_id from draft session
+                    guild_id = draft_session.guild_id
             
             from betting_utilities import calculate_team_win_probability, convert_probability_to_odds
             from american_odds_conversion import convert_to_american_odds, convert_probability_to_american_odds
@@ -1188,7 +1191,7 @@ async def setup_betting_for_draft(bot, draft_session_id, channel_id):
         try:
             # Create markets in a separate transaction
             from betting_utilities import create_betting_markets_for_draft
-            market_ids = await create_betting_markets_for_draft(draft_session_id)
+            market_ids = await create_betting_markets_for_draft(draft_session_id, guild_id)
             
             if not market_ids:
                 logger.error(f"Failed to create betting markets for draft {draft_session_id}")

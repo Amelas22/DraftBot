@@ -8,7 +8,7 @@ from session import AsyncSessionLocal, DraftSession, PlayerStats
 from typing import Dict, List
 
 class TeamBetButton(Button):
-    def __init__(self, market_id: int, outcome: str, label: str, american_odds: str, decimal_odds: float):
+    def __init__(self, market_id: int, outcome: str, label: str, american_odds: str, decimal_odds: float, guild_id: str):
         # Set button style based on outcome
         style = discord.ButtonStyle.danger if outcome == "team_a" else \
                 discord.ButtonStyle.success if outcome == "team_b" else \
@@ -18,10 +18,11 @@ class TeamBetButton(Button):
         self.market_id = market_id
         self.outcome = outcome
         self.decimal_odds = decimal_odds
+        self.guild_id = guild_id  # Add guild_id
         
     async def callback(self, interaction: discord.Interaction):
         # Create dropdown for betting amount
-        view = BetAmountView(self.market_id, self.outcome, self.decimal_odds)
+        view = BetAmountView(self.market_id, self.outcome, self.decimal_odds, self.guild_id)  # Pass guild_id
         await interaction.response.send_message(
             f"Select bet amount for {self.label}:", 
             view=view, 
@@ -29,7 +30,7 @@ class TeamBetButton(Button):
         )
 
 class TrophyBetButton(Button):
-    def __init__(self, market_id: int, player_id: str, player_name: str, american_odds: str, decimal_odds: float):
+    def __init__(self, market_id: int, player_id: str, player_name: str, american_odds: str, decimal_odds: float, guild_id: str):
         super().__init__(
             style=discord.ButtonStyle.primary,
             label=f"{player_name} ({american_odds})",
@@ -39,10 +40,11 @@ class TrophyBetButton(Button):
         self.player_id = player_id
         self.outcome = "trophy"  # When betting on trophy, the outcome is always "trophy"
         self.decimal_odds = decimal_odds
+        self.guild_id = guild_id  # Add guild_id
         
     async def callback(self, interaction: discord.Interaction):
         # Create dropdown for betting amount
-        view = BetAmountView(self.market_id, self.outcome, self.decimal_odds)
+        view = BetAmountView(self.market_id, self.outcome, self.decimal_odds, self.guild_id)  # Pass guild_id
         await interaction.response.send_message(
             f"Select bet amount for {self.label}:", 
             view=view, 
@@ -50,7 +52,7 @@ class TrophyBetButton(Button):
         )
 
 class BetAmountSelect(Select):
-    def __init__(self, market_id: int, outcome: str, decimal_odds: float):
+    def __init__(self, market_id: int, outcome: str, decimal_odds: float, guild_id: str):
         options = []
         for amount in range(25, 276, 25):  # 25, 50, 75, ..., 250
             # Calculate potential profit (not including the stake)
@@ -74,6 +76,7 @@ class BetAmountSelect(Select):
         self.market_id = market_id
         self.outcome = outcome
         self.decimal_odds = decimal_odds
+        self.guild_id = guild_id  # Add guild_id
         
     async def callback(self, interaction: discord.Interaction):
         # Get selected amount
@@ -84,8 +87,9 @@ class BetAmountSelect(Select):
         
         user_id = str(interaction.user.id)
         display_name = interaction.user.display_name
+        guild_id = self.guild_id  # Use stored guild_id
         
-        result = await place_bet(user_id, display_name, self.market_id, amount, self.outcome)
+        result = await place_bet(user_id, guild_id, display_name, self.market_id, amount, self.outcome)
         
         if result["success"]:
             # Calculate profit (not including stake)
@@ -111,12 +115,12 @@ class BetAmountSelect(Select):
             )
 
 class BetAmountView(View):
-    def __init__(self, market_id: int, outcome: str, decimal_odds: float):
+    def __init__(self, market_id: int, outcome: str, decimal_odds: float, guild_id: str):
         super().__init__(timeout=60)  # 1 minute timeout
-        self.add_item(BetAmountSelect(market_id, outcome, decimal_odds))
+        self.add_item(BetAmountSelect(market_id, outcome, decimal_odds, guild_id))
 
 class TeamBettingView(View):
-    def __init__(self, markets: Dict, team_a_name: str, team_b_name: str, has_draw: bool = False):
+    def __init__(self, markets: Dict, team_a_name: str, team_b_name: str, guild_id: str, has_draw: bool = False):
         super().__init__(timeout=15*60)  # 15 minute timeout
         
         # Find team win market
@@ -132,11 +136,13 @@ class TeamBettingView(View):
         # Add buttons for team A and B
         self.add_item(TeamBetButton(
             team_win_market.id, "team_a", team_a_name, 
-            team_a_american, team_win_market.team_a_odds
+            team_a_american, team_win_market.team_a_odds,
+            guild_id  # Pass guild_id
         ))
         self.add_item(TeamBetButton(
             team_win_market.id, "team_b", team_b_name, 
-            team_b_american, team_win_market.team_b_odds
+            team_b_american, team_win_market.team_b_odds,
+            guild_id  # Pass guild_id
         ))
         
         # Add draw button if applicable
@@ -144,11 +150,12 @@ class TeamBettingView(View):
             draw_american = convert_to_american_odds(team_win_market.draw_odds)
             self.add_item(TeamBetButton(
                 team_win_market.id, "draw", "Match Draw", 
-                draw_american, team_win_market.draw_odds
+                draw_american, team_win_market.draw_odds,
+                guild_id  # Pass guild_id
             ))
 
 class TrophyBettingView(View):
-    def __init__(self, markets: List, player_map: Dict):
+    def __init__(self, markets: List, player_map: Dict, guild_id: str):
         super().__init__(timeout=15*60)  # 15 minute timeout
         
         # Add buttons for each player's trophy market
@@ -161,7 +168,8 @@ class TrophyBettingView(View):
                 
                 self.add_item(TrophyBetButton(
                     market.id, market.player_id, player_name,
-                    american_odds, market.trophy_odds
+                    american_odds, market.trophy_odds,
+                    guild_id  # Pass guild_id
                 ))
 
 async def get_player_trueskill_ratings(player_ids):
@@ -191,7 +199,7 @@ async def get_player_trueskill_ratings(player_ids):
 
 async def manage_betting_period(bot, draft_session_id, channel_id):
     """Create and manage the betting period for a draft."""
-    from session import BettingMarket
+    from session import BettingMarket, DraftSession
     
     try:
         # Get draft session
@@ -205,9 +213,13 @@ async def manage_betting_period(bot, draft_session_id, channel_id):
                     logger.error(f"Draft session {draft_session_id} not found for betting")
                     return
                 
+                # Get guild_id from draft session
+                guild_id = draft_session.guild_id
+                
                 # Get betting markets
                 markets_query = select(BettingMarket).where(
                     BettingMarket.draft_session_id == draft_session_id,
+                    BettingMarket.guild_id == guild_id,  # Add guild filter
                     BettingMarket.status == 'open'
                 )
                 markets_result = await session.execute(markets_query)
@@ -223,7 +235,15 @@ async def manage_betting_period(bot, draft_session_id, channel_id):
             logger.error(f"Channel {channel_id} not found")
             return
         
-        # Get TrueSkill ratings for all players
+        # Create player ID to name mapping
+        player_map = {}
+        for player_id in draft_session.team_a + draft_session.team_b:
+            player_map[player_id] = draft_session.sign_ups.get(player_id, f"Player {player_id}")
+        
+        # Create team names
+        team_a_name = draft_session.team_a_name or "Team A"
+        team_b_name = draft_session.team_b_name or "Team B"
+
         all_player_ids = draft_session.team_a + draft_session.team_b
         player_ratings = await get_player_trueskill_ratings(all_player_ids)
         
@@ -247,10 +267,6 @@ async def manage_betting_period(bot, draft_session_id, channel_id):
             # Add TrueSkill rating to the display
             mu = player_ratings[player_id]["mu"]
             team_b_display.append(f"{display_name} [Rating: {mu:.1f}]")
-        
-        # Create team names
-        team_a_name = draft_session.team_a_name or "Team A"
-        team_b_name = draft_session.team_b_name or "Team B"
         
         # Create betting embeds
         has_draw = len(draft_session.team_a) == 4 and len(draft_session.team_b) == 4
@@ -277,7 +293,7 @@ async def manage_betting_period(bot, draft_session_id, channel_id):
             inline=True
         )
         
-        team_embed.set_footer(text=f"Claim daily coins with /claim | Check balance with /balance")
+        team_embed.set_footer(text=f"Good Luck!")
         
         trophy_embed = discord.Embed(
             title="🏆 PLACE YOUR BETS - Trophy Winners",
@@ -286,14 +302,14 @@ async def manage_betting_period(bot, draft_session_id, channel_id):
         )
         trophy_embed.add_field(
             name="Trophy Bets",
-            value="Click a player's button below to bet on them getting a trophy. All bets are refunded if no result is determined within 8 hours.",
+            value="Click a player's button below to bet on them getting a trophy! Max bet 250.",
             inline=False
         )
-        trophy_embed.set_footer(text=f"Claim daily coins with /claim | Check balance with /balance")
+        trophy_embed.set_footer(text=f"Good Luck!")
         
-        # Create views
-        team_view = TeamBettingView(markets, team_a_name, team_b_name, has_draw)
-        trophy_view = TrophyBettingView(markets, player_map)
+        # Create views with guild_id
+        team_view = TeamBettingView(markets, team_a_name, team_b_name, guild_id, has_draw)
+        trophy_view = TrophyBettingView(markets, player_map, guild_id)
         
         # Send embeds
         team_message = await channel.send(embed=team_embed, view=team_view)
@@ -316,7 +332,7 @@ async def manage_betting_period(bot, draft_session_id, channel_id):
         await asyncio.sleep(15 * 60)
         
         # Create summary before deleting messages
-        summary_embed = await create_betting_summary(draft_session_id)
+        summary_embed = await create_betting_summary(draft_session_id, guild_id)
         
         # Delete betting messages
         try:
@@ -330,17 +346,17 @@ async def manage_betting_period(bot, draft_session_id, channel_id):
             await channel.send(embed=summary_embed)
         
         # Close betting markets
-        await close_betting_markets(draft_session_id)
+        await close_betting_markets(draft_session_id, guild_id)
         
         # Schedule a check to refund bets if no result after 8 hours
         asyncio.create_task(
-            check_and_refund_bets_if_needed(draft_session_id, bot, channel_id)
+            check_and_refund_bets_if_needed(draft_session_id, guild_id, bot, channel_id)
         )
         
     except Exception as e:
         logger.error(f"Error in manage_betting_period: {e}")
 
-async def check_and_refund_bets_if_needed(draft_session_id, bot, channel_id, hours=8):
+async def check_and_refund_bets_if_needed(draft_session_id, guild_id, bot, channel_id, hours=8):
     """Check if the draft has a result after specified hours and refund bets if not."""
     await asyncio.sleep(hours * 60 * 60)  # Wait for specified hours
     
@@ -360,7 +376,7 @@ async def check_and_refund_bets_if_needed(draft_session_id, bot, channel_id, hou
                 if not draft_session.victory_message_id_draft_chat:
                     # Refund all bets
                     from betting_utilities import refund_all_bets
-                    refund_result = await refund_all_bets(draft_session_id)
+                    refund_result = await refund_all_bets(draft_session_id, guild_id)
                     
                     # Send notification to the channel
                     channel = bot.get_channel(int(channel_id))
@@ -380,9 +396,9 @@ async def check_and_refund_bets_if_needed(draft_session_id, bot, channel_id, hou
     except Exception as e:
         logger.error(f"Error in check_and_refund_bets_if_needed: {e}")
 
-async def create_betting_summary(draft_session_id):
+async def create_betting_summary(draft_session_id, guild_id):
     """Create a summary of all bets placed on a draft."""
-    from session import BettingMarket, UserBet
+    from session import BettingMarket, UserBet, DraftSession
     
     try:
         async with AsyncSessionLocal() as session:
@@ -395,8 +411,11 @@ async def create_betting_summary(draft_session_id):
                 if not draft_session:
                     return None
                 
-                # Get markets for this draft
-                markets_query = select(BettingMarket).where(BettingMarket.draft_session_id == draft_session_id)
+                # Get markets for this draft and guild
+                markets_query = select(BettingMarket).where(
+                    BettingMarket.draft_session_id == draft_session_id,
+                    BettingMarket.guild_id == guild_id
+                )
                 markets_result = await session.execute(markets_query)
                 markets = {market.id: market for market in markets_result.scalars().all()}
                 
@@ -406,6 +425,7 @@ async def create_betting_summary(draft_session_id):
                 # Get all bets for these markets
                 bets_query = select(UserBet).where(
                     UserBet.market_id.in_(list(markets.keys())),
+                    UserBet.guild_id == guild_id,
                     UserBet.status == 'active'
                 )
                 bets_result = await session.execute(bets_query)
@@ -515,7 +535,7 @@ async def create_betting_summary(draft_session_id):
                     inline=False
                 )
         
-        # Count the actual number of bets displayed in the summary
+        # Calculate bet totals properly - FIXED VERSION
         displayed_bets_count = 0
         total_bet_amount = 0
         
@@ -529,7 +549,7 @@ async def create_betting_summary(draft_session_id):
             displayed_bets_count += len(outcome_bets)
             total_bet_amount += sum(bet.bet_amount for bet in outcome_bets)
         
-        # Update footer with totals
+        # Update footer with correct totals
         embed.set_footer(text=f"Total bets: {displayed_bets_count} | Total amount: {total_bet_amount} coins")
         
         return embed
@@ -537,17 +557,18 @@ async def create_betting_summary(draft_session_id):
     except Exception as e:
         logger.error(f"Error creating betting summary: {e}")
         return None
-
-async def close_betting_markets(draft_session_id):
+    
+async def close_betting_markets(draft_session_id, guild_id):
     """Close all open betting markets for a draft."""
     from session import BettingMarket
     
     try:
         async with AsyncSessionLocal() as session:
             async with session.begin():
-                # Get open markets for this draft
+                # Get open markets for this draft and guild
                 markets_query = select(BettingMarket).where(
                     BettingMarket.draft_session_id == draft_session_id,
+                    BettingMarket.guild_id == guild_id,
                     BettingMarket.status == 'open'
                 )
                 markets_result = await session.execute(markets_query)

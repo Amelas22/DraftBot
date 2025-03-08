@@ -16,6 +16,7 @@ class BettingMarket(Base):
     
     id = Column(Integer, primary_key=True)
     draft_session_id = Column(String(64))  # Foreign key to draft_sessions.session_id
+    guild_id = Column(String(64), nullable=False)  # Added guild_id column
     market_type = Column(String(32))  # 'team_win', 'player_trophy'
     status = Column(String(32), default='open')  # 'open', 'closed', 'resolved', 'cancelled'
     created_at = Column(DateTime, default=datetime.now)
@@ -39,7 +40,9 @@ class BettingMarket(Base):
 class UserWallet(Base):
     __tablename__ = 'user_wallets'
     
+    # Make both user_id and guild_id part of the primary key
     user_id = Column(String(64), primary_key=True)
+    guild_id = Column(String(64), primary_key=True)  # Added guild_id as part of primary key
     display_name = Column(String(128))
     balance = Column(Integer, default=1000)  # Start with 1000 coins
     last_daily_claim = Column(DateTime, nullable=True)
@@ -49,6 +52,7 @@ class UserBet(Base):
     
     id = Column(Integer, primary_key=True)
     user_id = Column(String(64))
+    guild_id = Column(String(64), nullable=False)  # Added guild_id column
     display_name = Column(String(128))
     market_id = Column(Integer, ForeignKey('betting_markets.id'))
     bet_amount = Column(Integer)
