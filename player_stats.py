@@ -5,8 +5,8 @@ from sqlalchemy import select, func, and_, or_, text
 from session import AsyncSessionLocal, DraftSession, MatchResult, PlayerStats
 from loguru import logger
 
-async def get_player_statistics(user_id, time_frame=None, user_display_name=None):
-    """Get player statistics for a specific user and time frame."""
+async def get_player_statistics(user_id, time_frame=None, user_display_name=None, guild_id=None):
+    """Get player statistics for a specific user and time frame, filtered by guild_id if provided."""
     try:
         now = datetime.now()
         
@@ -30,8 +30,15 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
         
         async with AsyncSessionLocal() as session:
             async with session.begin():
-                # Get basic player stats if they exist
-                player_stats_query = select(PlayerStats).where(PlayerStats.player_id == user_id)
+                # Get basic player stats if they exist - now with guild_id filter if provided
+                player_stats_query = select(PlayerStats).where(
+                    PlayerStats.player_id == user_id
+                )
+                
+                # Add guild_id filter if provided
+                if guild_id:
+                    player_stats_query = player_stats_query.where(PlayerStats.guild_id == guild_id)
+                
                 player_stats_result = await session.execute(player_stats_query)
                 player_stats = player_stats_result.scalar_one_or_none()
                 
@@ -44,9 +51,9 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                 pattern = f'%"{user_id}"%'  # Pattern to match user_id in JSON string
                 
                 # For SQLite, we need to use json_extract with LIKE to search for values in JSON
-                # UPDATED: Only count completed random drafts
-                drafts_query = text("""
-                    SELECT COUNT(*) FROM draft_sessions 
+                # Build the base query with time frame and session type filters
+                base_query = """
+                    FROM draft_sessions 
                     WHERE (
                         json_extract(sign_ups, '$') LIKE :pattern
                         OR json_extract(team_a, '$') LIKE :pattern
@@ -55,16 +62,25 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                     AND draft_start_time >= :start_date
                     AND session_type = 'random'
                     AND victory_message_id_results_channel IS NOT NULL
-                """)
+                """
                 
-                drafts_played_result = await session.execute(
-                    drafts_query, 
-                    {"pattern": pattern, "start_date": start_date}
-                )
+                # Add guild_id condition if provided
+                if guild_id:
+                    base_query += " AND guild_id = :guild_id"
+                
+                # Count completed drafts
+                drafts_query = text(f"SELECT COUNT(*) {base_query}")
+                
+                # Prepare query parameters
+                query_params = {"pattern": pattern, "start_date": start_date}
+                if guild_id:
+                    query_params["guild_id"] = guild_id
+                
+                drafts_played_result = await session.execute(drafts_query, query_params)
                 drafts_played = drafts_played_result.scalar() or 0
                 
-                # Get matches won - update to only count matches from completed random drafts
-                matches_won_query = text("""
+                # Get matches won - update to include guild_id filter
+                matches_won_query_text = """
                     SELECT COUNT(*) 
                     FROM match_results 
                     WHERE winner_id = :user_id
@@ -73,22 +89,39 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                         WHERE draft_start_time >= :start_date
                         AND session_type = 'random'
                         AND victory_message_id_results_channel IS NOT NULL
-                    )
-                """)
-                matches_won_result = await session.execute(
-                    matches_won_query, 
-                    {"user_id": user_id, "start_date": start_date}
-                )
+                """
+                
+                if guild_id:
+                    matches_won_query_text += " AND guild_id = :guild_id"
+                
+                matches_won_query_text += ")"
+                matches_won_query = text(matches_won_query_text)
+                
+                # Update parameters for matches won query
+                matches_won_params = {"user_id": user_id, "start_date": start_date}
+                if guild_id:
+                    matches_won_params["guild_id"] = guild_id
+                
+                matches_won_result = await session.execute(matches_won_query, matches_won_params)
                 matches_won = matches_won_result.scalar() or 0
                 
-                # First, try to get the display name from any sign_ups entries
-                name_query = text("""
+                # First, try to get the display name from any sign_ups entries, with guild_id filter
+                name_query_text = """
                     SELECT sign_ups FROM draft_sessions 
                     WHERE json_extract(sign_ups, '$') LIKE :pattern
-                    ORDER BY draft_start_time DESC LIMIT 1
-                """)
+                """
                 
-                name_result = await session.execute(name_query, {"pattern": pattern})
+                if guild_id:
+                    name_query_text += " AND guild_id = :guild_id"
+                
+                name_query_text += " ORDER BY draft_start_time DESC LIMIT 1"
+                name_query = text(name_query_text)
+                
+                name_params = {"pattern": pattern}
+                if guild_id:
+                    name_params["guild_id"] = guild_id
+                
+                name_result = await session.execute(name_query, name_params)
                 sign_ups_json = name_result.scalar()
                 
                 # Extract display name from sign_ups JSON
@@ -107,16 +140,25 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                     except Exception as e:
                         logger.error(f"Error parsing sign_ups JSON: {e}")
                 
-                # Get trophies - update to only count completed random drafts
-                trophies_query = text("""
+                # Get trophies with guild_id filter
+                trophies_query_text = """
                     SELECT trophy_drafters FROM draft_sessions 
                     WHERE trophy_drafters IS NOT NULL
                     AND draft_start_time >= :start_date
                     AND session_type = 'random'
                     AND victory_message_id_results_channel IS NOT NULL
-                """)
+                """
                 
-                trophies_result = await session.execute(trophies_query, {"start_date": start_date})
+                if guild_id:
+                    trophies_query_text += " AND guild_id = :guild_id"
+                
+                trophies_query = text(trophies_query_text)
+                
+                trophies_params = {"start_date": start_date}
+                if guild_id:
+                    trophies_params["guild_id"] = guild_id
+                
+                trophies_result = await session.execute(trophies_query, trophies_params)
                 trophies_entries = trophies_result.fetchall()
                 
                 trophies_won = 0
@@ -194,7 +236,7 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                             logger.error(f"Error processing trophy_drafters for alternates: {e}")
                 
                 # Get total matches played - update to only count completed random drafts
-                matches_played_query = text("""
+                matches_played_query_text = """
                     SELECT COUNT(*) 
                     FROM match_results 
                     WHERE (player1_id = :user_id OR player2_id = :user_id)
@@ -203,20 +245,26 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                         WHERE draft_start_time >= :start_date
                         AND session_type = 'random'
                         AND victory_message_id_results_channel IS NOT NULL
-                    )
-                """)
-                matches_played_result = await session.execute(
-                    matches_played_query, 
-                    {"user_id": user_id, "start_date": start_date}
-                )
+                """
+                
+                if guild_id:
+                    matches_played_query_text += " AND guild_id = :guild_id"
+                
+                matches_played_query_text += ")"
+                matches_played_query = text(matches_played_query_text)
+                
+                matches_played_params = {"user_id": user_id, "start_date": start_date}
+                if guild_id:
+                    matches_played_params["guild_id"] = guild_id
+                
+                matches_played_result = await session.execute(matches_played_query, matches_played_params)
                 matches_played = matches_played_result.scalar() or 0
                 
                 # Calculate match win percentage
                 match_win_percentage = (matches_won / matches_played * 100) if matches_played > 0 else 0
                 
-                # ==== TEAM DRAFT WINS ====
-                # Get all draft sessions the user participated in - update for only completed random drafts
-                drafts_query = text("""
+                # Get all draft sessions with guild_id filter
+                drafts_query_text = """
                     SELECT id, session_id, team_a, team_b
                     FROM draft_sessions 
                     WHERE (
@@ -227,13 +275,18 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                     AND draft_start_time >= :start_date
                     AND session_type = 'random'
                     AND victory_message_id_results_channel IS NOT NULL
-                """)
+                """
                 
-                drafts_result = await session.execute(
-                    drafts_query, 
-                    {"pattern": pattern, "start_date": start_date}
-                )
+                if guild_id:
+                    drafts_query_text += " AND guild_id = :guild_id"
                 
+                drafts_query = text(drafts_query_text)
+                
+                drafts_params = {"pattern": pattern, "start_date": start_date}
+                if guild_id:
+                    drafts_params["guild_id"] = guild_id
+                
+                drafts_result = await session.execute(drafts_query, drafts_params)
                 draft_sessions = drafts_result.fetchall()
                 
                 # Initialize counters
@@ -309,8 +362,8 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                 # Calculate team draft win percentage
                 team_draft_win_percentage = (team_drafts_won / team_drafts_played * 100) if team_drafts_played > 0 else 0
                 
-                # Get stats by cube type - update for only completed random drafts
-                cube_query = text("""
+                # Get stats by cube type with guild_id filter
+                cube_query_text = """
                     SELECT cube, COUNT(*) as draft_count 
                     FROM draft_sessions 
                     WHERE (
@@ -322,14 +375,19 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                     AND cube IS NOT NULL
                     AND session_type = 'random'
                     AND victory_message_id_results_channel IS NOT NULL
-                    GROUP BY LOWER(cube)
-                    HAVING COUNT(*) >= 5
-                """)
+                """
                 
-                cube_result = await session.execute(
-                    cube_query, 
-                    {"pattern": pattern, "start_date": start_date}
-                )
+                if guild_id:
+                    cube_query_text += " AND guild_id = :guild_id"
+                
+                cube_query_text += " GROUP BY LOWER(cube) HAVING COUNT(*) >= 5"
+                cube_query = text(cube_query_text)
+                
+                cube_params = {"pattern": pattern, "start_date": start_date}
+                if guild_id:
+                    cube_params["guild_id"] = guild_id
+                
+                cube_result = await session.execute(cube_query, cube_params)
                 cube_data = cube_result.fetchall()
                 
                 # For each cube, get matches played and won
