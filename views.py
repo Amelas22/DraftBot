@@ -654,8 +654,14 @@ class PersistentView(discord.ui.View):
             del PROCESSING_ROOMS_PAIRINGS[session_id]
 
     async def create_team_channel(self, guild, team_name, team_members, team_a=None, team_b=None):
-        draft_category = discord.utils.get(guild.categories, name="Draft Channels")
-        voice_category = discord.utils.get(guild.categories, name="Draft Voice")
+        from config import get_config, is_special_guild
+
+        config = get_config(guild.id)
+        draft_category = discord.utils.get(guild.categories, name=config["categories"]["draft"])
+        voice_category = None
+        if is_special_guild(guild.id) and "voice" in config["categories"]:
+            voice_category = discord.utils.get(guild.categories, name=config["categories"]["voice"])
+        
         session = await get_draft_session(self.draft_session_id)
         if not session:
             print("Draft session not found.")

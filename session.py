@@ -201,6 +201,28 @@ async def get_draft_session(session_id: str):
             draft_session = result.scalars().first()
             return draft_session
         
+async def ensure_guild_id_in_tables():
+    """Ensure all relevant tables have a guild_id column"""
+    tables_to_check = [
+        'draft_sessions', 
+        'match_results',
+        'player_stats',
+        'messages'
+    ]
+    
+    async with engine.begin() as conn:
+        for table in tables_to_check:
+            try:
+                # Check if guild_id column exists
+                query = f"SELECT guild_id FROM {table} LIMIT 1"
+                await conn.execute(query)
+            except Exception as e:
+                if "no such column: guild_id" in str(e):
+                    # Add guild_id column
+                    query = f"ALTER TABLE {table} ADD COLUMN guild_id VARCHAR(64)"
+                    await conn.execute(query)
+                    print(f"Added guild_id column to {table}")
+
 async def re_register_views(bot):
     async with AsyncSessionLocal() as session:
         async with session.begin():

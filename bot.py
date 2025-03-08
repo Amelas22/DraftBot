@@ -4,10 +4,10 @@ import os
 from discord.ext import commands
 from dotenv import load_dotenv
 from database.message_management import setup_sticky_handler
-from session import init_db
+from session import init_db, ensure_guild_id_in_tables
 from modals import CubeSelectionModal
 from utils import cleanup_sessions_task
-from commands import league_commands, scheduled_posts, swiss_draft_commands
+from commands import league_commands, scheduled_posts
 
 
 
@@ -41,6 +41,20 @@ async def main():
         await re_register_teamfinder(bot)
         logger.info("Re-registered team finder")
 
+    @bot.event
+    async def on_guild_join(guild):
+        # Initialize config for the new guild
+        from config import get_config
+        config = get_config(guild.id)
+        # Log the join
+        print(f"Joined new guild: {guild.name} (ID: {guild.id})")
+        
+        # Try to send a welcome message to the system channel if available
+        if guild.system_channel:
+            await guild.system_channel.send(
+                "Thanks for adding the Draft Bot! To set up needed channels and roles, an admin should use `/setup`."
+            )
+
     @bot.slash_command(name='startdraft', description='Start a team draft with random teams', guild_id=None)
     async def start_draft(interaction: discord.Interaction):
         logger.info("Received startdraft command")
@@ -54,14 +68,16 @@ async def main():
     
     await league_commands(bot)
     await scheduled_posts(bot)
-    await swiss_draft_commands(bot)
     await init_db()
+    await ensure_guild_id_in_tables()
     logger.info("Database initialized")
 
     await setup_sticky_handler(bot)
 
     # Run the bot
     await bot.start(TOKEN)
+
+
 
 if __name__ == "__main__":
     import asyncio

@@ -1,15 +1,13 @@
 import discord
-from session import register_team_to_db, Team, AsyncSessionLocal, Match, TeamFinder, WeeklyLimit, DraftSession, remove_team_from_db, TeamRegistration
-from sqlalchemy import select, not_
-from sqlalchemy.orm.attributes import flag_modified
 import aiocron
 import pytz
-import random
+from session import  Team, AsyncSessionLocal, Match, WeeklyLimit, DraftSession
+from sqlalchemy import select, not_
 from datetime import datetime, timedelta
 from collections import Counter
 from player_stats import get_player_statistics, create_stats_embed
 from loguru import logger
-from discord import Option
+from discord.ext import commands
 
 pacific_time_zone = pytz.timezone('America/Los_Angeles')
 cutoff_datetime = pacific_time_zone.localize(datetime(2024, 5, 6, 0, 0))
@@ -54,7 +52,104 @@ async def league_commands(bot):
 
     #             await session.commit()
     #     await ctx.followup.send("Click your timezone below to add your name to that timezone. You can click any name to open a DM with that user to coordiante finding teammates. Clicking the timezone again (once signed up) will remove your name from the list.", ephemeral=True)
+    @bot.slash_command(
+    name="setup", 
+    description="Set up the bot for this server",
+    default_member_permissions=discord.Permissions(administrator=True)
+    )
+    async def setup(ctx):
+        from config import get_config, is_special_guild
+        
+        guild = ctx.guild
+        config = get_config(guild.id)
+        
+        # Create categories
+        draft_category = discord.utils.get(guild.categories, name=config["categories"]["draft"])
+        if not draft_category:
+            draft_category = await guild.create_category(config["categories"]["draft"])
+        
+        # Only create voice category in your guild
+        if is_special_guild(guild.id) and "voice" in config["categories"]:
+            voice_category = discord.utils.get(guild.categories, name=config["categories"]["voice"])
+            if not voice_category:
+                voice_category = await guild.create_category(config["categories"]["voice"])
+        
+        # Create channels
+        channels_created = []
+        for channel_key, channel_name in config["channels"].items():
+            # Skip special channels in non-special guilds
+            if channel_key in ["winston_draft", "role_request", "open_play"] and not is_special_guild(guild.id):
+                continue
+                
+            if not discord.utils.get(guild.text_channels, name=channel_name):
+                channel = await guild.create_text_channel(
+                    name=channel_name, 
+                    category=draft_category
+                )
+                channels_created.append(channel_name)
+        
+        # Create roles
+        roles_created = []
+        for role_key, role_name in config["roles"].items():
+            # Skip special roles in non-special guilds
+            if role_key == "suspected_bot" and not is_special_guild(guild.id):
+                continue
+                
+            if not discord.utils.get(guild.roles, name=role_name):
+                await guild.create_role(name=role_name)
+                roles_created.append(role_name)
+        
+        response = "Setup complete!\n"
+        if channels_created:
+            response += f"Channels created: {', '.join(channels_created)}\n"
+        if roles_created:
+            response += f"Roles created: {', '.join(roles_created)}\n"
+            
+        await ctx.respond(response)
 
+    @bot.slash_command(
+    name="configure", 
+    description="Configure bot settings",
+    default_member_permissions=discord.Permissions(administrator=True)
+    )
+    async def configure(ctx, setting: str, value: str):
+        """
+        Configure bot settings for this server.
+        Examples:
+        /config channels.draft_results new-channel-name
+        /config categories.draft Draft Rooms
+        /config timezone US/Pacific
+        """
+        try:
+            # Import the config module properly
+            from config import get_config
+            
+            # Get the config for this guild
+            guild_config = get_config(ctx.guild.id)
+            
+            # Call the appropriate update method
+            parts = setting.split('.')
+            current = guild_config
+            for i, part in enumerate(parts):
+                if i == len(parts) - 1:
+                    current[part] = value
+                    success = True
+                else:
+                    if part not in current:
+                        current[part] = {}
+                    current = current[part]
+            
+            # Save the config
+            from config import save_config
+            save_config(ctx.guild.id, guild_config)
+            
+            if success:
+                await ctx.respond(f"Setting `{setting}` updated to `{value}`")
+            else:
+                await ctx.respond(f"Failed to update setting. Check your syntax.")
+        except Exception as e:
+            await ctx.respond(f"Error updating config: {e}")
+                
     @bot.slash_command(name="stats", description="Display your draft statistics")
     async def stats(ctx):
         """Display your personal draft statistics."""
@@ -180,6 +275,12 @@ async def league_commands(bot):
 
     @bot.slash_command(name='winston_draft', description='Lists all available slash commands')
     async def winstondraft(interaction: discord.Interaction):
+        from config import is_special_guild, get_config
+    
+        # Only allow this command in your guild
+        if not is_special_guild(interaction.guild_id):
+            await interaction.response.send_message("Winston draft is not available on this server.", ephemeral=True)
+            return
         from utils import create_winston_draft
         await create_winston_draft(bot, interaction)
         await interaction.response.send_message("Queue posted in #winston-draft. Good luck!", ephemeral=True)
@@ -410,19 +511,29 @@ async def league_commands(bot):
 
     @bot.event
     async def on_reaction_add(reaction, user):
+        from config import get_config, is_special_guild
+        
+        # Only run bot detection in your guild
+        if not is_special_guild(reaction.message.guild.id):
+            return
+        
+        config = get_config(reaction.message.guild.id)
+        role_request_channel = config["channels"].get("role_request")
+        
         # Check if the reaction is in the role-request channel
-        if reaction.message.channel.name == 'role-request':
+        if reaction.message.channel.name == role_request_channel:
             # Ensure user is a Member object
             if reaction.message.guild:
                 member = await reaction.message.guild.fetch_member(user.id)
                 # Check if the user has no roles other than @everyone
                 if len(member.roles) == 1:
                     # Find the 'suspected bot' role in the guild
-                    suspected_bot_role = discord.utils.get(member.guild.roles, name='suspected bot')
+                    suspected_bot_role_name = config["roles"].get("suspected_bot")
+                    suspected_bot_role = discord.utils.get(member.guild.roles, name=suspected_bot_role_name)
                     if suspected_bot_role:
                         try:
                             await member.add_roles(suspected_bot_role)
-                            print(f"Assigned 'suspected bot' role to {member.name}")
+                            print(f"Assigned '{suspected_bot_role_name}' role to {member.name}")
                         except discord.Forbidden:
                             print(f"Permission error: Unable to assign roles. Check the bot's role position and permissions.")
                         except discord.HTTPException as e:
