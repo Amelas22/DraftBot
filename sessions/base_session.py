@@ -4,10 +4,14 @@ from session import DraftSession, AsyncSessionLocal
 from datetime import datetime, timedelta
 from views import PersistentView
 import discord
+from services.draft_setup_manager import DraftSetupManager
+import asyncio
 
 class BaseSession:
     def __init__(self, session_details: SessionDetails):
         self.session_details = session_details
+        self.draft_manager = None
+        self.connection_task = None
 
     async def create_draft_session(self, interaction, bot):
         async with AsyncSessionLocal() as session:
@@ -15,8 +19,17 @@ class BaseSession:
                 # Step 1: Set up the draft session
                 new_draft_session = self.setup_draft_session(session)
                 await session.commit()
-
-                # Step 2: Create Embed and Persistent View
+                
+                # Step 2: Set up draft manager and start connection
+                self.draft_manager = DraftSetupManager(
+                    session_id=new_draft_session.session_id,
+                    draft_id=new_draft_session.draft_id,
+                    cube_id=new_draft_session.cube
+                )
+                # Start the connection manager as a background task
+                self.connection_task = asyncio.create_task(self.draft_manager.keep_connection_alive())
+                
+                # Step 3: Create Embed and Persistent View
                 embed = self.create_embed()
                 view = PersistentView(
                     bot=bot,
@@ -27,14 +40,26 @@ class BaseSession:
                 )
                 await interaction.response.send_message(embed=embed, view=view)
 
-                # Step 3: Get the original response message to set as sticky
+                # Step 4: Get the original response message to set as sticky
                 message = await interaction.original_response()
 
-                # Step 4: Update the draft session with message information
+                # Step 5: Update the draft session with message information
                 await self.update_message_info(new_draft_session, message)
 
-                # Step 5: Make the message sticky (replace pinning with sticky logic)
+                # Step 6: Make the message sticky
                 await make_message_sticky(interaction.guild.id, message.channel.id, message, view)
+
+    async def cleanup(self):
+        """Call this method when the draft session needs to be cleaned up"""
+        if self.connection_task and not self.connection_task.done():
+            self.connection_task.cancel()
+            try:
+                await self.connection_task
+            except asyncio.CancelledError:
+                pass
+
+        if self.draft_manager and self.draft_manager.sio.connected:
+            await self.draft_manager.sio.disconnect()
 
     def setup_draft_session(self, session):
         new_draft_session = DraftSession(
