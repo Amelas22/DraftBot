@@ -7,54 +7,113 @@ from models.session_details import SessionDetails
 
 from sessions import RandomSession, PremadeSession, SwissSession, BaseSession
 
-class CubeSelectionModal(discord.ui.Modal):
-    def __init__(self, session_type: str, *args, **kwargs) -> None:
-        super().__init__(title="Cube Selection", *args, **kwargs)
+class CubeDraftModal(discord.ui.Modal):
+    @classmethod
+    def create_if_needed(cls, session_type: str, cube_choice: str) -> Optional['CubeDraftModal']:
+        """Create a modal only if it would have input fields."""
+        modal = cls(session_type, cube_choice)
+        return modal if modal.children else None
+
+    def __init__(self, session_type: str, cube_choice: str, *args, **kwargs) -> None:
+        super().__init__(title="Draft Setup", *args, **kwargs)
         self.session_type: str = session_type
-        self.add_item(discord.ui.InputText(label="Cube Name", placeholder="LSVCube, AlphaFrog, MOCS24, or your choice", custom_id="cube_name_input"))
+        self.cube_choice = cube_choice
+        
+        if cube_choice == "custom":
+            self.add_item(discord.ui.InputText(
+                label="Custom Cube Name",
+                placeholder="Enter your cube name",
+                custom_id="cube_name_input"
+            ))
+            
         if self.session_type == "premade":
-            self.add_item(discord.ui.InputText(label="Team A Name", placeholder="Enter Team A Name", custom_id="team_a_input"))
-            self.add_item(discord.ui.InputText(label="Team B Name", placeholder="Enter Team B Name", custom_id="team_b_input"))
+            self.add_item(discord.ui.InputText(
+                label="Team A Name", 
+                placeholder="Enter Team A Name", 
+                custom_id="team_a_input"
+            ))
+            self.add_item(discord.ui.InputText(
+                label="Team B Name", 
+                placeholder="Enter Team B Name", 
+                custom_id="team_b_input"
+            ))
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        bot = interaction.client
-        # Create and configure session details from user input
         session_details: SessionDetails = self.configure_session_details(interaction)
-        # Handle the scheduled session type with a specific message
-        if self.session_type == "schedule":
-            from league import InitialPostView
-            initial_view = InitialPostView(
-                command_type=self.session_type, 
-                team_id=1, 
-                cube_choice=session_details.cube_choice
-            )
-            await interaction.response.send_message(
-                "Post a scheduled draft. Select a Timezone.", 
-                view=initial_view, 
-                ephemeral=True
-            )
-            return
-        # Delegate to the correct session type
-        session_instance: BaseSession = self.create_session_instance(session_details)
-        await session_instance.create_draft_session(interaction, bot)
+        await handle_draft_session(interaction, self.session_type, session_details)
 
     def configure_session_details(self, interaction: discord.Interaction) -> SessionDetails:
         """Prepare the session details based on the user input."""
         details: SessionDetails = SessionDetails(interaction)
-        details.cube_choice = self.children[0].value
+        
+        # If custom cube, get name from input, otherwise use preset choice
+        if hasattr(self, 'cube_choice'):
+            details.cube_choice = self.cube_choice
+        else:
+            details.cube_choice = self.children[0].value
 
         if self.session_type == "premade":
-            details.team_a_name = self.children[1].value or "Team A"
-            details.team_b_name = self.children[2].value or "Team B"
+            input_offset = 0 if hasattr(self, 'cube_choice') else 1
+            details.team_a_name = self.children[input_offset].value or "Team A"
+            details.team_b_name = self.children[input_offset + 1].value or "Team B"
 
         return details
 
-    def create_session_instance(self, session_details: SessionDetails) -> BaseSession:
-        """Dynamically create the appropriate session instance based on the session type."""
-        session_class: type = {
-            "premade": PremadeSession,
-            "swiss": SwissSession,
-            'random': RandomSession,
-        }.get(self.session_type, BaseSession)  # Default to BaseSession if type is not recognized
+class CubeDraftSelectionView(discord.ui.View):
+    def __init__(self, session_type: str):
+        super().__init__()
+        self.session_type = session_type
+        
+        self.cube_select = discord.ui.Select(
+            placeholder="Select a Cube",
+            options=[
+                discord.SelectOption(label="LSVCube", value="LSVCube"),
+                discord.SelectOption(label="AlphaFrog", value="AlphaFrog"),
+                discord.SelectOption(label="modovintage", value="modovintage"),
+                discord.SelectOption(label="LSVRetro", value="LSVRetro"),
+                discord.SelectOption(label="PowerMack", value="PowerMack"),
+                discord.SelectOption(label="Custom Cube...", value="custom")
+            ]
+        )
+        self.cube_select.callback = self.cube_select_callback
+        self.add_item(self.cube_select)
 
-        return session_class(session_details)
+    async def cube_select_callback(self, interaction: discord.Interaction):
+        cube_choice = self.cube_select.values[0]
+        
+        if modal := CubeDraftModal.create_if_needed(self.session_type, cube_choice):
+            await interaction.response.send_modal(modal)
+        else:
+            session_details = SessionDetails(interaction)
+            session_details.cube_choice = cube_choice
+            await handle_draft_session(interaction, self.session_type, session_details)
+
+# Shared utility functions
+def create_session_instance(session_type: str, session_details: SessionDetails) -> BaseSession:
+    """Dynamically create the appropriate session instance based on the session type."""
+    session_class: type = {
+        "premade": PremadeSession,
+        "swiss": SwissSession,
+        'random': RandomSession,
+    }.get(session_type, BaseSession)
+
+    return session_class(session_details)
+
+async def handle_draft_session(interaction: discord.Interaction, session_type: str, session_details: SessionDetails) -> None:
+    """Handle either scheduled or immediate draft sessions."""
+    if session_type == "schedule":
+        from league import InitialPostView
+        initial_view = InitialPostView(
+            command_type=session_type,
+            team_id=1,
+            cube_choice=session_details.cube_choice
+        )
+        await interaction.response.send_message(
+            "Post a scheduled draft. Select a Timezone.",
+            view=initial_view,
+            ephemeral=True
+        )
+        return
+
+    session_instance = create_session_instance(session_type, session_details)
+    await session_instance.create_draft_session(interaction, interaction.client)

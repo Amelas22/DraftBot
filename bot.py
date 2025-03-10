@@ -5,7 +5,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from database.message_management import setup_sticky_handler
 from session import init_db, ensure_guild_id_in_tables
-from modals import CubeSelectionModal
+from modals import CubeDraftSelectionView
 from utils import cleanup_sessions_task
 from commands import league_commands, scheduled_posts
 
@@ -58,12 +58,13 @@ async def main():
     @bot.slash_command(name='startdraft', description='Start a team draft with random teams', guild_id=None)
     async def start_draft(interaction: discord.Interaction):
         logger.info("Received startdraft command")
-        await interaction.response.send_modal(CubeSelectionModal(session_type="random"))
-
+        view = CubeDraftSelectionView(session_type="random")
+        await interaction.response.send_message("Select a cube:", view=view, ephemeral=True)
     @bot.slash_command(name='premadedraft', description='Start a team draft with premade teams', guild_id=None)
     async def premade_draft(interaction: discord.Interaction):
         logger.info("Received premadedraft command")
-        await interaction.response.send_modal(CubeSelectionModal(session_type="premade"))
+        view = CubeDraftSelectionView(session_type="premade")
+        await interaction.response.send_message("Select a cube:", view=view, ephemeral=True)
 
     
     await league_commands(bot)
