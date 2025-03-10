@@ -670,45 +670,33 @@ class PersistentView(discord.ui.View):
             return
         channel_name = f"{team_name}-Chat-{session.draft_id}"
 
-        # Retrieve the "Cube Overseer" role
-        overseer_role = discord.utils.get(guild.roles, name="Cube Overseer")
-        development_role = discord.utils.get(guild.roles, name="Developer")
+        # Get the admin role from config instead of hardcoding role names
+        admin_role_name = config["roles"].get("admin")
+        admin_role = discord.utils.get(guild.roles, name=admin_role_name) if admin_role_name else None
         
-         # Initialize an empty list to hold all special role members
-        all_special_role_members = []
-
-        # If the roles exist, add their members to the list, avoiding duplicates
-        if overseer_role:
-            all_special_role_members.extend(overseer_role.members)
-        if development_role:
-            all_special_role_members.extend(development_role.members)
-
-        # Remove duplicates by converting the list to a set and back to a list
-        all_special_role_members = list(set(all_special_role_members))
-
         # Basic permissions overwrites for the channel
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             guild.me: discord.PermissionOverwrite(read_messages=True)
         }
 
-        if team_name in ["Team-A", "Team-B"]:
-            # Apply logic to both "Cube Overseer" and "Development" role members
-            for member in all_special_role_members:
-                # Check if the member is part of the current team or not
-                if member.id not in team_a and member.id not in team_b:
-                    overwrites[member] = discord.PermissionOverwrite(read_messages=True)
-                elif (team_name == "Team-A" and member.id in team_b) or (team_name == "Team-B" and member.id in team_a):
-                    # Remove access for members who are part of the other team
-                    overwrites[member] = discord.PermissionOverwrite(read_messages=False)
+        # For team-specific channels (Red-Team or Blue-Team)
+        if team_name in ["Red-Team", "Blue-Team"]:
+            if admin_role:
+                # First, give all admins access by default
+                overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True)
+                
+                # Then, for each admin who is participating in the draft, adjust permissions individually
+                for member in admin_role.members:
+                    # If admin is on the opposite team, deny access to this team's channel
+                    if (team_name == "Red-Team" and member.id in team_b) or (team_name == "Blue-Team" and member.id in team_a):
+                        overwrites[member] = discord.PermissionOverwrite(read_messages=False)
         else:
-            # For the "Draft-chat" channel, add read permissions for both roles if they exist
-            if overseer_role:
-                overwrites[overseer_role] = discord.PermissionOverwrite(read_messages=True)
-            if development_role:
-                overwrites[development_role] = discord.PermissionOverwrite(read_messages=True)
+            # For the "Draft-chat" channel, add read permissions for admin role
+            if admin_role:
+                overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True)
 
-        # Add team members with read permission. This specifically allows these members, overriding role-based permissions if needed.
+        # Add team members with read permission (this overrides any role-based permissions)
         for member in team_members:
             overwrites[member] = discord.PermissionOverwrite(read_messages=True)
         
