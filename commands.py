@@ -93,14 +93,6 @@ async def league_commands(bot):
         default="Just me"
     )
     async def stats(ctx, visibility: str = "Just me"):
-    @discord.option(
-        "visibility",
-        description="Who can see the stats?",
-        required=False,
-        choices=["Just me", "Everyone"],
-        default="Just me"
-    )
-    async def stats(ctx, visibility: str = "Just me"):
         """Display your personal draft statistics."""
         # Convert choice to boolean for internal logic
         hidden_message = visibility == "Just me"
@@ -124,7 +116,6 @@ async def league_commands(bot):
             await ctx.followup.send(embed=embed, ephemeral=hidden_message)
         except Exception as e:
             logger.error(f"Error in stats command: {e}")
-            await ctx.followup.send("An error occurred while fetching your stats. Please try again later.", ephemeral=True)
             await ctx.followup.send("An error occurred while fetching your stats. Please try again later.", ephemeral=True)
             
     # @bot.slash_command(name="record", description="Display your head-to-head record against another player")
