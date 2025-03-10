@@ -85,9 +85,20 @@ async def league_commands(bot):
 
                 
     @bot.slash_command(name="stats", description="Display your draft statistics")
-    async def stats(ctx):
+    @discord.option(
+        "visibility",
+        description="Who can see the stats?",
+        required=False,
+        choices=["Just me", "Everyone"],
+        default="Just me"
+    )
+    async def stats(ctx, visibility: str = "Just me"):
         """Display your personal draft statistics."""
-        await ctx.defer()
+        # Convert choice to boolean for internal logic
+        hidden_message = visibility == "Just me"
+        
+        # Only defer publicly if stats are meant to be public
+        await ctx.defer(ephemeral=hidden_message)
         
         user = ctx.author
         user_id = str(user.id)
@@ -102,10 +113,10 @@ async def league_commands(bot):
             
             # Create and send the embed
             embed = await create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime)
-            await ctx.followup.send(embed=embed)
+            await ctx.followup.send(embed=embed, ephemeral=hidden_message)
         except Exception as e:
             logger.error(f"Error in stats command: {e}")
-            await ctx.followup.send("An error occurred while fetching your stats. Please try again later.")
+            await ctx.followup.send("An error occurred while fetching your stats. Please try again later.", ephemeral=True)
             
     # @bot.slash_command(name="record", description="Display your head-to-head record against another player")
     # @discord.option("opponent_name", description="The display name of the opponent", required=True)
