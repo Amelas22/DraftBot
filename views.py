@@ -447,42 +447,24 @@ class PersistentView(discord.ui.View):
 
         # Optionally update the message view to reflect the new team compositions
         await self.update_team_view(interaction)
-    
 
     async def cancel_draft_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-
         session = await get_draft_session(self.draft_session_id)
         if not session:
-            await interaction.followup.send("The draft session could not be found.", ephemeral=True)
+            await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
             return
+        
         user_id = str(interaction.user.id)
-        sign_ups = session.sign_ups or {}  # Ensure we have a dictionary
+        sign_ups = session.sign_ups or {}  
 
         # Check if the user is in the sign-up list or if the sign-up list is empty
-        if sign_ups and user_id not in sign_ups.keys():
-            await interaction.followup.send("You do not have permissions to cancel this draft.", ephemeral=True)
+        if user_id not in sign_ups.keys():
+            await interaction.response.send_message("You do not have permissions to cancel this draft.", ephemeral=True)
             return
 
-        # Delete the draft message if it exists
-        bot = interaction.client
-        channel = bot.get_channel(int(session.draft_channel_id))
-        if channel:
-            try:
-                message = await channel.fetch_message(int(session.message_id))
-                await message.delete()
-            except Exception as e:
-                print(f"Failed to delete draft message: {e}")
-
-        # Remove the session from the database
-        async with AsyncSessionLocal() as db_session:
-            async with db_session.begin():
-                await db_session.delete(session)
-                await db_session.commit()
-
-        # Send a confirmation message using followup.send
-        await interaction.followup.send("The draft has been canceled.", ephemeral=True)
-
+        # Show confirmation dialog
+        confirm_view = CancelConfirmationView(self.bot, self.draft_session_id, interaction.user.display_name)
+        await interaction.response.send_message("Are you sure you want to cancel this draft?", view=confirm_view, ephemeral=True)    
 
     async def update_team_view(self, interaction: discord.Interaction):
         session = await get_draft_session(self.draft_session_id)
@@ -598,8 +580,8 @@ class PersistentView(discord.ui.View):
                         all_members = team_a_members + team_b_members
 
                         session.draft_chat_channel = str(await self.create_team_channel(guild, "Draft", all_members, session.team_a, session.team_b))
-                        await self.create_team_channel(guild, "Team-A", team_a_members, session.team_a, session.team_b)
-                        await self.create_team_channel(guild, "Team-B", team_b_members, session.team_a, session.team_b)
+                        await self.create_team_channel(guild, "Red-Team", team_a_members, session.team_a, session.team_b)
+                        await self.create_team_channel(guild, "Blue-Team", team_b_members, session.team_a, session.team_b)
 
                         # Fetch the channel object using the ID
                         draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
@@ -670,45 +652,33 @@ class PersistentView(discord.ui.View):
             return
         channel_name = f"{team_name}-Chat-{session.draft_id}"
 
-        # Retrieve the "Cube Overseer" role
-        overseer_role = discord.utils.get(guild.roles, name="Cube Overseer")
-        development_role = discord.utils.get(guild.roles, name="Developer")
+        # Get the admin role from config instead of hardcoding role names
+        admin_role_name = config["roles"].get("admin")
+        admin_role = discord.utils.get(guild.roles, name=admin_role_name) if admin_role_name else None
         
-         # Initialize an empty list to hold all special role members
-        all_special_role_members = []
-
-        # If the roles exist, add their members to the list, avoiding duplicates
-        if overseer_role:
-            all_special_role_members.extend(overseer_role.members)
-        if development_role:
-            all_special_role_members.extend(development_role.members)
-
-        # Remove duplicates by converting the list to a set and back to a list
-        all_special_role_members = list(set(all_special_role_members))
-
         # Basic permissions overwrites for the channel
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             guild.me: discord.PermissionOverwrite(read_messages=True)
         }
 
-        if team_name in ["Team-A", "Team-B"]:
-            # Apply logic to both "Cube Overseer" and "Development" role members
-            for member in all_special_role_members:
-                # Check if the member is part of the current team or not
-                if member.id not in team_a and member.id not in team_b:
-                    overwrites[member] = discord.PermissionOverwrite(read_messages=True)
-                elif (team_name == "Team-A" and member.id in team_b) or (team_name == "Team-B" and member.id in team_a):
-                    # Remove access for members who are part of the other team
-                    overwrites[member] = discord.PermissionOverwrite(read_messages=False)
+        # For team-specific channels (Red-Team or Blue-Team)
+        if team_name in ["Red-Team", "Blue-Team"]:
+            if admin_role:
+                # First, give all admins access by default
+                overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True)
+                
+                # Then, for each admin who is participating in the draft, adjust permissions individually
+                for member in admin_role.members:
+                    # If admin is on the opposite team, deny access to this team's channel
+                    if (team_name == "Red-Team" and member.id in team_b) or (team_name == "Blue-Team" and member.id in team_a):
+                        overwrites[member] = discord.PermissionOverwrite(read_messages=False)
         else:
-            # For the "Draft-chat" channel, add read permissions for both roles if they exist
-            if overseer_role:
-                overwrites[overseer_role] = discord.PermissionOverwrite(read_messages=True)
-            if development_role:
-                overwrites[development_role] = discord.PermissionOverwrite(read_messages=True)
+            # For the "Draft-chat" channel, add read permissions for admin role
+            if admin_role:
+                overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True)
 
-        # Add team members with read permission. This specifically allows these members, overriding role-based permissions if needed.
+        # Add team members with read permission (this overrides any role-based permissions)
         for member in team_members:
             overwrites[member] = discord.PermissionOverwrite(read_messages=True)
         
@@ -1115,3 +1085,52 @@ async def update_draft_message(bot, session_id):
 
     except Exception as e:
         logger.exception(f"Failed to update message for session {session_id}. Error: {e}")
+
+
+class CancelConfirmationView(discord.ui.View):
+    def __init__(self, bot, draft_session_id, user_display_name):
+        super().__init__(timeout=60)  # 60 second timeout
+        self.bot = bot
+        self.draft_session_id = draft_session_id
+        self.user_display_name = user_display_name
+
+    @discord.ui.button(label="Yes, Cancel Draft", style=discord.ButtonStyle.danger)
+    async def confirm_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+        # Disable buttons
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+        
+        # Get session to proceed with cancellation
+        session = await get_draft_session(self.draft_session_id)
+        if not session:
+            await interaction.followup.send("The draft session could not be found.", ephemeral=True)
+            return
+        
+        # First, announce the cancellation in the channel
+        channel = self.bot.get_channel(int(session.draft_channel_id))
+        if channel:
+            await channel.send(f"User **{self.user_display_name}** has cancelled the draft.")
+        
+        # Then delete the message
+        if channel:
+            try:
+                message = await channel.fetch_message(int(session.message_id))
+                await message.delete()
+            except Exception as e:
+                print(f"Failed to delete draft message: {e}")
+        
+        # Remove from database
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                await db_session.delete(session)
+                await db_session.commit()
+        
+        await interaction.followup.send("The draft has been canceled.", ephemeral=True)
+
+    @discord.ui.button(label="No, Keep Draft", style=discord.ButtonStyle.secondary)
+    async def cancel_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+        # Disable buttons
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="Draft cancellation aborted.", view=self)

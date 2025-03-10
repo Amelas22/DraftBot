@@ -19,6 +19,7 @@ class PremadeSession(BaseSession):
         )
         color = discord.Color.blue()
         embed = discord.Embed(title=title, description=description, color=color)
+
         embed.set_thumbnail(url=self.get_thumbnail_url())
         
         embed.add_field(

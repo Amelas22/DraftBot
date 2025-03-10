@@ -14,7 +14,9 @@ class RandomSession(BaseSession):
         )
         embed = Embed(title=title, description=description, color=Color.dark_magenta())
         embed.add_field(name="Sign-Ups", value="No players yet.", inline=False)
+
         embed.set_thumbnail(url=self.get_thumbnail_url())
+  
         return embed
 
     def get_session_type(self):
