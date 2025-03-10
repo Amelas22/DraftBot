@@ -633,7 +633,8 @@ class PersistentView(discord.ui.View):
                         except discord.HTTPException as e:
                             print(f"Failed to delete message {original_message_id}: {e}")
 
-
+                    session.deletion_time = datetime.now() + timedelta(days=7)
+                    
                     await db_session.commit()
                 # Execute Post Pairings
                 await post_pairings(bot, guild, session.session_id)

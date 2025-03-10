@@ -534,7 +534,8 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 if draft_session.tracked_draft and draft_session.premade_match_id is not None:
                     await update_match_db_with_wins_winner(draft_session.premade_match_id, team_a_wins, team_b_wins)
                 gap = abs(team_a_wins - team_b_wins)
-
+                
+                draft_session.deletion_time = datetime.now() + timedelta(hours=2)
                 embed = await generate_draft_summary_embed(bot, draft_session_id)
                 three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
                 embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
