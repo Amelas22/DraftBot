@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Union
 import discord
 from sqlalchemy import JSON, Column, Integer, String, Boolean, Float, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +12,7 @@ import asyncio
 STICKY_MESSAGE_BUFFER = 8
 INACTIVITY_THRESHOLD = 120  # 120 seconds (2 minutes) of inactivity
 INACTIVITY_CHECK_INTERVAL = 60  # Check for inactive channels every 60 seconds
+DRAFT_NOTIFICATION_CHANNEL = "wheres-the-draft"  # Name of the channel to post draft links
 
 class Message(Base):
     """Represents a message stored in the database, potentially a sticky message."""
@@ -26,6 +27,7 @@ class Message(Base):
     is_sticky = Column(Boolean, default=False)
     message_count = Column(Integer, default=0)
     last_activity = Column(Float, default=0.0)  # Timestamp of last message in channel
+    notification_message_id = Column(String(64), nullable=True)  # ID of the notification message in wheres-the-draft channel
 
     def __repr__(self) -> str:
         return (
@@ -60,6 +62,77 @@ async def update_draft_session_message(draft_session_id: str, message_id: str, s
     draft_session.message_id = message_id
     session.add(draft_session)
     await session.commit()
+
+
+async def find_notification_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
+    """Find the notification channel in the guild if it exists."""
+    for channel in guild.channels:
+        if isinstance(channel, discord.TextChannel) and channel.name.lower() == DRAFT_NOTIFICATION_CHANNEL:
+            return channel
+    return None
+
+
+async def find_cube_drafters_role(guild: discord.Guild) -> Optional[discord.Role]:
+    """Find the Cube Drafters role in the guild if it exists."""
+    for role in guild.roles:
+        if role.name.lower() == "cube drafters":
+            return role
+    return None
+
+
+async def post_or_update_notification(
+    bot: discord.Client, 
+    guild_id: str, 
+    draft_channel_id: str, 
+    sticky_message_id: str, 
+    notification_message_id: Optional[str], 
+    session: AsyncSession
+) -> Optional[str]:
+    """Post or update a notification message in the notification channel."""
+    try:
+        # Fetch the guild and check if notification channel exists
+        guild = bot.get_guild(int(guild_id))
+        if not guild:
+            guild = await bot.fetch_guild(int(guild_id))
+        
+        notification_channel = await find_notification_channel(guild)
+        if not notification_channel:
+            logger.info(f"Notification channel '{DRAFT_NOTIFICATION_CHANNEL}' not found in guild {guild_id}")
+            return None
+        
+        # Create message content with link to draft
+        draft_channel = await bot.fetch_channel(int(draft_channel_id))
+        # Use Discord's native message link format
+        message_link = f"https://discord.com/channels/{guild_id}/{draft_channel_id}/{sticky_message_id}"
+        
+        content = f"{message_link}: Looking for Drafters"
+        
+        # If this is the first notification, add a mention to the Cube Drafters role
+        if not notification_message_id:
+            cube_drafters_role = await find_cube_drafters_role(guild)
+            if cube_drafters_role:
+                content = f"{cube_drafters_role.mention} {content}"
+        
+        # Either update existing notification or create a new one
+        if notification_message_id:
+            try:
+                notification_message = await notification_channel.fetch_message(int(notification_message_id))
+                await notification_message.edit(content=content)
+                logger.info(f"Updated notification message in channel '{DRAFT_NOTIFICATION_CHANNEL}'")
+                return notification_message_id
+            except discord.NotFound:
+                logger.info(f"Previous notification message not found. Creating a new one.")
+                notification_message_id = None
+        
+        if not notification_message_id:
+            new_notification = await notification_channel.send(content=content)
+            logger.info(f"Posted new notification message in channel '{DRAFT_NOTIFICATION_CHANNEL}'")
+            return str(new_notification.id)
+            
+    except Exception as e:
+        logger.error(f"Error posting/updating notification: {str(e)}")
+    
+    return None
 
 
 async def handle_sticky_message_update(sticky_message: Message, bot: discord.Client, session: AsyncSession) -> None:
@@ -104,6 +177,18 @@ async def handle_sticky_message_update(sticky_message: Message, bot: discord.Cli
     sticky_message.view_metadata = view_metadata  # Save the updated metadata
     sticky_message.message_count = 0  # Reset message count after update
     sticky_message.last_activity = time.time()  # Reset last activity timestamp
+    
+    # Update the notification message in the wheres-the-draft channel
+    new_notification_id = await post_or_update_notification(
+        bot, 
+        sticky_message.guild_id, 
+        sticky_message.channel_id, 
+        sticky_message.message_id, 
+        sticky_message.notification_message_id,
+        session
+    )
+    if new_notification_id:
+        sticky_message.notification_message_id = new_notification_id
     
     # Update the draft session directly without calling update_draft_session_message
     if draft_session:
@@ -192,15 +277,18 @@ async def make_message_sticky(
             logger.info(f"Pinned message ID {message.id} in channel {channel_id} as sticky.")
 
         current_time = time.time()
+        
+        # Prepare the sticky message record
         if existing_sticky:
             existing_sticky.message_id = str(message.id)
             existing_sticky.content = message.content
             existing_sticky.view_metadata = view_metadata
             existing_sticky.message_count = 0  # Reset counter on update
             existing_sticky.last_activity = current_time  # Initialize activity timestamp
+            sticky_message = existing_sticky
             logger.info(f"Updated sticky message in database for channel {channel_id}.")
         else:
-            new_message = Message(
+            sticky_message = Message(
                 guild_id=guild_id,
                 channel_id=channel_id,
                 message_id=str(message.id),
@@ -210,9 +298,22 @@ async def make_message_sticky(
                 message_count=0,  # Initialize counter
                 last_activity=current_time  # Initialize activity timestamp
             )
-            session.add(new_message)
+            session.add(sticky_message)
             logger.info(f"Created new sticky message entry for channel {channel_id}.")
-
+        
+        # Post notification in wheres-the-draft channel if it exists
+        bot = message.guild._state._get_client()
+        notification_message_id = await post_or_update_notification(
+            bot,
+            guild_id,
+            channel_id,
+            str(message.id),
+            None,  # First post, no existing notification message
+            session
+        )
+        if notification_message_id:
+            sticky_message.notification_message_id = notification_message_id
+        
         await session.commit()
         logger.info(f"Sticky message ID {message.id} committed for channel {channel_id}")
 
@@ -223,6 +324,18 @@ async def remove_sticky_message(message: discord.Message) -> None:
         sticky_message = await fetch_sticky_message(str(message.channel.id), session)
         if not sticky_message or sticky_message.message_id != str(message.id):
             return
+        
+        # If there's a notification message, try to delete it
+        if sticky_message.notification_message_id:
+            try:
+                guild = message.guild
+                notification_channel = await find_notification_channel(guild)
+                if notification_channel:
+                    notification_msg = await notification_channel.fetch_message(int(sticky_message.notification_message_id))
+                    await notification_msg.delete()
+                    logger.info(f"Deleted notification message with ID {sticky_message.notification_message_id}")
+            except Exception as e:
+                logger.error(f"Error deleting notification message: {str(e)}")
 
         await session.delete(sticky_message)
         logger.info(f"Removed sticky message with ID {message.id} from channel {message.channel.id} in database.")
