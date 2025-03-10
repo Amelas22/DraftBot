@@ -598,8 +598,8 @@ class PersistentView(discord.ui.View):
                         all_members = team_a_members + team_b_members
 
                         session.draft_chat_channel = str(await self.create_team_channel(guild, "Draft", all_members, session.team_a, session.team_b))
-                        await self.create_team_channel(guild, "Team-A", team_a_members, session.team_a, session.team_b)
-                        await self.create_team_channel(guild, "Team-B", team_b_members, session.team_a, session.team_b)
+                        await self.create_team_channel(guild, "Red-Team", team_a_members, session.team_a, session.team_b)
+                        await self.create_team_channel(guild, "Blue-Team", team_b_members, session.team_a, session.team_b)
 
                         # Fetch the channel object using the ID
                         draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
