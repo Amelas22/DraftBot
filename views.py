@@ -372,8 +372,9 @@ class PersistentView(discord.ui.View):
                     color=discord.Color.dark_gold() if session.session_type == "swiss" else discord.Color.blue()
                 )
                 if session.session_type != 'swiss':
-                    embed.add_field(name="Team A" if session.session_type == "random" else f"{session.team_a_name}", value="\n".join(team_a_display_names), inline=True)
-                    embed.add_field(name="Team B" if session.session_type == "random" else f"{session.team_b_name}", value="\n".join(team_b_display_names), inline=True)
+                    # Change to Team Red and Team Blue with emojis
+                    embed.add_field(name="🔴 Team Red" if session.session_type == "random" else f"{session.team_a_name}", value="\n".join(team_a_display_names), inline=True)
+                    embed.add_field(name="🔵 Team Blue" if session.session_type == "random" else f"{session.team_b_name}", value="\n".join(team_b_display_names), inline=True)
                 embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
 
                 # Iterate over the view's children (buttons) to update their disabled status
@@ -634,7 +635,7 @@ class PersistentView(discord.ui.View):
                             print(f"Failed to delete message {original_message_id}: {e}")
 
                     session.deletion_time = datetime.now() + timedelta(days=7)
-                    
+
                     await db_session.commit()
                 # Execute Post Pairings
                 await post_pairings(bot, guild, session.session_id)
@@ -845,7 +846,7 @@ async def create_pairings_view(bot, guild, session_id, match_results):
             match_id=match_result.id,  
             match_number=match_result.match_number,
             label=f"Match {match_result.match_number} Results",
-            style=discord.ButtonStyle.primary,
+            style=discord.ButtonStyle.secondary,
             row=None  
         )
         view.add_item(button)
@@ -991,13 +992,26 @@ class MatchResultSelect(Select):
                 if match_result.match_number == match_number:
                     player1, player2 = guild.get_member(int(match_result.player1_id)), guild.get_member(int(match_result.player2_id))
                     player1_name, player2_name = player1.display_name if player1 else 'Unknown', player2.display_name if player2 else 'Unknown'
-                    updated_value = f"**Match {match_result.match_number}**\n{player1_name}: {match_result.player1_wins} wins\n{player2_name}: {match_result.player2_wins} wins"
+                    
+                    # Determine which team won
+                    winning_team_emoji = ""
+                    if match_result.winner_id:
+                        # Get draft session to check which team the winner belongs to
+                        draft_session_result = await session.execute(select(DraftSession).filter_by(session_id=draft_session_id))
+                        draft_session = draft_session_result.scalar_one_or_none()
+                        
+                        if draft_session and match_result.winner_id in draft_session.team_a:
+                            winning_team_emoji = "🔴 "  # Red emoji for Team A
+                        elif draft_session and match_result.winner_id in draft_session.team_b:
+                            winning_team_emoji = "🔵 "  # Blue emoji for Team B
+                    
+                    # Update the field with the winning team emoji
+                    updated_value = f"{winning_team_emoji}**Match {match_result.match_number}**\n{player1_name}: {match_result.player1_wins} wins\n{player2_name}: {match_result.player2_wins} wins"
                     
                     for i, field in enumerate(embed.fields):
                         if f"**Match {match_result.match_number}**" in field.value:
                             embed.set_field_at(i, name=field.name, value=updated_value, inline=field.inline)
                             break
-
             new_view = await self.create_updated_view_for_pairings_message(bot, guild.id, draft_session_id, pairing_message_id)
 
             # Edit the message with the updated embed and view
@@ -1011,6 +1025,10 @@ class MatchResultSelect(Select):
 
         view = discord.ui.View(timeout=None)
         async with AsyncSessionLocal() as session:
+            # Fetch draft session
+            draft_session_result = await session.execute(select(DraftSession).filter_by(session_id=draft_session_id))
+            draft_session = draft_session_result.scalar_one_or_none()
+            
             # Fetch MatchResults associated with this specific pairing_message_id
             stmt = select(MatchResult).where(
                 MatchResult.session_id == draft_session_id,
@@ -1020,23 +1038,28 @@ class MatchResultSelect(Select):
             match_results = result.scalars().all()
 
             for match_result in match_results:
-                # Check if a winner has been reported for this match.
-                has_winner_reported = match_result.winner_id is not None
-
-                # Determine the button style: grey if a winner has been reported, otherwise primary.
-                button_style = discord.ButtonStyle.grey if has_winner_reported else discord.ButtonStyle.primary
-
-                # Create a button for each match. Assume MatchResultButton class exists and works as intended.
+                # Determine button style based on winning team
+                button_style = discord.ButtonStyle.secondary  # Default style if no winner
+                
+                if match_result.winner_id:
+                    if draft_session and match_result.winner_id in draft_session.team_a:
+                        button_style = discord.ButtonStyle.danger  # Red for Team A
+                    elif draft_session and match_result.winner_id in draft_session.team_b:
+                        button_style = discord.ButtonStyle.blurple  # Blue for Team B
+                    else:
+                        button_style = discord.ButtonStyle.grey  # Fallback
+                
+                # Create a button with the appropriate style
                 button = MatchResultButton(
                     bot=bot,
                     session_id=draft_session_id,
-                    match_id=match_result.id,  # Ensure this correctly targets the unique identifier for the MatchResult.
+                    match_id=match_result.id,
                     match_number=match_result.match_number,
                     label=f"Match {match_result.match_number} Results",
                     style=button_style
                 )
 
-                # Add the newly created button to the view.
+                # Add the newly created button to the view
                 view.add_item(button)
 
         return view

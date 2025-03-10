@@ -278,12 +278,13 @@ async def generate_draft_summary_embed(bot, draft_session_id):
             title, description, discord_color = await determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, half_matches, total_matches)
 
             embed = discord.Embed(title=title, description=description, color=discord_color)
-            embed.add_field(name="Team A" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"{draft_session.team_a_name}", value="\n".join(team_a_names), inline=True)
-            embed.add_field(name="Team B" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"{draft_session.team_b_name}", value="\n".join(team_b_names), inline=True)
+            # Change team names to Red and Blue with emojis
+            embed.add_field(name="🔴 Team Red" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"{draft_session.team_a_name}", value="\n".join(team_a_names), inline=True)
+            embed.add_field(name="🔵 Team Blue" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"{draft_session.team_b_name}", value="\n".join(team_b_names), inline=True)
             embed.add_field(
                 name="**Draft Standings**", 
-                value=(f"**Team A Wins:** {team_a_wins}" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"**{draft_session.team_a_name} Wins:** {team_a_wins}") + 
-                    (f"\n**Team B Wins:** {team_b_wins}" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"\n**{draft_session.team_b_name} Wins:** {team_b_wins}"), 
+                value=("🔴 **Team Red Wins:** " + str(team_a_wins) if draft_session.session_type == "random" or draft_session.session_type == "test" else f"**{draft_session.team_a_name} Wins:** {team_a_wins}") + 
+                    ("\n🔵 **Team Blue Wins:** " + str(team_b_wins) if draft_session.session_type == "random" or draft_session.session_type == "test" else f"\n**{draft_session.team_b_name} Wins:** {team_b_wins}"), 
                 inline=False)
         else:
             sign_ups_list = list(draft_session.sign_ups.keys())
@@ -534,7 +535,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 if draft_session.tracked_draft and draft_session.premade_match_id is not None:
                     await update_match_db_with_wins_winner(draft_session.premade_match_id, team_a_wins, team_b_wins)
                 gap = abs(team_a_wins - team_b_wins)
-                
+
                 draft_session.deletion_time = datetime.now() + timedelta(hours=2)
                 embed = await generate_draft_summary_embed(bot, draft_session_id)
                 three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
