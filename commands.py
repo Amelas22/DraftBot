@@ -855,7 +855,8 @@ async def scheduled_posts(bot):
                     stmt = select(DraftSession).where(
                         DraftSession.teams_start_time.between(start_time, end_time),
                         not_(DraftSession.victory_message_id_draft_chat == None),
-                        DraftSession.session_type == "random"
+                        DraftSession.session_type == "random",
+                        DraftSession.guild_id == str(guild.id)
                     )
                     result = await db_session.execute(stmt)
                     sessions = result.scalars().all()
@@ -919,7 +920,8 @@ async def scheduled_posts(bot):
                     stmt = select(DraftSession).where(
                         DraftSession.teams_start_time.between(start_time, end_time),
                         not_(DraftSession.victory_message_id_draft_chat == None),
-                        DraftSession.session_type == "random"
+                        DraftSession.session_type == "random",
+                        DraftSession.guild_id == str(guild.id)
                     )
                     result = await db_session.execute(stmt)
                     sessions = result.scalars().all()
