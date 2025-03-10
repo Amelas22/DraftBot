@@ -863,7 +863,7 @@ async def scheduled_posts(bot):
 
                     if not sessions:
                         await channel.send("No matches found in the last 24 hours.")
-                        return
+                        continue
                     
                     all_usernames = []
                     for session in sessions:
@@ -928,7 +928,7 @@ async def scheduled_posts(bot):
 
                     if not sessions:
                         await channel.send("No matches found in the last 24 hours.")
-                        return
+                        continue
                     
                     all_usernames = []
                     for session in sessions:
