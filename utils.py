@@ -1100,9 +1100,14 @@ async def re_register_challenges(bot):
                             print(f"Failed to re-register view for challenge: {challenge.id}, error: {e}")
 
 async def re_register_views(bot):
+    current_time = datetime.now()
+    
     async with AsyncSessionLocal() as db_session:
         async with db_session.begin():
-            stmt = select(DraftSession).options(joinedload(DraftSession.match_results)).order_by(desc(DraftSession.id)).limit(10)
+            # Query for all active draft sessions that have a deletion_time in the future
+            stmt = select(DraftSession).options(joinedload(DraftSession.match_results))\
+                .where(DraftSession.deletion_time > current_time)\
+                .order_by(desc(DraftSession.id))
             result = await db_session.execute(stmt)
             draft_sessions = result.scalars().unique()
 
@@ -1129,6 +1134,7 @@ async def re_register_views(bot):
                                                 session_stage=None)
                             
                         await message.edit(view=view)  # Reattach the view
+                        print(f"Re-registered view for session: {draft_session.session_id}")
                     except discord.NotFound:
                         # Handle cases where the message or channel might have been deleted
                         print(f"Message or channel not found for session: {draft_session.session_id}")
@@ -1149,6 +1155,7 @@ async def re_register_views(bot):
                                             team_b_name=draft_session.team_b_name,
                                             session_stage="teams")
                         await message.edit(view=view)  # Reattach the view
+                        print(f"Re-registered team view for session: {draft_session.session_id}")
                     except discord.NotFound:
                         # Handle cases where the message or channel might have been deleted
                         print(f"Message or channel not found for session: {draft_session.session_id}")
@@ -1191,6 +1198,7 @@ async def re_register_views(bot):
                                 
                                 # Now, view contains all buttons for the matches associated with this pairing message
                                 await message.edit(view=view)
+                                print(f"Re-registered pairing view for message ID: {pairing_message_id}")
                             except discord.NotFound:
                                 print(f"Pairing message or channel not found for pairing message ID: {pairing_message_id}")
                             except Exception as e:
