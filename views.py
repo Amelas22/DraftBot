@@ -365,8 +365,8 @@ class PersistentView(discord.ui.View):
                 # Create the embed message for displaying the teams and seating order
                 embed = discord.Embed(
                     title=f"Draft-{session.draft_id} is Ready!",
-                    description=f"**Draftmancer Session**: **[Join Here]({session.draft_link})** \n" +
-                                "Host of Draftmancer must manually adjust seating as per below. **TURN OFF RANDOM SEATING SETTING IN DRAFMANCER**" +
+                    description=f"➡️ **[JOIN DRAFT HERE]**({session.draft_link}) ⬅️\n\n" +
+                                "Host of Draftmancer must manually adjust seating as per below. **TURN OFF RANDOM SEATING SETTING IN DRAFTMANCER**" +
                                 "\n\n**AFTER THE DRAFT**, select Create Chat Rooms and Post Pairings" +
                                 "\nPost Pairings will post in the created draft-chat room",
                     color=discord.Color.dark_gold() if session.session_type == "swiss" else discord.Color.blue()

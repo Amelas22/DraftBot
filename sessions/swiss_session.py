@@ -7,13 +7,13 @@ class SwissSession(BaseSession):
         session_details = self.session_details
         title = f"AlphaFrog Prelims: Looking for Players! Queue Opened <t:{session_details.draft_start_time}:R>"
         description = (
-            "Swiss 8 player draft. Draftmancer host must still update the draftmancer session with the chosen cube.\n"
-            f"**Weekly Cube: [{session_details.cube_choice}](https://cubecobra.com/cube/list/{session_details.cube_choice})**\n"
-            f"**Draftmancer Session**: **[Join Here]({session_details.draft_link})**"
+            "Swiss 8 player draft. Draftmancer host must still update the draftmancer session with the chosen cube."
+            f"{self.get_common_description()}"
         )
         color = discord.Color.dark_gold()
         embed = discord.Embed(title=title, description=description, color=color)
         embed.add_field(name="Sign-Ups", value="No players yet.", inline=False)
+        embed.set_thumbnail(url=self.get_thumbnail_url())
         return embed
 
     def get_session_type(self):
