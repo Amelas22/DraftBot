@@ -37,6 +37,8 @@ async def main():
         from utils import re_register_views, re_register_challenges
         await re_register_views(bot)
         await re_register_challenges(bot)
+        from livedrafts import re_register_live_drafts
+        await re_register_live_drafts(bot)
         from teamfinder import re_register_teamfinder
         await re_register_teamfinder(bot)
         logger.info("Re-registered team finder")

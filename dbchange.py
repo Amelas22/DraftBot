@@ -1,43 +1,28 @@
 import asyncio
-import time
-from sqlalchemy import Column, Float, select, text
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
-import sqlalchemy as sa
-from loguru import logger
-from session import DATABASE_URL
+from sqlalchemy import text
+from session import engine
 
-async def add_last_activity_column():
-    """Add last_activity column to the messages table if it doesn't exist."""
-    # Create engine and session
-    engine = create_async_engine(DATABASE_URL)
-    async_session = sessionmaker(
-        engine, class_=AsyncSession, expire_on_commit=False
-    )
-
+async def add_live_draft_message_id_column():
     async with engine.begin() as conn:
-        # Check if the column already exists
         try:
-            result = await conn.execute(text("SELECT last_activity FROM messages LIMIT 1"))
-            logger.info("Column 'last_activity' already exists.")
-            return
-        except Exception:
-            logger.info("Column 'last_activity' does not exist. Adding it now.")
+            # Check if the column already exists
+            check_query = "PRAGMA table_info(draft_sessions)"
+            result = await conn.execute(text(check_query))
+            columns = result.fetchall()
             
-            # Add the column
-            await conn.execute(
-                text("ALTER TABLE messages ADD COLUMN last_activity FLOAT NOT NULL DEFAULT 0.0")
-            )
-            logger.info("Column 'last_activity' has been added successfully.")
+            column_exists = any(column[1] == 'live_draft_message_id' for column in columns)
+            
+            if not column_exists:
+                # Add the column if it doesn't exist
+                add_column_query = "ALTER TABLE draft_sessions ADD COLUMN live_draft_message_id VARCHAR(64)"
+                await conn.execute(text(add_column_query))
+                print("Successfully added live_draft_message_id column to draft_sessions table")
+            else:
+                print("Column live_draft_message_id already exists in draft_sessions table")
+                
+        except Exception as e:
+            print(f"Error adding column: {e}")
 
-    # Initialize the column with the current timestamp for all existing records
-    current_time = time.time()
-    async with async_session() as session:
-        async with session.begin():
-            await session.execute(
-                text(f"UPDATE messages SET last_activity = {current_time}")
-            )
-            logger.info(f"Initialized last_activity to {current_time} for all existing records.")
-
+# Run the migration
 if __name__ == "__main__":
-    asyncio.run(add_last_activity_column())
+    asyncio.run(add_live_draft_message_id_column())
