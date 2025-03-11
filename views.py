@@ -453,14 +453,6 @@ class PersistentView(discord.ui.View):
         if not session:
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
             return
-        
-        user_id = str(interaction.user.id)
-        sign_ups = session.sign_ups or {}  
-
-        # Check if the user is in the sign-up list or if the sign-up list is empty
-        if user_id not in sign_ups.keys():
-            await interaction.response.send_message("You do not have permissions to cancel this draft.", ephemeral=True)
-            return
 
         # Show confirmation dialog
         confirm_view = CancelConfirmationView(self.bot, self.draft_session_id, interaction.user.display_name)
