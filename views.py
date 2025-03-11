@@ -613,6 +613,8 @@ class PersistentView(discord.ui.View):
                     await db_session.commit()
                 # Execute Post Pairings
                 await post_pairings(bot, guild, session.session_id)
+                from livedrafts import create_live_draft_summary
+                await create_live_draft_summary(bot, session.session_id)
                 await interaction.followup.send("Pairings posted.", ephemeral=True)
 
                 draft_link = session.draft_link
@@ -890,6 +892,8 @@ class MatchResultSelect(Select):
                         await update_player_stats_and_elo(match_result)
                    
         await update_draft_summary_message(self.bot, self.session_id)
+        from livedrafts import update_live_draft_summary
+        await update_live_draft_summary(self.bot, self.session_id)
         if draft_session.session_type != "test":
             await check_and_post_victory_or_draw(self.bot, self.session_id)
         await self.update_pairings_posting(interaction, self.bot, self.session_id, self.match_number) 
