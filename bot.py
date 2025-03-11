@@ -58,14 +58,14 @@ async def main():
         logger.info("Received startdraft command")
         view = CubeDraftSelectionView(session_type="random")
         await interaction.response.send_message("Select a cube:", view=view, ephemeral=True)
-        
+
     @bot.slash_command(name='premadedraft', description='Start a team draft with premade teams', guild_id=None)
     async def premade_draft(interaction: discord.Interaction):
         logger.info("Received premadedraft command")
         view = CubeDraftSelectionView(session_type="premade")
         await interaction.response.send_message("Select a cube:", view=view, ephemeral=True)
         
-    @bot.slash_command(name='cash_draft', description='Start a team draft with random teams and customizable stakes')
+    @bot.slash_command(name='dynamic_stake', description='Start a team draft with random teams and customizable stakes')
     async def staked_draft(interaction: discord.Interaction):
         logger.info("Received stakedraft command")
         

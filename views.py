@@ -396,10 +396,8 @@ class PersistentView(discord.ui.View):
                         for stake_info in stake_infos:
                             stake_info_by_player[stake_info.player_id] = stake_info
                     
-                    # Use the updated session
                     session = updated_session
-                
-                # Now proceed with the rest of the method as normal
+
                 if session.session_type != "swiss":
                     team_a_display_names = [session.sign_ups[user_id] for user_id in session.team_a]
                     team_b_display_names = [session.sign_ups[user_id] for user_id in session.team_b]
@@ -407,8 +405,6 @@ class PersistentView(discord.ui.View):
                 else:
                     sign_ups_list = list(session.sign_ups.keys())
                     random.shuffle(sign_ups_list)  # This shuffles the list in-place
-
-                    # Now sign_ups_list is your seating order, with sign_ups_list[0] being the first seat, etc.
                     seating_order = [session.sign_ups[user_id] for user_id in sign_ups_list]
                     new_sign_ups = {user_id: session.sign_ups[user_id] for user_id in sign_ups_list}
                     await db_session.execute(update(DraftSession)
@@ -459,7 +455,37 @@ class PersistentView(discord.ui.View):
                             value="\n".join(formatted_lines),
                             inline=False
                         )
-
+                # If this is a staked draft, add a button to explain the stake calculations
+                if self.session_type == "staked":
+                    # Create a view with the stake calculation button
+                    stake_view = discord.ui.View(timeout=None)
+                    
+                    # Add the existing buttons from self.children to the new view
+                    for item in self.children:
+                        if isinstance(item, discord.ui.Button):
+                            # Clone the button with the same properties
+                            button_copy = CallbackButton(
+                                label=item.label,
+                                style=item.style,
+                                custom_id=item.custom_id,
+                                custom_callback=item.custom_callback
+                            )
+                            
+                            # Set disabled state based on button type
+                            if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}" or item.custom_id == f"cancel_draft_{self.draft_session_id}":
+                                button_copy.disabled = False
+                            else:
+                                button_copy.disabled = True
+                                
+                            stake_view.add_item(button_copy)
+                    
+                    # Add our new stake calculation button
+                    stake_view.add_item(StakeCalculationButton(session.session_id))
+                    
+                    # Use the new view instead of self
+                    await interaction.response.edit_message(embed=embed, view=stake_view)
+                    return  # Return early to avoid the default response
+                
                 # Iterate over the view's children (buttons) to update their disabled status
                 for item in self.children:
                     if isinstance(item, discord.ui.Button):
@@ -670,7 +696,20 @@ class PersistentView(discord.ui.View):
 
                     await draft_chat_channel.send(f"Pairings posted below. Good luck in your matches! {sign_up_tags}")
 
-                    draft_summary_message = await draft_chat_channel.send(embed=draft_summary_embed)
+                    if session.session_type == "staked":
+                        # Create a view with the stake calculation button
+                        from views import StakeCalculationButton
+                        stake_view = discord.ui.View(timeout=None)
+                        stake_view.add_item(StakeCalculationButton(session.session_id))
+                        
+                        # Send the draft summary with the button
+                        draft_summary_message = await draft_chat_channel.send(embed=draft_summary_embed, view=stake_view)
+                    else:
+                        draft_summary_message = await draft_chat_channel.send(embed=draft_summary_embed)
+
+                    if self.session_type != "test":
+                        await draft_summary_message.pin()
+                    session.draft_summary_message_id = str(draft_summary_message.id)
                     if self.session_type != "test":
                         await draft_summary_message.pin()
                     session.draft_summary_message_id = str(draft_summary_message.id)
@@ -1398,3 +1437,172 @@ class StakeModal(discord.ui.Modal):
         
         # Update the draft message to reflect the new list of sign-ups
         await update_draft_message(interaction.client, self.draft_session_id)
+
+class StakeCalculationButton(discord.ui.Button):
+    def __init__(self, session_id):
+        super().__init__(
+            label="How Stakes Were Calculated",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"stake_calculation_{session_id}"
+        )
+        self.session_id = session_id
+        
+    async def callback(self, interaction: discord.Interaction):
+        """Show a detailed explanation of how stakes were calculated"""
+        await interaction.response.defer(ephemeral=True)  # Use ephemeral to show just to the user who clicked
+        
+        # Fetch the draft session
+        draft_session = await get_draft_session(self.session_id)
+        if not draft_session:
+            await interaction.followup.send("Draft session not found.", ephemeral=True)
+            return
+            
+        # Fetch all stake info records
+        async with AsyncSessionLocal() as session:
+            # Get the original stake inputs
+            stake_stmt = select(StakeInfo).where(StakeInfo.session_id == self.session_id)
+            results = await session.execute(stake_stmt)
+            stake_infos = results.scalars().all()
+            
+            # Create mapping of player IDs to max stakes
+            max_stakes = {info.player_id: info.max_stake for info in stake_infos}
+            
+            # Create mapping of player IDs to display names
+            player_names = {player_id: draft_session.sign_ups.get(player_id, "Unknown") for player_id in max_stakes.keys()}
+            
+            # Create the explanation embed
+            embed = discord.Embed(
+                title="Stake Calculation Explanation",
+                description="Here's how the stakes were calculated for this draft:",
+                color=discord.Color.gold()
+            )
+            
+            # Step 1: Show the input stakes
+            team_a_stakes = []
+            for player_id in draft_session.team_a:
+                if player_id in max_stakes:
+                    team_a_stakes.append(f"{player_names[player_id]}: {max_stakes[player_id]} tix")
+            
+            team_b_stakes = []
+            for player_id in draft_session.team_b:
+                if player_id in max_stakes:
+                    team_b_stakes.append(f"{player_names[player_id]}: {max_stakes[player_id]} tix")
+            
+            embed.add_field(
+                name="Step 1: Input Max Stakes",
+                value="**Team A:**\n" + "\n".join(team_a_stakes) + "\n\n**Team B:**\n" + "\n".join(team_b_stakes),
+                inline=False
+            )
+            
+            # Step 2: Explain the sorting
+            embed.add_field(
+                name="Step 2: Sort By Stake Amount",
+                value=(
+                    "Players on each team are sorted by their max stake (highest first).\n"
+                    "Then players from each team are matched against each other in order."
+                ),
+                inline=False
+            )
+            
+            # Step 3: Show the initial pairing results
+            primary_pairings = []
+            team_a_sorted = sorted([(p, max_stakes.get(p, 0)) for p in draft_session.team_a if p in max_stakes], 
+                                  key=lambda x: x[1], reverse=True)
+            team_b_sorted = sorted([(p, max_stakes.get(p, 0)) for p in draft_session.team_b if p in max_stakes], 
+                                  key=lambda x: x[1], reverse=True)
+            
+            leftovers_a = []
+            leftovers_b = []
+            
+            for i in range(min(len(team_a_sorted), len(team_b_sorted))):
+                player_a, stake_a = team_a_sorted[i]
+                player_b, stake_b = team_b_sorted[i]
+                
+                bet_amount = min(stake_a, stake_b)
+                pairings_text = (
+                    f"{player_names[player_a]} ({stake_a} tix) vs {player_names[player_b]} ({stake_b} tix)\n"
+                    f"= {bet_amount} tix (minimum of the two)"
+                )
+                
+                # Check for leftovers
+                if stake_a > bet_amount:
+                    leftovers_a.append((player_a, stake_a - bet_amount))
+                    pairings_text += f"\n{player_names[player_a]} has {stake_a - bet_amount} tix remaining"
+                    
+                if stake_b > bet_amount:
+                    leftovers_b.append((player_b, stake_b - bet_amount))
+                    pairings_text += f"\n{player_names[player_b]} has {stake_b - bet_amount} tix remaining"
+                    
+                primary_pairings.append(pairings_text)
+            
+            # Add any unmatched players from first pass
+            if len(team_a_sorted) > len(team_b_sorted):
+                for i in range(len(team_b_sorted), len(team_a_sorted)):
+                    player_a, stake_a = team_a_sorted[i]
+                    leftovers_a.append((player_a, stake_a))
+                    primary_pairings.append(f"{player_names[player_a]} ({stake_a} tix) - Unmatched in initial pairing")
+            elif len(team_b_sorted) > len(team_a_sorted):
+                for i in range(len(team_a_sorted), len(team_b_sorted)):
+                    player_b, stake_b = team_b_sorted[i]
+                    leftovers_b.append((player_b, stake_b))
+                    primary_pairings.append(f"{player_names[player_b]} ({stake_b} tix) - Unmatched in initial pairing")
+            
+            embed.add_field(
+                name="Step 3: Initial Pairings",
+                value="\n\n".join(primary_pairings) if primary_pairings else "No initial pairings",
+                inline=False
+            )
+            
+            # Step 4: Secondary pairings
+            if leftovers_a or leftovers_b:
+                secondary_pairings = []
+                
+                leftovers_a.sort(key=lambda x: x[1], reverse=True)
+                leftovers_b.sort(key=lambda x: x[1], reverse=True)
+                
+                i = 0
+                while i < len(leftovers_a) and i < len(leftovers_b):
+                    player_a, remaining_a = leftovers_a[i]
+                    player_b, remaining_b = leftovers_b[i]
+                    
+                    secondary_bet = min(remaining_a, remaining_b)
+                    if secondary_bet >= draft_session.min_stake:
+                        secondary_pairings.append(
+                            f"{player_names[player_a]} ({remaining_a} tix) vs {player_names[player_b]} ({remaining_b} tix)\n"
+                            f"= {secondary_bet} tix"
+                        )
+                        
+                        # Check for still more leftovers
+                        if remaining_a > secondary_bet:
+                            leftovers_a.append((player_a, remaining_a - secondary_bet))
+                        if remaining_b > secondary_bet:
+                            leftovers_b.append((player_b, remaining_b - secondary_bet))
+                    else:
+                        secondary_pairings.append(
+                            f"{player_names[player_a]} ({remaining_a} tix) vs {player_names[player_b]} ({remaining_b} tix)\n"
+                            f"Not enough for a bet (below minimum of {draft_session.min_stake} tix)"
+                        )
+                        
+                    i += 1
+                
+                embed.add_field(
+                    name="Step 4: Secondary Pairings (Using Leftover Stakes)",
+                    value="\n\n".join(secondary_pairings) if secondary_pairings else "No secondary pairings",
+                    inline=False
+                )
+                
+                # Step 5: Any unused stakes
+                unused_stakes = []
+                for player_id, amount in leftovers_a + leftovers_b:
+                    if amount >= draft_session.min_stake:
+                        unused_stakes.append(f"{player_names[player_id]}: {amount} tix")
+                
+                if unused_stakes:
+                    embed.add_field(
+                        name="Step 5: Unused Stakes",
+                        value="\n".join(unused_stakes),
+                        inline=False
+                    )
+            
+            # Send the explanation
+            await interaction.followup.send(embed=embed, ephemeral=True)
