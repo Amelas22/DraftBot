@@ -175,7 +175,20 @@ class PersistentView(discord.ui.View):
         if user_id in sign_ups:
             # User is already signed up; inform them
             await interaction.response.send_message("You are already signed up!", ephemeral=True)
-        else:            
+        else:
+            # Handle staked drafts differently - show modal first before adding to sign_ups
+            if self.session_type == "staked":
+                # For staked drafts, we'll add them to sign_ups after stake validation
+                stake_modal = StakeModal(
+                    self.draft_session_id, 
+                    draft_link=draft_session.draft_link,
+                    user_display_name=interaction.user.display_name
+                )
+                await interaction.response.send_modal(stake_modal)
+                # The modal callback will handle adding to sign_ups if stake is valid
+                return
+            
+            # For non-staked drafts, add them to sign_ups now        
             sign_ups[user_id] = interaction.user.display_name
 
             # Start an asynchronous database session
@@ -194,17 +207,7 @@ class PersistentView(discord.ui.View):
             if not draft_session_updated:
                 print("Failed to fetch updated draft session after sign-up.")
                 return
-
-            # Handle staked drafts differently - show modal first
-            if self.session_type == "staked":
-                # Respond with the modal - this has to be the first response
-                stake_modal = StakeModal(self.draft_session_id, draft_link=draft_session_updated.draft_link)
-                await interaction.response.send_modal(stake_modal)
-                
-                # The modal callback will handle updating the draft message
-                return
-                
-            # For non-staked drafts, continue with the normal flow
+                    
             # Confirm signup with draft link
             draft_link = draft_session_updated.draft_link
             signup_confirmation_message = f"You are now signed up. Join Here: {draft_link}"
@@ -225,7 +228,6 @@ class PersistentView(discord.ui.View):
                     message_link = f"https://discord.com/channels/{draft_session_updated.guild_id}/{draft_session_updated.draft_channel_id}/{draft_session_updated.message_id}"
                     channel = discord.utils.get(guild.text_channels, name="cube-draft-open-play")
                     await channel.send(f"**{interaction.user.display_name}** is looking for an opponent for a **Winston Draft**. [Join Here!]({message_link}) ")
-
                     
     async def cancel_sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         draft_session = await get_draft_session(self.draft_session_id)
@@ -1365,10 +1367,11 @@ class CancelConfirmationView(discord.ui.View):
         await interaction.response.edit_message(content="Draft cancellation aborted.", view=self)
 
 class StakeModal(discord.ui.Modal):
-    def __init__(self, draft_session_id: str, draft_link: str = None, *args, **kwargs):
+    def __init__(self, draft_session_id: str, draft_link: str = None, user_display_name: str = None, *args, **kwargs):
         super().__init__(title="Enter Your Maximum Stake", *args, **kwargs)
         self.draft_session_id = draft_session_id
         self.draft_link = draft_link
+        self.user_display_name = user_display_name
         
         self.stake_input = discord.ui.InputText(
             label="Maximum Stake (tix)",
@@ -1383,9 +1386,6 @@ class StakeModal(discord.ui.Modal):
         # Parse the stake amount
         try:
             max_stake = int(self.stake_input.value)
-            if max_stake < 10:
-                await interaction.response.send_message("Minimum stake is 10 tix. Please try again.", ephemeral=True)
-                return
         except ValueError:
             await interaction.response.send_message("Please enter a valid number.", ephemeral=True)
             return
@@ -1405,6 +1405,17 @@ class StakeModal(discord.ui.Modal):
                 if max_stake < min_stake:
                     await interaction.response.send_message(f"Minimum stake for this draft is {min_stake} tix.", ephemeral=True)
                     return
+                
+                # Only add to sign_ups if stake is valid
+                sign_ups = draft_session.sign_ups or {}
+                sign_ups[user_id] = self.user_display_name or interaction.user.display_name
+                
+                # Update the draft session with the new sign_ups
+                await session.execute(
+                    update(DraftSession).
+                    where(DraftSession.session_id == self.draft_session_id).
+                    values(sign_ups=sign_ups)
+                )
                 
                 # Check if a stake record already exists for this player
                 stake_stmt = select(StakeInfo).where(and_(
