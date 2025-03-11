@@ -4,7 +4,7 @@ import asyncio
 import pytz
 from sqlalchemy import update, select, func, or_, desc, and_
 from datetime import datetime, timedelta
-from session import AsyncSessionLocal, get_draft_session, Challenge, PlayerLimit, DraftSession, MatchResult, PlayerStats, Match, Team, WeeklyLimit
+from session import AsyncSessionLocal, get_draft_session, StakeInfo, Challenge, PlayerLimit, DraftSession, MatchResult, PlayerStats, Match, Team, WeeklyLimit
 from sqlalchemy.orm import selectinload, joinedload
 from trueskill import Rating, rate_1vs1
 from discord.ui import View
@@ -262,40 +262,63 @@ async def calculate_team_wins(draft_session_id):
 
 async def generate_draft_summary_embed(bot, draft_session_id):
     async with AsyncSessionLocal() as session:
-        draft_session = await get_draft_session(draft_session_id)
-        if not draft_session:
-            print("Draft session not found. Generate Draft Summary")
-            return None
+        async with session.begin():
+            draft_session = await get_draft_session(draft_session_id)
+            if not draft_session:
+                print("Draft session not found. Generate Draft Summary")
+                return None
 
-        guild = bot.get_guild(int(draft_session.guild_id))
-        if draft_session.session_type != "swiss":
-            team_a_names = [guild.get_member(int(user_id)).display_name for user_id in draft_session.team_a]
-            team_b_names = [guild.get_member(int(user_id)).display_name for user_id in draft_session.team_b]
+            guild = bot.get_guild(int(draft_session.guild_id))
+            if draft_session.session_type != "swiss":
+                team_a_names = [guild.get_member(int(user_id)).display_name for user_id in draft_session.team_a]
+                team_b_names = [guild.get_member(int(user_id)).display_name for user_id in draft_session.team_b]
 
-            team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
-            total_matches = draft_session.match_counter - 1
-            half_matches = total_matches // 2
-            title, description, discord_color = await determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, half_matches, total_matches)
+                team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
+                total_matches = draft_session.match_counter - 1
+                half_matches = total_matches // 2
+                title, description, discord_color = await determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, half_matches, total_matches)
 
-            embed = discord.Embed(title=title, description=description, color=discord_color)
-            # Change team names to Red and Blue with emojis
-            embed.add_field(name="🔴 Team Red" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"{draft_session.team_a_name}", value="\n".join(team_a_names), inline=True)
-            embed.add_field(name="🔵 Team Blue" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"{draft_session.team_b_name}", value="\n".join(team_b_names), inline=True)
-            embed.add_field(
-                name="**Draft Standings**", 
-                value=("🔴 **Team Red Wins:** " + str(team_a_wins) if draft_session.session_type == "random" or draft_session.session_type == "test" else f"**{draft_session.team_a_name} Wins:** {team_a_wins}") + 
-                    ("\n🔵 **Team Blue Wins:** " + str(team_b_wins) if draft_session.session_type == "random" or draft_session.session_type == "test" else f"\n**{draft_session.team_b_name} Wins:** {team_b_wins}"), 
-                inline=False)
-        else:
-            sign_ups_list = list(draft_session.sign_ups.keys())
-            title = f"Swiss Draft - Session {draft_session.draft_id}"
-            description = f"Draft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
-            discord_color = discord.Color.dark_magenta()
-            embed = discord.Embed(title=title, description=description, color=discord_color)
-            seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
-            embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+                embed = discord.Embed(title=title, description=description, color=discord_color)
+                
+                # Add team fields
+                embed.add_field(name="🔴 Team Red" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_a_name}", 
+                                value="\n".join(team_a_names), inline=True)
+                embed.add_field(name="🔵 Team Blue" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_b_name}", 
+                                value="\n".join(team_b_names), inline=True)
+                embed.add_field(
+                    name="**Draft Standings**", 
+                    value=("🔴 **Team Red Wins:** " + str(team_a_wins) if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"**{draft_session.team_a_name} Wins:** {team_a_wins}") + 
+                        ("\n🔵 **Team Blue Wins:** " + str(team_b_wins) if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"\n**{draft_session.team_b_name} Wins:** {team_b_wins}"), 
+                    inline=False)
+                
+                # Add stakes information if this is a staked draft
+                if draft_session.session_type == "staked":
+                    # Use the utility function to get formatted stake pairs
+                    stake_lines, total_stakes = await get_formatted_stake_pairs(
+                        draft_session_id, 
+                        draft_session.sign_ups
+                    )
+                    
+                    # Add the stakes field to the embed
+                    if stake_lines:
+                        embed.add_field(
+                            name=f"**Staked Draft - Total: {total_stakes} tix**",
+                            value="\n".join(stake_lines),
+                            inline=False
+                        )
+                
+            else:
+                # Code for Swiss drafts
+                sign_ups_list = list(draft_session.sign_ups.keys())
+                title = f"Swiss Draft - Session {draft_session.draft_id}"
+                description = f"Draft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
+                discord_color = discord.Color.dark_magenta()
+                embed = discord.Embed(title=title, description=description, color=discord_color)
+                seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
+                embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
 
-        return embed
+            return embed
+        
 
 async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, half_matches, total_matches):
     guild = bot.get_guild(int(draft_session.guild_id))
@@ -319,7 +342,7 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
             title = "Draft Outcome"
 
     elif team_a_wins == 0 and team_b_wins == 0:
-        title = f"Draft-{draft_session.draft_id} Standings" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
+        title = f"Draft-{draft_session.draft_id} Standings" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
         description = "If a drafter is missing from this channel, they likely can still see the channel but have the Discord invisible setting on."
         discord_color = discord.Color.dark_blue()
     elif team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0:
@@ -327,7 +350,7 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
         description = f"Draft Start: <t:{int(draft_session.draft_start_time.timestamp())}:F>"
         discord_color = discord.Color.light_grey()
     else:
-        title = f"Draft-{draft_session.draft_id} Standings" if draft_session.session_type == "random" or draft_session.session_type == "test" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
+        title = f"Draft-{draft_session.draft_id} Standings" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
         description = "If a drafter is missing from this channel, they likely can still see the channel but have the Discord invisible setting on."
         discord_color = discord.Color.dark_blue()
     return title, description, discord_color
@@ -1326,4 +1349,120 @@ async def create_winston_draft(bot, interaction):
                 draft_channel_id=message.channel.id
             )
             db_session.add(new_draft_session)
+
+
+async def validate_stakes(session_id, min_stake=10):
+    """
+    Validate that all players in a staked draft have entered stake information.
+    Returns True if valid, False otherwise.
+    """
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            # Get the draft session
+            draft_session = await get_draft_session(session_id)
+            if not draft_session or draft_session.session_type != "staked":
+                return True  # Not a staked draft, so no validation needed
+            
+            # Get all player IDs from sign-ups
+            sign_up_ids = list(draft_session.sign_ups.keys())
+            
+            # Get stake info for all signed-up players
+            stake_stmt = select(StakeInfo).where(
+                StakeInfo.session_id == session_id
+            )
+            results = await session.execute(stake_stmt)
+            stake_infos = results.scalars().all()
+            
+            # Check that every signed-up player has stake info
+            stake_player_ids = [stake.player_id for stake in stake_infos]
+            missing_players = [pid for pid in sign_up_ids if pid not in stake_player_ids]
+            
+            return len(missing_players) == 0
+
+
+async def get_missing_stake_players(session_id):
+    """
+    Get a list of player IDs who have signed up but not set a stake.
+    """
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            # Get the draft session
+            draft_session = await get_draft_session(session_id)
+            if not draft_session or draft_session.session_type != "staked":
+                return []  # Not a staked draft, so no missing players
+            
+            # Get all player IDs from sign-ups
+            sign_up_ids = list(draft_session.sign_ups.keys())
+            
+            # Get stake info for all signed-up players
+            stake_stmt = select(StakeInfo).where(
+                StakeInfo.session_id == session_id
+            )
+            results = await session.execute(stake_stmt)
+            stake_infos = results.scalars().all()
+            
+            # Find players who have signed up but not set a stake
+            stake_player_ids = [stake.player_id for stake in stake_infos]
+            missing_players = [pid for pid in sign_up_ids if pid not in stake_player_ids]
+            
+            return missing_players
+        
+async def get_formatted_stake_pairs(session_id, sign_ups):
+    """
+    Get all stake pairs for a draft session, formatted for display.
     
+    Args:
+        session_id: The draft session ID
+        sign_ups: Dict mapping player IDs to display names
+        
+    Returns:
+        tuple: (formatted_stake_lines, total_stakes)
+    """
+    # Fetch all stake information
+    async with AsyncSessionLocal() as db_session:
+        async with db_session.begin():
+            # Get all stake info records
+            stake_stmt = select(StakeInfo).where(StakeInfo.session_id == session_id)
+            results = await db_session.execute(stake_stmt)
+            all_stake_infos = results.scalars().all()
+            
+            # Create a list to store unique stake pairs
+            unique_pairs = []
+            processed = set()
+            total_stake = 0
+            
+            # Process each stake info record
+            for stake in all_stake_infos:
+                # Skip if no opponent or amount
+                if not stake.opponent_id or not stake.assigned_stake:
+                    continue
+                
+                # Create a unique key for this pair
+                players = tuple(sorted([stake.player_id, stake.opponent_id]))
+                amount = stake.assigned_stake
+                pair_key = (players, amount)
+                
+                # Skip if we've already processed this exact pair
+                if pair_key in processed:
+                    continue
+                
+                # Mark as processed
+                processed.add(pair_key)
+                
+                # Get player names
+                player1_name = sign_ups.get(stake.player_id, "Unknown")
+                player2_name = sign_ups.get(stake.opponent_id, "Unknown")
+                
+                # Add to unique pairs list
+                unique_pairs.append((player1_name, player2_name, amount))
+                
+                # Add to total stake
+                total_stake += amount
+            
+            # Sort by amount (highest first)
+            unique_pairs.sort(key=lambda x: x[2], reverse=True)
+            
+            # Format for display
+            formatted_lines = [f"{a} vs {b}: {amount} tix" for a, b, amount in unique_pairs]
+            
+            return formatted_lines, total_stake

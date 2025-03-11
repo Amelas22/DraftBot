@@ -117,7 +117,8 @@ async def league_commands(bot):
         except Exception as e:
             logger.error(f"Error in stats command: {e}")
             await ctx.followup.send("An error occurred while fetching your stats. Please try again later.", ephemeral=True)
-            
+
+    
     # @bot.slash_command(name="record", description="Display your head-to-head record against another player")
     # @discord.option("opponent_name", description="The display name of the opponent", required=True)
     # async def record(ctx, opponent_name: str):

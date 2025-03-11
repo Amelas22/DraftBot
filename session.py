@@ -69,6 +69,8 @@ class DraftSession(Base):
     data_received = Column(Boolean, default=False)
     cube = Column(String(128))
     live_draft_message_id = Column(String(64))
+    min_stake = Column(Integer, default=10)
+    stakes = relationship("StakeInfo", backref="draft_session")
     
     def __repr__(self):
         return f"<DraftSession(session_id={self.session_id}, guild_id={self.guild_id})>"
@@ -197,6 +199,21 @@ class TeamFinder(Base):
     message_id = Column(String(64))
     channel_id = Column(String(64))
     guild_id = Column(String(64))
+
+class StakeInfo(Base):
+    __tablename__ = 'stake_info'
+    
+    id = Column(Integer, primary_key=True)
+    session_id = Column(String(64), ForeignKey('draft_sessions.session_id'))
+    player_id = Column(String(64), nullable=False)
+    max_stake = Column(Integer, nullable=False)
+    assigned_stake = Column(Integer, nullable=True)
+    opponent_id = Column(String(64), nullable=True)
+    
+    def __repr__(self):
+        return f"<StakeInfo(player_id={self.player_id}, max_stake={self.max_stake}, assigned_stake={self.assigned_stake})>"
+
+
 
 async def get_draft_session(session_id: str):
     async with AsyncSessionLocal() as session:

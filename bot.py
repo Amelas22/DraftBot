@@ -33,14 +33,10 @@ async def main():
     async def on_ready():
         bot.loop.create_task(cleanup_sessions_task(bot))
         print(f'Logged in as {bot.user}!')
-        # Call re_register_views here and pass the bot instance
-        from utils import re_register_views, re_register_challenges
+        from utils import re_register_views
         await re_register_views(bot)
-        await re_register_challenges(bot)
         from livedrafts import re_register_live_drafts
         await re_register_live_drafts(bot)
-        from teamfinder import re_register_teamfinder
-        await re_register_teamfinder(bot)
         logger.info("Re-registered team finder")
 
     @bot.event
@@ -62,12 +58,20 @@ async def main():
         logger.info("Received startdraft command")
         view = CubeDraftSelectionView(session_type="random")
         await interaction.response.send_message("Select a cube:", view=view, ephemeral=True)
+        
     @bot.slash_command(name='premadedraft', description='Start a team draft with premade teams', guild_id=None)
     async def premade_draft(interaction: discord.Interaction):
         logger.info("Received premadedraft command")
         view = CubeDraftSelectionView(session_type="premade")
         await interaction.response.send_message("Select a cube:", view=view, ephemeral=True)
-
+        
+    @bot.slash_command(name='cash_draft', description='Start a team draft with random teams and customizable stakes')
+    async def staked_draft(interaction: discord.Interaction):
+        logger.info("Received stakedraft command")
+        
+        from modals import StakedCubeDraftSelectionView
+        view = StakedCubeDraftSelectionView()
+        await interaction.response.send_message("Select a cube for the staked draft:", view=view, ephemeral=True)
     
     await league_commands(bot)
     await scheduled_posts(bot)
