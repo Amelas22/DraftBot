@@ -235,21 +235,22 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                         except Exception as e:
                             logger.error(f"Error processing trophy_drafters for alternates: {e}")
                 
-                # Get total matches played - update to only count completed random drafts
+                # Get total matches played - Only count matches that have a winner determined.
                 matches_played_query_text = """
                     SELECT COUNT(*) 
                     FROM match_results 
                     WHERE (player1_id = :user_id OR player2_id = :user_id)
+                    AND winner_id IS NOT NULL
                     AND session_id IN (
                         SELECT session_id FROM draft_sessions 
                         WHERE draft_start_time >= :start_date
                         AND session_type = 'random'
                         AND victory_message_id_results_channel IS NOT NULL
                 """
-                
+
                 if guild_id:
                     matches_played_query_text += " AND guild_id = :guild_id"
-                
+
                 matches_played_query_text += ")"
                 matches_played_query = text(matches_played_query_text)
                 
@@ -404,6 +405,7 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                         SELECT COUNT(*) 
                         FROM match_results 
                         WHERE (player1_id = :user_id OR player2_id = :user_id)
+                        AND winner_id IS NOT NULL
                         AND session_id IN (
                             SELECT session_id FROM draft_sessions 
                             WHERE LOWER(cube) = :cube_name
