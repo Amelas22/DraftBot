@@ -21,6 +21,11 @@ def load_legacy_data():
     """
     global _legacy_data_cache
     
+    # Print status message to help debugging
+    print(f"Loading legacy data from {CSV_DIR}")
+    print(f"Match results file: {MATCH_RESULTS_FILE}")
+    print(f"Draft results file: {DRAFT_RESULTS_FILE}")
+    
     # Return cached data if available
     if _legacy_data_cache is not None:
         return _legacy_data_cache
@@ -42,9 +47,9 @@ def load_legacy_data():
         # Filter draft results for the specific guild
         draft_results_df = draft_results_df[draft_results_df['guild_id'] == int(LEGACY_GUILD_ID)]
         
-        # Convert date strings to datetime objects
-        match_results_df['createdAt'] = pd.to_datetime(match_results_df['createdAt'])
-        draft_results_df['createdAt'] = pd.to_datetime(draft_results_df['createdAt'])
+        # Convert date strings to datetime objects and ensure they are timezone-naive
+        match_results_df['createdAt'] = pd.to_datetime(match_results_df['createdAt']).dt.tz_localize(None)
+        draft_results_df['createdAt'] = pd.to_datetime(draft_results_df['createdAt']).dt.tz_localize(None)
         
         # Cache the processed data
         _legacy_data_cache = (match_results_df, draft_results_df)
@@ -60,6 +65,8 @@ def process_legacy_drafts():
     Process the legacy draft data to create a structured representation.
     Returns a dictionary of processed drafts with team info and match results.
     """
+    global _legacy_data_cache
+    print("Processing legacy draft data...")
     match_results_df, draft_results_df = load_legacy_data()
     if match_results_df is None or draft_results_df is None:
         return {}
@@ -169,21 +176,30 @@ def get_legacy_player_stats(user_id, time_frame=None):
     if not processed_drafts:
         return stats
     
-    # Determine cutoff date based on time frame
+    # Determine cutoff date based on time frame - ensure naive datetime for comparison
     now = datetime.now()
     cutoff_date = None
     if time_frame == 'week':
         cutoff_date = now - pd.Timedelta(days=7)
     elif time_frame == 'month':
         cutoff_date = now - pd.Timedelta(days=30)
+        
+    # Ensure cutoff_date is timezone-naive
+    if cutoff_date and hasattr(cutoff_date, 'tzinfo') and cutoff_date.tzinfo is not None:
+        cutoff_date = cutoff_date.replace(tzinfo=None)
     
     # Process each draft
     for draft_id, draft in processed_drafts.items():
         draft_timestamp = draft['timestamp']
         
-        # Skip if outside time frame
-        if cutoff_date and draft_timestamp < cutoff_date:
-            continue
+        # Skip if outside time frame - ensure naive datetime comparison
+        if cutoff_date:
+            # Ensure timestamp is timezone-naive for comparison
+            compare_timestamp = draft_timestamp
+            if hasattr(compare_timestamp, 'tzinfo') and compare_timestamp.tzinfo is not None:
+                compare_timestamp = compare_timestamp.replace(tzinfo=None)
+            if compare_timestamp < cutoff_date:
+                continue
         
         # Check if user was in this draft
         user_in_blue = user_id in draft['team_blue']
@@ -263,13 +279,17 @@ def get_legacy_head_to_head_stats(user1_id, user2_id, time_frame=None):
             "teammate_stats": teammate_stats
         }
     
-    # Determine cutoff date based on time frame
+    # Determine cutoff date based on time frame - ensure naive datetime for comparison
     now = datetime.now()
     cutoff_date = None
     if time_frame == 'week':
         cutoff_date = now - pd.Timedelta(days=7)
     elif time_frame == 'month':
         cutoff_date = now - pd.Timedelta(days=30)
+        
+    # Ensure cutoff_date is timezone-naive
+    if cutoff_date and hasattr(cutoff_date, 'tzinfo') and cutoff_date.tzinfo is not None:
+        cutoff_date = cutoff_date.replace(tzinfo=None)
     
     # Process each draft
     for draft_id, draft in processed_drafts.items():
@@ -363,7 +383,6 @@ async def get_player_statistics_with_legacy(user_id, time_frame=None, user_displ
         Dictionary with combined player stats
     """
     # Get current stats from the database
-    
     current_stats = await get_player_statistics(user_id, time_frame, user_display_name, guild_id)
     
     # Only include legacy data if we're looking at the specific guild
