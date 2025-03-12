@@ -1,6 +1,7 @@
 from loguru import logger
 import discord
 import os
+import sys
 from discord.ext import commands
 from dotenv import load_dotenv
 from database.message_management import setup_sticky_handler
@@ -9,10 +10,21 @@ from modals import CubeDraftSelectionView
 from utils import cleanup_sessions_task
 from commands import league_commands, scheduled_posts
 
-
-
-# Configure loguru to handle all logs, and set up optional file logging
-logger.add("discord_bot.log", rotation="500 MB")
+# Configure loguru for all modules
+logger.remove()  # Remove default handler
+logger.add(
+    sys.stderr,
+    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
+)
+logger.add(
+    "logs/draftbot_{time}.log",
+    rotation="500 MB",
+    retention="1 week",
+    format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+    enqueue=True,  # Makes it thread-safe
+    backtrace=True,  # Detailed error traces
+    diagnose=True   # Even more detailed error information
+)
 
 async def main():
     load_dotenv()
