@@ -1642,8 +1642,8 @@ class StakeCalculationButton(discord.ui.Button):
             team_b_sorted = sorted([(p, max_stakes.get(p, 0)) for p in draft_session.team_b if p in max_stakes], 
                                   key=lambda x: x[1], reverse=True)
             
-            leftovers_a = []
-            leftovers_b = []
+            # Track remaining stakes after first pass
+            remaining_stakes = {}
             
             for i in range(min(len(team_a_sorted), len(team_b_sorted))):
                 player_a, stake_a = team_a_sorted[i]
@@ -1655,27 +1655,27 @@ class StakeCalculationButton(discord.ui.Button):
                     f"= {bet_amount} tix (minimum of the two)"
                 )
                 
-                # Check for leftovers
+                # Track leftover stakes for both players
                 if stake_a > bet_amount:
-                    leftovers_a.append((player_a, stake_a - bet_amount))
+                    remaining_stakes[player_a] = stake_a - bet_amount
                     pairings_text += f"\n{player_names[player_a]} has {stake_a - bet_amount} tix remaining"
                     
                 if stake_b > bet_amount:
-                    leftovers_b.append((player_b, stake_b - bet_amount))
+                    remaining_stakes[player_b] = stake_b - bet_amount
                     pairings_text += f"\n{player_names[player_b]} has {stake_b - bet_amount} tix remaining"
                     
                 primary_pairings.append(pairings_text)
             
-            # Add any unmatched players from first pass
+            # Add any unmatched players to remaining stakes
             if len(team_a_sorted) > len(team_b_sorted):
                 for i in range(len(team_b_sorted), len(team_a_sorted)):
                     player_a, stake_a = team_a_sorted[i]
-                    leftovers_a.append((player_a, stake_a))
+                    remaining_stakes[player_a] = stake_a
                     primary_pairings.append(f"{player_names[player_a]} ({stake_a} tix) - Unmatched in initial pairing")
             elif len(team_b_sorted) > len(team_a_sorted):
                 for i in range(len(team_a_sorted), len(team_b_sorted)):
                     player_b, stake_b = team_b_sorted[i]
-                    leftovers_b.append((player_b, stake_b))
+                    remaining_stakes[player_b] = stake_b
                     primary_pairings.append(f"{player_names[player_b]} ({stake_b} tix) - Unmatched in initial pairing")
             
             embed.add_field(
@@ -1685,53 +1685,87 @@ class StakeCalculationButton(discord.ui.Button):
             )
             
             # Step 4: Secondary pairings
-            if leftovers_a or leftovers_b:
-                secondary_pairings = []
+            secondary_pairings = []
+            
+            # Split remaining stakes by team
+            team_a_remaining = [(p, remaining_stakes[p]) for p in remaining_stakes if p in draft_session.team_a]
+            team_b_remaining = [(p, remaining_stakes[p]) for p in remaining_stakes if p in draft_session.team_b]
+            
+            # Sort by remaining stake amount (highest first)
+            team_a_remaining.sort(key=lambda x: x[1], reverse=True)
+            team_b_remaining.sort(key=lambda x: x[1], reverse=True)
+            
+            if team_a_remaining and team_b_remaining:
+                # Create a copy of remaining_stakes to track what's used
+                used_stakes = set()
+                processed_pairings = set()
                 
-                leftovers_a.sort(key=lambda x: x[1], reverse=True)
-                leftovers_b.sort(key=lambda x: x[1], reverse=True)
-                
-                i = 0
-                while i < len(leftovers_a) and i < len(leftovers_b):
-                    player_a, remaining_a = leftovers_a[i]
-                    player_b, remaining_b = leftovers_b[i]
+                # Continue matching as long as we have players with stakes on both teams
+                while team_a_remaining and team_b_remaining:
+                    player_a, stake_a = team_a_remaining.pop(0)
+                    player_b, stake_b = team_b_remaining.pop(0)
                     
-                    secondary_bet = min(remaining_a, remaining_b)
+                    pair_key = tuple(sorted([player_a, player_b]))
+                    if pair_key in processed_pairings:
+                        continue
+                    processed_pairings.add(pair_key)
+                    
+                    secondary_bet = min(stake_a, stake_b)
+                    
                     if secondary_bet >= draft_session.min_stake:
                         secondary_pairings.append(
-                            f"{player_names[player_a]} ({remaining_a} tix) vs {player_names[player_b]} ({remaining_b} tix)\n"
+                            f"{player_names[player_a]} ({stake_a} tix) vs {player_names[player_b]} ({stake_b} tix)\n"
                             f"= {secondary_bet} tix"
                         )
                         
-                        # Check for still more leftovers
-                        if remaining_a > secondary_bet:
-                            leftovers_a.append((player_a, remaining_a - secondary_bet))
-                        if remaining_b > secondary_bet:
-                            leftovers_b.append((player_b, remaining_b - secondary_bet))
+                        # Mark these players as having used these stakes
+                        used_stakes.add((player_a, player_b))
+                        
+                        # Update remaining stakes
+                        if stake_a > secondary_bet:
+                            new_stake_a = stake_a - secondary_bet
+                            remaining_stakes[player_a] = new_stake_a
+                            team_a_remaining.append((player_a, new_stake_a))
+                            team_a_remaining.sort(key=lambda x: x[1], reverse=True)
+                        else:
+                            # Remove fully used stakes
+                            if player_a in remaining_stakes:
+                                del remaining_stakes[player_a]
+                                
+                        if stake_b > secondary_bet:
+                            new_stake_b = stake_b - secondary_bet
+                            remaining_stakes[player_b] = new_stake_b
+                            team_b_remaining.append((player_b, new_stake_b))
+                            team_b_remaining.sort(key=lambda x: x[1], reverse=True)
+                        else:
+                            # Remove fully used stakes
+                            if player_b in remaining_stakes:
+                                del remaining_stakes[player_b]
                     else:
                         secondary_pairings.append(
-                            f"{player_names[player_a]} ({remaining_a} tix) vs {player_names[player_b]} ({remaining_b} tix)\n"
+                            f"{player_names[player_a]} ({stake_a} tix) vs {player_names[player_b]} ({stake_b} tix)\n"
                             f"Not enough for a bet (below minimum of {draft_session.min_stake} tix)"
                         )
-                        
-                    i += 1
                 
-                embed.add_field(
-                    name="Step 4: Secondary Pairings (Using Leftover Stakes)",
-                    value="\n\n".join(secondary_pairings) if secondary_pairings else "No secondary pairings",
-                    inline=False
-                )
-                
-                # Step 5: Any unused stakes
-                unused_stakes = []
-                for player_id, amount in leftovers_a + leftovers_b:
+                if secondary_pairings:
+                    embed.add_field(
+                        name="Step 4: Secondary Pairings (Using Leftover Stakes)",
+                        value="\n\n".join(secondary_pairings),
+                        inline=False
+                    )
+            
+            # Step 5: Show any remaining unused stakes
+            if remaining_stakes:
+                # Filter to only show stakes above minimum
+                valid_remaining = []
+                for player_id, amount in remaining_stakes.items():
                     if amount >= draft_session.min_stake:
-                        unused_stakes.append(f"{player_names[player_id]}: {amount} tix")
+                        valid_remaining.append(f"{player_names[player_id]}: {amount} tix")
                 
-                if unused_stakes:
+                if valid_remaining:
                     embed.add_field(
                         name="Step 5: Unused Stakes",
-                        value="\n".join(unused_stakes),
+                        value="\n".join(valid_remaining),
                         inline=False
                     )
             
