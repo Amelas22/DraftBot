@@ -118,37 +118,67 @@ async def league_commands(bot):
             logger.error(f"Error in stats command: {e}")
             await ctx.followup.send("An error occurred while fetching your stats. Please try again later.", ephemeral=True)
 
-    
-    # @bot.slash_command(name="record", description="Display your head-to-head record against another player")
-    # @discord.option("opponent_name", description="The display name of the opponent", required=True)
-    # async def record(ctx, opponent_name: str):
-    #     """Display your head-to-head record against another player."""
-    #     await ctx.defer()
+
+    @bot.slash_command(name="record", description="Display your head-to-head record against another player")
+    @discord.option("opponent_name", description="The display name of the opponent", required=True)
+    @discord.option(
+        "visibility",
+        description="Who can see the record?",
+        required=False,
+        choices=["Just me", "Everyone"],
+        default="Just me"
+    )
+    async def record(ctx, opponent_name: str, visibility: str = "Just me"):
+        """Display your head-to-head record against another player."""
+        # Convert choice to boolean for internal logic
+        hidden_message = visibility == "Just me"
         
-    #     user = ctx.author
-    #     user_id = str(user.id)
-    #     user_display_name = user.display_name
-    #     guild_id = str(ctx.guild.id)  # Get current guild ID
+        # Only defer publicly if stats are meant to be public
+        await ctx.defer(ephemeral=hidden_message)
         
-    #     try:
-    #         # Import needed functions from player_stats
-    #         from player_stats import find_discord_id_by_display_name, get_head_to_head_stats
+        user = ctx.author
+        user_id = str(user.id)
+        user_display_name = user.display_name
+        guild_id = str(ctx.guild.id)  # Get current guild ID
+        
+        try:
+            # Import needed functions from player_stats
+            from player_stats import find_discord_id_by_display_name, get_head_to_head_stats
             
-    #         # Pass guild_id to find_discord_id_by_display_name
-    #         opponent_id, opponent_display_name = await find_discord_id_by_display_name(opponent_name, guild_id)
+            # Pass guild_id to find_discord_id_by_display_name
+            opponent_id, opponent_display_name = await find_discord_id_by_display_name(opponent_name, guild_id)
             
-    #         if not opponent_id:
-    #             await ctx.followup.send(f"Could not find a player with the display name '{opponent_name}' in this server.", ephemeral=True)
-    #             return
+            if not opponent_id:
+                await ctx.followup.send(f"Could not find a player with the display name '{opponent_name}' in this server.", ephemeral=True)
+                return
             
-    #         # Pass guild_id to get_head_to_head_stats
-    #         h2h_stats = await get_head_to_head_stats(user_id, opponent_id, user_display_name, opponent_display_name, guild_id)
+            # Pass guild_id to get_head_to_head_stats
+            h2h_stats = await get_head_to_head_stats(user_id, opponent_id, user_display_name, opponent_display_name, guild_id)
             
-    #         # Rest of the function...
-    #     except Exception as e:
-    #         logger.error(f"Error in record command: {e}")
-    #         await ctx.followup.send("An error occurred while fetching the record. Please try again later.", ephemeral=True)
-                    
+            # Get the opponent user object if possible
+            opponent_user = None
+            try:
+                opponent_user = await ctx.guild.fetch_member(int(opponent_id))
+            except Exception as e:
+                logger.error(f"Error fetching opponent member: {e}")
+                # If we can't get the user object, proceed without it
+                pass
+            
+            # Create and send the embed - use our internal implementation if the import fails
+            try:
+                from player_stats import create_head_to_head_embed
+                embed = await create_head_to_head_embed(user, opponent_user, h2h_stats)
+            except (ImportError, AttributeError):
+                # Fall back to our local implementation
+                embed = await create_head_to_head_embed(user, opponent_user, h2h_stats)
+                
+            await ctx.followup.send(embed=embed, ephemeral=hidden_message)
+            
+        except Exception as e:
+            logger.error(f"Error in record command: {e}")
+            await ctx.followup.send("An error occurred while fetching the record. Please try again later.", ephemeral=True)
+            
+                
     # @bot.slash_command(name="registerteam", description="Register a new team in the league")
     # async def register_team(interaction: discord.Interaction, team_name: str):
     #     cube_overseer_role_name = "Cube Overseer"

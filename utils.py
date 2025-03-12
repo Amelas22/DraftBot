@@ -338,8 +338,14 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
             title = f"{team_name} has won the match!"
             description = f"Congratulations to " + ", ".join(member.display_name for member in winner_team if member) + f" on winning the draft!\nDraft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
             discord_color = discord.Color.gold()
+        elif draft_session.session_type == "staked":
+            title = "Congratulations to " + ", ".join(member.display_name for member in winner_team if member) + " on winning the draft!"
+            description = f"Draft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
+            discord_color = discord.Color.gold()
         else:
             title = "Draft Outcome"
+            description = f"Draft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
+            discord_color = discord.Color.gold()
 
     elif team_a_wins == 0 and team_b_wins == 0:
         title = f"Draft-{draft_session.draft_id} Standings" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
@@ -475,7 +481,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                                                 await post_or_update_victory_message(session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat')
 
                                             # Determine the correct results channel
-                                            results_channel_name = "team-draft-results" if draft_session.session_type == "random" else "league-draft-results"
+                                            results_channel_name = "team-draft-results" if draft_session.session_type == "random" or draft_session.session_type == "staked" else "league-draft-results"
                                             results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
                                             if results_channel:
                                                 await post_or_update_victory_message(session, results_channel, embed, draft_session, 'victory_message_id_results_channel')
@@ -570,7 +576,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                     await post_or_update_victory_message(session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat')
 
                 # Determine the correct results channel
-                results_channel_name = "team-draft-results" if draft_session.session_type == "random" else "league-draft-results"
+                results_channel_name = "team-draft-results" if draft_session.session_type == "random" or draft_session.session_type == "staked" else "league-draft-results"
                 results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
                 if results_channel:
                     await post_or_update_victory_message(session, results_channel, embed, draft_session, 'victory_message_id_results_channel')

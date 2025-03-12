@@ -529,13 +529,18 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
     
     return embed
 
-async def find_discord_id_by_display_name(display_name):
+async def find_discord_id_by_display_name(display_name, guild_id=None):
     """Find a Discord user ID from their display name by searching through recent DraftSessions."""
     try:
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 # First, check the PlayerStats table for an exact match
                 player_query = select(PlayerStats).where(func.lower(PlayerStats.display_name) == display_name.lower())
+                
+                # Add guild_id filter if provided
+                if guild_id:
+                    player_query = player_query.where(PlayerStats.guild_id == guild_id)
+                    
                 player_result = await session.execute(player_query)
                 player = player_result.scalar_one_or_none()
                 
@@ -543,7 +548,13 @@ async def find_discord_id_by_display_name(display_name):
                     return player.player_id, player.display_name
                 
                 # If not found, query for recent DraftSessions
-                recent_drafts_query = select(DraftSession).order_by(DraftSession.draft_start_time.desc()).limit(100)
+                recent_drafts_query = select(DraftSession).order_by(DraftSession.draft_start_time.desc())
+                
+                # Add guild_id filter if provided
+                if guild_id:
+                    recent_drafts_query = recent_drafts_query.where(DraftSession.guild_id == guild_id)
+                    
+                recent_drafts_query = recent_drafts_query.limit(100)
                 recent_drafts_result = await session.execute(recent_drafts_query)
                 recent_drafts = recent_drafts_result.scalars().all()
                 
@@ -567,7 +578,7 @@ async def find_discord_id_by_display_name(display_name):
         logger.error(f"Error finding Discord ID for display name {display_name}: {e}")
         return None, None
 
-async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, user2_display_name=None):
+async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, user2_display_name=None, guild_id=None):
     """Get head-to-head match statistics between two players."""
     try:
         # Calculate time frames
@@ -587,12 +598,16 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
                     # Get player stats for display names
                     if not user1_display_name:
                         player1_query = select(PlayerStats).where(PlayerStats.player_id == user1_id)
+                        if guild_id:
+                            player1_query = player1_query.where(PlayerStats.guild_id == guild_id)
                         player1_result = await session.execute(player1_query)
                         player1_stats = player1_result.scalar_one_or_none()
                         user1_display_name = player1_stats.display_name if player1_stats else "Unknown"
                     
                     if not user2_display_name:
                         player2_query = select(PlayerStats).where(PlayerStats.player_id == user2_id)
+                        if guild_id:
+                            player2_query = player2_query.where(PlayerStats.guild_id == guild_id)
                         player2_result = await session.execute(player2_query)
                         player2_stats = player2_result.scalar_one_or_none()
                         user2_display_name = player2_stats.display_name if player2_stats else "Unknown"
@@ -600,7 +615,10 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
                     # If still don't have names, search in sign_ups
                     if user1_display_name == "Unknown" or user2_display_name == "Unknown":
                         # Find in recent drafts
-                        recent_drafts_query = select(DraftSession).order_by(DraftSession.draft_start_time.desc()).limit(50)
+                        recent_drafts_query = select(DraftSession).order_by(DraftSession.draft_start_time.desc())
+                        if guild_id:
+                            recent_drafts_query = recent_drafts_query.where(DraftSession.guild_id == guild_id)
+                        recent_drafts_query = recent_drafts_query.limit(50)
                         recent_drafts_result = await session.execute(recent_drafts_query)
                         recent_drafts = recent_drafts_result.scalars().all()
                         
@@ -623,8 +641,55 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
         
         async with AsyncSessionLocal() as session:
             async with session.begin():
-                # Find all matches where both players participated
+                # Find all drafts where both players participated and were on opposite teams
+                drafts_query = select(DraftSession).where(
+                    DraftSession.victory_message_id_results_channel.isnot(None)  # Completed drafts
+                )
+                
+                # Add guild_id filter if provided
+                if guild_id:
+                    drafts_query = drafts_query.where(DraftSession.guild_id == guild_id)
+                
+                drafts_result = await session.execute(drafts_query)
+                all_drafts = drafts_result.scalars().all()
+                
+                # Filter to drafts where both players participated and were on opposite teams
+                relevant_drafts = []
+                for draft in all_drafts:
+                    # Skip if no sign_ups or teams
+                    if not draft.sign_ups or not draft.team_a or not draft.team_b:
+                        continue
+                    
+                    # Check if both players participated
+                    if user1_id not in draft.sign_ups or user2_id not in draft.sign_ups:
+                        continue
+                    
+                    # Check if players were on opposite teams
+                    user1_in_team_a = user1_id in draft.team_a
+                    user1_in_team_b = user1_id in draft.team_b
+                    user2_in_team_a = user2_id in draft.team_a
+                    user2_in_team_b = user2_id in draft.team_b
+                    
+                    if (user1_in_team_a and user2_in_team_b) or (user1_in_team_b and user2_in_team_a):
+                        relevant_drafts.append(draft)
+                
+                # Get all match results for relevant drafts
+                relevant_draft_ids = [draft.session_id for draft in relevant_drafts]
+                if not relevant_draft_ids:
+                    # No relevant drafts found
+                    return {
+                        "user1_id": user1_id,
+                        "user2_id": user2_id,
+                        "user1_display_name": user1_display_name,
+                        "user2_display_name": user2_display_name,
+                        "weekly": weekly_stats,
+                        "monthly": monthly_stats,
+                        "lifetime": lifetime_stats
+                    }
+                
+                # Find all matches where both players participated directly against each other
                 match_query = select(MatchResult).where(
+                    MatchResult.session_id.in_(relevant_draft_ids),
                     or_(
                         and_(MatchResult.player1_id == user1_id, MatchResult.player2_id == user2_id),
                         and_(MatchResult.player1_id == user2_id, MatchResult.player2_id == user1_id)
@@ -633,18 +698,12 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
                 match_results = await session.execute(match_query)
                 matches = match_results.scalars().all()
                 
-                # Get draft sessions for times
-                session_ids = [match.session_id for match in matches]
-                if session_ids:
-                    drafts_query = select(DraftSession).where(DraftSession.session_id.in_(session_ids))
-                    drafts_result = await session.execute(drafts_query)
-                    drafts = {draft.session_id: draft for draft in drafts_result.scalars().all()}
-                else:
-                    drafts = {}
+                # Create lookup of drafts by session_id for quick access
+                drafts_by_id = {draft.session_id: draft for draft in relevant_drafts}
                 
                 # Process each match
                 for match in matches:
-                    draft = drafts.get(match.session_id)
+                    draft = drafts_by_id.get(match.session_id)
                     if not draft or not match.winner_id:
                         continue
                         
@@ -706,6 +765,7 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
             "lifetime": {"matches_played": 0, "user1_wins": 0, "user2_wins": 0, "user1_win_percentage": 0, "user2_win_percentage": 0}
         }
 
+
 async def create_head_to_head_embed(user1, user2, h2h_stats):
     """Create a Discord embed with head-to-head statistics."""
     embed = discord.Embed(
@@ -714,12 +774,9 @@ async def create_head_to_head_embed(user1, user2, h2h_stats):
         timestamp=datetime.now()
     )
     
-    # Set thumbnails if user objects are available
-    if hasattr(user1, 'display_avatar') and user1.display_avatar:
-        embed.set_thumbnail(url=user1.display_avatar.url)
-    
+    # Set the opponent (user2) as the thumbnail
     if user2 and hasattr(user2, 'display_avatar') and user2.display_avatar:
-        embed.set_author(name=user2.display_name, icon_url=user2.display_avatar.url)
+        embed.set_thumbnail(url=user2.display_avatar.url)
     
     # Lifetime stats
     lifetime = h2h_stats['lifetime']
@@ -732,19 +789,6 @@ async def create_head_to_head_embed(user1, user2, h2h_stats):
         ),
         inline=False
     )
-    
-    # Monthly stats
-    monthly = h2h_stats['monthly']
-    if monthly['matches_played'] > 0:
-        embed.add_field(
-            name="Last 30 Days",
-            value=(
-                f"Matches: {monthly['matches_played']}\n"
-                f"{h2h_stats['user1_display_name']}: {monthly['user1_wins']} ({monthly['user1_win_percentage']:.1f}%)\n"
-                f"{h2h_stats['user2_display_name']}: {monthly['user2_wins']} ({monthly['user2_win_percentage']:.1f}%)"
-            ),
-            inline=True
-        )
     
     # Weekly stats
     weekly = h2h_stats['weekly']
@@ -759,6 +803,20 @@ async def create_head_to_head_embed(user1, user2, h2h_stats):
             inline=True
         )
     
+    # Monthly stats
+    monthly = h2h_stats['monthly']
+    if monthly['matches_played'] > 0:
+        embed.add_field(
+            name="Last 30 Days",
+            value=(
+                f"Matches: {monthly['matches_played']}\n"
+                f"{h2h_stats['user1_display_name']}: {monthly['user1_wins']} ({monthly['user1_win_percentage']:.1f}%)\n"
+                f"{h2h_stats['user2_display_name']}: {monthly['user2_wins']} ({monthly['user2_win_percentage']:.1f}%)"
+            ),
+            inline=True
+        )
+
+
     embed.set_footer(text="Stats are updated after each match")
     
     return embed
