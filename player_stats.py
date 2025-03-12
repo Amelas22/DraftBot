@@ -591,6 +591,16 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
         monthly_stats = {"matches_played": 0, "user1_wins": 0, "user2_wins": 0}
         lifetime_stats = {"matches_played": 0, "user1_wins": 0, "user2_wins": 0}
         
+        # Stats for when users are on opposing teams
+        opposing_weekly = {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0}
+        opposing_monthly = {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0}
+        opposing_lifetime = {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0}
+        
+        # Stats for when users are on the same team
+        teammate_weekly = {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0}
+        teammate_monthly = {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0}
+        teammate_lifetime = {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0}
+        
         # Get display names if not provided
         if not user1_display_name or not user2_display_name:
             async with AsyncSessionLocal() as session:
@@ -641,7 +651,7 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
         
         async with AsyncSessionLocal() as session:
             async with session.begin():
-                # Find all drafts where both players participated and were on opposite teams
+                # Find all completed drafts
                 drafts_query = select(DraftSession).where(
                     DraftSession.victory_message_id_results_channel.isnot(None)  # Completed drafts
                 )
@@ -653,94 +663,162 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
                 drafts_result = await session.execute(drafts_query)
                 all_drafts = drafts_result.scalars().all()
                 
-                # Filter to drafts where both players participated and were on opposite teams
-                relevant_drafts = []
+                # Process each draft to find ones where both players participated
                 for draft in all_drafts:
-                    # Skip if no sign_ups or teams
-                    if not draft.sign_ups or not draft.team_a or not draft.team_b:
+                    # Skip if no sign_ups
+                    if not draft.sign_ups:
                         continue
                     
-                    # Check if both players participated
+                    # Skip if either player didn't participate
                     if user1_id not in draft.sign_ups or user2_id not in draft.sign_ups:
                         continue
                     
-                    # Check if players were on opposite teams
-                    user1_in_team_a = user1_id in draft.team_a
-                    user1_in_team_b = user1_id in draft.team_b
-                    user2_in_team_a = user2_id in draft.team_a
-                    user2_in_team_b = user2_id in draft.team_b
+                    # Skip if no draft date
+                    draft_date = draft.draft_start_time
+                    if not draft_date:
+                        continue
                     
-                    if (user1_in_team_a and user2_in_team_b) or (user1_in_team_b and user2_in_team_a):
-                        relevant_drafts.append(draft)
-                
-                # Get all match results for relevant drafts
-                relevant_draft_ids = [draft.session_id for draft in relevant_drafts]
-                if not relevant_draft_ids:
-                    # No relevant drafts found
-                    return {
-                        "user1_id": user1_id,
-                        "user2_id": user2_id,
-                        "user1_display_name": user1_display_name,
-                        "user2_display_name": user2_display_name,
-                        "weekly": weekly_stats,
-                        "monthly": monthly_stats,
-                        "lifetime": lifetime_stats
-                    }
-                
-                # Find all matches where both players participated directly against each other
-                match_query = select(MatchResult).where(
-                    MatchResult.session_id.in_(relevant_draft_ids),
-                    or_(
-                        and_(MatchResult.player1_id == user1_id, MatchResult.player2_id == user2_id),
-                        and_(MatchResult.player1_id == user2_id, MatchResult.player2_id == user1_id)
+                    # Check if both players have head-to-head matches
+                    match_query = select(MatchResult).where(
+                        MatchResult.session_id == draft.session_id,
+                        or_(
+                            and_(MatchResult.player1_id == user1_id, MatchResult.player2_id == user2_id),
+                            and_(MatchResult.player1_id == user2_id, MatchResult.player2_id == user1_id)
+                        )
                     )
-                )
-                match_results = await session.execute(match_query)
-                matches = match_results.scalars().all()
-                
-                # Create lookup of drafts by session_id for quick access
-                drafts_by_id = {draft.session_id: draft for draft in relevant_drafts}
-                
-                # Process each match
-                for match in matches:
-                    draft = drafts_by_id.get(match.session_id)
-                    if not draft or not match.winner_id:
-                        continue
+                    match_results = await session.execute(match_query)
+                    h2h_matches = match_results.scalars().all()
+                    
+                    # Process head-to-head matches
+                    for match in h2h_matches:
+                        if not match.winner_id:
+                            continue
                         
-                    match_date = draft.draft_start_time
-                    if not match_date:
-                        continue
-                    
-                    # Determine match winner in relation to user1
-                    user1_won = match.winner_id == user1_id
-                    
-                    # Update lifetime stats
-                    lifetime_stats["matches_played"] += 1
-                    if user1_won:
-                        lifetime_stats["user1_wins"] += 1
-                    else:
-                        lifetime_stats["user2_wins"] += 1
-                    
-                    # Update monthly stats if within last 30 days
-                    if match_date >= month_ago:
-                        monthly_stats["matches_played"] += 1
+                        # Determine match winner in relation to user1
+                        user1_won = match.winner_id == user1_id
+                        
+                        # Update lifetime stats
+                        lifetime_stats["matches_played"] += 1
                         if user1_won:
-                            monthly_stats["user1_wins"] += 1
+                            lifetime_stats["user1_wins"] += 1
                         else:
-                            monthly_stats["user2_wins"] += 1
+                            lifetime_stats["user2_wins"] += 1
                         
-                        # Update weekly stats if within last 7 days
-                        if match_date >= week_ago:
-                            weekly_stats["matches_played"] += 1
+                        # Update monthly stats if within last 30 days
+                        if draft_date >= month_ago:
+                            monthly_stats["matches_played"] += 1
                             if user1_won:
-                                weekly_stats["user1_wins"] += 1
+                                monthly_stats["user1_wins"] += 1
                             else:
-                                weekly_stats["user2_wins"] += 1
+                                monthly_stats["user2_wins"] += 1
+                            
+                            # Update weekly stats if within last 7 days
+                            if draft_date >= week_ago:
+                                weekly_stats["matches_played"] += 1
+                                if user1_won:
+                                    weekly_stats["user1_wins"] += 1
+                                else:
+                                    weekly_stats["user2_wins"] += 1
+                    
+                    # Check team assignments for draft records
+                    # Handle potential None values in team_a and team_b safely
+                    team_a = draft.team_a or []
+                    team_b = draft.team_b or []
+                    
+                    # Skip if teams aren't fully populated (needed for determining team results)
+                    if not team_a or not team_b:
+                        continue
+                    
+                    # Get team win information
+                    team_a_wins = 0
+                    team_b_wins = 0
+                    
+                    # Get match results for this draft to calculate team wins
+                    all_matches_query = select(MatchResult).where(
+                        MatchResult.session_id == draft.session_id,
+                        MatchResult.winner_id.isnot(None)  # Only count completed matches
+                    )
+                    all_match_results = await session.execute(all_matches_query)
+                    all_matches = all_match_results.scalars().all()
+                    
+                    # Count team wins based on which team the winner was on
+                    for match in all_matches:
+                        if match.winner_id in team_a:
+                            team_a_wins += 1
+                        elif match.winner_id in team_b:
+                            team_b_wins += 1
+                    
+                    # Determine if players were on the same team or opposing teams
+                    user1_in_team_a = user1_id in team_a
+                    user1_in_team_b = user1_id in team_b
+                    user2_in_team_a = user2_id in team_a
+                    user2_in_team_b = user2_id in team_b
+                    
+                    same_team = (user1_in_team_a and user2_in_team_a) or (user1_in_team_b and user2_in_team_b)
+                    
+                    # Determine if the draft was a win, loss, or draw for the appropriate set of stats
+                    if team_a_wins > team_b_wins:
+                        winner_team = "A"
+                    elif team_b_wins > team_a_wins:
+                        winner_team = "B"
+                    else:
+                        winner_team = "Draw"
+                    
+                    if same_team:
+                        # Determine which team they were both on
+                        their_team = "A" if (user1_in_team_a and user2_in_team_a) else "B"
+                        
+                        # Update stats based on result
+                        stats_list = [teammate_lifetime]
+                        if draft_date >= month_ago:
+                            stats_list.append(teammate_monthly)
+                            if draft_date >= week_ago:
+                                stats_list.append(teammate_weekly)
+                        
+                        for stats in stats_list:
+                            if winner_team == "Draw":
+                                stats["draws"] += 1
+                            elif winner_team == their_team:
+                                stats["wins"] += 1
+                            else:
+                                stats["losses"] += 1
+                    else:
+                        # They're on opposite teams
+                        # Determine which team user1 was on
+                        user1_team = "A" if user1_in_team_a else "B"
+                        
+                        # Update stats based on result (from user1's perspective)
+                        stats_list = [opposing_lifetime]
+                        if draft_date >= month_ago:
+                            stats_list.append(opposing_monthly)
+                            if draft_date >= week_ago:
+                                stats_list.append(opposing_weekly)
+                        
+                        for stats in stats_list:
+                            if winner_team == "Draw":
+                                stats["draws"] += 1
+                            elif winner_team == user1_team:
+                                stats["wins"] += 1
+                            else:
+                                stats["losses"] += 1
                 
-                # Calculate win percentages
+                # Calculate win percentages for match stats
                 for stats in [weekly_stats, monthly_stats, lifetime_stats]:
                     stats["user1_win_percentage"] = (stats["user1_wins"] / stats["matches_played"] * 100) if stats["matches_played"] > 0 else 0
                     stats["user2_win_percentage"] = (stats["user2_wins"] / stats["matches_played"] * 100) if stats["matches_played"] > 0 else 0
+                
+                # Calculate win percentages for team stats (excluding draws from calculation)
+                for stats in [opposing_weekly, opposing_monthly, opposing_lifetime, teammate_weekly, teammate_monthly, teammate_lifetime]:
+                    wins_plus_losses = stats["wins"] + stats["losses"]
+                    if wins_plus_losses > 0:
+                        stats["win_percentage"] = (stats["wins"] / wins_plus_losses) * 100
+                    else:
+                        stats["win_percentage"] = 0
+                
+                # Debug log to verify data
+                logger.info(f"User1_id: {user1_id}, User2_id: {user2_id}")
+                logger.info(f"Opposing Lifetime: {opposing_lifetime}")
+                logger.info(f"Teammate Lifetime: {teammate_lifetime}")
                 
                 return {
                     "user1_id": user1_id,
@@ -749,20 +827,39 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
                     "user2_display_name": user2_display_name,
                     "weekly": weekly_stats,
                     "monthly": monthly_stats,
-                    "lifetime": lifetime_stats
+                    "lifetime": lifetime_stats,
+                    "opposing_weekly": opposing_weekly,
+                    "opposing_monthly": opposing_monthly,
+                    "opposing_lifetime": opposing_lifetime,
+                    "teammate_weekly": teammate_weekly,
+                    "teammate_monthly": teammate_monthly,
+                    "teammate_lifetime": teammate_lifetime
                 }
                 
     except Exception as e:
         logger.error(f"Error getting head-to-head stats between {user1_id} and {user2_id}: {e}")
-        # Return default values
+        # Return default values with percentages explicitly set to zero
+        weekly_stats = {"matches_played": 0, "user1_wins": 0, "user2_wins": 0, "user1_win_percentage": 0, "user2_win_percentage": 0}
+        monthly_stats = {"matches_played": 0, "user1_wins": 0, "user2_wins": 0, "user1_win_percentage": 0, "user2_win_percentage": 0}
+        lifetime_stats = {"matches_played": 0, "user1_wins": 0, "user2_wins": 0, "user1_win_percentage": 0, "user2_win_percentage": 0}
+        
+        # Default values for team records
+        empty_stats = {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0}
+        
         return {
             "user1_id": user1_id,
             "user2_id": user2_id,
             "user1_display_name": user1_display_name or "Unknown",
             "user2_display_name": user2_display_name or "Unknown",
-            "weekly": {"matches_played": 0, "user1_wins": 0, "user2_wins": 0, "user1_win_percentage": 0, "user2_win_percentage": 0},
-            "monthly": {"matches_played": 0, "user1_wins": 0, "user2_wins": 0, "user1_win_percentage": 0, "user2_win_percentage": 0},
-            "lifetime": {"matches_played": 0, "user1_wins": 0, "user2_wins": 0, "user1_win_percentage": 0, "user2_win_percentage": 0}
+            "weekly": weekly_stats,
+            "monthly": monthly_stats,
+            "lifetime": lifetime_stats,
+            "opposing_weekly": empty_stats,
+            "opposing_monthly": empty_stats,
+            "opposing_lifetime": empty_stats,
+            "teammate_weekly": empty_stats,
+            "teammate_monthly": empty_stats,
+            "teammate_lifetime": empty_stats
         }
 
 
@@ -774,49 +871,95 @@ async def create_head_to_head_embed(user1, user2, h2h_stats):
         timestamp=datetime.now()
     )
     
+
     # Set the opponent (user2) as the thumbnail
     if user2 and hasattr(user2, 'display_avatar') and user2.display_avatar:
         embed.set_thumbnail(url=user2.display_avatar.url)
     
     # Lifetime stats
-    lifetime = h2h_stats['lifetime']
+    lifetime = h2h_stats.get('lifetime', {"matches_played": 0, "user1_wins": 0, "user2_wins": 0, "user1_win_percentage": 0, "user2_win_percentage": 0})
     embed.add_field(
-        name="Lifetime Record",
+        name="Match Record",
         value=(
-            f"Matches: {lifetime['matches_played']}\n"
-            f"{h2h_stats['user1_display_name']}: {lifetime['user1_wins']} ({lifetime['user1_win_percentage']:.1f}%)\n"
-            f"{h2h_stats['user2_display_name']}: {lifetime['user2_wins']} ({lifetime['user2_win_percentage']:.1f}%)"
+            f"Matches: {lifetime.get('matches_played', 0)}\n"
+            f"{h2h_stats['user1_display_name']}: {lifetime.get('user1_wins', 0)} ({lifetime.get('user1_win_percentage', 0):.1f}%)\n"
+            f"{h2h_stats['user2_display_name']}: {lifetime.get('user2_wins', 0)} ({lifetime.get('user2_win_percentage', 0):.1f}%)"
         ),
         inline=False
     )
     
-    # Weekly stats
-    weekly = h2h_stats['weekly']
-    if weekly['matches_played'] > 0:
+    # Monthly stats
+    monthly = h2h_stats.get('monthly', {"matches_played": 0, "user1_wins": 0, "user2_wins": 0, "user1_win_percentage": 0, "user2_win_percentage": 0})
+    if monthly.get('matches_played', 0) > 0:
         embed.add_field(
-            name="Last 7 Days",
+            name="Last 30 Days",
             value=(
-                f"Matches: {weekly['matches_played']}\n"
-                f"{h2h_stats['user1_display_name']}: {weekly['user1_wins']} ({weekly['user1_win_percentage']:.1f}%)\n"
-                f"{h2h_stats['user2_display_name']}: {weekly['user2_wins']} ({weekly['user2_win_percentage']:.1f}%)"
+                f"Matches: {monthly.get('matches_played', 0)}\n"
+                f"{h2h_stats['user1_display_name']}: {monthly.get('user1_wins', 0)} ({monthly.get('user1_win_percentage', 0):.1f}%)\n"
+                f"{h2h_stats['user2_display_name']}: {monthly.get('user2_wins', 0)} ({monthly.get('user2_win_percentage', 0):.1f}%)"
             ),
             inline=True
         )
     
-    # Monthly stats
-    monthly = h2h_stats['monthly']
-    if monthly['matches_played'] > 0:
+    # Weekly stats
+    weekly = h2h_stats.get('weekly', {"matches_played": 0, "user1_wins": 0, "user2_wins": 0, "user1_win_percentage": 0, "user2_win_percentage": 0})
+    if weekly.get('matches_played', 0) > 0:
         embed.add_field(
-            name="Last 30 Days",
+            name="Last 7 Days",
             value=(
-                f"Matches: {monthly['matches_played']}\n"
-                f"{h2h_stats['user1_display_name']}: {monthly['user1_wins']} ({monthly['user1_win_percentage']:.1f}%)\n"
-                f"{h2h_stats['user2_display_name']}: {monthly['user2_wins']} ({monthly['user2_win_percentage']:.1f}%)"
+                f"Matches: {weekly.get('matches_played', 0)}\n"
+                f"{h2h_stats['user1_display_name']}: {weekly.get('user1_wins', 0)} ({weekly.get('user1_win_percentage', 0):.1f}%)\n"
+                f"{h2h_stats['user2_display_name']}: {weekly.get('user2_wins', 0)} ({weekly.get('user2_win_percentage', 0):.1f}%)"
             ),
             inline=True
         )
-
-
+    
+    # Add Draft Record (As Opponents)
+    opposing_lifetime = h2h_stats.get('opposing_lifetime', {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0})
+    opposing_monthly = h2h_stats.get('opposing_monthly', {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0})
+    opposing_weekly = h2h_stats.get('opposing_weekly', {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0})
+    
+    # Only add the field if there's opponent data
+    if opposing_lifetime.get('wins', 0) + opposing_lifetime.get('losses', 0) + opposing_lifetime.get('draws', 0) > 0:
+        opp_value = []
+        
+        if opposing_weekly.get('wins', 0) + opposing_weekly.get('losses', 0) + opposing_weekly.get('draws', 0) > 0:
+            opp_value.append(f"Last 7 Days: {opposing_weekly.get('wins', 0)}-{opposing_weekly.get('losses', 0)}-{opposing_weekly.get('draws', 0)} ({opposing_weekly.get('win_percentage', 0):.1f}%)")
+            
+        if opposing_monthly.get('wins', 0) + opposing_monthly.get('losses', 0) + opposing_monthly.get('draws', 0) > 0:
+            opp_value.append(f"Last 30 Days: {opposing_monthly.get('wins', 0)}-{opposing_monthly.get('losses', 0)}-{opposing_monthly.get('draws', 0)} ({opposing_monthly.get('win_percentage', 0):.1f}%)")
+            
+        opp_value.append(f"Lifetime: {opposing_lifetime.get('wins', 0)}-{opposing_lifetime.get('losses', 0)}-{opposing_lifetime.get('draws', 0)} ({opposing_lifetime.get('win_percentage', 0):.1f}%)")
+        
+        embed.add_field(
+            name="Draft Record (As Opponents)",
+            value="\n".join(opp_value),
+            inline=False
+        )
+    
+    # Add Draft Record (As Teammates)
+    teammate_lifetime = h2h_stats.get('teammate_lifetime', {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0})
+    teammate_monthly = h2h_stats.get('teammate_monthly', {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0})
+    teammate_weekly = h2h_stats.get('teammate_weekly', {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0})
+    
+    # Only add the field if there's teammate data
+    if teammate_lifetime.get('wins', 0) + teammate_lifetime.get('losses', 0) + teammate_lifetime.get('draws', 0) > 0:
+        team_value = []
+        
+        if teammate_weekly.get('wins', 0) + teammate_weekly.get('losses', 0) + teammate_weekly.get('draws', 0) > 0:
+            team_value.append(f"Last 7 Days: {teammate_weekly.get('wins', 0)}-{teammate_weekly.get('losses', 0)}-{teammate_weekly.get('draws', 0)} ({teammate_weekly.get('win_percentage', 0):.1f}%)")
+            
+        if teammate_monthly.get('wins', 0) + teammate_monthly.get('losses', 0) + teammate_monthly.get('draws', 0) > 0:
+            team_value.append(f"Last 30 Days: {teammate_monthly.get('wins', 0)}-{teammate_monthly.get('losses', 0)}-{teammate_monthly.get('draws', 0)} ({teammate_monthly.get('win_percentage', 0):.1f}%)")
+            
+        team_value.append(f"Lifetime: {teammate_lifetime.get('wins', 0)}-{teammate_lifetime.get('losses', 0)}-{teammate_lifetime.get('draws', 0)} ({teammate_lifetime.get('win_percentage', 0):.1f}%)")
+        
+        embed.add_field(
+            name="Draft Record (As Teammates)",
+            value="\n".join(team_value),
+            inline=False
+        )
+    
     embed.set_footer(text="Stats are updated after each match")
     
     return embed
