@@ -302,7 +302,7 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                     # Add the stakes field to the embed
                     if stake_lines:
                         embed.add_field(
-                            name=f"**Staked Draft - Total: {total_stakes} tix**",
+                            name=f"**Total Bets: {total_stakes} tix**",
                             value="\n".join(stake_lines),
                             inline=False
                         )
