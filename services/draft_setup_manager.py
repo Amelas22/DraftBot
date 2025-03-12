@@ -79,6 +79,33 @@ class DraftSetupManager:
                 f"User IDs={[user.get('userID') for user in users]}"
             )
 
+        @self.sio.on('storedSessionSettings')
+        async def on_stored_settings(data):
+            self.logger.info(f"Received updated session settings: {data}")
+
+    @exponential_backoff(max_retries=10, base_delay=1)
+    async def update_draft_settings(self):
+        if not self.sio.connected:
+            self.logger.error("Cannot update settings - socket not connected")
+            return False
+            
+        try:
+            # Send each setting individually
+            self.logger.debug("Updating draft settings...")
+            await self.sio.emit('setColorBalance', False)
+            await self.sio.emit('setMaxPlayers', 10)
+            await self.sio.emit('setDraftLogUnlockTimer', 180)
+            await self.sio.emit('setDraftLogRecipients', "delayed")
+            await self.sio.emit('setPersonalLogs', True)
+            await self.sio.emit('teamDraft', True)  # Added teamDraft setting
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error during settings update: {e}")
+            self.logger.exception("Full exception details:")
+            return False
+
     @exponential_backoff(max_retries=10, base_delay=1)
     async def import_cube(self):
         try:
@@ -88,24 +115,30 @@ class DraftSetupManager:
                 "matchVersions": True
             }
             
+            # Create a Future to wait for the callback
+            future = asyncio.Future()
+            
             def ack(response):
                 if 'error' in response:
                     self.logger.error(f"Import cube error: {response['error']}")
+                    future.set_result(False)
                 else:
                     self.logger.info("Cube import acknowledged")
                     self.cube_imported = True
+                    future.set_result(True)
 
             await self.sio.emit('importCube', import_data, callback=ack)
             self.logger.info(f"Sent cube import request for {self.cube_id}")
             
+            # Wait for the callback to complete
+            success = await future
+            return success
+            
         except Exception as e:
             self.logger.error(f"Fatal error during cube import: {e}")
-            # If import fails, we'll disconnect and let the task end
             if self.sio.connected:
                 await self.sio.disconnect()
             return False
-        
-        return self.cube_imported
 
     async def keep_connection_alive(self):
         self.logger.info(f"Starting connection task for draft_id: DB{self.draft_id}")
@@ -120,6 +153,11 @@ class DraftSetupManager:
             # If initial cube import fails, end the task
             if not self.cube_imported and not await self.import_cube():
                 self.logger.error("Initial cube import failed, ending connection task")
+                return
+
+            # Update draft settings after successful cube import
+            if not await self.update_draft_settings():
+                self.logger.error("Failed to update draft settings, ending connection task")
                 return
 
             # Wait for at least 2 other users
