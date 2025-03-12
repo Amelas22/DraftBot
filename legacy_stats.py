@@ -12,7 +12,8 @@ MATCH_RESULTS_FILE = os.path.join(CSV_DIR, "matchResults.csv")
 DRAFT_RESULTS_FILE = os.path.join(CSV_DIR, "draftResults.csv")
 
 # Cache for legacy data to avoid reprocessing
-_legacy_data_cache = None
+_legacy_data_cache = None  # For raw data frames
+_processed_drafts_cache = None  # For processed drafts
 
 def load_legacy_data():
     """
@@ -65,7 +66,12 @@ def process_legacy_drafts():
     Process the legacy draft data to create a structured representation.
     Returns a dictionary of processed drafts with team info and match results.
     """
-    global _legacy_data_cache
+    global _legacy_data_cache, _processed_drafts_cache
+    
+    # Return cached processed drafts if available
+    if _processed_drafts_cache is not None:
+        return _processed_drafts_cache
+        
     print("Processing legacy draft data...")
     match_results_df, draft_results_df = load_legacy_data()
     if match_results_df is None or draft_results_df is None:
@@ -145,6 +151,9 @@ def process_legacy_drafts():
                 'guild_id': LEGACY_GUILD_ID,
                 'team_formation': draft['team_formation']
             }
+    
+    # Cache the processed drafts
+    _processed_drafts_cache = processed_drafts
     
     return processed_drafts
 
