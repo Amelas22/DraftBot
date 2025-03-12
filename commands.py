@@ -9,6 +9,7 @@ from collections import Counter
 from player_stats import get_player_statistics, create_stats_embed
 from loguru import logger
 from discord.ext import commands
+from legacy_stats import get_legacy_player_stats, get_legacy_head_to_head_stats
 
 pacific_time_zone = pytz.timezone('America/Los_Angeles')
 cutoff_datetime = pacific_time_zone.localize(datetime(2024, 5, 6, 0, 0))
@@ -106,10 +107,12 @@ async def league_commands(bot):
         guild_id = str(ctx.guild.id)  # Get current guild ID
         
         try:
-            # Pass guild_id to get_player_statistics
-            stats_weekly = await get_player_statistics(user_id, 'week', user_display_name, guild_id)
-            stats_monthly = await get_player_statistics(user_id, 'month', user_display_name, guild_id)
-            stats_lifetime = await get_player_statistics(user_id, None, user_display_name, guild_id)
+            from legacy_stats import get_player_statistics_with_legacy
+            
+            # Get player statistics with legacy data incorporated
+            stats_weekly = await get_player_statistics_with_legacy(user_id, 'week', user_display_name, guild_id)
+            stats_monthly = await get_player_statistics_with_legacy(user_id, 'month', user_display_name, guild_id)
+            stats_lifetime = await get_player_statistics_with_legacy(user_id, None, user_display_name, guild_id)
             
             # Create and send the embed
             embed = await create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime)
@@ -142,8 +145,10 @@ async def league_commands(bot):
         guild_id = str(ctx.guild.id)  # Get current guild ID
         
         try:
-            # Import needed functions from player_stats
-            from player_stats import find_discord_id_by_display_name, get_head_to_head_stats
+            # Import needed functions
+            from player_stats import find_discord_id_by_display_name, create_head_to_head_embed
+            # Import the new combined stats function
+            from legacy_stats import get_head_to_head_stats_with_legacy
             
             # Pass guild_id to find_discord_id_by_display_name
             opponent_id, opponent_display_name = await find_discord_id_by_display_name(opponent_name, guild_id)
@@ -152,8 +157,8 @@ async def league_commands(bot):
                 await ctx.followup.send(f"Could not find a player with the display name '{opponent_name}' in this server.", ephemeral=True)
                 return
             
-            # Pass guild_id to get_head_to_head_stats
-            h2h_stats = await get_head_to_head_stats(user_id, opponent_id, user_display_name, opponent_display_name, guild_id)
+            # Get head-to-head stats with legacy data incorporated
+            h2h_stats = await get_head_to_head_stats_with_legacy(user_id, opponent_id, user_display_name, opponent_display_name, guild_id)
             
             # Get the opponent user object if possible
             opponent_user = None
@@ -164,19 +169,68 @@ async def league_commands(bot):
                 # If we can't get the user object, proceed without it
                 pass
             
-            # Create and send the embed - use our internal implementation if the import fails
-            try:
-                from player_stats import create_head_to_head_embed
-                embed = await create_head_to_head_embed(user, opponent_user, h2h_stats)
-            except (ImportError, AttributeError):
-                # Fall back to our local implementation
-                embed = await create_head_to_head_embed(user, opponent_user, h2h_stats)
-                
+            # Create and send the embed
+            embed = await create_head_to_head_embed(user, opponent_user, h2h_stats)
             await ctx.followup.send(embed=embed, ephemeral=hidden_message)
             
         except Exception as e:
             logger.error(f"Error in record command: {e}")
             await ctx.followup.send("An error occurred while fetching the record. Please try again later.", ephemeral=True)
+
+    # Add a setup function to initialize the legacy data
+    @bot.slash_command(name="setup_legacy_data", description="Admin Only: Setup legacy data for stats tracking")
+    @commands.has_permissions(administrator=True)
+    async def setup_legacy_data(ctx):
+        """Admin command to initialize legacy data for stats tracking."""
+        await ctx.defer(ephemeral=True)
+        
+        try:
+            from legacy_stats import load_legacy_data, process_legacy_drafts
+            
+            # Check if the CSV files exist
+            match_results_df, draft_results_df = load_legacy_data()
+            if match_results_df is None or draft_results_df is None:
+                await ctx.followup.send("Legacy data files not found. Please place matchResults.csv and draftResults.csv in the 'legacy_data' directory.", ephemeral=True)
+                return
+            
+            # Process the data
+            processed_drafts = process_legacy_drafts()
+            
+            # Show summary
+            guild_id = str(ctx.guild.id)
+            is_legacy_guild = guild_id == "715228693529886760"  # Check if this is the guild the legacy data is for
+            
+            embed = discord.Embed(
+                title="Legacy Data Setup",
+                description="Legacy data has been processed and is ready to use.",
+                color=discord.Color.green()
+            )
+            
+            embed.add_field(
+                name="Statistics",
+                value=f"Processed {len(processed_drafts)} drafts from the legacy data.",
+                inline=False
+            )
+            
+            embed.add_field(
+                name="Data Status",
+                value=f"Legacy data {'will' if is_legacy_guild else 'will not'} be included in stats for this guild.",
+                inline=False
+            )
+            
+            if not is_legacy_guild:
+                embed.add_field(
+                    name="Note",
+                    value=f"This guild ID ({guild_id}) does not match the legacy data guild ID (715228693529886760). "
+                        f"Legacy data will only be included for the matching guild.",
+                    inline=False
+                )
+            
+            await ctx.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Error in setup_legacy_data command: {e}")
+            await ctx.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
             
                 
     # @bot.slash_command(name="registerteam", description="Register a new team in the league")
