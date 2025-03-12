@@ -4,6 +4,8 @@ from datetime import datetime
 from loguru import logger
 from typing import Optional
 from models.session_details import SessionDetails
+from sessions.staked_session import StakedSession
+from stake_calculator import StakeCalculator
 
 from sessions import RandomSession, PremadeSession, SwissSession, BaseSession
 
@@ -117,3 +119,82 @@ async def handle_draft_session(interaction: discord.Interaction, session_type: s
 
     session_instance = create_session_instance(session_type, session_details)
     await session_instance.create_draft_session(interaction, interaction.client)
+
+
+class StakedCubeDraftSelectionView(discord.ui.View):
+    def __init__(self):
+        super().__init__()
+        
+        self.cube_select = discord.ui.Select(
+            placeholder="Select a Cube",
+            options=[
+                discord.SelectOption(label="LSVCube", value="LSVCube"),
+                discord.SelectOption(label="AlphaFrog", value="AlphaFrog"),
+                discord.SelectOption(label="modovintage", value="modovintage"),
+                discord.SelectOption(label="LSVRetro", value="LSVRetro"),
+                discord.SelectOption(label="PowerMack", value="PowerMack"),
+                discord.SelectOption(label="Custom Cube...", value="custom")
+            ]
+        )
+        self.cube_select.callback = self.cube_select_callback
+        self.add_item(self.cube_select)
+
+    async def cube_select_callback(self, interaction: discord.Interaction):
+        cube_choice = self.cube_select.values[0]
+        
+        # Always show the staked draft modal
+        modal = StakedCubeDraftModal(cube_choice)
+        await interaction.response.send_modal(modal)
+
+
+class StakedCubeDraftModal(discord.ui.Modal):
+    def __init__(self, cube_choice: str, *args, **kwargs) -> None:
+        super().__init__(title="Staked Draft Setup", *args, **kwargs)
+        self.cube_choice = cube_choice
+        
+        if cube_choice == "custom":
+            self.add_item(discord.ui.InputText(
+                label="Custom Cube Name",
+                placeholder="Enter your cube name",
+                custom_id="cube_name_input"
+            ))
+
+        # Add min stake input
+        self.add_item(discord.ui.InputText(
+            label="Minimum Stake (tix)",
+            placeholder="Enter minimum stake (default: 10)",
+            custom_id="min_stake_input",
+            required=False
+        ))
+            
+    async def callback(self, interaction: discord.Interaction) -> None:
+        # Configure session details
+        from models.session_details import SessionDetails
+        session_details = SessionDetails(interaction)
+        
+        # If custom cube, get name from input, otherwise use preset choice
+        if self.cube_choice == "custom":
+            session_details.cube_choice = self.children[0].value
+            input_offset = 1
+        else:
+            session_details.cube_choice = self.cube_choice
+            input_offset = 0
+        
+        # Get min stake if provided
+        min_stake_str = self.children[input_offset].value
+        min_stake = 10  
+        if min_stake_str:
+            try:
+                min_stake = int(min_stake_str)
+                if min_stake < 1:
+                    min_stake = 10 
+            except ValueError:
+                pass  
+        
+        # Store min stake in session details
+        session_details.min_stake = min_stake
+        
+        # Create and start the draft session
+        from sessions.staked_session import StakedSession
+        session_instance = StakedSession(session_details)
+        await session_instance.create_draft_session(interaction, interaction.client)
