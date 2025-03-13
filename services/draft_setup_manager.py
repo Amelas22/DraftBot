@@ -34,7 +34,7 @@ class DraftSetupManager:
         self.cube_id = cube_id
         self.sio = socketio.AsyncClient()
         self.cube_imported = False
-        self.other_users_count = 0  # Track number of other users
+        self.users_count = 0  # Track number of other users
         
         # Create a contextualized logger for this instance
         self.logger = logger.bind(
@@ -68,14 +68,11 @@ class DraftSetupManager:
         async def on_session_users(users):
             self.logger.debug(f"Raw users data received: {users}")
             
-            # More detailed counting logic
-            bot_id = 'DraftBot'
-            other_users = [user for user in users if user.get('userID') != bot_id]
-            self.other_users_count = len(other_users)
+            self.users_count = len(users)
             
             self.logger.info(
                 f"Users update: Total users={len(users)}, "
-                f"Other users={self.other_users_count}, "
+                f"Other users={self.users_count}, "
                 f"User IDs={[user.get('userID') for user in users]}"
             )
 
@@ -161,7 +158,7 @@ class DraftSetupManager:
                 return
 
             # Wait for at least 2 other users
-            while self.other_users_count < 2:
+            while self.users_count < 3:
                 if not self.sio.connected:
                     self.logger.error("Lost connection, ending connection task")
                     return
@@ -173,10 +170,10 @@ class DraftSetupManager:
                 except Exception as e:
                     self.logger.exception(f"Failed to request users: {e}")
                 
-                self.logger.info(f"Waiting for more users... Currently {self.other_users_count} other users present")
-                await asyncio.sleep(5)
+                self.logger.info(f"Waiting for more users... Currently {self.users_count} other users present")
+                await asyncio.sleep(20)
             
-            self.logger.success(f"At least 2 other users have joined the session ({self.other_users_count} total). Closing connection...")
+            self.logger.success(f"At least 2 other users have joined the session ({self.users_count} total). Closing connection...")
                     
         except Exception as e:
             self.logger.exception(f"Fatal error in keep_connection_alive: {e}")
