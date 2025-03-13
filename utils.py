@@ -21,39 +21,41 @@ async def split_into_teams(bot, draft_session_id):
         return
     
     # Get guild and config
-    guild_id = draft_session.guild_id
-    guild = bot.get_guild(int(guild_id))
+    # guild_id = draft_session.guild_id
+    # guild = bot.get_guild(int(guild_id))
 
-    from config import get_config
-    config = get_config(guild_id)
+    # from config import get_config
+    # config = get_config(guild_id)
 
-    # Get the TrueSkill chance from config
-    trueskill_chance = config.get("matchmaking", {}).get("trueskill_chance", 0)
+    # # Get the TrueSkill chance from config
+    # trueskill_chance = config.get("matchmaking", {}).get("trueskill_chance", 0)
     
-    # Determine whether to use TrueSkill for this draft
-    use_trueskill = random.randint(1, 100) <= trueskill_chance
-    print(f"TrueSkill chance: {trueskill_chance}%. Using TrueSkill: {use_trueskill}")
+    # # Determine whether to use TrueSkill for this draft
+    # use_trueskill = random.randint(1, 100) <= trueskill_chance
+    # print(f"TrueSkill chance: {trueskill_chance}%. Using TrueSkill: {use_trueskill}")
     
     sign_ups = draft_session.sign_ups
 
     if sign_ups:
         sign_ups_list = list(sign_ups.keys())
-        if use_trueskill:
-            # Use skill-based team balancing
-            team_a, team_b = await balance_teams(sign_ups_list, guild)
-        else:
-            # Use random teams
-            random.shuffle(sign_ups_list)
-            mid_point = len(sign_ups_list) // 2
-            team_a = sign_ups_list[:mid_point]
-            team_b = sign_ups_list[mid_point:]
+        # if use_trueskill:
+        #     # Use skill-based team balancing
+        #     team_a, team_b = await balance_teams(sign_ups_list, guild)
+        # else:
+        # Use random teams
+        random.shuffle(sign_ups_list)
+        mid_point = len(sign_ups_list) // 2
+        team_a = sign_ups_list[:mid_point]
+        team_b = sign_ups_list[mid_point:]
 
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
                 # Update the draft session with the new teams.
                 await db_session.execute(update(DraftSession)
                                          .where(DraftSession.session_id == draft_session_id)
-                                         .values(team_a=team_a, team_b=team_b, true_skill_draft=use_trueskill))
+                                         .values(team_a=team_a, team_b=team_b 
+                                                #  true_skill_draft=use_trueskill
+                                                ))
                 await db_session.commit()
 
 
