@@ -406,9 +406,14 @@ class PersistentView(discord.ui.View):
                     session = updated_session
 
                 if session.session_type != "swiss":
+                    sign_ups_list = list(session.sign_ups.keys())
+                    seating_order = [session.sign_ups[user_id] for user_id in sign_ups_list]
                     team_a_display_names = [session.sign_ups[user_id] for user_id in session.team_a]
                     team_b_display_names = [session.sign_ups[user_id] for user_id in session.team_b]
-                    seating_order = await generate_seating_order(bot, session)
+                    random.shuffle(team_a_display_names)
+                    random.shuffle(team_b_display_names)
+                    # legacy seating order process
+                    # seating_order = await generate_seating_order(bot, session)
                 else:
                     sign_ups_list = list(session.sign_ups.keys())
                     random.shuffle(sign_ups_list)  # This shuffles the list in-place

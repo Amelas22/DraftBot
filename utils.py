@@ -20,33 +20,21 @@ async def split_into_teams(bot, draft_session_id):
         print("The draft session could not be found.")
         return
     
-    # Get guild and config
-    # guild_id = draft_session.guild_id
-    # guild = bot.get_guild(int(guild_id))
-
-    # from config import get_config
-    # config = get_config(guild_id)
-
-    # # Get the TrueSkill chance from config
-    # trueskill_chance = config.get("matchmaking", {}).get("trueskill_chance", 0)
-    
-    # # Determine whether to use TrueSkill for this draft
-    # use_trueskill = random.randint(1, 100) <= trueskill_chance
-    # print(f"TrueSkill chance: {trueskill_chance}%. Using TrueSkill: {use_trueskill}")
-    
     sign_ups = draft_session.sign_ups
 
     if sign_ups:
         sign_ups_list = list(sign_ups.keys())
-        # if use_trueskill:
-        #     # Use skill-based team balancing
-        #     team_a, team_b = await balance_teams(sign_ups_list, guild)
-        # else:
-        # Use random teams
         random.shuffle(sign_ups_list)
-        mid_point = len(sign_ups_list) // 2
-        team_a = sign_ups_list[:mid_point]
-        team_b = sign_ups_list[mid_point:]
+
+        # New Random Team method. Takes Shuffled sign-up list and assigns team by taking every other player
+        # This also serves as setting the seating-order for the draft.
+        team_a = sign_ups_list[0::2]  # Elements at indices 0, 2, 4, etc.
+        team_b = sign_ups_list[1::2]  # Elements at indices 1, 3, 5, etc.
+
+        # Legacy split method - Used midpoint then first half of the list was team-a and second half was team-b
+        # mid_point = len(sign_ups_list) // 2
+        # team_a = sign_ups_list[:mid_point]
+        # team_b = sign_ups_list[mid_point:]
 
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
@@ -274,6 +262,8 @@ async def generate_draft_summary_embed(bot, draft_session_id):
             if draft_session.session_type != "swiss":
                 team_a_names = [guild.get_member(int(user_id)).display_name for user_id in draft_session.team_a]
                 team_b_names = [guild.get_member(int(user_id)).display_name for user_id in draft_session.team_b]
+                sign_ups_list = list(draft_session.sign_ups.keys())
+                seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
 
                 team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
                 total_matches = draft_session.match_counter - 1
@@ -282,7 +272,7 @@ async def generate_draft_summary_embed(bot, draft_session_id):
 
                 embed = discord.Embed(title=title, description=description, color=discord_color)
                 
-                # Add team fields
+                # Add team fields and seating order
                 embed.add_field(name="🔴 Team Red" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_a_name}", 
                                 value="\n".join(team_a_names), inline=True)
                 embed.add_field(name="🔵 Team Blue" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_b_name}", 
@@ -292,7 +282,8 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                     value=("🔴 **Team Red Wins:** " + str(team_a_wins) if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"**{draft_session.team_a_name} Wins:** {team_a_wins}") + 
                         ("\n🔵 **Team Blue Wins:** " + str(team_b_wins) if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"\n**{draft_session.team_b_name} Wins:** {team_b_wins}"), 
                     inline=False)
-                
+                embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+
                 # Add stakes information if this is a staked draft
                 if draft_session.session_type == "staked":
                     # Use the utility function to get formatted stake pairs
@@ -1429,6 +1420,18 @@ async def get_formatted_stake_pairs(session_id, sign_ups):
     # Fetch all stake information
     async with AsyncSessionLocal() as db_session:
         async with db_session.begin():
+            # Get the draft session to access team assignments
+            draft_stmt = select(DraftSession).where(DraftSession.session_id == session_id)
+            draft_result = await db_session.execute(draft_stmt)
+            draft_session = draft_result.scalars().first()
+            
+            if not draft_session:
+                return [], 0
+                
+            # Create sets of team members for quick lookup
+            team_red_members = set(draft_session.team_a)
+            team_blue_members = set(draft_session.team_b)
+            
             # Get all stake info records
             stake_stmt = select(StakeInfo).where(StakeInfo.session_id == session_id)
             results = await db_session.execute(stake_stmt)
@@ -1445,24 +1448,42 @@ async def get_formatted_stake_pairs(session_id, sign_ups):
                 if not stake.opponent_id or not stake.assigned_stake:
                     continue
                 
-                # Create a unique key for this pair
+                # Create a unique identifier for this pair 
+                # Sort the player IDs but keep the amount separate
                 players = tuple(sorted([stake.player_id, stake.opponent_id]))
                 amount = stake.assigned_stake
                 pair_key = (players, amount)
                 
-                # Skip if we've already processed this exact pair
+                # Skip if we've already processed this exact pairing
                 if pair_key in processed:
                     continue
-                
-                # Mark as processed
                 processed.add(pair_key)
                 
-                # Get player names
-                player1_name = sign_ups.get(stake.player_id, "Unknown")
-                player2_name = sign_ups.get(stake.opponent_id, "Unknown")
+                # Determine team membership
+                player_a_in_red = stake.player_id in team_red_members
+                player_b_in_red = stake.opponent_id in team_red_members
                 
-                # Add to unique pairs list
-                unique_pairs.append((player1_name, player2_name, amount))
+                # Always show red player first, blue player second
+                if player_a_in_red and not player_b_in_red:
+                    # player_a is red, player_b is blue - correct order
+                    red_player_id = stake.player_id
+                    blue_player_id = stake.opponent_id
+                elif not player_a_in_red and player_b_in_red:
+                    # player_a is blue, player_b is red - swap order
+                    red_player_id = stake.opponent_id
+                    blue_player_id = stake.player_id
+                else:
+                    # If team membership can't be determined
+                    # In this case, just use original order
+                    red_player_id = stake.player_id
+                    blue_player_id = stake.opponent_id
+                
+                # Get player names
+                red_player_name = sign_ups.get(red_player_id, "Unknown")
+                blue_player_name = sign_ups.get(blue_player_id, "Unknown")
+                
+                # Add to unique pairs list with correct order
+                unique_pairs.append((red_player_name, blue_player_name, amount))
                 
                 # Add to total stake
                 total_stake += amount
@@ -1470,7 +1491,7 @@ async def get_formatted_stake_pairs(session_id, sign_ups):
             # Sort by amount (highest first)
             unique_pairs.sort(key=lambda x: x[2], reverse=True)
             
-            # Format for display
+            # Format for display - Team Red player vs Team Blue player
             formatted_lines = [f"{a} vs {b}: {amount} tix" for a, b, amount in unique_pairs]
             
             return formatted_lines, total_stake
