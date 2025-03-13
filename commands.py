@@ -3,7 +3,7 @@ import aiocron
 import pytz
 import asyncio
 from session import  Team, AsyncSessionLocal, Match, WeeklyLimit, DraftSession
-from sqlalchemy import select, not_
+from sqlalchemy import select, not_, or_
 from datetime import datetime, timedelta
 from collections import Counter
 from player_stats import get_player_statistics, create_stats_embed
@@ -940,7 +940,10 @@ async def scheduled_posts(bot):
                     stmt = select(DraftSession).where(
                         DraftSession.teams_start_time.between(start_time, end_time),
                         not_(DraftSession.victory_message_id_draft_chat == None),
-                        DraftSession.session_type == "random",
+                        or_(
+                            DraftSession.session_type == "random",
+                            DraftSession.session_type == "staked"
+                        ),
                         DraftSession.guild_id == str(guild.id)
                     )
                     result = await db_session.execute(stmt)
@@ -1005,7 +1008,10 @@ async def scheduled_posts(bot):
                     stmt = select(DraftSession).where(
                         DraftSession.teams_start_time.between(start_time, end_time),
                         not_(DraftSession.victory_message_id_draft_chat == None),
-                        DraftSession.session_type == "random",
+                        or_(
+                            DraftSession.session_type == "random",
+                            DraftSession.session_type == "staked"
+                        ),
                         DraftSession.guild_id == str(guild.id)
                     )
                     result = await db_session.execute(stmt)
