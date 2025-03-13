@@ -16,14 +16,17 @@ class StakedSession(RandomSession):
         description = (
             "**Staked Draft Queue**\n"
             "1. Sign up and enter your max stake amount.\n"
-            "2. Teams will be created randomly.\n"
+            "2. Teams will be created randomly. Stakes are **NOT** factored in when making teams\n"
             "3. The bot will match players across teams by stake amount and assign wagers.\n"
             "4. Minimum stake: 10 tix\n\n"
             "**How it works:**\n"
             "• Your max stake is the most you're willing to bet.\n"
-            "• When teams are formed, players are matched by stake level.\n"
+            "• Teams will be randomized without factoring in the max stakes.\n"
+            "• After teams are formed, players are ranked from highest stake to lowest stake.\n"
+            "• Players are then paired with the opposing player of the same rank.\n"
             "• Each pair's wager will be the minimum of their max stakes.\n"
-            "• Leftover stakes may create additional wagers between players.\n"
+            "• Leftover stakes may create additional wagers between players.\n\n\n"
+            "**Click the 'How Stakes Work' button below for a more detailed explanation.**\n"
             f"{self.get_common_description()}"
         )
         embed = Embed(title=title, description=description, color=Color.gold())
