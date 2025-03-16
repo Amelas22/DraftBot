@@ -45,7 +45,6 @@ async def split_into_teams(bot, draft_session_id):
                                         .values(team_a=team_a, team_b=team_b, sign_ups=shuffled_sign_ups))
                 await db_session.commit()
 
-# Probably Dead code. Function handled in randomize_teams_callback
 async def generate_seating_order(bot, draft_session, command_type=None):
     guild = bot.get_guild(int(draft_session.guild_id))
 
