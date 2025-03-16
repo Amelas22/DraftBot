@@ -1789,6 +1789,7 @@ class StakeCalculationButton(discord.ui.Button):
                 total_min_team = sum(max_stakes.get(p, 0) for p in min_team if p in max_stakes)
                 
                 # Fixed percentages and allocations based on the equalized percentage
+                initial_total_allocation = 0
                 for player_id, stake in max_team_sorted:
                     player_name = player_names.get(player_id, "Unknown")
                     original = min(stake, theoretical_max_bid)  # Apply theoretical max cap
@@ -1799,11 +1800,38 @@ class StakeCalculationButton(discord.ui.Button):
                     
                     # Ensure it's at least min_stake and doesn't exceed original
                     allocation = max(min_stake, min(allocation, original))
+                    initial_total_allocation += allocation
                     
                     # Calculate percentage
                     percentage = (allocation / original * 100) if original > 0 else 0
                     
                     allocations_text.append(f"{player_name}: {allocation} tix / {original} tix = {percentage:.1f}%")
+                
+                # Calculate if adjustment is needed
+                adjustment_needed = min_team_total - initial_total_allocation
+                
+                if adjustment_needed != 0:
+                    # Add information about adjustment
+                    if adjustment_needed > 0:
+                        # For positive adjustments, add to the highest bettor
+                        highest_bettor_name = player_names.get(max_team_sorted[0][0], "Unknown")
+                        highest_bettor_allocation = max_player_allocations.get(max_team_sorted[0][0], 0)
+                        
+                        allocations_text.append(f"\nAdjustment needed: +{adjustment_needed} tix")
+                        allocations_text.append(f"Added {adjustment_needed} to highest bettor {highest_bettor_name}, now at {highest_bettor_allocation} tix")
+                    else:
+                        # For negative adjustments, take from the lowest non-minimum stake bettor
+                        # Find the lowest non-minimum bettor (from the end of the list, reversed)
+                        non_min_bettors = [(p, s) for p, s in reversed(max_team_sorted) 
+                                          if p in max_player_allocations and max_player_allocations[p] > min_stake]
+                        
+                        if non_min_bettors:
+                            lowest_bettor_id, _ = non_min_bettors[0]
+                            lowest_bettor_name = player_names.get(lowest_bettor_id, "Unknown")
+                            lowest_bettor_allocation = max_player_allocations.get(lowest_bettor_id, 0)
+                            
+                            allocations_text.append(f"\nAdjustment needed: {adjustment_needed} tix")
+                            allocations_text.append(f"Reduced lowest non-minimum bettor {lowest_bettor_name} by {-adjustment_needed} tix, now at {lowest_bettor_allocation} tix")
                 
                 embed.add_field(
                     name="Step 6: Apply Proportional Adjustment",
