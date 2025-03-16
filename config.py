@@ -34,6 +34,10 @@ class Config:
             },
             "matchmaking": {
                 "trueskill_chance": 0  # Default to 0% (always random teams)
+            },
+            "stakes": {
+                "use_optimized_algorithm": True,
+                "stake_multiple": 10
             }
         }
         
@@ -65,6 +69,10 @@ class Config:
             },
             "matchmaking": {
                 "trueskill_chance": 60  
+            },
+            "stakes": {
+                "use_optimized_algorithm": True,
+                "stake_multiple": 10
             }
         }
         
@@ -150,3 +158,15 @@ def is_special_guild(guild_id):
 def update_setting(guild_id, path, value):
     """Update a specific setting in a guild's config"""
     return bot_config.update_guild_setting(guild_id, path, value)
+
+def migrate_configs():
+    """Ensure all configs have the latest structure."""
+    for guild_id, config in bot_config.configs.items():
+        # Ensure stakes section exists
+        if "stakes" not in config:
+            config["stakes"] = {
+                "use_optimized_algorithm": False, 
+                "stake_multiple": 10
+            }
+            bot_config.save_config(guild_id)
+            print(f"Added stakes settings to guild {guild_id}")

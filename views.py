@@ -869,13 +869,24 @@ class PersistentView(discord.ui.View):
                 # Build stakes dictionary
                 stakes_dict = {record.player_id: record.max_stake for record in stake_info_records}
                 
-                # Use the StakeCalculator to calculate stake pairs
-                min_stake = draft_session.min_stake or 10
-                stake_pairs = StakeCalculator.calculate_stakes(
+                # Get configuration
+                from config import get_config
+                config = get_config(interaction.guild_id)
+                use_optimized = config.get("stakes", {}).get("use_optimized_algorithm", False)
+                stake_multiple = config.get("stakes", {}).get("stake_multiple", 10)
+                
+                # Get the user-specified min_stake from the draft session
+                user_min_stake = draft_session.min_stake or 10
+                
+                # Use the router function
+                from stake_calculator import calculate_stakes_with_strategy
+                stake_pairs = calculate_stakes_with_strategy(
                     draft_session.team_a, 
                     draft_session.team_b, 
                     stakes_dict,
-                    min_stake
+                    min_stake=user_min_stake,  # Use the min_stake specified by the user
+                    multiple=stake_multiple,
+                    use_optimized=use_optimized
                 )
                 
                 # First, clear any existing assigned stakes to avoid duplications
