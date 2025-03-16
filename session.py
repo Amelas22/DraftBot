@@ -1,10 +1,11 @@
 import discord
-from sqlalchemy import Column, Integer, String, DateTime, JSON, select, text, Boolean, ForeignKey, desc, Float, func
+from sqlalchemy import Column, Integer, String, DateTime, JSON, select, text, Boolean, ForeignKey, desc, Float, func, and_, or_
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, relationship
 from database.models_base import Base
 from datetime import datetime
 import logging
+from contextlib import asynccontextmanager
 
 # Set up logging
 logging.basicConfig(level=logging.WARNING)  # Adjust the application-wide logging level
@@ -19,6 +20,17 @@ AsyncSessionLocal = sessionmaker(
     expire_on_commit=False,
     class_=AsyncSession
 )
+
+@asynccontextmanager
+async def db_session():
+    """Context manager for database sessions with automatic commit/rollback"""
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 async def init_db():
 
@@ -75,6 +87,26 @@ class DraftSession(Base):
     def __repr__(self):
         return f"<DraftSession(session_id={self.session_id}, guild_id={self.guild_id})>"
 
+    @classmethod
+    async def get_by_session_id(cls, session_id: str):
+        """Get a draft session by its session ID"""
+        async with db_session() as session:
+            query = select(cls).filter_by(session_id=session_id)
+            result = await session.execute(query)
+            return result.scalar_one_or_none()
+    
+    @classmethod
+    async def get_by_channel_id(cls, channel_id: str):
+        """Get a draft session associated with a specific channel"""
+        async with db_session() as session:
+            query = select(cls).filter_by(draft_chat_channel=channel_id)
+            result = await session.execute(query)
+            return result.scalar_one_or_none()
+    
+    def is_user_participating(self, user_id: str) -> bool:
+        """Check if a user is participating in this draft session"""
+        return user_id in self.team_a or user_id in self.team_b
+
 class MatchResult(Base):
     __tablename__ = 'match_results'
 
@@ -89,6 +121,23 @@ class MatchResult(Base):
     pairing_message_id = Column(String(64))
     draft_session = relationship("DraftSession", back_populates="match_results")
 
+    @classmethod
+    async def find_unreported_for_user(cls, session_id: str, user_id: str):
+        """Find earliest unreported match for a user in a specific session"""
+        async with db_session() as session:
+            stmt = select(cls).where(
+                and_(
+                    cls.session_id == session_id,
+                    or_(
+                        cls.player1_id == user_id,
+                        cls.player2_id == user_id
+                    ),
+                    cls.winner_id == None
+                )
+            ).order_by(cls.match_number)
+            
+            result = await session.execute(stmt)
+            return result.scalars().first()
 
 class PlayerStats(Base):
     __tablename__ = 'player_stats'
@@ -216,13 +265,9 @@ class StakeInfo(Base):
 
 
 async def get_draft_session(session_id: str):
-    async with AsyncSessionLocal() as session:
-        async with session.begin():
-            query = select(DraftSession).filter_by(session_id=session_id)
-            result = await session.execute(query)
-            draft_session = result.scalars().first()
-            return draft_session
-        
+    """Legacy function - consider using DraftSession.get_by_session_id instead"""
+    return await DraftSession.get_by_session_id(session_id)
+
 async def ensure_guild_id_in_tables():
     """Ensure all relevant tables have a guild_id column"""
     tables_to_check = [
@@ -246,46 +291,42 @@ async def ensure_guild_id_in_tables():
                     print(f"Added guild_id column to {table}")
 
 async def register_team_to_db(team_name: str):
-    async with AsyncSessionLocal() as session:
-        async with session.begin():
-            # Normalize the team name for case-insensitive comparison
-            normalized_team_name = team_name.strip().lower()
-            # Check if the team already exists
-            query = select(Team).filter(func.lower(Team.TeamName) == normalized_team_name)
-            result = await session.execute(query)
-            existing_team = result.scalars().first()
+    async with db_session() as session:
+        # Normalize the team name for case-insensitive comparison
+        normalized_team_name = team_name.strip().lower()
+        # Check if the team already exists
+        query = select(Team).filter(func.lower(Team.TeamName) == normalized_team_name)
+        result = await session.execute(query)
+        existing_team = result.scalars().first()
 
-            if existing_team:
-                return existing_team, f"Team '{existing_team.TeamName}' is already registered."
+        if existing_team:
+            return existing_team, f"Team '{existing_team.TeamName}' is already registered."
 
-            # If not exists, create and register the new team
-            new_team = Team(TeamName=team_name)
-            session.add(new_team)
-            await session.commit()
-
-            return new_team, f"Team '{team_name}' has been registered successfully."
+        # If not exists, create and register the new team
+        new_team = Team(TeamName=team_name)
+        session.add(new_team)
+        
+        return new_team, f"Team '{team_name}' has been registered successfully."
 
 async def remove_team_from_db(ctx, team_name: str):
     # Check if the user has the "cube overseer" role
     if any(role.name == "Cube Overseer" for role in ctx.author.roles):
-        async with AsyncSessionLocal() as session:
-            async with session.begin():
-                # Normalize the team name for case-insensitive comparison
-                normalized_team_name = team_name.strip().lower()
-                # Check if the team exists
-                query = select(Team).filter(func.lower(Team.TeamName) == normalized_team_name)
-                result = await session.execute(query)
-                existing_team = result.scalars().first()
+        async with db_session() as session:
+            # Normalize the team name for case-insensitive comparison
+            normalized_team_name = team_name.strip().lower()
+            # Check if the team exists
+            query = select(Team).filter(func.lower(Team.TeamName) == normalized_team_name)
+            result = await session.execute(query)
+            existing_team = result.scalars().first()
 
-                if not existing_team:
-                    await ctx.send(f"Team '{team_name}' does not exist.")
-                    return
+            if not existing_team:
+                await ctx.send(f"Team '{team_name}' does not exist.")
+                return
 
-                # If exists, delete the team
-                await session.delete(existing_team)
-                await session.commit()
-
-                return f"Team '{team_name}' has been removed"
+            # If exists, delete the team
+            await session.delete(existing_team)
+            
+            return f"Team '{team_name}' has been removed"
     else:
         return "You do not have permission to remove a team. This action requires the 'cube overseer' role."
 
