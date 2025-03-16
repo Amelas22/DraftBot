@@ -69,8 +69,8 @@ class PersistentView(discord.ui.View):
                     self.add_item(self.create_button("Create Teams", "blurple", f"randomize_teams_{self.draft_session_id}", self.randomize_teams_callback))
                     
                 # Add "How Stakes Work" button for staked drafts when teams haven't been created yet
-                if self.session_type == "staked" and self.session_stage != "teams":
-                    self.add_item(self.create_button("How Stakes Work", "secondary", f"explain_stakes_{self.draft_session_id}", self.explain_stakes_callback))
+                # if self.session_type == "staked" and self.session_stage != "teams":
+                #     self.add_item(self.create_button("How Stakes Work", "secondary", f"explain_stakes_{self.draft_session_id}", self.explain_stakes_callback))
                     
             elif self.session_type == "premade":
                 self.add_item(self.create_button(self.team_a_name, "green", f"Team_A_{self.draft_session_id}", self.team_assignment_callback))
@@ -1595,7 +1595,7 @@ class StakeCalculationButton(discord.ui.Button):
         self.session_id = session_id
         
     async def callback(self, interaction: discord.Interaction):
-        """Show a detailed explanation of how stakes were calculated"""
+        """Show a detailed explanation of how stakes were calculated using the new optimized algorithm"""
         await interaction.response.defer(ephemeral=True)  # Use ephemeral to show just to the user who clicked
         
         # Fetch the draft session
@@ -1617,173 +1617,245 @@ class StakeCalculationButton(discord.ui.Button):
             # Create mapping of player IDs to display names
             player_names = {player_id: draft_session.sign_ups.get(player_id, "Unknown") for player_id in max_stakes.keys()}
             
+            # Calculate total stakes for each team
+            team_a_total = sum(max_stakes.get(player_id, 0) for player_id in draft_session.team_a)
+            team_b_total = sum(max_stakes.get(player_id, 0) for player_id in draft_session.team_b)
+            
+            # Determine min team and max team
+            if team_a_total <= team_b_total:
+                min_team = draft_session.team_a
+                max_team = draft_session.team_b
+                min_team_name = "Team A"
+                max_team_name = "Team B"
+                min_team_total = team_a_total
+                max_team_total = team_b_total
+            else:
+                min_team = draft_session.team_b
+                max_team = draft_session.team_a
+                min_team_name = "Team B"
+                max_team_name = "Team A"
+                min_team_total = team_b_total
+                max_team_total = team_a_total
+                
+            # Calculate theoretical max bid
+            min_stake = draft_session.min_stake or 10
+            theoretical_max_bid = min_team_total - (len(min_team) - 1) * min_stake
+            
+            # Format player stakes for display
+            min_team_stakes = [f"{player_names.get(player_id, 'Unknown')}: {max_stakes.get(player_id, 0)} tix" 
+                              for player_id in min_team if player_id in max_stakes]
+            
+            max_team_stakes = [f"{player_names.get(player_id, 'Unknown')}: {max_stakes.get(player_id, 0)} tix" 
+                              for player_id in max_team if player_id in max_stakes]
+            
+            # Identify minimum bettors on max team
+            min_bettors_max_team = [player_id for player_id in max_team 
+                                   if player_id in max_stakes and max_stakes[player_id] <= min_stake]
+            min_bettors_amount = sum(max_stakes.get(player_id, 0) for player_id in min_bettors_max_team)
+            
+            # Calculate adjusted stakes for max team
+            adjusted_max_stakes = {}
+            for player_id in max_team:
+                if player_id in max_stakes:
+                    stake = max_stakes[player_id]
+                    # Apply theoretical max bid cap
+                    if stake > theoretical_max_bid:
+                        adjusted_max_stakes[player_id] = theoretical_max_bid
+                    else:
+                        adjusted_max_stakes[player_id] = stake
+            
+            # Calculate equalized bet percentage
+            adjusted_max_team_total = sum(adjusted_max_stakes.values())
+            
+            # Calculate equalized percentage (avoid division by zero)
+            if adjusted_max_team_total > 0:
+                equalized_percentage = (min_team_total / adjusted_max_team_total) * 100
+            else:
+                equalized_percentage = 0
+                
+            # Apply proportional adjustment to max team bets
+            proportional_bets = {}
+            total_proportional_bets = 0
+            
+            for player_id in max_team:
+                if player_id in adjusted_max_stakes:
+                    # For minimum bettors, keep their original stake
+                    if player_id in min_bettors_max_team:
+                        proportional_bets[player_id] = adjusted_max_stakes[player_id]
+                    else:
+                        # Apply percentage and round to nearest 10
+                        raw_bet = adjusted_max_stakes[player_id] * equalized_percentage / 100
+                        rounded_bet = round(raw_bet / 10) * 10
+                        proportional_bets[player_id] = min(rounded_bet, adjusted_max_stakes[player_id])
+                    
+                    total_proportional_bets += proportional_bets[player_id]
+            
+            # Make final adjustments to match min team total
+            remaining_amount = min_team_total - total_proportional_bets
+            
+            # If we need to add more stake
+            if remaining_amount > 0:
+                # Find players who can take more stake
+                available_players = [p for p in max_team 
+                                    if p in proportional_bets and proportional_bets[p] < adjusted_max_stakes[p]]
+                
+                # Sort by stake capacity (highest first)
+                available_players.sort(key=lambda p: adjusted_max_stakes[p] - proportional_bets[p], reverse=True)
+                
+                # Distribute remaining amount
+                while remaining_amount > 0 and available_players:
+                    player_id = available_players[0]
+                    capacity = adjusted_max_stakes[player_id] - proportional_bets[player_id]
+                    
+                    if capacity >= 10:
+                        add_amount = min(remaining_amount, 10)
+                        proportional_bets[player_id] += add_amount
+                        remaining_amount -= add_amount
+                        
+                        # Recalculate capacity
+                        capacity = adjusted_max_stakes[player_id] - proportional_bets[player_id]
+                        if capacity < 10:
+                            available_players.pop(0)
+                    else:
+                        available_players.pop(0)
+            
+            # Create final pairings
+            pairings = []
+            min_team_remaining = {p: max_stakes.get(p, 0) for p in min_team if p in max_stakes}
+            max_team_remaining = proportional_bets.copy()
+            
+            # Sort players by stake amount for more efficient matching
+            min_team_players = sorted([(p, min_team_remaining[p]) for p in min_team_remaining], 
+                                      key=lambda x: x[1], reverse=True)
+            max_team_players = sorted([(p, max_team_remaining[p]) for p in max_team_remaining], 
+                                      key=lambda x: x[1], reverse=True)
+            
+            # Create pairings
+            for min_player, min_stake in min_team_players:
+                remaining_stake = min_stake
+                
+                while remaining_stake > 0:
+                    # Find max team player with closest stake amount
+                    best_match = None
+                    best_match_diff = float('inf')
+                    
+                    for i, (max_player, max_stake) in enumerate(max_team_players):
+                        if max_stake > 0:
+                            diff = abs(remaining_stake - max_stake)
+                            if diff < best_match_diff:
+                                best_match = (i, max_player, max_stake)
+                                best_match_diff = diff
+                    
+                    if best_match:
+                        idx, max_player, max_stake = best_match
+                        bet_amount = min(remaining_stake, max_stake)
+                        
+                        pairings.append((min_player, max_player, bet_amount))
+                        
+                        remaining_stake -= bet_amount
+                        max_team_players[idx] = (max_player, max_stake - bet_amount)
+                    else:
+                        break  # No more available max team players
+            
             # Create the explanation embed
             embed = discord.Embed(
-                title="Stake Calculation Explanation",
-                description="Here's how the stakes were calculated for this draft:",
+                title="Optimized Stake Calculation Explanation",
+                description="Here's how the stakes were calculated using our new proportional algorithm:",
                 color=discord.Color.gold()
             )
             
-            # Step 1: Show the input stakes
-            team_a_stakes = []
-            for player_id in draft_session.team_a:
-                if player_id in max_stakes:
-                    team_a_stakes.append(f"{player_names[player_id]}: {max_stakes[player_id]} tix")
-            
-            team_b_stakes = []
-            for player_id in draft_session.team_b:
-                if player_id in max_stakes:
-                    team_b_stakes.append(f"{player_names[player_id]}: {max_stakes[player_id]} tix")
-            
+            # Step 1: Show the input stakes and team identification
             embed.add_field(
-                name="Step 1: Input Max Stakes",
-                value="**Team A:**\n" + "\n".join(team_a_stakes) + "\n\n**Team B:**\n" + "\n".join(team_b_stakes),
-                inline=False
-            )
-            
-            # Step 2: Explain the sorting
-            embed.add_field(
-                name="Step 2: Sort By Stake Amount",
+                name="Step 1: Identify Min and Max Teams",
                 value=(
-                    "Players on each team are sorted by their max stake (highest first).\n"
-                    "Then players from each team are matched against each other in order."
+                    f"**{min_team_name}** (Min Team - Total: {min_team_total} tix):\n" + 
+                    "\n".join(min_team_stakes) + 
+                    f"\n\n**{max_team_name}** (Max Team - Total: {max_team_total} tix):\n" + 
+                    "\n".join(max_team_stakes)
                 ),
                 inline=False
             )
             
-            # Step 3: Show the initial pairing results
-            primary_pairings = []
-            team_a_sorted = sorted([(p, max_stakes.get(p, 0)) for p in draft_session.team_a if p in max_stakes], 
-                                  key=lambda x: x[1], reverse=True)
-            team_b_sorted = sorted([(p, max_stakes.get(p, 0)) for p in draft_session.team_b if p in max_stakes], 
-                                  key=lambda x: x[1], reverse=True)
-            
-            # Track remaining stakes after first pass
-            remaining_stakes = {}
-            
-            for i in range(min(len(team_a_sorted), len(team_b_sorted))):
-                player_a, stake_a = team_a_sorted[i]
-                player_b, stake_b = team_b_sorted[i]
-                
-                bet_amount = min(stake_a, stake_b)
-                pairings_text = (
-                    f"{player_names[player_a]} ({stake_a} tix) vs {player_names[player_b]} ({stake_b} tix)\n"
-                    f"= {bet_amount} tix (minimum of the two)"
-                )
-                
-                # Track leftover stakes for both players
-                if stake_a > bet_amount:
-                    remaining_stakes[player_a] = stake_a - bet_amount
-                    pairings_text += f"\n{player_names[player_a]} has {stake_a - bet_amount} tix remaining"
-                    
-                if stake_b > bet_amount:
-                    remaining_stakes[player_b] = stake_b - bet_amount
-                    pairings_text += f"\n{player_names[player_b]} has {stake_b - bet_amount} tix remaining"
-                    
-                primary_pairings.append(pairings_text)
-            
-            # Add any unmatched players to remaining stakes
-            if len(team_a_sorted) > len(team_b_sorted):
-                for i in range(len(team_b_sorted), len(team_a_sorted)):
-                    player_a, stake_a = team_a_sorted[i]
-                    remaining_stakes[player_a] = stake_a
-                    primary_pairings.append(f"{player_names[player_a]} ({stake_a} tix) - Unmatched in initial pairing")
-            elif len(team_b_sorted) > len(team_a_sorted):
-                for i in range(len(team_a_sorted), len(team_b_sorted)):
-                    player_b, stake_b = team_b_sorted[i]
-                    remaining_stakes[player_b] = stake_b
-                    primary_pairings.append(f"{player_names[player_b]} ({stake_b} tix) - Unmatched in initial pairing")
-            
+            # Step 2: Theoretical max bid
             embed.add_field(
-                name="Step 3: Initial Pairings",
-                value="\n\n".join(primary_pairings) if primary_pairings else "No initial pairings",
+                name="Step 2: Calculate Theoretical Maximum Bid",
+                value=(
+                    f"To prevent any single player from consuming too much of the total:\n"
+                    f"Min Team Total ({min_team_total} tix) - Minimum Stakes for Remaining Team Members ({(len(min_team) - 1) * 10} tix) = {theoretical_max_bid} tix\n\n"
+                    f"Players with max bets above {theoretical_max_bid} tix were capped at this amount."
+                ),
                 inline=False
             )
             
-            # Step 4: Secondary pairings
-            secondary_pairings = []
-            
-            # Split remaining stakes by team
-            team_a_remaining = [(p, remaining_stakes[p]) for p in remaining_stakes if p in draft_session.team_a]
-            team_b_remaining = [(p, remaining_stakes[p]) for p in remaining_stakes if p in draft_session.team_b]
-            
-            # Sort by remaining stake amount (highest first)
-            team_a_remaining.sort(key=lambda x: x[1], reverse=True)
-            team_b_remaining.sort(key=lambda x: x[1], reverse=True)
-            
-            if team_a_remaining and team_b_remaining:
-                # Create a copy of remaining_stakes to track what's used
-                used_stakes = set()
-                processed_pairings = set()
-                
-                # Continue matching as long as we have players with stakes on both teams
-                while team_a_remaining and team_b_remaining:
-                    player_a, stake_a = team_a_remaining.pop(0)
-                    player_b, stake_b = team_b_remaining.pop(0)
-                    
-                    pair_key = tuple(sorted([player_a, player_b]))
-                    if pair_key in processed_pairings:
-                        continue
-                    processed_pairings.add(pair_key)
-                    
-                    secondary_bet = min(stake_a, stake_b)
-                    
-                    if secondary_bet >= draft_session.min_stake:
-                        secondary_pairings.append(
-                            f"{player_names[player_a]} ({stake_a} tix) vs {player_names[player_b]} ({stake_b} tix)\n"
-                            f"= {secondary_bet} tix"
-                        )
-                        
-                        # Mark these players as having used these stakes
-                        used_stakes.add((player_a, player_b))
-                        
-                        # Update remaining stakes
-                        if stake_a > secondary_bet:
-                            new_stake_a = stake_a - secondary_bet
-                            remaining_stakes[player_a] = new_stake_a
-                            team_a_remaining.append((player_a, new_stake_a))
-                            team_a_remaining.sort(key=lambda x: x[1], reverse=True)
-                        else:
-                            # Remove fully used stakes
-                            if player_a in remaining_stakes:
-                                del remaining_stakes[player_a]
-                                
-                        if stake_b > secondary_bet:
-                            new_stake_b = stake_b - secondary_bet
-                            remaining_stakes[player_b] = new_stake_b
-                            team_b_remaining.append((player_b, new_stake_b))
-                            team_b_remaining.sort(key=lambda x: x[1], reverse=True)
-                        else:
-                            # Remove fully used stakes
-                            if player_b in remaining_stakes:
-                                del remaining_stakes[player_b]
+            # Step 3: Show adjusted max stakes
+            adjusted_stakes_text = []
+            for player_id in max_team:
+                if player_id in max_stakes and player_id in adjusted_max_stakes:
+                    original = max_stakes[player_id]
+                    adjusted = adjusted_max_stakes[player_id]
+                    if original != adjusted:
+                        adjusted_stakes_text.append(f"{player_names[player_id]}: {original} tix → {adjusted} tix (capped)")
                     else:
-                        secondary_pairings.append(
-                            f"{player_names[player_a]} ({stake_a} tix) vs {player_names[player_b]} ({stake_b} tix)\n"
-                            f"Not enough for a bet (below minimum of {draft_session.min_stake} tix)"
-                        )
-                
-                if secondary_pairings:
-                    embed.add_field(
-                        name="Step 4: Secondary Pairings (Using Leftover Stakes)",
-                        value="\n\n".join(secondary_pairings),
-                        inline=False
-                    )
+                        adjusted_stakes_text.append(f"{player_names[player_id]}: {original} tix (unchanged)")
             
-            # Step 5: Show any remaining unused stakes
-            if remaining_stakes:
-                # Filter to only show stakes above minimum
-                valid_remaining = []
-                for player_id, amount in remaining_stakes.items():
-                    if amount >= draft_session.min_stake:
-                        valid_remaining.append(f"{player_names[player_id]}: {amount} tix")
-                
-                if valid_remaining:
-                    embed.add_field(
-                        name="Step 5: Unused Stakes",
-                        value="\n".join(valid_remaining),
-                        inline=False
-                    )
+            embed.add_field(
+                name="Step 3: Apply Theoretical Maximum Cap",
+                value="\n".join(adjusted_stakes_text) if adjusted_stakes_text else "No adjustments needed",
+                inline=False
+            )
+            
+            # Step 4: Minimum bettors
+            embed.add_field(
+                name="Step 4: Reserve Minimum Stakes",
+                value=(
+                    f"Minimum bettors on Max Team: {', '.join(player_names[p] for p in min_bettors_max_team) if min_bettors_max_team else 'None'}\n"
+                    f"Reserved amount: {min_bettors_amount} tix"
+                ),
+                inline=False
+            )
+            
+            # Step 5: Equalized Bet Percentage
+            embed.add_field(
+                name="Step 5: Calculate Equalized Bet Percentage",
+                value=(
+                    f"Min Team Total: {min_team_total} tix\n"
+                    f"Adjusted Max Team Total: {adjusted_max_team_total} tix\n"
+                    f"Equalized Percentage: {min_team_total} ÷ {adjusted_max_team_total} = {equalized_percentage:.1f}%"
+                ),
+                inline=False
+            )
+            
+            # Step 6: Proportional Adjustment
+            prop_adjustment_text = []
+            for player_id in max_team:
+                if player_id in adjusted_max_stakes and player_id in proportional_bets:
+                    stake = adjusted_max_stakes[player_id]
+                    prop_bet = proportional_bets[player_id]
+                    percentage = (prop_bet / stake * 100) if stake > 0 else 0
+                    prop_adjustment_text.append(f"{player_names[player_id]}: {prop_bet} tix / {stake} tix = {percentage:.1f}%")
+            
+            embed.add_field(
+                name="Step 6: Apply Proportional Adjustment",
+                value=(
+                    "Each max team player's bet is adjusted to approximately match the equalized percentage, "
+                    "rounded to the nearest 10 tix.\n\n" + 
+                    "\n".join(prop_adjustment_text)
+                ),
+                inline=False
+            )
+            
+            # Step 7: Final Pairings
+            pairings_text = []
+            for min_player, max_player, amount in pairings:
+                min_name = player_names.get(min_player, "Unknown")
+                max_name = player_names.get(max_player, "Unknown")
+                pairings_text.append(f"{min_name} vs {max_name}: {amount} tix")
+            
+            embed.add_field(
+                name="Step 7: Final Bet Pairings",
+                value="\n".join(pairings_text) if pairings_text else "No pairings created",
+                inline=False
+            )
             
             # Send the explanation
             await interaction.followup.send(embed=embed, ephemeral=True)
