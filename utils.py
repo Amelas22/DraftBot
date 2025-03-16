@@ -23,30 +23,29 @@ async def split_into_teams(bot, draft_session_id):
     sign_ups = draft_session.sign_ups
 
     if sign_ups:
+        # Get list of sign-up keys and shuffle it
         sign_ups_list = list(sign_ups.keys())
         random.shuffle(sign_ups_list)
-
-        # New Random Team method. Takes Shuffled sign-up list and assigns team by taking every other player
-        # This also serves as setting the seating-order for the draft.
+        
+        # Create a new dictionary with the same key-value pairs but in the shuffled order
+        # This is important for preserving the shuffled order for seating
+        shuffled_sign_ups = {}
+        for user_id in sign_ups_list:
+            shuffled_sign_ups[user_id] = sign_ups[user_id]
+        
+        # Create teams by alternating players
         team_a = sign_ups_list[0::2]  # Elements at indices 0, 2, 4, etc.
         team_b = sign_ups_list[1::2]  # Elements at indices 1, 3, 5, etc.
 
-        # Legacy split method - Used midpoint then first half of the list was team-a and second half was team-b
-        # mid_point = len(sign_ups_list) // 2
-        # team_a = sign_ups_list[:mid_point]
-        # team_b = sign_ups_list[mid_point:]
-
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
-                # Update the draft session with the new teams.
+                # Update the draft session with the new teams AND the shuffled sign-ups
                 await db_session.execute(update(DraftSession)
-                                         .where(DraftSession.session_id == draft_session_id)
-                                         .values(team_a=team_a, team_b=team_b 
-                                                #  true_skill_draft=use_trueskill
-                                                ))
+                                        .where(DraftSession.session_id == draft_session_id)
+                                        .values(team_a=team_a, team_b=team_b, sign_ups=shuffled_sign_ups))
                 await db_session.commit()
 
-
+# Probably Dead code. Function handled in randomize_teams_callback
 async def generate_seating_order(bot, draft_session, command_type=None):
     guild = bot.get_guild(int(draft_session.guild_id))
 
