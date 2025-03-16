@@ -1595,7 +1595,7 @@ class StakeCalculationButton(discord.ui.Button):
         self.session_id = session_id
         
     async def callback(self, interaction: discord.Interaction):
-        """Show a detailed explanation of how stakes were calculated using the new optimized algorithm"""
+        """Show a detailed explanation of how stakes were calculated using the optimized algorithm"""
         await interaction.response.defer(ephemeral=True)  # Use ephemeral to show just to the user who clicked
         
         # Fetch the draft session
@@ -1603,259 +1603,237 @@ class StakeCalculationButton(discord.ui.Button):
         if not draft_session:
             await interaction.followup.send("Draft session not found.", ephemeral=True)
             return
-            
-        # Fetch all stake info records
-        async with AsyncSessionLocal() as session:
-            # Get the original stake inputs
-            stake_stmt = select(StakeInfo).where(StakeInfo.session_id == self.session_id)
-            results = await session.execute(stake_stmt)
-            stake_infos = results.scalars().all()
-            
-            # Create mapping of player IDs to max stakes
-            max_stakes = {info.player_id: info.max_stake for info in stake_infos}
-            
-            # Create mapping of player IDs to display names
-            player_names = {player_id: draft_session.sign_ups.get(player_id, "Unknown") for player_id in max_stakes.keys()}
-            
-            # Calculate total stakes for each team
-            team_a_total = sum(max_stakes.get(player_id, 0) for player_id in draft_session.team_a)
-            team_b_total = sum(max_stakes.get(player_id, 0) for player_id in draft_session.team_b)
-            
-            # Determine min team and max team
-            if team_a_total <= team_b_total:
-                min_team = draft_session.team_a
-                max_team = draft_session.team_b
-                min_team_name = "Team A"
-                max_team_name = "Team B"
-                min_team_total = team_a_total
-                max_team_total = team_b_total
-            else:
-                min_team = draft_session.team_b
-                max_team = draft_session.team_a
-                min_team_name = "Team B"
-                max_team_name = "Team A"
-                min_team_total = team_b_total
-                max_team_total = team_a_total
+        
+        try:
+            # Fetch all stake info records
+            async with AsyncSessionLocal() as session:
+                # Get the original stake inputs
+                stake_stmt = select(StakeInfo).where(StakeInfo.session_id == self.session_id)
+                results = await session.execute(stake_stmt)
+                stake_infos = results.scalars().all()
                 
-            # Calculate theoretical max bid
-            min_stake = draft_session.min_stake or 10
-            theoretical_max_bid = min_team_total - (len(min_team) - 1) * min_stake
-            
-            # Format player stakes for display
-            min_team_stakes = [f"{player_names.get(player_id, 'Unknown')}: {max_stakes.get(player_id, 0)} tix" 
-                              for player_id in min_team if player_id in max_stakes]
-            
-            max_team_stakes = [f"{player_names.get(player_id, 'Unknown')}: {max_stakes.get(player_id, 0)} tix" 
-                              for player_id in max_team if player_id in max_stakes]
-            
-            # Identify minimum bettors on max team
-            min_bettors_max_team = [player_id for player_id in max_team 
-                                   if player_id in max_stakes and max_stakes[player_id] <= min_stake]
-            min_bettors_amount = sum(max_stakes.get(player_id, 0) for player_id in min_bettors_max_team)
-            
-            # Calculate adjusted stakes for max team
-            adjusted_max_stakes = {}
-            for player_id in max_team:
-                if player_id in max_stakes:
-                    stake = max_stakes[player_id]
-                    # Apply theoretical max bid cap
+                # Create mapping of player IDs to max stakes
+                max_stakes = {info.player_id: info.max_stake for info in stake_infos}
+                
+                # Create mapping of player IDs to display names
+                player_names = {player_id: draft_session.sign_ups.get(player_id, "Unknown") for player_id in max_stakes.keys()}
+                
+                # Calculate total stakes for each team
+                team_a_total = sum(max_stakes.get(player_id, 0) for player_id in draft_session.team_a)
+                team_b_total = sum(max_stakes.get(player_id, 0) for player_id in draft_session.team_b)
+                
+                # Determine min team and max team
+                if team_a_total <= team_b_total:
+                    min_team = draft_session.team_a
+                    max_team = draft_session.team_b
+                    min_team_name = "Team A"
+                    max_team_name = "Team B"
+                    min_team_total = team_a_total
+                    max_team_total = team_b_total
+                else:
+                    min_team = draft_session.team_b
+                    max_team = draft_session.team_a
+                    min_team_name = "Team B"
+                    max_team_name = "Team A"
+                    min_team_total = team_b_total
+                    max_team_total = team_a_total
+                
+                # Calculate theoretical max bid
+                min_stake = draft_session.min_stake or 10
+                theoretical_max_bid = min_team_total - (len(min_team) - 1) * min_stake
+                
+                # Format player stakes for display
+                min_team_stakes = []
+                for player_id in min_team:
+                    if player_id in max_stakes:
+                        player_name = player_names.get(player_id, "Unknown")
+                        stake = max_stakes.get(player_id, 0)
+                        min_team_stakes.append(f"{player_name}: {stake} tix")
+                
+                max_team_stakes = []
+                for player_id in max_team:
+                    if player_id in max_stakes:
+                        player_name = player_names.get(player_id, "Unknown")
+                        stake = max_stakes.get(player_id, 0)
+                        max_team_stakes.append(f"{player_name}: {stake} tix")
+                
+                # Identify minimum bettors on max team
+                min_bettors_max_team = [player_id for player_id in max_team 
+                                      if player_id in max_stakes and max_stakes[player_id] <= min_stake]
+                min_bettors_amount = sum(max_stakes.get(player_id, 0) for player_id in min_bettors_max_team)
+                
+                # Sort teams by stake amount (highest first) for display purposes
+                max_team_players = [(p, max_stakes.get(p, 0)) for p in max_team if p in max_stakes]
+                max_team_players.sort(key=lambda x: x[1], reverse=True)
+                
+                # Apply theoretical max cap to max stakes
+                adjusted_max_stakes = {}
+                for player_id, stake in max_team_players:
                     if stake > theoretical_max_bid:
                         adjusted_max_stakes[player_id] = theoretical_max_bid
                     else:
                         adjusted_max_stakes[player_id] = stake
-            
-            # Calculate equalized bet percentage
-            adjusted_max_team_total = sum(adjusted_max_stakes.values())
-            
-            # Calculate equalized percentage (avoid division by zero)
-            if adjusted_max_team_total > 0:
-                equalized_percentage = (min_team_total / adjusted_max_team_total) * 100
-            else:
-                equalized_percentage = 0
                 
-            # Apply proportional adjustment to max team bets
-            proportional_bets = {}
-            total_proportional_bets = 0
-            
-            for player_id in max_team:
-                if player_id in adjusted_max_stakes:
-                    # For minimum bettors, keep their original stake
-                    if player_id in min_bettors_max_team:
-                        proportional_bets[player_id] = adjusted_max_stakes[player_id]
-                    else:
-                        # Apply percentage and round to nearest 10
-                        raw_bet = adjusted_max_stakes[player_id] * equalized_percentage / 100
-                        rounded_bet = round(raw_bet / 10) * 10
-                        proportional_bets[player_id] = min(rounded_bet, adjusted_max_stakes[player_id])
-                    
-                    total_proportional_bets += proportional_bets[player_id]
-            
-            # Make final adjustments to match min team total
-            remaining_amount = min_team_total - total_proportional_bets
-            
-            # If we need to add more stake
-            if remaining_amount > 0:
-                # Find players who can take more stake
-                available_players = [p for p in max_team 
-                                    if p in proportional_bets and proportional_bets[p] < adjusted_max_stakes[p]]
+                # Calculate effective max team total after capping
+                effective_max_total = sum(adjusted_max_stakes.values())
+                equalized_percentage = (min_team_total / effective_max_total * 100) if effective_max_total > 0 else 0
                 
-                # Sort by stake capacity (highest first)
-                available_players.sort(key=lambda p: adjusted_max_stakes[p] - proportional_bets[p], reverse=True)
+                # Extract actual final allocations (we need to reconstruct these from the pairings data)
+                # First collect all unique pairings
+                pairings = set()
+                max_player_allocations = {p: 0 for p, _ in max_team_players}
                 
-                # Distribute remaining amount
-                while remaining_amount > 0 and available_players:
-                    player_id = available_players[0]
-                    capacity = adjusted_max_stakes[player_id] - proportional_bets[player_id]
-                    
-                    if capacity >= 10:
-                        add_amount = min(remaining_amount, 10)
-                        proportional_bets[player_id] += add_amount
-                        remaining_amount -= add_amount
+                for info in stake_infos:
+                    if info.assigned_stake and info.opponent_id:
+                        # Determine which player is on which team
+                        min_player = None
+                        max_player = None
                         
-                        # Recalculate capacity
-                        capacity = adjusted_max_stakes[player_id] - proportional_bets[player_id]
-                        if capacity < 10:
-                            available_players.pop(0)
+                        if info.player_id in min_team and info.opponent_id in max_team:
+                            min_player = info.player_id
+                            max_player = info.opponent_id
+                        elif info.player_id in max_team and info.opponent_id in min_team:
+                            min_player = info.opponent_id
+                            max_player = info.player_id
+                        
+                        if min_player and max_player:
+                            # Add to pairings set as a tuple
+                            pairing = (min_player, max_player, info.assigned_stake)
+                            pairings.add(pairing)
+                            
+                            # Track total allocation for max team player
+                            max_player_allocations[max_player] += info.assigned_stake
+                
+                # Convert pairings set to list for sorting
+                pairings_list = list(pairings)
+                pairings_list.sort(key=lambda x: x[2], reverse=True)  # Sort by amount (highest first)
+                
+                # Create the explanation embed
+                embed = discord.Embed(
+                    title="Optimized Stake Calculation Explanation",
+                    description="Here's how the stakes were calculated using our new proportional algorithm:",
+                    color=discord.Color.gold()
+                )
+                
+                # Step 1: Show the input stakes and team identification
+                embed.add_field(
+                    name="Step 1: Identify Min and Max Teams",
+                    value=(
+                        f"**{min_team_name}** (Min Team - Total: {min_team_total} tix):\n" + 
+                        "\n".join(min_team_stakes) + 
+                        f"\n\n**{max_team_name}** (Max Team - Total: {max_team_total} tix):\n" + 
+                        "\n".join(max_team_stakes)
+                    ),
+                    inline=False
+                )
+                
+                # Step 2: Theoretical max bid
+                embed.add_field(
+                    name="Step 2: Calculate Theoretical Maximum Bid",
+                    value=(
+                        f"To prevent any single player from consuming too much of the total:\n"
+                        f"Min Team Total ({min_team_total} tix) - Minimum Stakes for Remaining Team Members ({(len(min_team) - 1)} players × {min_stake} tix = {(len(min_team) - 1) * min_stake} tix) = {theoretical_max_bid} tix\n\n"
+                        f"Players with max bets above {theoretical_max_bid} tix were capped at this amount."
+                    ),
+                    inline=False
+                )
+                
+                # Step 3: Show adjusted max stakes
+                adjusted_stakes_text = []
+                for player_id, stake in max_team_players:
+                    player_name = player_names.get(player_id, "Unknown")
+                    if stake > theoretical_max_bid:
+                        adjusted_stakes_text.append(f"{player_name}: {stake} tix → {theoretical_max_bid} tix (capped)")
                     else:
-                        available_players.pop(0)
-            
-            # Create final pairings
-            pairings = []
-            min_team_remaining = {p: max_stakes.get(p, 0) for p in min_team if p in max_stakes}
-            max_team_remaining = proportional_bets.copy()
-            
-            # Sort players by stake amount for more efficient matching
-            min_team_players = sorted([(p, min_team_remaining[p]) for p in min_team_remaining], 
+                        adjusted_stakes_text.append(f"{player_name}: {stake} tix (unchanged)")
+                
+                embed.add_field(
+                    name="Step 3: Apply Theoretical Maximum Cap",
+                    value="\n".join(adjusted_stakes_text) if adjusted_stakes_text else "No adjustments needed",
+                    inline=False
+                )
+                
+                # Step 4: Minimum bettors
+                min_bettors_names = [player_names.get(p, "Unknown") for p in min_bettors_max_team]
+                
+                embed.add_field(
+                    name="Step 4: Reserve Minimum Stakes",
+                    value=(
+                        f"Minimum bettors on Max Team: {', '.join(min_bettors_names) if min_bettors_names else 'None'}\n"
+                        f"Reserved amount: {min_bettors_amount} tix"
+                    ),
+                    inline=False
+                )
+                
+                # Step 5: Equalized Bet Percentage
+                embed.add_field(
+                    name="Step 5: Calculate Equalized Bet Percentage",
+                    value=(
+                        f"Min Team Total: {min_team_total} tix\n"
+                        f"Adjusted Max Team Total: {effective_max_total} tix\n"
+                        f"Equalized Percentage: {min_team_total} ÷ {effective_max_total} = {equalized_percentage:.1f}%"
+                    ),
+                    inline=False
+                )
+                
+                # Step 6: Proportional Adjustment
+                # Instead of recalculating allocations, use exact percentages from log
+                allocations_text = []
+                
+                # For Step 6, we need to get the initial allocations before final adjustments
+                # Get players in order by original stake
+                max_team_sorted = sorted([(p, max_stakes.get(p, 0)) for p in max_team if p in max_stakes], 
                                       key=lambda x: x[1], reverse=True)
-            max_team_players = sorted([(p, max_team_remaining[p]) for p in max_team_remaining], 
-                                      key=lambda x: x[1], reverse=True)
-            
-            # Create pairings
-            for min_player, min_stake in min_team_players:
-                remaining_stake = min_stake
                 
-                while remaining_stake > 0:
-                    # Find max team player with closest stake amount
-                    best_match = None
-                    best_match_diff = float('inf')
+                # Calculate total allocated for each max team player for display only
+                total_min_team = sum(max_stakes.get(p, 0) for p in min_team if p in max_stakes)
+                
+                # Fixed percentages and allocations based on the equalized percentage
+                for player_id, stake in max_team_sorted:
+                    player_name = player_names.get(player_id, "Unknown")
+                    original = min(stake, theoretical_max_bid)  # Apply theoretical max cap
                     
-                    for i, (max_player, max_stake) in enumerate(max_team_players):
-                        if max_stake > 0:
-                            diff = abs(remaining_stake - max_stake)
-                            if diff < best_match_diff:
-                                best_match = (i, max_player, max_stake)
-                                best_match_diff = diff
+                    # Calculate the proportional allocation (rounded to nearest 10)
+                    proportional = original * equalized_percentage / 100
+                    allocation = round(proportional / 10) * 10
                     
-                    if best_match:
-                        idx, max_player, max_stake = best_match
-                        bet_amount = min(remaining_stake, max_stake)
-                        
-                        pairings.append((min_player, max_player, bet_amount))
-                        
-                        remaining_stake -= bet_amount
-                        max_team_players[idx] = (max_player, max_stake - bet_amount)
-                    else:
-                        break  # No more available max team players
-            
-            # Create the explanation embed
-            embed = discord.Embed(
-                title="Optimized Stake Calculation Explanation",
-                description="Here's how the stakes were calculated using our new proportional algorithm:",
-                color=discord.Color.gold()
-            )
-            
-            # Step 1: Show the input stakes and team identification
-            embed.add_field(
-                name="Step 1: Identify Min and Max Teams",
-                value=(
-                    f"**{min_team_name}** (Min Team - Total: {min_team_total} tix):\n" + 
-                    "\n".join(min_team_stakes) + 
-                    f"\n\n**{max_team_name}** (Max Team - Total: {max_team_total} tix):\n" + 
-                    "\n".join(max_team_stakes)
-                ),
-                inline=False
-            )
-            
-            # Step 2: Theoretical max bid
-            embed.add_field(
-                name="Step 2: Calculate Theoretical Maximum Bid",
-                value=(
-                    f"To prevent any single player from consuming too much of the total:\n"
-                    f"Min Team Total ({min_team_total} tix) - Minimum Stakes for Remaining Team Members ({(len(min_team) - 1) * 10} tix) = {theoretical_max_bid} tix\n\n"
-                    f"Players with max bets above {theoretical_max_bid} tix were capped at this amount."
-                ),
-                inline=False
-            )
-            
-            # Step 3: Show adjusted max stakes
-            adjusted_stakes_text = []
-            for player_id in max_team:
-                if player_id in max_stakes and player_id in adjusted_max_stakes:
-                    original = max_stakes[player_id]
-                    adjusted = adjusted_max_stakes[player_id]
-                    if original != adjusted:
-                        adjusted_stakes_text.append(f"{player_names[player_id]}: {original} tix → {adjusted} tix (capped)")
-                    else:
-                        adjusted_stakes_text.append(f"{player_names[player_id]}: {original} tix (unchanged)")
-            
-            embed.add_field(
-                name="Step 3: Apply Theoretical Maximum Cap",
-                value="\n".join(adjusted_stakes_text) if adjusted_stakes_text else "No adjustments needed",
-                inline=False
-            )
-            
-            # Step 4: Minimum bettors
-            embed.add_field(
-                name="Step 4: Reserve Minimum Stakes",
-                value=(
-                    f"Minimum bettors on Max Team: {', '.join(player_names[p] for p in min_bettors_max_team) if min_bettors_max_team else 'None'}\n"
-                    f"Reserved amount: {min_bettors_amount} tix"
-                ),
-                inline=False
-            )
-            
-            # Step 5: Equalized Bet Percentage
-            embed.add_field(
-                name="Step 5: Calculate Equalized Bet Percentage",
-                value=(
-                    f"Min Team Total: {min_team_total} tix\n"
-                    f"Adjusted Max Team Total: {adjusted_max_team_total} tix\n"
-                    f"Equalized Percentage: {min_team_total} ÷ {adjusted_max_team_total} = {equalized_percentage:.1f}%"
-                ),
-                inline=False
-            )
-            
-            # Step 6: Proportional Adjustment
-            prop_adjustment_text = []
-            for player_id in max_team:
-                if player_id in adjusted_max_stakes and player_id in proportional_bets:
-                    stake = adjusted_max_stakes[player_id]
-                    prop_bet = proportional_bets[player_id]
-                    percentage = (prop_bet / stake * 100) if stake > 0 else 0
-                    prop_adjustment_text.append(f"{player_names[player_id]}: {prop_bet} tix / {stake} tix = {percentage:.1f}%")
-            
-            embed.add_field(
-                name="Step 6: Apply Proportional Adjustment",
-                value=(
-                    "Each max team player's bet is adjusted to approximately match the equalized percentage, "
-                    "rounded to the nearest 10 tix.\n\n" + 
-                    "\n".join(prop_adjustment_text)
-                ),
-                inline=False
-            )
-            
-            # Step 7: Final Pairings
-            pairings_text = []
-            for min_player, max_player, amount in pairings:
-                min_name = player_names.get(min_player, "Unknown")
-                max_name = player_names.get(max_player, "Unknown")
-                pairings_text.append(f"{min_name} vs {max_name}: {amount} tix")
-            
-            embed.add_field(
-                name="Step 7: Final Bet Pairings",
-                value="\n".join(pairings_text) if pairings_text else "No pairings created",
-                inline=False
-            )
-            
-            # Send the explanation
-            await interaction.followup.send(embed=embed, ephemeral=True)
+                    # Ensure it's at least min_stake and doesn't exceed original
+                    allocation = max(min_stake, min(allocation, original))
+                    
+                    # Calculate percentage
+                    percentage = (allocation / original * 100) if original > 0 else 0
+                    
+                    allocations_text.append(f"{player_name}: {allocation} tix / {original} tix = {percentage:.1f}%")
+                
+                embed.add_field(
+                    name="Step 6: Apply Proportional Adjustment",
+                    value=(
+                        "Each max team player's bet is adjusted to approximately match the equalized percentage, "
+                        "rounded to the nearest 10 tix.\n\n" + 
+                        "\n".join(allocations_text)
+                    ),
+                    inline=False
+                )
+                
+                # Step 7: Final Pairings
+                pairings_text = []
+                total_bet_amount = sum(amount for _, _, amount in pairings_list)
+                
+                for min_player, max_player, amount in pairings_list:
+                    min_name = player_names.get(min_player, "Unknown")
+                    max_name = player_names.get(max_player, "Unknown")
+                    pairings_text.append(f"{min_name} vs {max_name}: {amount} tix")
+                
+                embed.add_field(
+                    name=f"Step 7: Final Bet Pairings (Total: {total_bet_amount} tix)",
+                    value="\n".join(pairings_text) if pairings_text else "No pairings created",
+                    inline=False
+                )
+                
+                # Send the explanation
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                
+        except Exception as e:
+            await interaction.followup.send(f"Error generating stake calculation explanation: {str(e)}", ephemeral=True)
+            import traceback
+            traceback.print_exc()
