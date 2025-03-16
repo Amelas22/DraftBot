@@ -44,6 +44,8 @@ async def main():
     @bot.event
     async def on_ready():
         bot.loop.create_task(cleanup_sessions_task(bot))
+        from config import migrate_configs
+        migrate_configs()
         print(f'Logged in as {bot.user}!')
         from utils import re_register_views
         await re_register_views(bot)
