@@ -245,39 +245,6 @@ async def ensure_guild_id_in_tables():
                     await conn.execute(query)
                     print(f"Added guild_id column to {table}")
 
-async def re_register_views(bot):
-    async with AsyncSessionLocal() as session:
-        async with session.begin():
-            # Order the DraftSessions by their id in descending order to get the most recent ones
-            stmt = select(DraftSession).order_by(desc(DraftSession.id)).limit(10)
-            result = await session.execute(stmt)
-            draft_sessions = result.scalars().all()
-
-    for draft_session in draft_sessions:
-        if draft_session.draft_channel_id and draft_session.message_id:
-            channel_id = int(draft_session.draft_channel_id)
-            channel = bot.get_channel(channel_id)
-            if channel:
-                try:
-                    message = await channel.fetch_message(int(draft_session.message_id))
-                    from views import PersistentView
-                    view = PersistentView(bot=bot,
-                                          draft_session_id=draft_session.session_id,
-                                          session_type=draft_session.session_type,
-                                          team_a_name=draft_session.team_a_name,
-                                          team_b_name=draft_session.team_b_name)
-                    await message.edit(view=view)  # Reattach the view
-                except discord.NotFound:
-                    # Handle cases where the message or channel might have been deleted
-                    print(f"Message or channel not found for session: {draft_session.session_id}")
-                except Exception as e:
-                    # Log or handle any other exceptions
-                    print(f"Failed to re-register view for session: {draft_session.session_id}, error: {e}")
-        else:
-            # Log or handle sessions without a valid channel or message ID
-            print(f"Session {draft_session.session_id} does not have a valid channel and/or message ID.")
-
-
 async def register_team_to_db(team_name: str):
     async with AsyncSessionLocal() as session:
         async with session.begin():
