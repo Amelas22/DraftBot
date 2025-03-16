@@ -182,15 +182,19 @@ class PersistentView(discord.ui.View):
             # User is already signed up; inform them
             await interaction.response.send_message("You are already signed up!", ephemeral=True)
         else:
-            # Handle staked drafts differently - show modal first before adding to sign_ups
+            # Handle staked drafts differently - show dropdown first before adding to sign_ups
             if self.session_type == "staked":
-                # For staked drafts, we'll add them to sign_ups after stake validation
-                stake_modal = StakeModal()
-                stake_modal.draft_session_id = self.draft_session_id
-                stake_modal.draft_link = draft_session.draft_link
-                stake_modal.user_display_name = interaction.user.display_name
-                await interaction.response.send_modal(stake_modal)
-                # The modal callback will handle adding to sign_ups if stake is valid
+                # Create and send the stake options view
+                stake_options_view = StakeOptionsView(
+                    draft_session_id=self.draft_session_id,
+                    draft_link=draft_session.draft_link,
+                    user_display_name=interaction.user.display_name
+                )
+                await interaction.response.send_message(
+                    "Select your maximum stake amount:",
+                    view=stake_options_view,
+                    ephemeral=True
+                )
                 return
             
             # For non-staked drafts, add them to sign_ups now        
@@ -1480,13 +1484,112 @@ class CancelConfirmationView(discord.ui.View):
             child.disabled = True
         await interaction.response.edit_message(content="Draft cancellation aborted.", view=self)
 
+
+class StakeOptionsSelect(discord.ui.Select):
+    def __init__(self, draft_session_id, draft_link, user_display_name):
+        options = [
+            discord.SelectOption(label="10 TIX", value="10"),
+            discord.SelectOption(label="20 TIX", value="20"),
+            discord.SelectOption(label="50 TIX", value="50"),
+            discord.SelectOption(label="100 TIX", value="100"),
+            discord.SelectOption(label="Over 100 TIX", value="over_100"),
+        ]
+        super().__init__(placeholder="Select your maximum stake...", min_values=1, max_values=1, options=options)
+        self.draft_session_id = draft_session_id
+        self.draft_link = draft_link
+        self.user_display_name = user_display_name
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_value = self.values[0]
+        
+        if selected_value == "over_100":
+            # Show modal for custom amount over 100
+            stake_modal = StakeModal(over_100=True)
+            stake_modal.draft_session_id = self.draft_session_id
+            stake_modal.draft_link = self.draft_link
+            stake_modal.user_display_name = self.user_display_name
+            await interaction.response.send_modal(stake_modal)
+        else:
+            # Process the selected preset stake amount
+            stake_amount = int(selected_value)
+            
+            # Add user to sign_ups and handle stake submission
+            await self.handle_stake_submission(interaction, stake_amount)
+            
+    async def handle_stake_submission(self, interaction, stake_amount):
+        user_id = str(interaction.user.id)
+        
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                # Get the draft session
+                draft_stmt = select(DraftSession).where(DraftSession.session_id == self.draft_session_id)
+                draft_result = await session.execute(draft_stmt)
+                draft_session = draft_result.scalars().first()
+                
+                if not draft_session:
+                    await interaction.response.send_message("Draft session not found.", ephemeral=True)
+                    return
+                
+                # Update sign_ups
+                sign_ups = draft_session.sign_ups or {}
+                sign_ups[user_id] = interaction.user.display_name
+                
+                await session.execute(
+                    update(DraftSession).
+                    where(DraftSession.session_id == self.draft_session_id).
+                    values(sign_ups=sign_ups)
+                )
+                
+                # Check if a stake record already exists for this player
+                stake_stmt = select(StakeInfo).where(and_(
+                    StakeInfo.session_id == self.draft_session_id,
+                    StakeInfo.player_id == user_id
+                ))
+                stake_result = await session.execute(stake_stmt)
+                stake_info = stake_result.scalars().first()
+                
+                if stake_info:
+                    # Update existing stake
+                    stake_info.max_stake = stake_amount
+                else:
+                    # Create new stake record
+                    stake_info = StakeInfo(
+                        session_id=self.draft_session_id,
+                        player_id=user_id,
+                        max_stake=stake_amount
+                    )
+                    session.add(stake_info)
+                
+                await session.commit()
+        
+        # Confirm stake and provide draft link
+        signup_message = f"You've set your maximum stake to {stake_amount} tix."
+        if self.draft_link:
+            signup_message += f"\n\nYou are now signed up. Join Here: {self.draft_link}"
+        
+        # Send confirmation message
+        await interaction.response.send_message(signup_message, ephemeral=True)
+        
+        # Update the draft message to reflect the new list of sign-ups
+        await update_draft_message(interaction.client, self.draft_session_id)
+
+
+class StakeOptionsView(discord.ui.View):
+    def __init__(self, draft_session_id, draft_link, user_display_name):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.add_item(StakeOptionsSelect(draft_session_id, draft_link, user_display_name))
+
+
 class StakeModal(discord.ui.Modal):
-    def __init__(self):
+    def __init__(self, over_100=False):
         super().__init__(title="Enter Your Maximum Stake")
+        
+        self.over_100 = over_100
+        placeholder_text = "Enter amount (must be multiple of 50 over 100)" if over_100 else "Enter maximum amount you're willing to bet"
         
         self.stake_input = discord.ui.InputText(
             label="Maximum Stake (tix)",
-            placeholder="Enter maximum amount you're willing to bet",
+            placeholder=placeholder_text,
             required=True
         )
         self.add_item(self.stake_input)
@@ -1505,6 +1608,15 @@ class StakeModal(discord.ui.Modal):
         except ValueError:
             await interaction.response.send_message("Please enter a valid number.", ephemeral=True)
             return
+        
+        # Validation for over 100 stakes
+        if self.over_100:
+            if max_stake <= 100:
+                await interaction.response.send_message("Amount must be greater than 100 tix.", ephemeral=True)
+                return
+            if max_stake % 50 != 0:
+                await interaction.response.send_message("Amount must be a multiple of 50 (e.g., 150, 200, 250).", ephemeral=True)
+                return
         
         try:
             async with AsyncSessionLocal() as session:
@@ -1562,12 +1674,141 @@ class StakeModal(discord.ui.Modal):
                     
                     await session.commit()
             
-            # Create a response that includes only the stake confirmation and draft link
+            # Create a response that includes the stake confirmation, reminder about stake usage, and draft link
             signup_message = f"You've set your maximum stake to {max_stake} tix."
+            
+            # Add reminder for stakes over 100
+            if max_stake > 100:
+                signup_message += "\n\nReminder: Your max bet will be used to fill as many opposing team bets as possible."
+                
             if self.draft_link:
                 signup_message += f"\n\nYou are now signed up. Join Here: {self.draft_link}"
             
-            # Send the confirmation without the explanation button
+            # Send the confirmation
+            await interaction.response.send_message(signup_message, ephemeral=True)
+            
+            # Update the draft message to reflect the new list of sign-ups
+            await update_draft_message(interaction.client, self.draft_session_id)
+            
+        except Exception as e:
+            # Add detailed error handling to help diagnose the issue
+            error_message = f"An error occurred: {str(e)}"
+            print(f"StakeModal callback error: {error_message}")  # Log to console
+            try:
+                await interaction.response.send_message(error_message, ephemeral=True)
+            except:
+                # If interaction has already been responded to, try followup
+                try:
+                    await interaction.followup.send(error_message, ephemeral=True)
+                except Exception as followup_error:
+                    print(f"Failed to send error message to user: {followup_error}")
+
+
+class StakeModal(discord.ui.Modal):
+    def __init__(self, over_100=False):
+        super().__init__(title="Enter Your Maximum Stake")
+        
+        self.over_100 = over_100
+        placeholder_text = "Enter amount (must be multiple of 50 over 100)" if over_100 else "Enter maximum amount you're willing to bet"
+        
+        self.stake_input = discord.ui.InputText(
+            label="Maximum Stake (tix)",
+            placeholder=placeholder_text,
+            required=True
+        )
+        self.add_item(self.stake_input)
+        
+        # These will be set separately before sending the modal
+        self.draft_session_id = None
+        self.draft_link = None
+        self.user_display_name = None
+
+    async def callback(self, interaction: discord.Interaction):
+        user_id = str(interaction.user.id)
+        
+        try:
+            # Parse the stake amount
+            max_stake = int(self.stake_input.value)
+        except ValueError:
+            await interaction.response.send_message("Please enter a valid number.", ephemeral=True)
+            return
+        
+        # Validation for over 100 stakes
+        if self.over_100:
+            if max_stake <= 100:
+                await interaction.response.send_message("Amount must be greater than 100 tix.", ephemeral=True)
+                return
+            if max_stake % 50 != 0:
+                await interaction.response.send_message("Amount must be a multiple of 50 (e.g., 150, 200, 250).", ephemeral=True)
+                return
+        
+        try:
+            async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    # Check if draft_session_id is set properly
+                    if not self.draft_session_id:
+                        await interaction.response.send_message("Error: Draft session ID is missing. Please try again.", ephemeral=True)
+                        return
+                    
+                    # Get the draft session to check min stake
+                    draft_stmt = select(DraftSession).where(DraftSession.session_id == self.draft_session_id)
+                    draft_result = await session.execute(draft_stmt)
+                    draft_session = draft_result.scalars().first()
+                    
+                    if not draft_session:
+                        await interaction.response.send_message("Draft session not found.", ephemeral=True)
+                        return
+                    
+                    min_stake = draft_session.min_stake or 10
+                    if max_stake < min_stake:
+                        await interaction.response.send_message(f"Minimum stake for this draft is {min_stake} tix.", ephemeral=True)
+                        return
+                    
+                    # Only add to sign_ups if stake is valid
+                    sign_ups = draft_session.sign_ups or {}
+                    display_name = self.user_display_name or interaction.user.display_name
+                    sign_ups[user_id] = display_name
+                    
+                    # Update the draft session with the new sign_ups
+                    await session.execute(
+                        update(DraftSession).
+                        where(DraftSession.session_id == self.draft_session_id).
+                        values(sign_ups=sign_ups)
+                    )
+                    
+                    # Check if a stake record already exists for this player
+                    stake_stmt = select(StakeInfo).where(and_(
+                        StakeInfo.session_id == self.draft_session_id,
+                        StakeInfo.player_id == user_id
+                    ))
+                    stake_result = await session.execute(stake_stmt)
+                    stake_info = stake_result.scalars().first()
+                    
+                    if stake_info:
+                        # Update existing stake
+                        stake_info.max_stake = max_stake
+                    else:
+                        # Create new stake record
+                        stake_info = StakeInfo(
+                            session_id=self.draft_session_id,
+                            player_id=user_id,
+                            max_stake=max_stake
+                        )
+                        session.add(stake_info)
+                    
+                    await session.commit()
+            
+            # Create a response that includes the stake confirmation, reminder about stake usage, and draft link
+            signup_message = f"You've set your maximum stake to {max_stake} tix."
+            
+            # Add reminder for stakes over 100
+            if max_stake > 100:
+                signup_message += "\n\nReminder: Your max bet will be used to fill as many opposing team bets as possible."
+                
+            if self.draft_link:
+                signup_message += f"\n\nYou are now signed up. Join Here: {self.draft_link}"
+            
+            # Send the confirmation
             await interaction.response.send_message(signup_message, ephemeral=True)
             
             # Update the draft message to reflect the new list of sign-ups
