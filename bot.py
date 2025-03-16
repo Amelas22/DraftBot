@@ -26,6 +26,15 @@ logger.add(
     diagnose=True   # Even more detailed error information
 )
 
+async def load_extensions(bot):
+    for filename in os.listdir("./cogs"):
+        if filename.endswith(".py") and not filename.startswith("_"):
+            try:
+                bot.load_extension(f"cogs.{filename[:-3]}")
+                logger.info(f"Loaded extension: {filename[:-3]}")
+            except Exception as e:
+                logger.error(f"Failed to load extension {filename}: {e}")
+
 async def main():
     load_dotenv()
 
@@ -43,6 +52,8 @@ async def main():
 
     @bot.event
     async def on_ready():
+        await bot.sync_commands()
+        
         bot.loop.create_task(cleanup_sessions_task(bot))
         print(f'Logged in as {bot.user}!')
         from utils import re_register_views
@@ -65,38 +76,17 @@ async def main():
                 "Thanks for adding the Draft Bot! To set up needed channels and roles, an admin should use `/setup`."
             )
 
-    @bot.slash_command(name='startdraft', description='Start a team draft with random teams', guild_id=None)
-    async def start_draft(interaction: discord.Interaction):
-        logger.info("Received startdraft command")
-        view = CubeDraftSelectionView(session_type="random")
-        await interaction.response.send_message("Select a cube:", view=view, ephemeral=True)
 
-    @bot.slash_command(name='premadedraft', description='Start a team draft with premade teams', guild_id=None)
-    async def premade_draft(interaction: discord.Interaction):
-        logger.info("Received premadedraft command")
-        view = CubeDraftSelectionView(session_type="premade")
-        await interaction.response.send_message("Select a cube:", view=view, ephemeral=True)
-        
-    @bot.slash_command(name='dynamic_stake', description='Start a team draft with random teams and customizable stakes')
-    async def staked_draft(interaction: discord.Interaction):
-        logger.info("Received stakedraft command")
-        
-        from modals import StakedCubeDraftSelectionView
-        view = StakedCubeDraftSelectionView()
-        await interaction.response.send_message("Select a cube for the staked draft:", view=view, ephemeral=True)
-    
     await league_commands(bot)
     await scheduled_posts(bot)
+    await load_extensions(bot)
     await init_db()
     await ensure_guild_id_in_tables()
     logger.info("Database initialized")
 
     await setup_sticky_handler(bot)
-
     # Run the bot
     await bot.start(TOKEN)
-
-
 
 if __name__ == "__main__":
     import asyncio
