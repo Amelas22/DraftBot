@@ -1494,7 +1494,7 @@ class StakeOptionsSelect(discord.ui.Select):
             discord.SelectOption(label="100 TIX", value="100"),
             discord.SelectOption(label="Over 100 TIX", value="over_100"),
         ]
-        super().__init__(placeholder="Select your maximum stake...", min_values=1, max_values=1, options=options)
+        super().__init__(placeholder="Select your maximum bet...", min_values=1, max_values=1, options=options)
         self.draft_session_id = draft_session_id
         self.draft_link = draft_link
         self.user_display_name = user_display_name
@@ -1582,10 +1582,10 @@ class StakeOptionsView(discord.ui.View):
 
 class StakeModal(discord.ui.Modal):
     def __init__(self, over_100=False):
-        super().__init__(title="Enter Your Maximum Stake")
+        super().__init__(title="Enter Your Maximum Bet. Reminder: Bets will be used to fill as many opposing team bets as possible")
         
         self.over_100 = over_100
-        placeholder_text = "Enter amount (must be multiple of 50 over 100)" if over_100 else "Enter maximum amount you're willing to bet"
+        placeholder_text = "Enter Max Bet (Must be multiple of 50)" if over_100 else "Enter maximum amount you're willing to bet"
         
         self.stake_input = discord.ui.InputText(
             label="Maximum Stake (tix)",
