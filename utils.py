@@ -261,7 +261,8 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                 team_a_names = [guild.get_member(int(user_id)).display_name for user_id in draft_session.team_a]
                 team_b_names = [guild.get_member(int(user_id)).display_name for user_id in draft_session.team_b]
                 sign_ups_list = list(draft_session.sign_ups.keys())
-                seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
+                if draft_session.session_type != "premade":
+                    seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
 
                 team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
                 total_matches = draft_session.match_counter - 1
@@ -280,7 +281,8 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                     value=("🔴 **Team Red Wins:** " + str(team_a_wins) if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"**{draft_session.team_a_name} Wins:** {team_a_wins}") + 
                         ("\n🔵 **Team Blue Wins:** " + str(team_b_wins) if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"\n**{draft_session.team_b_name} Wins:** {team_b_wins}"), 
                     inline=False)
-                embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+                if draft_session.session_type != "premade":
+                    embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
 
                 # Add stakes information if this is a staked draft
                 if draft_session.session_type == "staked":
