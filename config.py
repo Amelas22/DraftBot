@@ -1,4 +1,3 @@
-# config.py
 import json
 import os
 from pathlib import Path
@@ -35,10 +34,11 @@ class Config:
             "matchmaking": {
                 "trueskill_chance": 0  # Default to 0% (always random teams)
             },
-            "stakes": {
+              "stakes": {
                 "use_optimized_algorithm": True,
+                "use_bottoms_up_algorithm": True,  # Enable the new algorithm by default
                 "stake_multiple": 10
-            }
+            },
         }
         
         # Special configuration just for your guild
@@ -71,9 +71,10 @@ class Config:
                 "trueskill_chance": 60  
             },
             "stakes": {
-                "use_optimized_algorithm": True,
+                "use_optimized_algorithm": False,
+                "use_bottoms_up_algorithm": True,  # Enable the new algorithm by default
                 "stake_multiple": 10
-            }
+            },  
         }
         
         self.configs = {}

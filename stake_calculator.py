@@ -138,30 +138,211 @@ class StakeCalculator:
         
         return results
 
-def calculate_stakes_with_strategy(team_a: List[str], team_b: List[str], 
-                                  stakes: Dict[str, int], min_stake: int = 10,
-                                  multiple: int = 10, use_optimized: bool = False) -> List[StakePair]:
-    """
-    Calculate stake pairings using either the original or optimized algorithm.
-    
-    Args:
-        team_a: List of player IDs in team A
-        team_b: List of player IDs in team B
-        stakes: Dictionary mapping player IDs to their max stake
-        min_stake: Minimum stake amount allowed (from user input in /dynamic_stake)
-        multiple: Round stakes to this multiple (5 or 10)
-        use_optimized: Whether to use the optimized algorithm
+class BottomsUpCalculator:
+    @staticmethod
+    def calculate_stakes(team_a: List[str], team_b: List[str], 
+                          stakes: Dict[str, int], min_stake: int = 10,
+                          multiple: int = 10) -> List[StakePair]:
+        """
+        Calculate stake pairings between two teams, prioritizing exact-tier matches first.
         
-    Returns:
-        List of StakePair objects representing the stake assignments
-    """
-    if use_optimized:
-        stake_logger.info(f"Using optimized stake calculation algorithm with min_stake={min_stake}")
-        return OptimizedStakeCalculator.calculate_stakes(team_a, team_b, stakes, min_stake, multiple)
-    else:
-        stake_logger.info(f"Using original stake calculation algorithm with min_stake={min_stake}")
-        return StakeCalculator.calculate_stakes(team_a, team_b, stakes, min_stake)
-    
+        Args:
+            team_a: List of player IDs in team A
+            team_b: List of player IDs in team B
+            stakes: Dictionary mapping player IDs to their max stake
+            min_stake: Minimum stake amount allowed
+            multiple: Round stakes to this multiple
+            
+        Returns:
+            List of StakePair objects representing the stake assignments
+        """
+        stake_logger.info(f"Starting bottoms-up stake calculation with: Team A: {team_a}, Team B: {team_b}")
+        stake_logger.info(f"Input stakes: {stakes}")
+        
+        # Create sets for team membership for quick lookup
+        team_a_set = set(team_a)
+        team_b_set = set(team_b)
+        
+        # Initialize results list and tracking of remaining stakes
+        results = []
+        remaining_stakes = stakes.copy()  # We'll modify this as we go
+        
+        # Track players that have been fully processed
+        fully_processed = set()
+        
+        # List of stake tiers to process in order
+        stake_tiers = [10, 20, 50]
+        
+        # Process each tier
+        for tier in stake_tiers:
+            stake_logger.info(f"Processing tier: {tier} tix")
+            
+            # PHASE 1: EXACT-TO-EXACT MATCHES
+            # Get all players from each team who have exactly this tier amount
+            team_a_exact = [p for p in team_a 
+                         if p not in fully_processed and remaining_stakes.get(p, 0) == tier]
+            team_b_exact = [p for p in team_b 
+                         if p not in fully_processed and remaining_stakes.get(p, 0) == tier]
+            
+            # Match exact-tier players with each other first
+            while team_a_exact and team_b_exact:
+                player_a = team_a_exact.pop(0)
+                player_b = team_b_exact.pop(0)
+                
+                # Create a stake pair with correct team order
+                stake_pair = StakePair(player_a, player_b, tier)
+                results.append(stake_pair)
+                
+                # Update remaining stakes
+                remaining_stakes[player_a] = 0  # Fully matched
+                remaining_stakes[player_b] = 0  # Fully matched
+                
+                # Mark as fully processed
+                fully_processed.add(player_a)
+                fully_processed.add(player_b)
+                
+                stake_logger.info(f"Exact-tier match: {player_a} vs {player_b} for {tier} tix")
+            
+            # PHASE 2: MATCH REMAINING EXACT-TIER PLAYERS
+            # Only after exhausting exact-to-exact matches, start matching with higher-tier players
+            
+            # For any remaining exact-tier players on Team A, try to match with higher-tier on Team B
+            if team_a_exact:
+                # Find Team B players with higher stakes and sort by stake (lowest first)
+                team_b_higher = [p for p in team_b 
+                            if p not in fully_processed and remaining_stakes.get(p, 0) > tier]
+                
+                # Sort by stake (lowest first) to minimize the number of players involved
+                team_b_higher.sort(key=lambda p: remaining_stakes.get(p, float('inf')))
+                
+                while team_a_exact and team_b_higher:
+                    player_a = team_a_exact.pop(0)
+                    player_b = team_b_higher.pop(0)
+                    
+                    # Create a stake pair
+                    stake_pair = StakePair(player_a, player_b, tier)
+                    results.append(stake_pair)
+                    
+                    # Update remaining stakes
+                    remaining_stakes[player_a] = 0  # Fully matched
+                    remaining_stakes[player_b] -= tier  # Reduce by tier amount
+                    
+                    # Mark player A as fully processed
+                    fully_processed.add(player_a)
+                    
+                    stake_logger.info(f"A-exact to B-higher match: {player_a} vs {player_b} for {tier} tix")
+                    
+                    # If player B still has significant stake, consider them for future matches
+                    if remaining_stakes[player_b] < min_stake:
+                        # If below min_stake, mark as fully processed
+                        fully_processed.add(player_b)
+            
+            # For any remaining exact-tier players on Team B, try to match with higher-tier on Team A
+            if team_b_exact:
+                # Find Team A players with higher stakes and sort by stake (lowest first)
+                team_a_higher = [p for p in team_a 
+                            if p not in fully_processed and remaining_stakes.get(p, 0) > tier]
+                
+                # Sort by stake (lowest first) to minimize the number of players involved
+                team_a_higher.sort(key=lambda p: remaining_stakes.get(p, float('inf')))
+                
+                while team_b_exact and team_a_higher:
+                    player_b = team_b_exact.pop(0)
+                    player_a = team_a_higher.pop(0)
+                    
+                    # Create a stake pair
+                    stake_pair = StakePair(player_a, player_b, tier)
+                    results.append(stake_pair)
+                    
+                    # Update remaining stakes
+                    remaining_stakes[player_b] = 0  # Fully matched
+                    remaining_stakes[player_a] -= tier  # Reduce by tier amount
+                    
+                    # Mark player B as fully processed
+                    fully_processed.add(player_b)
+                    
+                    stake_logger.info(f"B-exact to A-higher match: {player_a} vs {player_b} for {tier} tix")
+                    
+                    # If player A still has significant stake, consider them for future matches
+                    if remaining_stakes[player_a] < min_stake:
+                        # If below min_stake, mark as fully processed
+                        fully_processed.add(player_a)
+        
+        # After processing all tiers, use OptimizedStakeCalculator for the remaining stakes
+        remaining_team_a = [p for p in team_a if p not in fully_processed and remaining_stakes.get(p, 0) >= min_stake]
+        remaining_team_b = [p for p in team_b if p not in fully_processed and remaining_stakes.get(p, 0) >= min_stake]
+        
+        if remaining_team_a and remaining_team_b:
+            # Create a filtered stakes dictionary with just the remaining stakes
+            remaining_stakes_dict = {p: remaining_stakes[p] for p in remaining_team_a + remaining_team_b}
+            
+            stake_logger.info(f"Using OptimizedStakeCalculator for remaining players:")
+            stake_logger.info(f"Team A remaining: {remaining_team_a}")
+            stake_logger.info(f"Team B remaining: {remaining_team_b}")
+            stake_logger.info(f"Remaining stakes: {remaining_stakes_dict}")
+            
+            # Use OptimizedStakeCalculator for the remaining players
+            optimized_pairs = OptimizedStakeCalculator.calculate_stakes(
+                remaining_team_a, remaining_team_b, remaining_stakes_dict, min_stake, multiple
+            )
+            results.extend(optimized_pairs)
+        
+        # Ensure every player has at least one match
+        all_matched_players = set()
+        for pair in results:
+            all_matched_players.add(pair.player_a_id)
+            all_matched_players.add(pair.player_b_id)
+        
+        # Find unmatched players
+        all_players = set(team_a + team_b)
+        unmatched_players = all_players - all_matched_players
+        
+        if unmatched_players:
+            stake_logger.info(f"Found unmatched players: {unmatched_players}")
+            
+            # Try to match unmatched players
+            unmatched_team_a = [p for p in unmatched_players if p in team_a_set]
+            unmatched_team_b = [p for p in unmatched_players if p in team_b_set]
+            
+            # Create emergency matches for unmatched players, prioritizing the lowest-stake opponents
+            for player_a in unmatched_team_a:
+                # Find a team B player with remaining stake, sorted by stake (lowest first)
+                potential_opponents = [p for p in team_b if p not in unmatched_players and remaining_stakes.get(p, 0) >= min_stake]
+                potential_opponents.sort(key=lambda p: remaining_stakes.get(p, float('inf')))
+                
+                if potential_opponents and remaining_stakes.get(player_a, 0) >= min_stake:
+                    player_b = potential_opponents[0]
+                    match_amount = min(remaining_stakes[player_a], remaining_stakes[player_b], min_stake)
+                    
+                    stake_pair = StakePair(player_a, player_b, match_amount)
+                    results.append(stake_pair)
+                    
+                    # Update remaining stakes
+                    remaining_stakes[player_a] -= match_amount
+                    remaining_stakes[player_b] -= match_amount
+                    
+                    stake_logger.info(f"Emergency match for A: {player_a} vs {player_b} for {match_amount} tix")
+            
+            for player_b in unmatched_team_b:
+                # Find a team A player with remaining stake, sorted by stake (lowest first)
+                potential_opponents = [p for p in team_a if p not in unmatched_players and remaining_stakes.get(p, 0) >= min_stake]
+                potential_opponents.sort(key=lambda p: remaining_stakes.get(p, float('inf')))
+                
+                if potential_opponents and remaining_stakes.get(player_b, 0) >= min_stake:
+                    player_a = potential_opponents[0]
+                    match_amount = min(remaining_stakes[player_a], remaining_stakes[player_b], min_stake)
+                    
+                    stake_pair = StakePair(player_a, player_b, match_amount)
+                    results.append(stake_pair)
+                    
+                    # Update remaining stakes
+                    remaining_stakes[player_a] -= match_amount
+                    remaining_stakes[player_b] -= match_amount
+                    
+                    stake_logger.info(f"Emergency match for B: {player_a} vs {player_b} for {match_amount} tix")
+        
+        return results
+
 class OptimizedStakeCalculator:
     @staticmethod
     def calculate_stakes(team_a: List[str], team_b: List[str], 
@@ -236,8 +417,9 @@ class OptimizedStakeCalculator:
             min_team_count = len(min_team)
             min_team_total_stakes = sum(stake for _, stake in min_team)
             
-            # Formula: Min team total - ((min_team_count - 1) * min_stake)
-            theoretical_max = min_team_total_stakes - ((min_team_count - 1) * min_stake)
+            # The theoretical max is the entire min team total
+            # We don't need to reserve min_stake amounts anymore since those are handled by BottomsUpCalculator
+            theoretical_max = min_team_total_stakes
             theoretical_max = max(theoretical_max, min_stake)  # Ensure at least min_stake
             
             stake_logger.info(f"Theoretical max bet: {theoretical_max} (min team total: {min_team_total_stakes}, players: {min_team_count})")
@@ -249,20 +431,17 @@ class OptimizedStakeCalculator:
                     above_min_players[i] = (player_id, theoretical_max)
                     stake_logger.info(f"Capped bettor {player_id} from {max_stake} to {theoretical_max}")
         
-        # Step 3: Calculate total allocated to min stake players
-        min_stake_allocation = sum(min(stake, min_stake) for _, stake in min_stake_players)
+        # Step 3: Calculate total capacity for above-min players
+        # This is now the full min_team_total since we no longer need to reserve for min stake players
+        remaining_capacity = min_team_total
         
-        # Step 4: Calculate remaining capacity for above-min players
-        remaining_capacity = min_team_total - min_stake_allocation
-        
-        # Step 5: Calculate effective max for above-min players
+        # Step 4: Calculate effective max for above-min players
         effective_max_total = sum(max_stake for _, max_stake in above_min_players)
         
-        stake_logger.info(f"Min stake allocation: {min_stake_allocation}")
         stake_logger.info(f"Remaining capacity: {remaining_capacity}")
         stake_logger.info(f"Effective max total: {effective_max_total}")
         
-        # Step 6: Calculate equalized bet score and allocations for Max Team
+        # Step 5: Calculate equalized bet score and allocations for Max Team
         all_allocations = []
         
         if above_min_players and effective_max_total > 0:
@@ -294,7 +473,7 @@ class OptimizedStakeCalculator:
                 stake_logger.info(f"Player {player_id}: {rounded_allocation}/{max_stake} = {(rounded_allocation/max_stake)*100:.1f}%")
             
             # Adjust for rounding errors to match min team capacity exactly
-            total_all_allocated = total_allocated + min_stake_allocation
+            total_all_allocated = total_allocated
             adjustment_needed = min_team_total - total_all_allocated
             
             if adjustment_needed != 0:
@@ -368,7 +547,7 @@ class OptimizedStakeCalculator:
         
         stake_logger.info(f"Final max team allocations: {all_allocations}")
         
-        # Step 7: Create stake pairs ensuring Min Team players get 100% of their bets
+        # Step 6: Create stake pairs ensuring Min Team players get 100% of their bets
         result_pairs = []
         
         # Create a dict of allocations for quick lookup
@@ -417,7 +596,7 @@ class OptimizedStakeCalculator:
                         
                         remaining_min_stake -= rounded_amount
         
-        # Step 8: Add a post-processing step to ensure min team gets 100% allocation
+        # Step 7: Add a post-processing step to ensure min team gets 100% allocation
         # Recalculate min_player_allocated from the pairs we've created so far
         min_player_allocated = {player_id: 0 for player_id, _ in min_team}
         for pair in result_pairs:
@@ -503,7 +682,7 @@ class OptimizedStakeCalculator:
                             remaining = 0
                             break
         
-        # Step 9: Try to consolidate multiple bets between the same players
+        # Step 8: Try to consolidate multiple bets between the same players
         consolidated_pairs = []
         pair_map = {}
         
@@ -580,3 +759,32 @@ class OptimizedStakeCalculator:
         
         # Return consolidated pairs for a cleaner result
         return consolidated_pairs
+
+def calculate_stakes_with_strategy(team_a: List[str], team_b: List[str], 
+                                  stakes: Dict[str, int], min_stake: int = 10,
+                                  multiple: int = 10, use_optimized: bool = False,
+                                  use_bottoms_up: bool = False) -> List[StakePair]:
+    """
+    Calculate stake pairings using the selected algorithm.
+    
+    Args:
+        team_a: List of player IDs in team A
+        team_b: List of player IDs in team B
+        stakes: Dictionary mapping player IDs to their max stake
+        min_stake: Minimum stake amount allowed (from user input in /dynamic_stake)
+        multiple: Round stakes to this multiple (5 or 10)
+        use_optimized: Whether to use the optimized algorithm
+        use_bottoms_up: Whether to use the bottoms-up algorithm
+        
+    Returns:
+        List of StakePair objects representing the stake assignments
+    """
+    if use_bottoms_up:
+        stake_logger.info(f"Using bottoms-up stake calculation algorithm with min_stake={min_stake}")
+        return BottomsUpCalculator.calculate_stakes(team_a, team_b, stakes, min_stake, multiple)
+    elif use_optimized:
+        stake_logger.info(f"Using optimized stake calculation algorithm with min_stake={min_stake}")
+        return OptimizedStakeCalculator.calculate_stakes(team_a, team_b, stakes, min_stake, multiple)
+    else:
+        stake_logger.info(f"Using original stake calculation algorithm with min_stake={min_stake}")
+        return StakeCalculator.calculate_stakes(team_a, team_b, stakes, min_stake)

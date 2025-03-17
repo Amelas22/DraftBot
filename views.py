@@ -878,12 +878,13 @@ class PersistentView(discord.ui.View):
                 from config import get_config
                 config = get_config(interaction.guild_id)
                 use_optimized = config.get("stakes", {}).get("use_optimized_algorithm", False)
+                use_bottoms_up = config.get("stakes", {}).get("use_bottoms_up_algorithm", True)  # Default to True for the new algorithm
                 stake_multiple = config.get("stakes", {}).get("stake_multiple", 10)
                 
                 # Get the user-specified min_stake from the draft session
                 user_min_stake = draft_session.min_stake or 10
                 
-                # Use the router function
+                # Use the router function with the bottoms_up parameter
                 from stake_calculator import calculate_stakes_with_strategy
                 stake_pairs = calculate_stakes_with_strategy(
                     draft_session.team_a, 
@@ -891,7 +892,8 @@ class PersistentView(discord.ui.View):
                     stakes_dict,
                     min_stake=user_min_stake,  # Use the min_stake specified by the user
                     multiple=stake_multiple,
-                    use_optimized=use_optimized
+                    use_optimized=use_optimized,
+                    use_bottoms_up=use_bottoms_up  # Pass the new parameter
                 )
                 
                 # First, clear any existing assigned stakes to avoid duplications
