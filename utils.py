@@ -297,6 +297,26 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                             value="\n".join(stake_lines),
                             inline=False
                         )
+                    
+                    # Add bet outcomes if there's a winner
+                    if team_a_wins > half_matches or team_b_wins > half_matches:
+                        # Determine the winning team
+                        winning_team = draft_session.team_a if team_a_wins > team_b_wins else draft_session.team_b
+                        
+                        # Get bet outcome lines
+                        outcome_lines, outcome_total = await get_formatted_bet_outcomes(
+                            draft_session_id, 
+                            draft_session.sign_ups, 
+                            winning_team
+                        )
+                        
+                        # Add the bet outcomes field to the embed
+                        if outcome_lines:
+                            embed.add_field(
+                                name="**Bet Outcomes**",
+                                value="\n".join(outcome_lines),
+                                inline=False
+                            )
                 
             else:
                 # Code for Swiss drafts
@@ -1493,3 +1513,88 @@ async def get_formatted_stake_pairs(session_id, sign_ups):
             formatted_lines = [f"{a} vs {b}: {amount} tix" for a, b, amount in unique_pairs]
             
             return formatted_lines, total_stake
+
+async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
+    """
+    Get formatted bet outcomes for a draft session.
+    
+    Args:
+        session_id: The draft session ID
+        sign_ups: Dict mapping player IDs to display names
+        winning_team_ids: List of player IDs on the winning team
+        
+    Returns:
+        tuple: (formatted_outcome_lines, total_stakes)
+    """
+    async with AsyncSessionLocal() as db_session:
+        async with db_session.begin():
+            # Get the draft session to access team assignments
+            draft_stmt = select(DraftSession).where(DraftSession.session_id == session_id)
+            draft_result = await db_session.execute(draft_stmt)
+            draft_session = draft_result.scalars().first()
+            
+            if not draft_session:
+                return [], 0
+                
+            # Get all stake info records
+            stake_stmt = select(StakeInfo).where(StakeInfo.session_id == session_id)
+            results = await db_session.execute(stake_stmt)
+            all_stake_infos = results.scalars().all()
+            
+            # Create a list to store unique stake pairs
+            unique_pairs = []
+            processed = set()
+            total_stake = 0
+            
+            # Process each stake info record
+            for stake in all_stake_infos:
+                # Skip if no opponent or amount
+                if not stake.opponent_id or not stake.assigned_stake:
+                    continue
+                
+                # Create a unique identifier for this pair 
+                # Sort the player IDs but keep the amount separate
+                players = tuple(sorted([stake.player_id, stake.opponent_id]))
+                amount = stake.assigned_stake
+                pair_key = (players, amount)
+                
+                # Skip if we've already processed this exact pairing
+                if pair_key in processed:
+                    continue
+                processed.add(pair_key)
+                
+                # Skip if both players are on the same team
+                player_a_on_winning_team = stake.player_id in winning_team_ids
+                player_b_on_winning_team = stake.opponent_id in winning_team_ids
+                
+                if player_a_on_winning_team == player_b_on_winning_team:
+                    # Both are winners or both are losers, so no bet outcome
+                    continue
+                
+                # Determine winner and loser
+                if player_a_on_winning_team:
+                    winner_id = stake.player_id
+                    loser_id = stake.opponent_id
+                else:
+                    winner_id = stake.opponent_id
+                    loser_id = stake.player_id
+                
+                # Get player names
+                winner_name = sign_ups.get(winner_id, "Unknown")
+                loser_name = sign_ups.get(loser_id, "Unknown")
+                
+                # Add to unique outcomes list
+                unique_pairs.append((loser_name, winner_name, amount))
+                
+                # Add to total stake
+                total_stake += amount
+            
+            # Sort by amount (highest first)
+            unique_pairs.sort(key=lambda x: x[2], reverse=True)
+            
+            # Format for display - Loser owes Winner
+            formatted_lines = [f"{loser} owes {winner}: {amount} tix" for loser, winner, amount in unique_pairs]
+            
+            return formatted_lines, total_stake
+
+
