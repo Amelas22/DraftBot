@@ -29,7 +29,7 @@ class DraftCommands(commands.Cog):
         await ctx.response.send_message("Select a cube for the staked draft:", view=view, ephemeral=True)
 
     @discord.slash_command(
-        name='report', 
+        name='report_results', 
         description='Report the result of your last unreported match',
         guild_ids=None
     )
