@@ -336,9 +336,18 @@ class PersistentView(discord.ui.View):
     async def randomize_teams_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         bot = interaction.client
         session_id = self.draft_session_id
-        
+
         # Check for stake-related requirements first
         if self.session_type == "staked":
+            # First, check if a ready check has been performed
+            ready_check_performed = session_id in sessions
+            if not ready_check_performed:
+                await interaction.response.send_message(
+                    "You must perform a Ready Check before creating teams for a money draft.",
+                    ephemeral=True
+                )
+                return
+            
             # Check that all players have set their stakes
             from utils import get_missing_stake_players
             missing_players = await get_missing_stake_players(session_id)
