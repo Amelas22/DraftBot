@@ -150,11 +150,11 @@ class StakeCalculator:
         stake_logger.info(f"Input stakes: {stakes}")
         stake_logger.info(f"Minimum stake: {min_stake}")
         
-        # Handle outliers
-        capped_stakes = handle_outliers(stakes)
-        if capped_stakes != stakes:
-            stake_logger.info("Outlier stakes detected and capped")
-            stakes = capped_stakes
+        # # Handle outliers
+        # capped_stakes = handle_outliers(stakes)
+        # if capped_stakes != stakes:
+        #     stake_logger.info("Outlier stakes detected and capped")
+        #     stakes = capped_stakes
         
         # Create sorted lists of player stakes for each team
         team_a_stakes = [(player_id, stakes[player_id]) for player_id in team_a if player_id in stakes]
@@ -978,8 +978,8 @@ def handle_outliers(stakes: Dict[str, int]):
     q3 = values[q3_idx]
     iqr = q3 - q1
 
-    # Define upper bound for outliers, conservative approach of q3 + 1 * iqr (standard is 1.5 * iqr)
-    upper_bound = q3 + iqr
+    # Define upper bound for outliers (standard is 1.5 * iqr)
+    upper_bound = q3 + (1.5 * iqr)
 
     # Cap any outliers at the upper bound
     capped_stakes = {}
