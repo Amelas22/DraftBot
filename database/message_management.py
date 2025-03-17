@@ -9,10 +9,12 @@ from loguru import logger
 import time
 import asyncio
 
-STICKY_MESSAGE_BUFFER = 8
+MESSAGES_BEFORE_REGULAR_UPDATE = 8
 INACTIVITY_THRESHOLD = 120  # 120 seconds (2 minutes) of inactivity
 INACTIVITY_CHECK_INTERVAL = 60  # Check for inactive channels every 60 seconds
 DRAFT_NOTIFICATION_CHANNEL = "wheres-the-draft"  # Name of the channel to post draft links
+MESSAGES_BEFORE_VOLUME_UPDATE = 20  # Higher threshold for the message-only trigger
+ANTI_SPAM_COOLDOWN_SECONDS = 180  # Minimum seconds between updates to prevent spam (3 minutes)
 
 class Message(Base):
     """Represents a message stored in the database, potentially a sticky message."""
@@ -28,6 +30,7 @@ class Message(Base):
     message_count = Column(Integer, default=0)
     last_activity = Column(Float, default=0.0)  # Timestamp of last message in channel
     notification_message_id = Column(String(64), nullable=True)  # ID of the notification message in wheres-the-draft channel
+    last_update_time = Column(Float, default=0.0)  # Timestamp of when we last updated the sticky message
 
     def __repr__(self) -> str:
         return (
@@ -138,8 +141,8 @@ async def post_or_update_notification(
 async def handle_sticky_message_update(sticky_message: Message, bot: discord.Client, session: AsyncSession) -> None:
     """Handles the process of updating and pinning the sticky message in Discord."""
     # Check if message_count threshold is met before doing anything
-    if sticky_message.message_count < STICKY_MESSAGE_BUFFER:
-        logger.info(f"Not enough messages ({sticky_message.message_count}/{STICKY_MESSAGE_BUFFER}) to update sticky message in channel {sticky_message.channel_id}")
+    if sticky_message.message_count < MESSAGES_BEFORE_REGULAR_UPDATE:
+        logger.info(f"Not enough messages ({sticky_message.message_count}/{MESSAGES_BEFORE_REGULAR_UPDATE}) to update sticky message in channel {sticky_message.channel_id}")
         return
 
     draft_session_id = sticky_message.view_metadata.get("draft_session_id")
@@ -177,6 +180,7 @@ async def handle_sticky_message_update(sticky_message: Message, bot: discord.Cli
     sticky_message.view_metadata = view_metadata  # Save the updated metadata
     sticky_message.message_count = 0  # Reset message count after update
     sticky_message.last_activity = time.time()  # Reset last activity timestamp
+    sticky_message.last_update_time = time.time()  # Record when we did this update
     
     # Update the notification message in the wheres-the-draft channel
     new_notification_id = await post_or_update_notification(
@@ -220,9 +224,23 @@ async def check_channels_for_inactivity(bot: discord.Client) -> None:
             
             for sticky_message in sticky_messages:
                 elapsed_time = current_time - sticky_message.last_activity
+                time_since_last_update = current_time - (sticky_message.last_update_time or 0)
                 
-                if elapsed_time >= INACTIVITY_THRESHOLD and sticky_message.message_count >= STICKY_MESSAGE_BUFFER:
+                # Check if update is needed due to inactivity or high message volume
+                should_update = False
+                
+                # Inactivity check
+                if elapsed_time >= INACTIVITY_THRESHOLD and sticky_message.message_count >= MESSAGES_BEFORE_REGULAR_UPDATE:
                     logger.info(f"Channel {sticky_message.channel_id} has been inactive for {elapsed_time:.2f}s with {sticky_message.message_count} messages. Updating sticky message.")
+                    should_update = True
+                
+                # Message volume check with anti-spam protection
+                elif (sticky_message.message_count >= MESSAGES_BEFORE_VOLUME_UPDATE and 
+                      time_since_last_update >= ANTI_SPAM_COOLDOWN_SECONDS):
+                    logger.info(f"High message volume detected ({sticky_message.message_count} messages) and anti-spam cooldown passed. Updating sticky message.")
+                    should_update = True
+                
+                if should_update:
                     await handle_sticky_message_update(sticky_message, bot, session)
         
         # Wait before checking again
@@ -253,8 +271,10 @@ async def setup_sticky_handler(bot: discord.Client) -> None:
             # Increment message count
             sticky_message.message_count += 1
             
-            logger.info(f"Updated channel {message.channel.id} activity. Count: {sticky_message.message_count}/{STICKY_MESSAGE_BUFFER}")
-            await session.commit()  # Commit to save the changes
+            logger.info(f"Updated channel {message.channel.id} activity. Count: {sticky_message.message_count}/{MESSAGES_BEFORE_REGULAR_UPDATE}")
+            
+            # Just save the changes - actual updates happen in the background check
+            await session.commit()
 
     @bot.event
     async def on_message_unpin(message: discord.Message) -> None:
@@ -285,6 +305,7 @@ async def make_message_sticky(
             existing_sticky.view_metadata = view_metadata
             existing_sticky.message_count = 0  # Reset counter on update
             existing_sticky.last_activity = current_time  # Initialize activity timestamp
+            existing_sticky.last_update_time = current_time  # Initialize update timestamp
             sticky_message = existing_sticky
             logger.info(f"Updated sticky message in database for channel {channel_id}.")
         else:
@@ -296,7 +317,8 @@ async def make_message_sticky(
                 view_metadata=view_metadata,
                 is_sticky=True,
                 message_count=0,  # Initialize counter
-                last_activity=current_time  # Initialize activity timestamp
+                last_activity=current_time,  # Initialize activity timestamp
+                last_update_time=current_time  # Initialize update timestamp
             )
             session.add(sticky_message)
             logger.info(f"Created new sticky message entry for channel {channel_id}.")
