@@ -497,7 +497,7 @@ class PersistentView(discord.ui.View):
                             stake_view.add_item(button_copy)
                     
                     # Add our new stake calculation button
-                    stake_view.add_item(StakeCalculationButton(session.session_id))
+                    # stake_view.add_item(StakeCalculationButton(session.session_id))
                     
                     # Use the new view instead of self
                     await interaction.response.edit_message(embed=embed, view=stake_view)
@@ -805,16 +805,17 @@ class PersistentView(discord.ui.View):
 
                     await draft_chat_channel.send(f"Pairings posted below. Good luck in your matches! {sign_up_tags}")
 
-                    if session.session_type == "staked":
-                        # Create a view with the stake calculation button
-                        from views import StakeCalculationButton
-                        stake_view = discord.ui.View(timeout=None)
-                        stake_view.add_item(StakeCalculationButton(session.session_id))
+                    # if session.session_type == "staked":
+                    #     # Create a view with the stake calculation button
+                    #     from views import StakeCalculationButton
+                    #     stake_view = discord.ui.View(timeout=None)
+                    #     stake_view.add_item(StakeCalculationButton(session.session_id))
                         
-                        # Send the draft summary with the button
-                        draft_summary_message = await draft_chat_channel.send(embed=draft_summary_embed, view=stake_view)
-                    else:
-                        draft_summary_message = await draft_chat_channel.send(embed=draft_summary_embed)
+                    #     # Send the draft summary with the button
+                    #     draft_summary_message = await draft_chat_channel.send(embed=draft_summary_embed, view=stake_view)
+                    # else:
+                    #     draft_summary_message = await draft_chat_channel.send(embed=draft_summary_embed)
+                    draft_summary_message = await draft_chat_channel.send(embed=draft_summary_embed)
 
                     if self.session_type != "test":
                         await draft_summary_message.pin()
