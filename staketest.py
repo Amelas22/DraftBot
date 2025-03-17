@@ -102,10 +102,9 @@ def run_stake_simulations(players, min_stake=10, multiple=10):
     """
     results = []
     all_logs = []
-    original_logs = []
+    player_ids = list(players.keys())
     
     log_capture = LogCapture()
-    player_ids = list(players.keys())
     
     for i in range(NUM_SIMULATIONS):
         print(f"Running simulation {i+1}...")
@@ -113,97 +112,61 @@ def run_stake_simulations(players, min_stake=10, multiple=10):
         # Randomize teams
         team_a, team_b = randomize_teams(player_ids)
         
-        # ----- Run Optimized Algorithm -----
         # Start log capture
         log_capture.start()
         
-        # Run stake calculation
-        optimized_pairs = calculate_stakes_with_strategy(
+        # Run stake calculation using tiered algorithm
+        tiered_pairs = calculate_stakes_with_strategy(
             team_a=team_a,
             team_b=team_b,
             stakes=players,
             min_stake=min_stake,
-            multiple=multiple,
-            use_optimized=True
+            multiple=multiple
         )
         
         # Stop log capture
         log_capture.stop()
-        optimized_log = log_capture.get_logs()
+        sim_log = log_capture.get_logs()
         
-        # ----- Run Original Algorithm -----
-        # Start log capture
-        log_capture.start()
+        # Calculate total bets per player
+        player_bets = {}
         
-        # Run stake calculation
-        original_pairs = calculate_stakes_with_strategy(
-            team_a=team_a,
-            team_b=team_b,
-            stakes=players,
-            min_stake=min_stake,
-            multiple=multiple,
-            use_optimized=False
-        )
-        
-        # Stop log capture
-        log_capture.stop()
-        original_log = log_capture.get_logs()
-        
-        # Calculate total bets per player for both algorithms
-        optimized_player_bets = {}
-        original_player_bets = {}
-        
-        # Calculate totals for optimized algorithm
-        for pair in optimized_pairs:
-            optimized_player_bets[pair.player_a_id] = optimized_player_bets.get(pair.player_a_id, 0) + pair.amount
-            optimized_player_bets[pair.player_b_id] = optimized_player_bets.get(pair.player_b_id, 0) + pair.amount
-        
-        # Calculate totals for original algorithm
-        for pair in original_pairs:
-            original_player_bets[pair.player_a_id] = original_player_bets.get(pair.player_a_id, 0) + pair.amount
-            original_player_bets[pair.player_b_id] = original_player_bets.get(pair.player_b_id, 0) + pair.amount
+        # Calculate totals
+        for pair in tiered_pairs:
+            player_bets[pair.player_a_id] = player_bets.get(pair.player_a_id, 0) + pair.amount
+            player_bets[pair.player_b_id] = player_bets.get(pair.player_b_id, 0) + pair.amount
         
         # Format player bet summaries
-        optimized_bet_summary = []
-        original_bet_summary = []
+        bet_summary = []
         
         for player_id in sorted(players.keys()):
             max_stake = players[player_id]
-            optimized_bet = optimized_player_bets.get(player_id, 0)
-            original_bet = original_player_bets.get(player_id, 0)
+            bet = player_bets.get(player_id, 0)
             
             # Calculate bet percentages
-            opt_pct = (optimized_bet / max_stake) * 100 if max_stake > 0 else 0
-            orig_pct = (original_bet / max_stake) * 100 if max_stake > 0 else 0
+            pct = (bet / max_stake) * 100 if max_stake > 0 else 0
             
-            optimized_bet_summary.append(f"{player_id}: {optimized_bet}/{max_stake} ({opt_pct:.1f}%)")
-            original_bet_summary.append(f"{player_id}: {original_bet}/{max_stake} ({orig_pct:.1f}%)")
+            bet_summary.append(f"{player_id}: {bet}/{max_stake} ({pct:.1f}%)")
         
         # Store results
         sim_result = {
             'simulation': i+1,
             'team_a': [f"{p} ({players[p]} tix)" for p in team_a],
             'team_b': [f"{p} ({players[p]} tix)" for p in team_b],
-            'optimized_stake_pairs': [f"{p.player_a_id} vs {p.player_b_id}: {p.amount} tix" for p in optimized_pairs],
-            'original_stake_pairs': [f"{p.player_a_id} vs {p.player_b_id}: {p.amount} tix" for p in original_pairs],
-            'optimized_total_stake': sum(p.amount for p in optimized_pairs),
-            'original_total_stake': sum(p.amount for p in original_pairs),
-            'optimized_num_pairs': len(optimized_pairs),
-            'original_num_pairs': len(original_pairs),
-            'optimized_player_bets': optimized_player_bets,
-            'original_player_bets': original_player_bets,
-            'optimized_bet_summary': optimized_bet_summary,
-            'original_bet_summary': original_bet_summary
+            'stake_pairs': [f"{p.player_a_id} vs {p.player_b_id}: {p.amount} tix" for p in tiered_pairs],
+            'total_stake': sum(p.amount for p in tiered_pairs),
+            'num_pairs': len(tiered_pairs),
+            'player_bets': player_bets,
+            'bet_summary': bet_summary
         }
         
         results.append(sim_result)
-        all_logs.append(optimized_log)
-        original_logs.append(original_log)
+        all_logs.append(sim_log)
     
-    return results, all_logs, original_logs
+    return results, all_logs
 
 
-def write_to_excel(players, results, optimized_logs, original_logs):
+def write_to_excel(players, results, logs):
     """
     Write simulation results to Excel file.
     """
@@ -233,12 +196,8 @@ def write_to_excel(players, results, optimized_logs, original_logs):
     summary_sheet = wb.create_sheet("Summary", 0)  # Make it the first sheet
     summary_sheet.append([
         "Simulation", 
-        "Optimized Total Stake", 
-        "Original Total Stake", 
-        "Difference",
-        "Optimized # Txns",
-        "Original # Txns",
-        "Txns Saved",
+        "Total Stake", 
+        "# Transactions",
         "Team A", 
         "Team B"
     ])
@@ -248,27 +207,10 @@ def write_to_excel(players, results, optimized_logs, original_logs):
         cell.fill = header_fill
         cell.font = header_font
     
-    # Add comparison sheet
-    comparison_sheet = wb.create_sheet("Algorithm Comparison")
-    comparison_sheet.append([
-        "Simulation", 
-        "Team Configuration", 
-        "Comparison Total Bets (Max Bet: Original / Optimized)",
-        "Optimized Stake Pairs",
-        "Optimized Total",
-        "Original Stake Pairs",
-        "Original Total"
-    ])
-    
-    # Format header
-    for cell in comparison_sheet[1]:
-        cell.fill = header_fill
-        cell.font = header_font
-    
     # Add results for each simulation
-    for i, (result, opt_log, orig_log) in enumerate(zip(results, optimized_logs, original_logs)):
-        # Create simulation sheet for optimized algorithm
-        sim_sheet = wb.create_sheet(f"Sim {i+1} Optimized")
+    for i, (result, log) in enumerate(zip(results, logs)):
+        # Create simulation sheet
+        sim_sheet = wb.create_sheet(f"Sim {i+1}")
         
         # Add team information
         sim_sheet.append(["Team A (sorted by stake)"])
@@ -291,14 +233,14 @@ def write_to_excel(players, results, optimized_logs, original_logs):
         
         sim_sheet.append([])  # Empty row
         
-        # Add optimized stake pairs
-        sim_sheet.append(["Optimized Stake Pairs"])
-        for pair in result['optimized_stake_pairs']:
+        # Add stake pairs
+        sim_sheet.append(["Tiered Stake Pairs"])
+        for pair in result['stake_pairs']:
             sim_sheet.append([pair])
         
         sim_sheet.append([])  # Empty row
-        sim_sheet.append(["Total Stake", result['optimized_total_stake']])
-        sim_sheet.append(["Number of Transactions", result['optimized_num_pairs']])
+        sim_sheet.append(["Total Stake", result['total_stake']])
+        sim_sheet.append(["Number of Transactions", result['num_pairs']])
         
         # Add player bet details
         sim_sheet.append([])  # Empty row
@@ -309,7 +251,7 @@ def write_to_excel(players, results, optimized_logs, original_logs):
         
         for player_id in sorted(players.keys()):
             max_stake = players[player_id]
-            allocated = result['optimized_player_bets'].get(player_id, 0)
+            allocated = result['player_bets'].get(player_id, 0)
             percentage = (allocated / max_stake * 100) if max_stake > 0 else 0
             sim_sheet.append([player_id, max_stake, allocated, f"{percentage:.1f}%"])
         
@@ -323,159 +265,26 @@ def write_to_excel(players, results, optimized_logs, original_logs):
                 # Skip if row doesn't exist
                 pass
         
-        # Add original algorithm results
-        orig_sheet = wb.create_sheet(f"Sim {i+1} Original")
-        
-        # Add team information (same teams as optimized)
-        orig_sheet.append(["Team A (sorted by stake)"])
-        for player in team_a_sorted:
-            orig_sheet.append([player])
-        
-        orig_sheet.append([])  # Empty row
-        
-        orig_sheet.append(["Team B (sorted by stake)"])
-        for player in team_b_sorted:
-            orig_sheet.append([player])
-        
-        orig_sheet.append([])  # Empty row
-        
-        # Add original stake pairs
-        orig_sheet.append(["Original Stake Pairs"])
-        for pair in result['original_stake_pairs']:
-            orig_sheet.append([pair])
-        
-        orig_sheet.append([])  # Empty row
-        orig_sheet.append(["Total Stake", result['original_total_stake']])
-        orig_sheet.append(["Number of Transactions", result['original_num_pairs']])
-        
-        # Add player bet details
-        orig_sheet.append([])  # Empty row
-        orig_sheet.append(["Player Bet Details"])
-        
-        # Format as a table
-        orig_sheet.append(["Player", "Max Stake", "Allocated", "Percentage"])
-        
-        for player_id in sorted(players.keys()):
-            max_stake = players[player_id]
-            allocated = result['original_player_bets'].get(player_id, 0)
-            percentage = (allocated / max_stake * 100) if max_stake > 0 else 0
-            orig_sheet.append([player_id, max_stake, allocated, f"{percentage:.1f}%"])
-        
-        # Format headers
-        for row_idx in [1, 4, 8, len(team_a_sorted) + len(team_b_sorted) + 8]:
-            try:
-                for cell in orig_sheet[row_idx]:
-                    cell.fill = header_fill
-                    cell.font = header_font
-            except IndexError:
-                # Skip if row doesn't exist
-                pass
-        
         # Add logs
         log_sheet = wb.create_sheet(f"Sim {i+1} Logs")
         
-        # Split log by sections
-        log_sheet.append(["Optimized Algorithm Logs"])
-        log_lines = opt_log.strip().split('\n')
+        # Process logs
+        log_lines = log.strip().split('\n')
         for line in log_lines:
             log_sheet.append([line])
         
-        log_sheet.append([])  # Empty row
-        log_sheet.append(["Original Algorithm Logs"])
-        orig_log_lines = orig_log.strip().split('\n')
-        for line in orig_log_lines:
-            log_sheet.append([line])
-        
-        # Format headers
+        # Format header
         log_sheet.cell(row=1, column=1).fill = header_fill
         log_sheet.cell(row=1, column=1).font = header_font
-        try:
-            log_sheet.cell(row=len(log_lines) + 3, column=1).fill = header_fill
-            log_sheet.cell(row=len(log_lines) + 3, column=1).font = header_font
-        except:
-            pass
-        
-        # Create compact comparison of player bets by team - maintaining same order as team configuration
-        team_a_bet_comparison = []
-        team_b_bet_comparison = []
-        
-        # Sort team members by stake amount (same as in team configuration)
-        team_a_with_stakes = [(p.split(" (")[0], int(p.split("(")[1].split(" ")[0])) for p in result['team_a']]
-        team_a_with_stakes.sort(key=lambda x: x[1], reverse=True)
-        team_a_sorted_players = [p for p, s in team_a_with_stakes]
-        
-        team_b_with_stakes = [(p.split(" (")[0], int(p.split("(")[1].split(" ")[0])) for p in result['team_b']]
-        team_b_with_stakes.sort(key=lambda x: x[1], reverse=True)
-        team_b_sorted_players = [p for p, s in team_b_with_stakes]
-        
-        # Generate comparison string in the same order as team configuration
-        for player_id, max_stake in team_a_with_stakes:
-            opt_bet = result['optimized_player_bets'].get(player_id, 0)
-            orig_bet = result['original_player_bets'].get(player_id, 0)
-            team_a_bet_comparison.append(f"{player_id} ({max_stake}: {orig_bet} / {opt_bet})")
-            
-        for player_id, max_stake in team_b_with_stakes:
-            opt_bet = result['optimized_player_bets'].get(player_id, 0)
-            orig_bet = result['original_player_bets'].get(player_id, 0)
-            team_b_bet_comparison.append(f"{player_id} ({max_stake}: {orig_bet} / {opt_bet})")
-            
-        bet_comparison = f"Team A: {', '.join(team_a_bet_comparison)}\nTeam B: {', '.join(team_b_bet_comparison)}"
-        
-        # Add to comparison sheet
-        team_config = f"A: {', '.join(team_a_sorted)}\nB: {', '.join(team_b_sorted)}"
-        comparison_sheet.append([
-            result['simulation'],
-            team_config,
-            bet_comparison,
-            "\n".join(result['optimized_stake_pairs']),
-            result['optimized_total_stake'],
-            "\n".join(result['original_stake_pairs']),
-            result['original_total_stake']
-        ])
         
         # Add to summary
-        stake_diff = result['optimized_total_stake'] - result['original_total_stake']
-        txn_diff = result['original_num_pairs'] - result['optimized_num_pairs']
         summary_sheet.append([
             result['simulation'],
-            result['optimized_total_stake'],
-            result['original_total_stake'],
-            stake_diff,
-            result['optimized_num_pairs'],
-            result['original_num_pairs'],
-            txn_diff,
+            result['total_stake'],
+            result['num_pairs'],
             ", ".join(team_a_sorted),
             ", ".join(team_b_sorted)
         ])
-    
-    # Format comparison sheet
-    for row in comparison_sheet.iter_rows(min_row=2):
-        for cell in row:
-            cell.alignment = Alignment(wrap_text=True, vertical='top')
-    
-    comparison_sheet.column_dimensions['A'].width = 10
-    comparison_sheet.column_dimensions['B'].width = 25
-    comparison_sheet.column_dimensions['C'].width = 40
-    comparison_sheet.column_dimensions['D'].width = 25
-    comparison_sheet.column_dimensions['E'].width = 15
-    comparison_sheet.column_dimensions['F'].width = 25
-    comparison_sheet.column_dimensions['G'].width = 15
-    
-    # Format summary sheet conditional formatting
-    for row_idx in range(2, summary_sheet.max_row + 1):
-        # Color stake difference
-        diff_cell = summary_sheet.cell(row=row_idx, column=4)
-        if diff_cell.value > 0:
-            diff_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-        elif diff_cell.value < 0:
-            diff_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-        
-        # Color transaction difference
-        txn_cell = summary_sheet.cell(row=row_idx, column=7)
-        if txn_cell.value > 0:
-            txn_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-        elif txn_cell.value < 0:
-            txn_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
     
     # Adjust column widths
     for sheet in wb.worksheets:
@@ -493,7 +302,7 @@ def write_to_excel(players, results, optimized_logs, original_logs):
     
     # Generate filename with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"stake_simulations_{timestamp}.xlsx"
+    filename = f"tiered_stake_simulations_{timestamp}.xlsx"
     
     # Save workbook
     wb.save(filename)
@@ -502,8 +311,8 @@ def write_to_excel(players, results, optimized_logs, original_logs):
 
 
 def main():
-    print("Welcome to the Stake Algorithm Tester")
-    print("=====================================")
+    print("Welcome to the Tiered Stake Algorithm Tester")
+    print("===========================================")
     
     # Get player stakes
     players = get_player_stakes()
@@ -524,11 +333,11 @@ def main():
         multiple = 10
         print("Invalid input. Using default multiple of 10.")
     
-    # Run simulations
-    results, optimized_logs, original_logs = run_stake_simulations(players, min_stake, multiple)
+    # Run simulations with just the tiered algorithm
+    results, logs = run_stake_simulations(players, min_stake, multiple)
     
     # Write to Excel
-    filename = write_to_excel(players, results, optimized_logs, original_logs)
+    filename = write_to_excel(players, results, logs)
     
     print(f"Testing complete! Results saved to {filename}")
 

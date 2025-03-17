@@ -137,6 +137,392 @@ class StakeCalculator:
             stake_logger.info(f"Unused stakes from Team B: {remaining_b}")
         
         return results
+    
+    @staticmethod
+    def tiered_stakes_calculator(team_a: List[str], team_b: List[str], 
+                                stakes: Dict[str, int], min_stake: int = 10,
+                                multiple: int = 10) -> List[StakePair]:
+        """
+        Calculate stake pairings using a tiered approach that prioritizes 10/20/50 bets
+        and applies proportional allocation to higher bets.
+        """
+        stake_logger.info(f"Starting tiered stake calculation with: Team A: {team_a}, Team B: {team_b}")
+        stake_logger.info(f"Input stakes: {stakes}")
+        stake_logger.info(f"Minimum stake: {min_stake}")
+        
+        # Handle outliers
+        capped_stakes = handle_outliers(stakes)
+        if capped_stakes != stakes:
+            stake_logger.info("Outlier stakes detected and capped")
+            stakes = capped_stakes
+        
+        # Create sorted lists of player stakes for each team
+        team_a_stakes = [(player_id, stakes[player_id]) for player_id in team_a if player_id in stakes]
+        team_b_stakes = [(player_id, stakes[player_id]) for player_id in team_b if player_id in stakes]
+        
+        # Calculate minimum required bet capacity for each team
+        team_a_min_required = 0
+        for player_id, stake in team_a_stakes:
+            if stake <= 50:
+                team_a_min_required += stake
+            else:
+                team_a_min_required += 50  # Can't reduce a 100+ bet below 50
+        
+        team_b_min_required = 0
+        for player_id, stake in team_b_stakes:
+            if stake <= 50:
+                team_b_min_required += stake
+            else:
+                team_b_min_required += 50  # Can't reduce a 100+ bet below 50
+        
+        # Calculate total stakes for each team
+        team_a_total = sum(stake for _, stake in team_a_stakes)
+        team_b_total = sum(stake for _, stake in team_b_stakes)
+        
+        stake_logger.info(f"Team A total: {team_a_total}, minimum required: {team_a_min_required}")
+        stake_logger.info(f"Team B total: {team_b_total}, minimum required: {team_b_min_required}")
+        
+        # Check if minimum requirements can be met
+        if team_a_total < team_b_min_required or team_b_total < team_a_min_required:
+            stake_logger.info(f"Minimum requirements not met, falling back to optimized algorithm")
+            # Fall back to optimized algorithm
+            return OptimizedStakeCalculator.calculate_stakes(team_a, team_b, stakes, min_stake, multiple)
+        
+        stake_logger.info(f"Minimum requirements met, proceeding with tiered algorithm")
+        
+        # Sort stakes by amount (highest first)
+        team_a_stakes.sort(key=lambda x: x[1], reverse=True)
+        team_b_stakes.sort(key=lambda x: x[1], reverse=True)
+        
+        stake_logger.info(f"Team A stakes after sorting: {team_a_stakes}")
+        stake_logger.info(f"Team B stakes after sorting: {team_b_stakes}")
+        
+        # Identify low tiers (10/20/50) and high tiers (100+)
+        team_a_low_tier = [(pid, stake) for pid, stake in team_a_stakes if stake <= 50]
+        team_a_high_tier = [(pid, stake) for pid, stake in team_a_stakes if stake > 50]
+        team_b_low_tier = [(pid, stake) for pid, stake in team_b_stakes if stake <= 50]
+        team_b_high_tier = [(pid, stake) for pid, stake in team_b_stakes if stake > 50]
+        
+        stake_logger.info(f"Team A low tier (≤50): {team_a_low_tier}")
+        stake_logger.info(f"Team A high tier (>50): {team_a_high_tier}")
+        stake_logger.info(f"Team B low tier (≤50): {team_b_low_tier}")
+        stake_logger.info(f"Team B high tier (>50): {team_b_high_tier}")
+        
+        # Calculate reserved amounts for low tiers
+        team_a_reserved = sum(stake for _, stake in team_a_low_tier)
+        team_b_reserved = sum(stake for _, stake in team_b_low_tier)
+        
+        # Calculate remaining capacity for high tiers
+        team_a_remaining = team_a_total - team_a_reserved
+        team_b_remaining = team_b_total - team_b_reserved
+        
+        stake_logger.info(f"Team A reserved for low tier: {team_a_reserved}, remaining: {team_a_remaining}")
+        stake_logger.info(f"Team B reserved for low tier: {team_b_reserved}, remaining: {team_b_remaining}")
+        
+        # Initialize result pairs
+        result_pairs = []
+        
+        # Critical: Track remaining stakes for each player to avoid exceeding max stakes
+        remaining_stakes = {player_id: stake for player_id, stake in stakes.items()}
+        
+        # Process low tier stakes first (guaranteed 100% allocation)
+        stake_logger.info(f"Processing low tier stakes (10/20/50)...")
+        
+        # Process team A low tier players
+        for a_player_id, a_max_stake in team_a_low_tier:
+            # Get current remaining stake
+            a_remaining = remaining_stakes[a_player_id]
+            stake_logger.info(f"Processing low tier player {a_player_id} with {a_remaining} tix remaining")
+            
+            # Skip if already fully allocated
+            if a_remaining <= 0:
+                continue
+                
+            # Try to match with team B's low tier players first
+            for b_player_id, b_max_stake in team_b_low_tier:
+                # Skip if this player is already fully allocated
+                b_remaining = remaining_stakes[b_player_id]
+                if b_remaining <= 0:
+                    continue
+                    
+                # Calculate match amount - minimum of both players' remaining stakes
+                match_amount = min(a_remaining, b_remaining)
+                
+                if match_amount >= min_stake:
+                    # Create stake pair
+                    stake_pair = StakePair(a_player_id, b_player_id, match_amount)
+                    result_pairs.append(stake_pair)
+                    
+                    # Update remaining stakes for both players
+                    remaining_stakes[a_player_id] -= match_amount
+                    remaining_stakes[b_player_id] -= match_amount
+                    
+                    stake_logger.info(f"Low tier match: {a_player_id} ({a_max_stake}) with {b_player_id} ({b_max_stake}) for {match_amount} tix")
+                    stake_logger.info(f"  {a_player_id} remaining: {remaining_stakes[a_player_id]}, {b_player_id} remaining: {remaining_stakes[b_player_id]}")
+                    
+                    # If player A is fully allocated, break the inner loop
+                    a_remaining = remaining_stakes[a_player_id]
+                    if a_remaining <= 0:
+                        break
+            
+            # If player A still has remaining stake, try to match with high tier players
+            a_remaining = remaining_stakes[a_player_id]
+            if a_remaining > 0:
+                for idx, (b_player_id, b_max_stake) in enumerate(team_b_high_tier):
+                    b_remaining = remaining_stakes[b_player_id]
+                    
+                    # Skip if high tier player has no remaining stake
+                    if b_remaining <= 0:
+                        continue
+                        
+                    # Match amount is player A's remaining stake (high tier has plenty)
+                    match_amount = min(a_remaining, b_remaining)
+                    
+                    if match_amount >= min_stake:
+                        # Create stake pair
+                        stake_pair = StakePair(a_player_id, b_player_id, match_amount)
+                        result_pairs.append(stake_pair)
+                        
+                        # Update remaining stakes
+                        remaining_stakes[a_player_id] -= match_amount
+                        remaining_stakes[b_player_id] -= match_amount
+                        
+                        stake_logger.info(f"Low-High tier match: {a_player_id} ({a_max_stake}) with {b_player_id} ({b_max_stake}) for {match_amount} tix")
+                        stake_logger.info(f"  {a_player_id} remaining: {remaining_stakes[a_player_id]}, {b_player_id} remaining: {remaining_stakes[b_player_id]}")
+                        
+                        # If player A is fully allocated, break
+                        if remaining_stakes[a_player_id] <= 0:
+                            break
+        
+        # Process team B low tier players
+        for b_player_id, b_max_stake in team_b_low_tier:
+            # Get current remaining stake
+            b_remaining = remaining_stakes[b_player_id]
+            stake_logger.info(f"Processing remaining low tier player {b_player_id} with {b_remaining} tix remaining")
+            
+            # Skip if already fully allocated
+            if b_remaining <= 0:
+                continue
+                
+            # Try to match with team A's high tier players
+            for idx, (a_player_id, a_max_stake) in enumerate(team_a_high_tier):
+                a_remaining = remaining_stakes[a_player_id]
+                
+                # Skip if high tier player has no remaining stake
+                if a_remaining <= 0:
+                    continue
+                    
+                # Match amount is player B's remaining stake (high tier has plenty)
+                match_amount = min(b_remaining, a_remaining)
+                
+                if match_amount >= min_stake:
+                    # Create stake pair
+                    stake_pair = StakePair(a_player_id, b_player_id, match_amount)
+                    result_pairs.append(stake_pair)
+                    
+                    # Update remaining stakes
+                    remaining_stakes[a_player_id] -= match_amount
+                    remaining_stakes[b_player_id] -= match_amount
+                    
+                    stake_logger.info(f"High-Low tier match: {a_player_id} ({a_max_stake}) with {b_player_id} ({b_max_stake}) for {match_amount} tix")
+                    stake_logger.info(f"  {a_player_id} remaining: {remaining_stakes[a_player_id]}, {b_player_id} remaining: {remaining_stakes[b_player_id]}")
+                    
+                    # If player B is fully allocated, break
+                    if remaining_stakes[b_player_id] <= 0:
+                        break
+        
+        # Calculate remaining totals after low tier processing for high tier allocation
+        team_a_high_remaining = sum(min(remaining_stakes[pid], stake) for pid, stake in team_a_high_tier)
+        team_b_high_remaining = sum(min(remaining_stakes[pid], stake) for pid, stake in team_b_high_tier)
+        
+        stake_logger.info(f"After low tier processing: Team A high tier total: {team_a_high_remaining}")
+        stake_logger.info(f"After low tier processing: Team B high tier total: {team_b_high_remaining}")
+        
+        # Apply proportional allocation to high tier bets
+        if team_a_high_remaining > 0 and team_b_high_remaining > 0:
+            stake_logger.info(f"Processing high tier stakes (>50)...")
+            
+            # Recalculate min/max high team after low tier processing
+            if team_a_high_remaining <= team_b_high_remaining:
+                min_high_team = [(pid, min(remaining_stakes[pid], stake)) for pid, stake in team_a_high_tier if remaining_stakes[pid] > 0]
+                max_high_team = [(pid, min(remaining_stakes[pid], stake)) for pid, stake in team_b_high_tier if remaining_stakes[pid] > 0]
+                min_high_team_name, max_high_team_name = "Team A", "Team B"
+                min_high_team_total = team_a_high_remaining
+                max_high_team_total = team_b_high_remaining
+                is_team_a_min_high = True
+            else:
+                min_high_team = [(pid, min(remaining_stakes[pid], stake)) for pid, stake in team_b_high_tier if remaining_stakes[pid] > 0]
+                max_high_team = [(pid, min(remaining_stakes[pid], stake)) for pid, stake in team_a_high_tier if remaining_stakes[pid] > 0]
+                min_high_team_name, max_high_team_name = "Team B", "Team A"
+                min_high_team_total = team_b_high_remaining
+                max_high_team_total = team_a_high_remaining
+                is_team_a_min_high = False
+            
+            stake_logger.info(f"Updated min high tier team: {min_high_team_name}, total: {min_high_team_total}")
+            stake_logger.info(f"Updated max high tier team: {max_high_team_name}, total: {max_high_team_total}")
+            
+            # Calculate the equalized percentage for high tier bets
+            if max_high_team_total > 0:
+                equalized_percentage = (min_high_team_total / max_high_team_total) * 100
+                equalized_percentage = min(equalized_percentage, 100.0)  # Cap at 100%
+                
+                stake_logger.info(f"Equalized percentage for high tier: {equalized_percentage:.2f}%")
+                
+                # Calculate adjusted allocations for max team
+                max_high_allocations = []
+                total_allocation = 0
+                
+                for player_id, stake in max_high_team:
+                    # Calculate proportional allocation
+                    allocation = stake * equalized_percentage / 100
+                    
+                    # Round to nearest multiple
+                    rounded_allocation = round(allocation / multiple) * multiple
+                    
+                    # Ensure allocation is at least 50 tix for high tier bets
+                    rounded_allocation = max(rounded_allocation, 50)
+                    
+                    # Ensure it doesn't exceed original stake
+                    rounded_allocation = min(rounded_allocation, stake)
+                    
+                    # Add to list
+                    max_high_allocations.append((player_id, rounded_allocation))
+                    total_allocation += rounded_allocation
+                    
+                    stake_logger.info(f"High tier player {player_id}: {rounded_allocation}/{stake} = {(rounded_allocation/stake*100):.1f}%")
+                
+                # Check if adjustment is needed to match exactly
+                adjustment_needed = min_high_team_total - total_allocation
+                
+                if abs(adjustment_needed) >= multiple:
+                    stake_logger.info(f"Adjustment needed: {adjustment_needed} tix")
+                    
+                    if adjustment_needed > 0:
+                        # Distribute additional capacity to players with the highest max stake first
+                        sorted_allocations = []
+                        for i, (player_id, current_allocation) in enumerate(max_high_allocations):
+                            original_max = next(stake for pid, stake in max_high_team if pid == player_id)
+                            sorted_allocations.append((i, player_id, current_allocation, original_max))
+                        
+                        # Sort by original max stake (highest first)
+                        sorted_allocations.sort(key=lambda x: x[3], reverse=True)
+                        
+                        for idx, player_id, current_allocation, original_max in sorted_allocations:
+                            room_left = original_max - current_allocation
+                            
+                            # Only adjust by multiples
+                            adjustment = min(room_left, adjustment_needed)
+                            adjustment = (adjustment // multiple) * multiple
+                            
+                            if adjustment > 0:
+                                new_allocation = current_allocation + adjustment
+                                max_high_allocations[idx] = (player_id, new_allocation)
+                                adjustment_needed -= adjustment
+                                stake_logger.info(f"Added {adjustment} to highest bettor {player_id}, now at {new_allocation}")
+                                
+                                if adjustment_needed < multiple:
+                                    break
+                    
+                    elif adjustment_needed < 0:
+                        # Remove excess capacity from the lowest non-min bettor first
+                        sorted_allocations = []
+                        for i, (player_id, current_allocation) in enumerate(max_high_allocations):
+                            original_max = next(stake for pid, stake in max_high_team if pid == player_id)
+                            # Only include players who aren't already at 50 tix
+                            if current_allocation > 50:
+                                sorted_allocations.append((i, player_id, current_allocation, original_max))
+                        
+                        # Sort by original max stake (lowest first)
+                        sorted_allocations.sort(key=lambda x: x[3], reverse=False)
+                        
+                        for idx, player_id, current_allocation, original_max in sorted_allocations:
+                            reducible_amount = current_allocation - 50  # Can't go below 50
+                            
+                            # Only adjust by multiples
+                            adjustment = min(abs(adjustment_needed), reducible_amount)
+                            adjustment = (adjustment // multiple) * multiple
+                            
+                            if adjustment > 0:
+                                new_allocation = current_allocation - adjustment
+                                max_high_allocations[idx] = (player_id, new_allocation)
+                                adjustment_needed += adjustment
+                                stake_logger.info(f"Removed {adjustment} from lowest bettor {player_id}, now at {new_allocation}")
+                                
+                                if adjustment_needed > -multiple:
+                                    break
+                
+                # Match high tier players from min team with max team according to allocations
+                for min_player_id, min_player_stake in min_high_team:
+                    min_remaining = remaining_stakes[min_player_id]
+                    if min_remaining <= 0:
+                        continue
+                        
+                    # Match with max high tier players according to allocations
+                    for max_idx, (max_player_id, max_allocation) in enumerate(max_high_allocations):
+                        max_remaining = remaining_stakes[max_player_id]
+                        if max_remaining <= 0:
+                            continue
+                            
+                        # Determine how much to match
+                        match_amount = min(min_remaining, max_allocation, max_remaining)
+                        
+                        if match_amount >= min_stake:  # Only create pairs above min stake
+                            # Create the pair with correct team order
+                            if is_team_a_min_high:
+                                pair = StakePair(min_player_id, max_player_id, match_amount)
+                            else:
+                                pair = StakePair(max_player_id, min_player_id, match_amount)
+                            
+                            result_pairs.append(pair)
+                            
+                            # Update remaining stakes
+                            remaining_stakes[min_player_id] -= match_amount
+                            remaining_stakes[max_player_id] -= match_amount
+                            
+                            min_remaining = remaining_stakes[min_player_id]
+                            max_remaining = remaining_stakes[max_player_id]
+                            
+                            stake_logger.info(f"Matched high tier: {min_player_id} ({min_player_stake}) with {max_player_id} ({max_allocation}) for {match_amount} tix")
+                            stake_logger.info(f"  {min_player_id} remaining: {min_remaining}, {max_player_id} remaining: {max_remaining}")
+                            
+                            # If min player is fully allocated, break
+                            if min_remaining <= 0:
+                                break
+        
+        # Log the final allocation for each player
+        stake_logger.info("Final allocation by player:")
+        allocated_stakes = {player_id: stakes[player_id] - remaining for player_id, remaining in remaining_stakes.items()}
+        
+        for player_id, allocated in sorted(allocated_stakes.items(), key=lambda x: x[0]):
+            if allocated > 0:
+                max_stake = stakes[player_id]
+                percentage = (allocated / max_stake) * 100
+                stake_logger.info(f"Player {player_id}: {allocated}/{max_stake} tix ({percentage:.1f}%)")
+        
+        # Consolidate multiple bets between the same players
+        stake_logger.info("Consolidating multiple bets between same players...")
+        consolidated_pairs = []
+        pair_map = {}
+        
+        for pair in result_pairs:
+            # Create a unique key for each player pair (order matters)
+            key = (pair.player_a_id, pair.player_b_id)
+            
+            if key in pair_map:
+                # If we already have a pair with these players, add to the amount
+                pair_map[key] += pair.amount
+            else:
+                # Otherwise, create a new entry
+                pair_map[key] = pair.amount
+        
+        # Create consolidated pairs
+        for key, amount in pair_map.items():
+            player_a_id, player_b_id = key
+            consolidated_pair = StakePair(player_a_id, player_b_id, amount)
+            consolidated_pairs.append(consolidated_pair)
+        
+        stake_logger.info(f"Final stake pairs: {consolidated_pairs}")
+        return consolidated_pairs
 
 def calculate_stakes_with_strategy(team_a: List[str], team_b: List[str], 
                                   stakes: Dict[str, int], min_stake: int = 10,
@@ -155,12 +541,9 @@ def calculate_stakes_with_strategy(team_a: List[str], team_b: List[str],
     Returns:
         List of StakePair objects representing the stake assignments
     """
-    if use_optimized:
-        stake_logger.info(f"Using optimized stake calculation algorithm with min_stake={min_stake}")
-        return OptimizedStakeCalculator.calculate_stakes(team_a, team_b, stakes, min_stake, multiple)
-    else:
-        stake_logger.info(f"Using original stake calculation algorithm with min_stake={min_stake}")
-        return StakeCalculator.calculate_stakes(team_a, team_b, stakes, min_stake)
+    stake_logger.info(f"Using tiered stake calculation algorithm with min_stake={min_stake}")
+    return StakeCalculator.tiered_stakes_calculator(team_a, team_b, stakes, min_stake, multiple)
+
     
 class OptimizedStakeCalculator:
     @staticmethod
@@ -580,3 +963,37 @@ class OptimizedStakeCalculator:
         
         # Return consolidated pairs for a cleaner result
         return consolidated_pairs
+    
+def handle_outliers(stakes: Dict[str, int]):
+    """Apply statistical outlier detection and capping"""
+
+    values = list(stakes.values())
+
+    # Calculate quartiles and IQR
+    values.sort()
+    n = len(values)
+    q1_idx = n // 4
+    q3_idx = (3 * n) // 4
+    q1 = values[q1_idx]
+    q3 = values[q3_idx]
+    iqr = q3 - q1
+
+    # Define upper bound for outliers, conservative approach of q3 + 1 * iqr (standard is 1.5 * iqr)
+    upper_bound = q3 + iqr
+
+    # Cap any outliers at the upper bound
+    capped_stakes = {}
+    outliers_found = False
+
+    for player_id, stake in stakes.items():
+        if stake > upper_bound:
+            capped_stakes[player_id] = int(upper_bound)
+            outliers_found = True
+            stake_logger.info(f"Capped outlier bet: Player {player_id} from {stake} to {upper_bound}")
+        else:
+            capped_stakes[player_id] = stake
+            
+    if outliers_found:
+        return capped_stakes
+    else:
+        return stakes
