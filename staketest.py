@@ -7,9 +7,10 @@ from loguru import logger
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from stake_calculator import calculate_stakes_with_strategy, StakePair
+import copy
 
 # Define number of simulations to run
-NUM_SIMULATIONS = 5
+NUM_SIMULATIONS = 10
 
 # Setup custom log handler to capture logs
 class LogCapture:
@@ -115,11 +116,14 @@ def run_stake_simulations(players, min_stake=10, multiple=10):
         # Start log capture
         log_capture.start()
         
+        # Create a deep copy of the stakes dictionary to prevent modifications from affecting future runs
+        stakes_copy = copy.deepcopy(players)
+        
         # Run stake calculation using tiered algorithm
         tiered_pairs = calculate_stakes_with_strategy(
             team_a=team_a,
             team_b=team_b,
-            stakes=players,
+            stakes=stakes_copy,  # Use the copy instead of the original
             min_stake=min_stake,
             multiple=multiple
         )
@@ -140,7 +144,7 @@ def run_stake_simulations(players, min_stake=10, multiple=10):
         bet_summary = []
         
         for player_id in sorted(players.keys()):
-            max_stake = players[player_id]
+            max_stake = players[player_id]  # Use original max stake for percentage calculation
             bet = player_bets.get(player_id, 0)
             
             # Calculate bet percentages
@@ -151,13 +155,14 @@ def run_stake_simulations(players, min_stake=10, multiple=10):
         # Store results
         sim_result = {
             'simulation': i+1,
-            'team_a': [f"{p} ({players[p]} tix)" for p in team_a],
-            'team_b': [f"{p} ({players[p]} tix)" for p in team_b],
+            'team_a': [f"{p} ({players[p]} tix)" for p in team_a],  # Use original stakes for display
+            'team_b': [f"{p} ({players[p]} tix)" for p in team_b],  # Use original stakes for display
             'stake_pairs': [f"{p.player_a_id} vs {p.player_b_id}: {p.amount} tix" for p in tiered_pairs],
             'total_stake': sum(p.amount for p in tiered_pairs),
             'num_pairs': len(tiered_pairs),
             'player_bets': player_bets,
-            'bet_summary': bet_summary
+            'bet_summary': bet_summary,
+            'modified_stakes': stakes_copy  # Store the modified stakes for reference
         }
         
         results.append(sim_result)
@@ -247,13 +252,22 @@ def write_to_excel(players, results, logs):
         sim_sheet.append(["Player Bet Details"])
         
         # Format as a table
-        sim_sheet.append(["Player", "Max Stake", "Allocated", "Percentage"])
+        sim_sheet.append(["Player", "Max Stake", "MTMB Adjusted Stake", "Allocated", "Percentage"])
+        
+        # Get modified stakes from this simulation
+        modified_stakes = result.get('modified_stakes', {})
         
         for player_id in sorted(players.keys()):
-            max_stake = players[player_id]
+            original_max_stake = players[player_id]
+            adjusted_stake = modified_stakes.get(player_id, original_max_stake)
             allocated = result['player_bets'].get(player_id, 0)
-            percentage = (allocated / max_stake * 100) if max_stake > 0 else 0
-            sim_sheet.append([player_id, max_stake, allocated, f"{percentage:.1f}%"])
+            percentage = (allocated / original_max_stake * 100) if original_max_stake > 0 else 0
+            
+            # Only show adjusted stake if it differs from original
+            if original_max_stake != adjusted_stake:
+                sim_sheet.append([player_id, original_max_stake, adjusted_stake, allocated, f"{percentage:.1f}%"])
+            else:
+                sim_sheet.append([player_id, original_max_stake, "-", allocated, f"{percentage:.1f}%"])
         
         # Format headers
         for row_idx in [1, 4, 8, len(team_a_sorted) + len(team_b_sorted) + 8]:
@@ -264,6 +278,17 @@ def write_to_excel(players, results, logs):
             except IndexError:
                 # Skip if row doesn't exist
                 pass
+        
+        # Add MTMB section to show what happened with stakes
+        sim_sheet.append([])  # Empty row
+        sim_sheet.append(["MTMB Adjustments"])
+        sim_sheet.append(["Player", "Original Stake", "MTMB Adjusted"])
+        
+        for player_id in sorted(modified_stakes.keys()):
+            original = players[player_id]
+            adjusted = modified_stakes[player_id]
+            if original != adjusted:
+                sim_sheet.append([player_id, original, adjusted])
         
         # Add logs
         log_sheet = wb.create_sheet(f"Sim {i+1} Logs")
