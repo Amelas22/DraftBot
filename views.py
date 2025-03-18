@@ -304,7 +304,7 @@ class PersistentView(discord.ui.View):
                 break
 
         # Generate the initial embed
-        embed = await generate_ready_check_embed(ready_check_status=ready_check_status, sign_ups=session.sign_ups)
+        embed = await generate_ready_check_embed(ready_check_status=ready_check_status, sign_ups=session.sign_ups, draft_link=session.draft_link)
         
         # Create the view with the buttons
         view = ReadyCheckView(self.draft_session_id)
@@ -1027,7 +1027,7 @@ class PersistentView(discord.ui.View):
 
         return channel.id
 
-async def generate_ready_check_embed(ready_check_status, sign_ups):
+async def generate_ready_check_embed(ready_check_status, sign_ups, draft_link):
     # Define a function to convert user IDs to their names using the sign_ups dictionary
     def get_names(user_ids):
         return "\n".join(sign_ups.get(user_id, "Unknown user") for user_id in user_ids) or "None"
@@ -1037,6 +1037,7 @@ async def generate_ready_check_embed(ready_check_status, sign_ups):
     embed.add_field(name="Ready", value=get_names(ready_check_status['ready']), inline=False)
     embed.add_field(name="Not Ready", value=get_names(ready_check_status['not_ready']), inline=False)
     embed.add_field(name="No Response", value=get_names(ready_check_status['no_response']), inline=False)
+    embed.add_field(name="Draftmancer Link", value=f"**➡️ [JOIN DRAFT HERE]({draft_link})⬅️**", inline=False)
     
     return embed
 
@@ -1077,7 +1078,7 @@ class ReadyCheckView(discord.ui.View):
         # await update_draft_session(self.draft_session_id, session)
         draft_session = await get_draft_session(self.draft_session_id)
         # Generate the updated embed
-        embed = await generate_ready_check_embed(session, draft_session.sign_ups)
+        embed = await generate_ready_check_embed(session, draft_session.sign_ups, draft_session.draft_link)
 
         # Update the message
         await interaction.response.edit_message(embed=embed, view=self)
