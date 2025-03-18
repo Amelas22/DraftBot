@@ -529,54 +529,6 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
     
     return embed
 
-async def find_discord_id_by_display_name(display_name, guild_id=None):
-    """Find a Discord user ID from their display name by searching through recent DraftSessions."""
-    try:
-        async with AsyncSessionLocal() as session:
-            async with session.begin():
-                # First, check the PlayerStats table for an exact match
-                player_query = select(PlayerStats).where(func.lower(PlayerStats.display_name) == display_name.lower())
-                
-                # Add guild_id filter if provided
-                if guild_id:
-                    player_query = player_query.where(PlayerStats.guild_id == guild_id)
-                    
-                player_result = await session.execute(player_query)
-                player = player_result.scalar_one_or_none()
-                
-                if player:
-                    return player.player_id, player.display_name
-                
-                # If not found, query for recent DraftSessions
-                recent_drafts_query = select(DraftSession).order_by(DraftSession.draft_start_time.desc())
-                
-                # Add guild_id filter if provided
-                if guild_id:
-                    recent_drafts_query = recent_drafts_query.where(DraftSession.guild_id == guild_id)
-                    
-                recent_drafts_query = recent_drafts_query.limit(100)
-                recent_drafts_result = await session.execute(recent_drafts_query)
-                recent_drafts = recent_drafts_result.scalars().all()
-                
-                # Search through sign_ups in recent drafts
-                for draft in recent_drafts:
-                    if not draft.sign_ups:
-                        continue
-                    
-                    # Process sign_ups
-                    sign_ups = draft.sign_ups
-                    
-                    # Search for display_name in values (case-insensitive)
-                    for user_id, user_display_name in sign_ups.items():
-                        if isinstance(user_display_name, str) and user_display_name.lower() == display_name.lower():
-                            return user_id, user_display_name
-                
-                # If we get here, no match was found
-                return None, None
-                
-    except Exception as e:
-        logger.error(f"Error finding Discord ID for display name {display_name}: {e}")
-        return None, None
 
 async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, user2_display_name=None, guild_id=None):
     """Get head-to-head match statistics between two players."""
@@ -963,3 +915,86 @@ async def create_head_to_head_embed(user1, user2, h2h_stats):
     embed.set_footer(text="Stats are updated after each match")
     
     return embed
+
+async def find_discord_id_by_display_name_fuzzy(display_name, guild_id=None):
+    """
+    Find Discord user IDs by partial display name matching.
+    
+    Args:
+        display_name: Partial or full display name to search for
+        guild_id: Optional guild ID to filter results
+        
+    Returns:
+        Tuple of (result, name, multiple_matches) where:
+        - If multiple_matches is False, result is a single user_id and name is their display_name
+        - If multiple_matches is True, result is a list of (user_id, display_name) tuples and name is None
+    """
+    try:
+        matches = []
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                # First, check the PlayerStats table for partial matches
+                player_query = select(PlayerStats).where(
+                    func.lower(PlayerStats.display_name).like(f"%{display_name.lower()}%")
+                )
+                
+                # Add guild_id filter if provided
+                if guild_id:
+                    player_query = player_query.where(PlayerStats.guild_id == guild_id)
+                    
+                player_result = await session.execute(player_query)
+                players = player_result.scalars().all()
+                
+                # Add all database matches
+                for player in players:
+                    matches.append((player.player_id, player.display_name))
+                
+                # If none found in database, query recent drafts
+                if not matches:
+                    recent_drafts_query = select(DraftSession).order_by(DraftSession.draft_start_time.desc())
+                    
+                    # Add guild_id filter if provided
+                    if guild_id:
+                        recent_drafts_query = recent_drafts_query.where(DraftSession.guild_id == guild_id)
+                        
+                    recent_drafts_query = recent_drafts_query.limit(100)
+                    recent_drafts_result = await session.execute(recent_drafts_query)
+                    recent_drafts = recent_drafts_result.scalars().all()
+                    
+                    # Keep track of all seen display names to avoid duplicates
+                    seen_display_names = set()
+                    
+                    # Search through sign_ups in recent drafts
+                    for draft in recent_drafts:
+                        if not draft.sign_ups:
+                            continue
+                        
+                        # Process sign_ups
+                        sign_ups = draft.sign_ups
+                        
+                        # Search for partial matches in display_names (case-insensitive)
+                        for user_id, user_display_name in sign_ups.items():
+                            if isinstance(user_display_name, str) and display_name.lower() in user_display_name.lower():
+                                if user_display_name not in seen_display_names:
+                                    matches.append((user_id, user_display_name))
+                                    seen_display_names.add(user_display_name)
+                
+                # Check for exact match first (prioritize exact matches)
+                for user_id, user_display_name in matches:
+                    if user_display_name.lower() == display_name.lower():
+                        return user_id, user_display_name, False
+                
+                # Return results based on number of matches
+                if len(matches) == 1:
+                    # Single match - return just the ID and display_name 
+                    return matches[0][0], matches[0][1], False
+                elif len(matches) > 1:
+                    # Multiple matches - return the list with a flag
+                    return matches, None, True
+                else:
+                    # No matches
+                    return None, None, False
+                
+    except Exception as e:
+        logger.error(f"Error finding Discord ID for display name {display_name}: {e}")
+        return None, None, False

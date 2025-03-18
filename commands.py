@@ -123,7 +123,7 @@ async def league_commands(bot):
 
 
     @bot.slash_command(name="record", description="Display your head-to-head record against another player")
-    @discord.option("opponent_name", description="The display name of the opponent", required=True)
+    @discord.option("opponent_name", description="The display name of the opponent (partial name works too)", required=True)
     @discord.option(
         "visibility",
         description="Who can see the record?",
@@ -146,16 +146,31 @@ async def league_commands(bot):
         
         try:
             # Import needed functions
-            from player_stats import find_discord_id_by_display_name, create_head_to_head_embed
+            from player_stats import find_discord_id_by_display_name_fuzzy, create_head_to_head_embed
             # Import the new combined stats function
             from legacy_stats import get_head_to_head_stats_with_legacy
             
-            # Pass guild_id to find_discord_id_by_display_name
-            opponent_id, opponent_display_name = await find_discord_id_by_display_name(opponent_name, guild_id)
+            # Use fuzzy search to find potential matches
+            result, opponent_display_name, multiple_matches = await find_discord_id_by_display_name_fuzzy(opponent_name, guild_id)
             
-            if not opponent_id:
-                await ctx.followup.send(f"Could not find a player with the display name '{opponent_name}' in this server.", ephemeral=True)
+            # Handle the three possible outcomes
+            if result is None:
+                await ctx.followup.send(f"Could not find any players with a name containing '{opponent_name}' in this server.", ephemeral=True)
                 return
+            
+            if multiple_matches:
+                # Format the list of matches
+                matches_list = result
+                match_text = f"**Multiple players found matching '{opponent_name}'**\n\n"
+                for i, (_, display_name) in enumerate(matches_list, 1):
+                    match_text += f"{i}. {display_name}\n"
+                match_text += "\nPlease try again with a more specific name."
+                
+                await ctx.followup.send(match_text, ephemeral=True)
+                return
+            
+            # If we get here, we have a single match
+            opponent_id = result
             
             # Get head-to-head stats with legacy data incorporated
             h2h_stats = await get_head_to_head_stats_with_legacy(user_id, opponent_id, user_display_name, opponent_display_name, guild_id)
@@ -176,7 +191,6 @@ async def league_commands(bot):
         except Exception as e:
             logger.error(f"Error in record command: {e}")
             await ctx.followup.send("An error occurred while fetching the record. Please try again later.", ephemeral=True)
-
     # Add a setup function to initialize the legacy data
     @bot.slash_command(name="setup_legacy_data", description="Admin Only: Setup legacy data for stats tracking")
     @commands.has_permissions(administrator=True)
