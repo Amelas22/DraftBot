@@ -228,22 +228,19 @@ def get_legacy_player_stats(user_id, time_frame=None):
             stats['team_drafts_tied'] += 1
         elif draft['winning_team'] == user_team:
             stats['team_drafts_won'] += 1
+            
+            # Trophy counts for 3-0 drafters
+            if user_team == 'blue' and draft['team_blue_wins'] > 0 and draft['team_red_wins'] == 0:
+                stats['trophies_won'] += 1
+            elif user_team == 'red' and draft['team_red_wins'] > 0 and draft['team_blue_wins'] == 0:
+                stats['trophies_won'] += 1
         
-        # Count individual matches and track for trophy calculation
-        user_match_count = 0
-        user_win_count = 0
-        
+        # Count individual matches
         for match in draft['match_details']:
             if user_id in [match['player1_id'], match['player2_id']]:
-                user_match_count += 1
                 stats['matches_played'] += 1
                 if match['winner_id'] == user_id:
-                    user_win_count += 1
                     stats['matches_won'] += 1
-        
-        # Award trophy if player won all 3 of their matches in a draft
-        if user_match_count == 3 and user_win_count == 3:
-            stats['trophies_won'] += 1
     
     # Calculate team win percentage
     if stats['team_drafts_played'] > 0:
