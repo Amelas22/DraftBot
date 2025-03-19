@@ -1,35 +1,57 @@
 import asyncio
-from sqlalchemy import Column, String, text
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
-from loguru import logger
+import logging
+from sqlalchemy import text
 
-# Import your database connection string
-# This should match what's in your AsyncSessionLocal configuration
-from session import DATABASE_URL
+# Configure logging
+logging.basicConfig(level=logging.INFO, 
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-async def add_notification_message_id_column():
-    """Add notification_message_id column to the messages table if it doesn't exist."""
-    # Create engine and session
-    engine = create_async_engine(DATABASE_URL)
-    async_session = sessionmaker(
-        engine, class_=AsyncSession, expire_on_commit=False
-    )
+# Database URL - should match your existing configuration
+DATABASE_URL = "sqlite+aiosqlite:///drafts.db"  # Update this if your database is in a different file
 
-    async with engine.begin() as conn:
-        # Check if the column already exists
-        try:
-            result = await conn.execute(text("SELECT notification_message_id FROM messages LIMIT 1"))
-            logger.info("Column 'notification_message_id' already exists.")
-            return
-        except Exception:
-            logger.info("Column 'notification_message_id' does not exist. Adding it now.")
-            
-            # Add the column
-            await conn.execute(
-                text("ALTER TABLE messages ADD COLUMN notification_message_id VARCHAR(64)")
-            )
-            logger.info("Column 'notification_message_id' has been added successfully.")
+async def add_last_update_time_column():
+    """Add last_update_time column to messages table if it doesn't exist"""
+    from sqlalchemy.ext.asyncio import create_async_engine
+    engine = create_async_engine(DATABASE_URL, echo=True)
+    
+    try:
+        async with engine.begin() as conn:
+            # Check if the column already exists
+            try:
+                columns_query = """
+                PRAGMA table_info(messages);
+                """
+                result = await conn.execute(text(columns_query))
+                columns = result.fetchall()
+                
+                # Check if last_update_time column exists
+                has_last_update_time = any(col[1] == 'last_update_time' for col in columns)
+                
+                if not has_last_update_time:
+                    # Column doesn't exist, add it
+                    await conn.execute(text("ALTER TABLE messages ADD COLUMN last_update_time REAL DEFAULT 0.0"))
+                    logger.info("Added last_update_time column to messages table")
+                else:
+                    logger.info("last_update_time column already exists")
+            except Exception as e:
+                logger.error(f"Error checking for last_update_time column: {e}")
+                raise
+    except Exception as e:
+        logger.error(f"Error adding last_update_time column: {e}")
+        raise
+    finally:
+        await engine.dispose()
+
+async def migrate_database():
+    """Execute the migration step"""
+    logger.info("Starting database migration to add last_update_time column")
+    
+    try:
+        await add_last_update_time_column()
+        logger.info("Database migration completed successfully")
+    except Exception as e:
+        logger.error(f"Database migration failed: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(add_notification_message_id_column())
+    asyncio.run(migrate_database())
