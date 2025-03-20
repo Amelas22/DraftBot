@@ -1717,13 +1717,13 @@ class StakeModal(discord.ui.Modal):
 
 class StakeModal(discord.ui.Modal):
     def __init__(self, over_100=False):
-        super().__init__(title="Enter Your Maximum Stake")
+        super().__init__(title="Enter Max Bet")
         
         self.over_100 = over_100
-        placeholder_text = "Enter amount (must be multiple of 50 over 100)" if over_100 else "Enter maximum amount you're willing to bet"
+        placeholder_text = "Reminder: Your bet can fill multiple bets when possible" if over_100 else "Enter maximum amount you're willing to bet"
         
         self.stake_input = discord.ui.InputText(
-            label="Maximum Stake (tix)",
+            label="Enter max bet (increments of 50)",
             placeholder=placeholder_text,
             required=True
         )
