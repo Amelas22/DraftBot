@@ -258,6 +258,7 @@ class StakeInfo(Base):
     max_stake = Column(Integer, nullable=False)
     assigned_stake = Column(Integer, nullable=True)
     opponent_id = Column(String(64), nullable=True)
+    is_capped = Column(Boolean, default=True)  
     
     def __repr__(self):
         return f"<StakeInfo(player_id={self.player_id}, max_stake={self.max_stake}, assigned_stake={self.assigned_stake})>"

@@ -2,6 +2,7 @@ import random
 import io
 import sys
 import pandas as pd
+import os
 from datetime import datetime
 from loguru import logger
 import openpyxl
@@ -31,35 +32,114 @@ class LogCapture:
         return self.logs.getvalue()
 
 
+def read_from_excel():
+    """
+    Try to read player data from an examplebets.xlsx file in the current directory.
+    Returns a tuple of (players_dict, cap_info_dict) if successful, or (None, None) if not.
+    """
+    filename = "examplebets.xlsx"
+    
+    if not os.path.exists(filename):
+        print(f"File '{filename}' not found in current directory.")
+        return None, None
+    
+    try:
+        # Read the Excel file
+        df = pd.read_excel(filename)
+        
+        # Check if required columns exist
+        required_columns = ["Player Name", "Player Bet"]
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            print(f"Missing required columns in '{filename}': {', '.join(missing_columns)}")
+            return None, None
+        
+        # Create players dictionary
+        players = {}
+        cap_info = {}
+        
+        for _, row in df.iterrows():
+            player_name = str(row["Player Name"])
+            player_bet = int(row["Player Bet"])
+            
+            # Check if cap setting column exists
+            if "Cap Player Settings" in df.columns:
+                # Handle different possible values in the Cap Player Settings column
+                cap_setting = row["Cap Player Settings"]
+                is_capped = True  # Default to True
+                
+                if isinstance(cap_setting, str):
+                    cap_setting = cap_setting.lower()
+                    if cap_setting in ['no', 'false', 'off', '0']:
+                        is_capped = False
+                elif isinstance(cap_setting, bool):
+                    is_capped = cap_setting
+                elif isinstance(cap_setting, (int, float)):
+                    is_capped = bool(cap_setting)
+                
+                cap_info[player_name] = is_capped
+            else:
+                # Default to True if column doesn't exist
+                cap_info[player_name] = True
+            
+            players[player_name] = player_bet
+        
+        print(f"Successfully loaded {len(players)} players from '{filename}'")
+        # Print cap settings for reference
+        for player, is_capped in cap_info.items():
+            cap_status = "CAPPED" if is_capped else "UNCAPPED"
+            print(f"  • {player}: {players[player]} tix - {cap_status}")
+        
+        return players, cap_info
+    
+    except Exception as e:
+        print(f"Error reading from Excel file '{filename}': {str(e)}")
+        return None, None
+
+
 def get_player_stakes():
     """
     Get user input for player stakes.
-    Returns a dictionary mapping player IDs to stake amounts.
+    Returns a tuple of (players_dict, cap_info_dict).
     """
     print("Enter player stakes:")
     
     players = {}
+    cap_info = {}
     player_count = 0
     
     while True:
-        player_input = input(f"Player {player_count + 1} name and stake (e.g., 'Alice 100') or 'done' to finish: ")
+        player_input = input(f"Player {player_count + 1} name, stake, and cap setting (e.g., 'Alice 100 yes') or 'done' to finish: ")
         
         if player_input.lower() == 'done':
             break
             
         try:
             parts = player_input.split(' ')
-            if len(parts) != 2:
-                print("Invalid format. Please enter name and stake separated by space.")
+            if len(parts) < 2:
+                print("Invalid format. Please enter at least name and stake separated by space.")
                 continue
                 
-            name, stake = parts
-            stake = int(stake)
+            name = parts[0]
+            stake = int(parts[1])
+            
+            # Check for cap setting (default to True if not provided)
+            is_capped = True
+            if len(parts) > 2:
+                cap_setting = parts[2].lower()
+                if cap_setting in ['no', 'false', 'off', '0', 'n']:
+                    is_capped = False
             
             # Use name as player ID
             player_id = name
             players[player_id] = stake
+            cap_info[player_id] = is_capped
             player_count += 1
+            
+            # Print confirmation with cap status
+            cap_status = "CAPPED" if is_capped else "UNCAPPED"
+            print(f"Added {name}: {stake} tix - {cap_status}")
             
             # For testing, we'll allow 6 or 8 players
             if player_count >= 8:
@@ -70,14 +150,14 @@ def get_player_stakes():
     # Validate we have enough players
     if player_count < 6:
         print("Need at least 6 players to run simulations.")
-        return None
+        return None, None
     
     # If odd number of players between 6 and 8, ask for one more
     if player_count % 2 != 0:
         print("Need an even number of players. Please add one more.")
         return get_player_stakes()
         
-    return players
+    return players, cap_info
 
 
 def randomize_teams(player_ids):
@@ -96,7 +176,7 @@ def randomize_teams(player_ids):
     return team_a, team_b
 
 
-def run_stake_simulations(players, min_stake=10, multiple=10):
+def run_stake_simulations(players, cap_info, min_stake=10, multiple=10):
     """
     Run multiple stake calculation simulations with different team assignments.
     Returns simulation results and captured logs.
@@ -119,13 +199,14 @@ def run_stake_simulations(players, min_stake=10, multiple=10):
         # Create a deep copy of the stakes dictionary to prevent modifications from affecting future runs
         stakes_copy = copy.deepcopy(players)
         
-        # Run stake calculation using tiered algorithm
+        # Run stake calculation using tiered algorithm with cap_info
         tiered_pairs = calculate_stakes_with_strategy(
             team_a=team_a,
             team_b=team_b,
             stakes=stakes_copy,  # Use the copy instead of the original
             min_stake=min_stake,
-            multiple=multiple
+            multiple=multiple,
+            cap_info=cap_info  # Pass the cap_info parameter
         )
         
         # Stop log capture
@@ -150,19 +231,22 @@ def run_stake_simulations(players, min_stake=10, multiple=10):
             # Calculate bet percentages
             pct = (bet / max_stake) * 100 if max_stake > 0 else 0
             
-            bet_summary.append(f"{player_id}: {bet}/{max_stake} ({pct:.1f}%)")
+            # Add cap status to the summary
+            cap_status = "🧢" if cap_info.get(player_id, True) else "🏎️"
+            bet_summary.append(f"{player_id} {cap_status}: {bet}/{max_stake} ({pct:.1f}%)")
         
         # Store results
         sim_result = {
             'simulation': i+1,
-            'team_a': [f"{p} ({players[p]} tix)" for p in team_a],  # Use original stakes for display
-            'team_b': [f"{p} ({players[p]} tix)" for p in team_b],  # Use original stakes for display
+            'team_a': [f"{p} ({players[p]} tix)" + (" 🧢" if cap_info.get(p, True) else " 🏎️") for p in team_a],
+            'team_b': [f"{p} ({players[p]} tix)" + (" 🧢" if cap_info.get(p, True) else " 🏎️") for p in team_b],
             'stake_pairs': [f"{p.player_a_id} vs {p.player_b_id}: {p.amount} tix" for p in tiered_pairs],
             'total_stake': sum(p.amount for p in tiered_pairs),
             'num_pairs': len(tiered_pairs),
             'player_bets': player_bets,
             'bet_summary': bet_summary,
-            'modified_stakes': stakes_copy  # Store the modified stakes for reference
+            'modified_stakes': stakes_copy,  # Store the modified stakes for reference
+            'cap_info': cap_info  # Store cap info for reference
         }
         
         results.append(sim_result)
@@ -171,7 +255,7 @@ def run_stake_simulations(players, min_stake=10, multiple=10):
     return results, all_logs
 
 
-def write_to_excel(players, results, logs):
+def write_to_excel(players, cap_info, results, logs):
     """
     Write simulation results to Excel file.
     """
@@ -184,10 +268,11 @@ def write_to_excel(players, results, logs):
     
     # Add input sheet
     input_sheet = wb.create_sheet("Player Inputs")
-    input_sheet.append(["Player", "Max Stake"])
+    input_sheet.append(["Player", "Max Stake", "Cap Setting"])
     
     for player, stake in sorted(players.items(), key=lambda x: x[1], reverse=True):
-        input_sheet.append([player, stake])
+        cap_setting = "CAPPED" if cap_info.get(player, True) else "UNCAPPED"
+        input_sheet.append([player, stake, cap_setting])
     
     # Format headers
     header_fill = PatternFill(start_color="CCCCCC", end_color="CCCCCC", fill_type="solid")
@@ -222,7 +307,7 @@ def write_to_excel(players, results, logs):
         # Sort team A by stake amount
         team_a_with_stakes = [(p.split(" (")[0], int(p.split("(")[1].split(" ")[0])) for p in result['team_a']]
         team_a_with_stakes.sort(key=lambda x: x[1], reverse=True)
-        team_a_sorted = [f"{p} ({s} tix)" for p, s in team_a_with_stakes]
+        team_a_sorted = result['team_a']  # Keep original format with cap status
         for player in team_a_sorted:
             sim_sheet.append([player])
         
@@ -232,7 +317,7 @@ def write_to_excel(players, results, logs):
         # Sort team B by stake amount
         team_b_with_stakes = [(p.split(" (")[0], int(p.split("(")[1].split(" ")[0])) for p in result['team_b']]
         team_b_with_stakes.sort(key=lambda x: x[1], reverse=True)
-        team_b_sorted = [f"{p} ({s} tix)" for p, s in team_b_with_stakes]
+        team_b_sorted = result['team_b']  # Keep original format with cap status
         for player in team_b_sorted:
             sim_sheet.append([player])
         
@@ -252,7 +337,7 @@ def write_to_excel(players, results, logs):
         sim_sheet.append(["Player Bet Details"])
         
         # Format as a table
-        sim_sheet.append(["Player", "Max Stake", "MTMB Adjusted Stake", "Allocated", "Percentage"])
+        sim_sheet.append(["Player", "Cap Setting", "Max Stake", "MTMB Adjusted Stake", "Allocated", "Percentage"])
         
         # Get modified stakes from this simulation
         modified_stakes = result.get('modified_stakes', {})
@@ -262,12 +347,13 @@ def write_to_excel(players, results, logs):
             adjusted_stake = modified_stakes.get(player_id, original_max_stake)
             allocated = result['player_bets'].get(player_id, 0)
             percentage = (allocated / original_max_stake * 100) if original_max_stake > 0 else 0
+            cap_setting = "CAPPED" if cap_info.get(player_id, True) else "UNCAPPED"
             
             # Only show adjusted stake if it differs from original
             if original_max_stake != adjusted_stake:
-                sim_sheet.append([player_id, original_max_stake, adjusted_stake, allocated, f"{percentage:.1f}%"])
+                sim_sheet.append([player_id, cap_setting, original_max_stake, adjusted_stake, allocated, f"{percentage:.1f}%"])
             else:
-                sim_sheet.append([player_id, original_max_stake, "-", allocated, f"{percentage:.1f}%"])
+                sim_sheet.append([player_id, cap_setting, original_max_stake, "-", allocated, f"{percentage:.1f}%"])
         
         # Format headers
         for row_idx in [1, 4, 8, len(team_a_sorted) + len(team_b_sorted) + 8]:
@@ -281,14 +367,15 @@ def write_to_excel(players, results, logs):
         
         # Add MTMB section to show what happened with stakes
         sim_sheet.append([])  # Empty row
-        sim_sheet.append(["MTMB Adjustments"])
-        sim_sheet.append(["Player", "Original Stake", "MTMB Adjusted"])
+        sim_sheet.append(["MTMB and Cap Adjustments"])
+        sim_sheet.append(["Player", "Original Stake", "Cap Setting", "MTMB Adjusted"])
         
         for player_id in sorted(modified_stakes.keys()):
             original = players[player_id]
             adjusted = modified_stakes[player_id]
+            cap_setting = "CAPPED" if cap_info.get(player_id, True) else "UNCAPPED"
             if original != adjusted:
-                sim_sheet.append([player_id, original, adjusted])
+                sim_sheet.append([player_id, original, cap_setting, adjusted])
         
         # Add logs
         log_sheet = wb.create_sheet(f"Sim {i+1} Logs")
@@ -302,13 +389,13 @@ def write_to_excel(players, results, logs):
         log_sheet.cell(row=1, column=1).fill = header_fill
         log_sheet.cell(row=1, column=1).font = header_font
         
-        # Add to summary
+        # Add to summary - shorten team listings
         summary_sheet.append([
             result['simulation'],
             result['total_stake'],
             result['num_pairs'],
-            ", ".join(team_a_sorted),
-            ", ".join(team_b_sorted)
+            ", ".join([p.split(" (")[0] for p in team_a_sorted]),
+            ", ".join([p.split(" (")[0] for p in team_b_sorted])
         ])
     
     # Adjust column widths
@@ -339,10 +426,15 @@ def main():
     print("Welcome to the Tiered Stake Algorithm Tester")
     print("===========================================")
     
-    # Get player stakes
-    players = get_player_stakes()
+    # First try to read from Excel file
+    players, cap_info = read_from_excel()
+    
+    # If Excel file not found or invalid, use manual input
     if not players:
-        return
+        print("\nEntering manual input mode...")
+        players, cap_info = get_player_stakes()
+        if not players:
+            return
     
     # Get min stake
     try:
@@ -358,11 +450,11 @@ def main():
         multiple = 10
         print("Invalid input. Using default multiple of 10.")
     
-    # Run simulations with just the tiered algorithm
-    results, logs = run_stake_simulations(players, min_stake, multiple)
+    # Run simulations with the tiered algorithm
+    results, logs = run_stake_simulations(players, cap_info, min_stake, multiple)
     
     # Write to Excel
-    filename = write_to_excel(players, results, logs)
+    filename = write_to_excel(players, cap_info, results, logs)
     
     print(f"Testing complete! Results saved to {filename}")
 
