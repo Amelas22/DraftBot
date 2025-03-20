@@ -378,40 +378,73 @@ class StakeCalculator:
                     if eligible_bettors:
                         # Calculate how many bettors to distribute to
                         num_bettors = min(len(eligible_bettors), int(adjustment_needed // multiple))
-                        
-                        # Distribute evenly
-                        for j in range(num_bettors):
-                            i, player_id, current_allocation, adjusted_stake, room_left = eligible_bettors[j]
+
+                        if eligible_bettors and num_bettors > 0:
+                            # Use float division to calculate proper fair share
+                            adjustment_per_bettor = adjustment_needed / num_bettors
+                            # Round to nearest multiple
+                            fair_share = int(adjustment_per_bettor / multiple) * multiple
+                            # Ensure at least one multiple per bettor if there's enough adjustment needed
+                            if fair_share < multiple and adjustment_needed >= multiple * num_bettors:
+                                fair_share = multiple
                             
-                            # Calculate fair share of adjustment (ensure multiple)
-                            fair_share = (int(adjustment_needed) // (num_bettors * multiple)) * multiple
-                            fair_share = min(fair_share, int(room_left))
+                            remaining_adjustment = adjustment_needed
                             
-                            if fair_share > 0:
-                                # Update allocation
-                                new_allocation = current_allocation + fair_share
-                                high_tier_allocations[i] = (player_id, new_allocation, adjusted_stake, high_tier_allocations[i][3])
-                                adjustment_needed -= fair_share
-                                stake_logger.info(f"Added {fair_share} to high bettor {player_id}, now at {new_allocation}")
-                        
-                        # If there's still adjustment needed, add to highest bettor with room
-                        if adjustment_needed >= multiple:
-                            for i, player_id, current_allocation, adjusted_stake, room_left in eligible_bettors:
-                                updated_current = high_tier_allocations[i][1]  # Get updated allocation
-                                updated_room_left = adjusted_stake - updated_current
+                            # Distribute evenly with tracking of remaining adjustment
+                            for j in range(num_bettors):
+                                i, player_id, current_allocation, adjusted_stake, room_left = eligible_bettors[j]
                                 
-                                if updated_room_left >= multiple:
-                                    additional = min(int(adjustment_needed), int(updated_room_left))
-                                    additional = (additional // multiple) * multiple
+                                # Calculate this bettor's share (not exceeding room left)
+                                this_share = min(fair_share, room_left)
+                                this_share = min(this_share, remaining_adjustment)  # Don't exceed remaining adjustment
+                                
+                                if this_share >= multiple:
+                                    # Update allocation
+                                    new_allocation = current_allocation + this_share
+                                    high_tier_allocations[i] = (player_id, new_allocation, adjusted_stake, high_tier_allocations[i][3])
+                                    remaining_adjustment -= this_share
+                                    stake_logger.info(f"Added {this_share} to high bettor {player_id}, now at {new_allocation}")
+                            
+                            # If there's still adjustment needed, distribute the remainder more fairly
+                            if remaining_adjustment >= multiple:
+                                # Sort eligible bettors by room left (most room first) and then by original stake (highest first)
+                                remaining_eligible = []
+                                for i, player_id, current_allocation, adjusted_stake, room_left in eligible_bettors:
+                                    # Get updated allocation
+                                    updated_current = high_tier_allocations[i][1]
+                                    updated_room_left = adjusted_stake - updated_current
+                                    original_stake = high_tier_allocations[i][3]
                                     
-                                    if additional > 0:
-                                        new_allocation = updated_current + additional
-                                        high_tier_allocations[i] = (player_id, new_allocation, adjusted_stake, high_tier_allocations[i][3])
-                                        adjustment_needed -= additional
-                                        stake_logger.info(f"Added additional {additional} to high bettor {player_id}, now at {new_allocation}")
+                                    if updated_room_left >= multiple:
+                                        remaining_eligible.append((i, player_id, updated_current, adjusted_stake, updated_room_left, original_stake))
+                                
+                                # Sort by room left (descending) and then by original stake (descending)
+                                remaining_eligible.sort(key=lambda x: (x[4], x[5]), reverse=True)
+                                
+                                # Distribute remaining adjustment fairly across eligible bettors
+                                while remaining_adjustment >= multiple and remaining_eligible:
+                                    for idx, (i, player_id, current, adjusted_stake, room, original) in enumerate(remaining_eligible):
+                                        additional = multiple  # Add one multiple at a time
                                         
-                                        if adjustment_needed < multiple:
+                                        if room >= additional:
+                                            new_allocation = current + additional
+                                            high_tier_allocations[i] = (player_id, new_allocation, adjusted_stake, original)
+                                            remaining_adjustment -= additional
+                                            stake_logger.info(f"Added additional {additional} to high bettor {player_id}, now at {new_allocation}")
+                                            
+                                            # Update this entry for the next iteration
+                                            remaining_eligible[idx] = (i, player_id, new_allocation, adjusted_stake, room - additional, original)
+                                            
+                                            if remaining_adjustment < multiple:
+                                                break
+                                        else:
+                                            # Remove this entry as it has no more room
+                                            remaining_eligible.pop(idx)
                                             break
+                                    
+                                    # If we've gone through all eligible bettors and still have adjustment, break to avoid infinite loop
+                                    if remaining_adjustment >= multiple and not any(room >= multiple for _, _, _, _, room, _ in remaining_eligible):
+                                        break
                 
                 # Store final high tier allocations
                 for player_id, allocation, adjusted_stake, original_stake in high_tier_allocations:
@@ -708,6 +741,188 @@ class StakeCalculator:
                 final_allocations[pair.player_a_id] = final_allocations.get(pair.player_a_id, 0) + pair.amount
                 final_allocations[pair.player_b_id] = final_allocations.get(pair.player_b_id, 0) + pair.amount
             
+            stake_logger.info("Ensuring max team players get their target allocations...")
+
+            # Recalculate max_player_allocated from the pairs we've created
+            max_player_allocated = {player_id: 0 for player_id, _ in max_team}
+            for pair in result_pairs:
+                max_player_id = pair.player_b_id if min_team_id == 'A' else pair.player_a_id
+                if max_player_id in max_player_allocated:
+                    max_player_allocated[max_player_id] += pair.amount
+
+            # Process max team players with allocation shortfall
+            for max_player_id, target_allocation in allocations.items():
+                # Skip players not in max team
+                if max_player_id not in [p_id for p_id, _ in max_team]:
+                    continue
+                
+                allocated = max_player_allocated.get(max_player_id, 0)
+                if allocated < target_allocation:
+                    shortfall = target_allocation - allocated
+                    stake_logger.info(f"Max player {max_player_id} needs {shortfall} more to reach target allocation of {target_allocation}")
+                    
+                    # Find min team players with excess allocation beyond their targets
+                    min_player_excess = {}
+                    for min_player_id, min_target in allocations.items():
+                        # Skip players not in min team
+                        if min_player_id not in [p_id for p_id, _ in min_team]:
+                            continue
+                        
+                        min_allocated = 0
+                        for pair in result_pairs:
+                            min_in_pair = pair.player_a_id if min_team_id == 'A' else pair.player_b_id
+                            if min_in_pair == min_player_id:
+                                min_allocated += pair.amount
+                        
+                        if min_allocated > min_target:
+                            excess = min_allocated - min_target
+                            min_player_excess[min_player_id] = excess
+                    
+                    # If there are min players with excess, redistribute
+                    if min_player_excess:
+                        for min_player_id, excess in min_player_excess.items():
+                            if shortfall <= 0:
+                                break
+                            
+                            # Find pairs between this min player and other max players
+                            pairs_to_adjust = []
+                            for i, pair in enumerate(result_pairs):
+                                min_in_pair = pair.player_a_id if min_team_id == 'A' else pair.player_b_id
+                                max_in_pair = pair.player_b_id if min_team_id == 'A' else pair.player_a_id
+                                
+                                if min_in_pair == min_player_id and max_in_pair != max_player_id:
+                                    pairs_to_adjust.append((i, pair, max_in_pair))
+                            
+                            # Redistribute from these pairs to our max player
+                            for i, pair, other_max_id in pairs_to_adjust:
+                                if shortfall <= 0:
+                                    break
+                                
+                                # How much can we take from this pair
+                                reducible = min(pair.amount, excess, shortfall)
+                                if reducible <= 0:
+                                    continue
+                                
+                                # Reduce this pair
+                                result_pairs[i] = StakePair(
+                                    pair.player_a_id, 
+                                    pair.player_b_id, 
+                                    pair.amount - reducible
+                                )
+                                
+                                # Create or update a pair for our max player
+                                max_pair_found = False
+                                for j, p in enumerate(result_pairs):
+                                    max_is_a = min_team_id != 'A'  # max team is A if min team is B
+                                    if ((max_is_a and p.player_a_id == max_player_id and p.player_b_id == min_player_id) or
+                                        (not max_is_a and p.player_b_id == max_player_id and p.player_a_id == min_player_id)):
+                                        # Update existing pair
+                                        if max_is_a:
+                                            result_pairs[j] = StakePair(max_player_id, min_player_id, p.amount + reducible)
+                                        else:
+                                            result_pairs[j] = StakePair(min_player_id, max_player_id, p.amount + reducible)
+                                        max_pair_found = True
+                                        break
+                                
+                                if not max_pair_found:
+                                    # Create new pair
+                                    if min_team_id == 'A':
+                                        new_pair = StakePair(min_player_id, max_player_id, reducible)
+                                    else:
+                                        new_pair = StakePair(max_player_id, min_player_id, reducible)
+                                    result_pairs.append(new_pair)
+                                
+                                stake_logger.info(f"Redistributed {reducible} from min player {min_player_id}'s pair with {other_max_id} to max player {max_player_id}")
+                                
+                                shortfall -= reducible
+                                excess -= reducible
+                                
+                                if excess <= 0:
+                                    break
+                    
+                    # If still not fully allocated, try to find underallocated min players
+                    if shortfall > 0:
+                        stake_logger.info(f"Max player {max_player_id} still needs {shortfall} more - looking for additional sources")
+                        
+                        # Try to find pairs with max players who are over their target
+                        max_player_excess = {}
+                        for other_max_id, other_target in allocations.items():
+                            # Skip our player or players not in max team
+                            if other_max_id == max_player_id or other_max_id not in [p_id for p_id, _ in max_team]:
+                                continue
+                            
+                            other_allocated = 0
+                            for pair in result_pairs:
+                                other_in_pair = pair.player_b_id if min_team_id == 'A' else pair.player_a_id
+                                if other_in_pair == other_max_id:
+                                    other_allocated += pair.amount
+                            
+                            if other_allocated > other_target:
+                                excess = other_allocated - other_target
+                                max_player_excess[other_max_id] = excess
+                        
+                        # If there are max players with excess, redistribute
+                        if max_player_excess:
+                            for other_max_id, excess in max_player_excess.items():
+                                if shortfall <= 0:
+                                    break
+                                
+                                # Find pairs between other max player and min players
+                                pairs_to_adjust = []
+                                for i, pair in enumerate(result_pairs):
+                                    min_in_pair = pair.player_a_id if min_team_id == 'A' else pair.player_b_id
+                                    max_in_pair = pair.player_b_id if min_team_id == 'A' else pair.player_a_id
+                                    
+                                    if max_in_pair == other_max_id:
+                                        pairs_to_adjust.append((i, pair, min_in_pair))
+                                
+                                # Redistribute from these pairs to our max player
+                                for i, pair, min_player_id in pairs_to_adjust:
+                                    if shortfall <= 0:
+                                        break
+                                    
+                                    # How much can we take from this pair
+                                    reducible = min(pair.amount, excess, shortfall)
+                                    if reducible <= 0:
+                                        continue
+                                    
+                                    # Reduce this pair
+                                    result_pairs[i] = StakePair(
+                                        pair.player_a_id, 
+                                        pair.player_b_id, 
+                                        pair.amount - reducible
+                                    )
+                                    
+                                    # Create or update a pair for our max player
+                                    max_pair_found = False
+                                    for j, p in enumerate(result_pairs):
+                                        max_is_a = min_team_id != 'A'  # max team is A if min team is B
+                                        if ((max_is_a and p.player_a_id == max_player_id and p.player_b_id == min_player_id) or
+                                            (not max_is_a and p.player_b_id == max_player_id and p.player_a_id == min_player_id)):
+                                            # Update existing pair
+                                            if max_is_a:
+                                                result_pairs[j] = StakePair(max_player_id, min_player_id, p.amount + reducible)
+                                            else:
+                                                result_pairs[j] = StakePair(min_player_id, max_player_id, p.amount + reducible)
+                                            max_pair_found = True
+                                            break
+                                    
+                                    if not max_pair_found:
+                                        # Create new pair
+                                        if min_team_id == 'A':
+                                            new_pair = StakePair(min_player_id, max_player_id, reducible)
+                                        else:
+                                            new_pair = StakePair(max_player_id, min_player_id, reducible)
+                                        result_pairs.append(new_pair)
+                                    
+                                    stake_logger.info(f"Redistributed {reducible} from max player {other_max_id}'s pair with {min_player_id} to max player {max_player_id}")
+                                    
+                                    shortfall -= reducible
+                                    excess -= reducible
+                                    
+                                    if excess <= 0:
+                                        break
+                                    
             # Log the final allocation for each player
             stake_logger.info("Final allocation by player:")
             for player_id in sorted(allocations.keys()):
