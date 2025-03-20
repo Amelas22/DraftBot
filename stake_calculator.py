@@ -477,41 +477,44 @@ class StakeCalculator:
                     stake_logger.info(f"Adjusted max team player {player_to_adjust} allocation by -{adjustment} to balance teams")
             
             # ------------------------------------------------------
-            # Phase 2: Generate Optimized Pairings
+            # Phase 2: Generate Optimized Pairings with Balanced Allocation
             # ------------------------------------------------------
-            stake_logger.info("Phase 2: Generating optimized pairings")
-            
+            stake_logger.info("Phase 2: Generating balanced stake pairings")
+
             # Create lists of players with their allocations for each team
             min_team_players = [(pid, allocations.get(pid, 0)) for pid, _ in min_team]
             max_team_players = [(pid, allocations.get(pid, 0)) for pid, _ in max_team]
-            
+
+            # Create a dictionary of target allocations for faster lookup
+            target_allocations = copy.deepcopy(allocations)
+
             # Initialize result pairs
             result_pairs = []
-            
-            # Initialize remaining allocations for each player
-            remaining_allocations = copy.deepcopy(allocations)
-            
-            # Step 1: First match identical allocations
+
+            # Initialize tracking of allocated amounts
+            allocated = {player_id: 0 for player_id in allocations.keys()}
+
+            # Step 1: Match identical allocations first (these are always perfect matches)
             stake_logger.info("Matching identical allocations first")
-            min_allocations = {}
-            max_allocations = {}
-            
+            min_by_allocation = {}
+            max_by_allocation = {}
+
             # Group players by allocation amount
             for player_id, amount in min_team_players:
-                if amount not in min_allocations:
-                    min_allocations[amount] = []
-                min_allocations[amount].append(player_id)
-                
+                if amount not in min_by_allocation:
+                    min_by_allocation[amount] = []
+                min_by_allocation[amount].append(player_id)
+
             for player_id, amount in max_team_players:
-                if amount not in max_allocations:
-                    max_allocations[amount] = []
-                max_allocations[amount].append(player_id)
-            
+                if amount not in max_by_allocation:
+                    max_by_allocation[amount] = []
+                max_by_allocation[amount].append(player_id)
+
             # Match identical allocations
-            for amount in sorted(min_allocations.keys(), reverse=True):
-                if amount in max_allocations and amount >= min_stake:
-                    min_players = min_allocations[amount]
-                    max_players = max_allocations[amount]
+            for amount in sorted(min_by_allocation.keys(), reverse=True):
+                if amount in max_by_allocation and amount >= min_stake:
+                    min_players = min_by_allocation[amount]
+                    max_players = max_by_allocation[amount]
                     
                     # Match as many as possible
                     pairs_to_match = min(len(min_players), len(max_players))
@@ -528,220 +531,227 @@ class StakeCalculator:
                             
                         result_pairs.append(pair)
                         
-                        # Update remaining allocations
-                        remaining_allocations[min_player_id] -= amount
-                        remaining_allocations[max_player_id] -= amount
+                        # Update allocated amounts
+                        allocated[min_player_id] += amount
+                        allocated[max_player_id] += amount
                         
                         stake_logger.info(f"Matched identical allocations: Min player {min_player_id} with Max player {max_player_id} for {amount} tix")
-            
-            # Step 2: Sort the remaining players by allocation amount (descending)
-            remaining_min_players = [(pid, remaining_allocations.get(pid, 0)) for pid, _ in min_team if remaining_allocations.get(pid, 0) > 0]
-            remaining_max_players = [(pid, remaining_allocations.get(pid, 0)) for pid, _ in max_team if remaining_allocations.get(pid, 0) > 0]
-            
-            remaining_min_players.sort(key=lambda x: x[1], reverse=True)
-            remaining_max_players.sort(key=lambda x: x[1], reverse=True)
-            
-            stake_logger.info(f"Remaining min team players sorted by allocation: {remaining_min_players}")
-            stake_logger.info(f"Remaining max team players sorted by allocation: {remaining_max_players}")
-            
-            # Step 3: Match remaining players using an optimized algorithm
-            remaining_min_players = [(pid, remaining_allocations.get(pid, 0)) for pid, _ in min_team if remaining_allocations.get(pid, 0) > 0]
-            remaining_max_players = [(pid, remaining_allocations.get(pid, 0)) for pid, _ in max_team if remaining_allocations.get(pid, 0) > 0]
 
-            stake_logger.info(f"Remaining min team players sorted by allocation: {remaining_min_players}")
-            stake_logger.info(f"Remaining max team players sorted by allocation: {remaining_max_players}")
+            # Step 2: Prepare remaining players for balanced matching
+            remaining_min = [(pid, target_allocations[pid] - allocated[pid]) 
+                            for pid, _ in min_team_players 
+                            if target_allocations[pid] > allocated[pid]]
 
-            # Sort by stake amount (descending)
-            remaining_min_players.sort(key=lambda x: x[1], reverse=True)
-            remaining_max_players.sort(key=lambda x: x[1], reverse=True)
+            remaining_max = [(pid, target_allocations[pid] - allocated[pid]) 
+                            for pid, _ in max_team_players 
+                            if target_allocations[pid] > allocated[pid]]
 
-            # Phase 1: First look for exact matches or complete allocation opportunities
-            # This helps reduce splits by handling cases where allocations match exactly
-            exact_matches = []
-            for i, (min_player_id, min_remaining) in enumerate(remaining_min_players):
-                for j, (max_player_id, max_remaining) in enumerate(remaining_max_players):
-                    if min_remaining == max_remaining and min_remaining >= min_stake:
-                        # Create stake pair for exact match
-                        if min_team_id == 'A':
-                            pair = StakePair(min_player_id, max_player_id, min_remaining)
-                        else:
-                            pair = StakePair(max_player_id, min_player_id, min_remaining)
+            # Sort by remaining amount (descending)
+            remaining_min.sort(key=lambda x: x[1], reverse=True)
+            remaining_max.sort(key=lambda x: x[1], reverse=True)
+
+            stake_logger.info(f"Remaining min team players: {remaining_min}")
+            stake_logger.info(f"Remaining max team players: {remaining_max}")
+
+            # Step 3: Formulate as a balanced allocation problem
+            # We'll use a modified Hungarian algorithm approach - assign players greedily
+            # but respect allocation limits on both sides
+
+            # This data structure will track allocation status of all players
+            allocation_status = {
+                'min': {pid: {'target': target_allocations[pid], 'allocated': allocated[pid]} 
+                    for pid, _ in min_team},
+                'max': {pid: {'target': target_allocations[pid], 'allocated': allocated[pid]} 
+                    for pid, _ in max_team}
+            }
+
+            # Define a scoring function to prioritize matches
+            def match_score(min_player, max_player, min_remaining, max_remaining):
+                """
+                Higher score means better match. This function prioritizes:
+                - Matches where one player would be completely allocated
+                - Matches with largest possible stake amount
+                - Matches that minimize leftover small amounts
+                """
+                match_amount = min(min_remaining, max_remaining)
+                
+                # Base score is the match amount
+                score = match_amount
+                
+                # Bonus for exact matches (completely allocates both players)
+                if min_remaining == max_remaining:
+                    score += 1000
+                
+                # Bonus for completely allocating either player
+                elif min_remaining == match_amount or max_remaining == match_amount:
+                    score += 500
+                    
+                # Penalty for leaving small remainder that might be below min_stake
+                remainder = abs(min_remaining - max_remaining)
+                if 0 < remainder < min_stake:
+                    score -= 300
+                
+                return score
+
+            # Process until all players are matched or no more valid matches exist
+            while remaining_min and remaining_max:
+                # Find the best match among remaining players
+                best_score = -float('inf')
+                best_match = None
+                
+                for i, (min_player, min_remaining) in enumerate(remaining_min):
+                    for j, (max_player, max_remaining) in enumerate(remaining_max):
+                        match_amount = min(min_remaining, max_remaining)
+                        
+                        # Skip if match amount is below minimum stake
+                        if match_amount < min_stake:
+                            continue
                             
-                        result_pairs.append(pair)
+                        score = match_score(min_player, max_player, min_remaining, max_remaining)
                         
-                        # Update remaining allocations
-                        remaining_allocations[min_player_id] = 0
-                        remaining_allocations[max_player_id] = 0
-                        
-                        # Mark these players for removal
-                        exact_matches.append((i, j))
-                        
-                        stake_logger.info(f"Exact match: Min player {min_player_id} with Max player {max_player_id} for {min_remaining} tix")
-
-            # Remove exact matches from lists (in reverse order to maintain indices)
-            for min_idx, max_idx in sorted(exact_matches, reverse=True):
-                remaining_min_players.pop(min_idx)
-                remaining_max_players.pop(max_idx)
-
-            # Phase 2: Minimize number of splits by prioritizing complete allocations
-            # Track which players must have split bets
-            must_split_min = set()
-            must_split_max = set()
-
-            # Calculate total allocation for each team (should be equal)
-            total_min_allocation = sum(amt for _, amt in remaining_min_players)
-            total_max_allocation = sum(amt for _, amt in remaining_max_players)
-
-            stake_logger.info(f"After exact matches - Min team remaining: {total_min_allocation}, Max team remaining: {total_max_allocation}")
-
-            # Phase 3: Use a smarter greedy algorithm that prioritizes minimizing splits
-            # We'll handle the largest allocations first to maintain bet sizes
-
-            # First, fill the largest players on each side where possible
-            # Priority cases:
-            # 1. Largest min player against largest max player
-            # 2. Ensure all min players get fully allocated
-            # 3. Minimize number of players that need to be split
-
-            remaining_pairings = []
-            processed_min = set()
-            processed_max = set()
-
-            # First, try to maximize the number of complete matches
-            # (where one player's entire allocation is handled by a single player)
-            for i, (min_player_id, min_remaining) in enumerate(remaining_min_players):
-                if min_player_id in processed_min:
-                    continue
+                        if score > best_score:
+                            best_score = score
+                            best_match = (i, j, match_amount)
+                
+                # If no valid match found, break
+                if best_match is None:
+                    stake_logger.info("No more valid matches found")
+                    break
                     
-                for j, (max_player_id, max_remaining) in enumerate(remaining_max_players):
-                    if max_player_id in processed_max:
-                        continue
+                # Create the stake pair for the best match
+                i, j, match_amount = best_match
+                min_player, min_remaining = remaining_min[i]
+                max_player, max_remaining = remaining_max[j]
+                
+                if min_team_id == 'A':
+                    pair = StakePair(min_player, max_player, match_amount)
+                else:
+                    pair = StakePair(max_player, min_player, match_amount)
+                    
+                result_pairs.append(pair)
+                
+                # Update allocated amounts
+                allocated[min_player] += match_amount
+                allocated[max_player] += match_amount
+                
+                stake_logger.info(f"Matched: Min player {min_player} with Max player {max_player} for {match_amount} tix")
+                
+                # Update remaining amounts
+                min_new_remaining = min_remaining - match_amount
+                max_new_remaining = max_remaining - match_amount
+                
+                # Remove or update min player
+                if min_new_remaining < min_stake:
+                    # If remaining amount is below min stake, don't consider for future matches
+                    remaining_min.pop(i)
+                else:
+                    remaining_min[i] = (min_player, min_new_remaining)
+                
+                # Remove or update max player
+                if max_new_remaining < min_stake:
+                    remaining_max.pop(j)
+                else:
+                    remaining_max[j] = (max_player, max_new_remaining)
+                
+            # Step 4: Process any remaining players with small allocations (below min_stake)
+            if remaining_min or remaining_max:
+                stake_logger.info("Processing remaining small allocations:")
+                
+                small_min = [(pid, amt) for pid, amt in remaining_min if amt > 0]
+                small_max = [(pid, amt) for pid, amt in remaining_max if amt > 0]
+                
+                if small_min:
+                    stake_logger.info(f"Min team small allocations: {small_min}")
+                if small_max:
+                    stake_logger.info(f"Max team small allocations: {small_max}")
+                
+                # Try to combine small allocations to meet min_stake requirement
+                # or add to existing stake pairs
+                
+                # First try to handle min team small allocations
+                for min_player, min_amount in small_min:
+                    # Look for existing pairs with this min player
+                    for i, pair in enumerate(result_pairs):
+                        min_in_pair = pair.player_a_id if min_team_id == 'A' else pair.player_b_id
+                        max_in_pair = pair.player_b_id if min_team_id == 'A' else pair.player_a_id
                         
-                    if min_remaining <= max_remaining:
-                        # Can fully allocate min player
-                        if min_team_id == 'A':
-                            pair = StakePair(min_player_id, max_player_id, min_remaining)
-                        else:
-                            pair = StakePair(max_player_id, min_player_id, min_remaining)
+                        if min_in_pair == min_player:
+                            # Add to existing pair if the max player still has room
+                            max_target = target_allocations[max_in_pair]
+                            max_current = allocated[max_in_pair]
                             
-                        result_pairs.append(pair)
-                        
-                        # Update remaining allocations
-                        remaining_allocations[min_player_id] = 0
-                        remaining_allocations[max_player_id] -= min_remaining
-                        
-                        processed_min.add(min_player_id)
-                        
-                        # If max player is fully allocated, mark them processed too
-                        if remaining_allocations[max_player_id] <= 0:
-                            processed_max.add(max_player_id)
-                        
-                        stake_logger.info(f"Complete min match: Min player {min_player_id} with Max player {max_player_id} for {min_remaining} tix")
-                        break
+                            if max_current < max_target:
+                                # Can add to this pair
+                                add_amount = min(min_amount, max_target - max_current)
+                                
+                                if min_team_id == 'A':
+                                    result_pairs[i] = StakePair(min_player, max_in_pair, pair.amount + add_amount)
+                                else:
+                                    result_pairs[i] = StakePair(max_in_pair, min_player, pair.amount + add_amount)
+                                
+                                allocated[min_player] += add_amount
+                                allocated[max_in_pair] += add_amount
+                                min_amount -= add_amount
+                                
+                                stake_logger.info(f"Added {add_amount} to existing pair: {min_player} with {max_in_pair}")
+                                
+                                if min_amount <= 0:
+                                    break
                 
-            # Filter processed players
-            remaining_min_players = [(pid, remaining_allocations.get(pid, 0)) for pid, _ in remaining_min_players 
-                                    if pid not in processed_min and remaining_allocations.get(pid, 0) > 0]
-            remaining_max_players = [(pid, remaining_allocations.get(pid, 0)) for pid, _ in remaining_max_players 
-                                    if pid not in processed_max and remaining_allocations.get(pid, 0) > 0]
-
-            # Sort remaining by allocation (descending)
-            remaining_min_players.sort(key=lambda x: x[1], reverse=True)
-            remaining_max_players.sort(key=lambda x: x[1], reverse=True)
-
-            # Calculate remaining players that must split bets
-            # If sum of all remaining max allocations < any min allocation, that min player must be split
-            # Or if sum of all remaining min allocations < any max allocation, that max player must be split
-            for min_player_id, min_remaining in remaining_min_players:
-                total_max_remaining = sum(max_remaining for _, max_remaining in remaining_max_players)
-                if min_remaining > total_max_remaining:
-                    stake_logger.warning(f"Insufficient total max allocation to handle min player {min_player_id}")
-                
-                # Check if player needs to be split across multiple max players
-                if all(min_remaining > max_remaining for _, max_remaining in remaining_max_players):
-                    must_split_min.add(min_player_id)
-                    stake_logger.info(f"Min player {min_player_id} must be split across multiple max players")
-
-            # Now allocate the remaining min players, starting with those that must be split
-            # This maximizes the chances that others can get full allocations
-            remaining_min_players.sort(key=lambda x: (x[0] in must_split_min, x[1]), reverse=True)
-
-            # For each remaining min player, try to allocate as efficiently as possible
-            while remaining_min_players:
-                min_player_id, min_remaining = remaining_min_players.pop(0)
-                
-                # Track this min player's pairings
-                current_min_pairings = []
-                
-                # First try to get a perfect match if available
-                perfect_match_found = False
-                for j, (max_player_id, max_remaining) in enumerate(remaining_max_players):
-                    if min_remaining == max_remaining and min_remaining >= min_stake:
-                        # Perfect match, use it
-                        if min_team_id == 'A':
-                            pair = StakePair(min_player_id, max_player_id, min_remaining)
-                        else:
-                            pair = StakePair(max_player_id, min_player_id, min_remaining)
+                # Then try to handle max team small allocations
+                for max_player, max_amount in small_max:
+                    # Look for existing pairs with this max player
+                    for i, pair in enumerate(result_pairs):
+                        min_in_pair = pair.player_a_id if min_team_id == 'A' else pair.player_b_id
+                        max_in_pair = pair.player_b_id if min_team_id == 'A' else pair.player_a_id
+                        
+                        if max_in_pair == max_player:
+                            # Add to existing pair if the min player still has room
+                            min_target = target_allocations[min_in_pair]
+                            min_current = allocated[min_in_pair]
                             
-                        result_pairs.append(pair)
-                        
-                        # Update remaining allocations
-                        remaining_allocations[min_player_id] = 0
-                        remaining_allocations[max_player_id] = 0
-                        
-                        # Remove this max player
-                        remaining_max_players.pop(j)
-                        
-                        stake_logger.info(f"Perfect match: Min player {min_player_id} with Max player {max_player_id} for {min_remaining} tix")
-                        perfect_match_found = True
-                        break
+                            if min_current < min_target:
+                                # Can add to this pair
+                                add_amount = min(max_amount, min_target - min_current)
+                                
+                                if min_team_id == 'A':
+                                    result_pairs[i] = StakePair(min_in_pair, max_player, pair.amount + add_amount)
+                                else:
+                                    result_pairs[i] = StakePair(max_player, min_in_pair, pair.amount + add_amount)
+                                
+                                allocated[max_player] += add_amount
+                                allocated[min_in_pair] += add_amount
+                                max_amount -= add_amount
+                                
+                                stake_logger.info(f"Added {add_amount} to existing pair: {max_player} with {min_in_pair}")
+                                
+                                if max_amount <= 0:
+                                    break
+
+            # Step 5: Verify allocation status
+            total_min_allocated = sum(allocated[pid] for pid, _ in min_team)
+            total_max_allocated = sum(allocated[pid] for pid, _ in max_team)
+            total_min_target = sum(target_allocations[pid] for pid, _ in min_team)
+            total_max_target = sum(target_allocations[pid] for pid, _ in max_team)
+
+            stake_logger.info(f"Min team: allocated {total_min_allocated} of {total_min_target}")
+            stake_logger.info(f"Max team: allocated {total_max_allocated} of {total_max_target}")
+
+            # Set final_allocations to our tracked allocations for compatibility with existing code
+            final_allocations = allocated
+
+            # Track allocation fulfillment for each player
+            for player_id in sorted(allocations.keys()):
+                target = target_allocations.get(player_id, 0)
+                actual = allocated.get(player_id, 0)
+                fulfillment = (actual / target * 100) if target > 0 else 0
                 
-                if perfect_match_found:
-                    continue
-                
-                # Else allocate against available max players, prioritizing larger allocations first
-                while min_remaining > 0 and remaining_max_players:
-                    # Sort max players by allocation (descending) - prioritize using up full max allocations
-                    remaining_max_players.sort(key=lambda x: x[1], reverse=True)
-                    
-                    max_player_id, max_remaining = remaining_max_players[0]
-                    
-                    match_amount = min(min_remaining, max_remaining)
-                    
-                    if match_amount >= min_stake:
-                        # Create stake pair
-                        if min_team_id == 'A':
-                            pair = StakePair(min_player_id, max_player_id, match_amount)
-                        else:
-                            pair = StakePair(max_player_id, min_player_id, match_amount)
-                            
-                        result_pairs.append(pair)
-                        current_min_pairings.append(pair)
-                        
-                        # Update allocations
-                        min_remaining -= match_amount
-                        remaining_allocations[min_player_id] -= match_amount
-                        remaining_allocations[max_player_id] -= match_amount
-                        
-                        stake_logger.info(f"Matched remaining: Min player {min_player_id} with Max player {max_player_id} for {match_amount} tix")
-                    
-                    # Update or remove max player
-                    if remaining_allocations[max_player_id] <= 0:
-                        remaining_max_players.pop(0)
-                    else:
-                        remaining_max_players[0] = (max_player_id, remaining_allocations[max_player_id])
-                
-                # Check if we have any unallocated amount (shouldn't happen with balanced teams)
-                if min_remaining > 0:
-                    stake_logger.warning(f"Unallocated stake for min player {min_player_id}: {min_remaining}")
-            
-            # Final verification: ensure each player's total matches their allocation
-            final_allocations = {pid: 0 for pid in allocations.keys()}
-            for pair in result_pairs:
-                final_allocations[pair.player_a_id] = final_allocations.get(pair.player_a_id, 0) + pair.amount
-                final_allocations[pair.player_b_id] = final_allocations.get(pair.player_b_id, 0) + pair.amount
-            
-            stake_logger.info("Ensuring max team players get their target allocations...")
+                if actual < target:
+                    stake_logger.warning(f"Player {player_id} allocation incomplete: {actual}/{target} ({fulfillment:.1f}%)")
+                else:
+                    stake_logger.info(f"Player {player_id} allocation complete: {actual}/{target} ({fulfillment:.1f}%)")
+
+            stake_logger.info("Running Post-Processing Check...")
 
             # Recalculate max_player_allocated from the pairs we've created
             max_player_allocated = {player_id: 0 for player_id, _ in max_team}
@@ -923,24 +933,11 @@ class StakeCalculator:
                                     if excess <= 0:
                                         break
                                     
-            # Log the final allocation for each player
-            stake_logger.info("Final allocation by player:")
-            for player_id in sorted(allocations.keys()):
-                target = allocations.get(player_id, 0)
-                actual = final_allocations.get(player_id, 0)
-                original = original_stakes.get(player_id, 0)
-                
-                percentage = (actual / original) * 100 if original > 0 else 0
-                stake_logger.info(f"Player {player_id}: {actual}/{original} tix ({percentage:.1f}%)")
-                
-                if actual != target:
-                    stake_logger.warning(f"Player {player_id} allocation mismatch! Target: {target}, Actual: {actual}")
-            
             # Consolidate multiple bets between the same players
             stake_logger.info("Consolidating multiple bets between same players...")
             consolidated_pairs = []
             pair_map = {}
-            
+
             for pair in result_pairs:
                 # Create a unique key for each player pair (order matters)
                 key = (pair.player_a_id, pair.player_b_id)
@@ -951,7 +948,7 @@ class StakeCalculator:
                 else:
                     # Otherwise, create a new entry
                     pair_map[key] = pair.amount
-            
+
             # Create consolidated pairs
             for key, amount in pair_map.items():
                 player_a_id, player_b_id = key
