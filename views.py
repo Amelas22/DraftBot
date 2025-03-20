@@ -84,7 +84,7 @@ class PersistentView(discord.ui.View):
             if self.session_type == "staked":
                 # Add bet cap toggle button
                 self.add_item(BetCapToggleButton(self.draft_session_id))
-                
+
             if self.session_type != "test":
             #    self.add_item(self.create_button("Post Pairings", "primary", f"create_rooms_pairings_{self.draft_session_id}", self.create_rooms_pairings_callback, disabled=True))
             #else:
@@ -887,6 +887,9 @@ class PersistentView(discord.ui.View):
                 # Build stakes dictionary
                 stakes_dict = {record.player_id: record.max_stake for record in stake_info_records}
                 
+                # Build capping info dictionary
+                cap_info = {record.player_id: getattr(record, 'is_capped', True) for record in stake_info_records}
+                
                 # Get configuration
                 from config import get_config
                 config = get_config(interaction.guild_id)
@@ -896,7 +899,7 @@ class PersistentView(discord.ui.View):
                 # Get the user-specified min_stake from the draft session
                 user_min_stake = draft_session.min_stake or 10
                 
-                # Use the router function
+                # Use the router function with capping info
                 from stake_calculator import calculate_stakes_with_strategy
                 stake_pairs = calculate_stakes_with_strategy(
                     draft_session.team_a, 
@@ -904,7 +907,8 @@ class PersistentView(discord.ui.View):
                     stakes_dict,
                     min_stake=user_min_stake,  # Use the min_stake specified by the user
                     multiple=stake_multiple,
-                    use_optimized=use_optimized
+                    use_optimized=use_optimized,
+                    cap_info=cap_info
                 )
                 
                 # First, clear any existing assigned stakes to avoid duplications
@@ -1434,7 +1438,7 @@ class PersonalizedCapStatusView(discord.ui.View):
                 await interaction.response.edit_message(
                     content=f"Your bet cap status is now: {new_status}.\n" +
                     ("Your bet will be capped at the highest opponent bet." if stake_info.is_capped else 
-                     "Your bet will NOT be capped and may be spread across multiple opponents."),
+                     "Your bet will NOT be capped by the opposing team's highest bet and may be spread across multiple opponents."),
                     view=updated_view
                 )
                 
@@ -1490,7 +1494,7 @@ async def show_personalized_cap_status(interaction, draft_session_id):
             await interaction.response.send_message(
                 f"Your bet cap status is: {status}.\n" +
                 ("Your bet will be capped at the highest opponent bet." if is_capped else 
-                 "Your bet will NOT be capped and may be spread across multiple opponents."),
+                 "Your bet will NOT be capped by the opposing team's highest bet and may be spread across multiple opponents."),
                 view=view,
                 ephemeral=True
             )
@@ -1726,7 +1730,7 @@ class StakeOptionsSelect(discord.ui.Select):
         if is_capped:
             signup_message += " Your bet will be capped at the highest opponent bet."
         else:
-            signup_message += " Your bet will NOT be capped and may be spread across multiple opponents."
+            signup_message += " Your bet will NOT be capped by the opposing team's highest bet and may be spread across multiple opponents."
             
         if self.draft_link:
             signup_message += f"\n\nYou are now signed up. Join Here: {self.draft_link}"
@@ -1861,7 +1865,7 @@ class StakeModal(discord.ui.Modal):
             if is_capped:
                 signup_message += " Your bet will be capped at the highest opponent bet."
             else:
-                signup_message += " Your bet will NOT be capped and may be spread across multiple opponents."
+                signup_message += " Your bet will NOT be capped by the opposing team's highest bet and may be spread across multiple opponents."
             
             # Add reminder for stakes over 100
             if max_stake > 100:
@@ -2243,7 +2247,7 @@ class PersonalizedCapStatusView(discord.ui.View):
                 await interaction.response.edit_message(
                     content=f"Your bet cap status is now: {new_status}.\n" +
                     ("Your bet will be capped at the highest opponent bet." if stake_info.is_capped else 
-                     "Your bet will NOT be capped and may be spread across multiple opponents."),
+                     "Your bet will NOT be capped by the opposing team's highest bet and may be spread across multiple opponents."),
                     view=updated_view
                 )
                 
@@ -2299,7 +2303,7 @@ async def show_personalized_cap_status(interaction, draft_session_id):
             await interaction.response.send_message(
                 f"Your bet cap status is: {status}.\n" +
                 ("Your bet will be capped at the highest opponent bet." if is_capped else 
-                 "Your bet will NOT be capped and may be spread across multiple opponents."),
+                 "Your bet will NOT be capped by the opposing team's highest bet and may be spread across multiple opponents."),
                 view=view,
                 ephemeral=True
             )
@@ -2451,7 +2455,7 @@ class BetCapToggleButton(CallbackButton):
                     updated_view.add_item(updated_button)
                     
                     await no_interaction.response.edit_message(
-                        content="Your bet cap status has been set to OFF. Your bet will NOT be capped and may be spread across multiple opponents.",
+                        content="Your bet cap status has been set to OFF. Your bet will NOT be capped by the opposing team's highest bet and may be spread across multiple opponents.",
                         view=updated_view
                     )
                     

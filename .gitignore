@@ -4,6 +4,7 @@ key
 *.png
 *.json
 *.db
+*.xlsx
 test.py
 
 # Byte-compiled / optimized / DLL files
