@@ -28,7 +28,8 @@ class StakePair:
 class StakeCalculator:
     @staticmethod
     def calculate_stakes(team_a: List[str], team_b: List[str], 
-                         stakes: Dict[str, int], min_stake: int = 10) -> List[StakePair]:
+                         stakes: Dict[str, int], min_stake: int = 10,
+                         multiple: int = 10) -> List[StakePair]:
         """
         Calculate stake pairings between two teams.
         
@@ -37,6 +38,7 @@ class StakeCalculator:
             team_b: List of player IDs in team B
             stakes: Dictionary mapping player IDs to their max stake
             min_stake: Minimum stake amount allowed
+            multiple: Round stakes to this multiple
             
         Returns:
             List of StakePair objects representing the stake assignments
@@ -102,7 +104,8 @@ class StakeCalculator:
                 bet_amount = min(stake_a, stake_b)
                 stake_logger.info(f"Secondary match: {player_a} ({stake_a} tix) vs {player_b} ({stake_b} tix) = {bet_amount} tix")
                 
-                if bet_amount >= min_stake:
+                # CHANGED: Check against multiple instead of min_stake
+                if bet_amount >= multiple:
                     stake_pair = StakePair(player_a, player_b, bet_amount)
                     results.append(stake_pair)
                     
@@ -116,8 +119,9 @@ class StakeCalculator:
                         remaining_b.sort(key=lambda x: x[1], reverse=True)
                         stake_logger.debug(f"Player {player_b} still has {stake_b - bet_amount} tix remaining")
                 else:
-                    stake_logger.info(f"Bet amount {bet_amount} is below minimum stake {min_stake}, skipping this pairing")
-                    # Keep the stakes that were not used due to minimum stake
+                    # CHANGED: Log message to reflect the check against multiple
+                    stake_logger.info(f"Bet amount {bet_amount} is below minimum multiple {multiple}, skipping this pairing")
+                    # Keep the stakes that were not used due to minimum multiple
                     final_remaining_a.append((player_a, stake_a))
                     remaining_b.append((player_b, stake_b))
                     remaining_b.sort(key=lambda x: x[1], reverse=True)
@@ -395,7 +399,7 @@ class StakeCalculator:
                     rounded_allocation = (raw_allocation // multiple) * multiple
                     
                     # Ensure at least minimum stake
-                    rounded_allocation = max(rounded_allocation, min_stake)
+                    rounded_allocation = max(rounded_allocation, multiple)  # CHANGED: minimum is now multiple
                     
                     # But don't exceed the adjusted stake
                     rounded_allocation = min(rounded_allocation, adjusted_stake)
@@ -557,7 +561,7 @@ class StakeCalculator:
 
             # Match identical allocations
             for amount in sorted(min_by_allocation.keys(), reverse=True):
-                if amount in max_by_allocation and amount >= min_stake:
+                if amount in max_by_allocation and amount >= multiple:  # CHANGED: check against multiple
                     min_players = min_by_allocation[amount]
                     max_players = max_by_allocation[amount]
                     
@@ -631,9 +635,9 @@ class StakeCalculator:
                 elif min_remaining == match_amount or max_remaining == match_amount:
                     score += 500
                     
-                # Penalty for leaving small remainder that might be below min_stake
+                # Penalty for leaving small remainder that might be below multiple
                 remainder = abs(min_remaining - max_remaining)
-                if 0 < remainder < min_stake:
+                if 0 < remainder < multiple:  # CHANGED: check against multiple
                     score -= 300
                 
                 return score
@@ -648,8 +652,8 @@ class StakeCalculator:
                     for j, (max_player, max_remaining) in enumerate(remaining_max):
                         match_amount = min(min_remaining, max_remaining)
                         
-                        # Skip if match amount is below minimum stake
-                        if match_amount < min_stake:
+                        # Skip if match amount is below minimum multiple
+                        if match_amount < multiple:  # CHANGED: check against multiple
                             continue
                             
                         score = match_score(min_player, max_player, min_remaining, max_remaining)
@@ -686,19 +690,19 @@ class StakeCalculator:
                 max_new_remaining = max_remaining - match_amount
                 
                 # Remove or update min player
-                if min_new_remaining < min_stake:
-                    # If remaining amount is below min stake, don't consider for future matches
+                if min_new_remaining < multiple:  # CHANGED: check against multiple
+                    # If remaining amount is below multiple, don't consider for future matches
                     remaining_min.pop(i)
                 else:
                     remaining_min[i] = (min_player, min_new_remaining)
                 
                 # Remove or update max player
-                if max_new_remaining < min_stake:
+                if max_new_remaining < multiple:  # CHANGED: check against multiple
                     remaining_max.pop(j)
                 else:
                     remaining_max[j] = (max_player, max_new_remaining)
                 
-            # Step 4: Process any remaining players with small allocations (below min_stake)
+            # Step 4: Process any remaining players with small allocations (below multiple)
             if remaining_min or remaining_max:
                 stake_logger.info("Processing remaining small allocations:")
                 
@@ -710,7 +714,7 @@ class StakeCalculator:
                 if small_max:
                     stake_logger.info(f"Max team small allocations: {small_max}")
                 
-                # Try to combine small allocations to meet min_stake requirement
+                # Try to combine small allocations to meet multiple requirement
                 # or add to existing stake pairs
                 
                 # First try to handle min team small allocations
@@ -1094,7 +1098,7 @@ class OptimizedStakeCalculator:
             is_team_a_min = False
         
         stake_logger.info(f"Min Team: {min_team} (total: {min_team_total})")
-        stake_logger.info(f"Max Team: {max_team} (total: {max_team_total})")
+        stake_logger.info(f"Max Team: {max_team} (total: {max_team_total}")
         
         # Step 1: Group players by those who are at min stake and those above
         min_stake_players = []
@@ -1162,7 +1166,7 @@ class OptimizedStakeCalculator:
                 rounded_allocation = round(allocation / multiple) * multiple
                 
                 # Ensure minimum
-                rounded_allocation = max(rounded_allocation, min_stake)
+                rounded_allocation = max(rounded_allocation, multiple)  # CHANGED: minimum is now multiple
                 
                 above_min_allocations.append((player_id, rounded_allocation))
                 total_allocated += rounded_allocation
@@ -1245,8 +1249,8 @@ class OptimizedStakeCalculator:
                     sorted_allocations = []
                     for i, (player_id, current_allocation) in enumerate(above_min_allocations):
                         original_max = next(stake for pid, stake in above_min_players if pid == player_id)
-                        # Only include players who aren't already at the minimum stake
-                        if current_allocation > min_stake:
+                        # Only include players who aren't already at the minimum multiple
+                        if current_allocation > multiple:  # CHANGED: check against multiple
                             sorted_allocations.append((i, player_id, current_allocation, original_max))
                     
                     # Distribute negative adjustment fairly across multiple players
@@ -1254,8 +1258,8 @@ class OptimizedStakeCalculator:
                     sorted_allocations = []
                     for i, (player_id, current_allocation) in enumerate(above_min_allocations):
                         original_max = next(stake for pid, stake in above_min_players if pid == player_id)
-                        # Only include players who aren't already at the minimum stake
-                        if current_allocation > min_stake:
+                        # Only include players who aren't already at the minimum multiple
+                        if current_allocation > multiple:  # CHANGED: check against multiple
                             sorted_allocations.append((i, player_id, current_allocation, original_max))
                     
                     # Calculate how many multiples of adjustment we need to distribute
@@ -1276,7 +1280,7 @@ class OptimizedStakeCalculator:
                         
                         for j in range(players_to_adjust):
                             i, player_id, current_allocation, original_max = sorted_allocations[j]
-                            max_reduction = current_allocation - min_stake
+                            max_reduction = current_allocation - multiple  # CHANGED: check against multiple
                             
                             if max_reduction >= multiple:
                                 reduction = multiple
@@ -1294,7 +1298,7 @@ class OptimizedStakeCalculator:
                             adjusted_player = False
                             
                             for j, (i, player_id, current_allocation, original_max) in enumerate(sorted_allocations):
-                                max_reduction = current_allocation - min_stake
+                                max_reduction = current_allocation - multiple  # CHANGED: check against multiple
                                 
                                 if max_reduction >= multiple:
                                     reduction = multiple
@@ -1360,7 +1364,7 @@ class OptimizedStakeCalculator:
             
             for i, (min_player, min_remaining) in enumerate(remaining_min):
                 for j, (max_player, max_remaining) in enumerate(remaining_max):
-                    if min_remaining == max_remaining and min_remaining >= min_stake:
+                    if min_remaining == max_remaining and min_remaining >= multiple:  # CHANGED: check against multiple
                         # Exact match - create pair
                         if is_team_a_min:
                             pair = StakePair(min_player, max_player, min_remaining)
@@ -1417,7 +1421,7 @@ class OptimizedStakeCalculator:
                 for j, (max_player, max_remaining) in enumerate(remaining_max):
                     match_amount = min(min_remaining, max_remaining)
                     
-                    if match_amount < min_stake:
+                    if match_amount < multiple:  # CHANGED: check against multiple
                         continue
                         
                     # Calculate match score - prioritize:
@@ -1444,10 +1448,10 @@ class OptimizedStakeCalculator:
                     remainder_min = min_remaining - match_amount
                     remainder_max = max_remaining - match_amount
                     
-                    if 0 < remainder_min < min_stake:
+                    if 0 < remainder_min < multiple:  # CHANGED: check against multiple
                         score -= 3000
                         
-                    if 0 < remainder_max < min_stake:
+                    if 0 < remainder_max < multiple:  # CHANGED: check against multiple
                         score -= 1000
                         
                     if score > best_score:
@@ -1484,7 +1488,7 @@ class OptimizedStakeCalculator:
             for idx, (player, remaining) in enumerate(remaining_min):
                 if idx == i:  # This is the player we just matched
                     new_remaining = remaining - match_amount
-                    if new_remaining >= min_stake:
+                    if new_remaining >= multiple:  # CHANGED: check against multiple
                         new_remaining_min.append((player, new_remaining))
                 else:
                     new_remaining_min.append((player, remaining))
@@ -1493,7 +1497,7 @@ class OptimizedStakeCalculator:
             for idx, (player, remaining) in enumerate(remaining_max):
                 if idx == j:  # This is the player we just matched
                     new_remaining = remaining - match_amount
-                    if new_remaining >= min_stake:
+                    if new_remaining >= multiple:  # CHANGED: check against multiple
                         new_remaining_max.append((player, new_remaining))
                 else:
                     new_remaining_max.append((player, remaining))
@@ -1543,14 +1547,14 @@ class OptimizedStakeCalculator:
                                     break
                     
                     # If not added to an existing pair and amount is substantial, create a new pair
-                    if not added and min_amount >= min_stake:
+                    if not added and min_amount >= multiple:  # CHANGED: check against multiple
                         for max_player, max_allocation in max_team_allocations.items():
                             max_current = max_allocated.get(max_player, 0)
                             
                             if max_current < max_allocation:
                                 add_amount = min(min_amount, max_allocation - max_current)
                                 
-                                if add_amount >= min_stake:
+                                if add_amount >= multiple:  # CHANGED: check against multiple
                                     # Create a new pair
                                     if is_team_a_min:
                                         new_pair = StakePair(min_player, max_player, add_amount)
