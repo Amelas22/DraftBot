@@ -1340,7 +1340,7 @@ class MatchResultSelect(Select):
                     updated_value = f"{winning_team_emoji}**Match {match_result.match_number}**\n{player1_name}: {match_result.player1_wins} wins\n{player2_name}: {match_result.player2_wins} wins"
                     
                     for i, field in enumerate(embed.fields):
-                        if f"**Match {match_result.match_number}**" in field.value:
+                        if f":black_circle: **Match {match_result.match_number}**" in field.value:
                             embed.set_field_at(i, name=field.name, value=updated_value, inline=field.inline)
                             break
             new_view = await self.create_updated_view_for_pairings_message(bot, guild.id, draft_session_id, pairing_message_id)
