@@ -186,7 +186,7 @@ async def post_pairings(bot, guild, session_id):
                     opponent_name = guild.get_member(int(match_result.player2_id)).display_name if guild.get_member(int(match_result.player2_id)) else 'Unknown'
 
                     # Formatting the pairings without wins
-                    match_info = f"**Match {match_result.match_number}**\n{player_name} v.\n{opponent_name}"
+                    match_info = f"**:black_circle: Match {match_result.match_number}**\n{player_name} v.\n{opponent_name}"
                     embed.add_field(name="\u200b", value=match_info, inline=False)
                 # Post the pairings message for the current round
                 pairings_message = await draft_chat_channel_obj.send(embed=embed, view=view)

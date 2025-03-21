@@ -776,7 +776,7 @@ class PersistentView(discord.ui.View):
                         state_to_save, match_counter = await calculate_pairings(session, db_session)
                         session.match_counter = match_counter
                         session.swiss_matches = state_to_save
-                    if session.session_type == "random":
+                    if session.session_type == "random" or session.session_type == "staked":
                         await update_player_stats_for_draft(session.session_id, guild)
                     
                     for child in self.children:
@@ -827,10 +827,6 @@ class PersistentView(discord.ui.View):
                     if self.session_type != "test":
                         await draft_summary_message.pin()
                     session.draft_summary_message_id = str(draft_summary_message.id)
-                    if self.session_type != "test":
-                        await draft_summary_message.pin()
-                    session.draft_summary_message_id = str(draft_summary_message.id)
-
 
                     draft_channel_id = int(session.draft_channel_id) 
                     original_message_id = int(session.message_id)
@@ -1214,7 +1210,7 @@ class MatchResultSelect(Select):
 
                     await session.commit()  # Commit the changes to the database
                     
-                    if draft_session and draft_session.session_type == "random":
+                    if draft_session and draft_session.session_type == "random" or draft_session.session_type == "staked":
                         await update_player_stats_and_elo(match_result)
                    
         await update_draft_summary_message(self.bot, self.session_id)
