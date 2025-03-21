@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from loguru import logger
-from modals import CubeDraftSelectionView, StakedCubeDraftSelectionView
+from modals import CubeDraftSelectionView, StakedCubeDraftSelectionView, StakedWinstonDraftSelectionView
 
 from session import DraftSession, MatchResult
 from views import MatchResultSelect
@@ -22,11 +22,18 @@ class DraftCommands(commands.Cog):
         view = CubeDraftSelectionView(session_type="premade")
         await ctx.response.send_message("Select a cube:", view=view, ephemeral=True)
         
-    @discord.slash_command(name='dynamic_stake', description='Start a team draft with random teams and customizable stakes')
+    @discord.slash_command(name='dynamic_money_draft', description='Start a team draft with random teams and customizable bets')
     async def staked_draft(self, ctx):
-        logger.info("Received stakedraft command")
+        logger.info("Received moneydraft command")
         view = StakedCubeDraftSelectionView()
         await ctx.response.send_message("Select a cube for the staked draft:", view=view, ephemeral=True)
+    
+    @discord.slash_command(name='dynamic_winston', description='Start a winston queue with a min bet and max bet')
+    async def dynamic_winston_draft(self, ctx):
+        """Start a winston draft with customizable bets"""
+        logger.info("Received dynamic winston command")
+        view = StakedWinstonDraftSelectionView()
+        await ctx.response.send_message("Select a cube for the dynamic winston draft:", view=view, ephemeral=True)
 
     @discord.slash_command(
         name='report_results', 

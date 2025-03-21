@@ -50,7 +50,7 @@ class PersistentView(discord.ui.View):
         )
 
     def add_buttons(self):
-        if self.session_type == "winston":
+        if self.session_type == "winston" or self.session_type == "dynamic_winston":
             self.add_item(self.create_button("Sign Up", "green", f"sign_up_{self.draft_session_id}", self.sign_up_callback))
             self.add_item(self.create_button("Cancel Sign Up", "red", f"cancel_sign_up_{self.draft_session_id}", self.cancel_sign_up_callback))
             self.add_item(self.create_button("Cancel Draft", "grey", f"cancel_draft_{self.draft_session_id}", self.cancel_draft_callback))
@@ -139,16 +139,36 @@ class PersistentView(discord.ui.View):
 
 
     async def sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.session_type == "winston":
-            now = datetime.now()
-            deletion_time = now + timedelta(minutes=10)
-            relative_time = f"<t:{int(deletion_time.timestamp())}:R>"
-
         # Fetch the current draft session to ensure it's up to date
         draft_session = await get_draft_session(self.draft_session_id)
         if not draft_session:
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
             return
+        
+        sign_ups = draft_session.sign_ups or {}
+        user_id = str(interaction.user.id)
+
+        # Handle dynamic_winston session type
+        if self.session_type == "dynamic_winston":
+            if user_id in sign_ups:
+                # User is already signed up; inform them
+                await interaction.response.send_message("You are already signed up!", ephemeral=True)
+                return
+                
+            # Check if the draft is already full
+            if len(sign_ups) >= 2:
+                await interaction.response.send_message("This draft is already full!", ephemeral=True)
+                return
+                
+            # Show the join modal for the second player to set their bet
+            modal = DynamicWinstonJoinModal(draft_session)
+            await interaction.response.send_modal(modal)
+            return
+        
+        if self.session_type == "winston":
+            now = datetime.now()
+            deletion_time = now + timedelta(minutes=10)
+            relative_time = f"<t:{int(deletion_time.timestamp())}:R>"
         
         sign_ups = draft_session.sign_ups or {}
         user_id = str(interaction.user.id)
@@ -2520,3 +2540,156 @@ class BetCapToggleButton(CallbackButton):
                     view=view,
                     ephemeral=True
                 )
+
+class DynamicWinstonJoinModal(discord.ui.Modal):
+    def __init__(self, draft_session):
+        super().__init__(title="Join Dynamic Winston Draft")
+        self.draft_session = draft_session
+        
+        self.add_item(discord.ui.InputText(
+            label=f"Your Max Bet (min: {draft_session.min_stake} tix)",
+            placeholder=f"Enter a number (minimum {draft_session.min_stake})",
+            custom_id="max_bet_input",
+            required=True
+        ))
+    
+    async def callback(self, interaction: discord.Interaction):
+        user_id = str(interaction.user.id)
+        user_name = interaction.user.display_name
+        
+        # Parse max bet
+        try:
+            max_bet = int(self.children[0].value)
+            if max_bet < self.draft_session.min_stake:
+                await interaction.response.send_message(
+                    f"Your max bet must be at least {self.draft_session.min_stake} tix.", 
+                    ephemeral=True
+                )
+                return
+        except ValueError:
+            await interaction.response.send_message(
+                "Please enter a valid number for your max bet.", 
+                ephemeral=True
+            )
+            return
+        
+        # Add user to sign_ups and create stake info
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                # Update sign_ups
+                sign_ups = self.draft_session.sign_ups
+                sign_ups[user_id] = user_name
+                
+                # Get first player's stake info
+                first_player_id = next(iter([pid for pid in sign_ups.keys() if pid != user_id]), None)
+                if not first_player_id:
+                    await interaction.response.send_message(
+                        "Error: Could not find the first player's information.", 
+                        ephemeral=True
+                    )
+                    return
+                
+                first_stake_stmt = select(StakeInfo).where(
+                    StakeInfo.session_id == self.draft_session.session_id,
+                    StakeInfo.player_id == first_player_id
+                )
+                first_stake_result = await db_session.execute(first_stake_stmt)
+                first_stake_info = first_stake_result.scalars().first()
+                
+                if not first_stake_info:
+                    await interaction.response.send_message(
+                        "Error: Could not find the first player's stake information.", 
+                        ephemeral=True
+                    )
+                    return
+                
+                # Create stake info for second player
+                second_stake_info = StakeInfo(
+                    session_id=self.draft_session.session_id,
+                    player_id=user_id,
+                    max_stake=max_bet,
+                    assigned_stake=0,  # Will be calculated below
+                    is_capped=True
+                )
+                db_session.add(second_stake_info)
+                
+                # Calculate final bet (minimum of both max bets)
+                final_bet = min(first_stake_info.max_stake, max_bet)
+                
+                # Update both players' assigned stakes
+                first_stake_info.assigned_stake = final_bet
+                first_stake_info.opponent_id = user_id
+                second_stake_info.assigned_stake = final_bet
+                second_stake_info.opponent_id = first_player_id
+                
+                # Update the draft session
+                await db_session.execute(
+                    update(DraftSession)
+                    .where(DraftSession.session_id == self.draft_session.session_id)
+                    .values(sign_ups=sign_ups)
+                )
+                
+                await db_session.commit()
+        
+        # Get updated draft session
+        updated_session = await get_draft_session(self.draft_session.session_id)
+        if not updated_session:
+            await interaction.response.send_message(
+                "Error: Could not retrieve updated draft session.", 
+                ephemeral=True
+            )
+            return
+        
+        # Update the embed
+        channel = interaction.client.get_channel(int(updated_session.draft_channel_id))
+        if channel:
+            try:
+                message = await channel.fetch_message(int(updated_session.message_id))
+                embed = message.embeds[0]
+                
+                # Update sign-ups field
+                sign_ups_str = ""
+                for pid, name in updated_session.sign_ups.items():
+                    async with AsyncSessionLocal() as session:
+                        stake_stmt = select(StakeInfo).where(
+                            StakeInfo.session_id == updated_session.session_id,
+                            StakeInfo.player_id == pid
+                        )
+                        stake_result = await session.execute(stake_stmt)
+                        stake_info = stake_result.scalars().first()
+                        
+                        max_bet = stake_info.max_stake if stake_info else "unknown"
+                        sign_ups_str += f"{name} - Max Bet: {max_bet} tix\n"
+                
+                embed.set_field_at(0, name="Sign-Ups (2/2)", value=sign_ups_str, inline=False)
+                
+                # Add final bet field
+                embed.add_field(
+                    name="Final Bet", 
+                    value=f"The agreed bet is **{final_bet} tix**", 
+                    inline=False
+                )
+                
+                # Change color to green to indicate it's ready
+                embed.color = discord.Color.green()
+                
+                await message.edit(embed=embed)
+                
+                # Notify both players
+                player_mentions = " ".join([f"<@{pid}>" for pid in updated_session.sign_ups.keys()])
+                await channel.send(
+                    f"{player_mentions} Your Dynamic Winston Draft is ready!\n"
+                    f"The bet is set to **{final_bet} tix**.\n"
+                    f"Please join the draftmancer session: {updated_session.draft_link}"
+                )
+                
+            except Exception as e:
+                print(f"Error updating message: {e}")
+        
+        # Confirm to the user
+        await interaction.response.send_message(
+            f"You've joined the Dynamic Winston Draft with a max bet of {max_bet} tix.\n"
+            f"The final bet is {final_bet} tix.\n"
+            f"Join Here: {updated_session.draft_link}", 
+            ephemeral=True
+        )

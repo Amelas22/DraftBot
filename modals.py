@@ -198,3 +198,119 @@ class StakedCubeDraftModal(discord.ui.Modal):
         from sessions.staked_session import StakedSession
         session_instance = StakedSession(session_details)
         await session_instance.create_draft_session(interaction, interaction.client)
+
+class StakedWinstonDraftSelectionView(discord.ui.View):
+    def __init__(self):
+        super().__init__()
+        
+        self.cube_select = discord.ui.Select(
+            placeholder="Select a Cube",
+            options=[
+                discord.SelectOption(label="ChillWinston", value="ChillWinston"),
+                discord.SelectOption(label="LSVWinston", value="LSVWinston"),
+                discord.SelectOption(label="WinstonDeluxe", value="WinstonDeluxe"),
+                discord.SelectOption(label="Custom Cube...", value="custom")
+            ]
+        )
+        self.cube_select.callback = self.cube_select_callback
+        self.add_item(self.cube_select)
+
+    async def cube_select_callback(self, interaction: discord.Interaction):
+        cube_choice = self.cube_select.values[0]
+        
+        # Always show the staked draft modal
+        modal = WinstonDraftModal(cube_choice)
+        await interaction.response.send_modal(modal)
+
+class WinstonDraftModal(discord.ui.Modal):
+    def __init__(self, cube_choice: str, *args, **kwargs) -> None:
+        super().__init__(title="Dynamic Winston Draft Setup", *args, **kwargs)
+        self.cube_choice = cube_choice
+        
+        if cube_choice == "custom":
+            self.add_item(discord.ui.InputText(
+                label="Custom Cube Name",
+                placeholder="Enter your cube name",
+                custom_id="cube_name_input"
+            ))
+
+        # Add min stake input
+        self.add_item(discord.ui.InputText(
+            label="Minimum Bet for Queue (tix)",
+            placeholder="Enter minimum bet for queue (default: 10)",
+            custom_id="min_stake_input",
+            required=False
+        ))
+
+        self.add_item(discord.ui.InputText(
+            label="Your Max Bet (tix)",
+            placeholder="Enter your max bet (tix)",
+            custom_id="max_bet_input",
+            required=True
+        ))
+            
+    async def callback(self, interaction: discord.Interaction) -> None:
+        # Configure session details
+        from models.session_details import SessionDetails
+        session_details = SessionDetails(interaction)
+        
+        # If custom cube, get name from input, otherwise use preset choice
+        if self.cube_choice == "custom":
+            session_details.cube_choice = self.children[0].value
+            input_offset = 1
+        else:
+            session_details.cube_choice = self.cube_choice
+            input_offset = 0
+        
+        # Get min stake if provided
+        min_stake_str = self.children[input_offset].value
+        min_stake = 10  # Default value
+        if min_stake_str:
+            try:
+                min_stake = int(min_stake_str)
+                if min_stake < 1:
+                    min_stake = 10 
+            except ValueError:
+                await interaction.response.send_message(
+                    "Please enter a valid number for minimum bet.", 
+                    ephemeral=True
+                )
+                return
+        
+        # Get max bet (required field)
+        max_bet_str = self.children[input_offset + 1].value
+        try:
+            max_bet = int(max_bet_str)
+            if max_bet < min_stake:
+                await interaction.response.send_message(
+                    f"Your max bet must be at least the minimum bet ({min_stake} tix).", 
+                    ephemeral=True
+                )
+                return
+        except ValueError:
+            await interaction.response.send_message(
+                "Please enter a valid number for your max bet.", 
+                ephemeral=True
+            )
+            return
+        
+        # Store values in session details
+        session_details.min_stake = min_stake
+        session_details.max_stake = max_bet
+        
+        # Store user information - This is what was missing
+        session_details.creator_id = str(interaction.user.id)
+        session_details.creator_name = interaction.user.display_name
+        
+        # Create and start the draft session
+        from sessions.winston_session import WinstonSession
+        session_instance = WinstonSession(session_details)
+        
+        # Create draft
+        await session_instance.create_draft_session(interaction, interaction.client)
+        
+        # Try to mention the winston role, if it exists
+        winston_role = discord.utils.get(interaction.guild.roles, name="Chill Winston")
+        if winston_role:
+            channel = interaction.channel
+            await channel.send(f"{winston_role.mention} {interaction.user.display_name} is looking to Winston Draft with a bet between **{min_stake} and {session_details.max_stake}**!")
