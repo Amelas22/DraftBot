@@ -129,7 +129,7 @@ async def generate_live_draft_embed(bot, draft_session):
                     
                 match_text = f"{winner_emoji}**Match {match.match_number}**: {winner_name} defeats {loser_name} ({score})"
             else:
-                match_text = f"**:black_circle: Match {match.match_number}**: {player1_name} v. {player2_name}"
+                match_text = f"**⚫ Match {match.match_number}**: {player1_name} v. {player2_name}"
                 
             matches_text += match_text + "\n"
     

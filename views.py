@@ -1324,25 +1324,29 @@ class MatchResultSelect(Select):
                     player1, player2 = guild.get_member(int(match_result.player1_id)), guild.get_member(int(match_result.player2_id))
                     player1_name, player2_name = player1.display_name if player1 else 'Unknown', player2.display_name if player2 else 'Unknown'
                     
-                    # Determine which team won
-                    winning_team_emoji = ""
+                    # Determine which team won - default to black circle if no winner
+                    winning_team_emoji = "⚫ "
                     if match_result.winner_id:
                         # Get draft session to check which team the winner belongs to
-                        draft_session_result = await session.execute(select(DraftSession).filter_by(session_id=draft_session_id))
-                        draft_session = draft_session_result.scalar_one_or_none()
-                        
-                        if draft_session and match_result.winner_id in draft_session.team_a:
+                        if match_result.winner_id in draft_session.team_a:
                             winning_team_emoji = "🔴 "  # Red emoji for Team A
-                        elif draft_session and match_result.winner_id in draft_session.team_b:
+                        elif match_result.winner_id in draft_session.team_b:
                             winning_team_emoji = "🔵 "  # Blue emoji for Team B
                     
-                    # Update the field with the winning team emoji
+                    # Update the field with the appropriate emoji
                     updated_value = f"{winning_team_emoji}**Match {match_result.match_number}**\n{player1_name}: {match_result.player1_wins} wins\n{player2_name}: {match_result.player2_wins} wins"
                     
+                    # Fix: Look for the match number in the field value rather than expecting a specific format
+                    found_match = False
                     for i, field in enumerate(embed.fields):
-                        if f":black_circle: **Match {match_result.match_number}**" in field.value:
+                        if f"Match {match_result.match_number}" in field.value:
                             embed.set_field_at(i, name=field.name, value=updated_value, inline=field.inline)
+                            found_match = True
                             break
+                    
+                    if not found_match:
+                        print(f"Could not find field for Match {match_result.match_number}")
+            
             new_view = await self.create_updated_view_for_pairings_message(bot, guild.id, draft_session_id, pairing_message_id)
 
             # Edit the message with the updated embed and view
