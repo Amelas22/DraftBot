@@ -1262,7 +1262,7 @@ class MatchResultSelect(Select):
         if draft_session.session_type != "test":
             await check_and_post_victory_or_draw(self.bot, self.session_id)
         await self.update_pairings_posting(interaction, self.bot, self.session_id, self.match_number) 
-                    
+
     async def update_pairings_posting(self, interaction, bot, draft_session_id, match_number):
         guild = bot.get_guild(int(interaction.guild_id))
 
@@ -1318,12 +1318,15 @@ class MatchResultSelect(Select):
             result = await session.execute(stmt)
             match_results_for_this_message = result.scalars().all()
 
+            # Get player names for match identification
+            player1 = guild.get_member(int(match_result.player1_id))
+            player2 = guild.get_member(int(match_result.player2_id))
+            player1_name = player1.display_name if player1 else 'Unknown'
+            player2_name = player2.display_name if player2 else 'Unknown'
+
             # Update the embed with new match results
             for match_result in match_results_for_this_message:
                 if match_result.match_number == match_number:
-                    player1, player2 = guild.get_member(int(match_result.player1_id)), guild.get_member(int(match_result.player2_id))
-                    player1_name, player2_name = player1.display_name if player1 else 'Unknown', player2.display_name if player2 else 'Unknown'
-                    
                     # Determine which team won - default to black circle if no winner
                     winning_team_emoji = "⚫ "
                     if match_result.winner_id:
@@ -1336,22 +1339,36 @@ class MatchResultSelect(Select):
                     # Update the field with the appropriate emoji
                     updated_value = f"{winning_team_emoji}**Match {match_result.match_number}**\n{player1_name}: {match_result.player1_wins} wins\n{player2_name}: {match_result.player2_wins} wins"
                     
-                    # Fix: Look for the match number in the field value rather than expecting a specific format
+                    # Use a more robust method to find the right field - match the match number and player names
                     found_match = False
                     for i, field in enumerate(embed.fields):
-                        if f"Match {match_result.match_number}" in field.value:
+                        # Check if field has both match number and both players' names
+                        if (f"Match {match_result.match_number}" in field.value and 
+                            player1_name in field.value and 
+                            player2_name in field.value):
                             embed.set_field_at(i, name=field.name, value=updated_value, inline=field.inline)
                             found_match = True
                             break
                     
                     if not found_match:
                         print(f"Could not find field for Match {match_result.match_number}")
+                        # Try an alternative approach - just look for the match number
+                        for i, field in enumerate(embed.fields):
+                            if f"Match {match_result.match_number}" in field.value:
+                                embed.set_field_at(i, name=field.name, value=updated_value, inline=field.inline)
+                                found_match = True
+                                break
             
+            # Create a new view with updated button colors
             new_view = await self.create_updated_view_for_pairings_message(bot, guild.id, draft_session_id, pairing_message_id)
 
-            # Edit the message with the updated embed and view
-            await message.edit(embed=embed, view=new_view)
-
+            try:
+                # Edit the message with the updated embed and view
+                await message.edit(embed=embed, view=new_view)
+                print(f"Successfully updated message for match {match_number}")
+            except Exception as e:
+                print(f"Error updating message: {e}")
+                
     async def create_updated_view_for_pairings_message(self, bot, guild_id, draft_session_id, pairing_message_id):
         guild = bot.get_guild(guild_id)
         if not guild:

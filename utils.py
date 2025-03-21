@@ -185,8 +185,8 @@ async def post_pairings(bot, guild, session_id):
                     player_name = guild.get_member(int(match_result.player1_id)).display_name if guild.get_member(int(match_result.player1_id)) else 'Unknown'
                     opponent_name = guild.get_member(int(match_result.player2_id)).display_name if guild.get_member(int(match_result.player2_id)) else 'Unknown'
 
-                    # Formatting the pairings without wins
-                    match_info = f"**:black_circle: Match {match_result.match_number}**\n{player_name} v.\n{opponent_name}"
+                    # Formatting the pairings without wins - add black circle emoji for all initial matches
+                    match_info = f"⚫ **Match {match_result.match_number}**\n{player_name} v.\n{opponent_name}"
                     embed.add_field(name="\u200b", value=match_info, inline=False)
                 # Post the pairings message for the current round
                 pairings_message = await draft_chat_channel_obj.send(embed=embed, view=view)
@@ -213,8 +213,8 @@ async def post_pairings(bot, guild, session_id):
                     player_name = guild.get_member(int(match_result.player1_id)).display_name if guild.get_member(int(match_result.player1_id)) else 'Unknown'
                     opponent_name = guild.get_member(int(match_result.player2_id)).display_name if guild.get_member(int(match_result.player2_id)) else 'Unknown'
 
-                    # Formatting the pairings without wins
-                    match_info = f"**Match {match_result.match_number}**\n{player_name} v.\n{opponent_name}"
+                    # Formatting the pairings without wins - add black circle emoji for all initial matches
+                    match_info = f"⚫ **Match {match_result.match_number}**\n{player_name} v.\n{opponent_name}"
                     embed.add_field(name="\u200b", value=match_info, inline=False)
                 # Post the pairings message for the current round
                 pairings_message = await draft_chat_channel_obj.send(embed=embed, view=view)
