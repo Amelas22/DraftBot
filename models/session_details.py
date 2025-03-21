@@ -13,4 +13,5 @@ class SessionDetails:
         self.cube_choice = None
         self.team_a_name = None
         self.team_b_name = None
+        self.min_stake = 10
         logger.debug(f"SessionDetails initialized: {self}")

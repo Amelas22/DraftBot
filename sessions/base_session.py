@@ -74,7 +74,8 @@ class BaseSession:
             team_a_name=self.session_details.team_a_name,
             team_b_name=self.session_details.team_b_name,
             tracked_draft=True,
-            cube=self.session_details.cube_choice
+            cube=self.session_details.cube_choice,
+            min_stake=getattr(self.session_details, 'min_stake', 10)
         )
         session.add(new_draft_session)
         return new_draft_session

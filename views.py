@@ -151,12 +151,6 @@ class PersistentView(discord.ui.View):
             return
         
         sign_ups = draft_session.sign_ups or {}
-
-        # Check if the sign-up list is already full
-        if self.session_type != "schedule":
-            if len(sign_ups) >= 8:
-                await interaction.response.send_message("The sign-up list is already full. No more players can sign up.", ephemeral=True)
-                return
         user_id = str(interaction.user.id)
 
         if draft_session.session_type == "swiss":
@@ -191,10 +185,11 @@ class PersistentView(discord.ui.View):
                 stake_options_view = StakeOptionsView(
                     draft_session_id=self.draft_session_id,
                     draft_link=draft_session.draft_link,
-                    user_display_name=interaction.user.display_name
+                    user_display_name=interaction.user.display_name,
+                    min_stake=draft_session.min_stake
                 )
                 await interaction.response.send_message(
-                    "Select your maximum stake amount:",
+                    f"Min Bet for queue is {draft_session.min_stake}. Select your max bet:",
                     view=stake_options_view,
                     ephemeral=True
                 )
@@ -1647,18 +1642,25 @@ class CancelConfirmationView(discord.ui.View):
 
 
 class StakeOptionsSelect(discord.ui.Select):
-    def __init__(self, draft_session_id, draft_link, user_display_name):
-        options = [
-            discord.SelectOption(label="10 TIX", value="10"),
-            discord.SelectOption(label="20 TIX", value="20"),
-            discord.SelectOption(label="50 TIX", value="50"),
-            discord.SelectOption(label="100 TIX", value="100"),
-            discord.SelectOption(label="Over 100 TIX", value="over_100"),
-        ]
-        super().__init__(placeholder="Select your maximum bet...", min_values=1, max_values=1, options=options)
+    def __init__(self, draft_session_id, draft_link, user_display_name, min_stake):
         self.draft_session_id = draft_session_id
         self.draft_link = draft_link
         self.user_display_name = user_display_name
+        self.min_stake = min_stake
+
+        options = []
+        if self.min_stake <= 10:
+            options.append(discord.SelectOption(label="10 TIX", value="10"))
+        if self.min_stake <= 20:
+            options.append(discord.SelectOption(label="20 TIX", value="20"))
+        if self.min_stake <= 50:   
+            options.append(discord.SelectOption(label="50 TIX", value="50"))
+        if self.min_stake <= 100:   
+            options.append(discord.SelectOption(label="100 TIX", value="100"))
+        options.append(discord.SelectOption(label="Over 100 TIX", value="over_100"))
+
+        super().__init__(placeholder=f"Select your maximum bet... ", min_values=1, max_values=1, options=options)
+        
 
     async def callback(self, interaction: discord.Interaction):
         selected_value = self.values[0]
@@ -1726,7 +1728,7 @@ class StakeOptionsSelect(discord.ui.Select):
                 await session.commit()
         
         # Confirm stake and provide draft link
-        signup_message = f"You've set your maximum stake to {stake_amount} tix."
+        signup_message = f"You've set your maximum bet to {stake_amount} tix."
         if is_capped:
             signup_message += " Your bet will be capped at the highest opponent bet."
         else:
@@ -1743,9 +1745,9 @@ class StakeOptionsSelect(discord.ui.Select):
 
 
 class StakeOptionsView(discord.ui.View):
-    def __init__(self, draft_session_id, draft_link, user_display_name):
+    def __init__(self, draft_session_id, draft_link, user_display_name, min_stake):
         super().__init__(timeout=300)  # 5 minute timeout
-        self.add_item(StakeOptionsSelect(draft_session_id, draft_link, user_display_name))
+        self.add_item(StakeOptionsSelect(draft_session_id, draft_link, user_display_name, min_stake))
 
 
 class StakeModal(discord.ui.Modal):
@@ -1861,7 +1863,7 @@ class StakeModal(discord.ui.Modal):
                     await session.commit()
             
             # Create a response that includes the stake confirmation, reminder about stake usage, and draft link
-            signup_message = f"You've set your maximum stake to {max_stake} tix."
+            signup_message = f"You've set your maximum bet to {max_stake} tix."
             if is_capped:
                 signup_message += " Your bet will be capped at the highest opponent bet."
             else:
