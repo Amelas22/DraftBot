@@ -1024,10 +1024,10 @@ async def update_player_stats_and_elo(match_result):
                 else:
                     winner, loser = player2, player1
 
-                # Update ELO ratings
-                elo_diff = calculate_elo_diff(winner.elo_rating, loser.elo_rating)
-                winner.elo_rating += elo_diff
-                loser.elo_rating -= elo_diff
+                # # Update ELO ratings
+                # elo_diff = calculate_elo_diff(winner.elo_rating, loser.elo_rating)
+                # winner.elo_rating += elo_diff
+                # loser.elo_rating -= elo_diff
 
                 # Create TrueSkill Rating objects for winner and loser
                 winner_rating = Rating(mu=winner.true_skill_mu, sigma=winner.true_skill_sigma)
