@@ -1,3 +1,4 @@
+# db_migrate_player_preferences.py
 import asyncio
 import logging
 from sqlalchemy import text
@@ -10,56 +11,54 @@ logger = logging.getLogger(__name__)
 # Database URL - should match your existing configuration
 DATABASE_URL = "sqlite+aiosqlite:///drafts.db"
 
-async def add_is_capped_column():
-    """Add is_capped column to stake_info table"""
+async def create_player_preferences_table():
+    """Create the player_preferences table using raw SQL, safer for SQLite"""
     from sqlalchemy.ext.asyncio import create_async_engine
     engine = create_async_engine(DATABASE_URL, echo=True)
     
     try:
         async with engine.begin() as conn:
-            # First check if the stake_info table exists
-            result = await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='stake_info'"))
+            # Check if the table already exists
+            result = await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='player_preferences'"))
             table_exists = result.scalar()
             
             if not table_exists:
-                logger.warning("stake_info table does not exist. No migration needed.")
-                return
-            
-            # Check if the is_capped column already exists
-            columns_query = """
-            PRAGMA table_info(stake_info);
-            """
-            result = await conn.execute(text(columns_query))
-            columns = result.fetchall()
-            
-            column_names = [col[1] for col in columns]
-            
-            # Add the is_capped column if it doesn't exist
-            if 'is_capped' not in column_names:
-                # SQLite doesn't support ADD COLUMN with DEFAULT for existing rows in one statement,
-                # so we need to add the column first, then update existing rows
-                await conn.execute(text("ALTER TABLE stake_info ADD COLUMN is_capped BOOLEAN"))
-                logger.info("Added is_capped column to stake_info table")
+                # Create the table with pure SQL (SQLite-safe approach)
+                create_table_sql = """
+                CREATE TABLE player_preferences (
+                    id VARCHAR(128) PRIMARY KEY,
+                    player_id VARCHAR(64) NOT NULL,
+                    guild_id VARCHAR(64) NOT NULL, 
+                    is_bet_capped BOOLEAN DEFAULT 1,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+                await conn.execute(text(create_table_sql))
+                logger.info("Created player_preferences table successfully")
                 
-                # Now set the default value for all existing rows
-                await conn.execute(text("UPDATE stake_info SET is_capped = 1"))
-                logger.info("Set default value (TRUE) for is_capped column on all existing records")
+                # Create an index for faster lookups
+                index_sql = """
+                CREATE INDEX idx_player_guild 
+                ON player_preferences(player_id, guild_id);
+                """
+                await conn.execute(text(index_sql))
+                logger.info("Created index on player_id and guild_id")
             else:
-                logger.info("is_capped column already exists in stake_info table")
-
+                logger.info("player_preferences table already exists")
+                
     except Exception as e:
-        logger.error(f"Error adding is_capped column to stake_info table: {e}")
+        logger.error(f"Error creating player_preferences table: {e}")
         raise
     finally:
         await engine.dispose()
 
 async def migrate_database():
     """Execute all migration steps"""
-    logger.info("Starting database migration for stake capping feature")
+    logger.info("Starting database migration for player preferences")
     
     try:
-        # Add the is_capped column to stake_info table
-        await add_is_capped_column()
+        # Create the player_preferences table
+        await create_player_preferences_table()
         
         logger.info("Database migration completed successfully")
     except Exception as e:
