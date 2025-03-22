@@ -402,8 +402,15 @@ class PersistentView(discord.ui.View):
                         stake_info_by_player = {}
                         
                         if self.session_type == "staked" and updated_session and updated_session.team_a and updated_session.team_b:
-                            # Calculate and store stakes in database
-                            await self.calculate_and_store_stakes(interaction, updated_session)
+                            # Load player preferences for all participants
+                            all_players = updated_session.team_a + updated_session.team_b
+                            
+                            # Get cap info from database
+                            from preference_service import get_players_bet_capping_preferences
+                            cap_info = await get_players_bet_capping_preferences(all_players, guild_id=str(interaction.guild_id))
+                            
+                            # Calculate and store stakes
+                            await self.calculate_and_store_stakes(interaction, updated_session, cap_info)
                             
                             # Fetch the calculated stakes for display
                             stake_stmt = select(StakeInfo).where(StakeInfo.session_id == session_id)
@@ -909,7 +916,7 @@ class PersistentView(discord.ui.View):
         finally:
             del PROCESSING_ROOMS_PAIRINGS[session_id]
 
-    async def calculate_and_store_stakes(self, interaction: discord.Interaction, draft_session):
+    async def calculate_and_store_stakes(self, interaction: discord.Interaction, draft_session, cap_info=None):
         """Calculate and store stakes for a staked draft session."""
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
@@ -921,8 +928,10 @@ class PersistentView(discord.ui.View):
                 # Build stakes dictionary
                 stakes_dict = {record.player_id: record.max_stake for record in stake_info_records}
                 
-                # Build capping info dictionary
-                cap_info = {record.player_id: getattr(record, 'is_capped', True) for record in stake_info_records}
+                # Build capping info dictionary - use passed cap_info if provided
+                if cap_info is None:
+                    # Fall back to using the is_capped values from stake_info_records if no cap_info provided
+                    cap_info = {record.player_id: getattr(record, 'is_capped', True) for record in stake_info_records}
                 
                 # Get configuration
                 from config import get_config
@@ -930,7 +939,6 @@ class PersistentView(discord.ui.View):
                 use_optimized = config.get("stakes", {}).get("use_optimized_algorithm", False)
                 stake_multiple = config.get("stakes", {}).get("stake_multiple", 10)
                 
-                # Get the user-specified min_stake from the draft session
                 user_min_stake = draft_session.min_stake or 10
                 
                 # Use the router function with capping info
@@ -939,7 +947,7 @@ class PersistentView(discord.ui.View):
                     draft_session.team_a, 
                     draft_session.team_b, 
                     stakes_dict,
-                    min_stake=user_min_stake,  # Use the min_stake specified by the user
+                    min_stake=user_min_stake,  
                     multiple=stake_multiple,
                     use_optimized=use_optimized,
                     cap_info=cap_info
@@ -1721,26 +1729,39 @@ class StakeOptionsSelect(discord.ui.Select):
 
         super().__init__(placeholder=f"Select your maximum bet... ", min_values=1, max_values=1, options=options)
         
-
     async def callback(self, interaction: discord.Interaction):
+        user_id = str(interaction.user.id)
+        guild_id = str(interaction.guild_id)
+        
+        # Load the user's saved preference
+        from preference_service import get_player_bet_capping_preference
+        is_capped = await get_player_bet_capping_preference(user_id, guild_id)
+        
         selected_value = self.values[0]
         
         if selected_value == "over_100":
-            # Show modal for custom amount over 100
+            # Create modal for custom amount over 100
             stake_modal = StakeModal(over_100=True)
             stake_modal.draft_session_id = self.draft_session_id
             stake_modal.draft_link = self.draft_link
             stake_modal.user_display_name = self.user_display_name
+            
+            # IMPORTANT: Set the default value based on saved preference before showing the modal
+            stake_modal.default_cap_setting = is_capped
+            # Update the cap checkbox value based on the preference
+            stake_modal.cap_checkbox.value = "yes" if is_capped else "no"
+            
             await interaction.response.send_modal(stake_modal)
         else:
-            # Process the selected preset stake amount
+            # Process the selected preset stake amount with the saved preference
             stake_amount = int(selected_value)
             
-            # Add user to sign_ups and handle stake submission (with default capping enabled)
-            await self.handle_stake_submission(interaction, stake_amount, is_capped=True)
+            # Add user to sign_ups and handle stake submission using saved preference
+            await self.handle_stake_submission(interaction, stake_amount, is_capped=is_capped)
             
     async def handle_stake_submission(self, interaction, stake_amount, is_capped=True):
         user_id = str(interaction.user.id)
+        guild_id = str(interaction.guild_id)
         
         async with AsyncSessionLocal() as session:
             async with session.begin():
@@ -1788,11 +1809,9 @@ class StakeOptionsSelect(discord.ui.Select):
                 await session.commit()
         
         # Confirm stake and provide draft link
-        signup_message = f"You've set your maximum bet to {stake_amount} tix."
-        if is_capped:
-            signup_message += " Your bet will be capped at the highest opponent bet."
-        else:
-            signup_message += " Your bet will NOT be capped by the opposing team's highest bet and may be spread across multiple opponents."
+        cap_status = "capped at the highest opponent bet" if is_capped else "NOT capped (full action)"
+        signup_message = f"You've set your maximum stake to {stake_amount} tix."
+        signup_message += f"\nYour bet will be {cap_status}."
             
         if self.draft_link:
             signup_message += f"\n\nYou are now signed up. Join Here: {self.draft_link}"
@@ -1815,6 +1834,7 @@ class StakeModal(discord.ui.Modal):
         super().__init__(title="Enter Maximum Bet")
         
         self.over_100 = over_100
+        self.default_cap_setting = True  # Will be set before showing modal
         placeholder_text = "Reminder: Your bet can fill multiple bets when possible" if over_100 else "Enter maximum amount you're willing to bet"
         
         self.stake_input = discord.ui.InputText(
@@ -1830,7 +1850,7 @@ class StakeModal(discord.ui.Modal):
                 label="Cap my bet at highest opponent bet",
                 placeholder="Type 'yes' to cap or 'no' to keep your full bet",
                 required=True,
-                value="yes"  # Default to 'yes'
+                value="yes"  # Will be updated with default_cap_setting before showing
             )
             self.add_item(self.cap_checkbox)
         
@@ -1841,6 +1861,7 @@ class StakeModal(discord.ui.Modal):
 
     async def callback(self, interaction: discord.Interaction):
         user_id = str(interaction.user.id)
+        guild_id = str(interaction.guild_id)
         
         try:
             # Parse the stake amount
@@ -1865,6 +1886,10 @@ class StakeModal(discord.ui.Modal):
                 return
         
         try:
+            # Update the player's preference in the database for future drafts
+            from preference_service import update_player_bet_capping_preference
+            await update_player_bet_capping_preference(user_id, guild_id, is_capped)
+            
             async with AsyncSessionLocal() as session:
                 async with session.begin():
                     # Check if draft_session_id is set properly
@@ -1923,11 +1948,12 @@ class StakeModal(discord.ui.Modal):
                     await session.commit()
             
             # Create a response that includes the stake confirmation, reminder about stake usage, and draft link
-            signup_message = f"You've set your maximum bet to {max_stake} tix."
-            if is_capped:
-                signup_message += " Your bet will be capped at the highest opponent bet."
-            else:
-                signup_message += " Your bet will NOT be capped by the opposing team's highest bet and may be spread across multiple opponents."
+            cap_status = "capped at the highest opponent bet" if is_capped else "NOT capped (full action)"
+            signup_message = f"You've set your maximum stake to {max_stake} tix."
+            signup_message += f"\nYour bet will be {cap_status}."
+            
+            # Add note about preference being saved for future drafts
+            signup_message += f"\n\nThis setting will be remembered for future drafts."
             
             # Add reminder for stakes over 100
             if max_stake > 100:
@@ -2382,6 +2408,7 @@ class BetCapToggleButton(CallbackButton):
     
     async def bet_cap_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = str(interaction.user.id)
+        guild_id = str(interaction.guild_id)
         
         # Check if user is registered in this draft
         async with AsyncSessionLocal() as session:
@@ -2464,6 +2491,10 @@ class BetCapToggleButton(CallbackButton):
                             inner_session.add(inner_stake_info)
                             await inner_session.commit()
                     
+                    # Update the player's preference for future drafts
+                    from preference_service import update_player_bet_capping_preference
+                    await update_player_bet_capping_preference(user_id, guild_id, True)
+                    
                     # Create updated view with the new status
                     updated_view = discord.ui.View(timeout=None)
                     updated_button = discord.ui.Button(
@@ -2475,7 +2506,7 @@ class BetCapToggleButton(CallbackButton):
                     updated_view.add_item(updated_button)
                     
                     await yes_interaction.response.edit_message(
-                        content="Your bet cap status has been set to ON. Your bet will be capped at the highest opponent bet.",
+                        content="Your bet cap status has been set to ON. Your bet will be capped at the highest opponent bet.\n\nThis preference will be remembered for future drafts.",
                         view=updated_view
                     )
                     
@@ -2506,6 +2537,10 @@ class BetCapToggleButton(CallbackButton):
                             inner_session.add(inner_stake_info)
                             await inner_session.commit()
                     
+                    # Update the player's preference for future drafts
+                    from preference_service import update_player_bet_capping_preference
+                    await update_player_bet_capping_preference(user_id, guild_id, False)
+                    
                     # Create updated view with the new status
                     updated_view = discord.ui.View(timeout=None)
                     updated_button = discord.ui.Button(
@@ -2517,7 +2552,7 @@ class BetCapToggleButton(CallbackButton):
                     updated_view.add_item(updated_button)
                     
                     await no_interaction.response.edit_message(
-                        content="Your bet cap status has been set to OFF. Your bet will NOT be capped by the opposing team's highest bet and may be spread across multiple opponents.",
+                        content="Your bet cap status has been set to OFF. Your bet will NOT be capped and may be spread across multiple opponents.\n\nThis preference will be remembered for future drafts.",
                         view=updated_view
                     )
                     
@@ -2534,7 +2569,7 @@ class BetCapToggleButton(CallbackButton):
                 
                 # Send the ephemeral message with current status
                 message_content = f"Your bet cap status is currently: {status}.\n\n"
-                message_content += "What would you like to do?"
+                message_content += "This setting will be remembered for future drafts."
                 
                 await interaction.response.send_message(
                     content=message_content,
