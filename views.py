@@ -445,10 +445,12 @@ class PersistentView(discord.ui.View):
                     # Create the embed message for displaying the teams and seating order
                     embed = discord.Embed(
                         title=f"Draft-{session.draft_id} is Ready!",
-                        description=f"**DRAFTMANCER SESSION:➡️ [JOIN DRAFT HERE]({session.draft_link})** ⬅️\n\n" +
-                                    "Host of Draftmancer must manually adjust seating as per below. **TURN OFF RANDOM SEATING SETTING IN DRAFTMANCER**" +
-                                    "\n\n**AFTER THE DRAFT**, select Create Chat Rooms and Post Pairings" +
-                                    "\nPost Pairings will post in the created draft-chat room",
+                        description=f"**DRAFTMANCER SESSION:➡️ [JOIN DRAFT HERE]({session.draft_link})** ⬅️"
+                                    f"\n**Chosen Cube: [{session.cube}]"
+                                    f"(https://cubecobra.com/cube/list/{session.cube})**\n\n" 
+                                    "Host of Draftmancer must manually adjust seating as per below. \n**TURN OFF RANDOM SEATING SETTING IN DRAFTMANCER**" 
+                                    "\n\n**AFTER THE DRAFT**, select Create Chat Rooms and Post Pairings" 
+                                    "\nPairings will post in the created draft-chat room",
                         color=discord.Color.dark_gold() if session.session_type == "swiss" else discord.Color.blue()
                     )
                     
@@ -490,7 +492,9 @@ class PersistentView(discord.ui.View):
                     # Create the new channel embed for team announcements
                     channel_embed = discord.Embed(
                         title="Teams have been formed. Seating Order Below!",
-                        description=f"**DRAFTMANCER SESSION:➡️ [JOIN DRAFT HERE]({session.draft_link})** ⬅️",
+                        description=f"**DRAFTMANCER SESSION:➡️ [JOIN DRAFT HERE]({session.draft_link})** ⬅️"
+                                    f"\n**Chosen Cube: [{session.cube}]"
+                                    f"(https://cubecobra.com/cube/list/{session.cube})**\n\n",
                         color=discord.Color.dark_gold() if session.session_type == "swiss" else discord.Color.green()
                     )
                     
