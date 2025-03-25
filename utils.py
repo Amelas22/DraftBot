@@ -195,6 +195,7 @@ async def post_pairings(bot, guild, session_id):
                 for match_result in match_results:
                     match_result.pairing_message_id = str(pairings_message.id)
                     db_session.add(match_result)
+            await draft_chat_channel_obj.send("**REMINDER**: You can report results using the `/report_results` command after each round. Good luck in your matches!")
         else:
             round_number = (draft_session.match_counter - 1) // 4
             stmt = select(MatchResult).where(MatchResult.session_id == draft_session.session_id, MatchResult.match_number.between((draft_session.match_counter - 4), draft_session.match_counter)).order_by(MatchResult.match_number.asc())
