@@ -58,7 +58,23 @@ class DraftLogManager:
 
                     data_fetched = await self.fetch_draft_log_data()
                     if data_fetched:
-                        print(f"Draft log data fetched and saved for {self.draft_id}, closing connection.")
+                        print(f"Draft log data fetched and saved for {self.draft_id}, staying connected for 3 hours and 15 minutes.")
+                        
+                        # Keep connection alive for 3 hours and 15 minutes (11700 seconds)
+                        # Send a ping every 2 minutes (120 seconds)
+                        remaining_time = 11700  
+                        ping_interval = 120  
+                        
+                        while remaining_time > 0:
+                            try:
+                                await self.sio.emit('ping')  
+                                await asyncio.sleep(min(ping_interval, remaining_time))  
+                                remaining_time -= min(ping_interval, remaining_time)
+                            except socketio.exceptions.ConnectionError:
+                                print(f"Connection to {self.draft_link} closed during waiting period, reconnecting...")
+                                break  
+                        
+                        print(f"Time period elapsed for {self.draft_id}, closing connection.")
                         await self.sio.disconnect()
                         return
                     else:
