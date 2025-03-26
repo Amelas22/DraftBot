@@ -2403,7 +2403,7 @@ async def show_personalized_cap_status(interaction, draft_session_id):
 class BetCapToggleButton(CallbackButton):
     def __init__(self, draft_session_id):
         super().__init__(
-            label="Bet Cap Settings",
+            label="Change Bet/Settings",
             style=discord.ButtonStyle.secondary,
             custom_id=f"bet_cap_toggle_{draft_session_id}",
             custom_callback=self.bet_cap_callback
@@ -2443,140 +2443,237 @@ class BetCapToggleButton(CallbackButton):
                     await interaction.response.send_message("You need to set a stake amount first.", ephemeral=True)
                     return
                 
-                # Create a personalized view with the user's current status
+                # Get user's current status
                 is_capped = getattr(stake_info, 'is_capped', True)  # Default to True if not set
                 status = "ON" if is_capped else "OFF"
                 style = discord.ButtonStyle.green if is_capped else discord.ButtonStyle.red
+                current_stake = stake_info.max_stake
                 
-                view = discord.ui.View(timeout=None)
+                # Create combined view with both stake options and cap buttons
+                combined_view = discord.ui.View(timeout=None)
+                
+                # Create a custom view that combines stake options and cap settings
+                # First add the stake options dropdown
+                min_stake = draft_session.min_stake or 10
+                options = []
+                if min_stake <= 10:
+                    options.append(discord.SelectOption(label="10 TIX", value="10"))
+                if min_stake <= 20:
+                    options.append(discord.SelectOption(label="20 TIX", value="20"))
+                if min_stake <= 50:   
+                    options.append(discord.SelectOption(label="50 TIX", value="50"))
+                if min_stake <= 100:   
+                    options.append(discord.SelectOption(label="100 TIX", value="100"))
+                options.append(discord.SelectOption(label="Over 100 TIX", value="over_100"))
+                
+                # Create the stake options dropdown
+                stake_select = CombinedStakeSelect(
+                    draft_session_id=self.draft_session_id,
+                    draft_link=draft_session.draft_link,
+                    user_display_name=interaction.user.display_name,
+                    min_stake=min_stake,
+                    current_stake=current_stake,
+                    options=options
+                )
+                combined_view.add_item(stake_select)
+                
+                # Add bet cap status button (informational only)
                 status_button = discord.ui.Button(
                     label=f"Bet Cap: {status}",
                     style=style,
                     custom_id=f"bet_cap_status_{self.draft_session_id}",
                     disabled=True
                 )
-                view.add_item(status_button)
+                combined_view.add_item(status_button)
                 
-                # Add Yes/No buttons to toggle status
+                # Create ON button with its callback
                 yes_button = discord.ui.Button(
-                    label="Turn ON",
+                    label="Turn ON 🧢",
                     style=discord.ButtonStyle.green,
                     custom_id=f"cap_yes_{self.draft_session_id}"
                 )
                 
-                no_button = discord.ui.Button(
-                    label="Turn OFF", 
-                    style=discord.ButtonStyle.red,
-                    custom_id=f"cap_no_{self.draft_session_id}"
-                )
-                
-                # Define callbacks for the yes/no buttons
                 async def yes_callback(yes_interaction):
                     if yes_interaction.user.id != interaction.user.id:
                         await yes_interaction.response.send_message("This button is not for you.", ephemeral=True)
                         return
-                        
-                    async with AsyncSessionLocal() as inner_session:
-                        async with inner_session.begin():
-                            # Get the stake info again
-                            inner_stake_stmt = select(StakeInfo).where(and_(
-                                StakeInfo.session_id == self.draft_session_id,
-                                StakeInfo.player_id == user_id
-                            ))
-                            inner_stake_result = await inner_session.execute(inner_stake_stmt)
-                            inner_stake_info = inner_stake_result.scalars().first()
-                            
-                            if not inner_stake_info:
-                                await yes_interaction.response.send_message("Error: Stake info not found.", ephemeral=True)
-                                return
-                                
-                            # Set is_capped to True
-                            inner_stake_info.is_capped = True
-                            inner_session.add(inner_stake_info)
-                            await inner_session.commit()
                     
-                    # Update the player's preference for future drafts
-                    from preference_service import update_player_bet_capping_preference
-                    await update_player_bet_capping_preference(user_id, guild_id, True)
-                    
-                    # Create updated view with the new status
-                    updated_view = discord.ui.View(timeout=None)
-                    updated_button = discord.ui.Button(
-                        label="Bet Cap: ON",
-                        style=discord.ButtonStyle.green,
-                        custom_id=f"bet_cap_status_{self.draft_session_id}",
-                        disabled=True
-                    )
-                    updated_view.add_item(updated_button)
-                    
-                    await yes_interaction.response.edit_message(
-                        content="Your bet cap status has been set to ON. Your bet will be capped at the highest opponent bet.\n\nThis preference will be remembered for future drafts.",
-                        view=updated_view
-                    )
-                    
-                    # Update the draft message
-                    await update_draft_message(yes_interaction.client, self.draft_session_id)
+                    # Update cap status
+                    await self.update_cap_status(yes_interaction, user_id, guild_id, is_capped=True)
+                
+                yes_button.callback = yes_callback
+                combined_view.add_item(yes_button)
+                
+                # Create OFF button with its callback
+                no_button = discord.ui.Button(
+                    label="Turn OFF 🏎️", 
+                    style=discord.ButtonStyle.red,
+                    custom_id=f"cap_no_{self.draft_session_id}"
+                )
                 
                 async def no_callback(no_interaction):
                     if no_interaction.user.id != interaction.user.id:
                         await no_interaction.response.send_message("This button is not for you.", ephemeral=True)
                         return
-                        
-                    async with AsyncSessionLocal() as inner_session:
-                        async with inner_session.begin():
-                            # Get the stake info again
-                            inner_stake_stmt = select(StakeInfo).where(and_(
-                                StakeInfo.session_id == self.draft_session_id,
-                                StakeInfo.player_id == user_id
-                            ))
-                            inner_stake_result = await inner_session.execute(inner_stake_stmt)
-                            inner_stake_info = inner_stake_result.scalars().first()
-                            
-                            if not inner_stake_info:
-                                await no_interaction.response.send_message("Error: Stake info not found.", ephemeral=True)
-                                return
-                                
-                            # Set is_capped to False
-                            inner_stake_info.is_capped = False
-                            inner_session.add(inner_stake_info)
-                            await inner_session.commit()
                     
-                    # Update the player's preference for future drafts
-                    from preference_service import update_player_bet_capping_preference
-                    await update_player_bet_capping_preference(user_id, guild_id, False)
-                    
-                    # Create updated view with the new status
-                    updated_view = discord.ui.View(timeout=None)
-                    updated_button = discord.ui.Button(
-                        label="Bet Cap: OFF",
-                        style=discord.ButtonStyle.red,
-                        custom_id=f"bet_cap_status_{self.draft_session_id}",
-                        disabled=True
-                    )
-                    updated_view.add_item(updated_button)
-                    
-                    await no_interaction.response.edit_message(
-                        content="Your bet cap status has been set to OFF. Your bet will NOT be capped and may be spread across multiple opponents.\n\nThis preference will be remembered for future drafts.",
-                        view=updated_view
-                    )
-                    
-                    # Update the draft message
-                    await update_draft_message(no_interaction.client, self.draft_session_id)
+                    # Update cap status
+                    await self.update_cap_status(no_interaction, user_id, guild_id, is_capped=False)
                 
-                # Assign callbacks
-                yes_button.callback = yes_callback
                 no_button.callback = no_callback
+                combined_view.add_item(no_button)
                 
-                # Add buttons to view
-                view.add_item(yes_button)
-                view.add_item(no_button)
-                
-                # Send the ephemeral message with current status
-                message_content = f"Your bet cap status is currently: {status}.\n\n"
-                message_content += "This setting will be remembered for future drafts."
+                # Send the ephemeral message with the combined view
+                message_content = f"Your current bet is {current_stake} tix with bet cap {status}.\n"
+                message_content += f"Min Bet for queue is {min_stake}. Select a new max bet and/or adjust your cap settings.\n"
+                message_content += "Your bet cap preferences will be saved for future drafts."
                 
                 await interaction.response.send_message(
                     content=message_content,
-                    view=view,
+                    view=combined_view,
                     ephemeral=True
                 )
+    
+    async def update_cap_status(self, interaction, user_id, guild_id, is_capped):
+        """Helper method to update cap status"""
+        async with AsyncSessionLocal() as inner_session:
+            async with inner_session.begin():
+                # Get the stake info
+                inner_stake_stmt = select(StakeInfo).where(and_(
+                    StakeInfo.session_id == self.draft_session_id,
+                    StakeInfo.player_id == user_id
+                ))
+                inner_stake_result = await inner_session.execute(inner_stake_stmt)
+                inner_stake_info = inner_stake_result.scalars().first()
+                
+                if not inner_stake_info:
+                    await interaction.response.send_message("Error: Stake info not found.", ephemeral=True)
+                    return
+                
+                # Set is_capped status
+                inner_stake_info.is_capped = is_capped
+                inner_session.add(inner_stake_info)
+                await inner_session.commit()
+        
+        # Update the player's preference for future drafts
+        from preference_service import update_player_bet_capping_preference
+        await update_player_bet_capping_preference(user_id, guild_id, is_capped)
+        
+        # Update the draft message
+        await update_draft_message(interaction.client, self.draft_session_id)
+        
+        # Inform the user
+        status_text = "ON" if is_capped else "OFF"
+        description_text = "capped at the highest opponent bet" if is_capped else "NOT capped and may be spread across multiple opponents"
+        
+        await interaction.response.send_message(
+            f"Your bet cap has been turned {status_text}. Your bet will be {description_text}.\n\nThis preference will be remembered for future drafts.",
+            ephemeral=True
+        )
+
+class CombinedStakeSelect(discord.ui.Select):
+    def __init__(self, draft_session_id, draft_link, user_display_name, min_stake, current_stake, options):
+        self.draft_session_id = draft_session_id
+        self.draft_link = draft_link
+        self.user_display_name = user_display_name
+        self.min_stake = min_stake
+        self.current_stake = current_stake
+        
+        # Set placeholder to show current stake
+        placeholder = f"Current Bet: {current_stake} tix - Select new max bet..."
+        
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
+        
+    async def callback(self, interaction: discord.Interaction):
+        user_id = str(interaction.user.id)
+        guild_id = str(interaction.guild_id)
+        
+        # Load the user's saved preference
+        from preference_service import get_player_bet_capping_preference
+        is_capped = await get_player_bet_capping_preference(user_id, guild_id)
+        
+        selected_value = self.values[0]
+        
+        if selected_value == "over_100":
+            # Create modal for custom amount over 100
+            stake_modal = StakeModal(over_100=True)
+            stake_modal.draft_session_id = self.draft_session_id
+            stake_modal.draft_link = self.draft_link
+            stake_modal.user_display_name = self.user_display_name
+            
+            # IMPORTANT: Set the default value based on saved preference before showing the modal
+            stake_modal.default_cap_setting = is_capped
+            # Update the cap checkbox value based on the preference
+            stake_modal.cap_checkbox.value = "yes" if is_capped else "no"
+            
+            await interaction.response.send_modal(stake_modal)
+        else:
+            # Process the selected preset stake amount with the saved preference
+            stake_amount = int(selected_value)
+            
+            # Add user to sign_ups and handle stake submission using saved preference
+            await self.handle_stake_submission(interaction, stake_amount, is_capped=is_capped)
+            
+    async def handle_stake_submission(self, interaction, stake_amount, is_capped=True):
+        user_id = str(interaction.user.id)
+        guild_id = str(interaction.guild_id)
+        
+        # Only proceed if this is different from current stake
+        if stake_amount == self.current_stake:
+            await interaction.response.send_message(f"You already have a {stake_amount} tix stake set.", ephemeral=True)
+            return
+            
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                # Get the draft session
+                draft_stmt = select(DraftSession).where(DraftSession.session_id == self.draft_session_id)
+                draft_result = await session.execute(draft_stmt)
+                draft_session = draft_result.scalars().first()
+                
+                if not draft_session:
+                    await interaction.response.send_message("Draft session not found.", ephemeral=True)
+                    return
+                
+                # Update sign_ups (ensure user is in the sign_ups)
+                sign_ups = draft_session.sign_ups or {}
+                sign_ups[user_id] = interaction.user.display_name
+                
+                await session.execute(
+                    update(DraftSession).
+                    where(DraftSession.session_id == self.draft_session_id).
+                    values(sign_ups=sign_ups)
+                )
+                
+                # Check if a stake record already exists for this player
+                stake_stmt = select(StakeInfo).where(and_(
+                    StakeInfo.session_id == self.draft_session_id,
+                    StakeInfo.player_id == user_id
+                ))
+                stake_result = await session.execute(stake_stmt)
+                stake_info = stake_result.scalars().first()
+                
+                if stake_info:
+                    # Update existing stake
+                    stake_info.max_stake = stake_amount
+                    stake_info.is_capped = is_capped
+                else:
+                    # Create new stake record
+                    stake_info = StakeInfo(
+                        session_id=self.draft_session_id,
+                        player_id=user_id,
+                        max_stake=stake_amount,
+                        is_capped=is_capped
+                    )
+                    session.add(stake_info)
+                
+                await session.commit()
+        
+        # Confirm stake and provide draft link
+        cap_status = "capped at the highest opponent bet" if is_capped else "NOT capped (full action)"
+        signup_message = f"You've updated your maximum bet to {stake_amount} tix."
+        signup_message += f"\nYour bet will be {cap_status}."
+            
+        # Send confirmation message
+        await interaction.response.send_message(signup_message, ephemeral=True)
+        
+        # Update the draft message to reflect the new list of sign-ups
+        await update_draft_message(interaction.client, self.draft_session_id)

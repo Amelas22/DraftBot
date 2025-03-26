@@ -164,8 +164,9 @@ async def update_live_draft_summary(bot, draft_session_id):
             # Update the message
             await message.edit(embed=updated_embed)
         except discord.NotFound:
+            pass
             # If message was deleted, create a new one
-            await create_live_draft_summary(bot, draft_session_id)
+            # await create_live_draft_summary(bot, draft_session_id)
         except Exception as e:
             print(f"Failed to update live draft summary: {e}")
 
