@@ -140,18 +140,49 @@ class DraftLogManager:
                 upload_successful = await self.save_to_digitalocean_spaces(draft_data)
                 stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
                 draft_session = await db_session.scalar(stmt)
+                
                 if upload_successful and draft_session:
                     draft_session.data_received = True
-                    # Generate MagicProTools links after successful upload
-                    if self.discord_client and self.guild_id:
+                    
+                    if draft_session.victory_message_id_draft_chat and self.discord_client and self.guild_id:
+                        print(f"Draft victory message detected. Sending logs for {self.draft_id}")
                         await self.send_magicprotools_embed(draft_data)
+                    elif draft_session.teams_start_time and self.discord_client and self.guild_id:
+                        unlock_time = draft_session.teams_start_time + timedelta(hours=3)
+                        current_time = datetime.now()
+                        if current_time >= unlock_time:
+                            # If 3 hours have already passed, post links immediately
+                            print(f"Draft {self.draft_id} logs are available (3+ hours since start)")
+                            await self.send_magicprotools_embed(draft_data)
+                        else:
+                            # Schedule a task to post links after the time difference
+                            time_to_wait = (unlock_time - current_time).total_seconds()
+                            minutes_to_wait = time_to_wait / 60
+                            print(f"Draft {self.draft_id} logs will be available in {minutes_to_wait:.1f} minutes")
+                            
+                            # Schedule the task
+                            self.discord_client.loop.create_task(self.post_links_after_delay(draft_data, time_to_wait))
+                    else:
+                        print(f"Draft {self.draft_id} log data saved but can't determine when to post links")
+                
                 elif draft_session:
                     draft_session.draft_data = draft_data
                     print(f"Draft log data saved in database for {self.draft_id}; SessionID: {self.session_id}")
                 else:
                     print(f"Draft session {self.session_id} not found in the database")
+            
             await db_session.commit()
 
+    async def post_links_after_delay(self, draft_data, delay_seconds):
+        """Post MagicProTools links after a specified delay."""
+        try:
+            print(f"Scheduled posting of links for draft {self.draft_id} in {delay_seconds/60:.1f} minutes")
+            await asyncio.sleep(delay_seconds)
+            print(f"Time's up! Posting links for draft {self.draft_id}")
+            await self.send_magicprotools_embed(draft_data)
+        except Exception as e:
+            print(f"Error posting links after delay for draft {self.draft_id}: {e}")
+            
     async def send_magicprotools_embed(self, draft_data):
         """Find draft-logs channel and send the embed if found."""
         try:
