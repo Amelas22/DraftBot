@@ -907,9 +907,18 @@ class PersistentView(discord.ui.View):
                 await interaction.followup.send("Pairings posted.", ephemeral=True)
 
                 draft_link = session.draft_link
+                guild_id = int(interaction.guild_id)
                 if draft_link:      
                     from datacollections import DraftLogManager
-                    manager = DraftLogManager(session.session_id, draft_link, session.draft_id, session.session_type, session.cube)
+                    manager = DraftLogManager(
+                        session.session_id, 
+                        draft_link, 
+                        session.draft_id, 
+                        session.session_type, 
+                        session.cube,
+                        discord_client=bot,  # Pass your Discord client
+                        guild_id=guild_id  # Pass the guild ID where you want to send logs
+                    )
                     asyncio.create_task(manager.keep_draft_session_alive())
                 else:
                     print("Draft link not found in database.")
