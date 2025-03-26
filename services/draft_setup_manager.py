@@ -170,7 +170,7 @@ class DraftSetupManager:
                 except Exception as e:
                     self.logger.exception(f"Failed to request users: {e}")
                 
-                self.logger.info(f"Waiting for more users... Currently {self.users_count} other users present")
+                # self.logger.info(f"Waiting for more users... Currently {self.users_count} other users present")
                 await asyncio.sleep(20)
             
             self.logger.success(f"At least 2 other users have joined the session ({self.users_count} total). Closing connection...")
