@@ -1481,7 +1481,7 @@ class PersonalizedCapStatusView(discord.ui.View):
                 await session.commit()
         
                 # Create an updated view
-                new_status = "ON" if stake_info.is_capped else "OFF"
+                new_status = "ON 🧢" if stake_info.is_capped else "OFF 🏎️"
                 style = discord.ButtonStyle.green if stake_info.is_capped else discord.ButtonStyle.red
                 
                 updated_view = discord.ui.View(timeout=None)
@@ -1532,7 +1532,7 @@ async def show_personalized_cap_status(interaction, draft_session_id):
             
             # Create the personalized view
             is_capped = getattr(stake_info, 'is_capped', True)
-            status = "ON" if is_capped else "OFF"
+            status = "ON 🧢" if is_capped else "OFF 🏎️"
             style = discord.ButtonStyle.green if is_capped else discord.ButtonStyle.red
             
             view = discord.ui.View(timeout=None)
@@ -2315,7 +2315,7 @@ class PersonalizedCapStatusView(discord.ui.View):
                 await session.commit()
         
                 # Create an updated view
-                new_status = "ON" if stake_info.is_capped else "OFF"
+                new_status = "ON 🧢" if stake_info.is_capped else "OFF 🏎️"
                 style = discord.ButtonStyle.green if stake_info.is_capped else discord.ButtonStyle.red
                 
                 updated_view = discord.ui.View(timeout=None)
@@ -2366,7 +2366,7 @@ async def show_personalized_cap_status(interaction, draft_session_id):
             
             # Create the personalized view
             is_capped = getattr(stake_info, 'is_capped', True)
-            status = "ON" if is_capped else "OFF"
+            status = "ON 🧢" if is_capped else "OFF 🏎️"
             style = discord.ButtonStyle.green if is_capped else discord.ButtonStyle.red
             
             view = discord.ui.View(timeout=None)
@@ -2445,7 +2445,7 @@ class BetCapToggleButton(CallbackButton):
                 
                 # Get user's current status
                 is_capped = getattr(stake_info, 'is_capped', True)  # Default to True if not set
-                status = "ON" if is_capped else "OFF"
+                status = "ON 🧢" if is_capped else "OFF 🏎️"
                 style = discord.ButtonStyle.green if is_capped else discord.ButtonStyle.red
                 current_stake = stake_info.max_stake
                 
@@ -2562,7 +2562,7 @@ class BetCapToggleButton(CallbackButton):
         await update_draft_message(interaction.client, self.draft_session_id)
         
         # Inform the user
-        status_text = "ON" if is_capped else "OFF"
+        status_text = "ON 🧢" if is_capped else "OFF 🏎️"
         description_text = "capped at the highest opponent bet" if is_capped else "NOT capped and may be spread across multiple opponents"
         
         await interaction.response.send_message(
