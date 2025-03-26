@@ -166,7 +166,7 @@ class DraftSetupManager:
                 # Request current users in the session
                 try:
                     await self.sio.emit('getUsers')
-                    self.logger.debug("Requested current users in session")
+                #    self.logger.debug("Requested current users in session")
                 except Exception as e:
                     self.logger.exception(f"Failed to request users: {e}")
                 
