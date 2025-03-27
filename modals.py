@@ -4,10 +4,9 @@ from datetime import datetime
 from loguru import logger
 from typing import Optional
 from models.session_details import SessionDetails
-from sessions.staked_session import StakedSession
-from stake_calculator import StakeCalculator
 
 from sessions import RandomSession, PremadeSession, SwissSession, BaseSession
+from sessions.staked_session import StakedSession
 
 class CubeDraftModal(discord.ui.Modal):
     @classmethod
@@ -169,7 +168,6 @@ class StakedCubeDraftModal(discord.ui.Modal):
             
     async def callback(self, interaction: discord.Interaction) -> None:
         # Configure session details
-        from models.session_details import SessionDetails
         session_details = SessionDetails(interaction)
         
         # If custom cube, get name from input, otherwise use preset choice
@@ -195,6 +193,5 @@ class StakedCubeDraftModal(discord.ui.Modal):
         session_details.min_stake = min_stake
         
         # Create and start the draft session
-        from sessions.staked_session import StakedSession
         session_instance = StakedSession(session_details)
         await session_instance.create_draft_session(interaction, interaction.client)

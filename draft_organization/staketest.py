@@ -7,7 +7,7 @@ from datetime import datetime
 from loguru import logger
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-from stake_calculator import calculate_stakes_with_strategy, StakePair
+from draft_organization.stake_calculator import calculate_stakes_with_strategy
 import copy
 
 # Define number of simulations to run

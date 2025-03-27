@@ -9,6 +9,7 @@ from sqlalchemy.orm import selectinload, joinedload
 from trueskill import Rating, rate_1vs1
 from discord.ui import View
 from league import ChallengeView
+from draft_organization.tournament import Tournament
 
 flags = {}
 locks = {}
@@ -98,7 +99,6 @@ async def calculate_pairings(session, db_session):
                 session.match_counter += 1
 
     elif session.session_type == "swiss" and session.match_counter == 1:
-        from tournament import Tournament
         to = Tournament(sign_ups=session.sign_ups)
         pairings = to.pair_round()
         for match in pairings:
@@ -118,7 +118,6 @@ async def calculate_pairings(session, db_session):
         return state_to_save, session.match_counter
 
     else:
-        from tournament import Tournament
         to = Tournament(from_state=session.swiss_matches)
         stmt = select(MatchResult).where(MatchResult.session_id == session.session_id).order_by(MatchResult.match_number.desc()).limit(4)
         results = await db_session.execute(stmt)
