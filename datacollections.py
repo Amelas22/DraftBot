@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from sqlalchemy.future import select
 from aiobotocore.session import get_session
 from session import AsyncSessionLocal, DraftSession
+from loguru import logger
 
 load_dotenv()
 
@@ -31,15 +32,15 @@ class DraftLogManager:
         
         @self.sio.event
         async def connect():
-            print(f"Successfully connected to the websocket for draft_id: DB{self.draft_id}")
+            logger.info(f"Successfully connected to the websocket for draft_id: DB{self.draft_id}")
 
         @self.sio.event
         async def connect_error(data):
-            print(f"Connection to the websocket failed for draft_id: DB{self.draft_id}")
+            logger.warning(f"Connection to the websocket failed for draft_id: DB{self.draft_id}")
 
         @self.sio.event
         async def disconnect():
-            print(f"Disconnected from the websocket for draft_id: DB{self.draft_id}")
+            logger.info(f"Disconnected from the websocket for draft_id: DB{self.draft_id}")
 
     async def keep_draft_session_alive(self):
         keep_running = True
@@ -55,13 +56,13 @@ class DraftLogManager:
                 
                 while True:
                     if self.fetch_attempts >= 20 or self.connection_attempts >= 20:
-                        print(f"Exceeded maximum attempts for {self.draft_id}, stopping attempts and disconnecting.")
+                        logger.warning(f"Exceeded maximum attempts for {self.draft_id}, stopping attempts and disconnecting.")
                         keep_running = False
                         break
 
                     data_fetched = await self.fetch_draft_log_data()
                     if data_fetched:
-                        print(f"Draft log data fetched and saved for {self.draft_id}, staying connected for 3 hours and 15 minutes.")
+                        logger.info(f"Draft log data fetched and saved for {self.draft_id}, staying connected for 3 hours and 15 minutes.")
                         
                         # Keep connection alive for 3 hours and 15 minutes (11700 seconds)
                         # Send a ping every 2 minutes (120 seconds)
@@ -74,26 +75,26 @@ class DraftLogManager:
                                 await asyncio.sleep(min(ping_interval, remaining_time))  
                                 remaining_time -= min(ping_interval, remaining_time)
                             except socketio.exceptions.ConnectionError:
-                                print(f"Connection to {self.draft_link} closed during waiting period, reconnecting...")
+                                logger.warning(f"Connection to {self.draft_link} closed during waiting period, reconnecting...")
                                 break  
                         
-                        print(f"Time period elapsed for {self.draft_id}, closing connection.")
+                        logger.info(f"Time period elapsed for {self.draft_id}, closing connection.")
                         await self.sio.disconnect()
                         return
                     else:
-                        print(f"{self.draft_id} log data not available attempt {self.fetch_attempts}, retrying in 5 minutes...")
+                        logger.info(f"{self.draft_id} log data not available attempt {self.fetch_attempts}, retrying in 5 minutes...")
                         await asyncio.sleep(300)  # Retry every 5 minutes
 
                     try:
                         await self.sio.emit('ping')  # Send a ping to keep the connection alive
                         await asyncio.sleep(120)  # Send a ping every 2 minutes
                     except socketio.exceptions.ConnectionError:
-                        print(f"Connection to {self.draft_link} closed, retrying...")
+                        logger.warning(f"Connection to {self.draft_link} closed, retrying...")
                         self.connection_attempts += 1
                         break
 
             except Exception as e:
-                print(f"Error connecting to {self.draft_link}: {e}")
+                logger.error(f"Error connecting to {self.draft_link}: {e}")
                 self.connection_attempts += 1
             
             if keep_running:
@@ -112,13 +113,13 @@ class DraftLogManager:
                             
                             next_fetch_time = datetime.now(pytz.utc) + timedelta(seconds=7500)
                             next_fetch_time_eastern = next_fetch_time.astimezone(eastern)
-                            print(f"Draft log data for {self.draft_id} has no picks, retrying at {next_fetch_time_eastern.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                            logger.info(f"Draft log data for {self.draft_id} has no picks, retrying at {next_fetch_time_eastern.strftime('%Y-%m-%d %H:%M:%S %Z')}")
                             await asyncio.sleep(7500)  # Wait for 2 hours and 5 minutes
                             self.first_delay = True
                             self.fetch_attempts += 1
                             return await self.fetch_draft_log_data()  # Retry fetching the data
                         elif self.first_delay and not first_user_picks:
-                            print(f"Draft log data for {self.draft_id} has no picks, retrying in 5 minutes")
+                            logger.info(f"Draft log data for {self.draft_id} has no picks, retrying in 5 minutes")
                             await asyncio.sleep(300)  # Wait for 5 minutes
                             self.fetch_attempts += 1
                             return await self.fetch_draft_log_data()
@@ -126,11 +127,11 @@ class DraftLogManager:
                             await self.save_draft_log_data(draft_data)
                             return True
                     else:
-                        print(f"Failed to fetch draft log data: status code {response.status}")
+                        logger.warning(f"Failed to fetch draft log data: status code {response.status}")
                         self.fetch_attempts += 1
                         return False
             except Exception as e:
-                print(f"Exception while fetching draft log data: {e}")
+                logger.error(f"Exception while fetching draft log data: {e}")
                 self.fetch_attempts += 1
                 return False
 
@@ -145,43 +146,43 @@ class DraftLogManager:
                     draft_session.data_received = True
                     
                     if draft_session.victory_message_id_draft_chat and self.discord_client and self.guild_id:
-                        print(f"Draft victory message detected. Sending logs for {self.draft_id}")
+                        logger.info(f"Draft victory message detected. Sending logs for {self.draft_id}")
                         await self.send_magicprotools_embed(draft_data)
                     elif draft_session.teams_start_time and self.discord_client and self.guild_id:
                         unlock_time = draft_session.teams_start_time + timedelta(hours=3)
                         current_time = datetime.now()
                         if current_time >= unlock_time:
                             # If 3 hours have already passed, post links immediately
-                            print(f"Draft {self.draft_id} logs are available (3+ hours since start)")
+                            logger.info(f"Draft {self.draft_id} logs are available (3+ hours since start)")
                             await self.send_magicprotools_embed(draft_data)
                         else:
                             # Schedule a task to post links after the time difference
                             time_to_wait = (unlock_time - current_time).total_seconds()
                             minutes_to_wait = time_to_wait / 60
-                            print(f"Draft {self.draft_id} logs will be available in {minutes_to_wait:.1f} minutes")
+                            logger.info(f"Draft {self.draft_id} logs will be available in {minutes_to_wait:.1f} minutes")
                             
                             # Schedule the task
                             self.discord_client.loop.create_task(self.post_links_after_delay(draft_data, time_to_wait))
                     else:
-                        print(f"Draft {self.draft_id} log data saved but can't determine when to post links")
+                        logger.info(f"Draft {self.draft_id} log data saved but can't determine when to post links")
                 
                 elif draft_session:
                     draft_session.draft_data = draft_data
-                    print(f"Draft log data saved in database for {self.draft_id}; SessionID: {self.session_id}")
+                    logger.info(f"Draft log data saved in database for {self.draft_id}; SessionID: {self.session_id}")
                 else:
-                    print(f"Draft session {self.session_id} not found in the database")
+                    logger.warning(f"Draft session {self.session_id} not found in the database")
             
             await db_session.commit()
 
     async def post_links_after_delay(self, draft_data, delay_seconds):
         """Post MagicProTools links after a specified delay."""
         try:
-            print(f"Scheduled posting of links for draft {self.draft_id} in {delay_seconds/60:.1f} minutes")
+            logger.info(f"Scheduled posting of links for draft {self.draft_id} in {delay_seconds/60:.1f} minutes")
             await asyncio.sleep(delay_seconds)
-            print(f"Time's up! Posting links for draft {self.draft_id}")
+            logger.info(f"Time's up! Posting links for draft {self.draft_id}")
             await self.send_magicprotools_embed(draft_data)
         except Exception as e:
-            print(f"Error posting links after delay for draft {self.draft_id}: {e}")
+            logger.error(f"Error posting links after delay for draft {self.draft_id}: {e}")
             
     async def send_magicprotools_embed(self, draft_data):
         """Find draft-logs channel and send the embed if found."""
@@ -189,7 +190,7 @@ class DraftLogManager:
             # Find the guild
             guild = self.discord_client.get_guild(self.guild_id)
             if not guild:
-                print(f"Could not find guild with ID {self.guild_id}")
+                logger.warning(f"Could not find guild with ID {self.guild_id}")
                 return
             
             # Find a channel named "draft-logs"
@@ -203,11 +204,11 @@ class DraftLogManager:
                 # Generate the embed and send it
                 embed = await self.generate_magicprotools_embed(draft_data)
                 await draft_logs_channel.send(embed=embed)
-                print(f"Sent MagicProTools links to #{draft_logs_channel.name} in {guild.name}")
+                logger.info(f"Sent MagicProTools links to #{draft_logs_channel.name} in {guild.name}")
             else:
-                print(f"No 'draft-logs' channel found in guild {guild.name}, skipping embed message")
+                logger.warning(f"No 'draft-logs' channel found in guild {guild.name}, skipping embed message")
         except Exception as e:
-            print(f"Error sending MagicProTools embed: {e}")
+            logger.error(f"Error sending MagicProTools embed: {e}")
 
     async def save_to_digitalocean_spaces(self, draft_data):
         DO_SPACES_REGION = os.getenv("DO_SPACES_REGION")
@@ -237,14 +238,14 @@ class DraftLogManager:
                     ContentType='application/json',
                     ACL='public-read'
                 )
-                print(f"Draft log data uploaded to DigitalOcean Space: {object_name}")
+                logger.info(f"Draft log data uploaded to DigitalOcean Space: {object_name}")
                 
                 # If upload successful, also generate and upload MagicProTools format logs
                 await self.process_draft_logs_for_magicprotools(draft_data, s3_client, DO_SPACES_BUCKET)
                 
                 return True
             except Exception as e:
-                print(f"Error uploading to DigitalOcean Space: {e}")
+                logger.error(f"Error uploading to DigitalOcean Space: {e}")
                 return False
 
     async def process_draft_logs_for_magicprotools(self, draft_data, s3_client, bucket_name):
@@ -273,12 +274,12 @@ class DraftLogManager:
                     ACL='public-read'
                 )
                 
-                print(f"MagicProTools format log for {user_name} uploaded: {txt_key}")
+                logger.info(f"MagicProTools format log for {user_name} uploaded: {txt_key}")
                 
-            print(f"All MagicProTools format logs generated and uploaded for draft {session_id}")
+            logger.info(f"All MagicProTools format logs generated and uploaded for draft {session_id}")
             return True
         except Exception as e:
-            print(f"Error generating MagicProTools format logs: {e}")
+            logger.error(f"Error generating MagicProTools format logs: {e}")
             return False
 
     def convert_to_magicprotools_format(self, draft_log, user_id):
@@ -392,12 +393,12 @@ class DraftLogManager:
                             )
                             continue
                     except Exception as e:
-                        print(f"Error submitting to MagicProTools API for {user_name}: {e}")
+                        logger.error(f"Error submitting to MagicProTools API for {user_name}: {e}")
                         # Fall back to URL method
             
             return embed
         except Exception as e:
-            print(f"Error generating Discord embed: {e}")
+            logger.error(f"Error generating Discord embed: {e}")
             # Return a basic embed if there's an error
             return discord.Embed(
                 title=f"Draft Log: {draft_data.get('sessionID')}",
@@ -433,14 +434,14 @@ class DraftLogManager:
                     if response.status == 200:
                         json_response = await response.json()
                         if "url" in json_response and not json_response.get("error"):
-                            print(f"Successfully submitted to MagicProTools API for user {user_id}")
+                            logger.info(f"Successfully submitted to MagicProTools API for user {user_id}")
                             return json_response["url"]
                         else:
-                            print(f"MagicProTools API error: {json_response.get('error', 'Unknown error')}")
+                            logger.warning(f"MagicProTools API error: {json_response.get('error', 'Unknown error')}")
                     else:
-                        print(f"MagicProTools API returned status {response.status}")
+                        logger.warning(f"MagicProTools API returned status {response.status}")
             
             return None  # Return None if unsuccessful
         except Exception as e:
-            print(f"Error submitting to MagicProTools API: {e}")
+            logger.error(f"Error submitting to MagicProTools API: {e}")
             return None
