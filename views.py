@@ -1386,7 +1386,6 @@ class MatchResultSelect(Select):
             try:
                 # Edit the message with the updated embed and view
                 await message.edit(embed=embed, view=new_view)
-                print(f"Successfully updated message for match {match_number}")
             except Exception as e:
                 print(f"Error updating message: {e}")
                 
