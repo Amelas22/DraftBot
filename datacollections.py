@@ -430,8 +430,8 @@ class DraftLogManager:
                                 player_records.setdefault(match.player1_id, {"wins": 0, "losses": 0})["losses"] += 1
             
             embed = discord.Embed(
-                title=f"Draft Log: {session_id}",
-                description=f"Import your draft to MagicProTools with the links below:\nDraft Type: {self.session_type.title()}, Cube: {self.cube}\nDraft Start: {formatted_start_time}",
+                title=f"Draft Log: Cube: {self.cube}, Session:{session_id}",
+                description=f"View your draft in MagicProTools with the links below:\n\n**Draft Start:** {formatted_start_time}",
                 color=0x3498db  # Blue color
             )
             
