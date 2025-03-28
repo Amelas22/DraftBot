@@ -19,7 +19,8 @@ class Config:
                 # Only basic category for regular guilds
             },
             "roles": {
-                "admin": "Cube Overseer"
+                "admin": "Cube Overseer",
+                "drafter": "Cube Drafters"
                 # Basic roles only
             },
             "timezone": "US/Eastern",
@@ -55,6 +56,7 @@ class Config:
             },
             "roles": {
                 "admin": "Cube Overseer",
+                "drafter": "Cube Drafter",
                 "suspected_bot": "suspected bot"
             },
             "timezone": "US/Eastern",
@@ -162,11 +164,22 @@ def update_setting(guild_id, path, value):
 def migrate_configs():
     """Ensure all configs have the latest structure."""
     for guild_id, config in bot_config.configs.items():
+        updated = False
+        
         # Ensure stakes section exists
         if "stakes" not in config:
             config["stakes"] = {
                 "use_optimized_algorithm": False, 
                 "stake_multiple": 10
             }
+            updated = True
+            
+        # Ensure drafter role exists in roles section
+        if "roles" in config and "drafter" not in config["roles"]:
+            config["roles"]["drafter"] = "Cube Drafters"
+            updated = True
+            
+        # Save if any updates were made
+        if updated:
             bot_config.save_config(guild_id)
-            print(f"Added stakes settings to guild {guild_id}")
+            print(f"Updated configuration for guild {guild_id}")

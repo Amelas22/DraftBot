@@ -34,6 +34,19 @@ async def add_magicprotools_links_column_to_draft_sessions():
                 logger.info("Added magicprotools_links column to draft_sessions table")
             else:
                 logger.info("magicprotools_links column already exists in draft_sessions table")
+            
+            if 'should_ping' not in columns:
+                # For SQLite, JSON is stored as TEXT
+                alter_table_sql = """
+                ALTER TABLE draft_sessions 
+                ADD COLUMN should_ping BOOLEAN;
+                """
+                await conn.execute(text(alter_table_sql))
+                logger.info("Added should_ping column to draft_sessions table")
+            else:
+                logger.info("should_ping column already exists in draft_sessions table")
+            
+            
                 
     except Exception as e:
         logger.error(f"Error adding magicprotools_links column to draft_sessions table: {e}")

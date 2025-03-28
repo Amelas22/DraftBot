@@ -50,6 +50,7 @@ class DraftSession(Base):
     logs_channel_id = Column(String(64))
     logs_message_id = Column(String(64))
     magicprotools_links = Column(JSON)
+    should_ping = Column(Boolean, default=False)
     
     # Relationships
     match_results = relationship("MatchResult", back_populates="draft_session", 

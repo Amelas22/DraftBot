@@ -44,9 +44,9 @@ class DraftLogManager:
 
     async def keep_draft_session_alive(self):
         keep_running = True
-        # if self.first_connection:
-        #     await asyncio.sleep(900)
-        #     self.first_connection = False
+        if self.first_connection:
+            await asyncio.sleep(900)
+            self.first_connection = False
         while keep_running:
             try:
                 await self.sio.connect(
@@ -133,7 +133,7 @@ class DraftLogManager:
                         logger.info(f"Draft victory message detected. Sending logs for {self.draft_id}")
                         await self.send_magicprotools_embed(draft_data)
                     elif draft_session.teams_start_time and self.discord_client and self.guild_id:
-                        unlock_time = draft_session.teams_start_time + timedelta(minutes=3)
+                        unlock_time = draft_session.teams_start_time + timedelta(hours=3)
                         current_time = datetime.now()
                         if current_time >= unlock_time:
                             # If 3 hours have already passed, post links immediately
