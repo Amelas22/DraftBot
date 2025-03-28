@@ -198,14 +198,24 @@ class PersistentView(discord.ui.View):
             # For non-staked drafts, add them to sign_ups now        
             sign_ups[user_id] = interaction.user.display_name
 
+            # Check if this is the 6th person to sign up AND we haven't pinged yet
+            should_ping = False
+            if len(sign_ups) == 5 and not draft_session.should_ping:
+                should_ping = True
+
             # Start an asynchronous database session
             async with AsyncSessionLocal() as session:
                 async with session.begin():
-                    # Directly update the 'sign_ups' of the draft session
+                    # Update values based on whether we need to ping
+                    values_to_update = {"sign_ups": sign_ups}
+                    if should_ping:
+                        values_to_update["should_ping"] = True
+                        
+                    # Update the draft session in the database
                     await session.execute(
                         update(DraftSession).
                         where(DraftSession.session_id == self.draft_session_id).
-                        values(sign_ups=sign_ups)
+                        values(**values_to_update)
                     )
                     await session.commit()
 
@@ -219,6 +229,23 @@ class PersistentView(discord.ui.View):
             draft_link = draft_session_updated.draft_link
             signup_confirmation_message = f"You are now signed up. Join Here: {draft_link}"
             await interaction.response.send_message(signup_confirmation_message, ephemeral=True)
+
+            # Send ping if needed (6th player and haven't pinged yet)
+            if should_ping:
+                # Get the drafter role from the config
+                from config import get_config
+                guild_config = get_config(interaction.guild_id)
+                drafter_role_name = guild_config["roles"]["drafter"]
+                
+                # Find the role in the guild
+                guild = interaction.guild
+                drafter_role = discord.utils.get(guild.roles, name=drafter_role_name)
+                
+                if drafter_role:
+                    # Get the channel where the draft message is
+                    channel = await interaction.client.fetch_channel(draft_session_updated.draft_channel_id)
+                    if channel:
+                        await channel.send(f"5 Players in queue! {drafter_role.mention}")
 
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
@@ -234,7 +261,7 @@ class PersistentView(discord.ui.View):
                     guild = interaction.guild
                     message_link = f"https://discord.com/channels/{draft_session_updated.guild_id}/{draft_session_updated.draft_channel_id}/{draft_session_updated.message_id}"
                     channel = discord.utils.get(guild.text_channels, name="cube-draft-open-play")
-                    await channel.send(f"**{interaction.user.display_name}** is looking for an opponent for a **Winston Draft**. [Join Here!]({message_link}) ")
+                    await channel.send(f"**{interaction.user.display_name}** is looking for an opponent for a **Winston Draft**. [Join Here!]({message_link})")
                     
     async def cancel_sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         draft_session = await get_draft_session(self.draft_session_id)

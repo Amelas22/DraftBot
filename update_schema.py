@@ -1,50 +1,70 @@
-import sqlite3
+import asyncio
+import logging
+from sqlalchemy import text
 
-DATABASE_URL = "drafts.db"
+# Configure logging
+logging.basicConfig(level=logging.INFO, 
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-def update_schema():
-    # Connect to the database
-    conn = sqlite3.connect(DATABASE_URL)
-    cursor = conn.cursor()
+# Database URL - should match your existing configuration
+DATABASE_URL = "sqlite+aiosqlite:///drafts.db"
 
-    # Disable foreign keys
-    cursor.execute("PRAGMA foreign_keys=off;")
+async def add_magicprotools_links_column_to_draft_sessions():
+    """Add magicprotools_links column to draft_sessions table"""
+    from sqlalchemy.ext.asyncio import create_async_engine
+    engine = create_async_engine(DATABASE_URL, echo=True)
+    
+    try:
+        async with engine.begin() as conn:
+            # Check if the magicprotools_links column already exists
+            result = await conn.execute(text(
+                "PRAGMA table_info(draft_sessions)"
+            ))
+            columns = {row[1]: row for row in result.fetchall()}
+            
+            # Check if the column needs to be added
+            if 'magicprotools_links' not in columns:
+                # For SQLite, JSON is stored as TEXT
+                alter_table_sql = """
+                ALTER TABLE draft_sessions 
+                ADD COLUMN magicprotools_links JSON;
+                """
+                await conn.execute(text(alter_table_sql))
+                logger.info("Added magicprotools_links column to draft_sessions table")
+            else:
+                logger.info("magicprotools_links column already exists in draft_sessions table")
+            
+            if 'should_ping' not in columns:
+                # For SQLite, JSON is stored as TEXT
+                alter_table_sql = """
+                ALTER TABLE draft_sessions 
+                ADD COLUMN should_ping BOOLEAN;
+                """
+                await conn.execute(text(alter_table_sql))
+                logger.info("Added should_ping column to draft_sessions table")
+            else:
+                logger.info("should_ping column already exists in draft_sessions table")
+            
+            
+                
+    except Exception as e:
+        logger.error(f"Error adding magicprotools_links column to draft_sessions table: {e}")
+        raise
+    finally:
+        await engine.dispose()
 
-    # Create a new table with the updated schema
-    cursor.execute("""
-    CREATE TABLE player_limits_new (
-        player_id TEXT NOT NULL,
-        display_name TEXT,
-        drafts_participated INTEGER DEFAULT 0,
-        WeekStartDate DATETIME NOT NULL,
-        match_one_points INTEGER DEFAULT 0,
-        match_two_points INTEGER DEFAULT 0,
-        match_three_points INTEGER DEFAULT 0,
-        match_four_points INTEGER DEFAULT 0,
-        PRIMARY KEY (player_id, WeekStartDate)
-    );
-    """)
-
-    # Copy data from the old table to the new table
-    cursor.execute("""
-    INSERT INTO player_limits_new (player_id, display_name, drafts_participated, WeekStartDate, match_one_points, match_two_points, match_three_points, match_four_points)
-    SELECT player_id, display_name, drafts_participated, WeekStartDate, match_one_points, match_two_points, match_three_points, match_four_points FROM player_limits;
-    """)
-
-    # Drop the old table
-    cursor.execute("DROP TABLE player_limits;")
-
-    # Rename the new table to the old table name
-    cursor.execute("ALTER TABLE player_limits_new RENAME TO player_limits;")
-
-    # Enable foreign keys
-    cursor.execute("PRAGMA foreign_keys=on;")
-
-    # Commit the changes and close the connection
-    conn.commit()
-    conn.close()
-
-    print("Schema update completed.")
+async def migrate_database():
+    """Execute all migration steps"""
+    logger.info("Starting database migration to add magicprotools_links column to draft_sessions")
+    
+    try:
+        # Add column to the draft_sessions table
+        await add_magicprotools_links_column_to_draft_sessions()
+        
+        logger.info("Database migration completed successfully")
+    except Exception as e:
+        logger.error(f"Database migration failed: {e}")
 
 if __name__ == "__main__":
-    update_schema()
+    asyncio.run(migrate_database())

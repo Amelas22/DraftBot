@@ -77,8 +77,16 @@ async def find_notification_channel(guild: discord.Guild) -> Optional[discord.Te
 
 async def find_cube_drafters_role(guild: discord.Guild) -> Optional[discord.Role]:
     """Find the Cube Drafters role in the guild if it exists."""
+    # Get the guild-specific configuration
+    from config import get_config
+    config = get_config(guild.id)
+    
+    # Get the drafter role name from the config
+    drafter_role_name = config["roles"]["drafter"]
+    
+    # Find the role with matching name
     for role in guild.roles:
-        if role.name.lower() == "cube drafters":
+        if role.name.lower() == drafter_role_name.lower():
             return role
     return None
 

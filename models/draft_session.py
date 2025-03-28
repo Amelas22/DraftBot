@@ -47,6 +47,10 @@ class DraftSession(Base):
     cube = Column(String(128))
     live_draft_message_id = Column(String(64))
     min_stake = Column(Integer, default=10)
+    logs_channel_id = Column(String(64))
+    logs_message_id = Column(String(64))
+    magicprotools_links = Column(JSON)
+    should_ping = Column(Boolean, default=False)
     
     # Relationships
     match_results = relationship("MatchResult", back_populates="draft_session", 
