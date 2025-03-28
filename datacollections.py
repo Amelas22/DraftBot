@@ -62,23 +62,7 @@ class DraftLogManager:
 
                     data_fetched = await self.fetch_draft_log_data()
                     if data_fetched:
-                        logger.info(f"Draft log data fetched and saved for {self.draft_id}, staying connected for 3 hours and 15 minutes.")
-                        
-                        # Keep connection alive for 3 hours and 15 minutes (11700 seconds)
-                        # Send a ping every 2 minutes (120 seconds)
-                        remaining_time = 11700  
-                        ping_interval = 120  
-                        
-                        while remaining_time > 0:
-                            try:
-                                await self.sio.emit('ping')  
-                                await asyncio.sleep(min(ping_interval, remaining_time))  
-                                remaining_time -= min(ping_interval, remaining_time)
-                            except socketio.exceptions.ConnectionError:
-                                logger.warning(f"Connection to {self.draft_link} closed during waiting period, reconnecting...")
-                                break  
-                        
-                        logger.info(f"Time period elapsed for {self.draft_id}, closing connection.")
+                        logger.info(f"Draft log data fetched and saved for {self.draft_id}, disconnecting")
                         await self.sio.disconnect()
                         return
                     else:
@@ -149,7 +133,7 @@ class DraftLogManager:
                         logger.info(f"Draft victory message detected. Sending logs for {self.draft_id}")
                         await self.send_magicprotools_embed(draft_data)
                     elif draft_session.teams_start_time and self.discord_client and self.guild_id:
-                        unlock_time = draft_session.teams_start_time + timedelta(hours=3)
+                        unlock_time = draft_session.teams_start_time + timedelta(minutes=3)
                         current_time = datetime.now()
                         if current_time >= unlock_time:
                             # If 3 hours have already passed, post links immediately
@@ -203,13 +187,48 @@ class DraftLogManager:
             if draft_logs_channel:
                 # Generate the embed and send it
                 embed = await self.generate_magicprotools_embed(draft_data)
-                await draft_logs_channel.send(embed=embed)
+                message = await draft_logs_channel.send(embed=embed)
                 logger.info(f"Sent MagicProTools links to #{draft_logs_channel.name} in {guild.name}")
+                
+                # Save the channel and message IDs to the database
+                async with AsyncSessionLocal() as db_session:
+                    async with db_session.begin():
+                        stmt = select(DraftSession).filter_by(session_id=self.session_id)
+                        result = await db_session.execute(stmt)
+                        draft_session = result.scalar_one_or_none()
+                        
+                        if draft_session:
+                            draft_session.logs_channel_id = str(draft_logs_channel.id)
+                            draft_session.logs_message_id = str(message.id)
+                            await db_session.commit()
+                            logger.info(f"Saved logs channel and message IDs for session {self.session_id}")
+
+                            # Update victory messages to include the logs link
+                            # Import the function here to avoid circular imports
+                            from utils import check_and_post_victory_or_draw
+                            logger.info(f"Updating victory messages for session {self.session_id} to include logs link")
+                            try:
+                                await check_and_post_victory_or_draw(self.discord_client, self.session_id)
+                                logger.info(f"Successfully updated victory messages with logs link for session {self.session_id}")
+                            except Exception as e:
+                                logger.error(f"Error updating victory messages with logs link: {e}")
+                        else:
+                            logger.warning(f"Draft session {self.session_id} not found, couldn't save logs message info")
+                    try:                        
+                        logger.info(f"Calling update_victory_messages_with_logs for session {self.session_id}")
+                        await update_victory_messages_with_logs(
+                            self.discord_client, 
+                            self.session_id,
+                            draft_session.logs_channel_id,
+                            draft_session.logs_message_id
+                        )
+                    except Exception as e:
+                        logger.error(f"Error updating victory messages with logs link: {e}")
             else:
                 logger.warning(f"No 'draft-logs' channel found in guild {guild.name}, skipping embed message")
         except Exception as e:
             logger.error(f"Error sending MagicProTools embed: {e}")
-
+            
     async def save_to_digitalocean_spaces(self, draft_data):
         DO_SPACES_REGION = os.getenv("DO_SPACES_REGION")
         DO_SPACES_ENDPOINT = os.getenv("DO_SPACES_ENDPOINT")
@@ -365,14 +384,55 @@ class DraftLogManager:
             session_id = draft_data.get("sessionID")
             folder = "swiss" if self.session_type == "swiss" else "team"
             
+            # Get the draft session to access sign_ups and start time
+            async with AsyncSessionLocal() as db_session:
+                draft_session_stmt = select(DraftSession).filter_by(session_id=self.session_id)
+                result = await db_session.execute(draft_session_stmt)
+                draft_session = result.scalar_one_or_none()
+                
+                if not draft_session:
+                    logger.warning(f"Draft session not found for session ID: {self.session_id}")
+                    sign_ups = {}
+                    formatted_start_time = "Unknown"
+                else:
+                    sign_ups = draft_session.sign_ups or {}
+                    if draft_session.teams_start_time:
+                        start_time = draft_session.teams_start_time
+                        # Format the start time for Discord
+                        start_timestamp = int(start_time.timestamp())
+                        formatted_start_time = f"<t:{start_timestamp}:F>"
+                    else:
+                        formatted_start_time = "Unknown"
+            
             embed = discord.Embed(
                 title=f"Draft Log: {session_id}",
-                description=f"Import your draft to MagicProTools with the links below:\nDraft Type: {self.session_type.title()}, Cube: {self.cube}",
+                description=f"Import your draft to MagicProTools with the links below:\n\nCube: {self.cube}\nDraft Start: {formatted_start_time}",
                 color=0x3498db  # Blue color
             )
             
+            # Get list of sign_ups values (Discord display names) in order
+            sign_up_display_names = list(sign_ups.values())
+            
+            # Create mapping of user index to Discord display name
+            sorted_users = sorted(
+                [(user_id, user_data) for user_id, user_data in draft_data["users"].items()],
+                key=lambda item: item[1].get("seatNum", 999)
+            )
+            
+            # Now map Discord display names to sorted users
+            discord_name_by_user_id = {}
+            for idx, (user_id, _) in enumerate(sorted_users):
+                if idx < len(sign_up_display_names):
+                    discord_name_by_user_id[user_id] = sign_up_display_names[idx]
+            
             for user_id, user_data in draft_data["users"].items():
                 user_name = user_data["userName"]
+                
+                # Get Discord display name if available
+                discord_name = discord_name_by_user_id.get(user_id)
+                display_name = user_name
+                if discord_name:
+                    display_name = f"{user_name} - {discord_name}"
                 
                 # Generate URLs
                 txt_key = f"draft_logs/{folder}/{session_id}/DraftLog_{user_id}.txt"
@@ -387,7 +447,7 @@ class DraftLogManager:
                         if direct_mpt_url:
                             # If API call successful, use the direct URL
                             embed.add_field(
-                                name=user_name,
+                                name=display_name,
                                 value=f"[View Raw Log]({txt_url}) | [View on MagicProTools]({direct_mpt_url})",
                                 inline=False
                             )
@@ -395,6 +455,13 @@ class DraftLogManager:
                     except Exception as e:
                         logger.error(f"Error submitting to MagicProTools API for {user_name}: {e}")
                         # Fall back to URL method
+                
+                # Fallback: Add field with raw log link and import link
+                embed.add_field(
+                    name=display_name,
+                    value=f"[View Raw Log]({txt_url}) | [Import to MagicProTools]({mpt_url})",
+                    inline=False
+                )
             
             return embed
         except Exception as e:
@@ -405,7 +472,7 @@ class DraftLogManager:
                 description="Error generating MagicProTools links. Check logs for details.",
                 color=0xFF0000  # Red color
             )
-
+        
     async def submit_to_mpt_api(self, user_id, draft_data, api_key):
         """Submit draft data directly to MagicProTools API."""
         try:
@@ -445,3 +512,108 @@ class DraftLogManager:
         except Exception as e:
             logger.error(f"Error submitting to MagicProTools API: {e}")
             return None
+
+async def update_victory_messages_with_logs(discord_client, session_id, logs_channel_id, logs_message_id):
+    """
+    Simpler function specifically for updating victory messages with logs links.
+    This bypasses the complexity of check_and_post_victory_or_draw.
+    """
+    logger.info(f"Starting direct update of victory messages for session {session_id}")
+    import discord
+
+    async with AsyncSessionLocal() as db_session:
+        async with db_session.begin():
+            # Get the draft session
+            stmt = select(DraftSession).filter_by(session_id=session_id)
+            result = await db_session.execute(stmt)
+            draft_session = result.scalar_one_or_none()
+            
+            if not draft_session:
+                logger.error(f"Draft session not found: {session_id}")
+                return False
+            
+            # Check if we have victory messages to update
+            if not draft_session.victory_message_id_draft_chat and not draft_session.victory_message_id_results_channel:
+                logger.info(f"No victory messages to update for session {session_id}")
+                return False
+            
+            # Get the guild
+            guild = discord_client.get_guild(int(draft_session.guild_id))
+            if not guild:
+                logger.error(f"Guild not found: {draft_session.guild_id}")
+                return False
+            
+            # Create the logs link
+            logs_link = f"https://discord.com/channels/{draft_session.guild_id}/{logs_channel_id}/{logs_message_id}"
+            logger.info(f"Created logs link: {logs_link}")
+            
+            # Update messages in both channels
+            success = False
+            
+            # Update draft chat message
+            if draft_session.victory_message_id_draft_chat:
+                try:
+                    draft_chat_channel = guild.get_channel(int(draft_session.draft_chat_channel))
+                    if draft_chat_channel:
+                        try:
+                            message = await draft_chat_channel.fetch_message(int(draft_session.victory_message_id_draft_chat))
+                            embed = message.embeds[0] if message.embeds else None
+                            
+                            if embed:
+                                # Add logs field if not already present
+                                if not any(field.name == "Draft Logs" for field in embed.fields):
+                                    embed.add_field(
+                                        name="Draft Logs",
+                                        value=f"[View Logs on Discord]({logs_link})",
+                                        inline=False
+                                    )
+                                    await message.edit(embed=embed)
+                                    logger.info(f"Updated draft chat victory message with logs link")
+                                    success = True
+                                else:
+                                    logger.info(f"Draft chat message already has logs field")
+                            else:
+                                logger.warning(f"No embed found in draft chat victory message")
+                        except discord.NotFound:
+                            logger.warning(f"Draft chat victory message not found: {draft_session.victory_message_id_draft_chat}")
+                        except Exception as e:
+                            logger.error(f"Error updating draft chat victory message: {e}")
+                except discord.NotFound:
+                    logger.warning(f"Draft chat channel not found: {draft_session.draft_chat_channel}")
+            
+            # Update results channel message
+            if draft_session.victory_message_id_results_channel:
+                try:
+                    results_channel_name = "team-draft-results" if draft_session.session_type == "random" or draft_session.session_type == "staked" else "league-draft-results"
+                    results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
+                    
+                    if results_channel:
+                        try:
+                            message = await results_channel.fetch_message(int(draft_session.victory_message_id_results_channel))
+                            embed = message.embeds[0] if message.embeds else None
+                            
+                            if embed:
+                                # Add logs field if not already present
+                                if not any(field.name == "Draft Logs" for field in embed.fields):
+                                    embed.add_field(
+                                        name="Draft Logs",
+                                        value=f"[View Logs on Discord]({logs_link})",
+                                        inline=False
+                                    )
+                                    await message.edit(embed=embed)
+                                    logger.info(f"Updated results channel victory message with logs link")
+                                    success = True
+                                else:
+                                    logger.info(f"Results channel message already has logs field")
+                            else:
+                                logger.warning(f"No embed found in results channel victory message")
+                        except discord.NotFound:
+                            logger.warning(f"Results victory message not found: {draft_session.victory_message_id_results_channel}")
+                        except Exception as e:
+                            logger.error(f"Error updating results victory message: {e}")
+                    else:
+                        logger.warning(f"Results channel '{results_channel_name}' not found")
+                except Exception as e:
+                    logger.error(f"Error processing results channel: {e}")
+            
+            return success

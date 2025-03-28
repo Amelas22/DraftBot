@@ -489,7 +489,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                                             seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
                                             embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
                                             embed.add_field(name="Standings", value=standings, inline=False)
-                                            
+
                                             if draft_chat_channel:
                                                 await post_or_update_victory_message(session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat')
 
@@ -582,7 +582,14 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 embed = await generate_draft_summary_embed(bot, draft_session_id)
                 three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
                 embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
-                
+                # Add logs link to the embed if available
+                if draft_session.data_received and hasattr(draft_session, 'logs_channel_id') and draft_session.logs_message_id:
+                    logs_link = f"https://discord.com/channels/{draft_session.guild_id}/{draft_session.logs_channel_id}/{draft_session.logs_message_id}"
+                    embed.add_field(
+                        name="Draft Logs",
+                        value=f"[View Draft Log]({logs_link})",
+                        inline=False
+                    )                
                 # Handle the draft-chat channel message
                 draft_chat_channel = guild.get_channel(int(draft_session.draft_chat_channel))
                 if draft_chat_channel:
@@ -599,8 +606,8 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 else:
                     print(f"Results channel '{results_channel_name}' not found.")
                 await session.execute(update(DraftSession)
-                                         .where(DraftSession.session_id == draft_session_id)
-                                         .values(winning_gap=gap))
+                                    .where(DraftSession.session_id == draft_session_id)
+                                    .values(winning_gap=gap))
                 
                 await session.commit()
 
