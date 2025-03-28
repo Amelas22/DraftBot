@@ -45,7 +45,7 @@ class DraftLogManager:
     async def keep_draft_session_alive(self):
         keep_running = True
         # if self.first_connection:
-        #     await asyncio.sleep(1800)
+        #     await asyncio.sleep(900)
         #     self.first_connection = False
         while keep_running:
             try:
@@ -375,9 +375,10 @@ class DraftLogManager:
         return "\n".join(output)
 
     async def generate_magicprotools_embed(self, draft_data):
-        """Generate a Discord embed with MagicProTools links for all drafters."""
+        """Generate a Discord embed with MagicProTools links for all drafters and store them in the database."""
         try:
             import discord  # Import locally to avoid issues if Discord isn't available
+            from models.match import MatchResult  # Import MatchResult class
             
             DO_SPACES_REGION = os.getenv("DO_SPACES_REGION")
             DO_SPACES_BUCKET = os.getenv("DO_SPACES_BUCKET")
@@ -394,6 +395,7 @@ class DraftLogManager:
                     logger.warning(f"Draft session not found for session ID: {self.session_id}")
                     sign_ups = {}
                     formatted_start_time = "Unknown"
+                    player_records = {}
                 else:
                     sign_ups = draft_session.sign_ups or {}
                     if draft_session.teams_start_time:
@@ -403,54 +405,118 @@ class DraftLogManager:
                         formatted_start_time = f"<t:{start_timestamp}:F>"
                     else:
                         formatted_start_time = "Unknown"
+                    
+                    # Get all match results for this session and calculate player records
+                    player_records = {}
+                    if draft_session.victory_message_id_draft_chat:  # Only fetch if victory message exists
+                        match_results_stmt = select(MatchResult).filter(MatchResult.session_id == self.session_id)
+                        match_results_result = await db_session.execute(match_results_stmt)
+                        match_results = match_results_result.scalars().all()
+                        
+                        # Calculate win-loss records for each player
+                        for match in match_results:
+                            # Skip matches without a winner
+                            if not match.winner_id:
+                                continue
+                                
+                            # Add win for winner, loss for loser
+                            if match.winner_id == match.player1_id:
+                                # Player 1 won
+                                player_records.setdefault(match.player1_id, {"wins": 0, "losses": 0})["wins"] += 1
+                                player_records.setdefault(match.player2_id, {"wins": 0, "losses": 0})["losses"] += 1
+                            elif match.winner_id == match.player2_id:
+                                # Player 2 won
+                                player_records.setdefault(match.player2_id, {"wins": 0, "losses": 0})["wins"] += 1
+                                player_records.setdefault(match.player1_id, {"wins": 0, "losses": 0})["losses"] += 1
             
             embed = discord.Embed(
                 title=f"Draft Log: {session_id}",
-                description=f"Import your draft to MagicProTools with the links below:\n\nCube: {self.cube}\nDraft Start: {formatted_start_time}",
+                description=f"Import your draft to MagicProTools with the links below:\nDraft Type: {self.session_type.title()}, Cube: {self.cube}\nDraft Start: {formatted_start_time}",
                 color=0x3498db  # Blue color
             )
             
-            # Get list of sign_ups values (Discord display names) in order
+            # Get list of sign_ups keys (Discord user IDs) and values (display names or dictionaries)
+            sign_up_discord_ids = list(sign_ups.keys())
             sign_up_display_names = list(sign_ups.values())
             
-            # Create mapping of user index to Discord display name
+            # Create mapping of user index to Discord display name and ID
+            # First sort users by seat number
             sorted_users = sorted(
                 [(user_id, user_data) for user_id, user_data in draft_data["users"].items()],
                 key=lambda item: item[1].get("seatNum", 999)
             )
             
-            # Now map Discord display names to sorted users
+            # Now map Discord display names and IDs to sorted users
             discord_name_by_user_id = {}
+            discord_id_by_user_id = {}
             for idx, (user_id, _) in enumerate(sorted_users):
                 if idx < len(sign_up_display_names):
-                    discord_name_by_user_id[user_id] = sign_up_display_names[idx]
+                    if idx < len(sign_up_discord_ids):
+                        discord_id_by_user_id[user_id] = sign_up_discord_ids[idx]
+                    
+                    if isinstance(sign_up_display_names[idx], str):
+                        discord_name_by_user_id[user_id] = sign_up_display_names[idx]
+                    elif isinstance(sign_up_display_names[idx], dict) and 'name' in sign_up_display_names[idx]:
+                        # Handle dictionary format
+                        discord_name_by_user_id[user_id] = sign_up_display_names[idx]['name']
             
-            for user_id, user_data in draft_data["users"].items():
+            # Dictionary to store MagicProTools links for each Discord ID
+            magicprotools_links = {}
+            
+            for idx, (user_id, user_data) in enumerate(sorted_users):
                 user_name = user_data["userName"]
                 
                 # Get Discord display name if available
                 discord_name = discord_name_by_user_id.get(user_id)
-                display_name = user_name
+                discord_id = discord_id_by_user_id.get(user_id)
+                
+                # Add team color emoji based on player position
+                # Odd positions (0, 2, 4...) are red team, even positions (1, 3, 5...) are blue team
+                team_emoji = "🔴" if idx % 2 == 0 else "🔵"
+                
+                # Get win-loss record if available
+                record_str = ""
+                trophy_emoji = ""
+                if discord_id and discord_id in player_records:
+                    record = player_records[discord_id]
+                    record_str = f" ({record['wins']}-{record['losses']})"
+                    # Add trophy emoji if they have 3 wins
+                    if record['wins'] == 3:
+                        trophy_emoji = "🏆 "
+                
+                # Format the name with team emoji, trophy, and record
+                display_name = f"{team_emoji} {trophy_emoji}{user_name}"
                 if discord_name:
-                    display_name = f"{user_name} - {discord_name}"
+                    display_name = f"{team_emoji} {user_name} - {discord_name}: {record_str}{trophy_emoji}"
                 
                 # Generate URLs
                 txt_key = f"draft_logs/{folder}/{session_id}/DraftLog_{user_id}.txt"
                 txt_url = f"https://{DO_SPACES_BUCKET}.{DO_SPACES_REGION}.digitaloceanspaces.com/{txt_key}"
                 mpt_url = f"https://magicprotools.com/draft/import?url={urllib.parse.quote(txt_url)}"
                 
-                # Direct API method 
-                mpt_api_key = os.getenv("MPT_API_KEY")  
+                # Direct API method
+                mpt_api_key = os.getenv("MPT_API_KEY")
+                final_mpt_url = mpt_url  # Default to import URL
+                
                 if mpt_api_key:
                     try:
                         direct_mpt_url = await self.submit_to_mpt_api(user_id, draft_data, mpt_api_key)
                         if direct_mpt_url:
                             # If API call successful, use the direct URL
+                            final_mpt_url = direct_mpt_url
                             embed.add_field(
                                 name=display_name,
                                 value=f"[View Raw Log]({txt_url}) | [View on MagicProTools]({direct_mpt_url})",
                                 inline=False
                             )
+                            
+                            # Get Discord ID and store the link in our dictionary
+                            if discord_id:
+                                magicprotools_links[discord_id] = {
+                                    "name": discord_name_by_user_id.get(user_id, user_name),
+                                    "link": direct_mpt_url
+                                }
+                            
                             continue
                     except Exception as e:
                         logger.error(f"Error submitting to MagicProTools API for {user_name}: {e}")
@@ -462,6 +528,23 @@ class DraftLogManager:
                     value=f"[View Raw Log]({txt_url}) | [Import to MagicProTools]({mpt_url})",
                     inline=False
                 )
+                
+                # Get Discord ID and store the link in our dictionary
+                if discord_id:
+                    magicprotools_links[discord_id] = {
+                        "name": discord_name_by_user_id.get(user_id, user_name),
+                        "link": final_mpt_url
+                    }
+            
+            # Update the database with the MagicProTools links
+            if magicprotools_links and draft_session:
+                try:
+                    draft_session.magicprotools_links = magicprotools_links
+                    db_session.add(draft_session)
+                    await db_session.commit()
+                    logger.info(f"Updated DraftSession with MagicProTools links for {len(magicprotools_links)} users")
+                except Exception as e:
+                    logger.error(f"Error saving MagicProTools links to database: {e}")
             
             return embed
         except Exception as e:
@@ -564,7 +647,7 @@ async def update_victory_messages_with_logs(discord_client, session_id, logs_cha
                                 if not any(field.name == "Draft Logs" for field in embed.fields):
                                     embed.add_field(
                                         name="Draft Logs",
-                                        value=f"[View Logs on Discord]({logs_link})",
+                                        value=f"[View Draft Log]({logs_link})",
                                         inline=False
                                     )
                                     await message.edit(embed=embed)
