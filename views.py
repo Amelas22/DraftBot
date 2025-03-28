@@ -5,8 +5,8 @@ import pytz
 from datetime import datetime, timedelta
 from discord import SelectOption
 from discord.ui import Button, View, Select, select
+from draft_organization.stake_calculator import calculate_stakes_with_strategy
 from session import StakeInfo, AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
-from stake_calculator import StakeCalculator, StakePair
 from sqlalchemy import update, select, and_
 from sqlalchemy.orm import selectinload
 from utils import calculate_pairings, create_winston_draft, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, update_draft_summary_message, check_and_post_victory_or_draw, update_player_stats_and_elo, check_weekly_limits, update_player_stats_for_draft
@@ -955,7 +955,6 @@ class PersistentView(discord.ui.View):
                 user_min_stake = draft_session.min_stake or 10
                 
                 # Use the router function with capping info
-                from stake_calculator import calculate_stakes_with_strategy
                 stake_pairs = calculate_stakes_with_strategy(
                     draft_session.team_a, 
                     draft_session.team_b, 
