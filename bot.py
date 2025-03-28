@@ -5,7 +5,7 @@ import sys
 from discord.ext import commands
 from dotenv import load_dotenv
 from database.message_management import setup_sticky_handler
-from session import init_db, ensure_guild_id_in_tables
+from database.db_session import init_db, ensure_guild_id_in_tables
 from utils import cleanup_sessions_task
 from commands import league_commands, scheduled_posts
 
