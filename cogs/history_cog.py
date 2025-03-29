@@ -12,7 +12,7 @@ from models.match import MatchResult
 
 class HistoryView(View):
     def __init__(self, pages, author_id):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)
         self.pages = pages
         self.author_id = author_id
         self.current_page = 0
