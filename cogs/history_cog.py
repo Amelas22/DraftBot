@@ -37,16 +37,13 @@ class HistoryView(View):
         else:
             await interaction.response.defer()
     
-    @discord.ui.button(label="🏆 Wins", style=ButtonStyle.green)
-    async def show_wins(self, button, interaction):
-        # This would require regenerating the pages with filtered data
-        # For simplicity, just show a message for now
-        await interaction.response.send_message("Filtering for wins coming soon!", ephemeral=True)
+    # @discord.ui.button(label="🏆 Wins", style=ButtonStyle.green)
+    # async def show_wins(self, button, interaction):
+    #     await interaction.response.send_message("Filtering for wins coming soon!", ephemeral=True)
     
-    @discord.ui.button(label="❌ Losses", style=ButtonStyle.red)
-    async def show_losses(self, button, interaction):
-        # This would require regenerating the pages with filtered data
-        await interaction.response.send_message("Filtering for losses coming soon!", ephemeral=True)
+    # @discord.ui.button(label="❌ Losses", style=ButtonStyle.red)
+    # async def show_losses(self, button, interaction):
+    #     await interaction.response.send_message("Filtering for losses coming soon!", ephemeral=True)
 
 def format_first_picks(pack_picks):
     """Format the first picks from each pack into a string."""
@@ -156,7 +153,7 @@ class HistoryCog(commands.Cog):
                                     member_losses += 1
                             
                             record_str = f" ({member_wins}-{member_losses})"
-                            trophy = "🏆 " if member_wins == 3 else ""
+                            trophy = " 🏆" if member_wins == 3 else ""
                             
                             # Add to teammates or opponents list
                             if (user_team == "A" and member_id in team_a) or (user_team == "B" and member_id in team_b):
@@ -212,44 +209,45 @@ class HistoryCog(commands.Cog):
                             else:
                                 user_name = user_info
                         
+                        # Determine user's team score and opponent's team score
+                        user_team_score = team_a_score if user_team == "A" else team_b_score
+                        opponent_team_score = team_b_score if user_team == "A" else team_a_score
+
                         # Determine outcome with emoji
-                        if (user_team == "A" and team_a_score > team_b_score) or (user_team == "B" and team_b_score > team_a_score):
-                            outcome = "✅ **Win**"  # Check mark for win
-                        elif team_a_score == team_b_score:
-                            outcome = "🔄 **Draw**"  # Circular arrows for draw
+                        if user_team_score > opponent_team_score:
+                            outcome = "✅ **Win**"
+                        elif user_team_score == opponent_team_score:
+                            outcome = "🔄 **Draw**"
                         else:
-                            outcome = "❌ **Loss**"  # X mark for loss
-                        
+                            outcome = "❌ **Loss**"
+
                         # Get first picks information
                         user_first_picks = {}
                         if draft.pack_first_picks and user_id in draft.pack_first_picks:
                             user_first_picks = draft.pack_first_picks[user_id]
-                        
+
                         first_picks_text = format_first_picks(user_first_picks)
-                        
+
                         # Format date
                         draft_date = draft.teams_start_time.strftime('%m/%d/%Y') if draft.teams_start_time else "Unknown date"
-                        
-                        # Add team emoji based on which team the user was on
-                        team_emoji = "🔴" if user_team == "A" else "🔵"
-                        
+
                         # Add trophy emoji if user went 3-0
                         trophy_emoji = " 🏆" if wins == 3 else ""
-                        
+
                         # Get MagicProTools link if available
                         mpt_link = ""
                         if draft.magicprotools_links and user_id in draft.magicprotools_links:
                             link_info = draft.magicprotools_links[user_id]
                             if "link" in link_info:
                                 mpt_link = f"\n[View Draft in MagicProTools]({link_info['link']})"
-                        if {draft.session_type.title()} == "staked":
-                            type = "Money"
-                        else:
-                            type = "Team"
+
+                        # Determine draft type
+                        draft_type = "Money" if draft.session_type.lower() == "staked" else "Team"
+
                         # Create field for this draft
-                        field_title = f"[{draft_date}] {draft.cube} {type} Draft"
+                        field_title = f"[{draft_date}] {draft.cube} {draft_type} Draft"
                         field_value = (
-                            f"{outcome}: {team_a_score}-{team_b_score} | Personal Record: {wins}-{losses} {trophy_emoji}\n"
+                            f"{outcome}: {user_team_score}-{opponent_team_score} | Personal Record: {wins}-{losses}{trophy_emoji}\n"
                             f"Draft Seat: {left_player_name} -> **{user_name}** -> {right_player_name}\n"
                             f"{first_picks_text}\n"
                             f"👥 Teammates: {', '.join(teammates) if teammates else 'None'}\n"
