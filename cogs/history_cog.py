@@ -5,10 +5,10 @@ from sqlalchemy import and_, or_, func, select
 from datetime import datetime
 from discord.ext import commands
 from loguru import logger
-
-# Import your local modules 
 from session import AsyncSessionLocal, DraftSession
 from models.match import MatchResult
+
+SEATING_ORDER_FIX = 1742144400
 
 class HistoryView(View):
     def __init__(self, pages, author_id):
@@ -165,50 +165,55 @@ class HistoryCog(commands.Cog):
                         # Determine team scores
                         team_a_score = sum(1 for m in match_results if m.winner_id in team_a)
                         team_b_score = sum(1 for m in match_results if m.winner_id in team_b)
-                        
-                        # Get the ordered list of players
-                        all_player_ids = list(sign_ups.keys())
-                        total_players = len(all_player_ids)
-                        
-                        # Find the user's position in the list
-                        user_position = None
-                        for idx, player_id in enumerate(all_player_ids):
-                            if player_id == user_id:
-                                user_position = idx
-                                break
-                        
-                        # Get players to the left and right
-                        left_position = (user_position - 1) % total_players if user_position is not None else None
-                        right_position = (user_position + 1) % total_players if user_position is not None else None
-                        
-                        left_player_id = all_player_ids[left_position] if left_position is not None else None
-                        right_player_id = all_player_ids[right_position] if right_position is not None else None
-                        
-                        # Get player names
-                        left_player_name = "Unknown"
-                        if left_player_id in sign_ups:
-                            left_player_info = sign_ups[left_player_id]
-                            if isinstance(left_player_info, dict) and "name" in left_player_info:
-                                left_player_name = left_player_info["name"]
-                            else:
-                                left_player_name = left_player_info
-                        
-                        right_player_name = "Unknown"
-                        if right_player_id in sign_ups:
-                            right_player_info = sign_ups[right_player_id]
-                            if isinstance(right_player_info, dict) and "name" in right_player_info:
-                                right_player_name = right_player_info["name"]
-                            else:
-                                right_player_name = right_player_info
-                        
-                        user_name = ctx.author.display_name
-                        if user_id in sign_ups:
-                            user_info = sign_ups[user_id]
-                            if isinstance(user_info, dict) and "name" in user_info:
-                                user_name = user_info["name"]
-                            else:
-                                user_name = user_info
-                        
+
+                        should_show_seating = draft.teams_start_time and draft.teams_start_time.timestamp() > SEATING_ORDER_FIX
+                        if should_show_seating:  
+                            # Get the ordered list of players
+                            all_player_ids = list(sign_ups.keys())
+                            total_players = len(all_player_ids)
+                            
+                            # Find the user's position in the list
+                            user_position = None
+                            for idx, player_id in enumerate(all_player_ids):
+                                if player_id == user_id:
+                                    user_position = idx
+                                    break
+                            
+                            # Get players to the left and right
+                            left_position = (user_position - 1) % total_players if user_position is not None else None
+                            right_position = (user_position + 1) % total_players if user_position is not None else None
+                            
+                            left_player_id = all_player_ids[left_position] if left_position is not None else None
+                            right_player_id = all_player_ids[right_position] if right_position is not None else None
+                            
+                            # Get player names
+                            left_player_name = "Unknown"
+                            if left_player_id in sign_ups:
+                                left_player_info = sign_ups[left_player_id]
+                                if isinstance(left_player_info, dict) and "name" in left_player_info:
+                                    left_player_name = left_player_info["name"]
+                                else:
+                                    left_player_name = left_player_info
+                            
+                            right_player_name = "Unknown"
+                            if right_player_id in sign_ups:
+                                right_player_info = sign_ups[right_player_id]
+                                if isinstance(right_player_info, dict) and "name" in right_player_info:
+                                    right_player_name = right_player_info["name"]
+                                else:
+                                    right_player_name = right_player_info
+                            
+                            user_name = ctx.author.display_name
+                            if user_id in sign_ups:
+                                user_info = sign_ups[user_id]
+                                if isinstance(user_info, dict) and "name" in user_info:
+                                    user_name = user_info["name"]
+                                else:
+                                    user_name = user_info
+                            seating_line = f"Draft Seat: {left_player_name} -> **{user_name}** -> {right_player_name}\n"
+                        else:
+                            seating_line = ""
+                            
                         # Determine user's team score and opponent's team score
                         user_team_score = team_a_score if user_team == "A" else team_b_score
                         opponent_team_score = team_b_score if user_team == "A" else team_a_score
@@ -248,7 +253,7 @@ class HistoryCog(commands.Cog):
                         field_title = f"[{draft_date}] {draft.cube} {draft_type} Draft"
                         field_value = (
                             f"{outcome}: {user_team_score}-{opponent_team_score} | Personal Record: {wins}-{losses}{trophy_emoji}\n"
-                            f"Draft Seat: {left_player_name} -> **{user_name}** -> {right_player_name}\n"
+                            f"{seating_line}"
                             f"{first_picks_text}\n"
                             f"👥 Teammates: {', '.join(teammates) if teammates else 'None'}\n"
                             f"⚔️ Opponents: {', '.join(opponents)}"
