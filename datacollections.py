@@ -129,6 +129,37 @@ class DraftLogManager:
                 if upload_successful and draft_session:
                     draft_session.data_received = True
                     
+                    # Extract and store first picks for each user and pack
+                    draftmancer_user_picks = {}
+                    for user_id, user_data in draft_data["users"].items():
+                        user_pack_picks = self.get_pack_first_picks(draft_data, user_id)
+                        draftmancer_user_picks[user_id] = user_pack_picks
+                    
+                    # We need to convert Draftmancer user IDs to Discord user IDs
+                    discord_user_pack_picks = {}
+
+                    # Get Discord IDs from sign_ups
+                    if draft_session.sign_ups:
+                        # Get list of Discord user IDs from sign_ups
+                        discord_ids = list(draft_session.sign_ups.keys())
+                        
+                        # Sort users by seat number
+                        sorted_users = sorted(
+                            [(user_id, user_data) for user_id, user_data in draft_data["users"].items()],
+                            key=lambda item: item[1].get("seatNum", 999)
+                        )
+                        
+                        # Map Draftmancer user IDs to Discord user IDs based on draft seat order
+                        for idx, (draft_user_id, _) in enumerate(sorted_users):
+                            if idx < len(discord_ids):
+                                discord_id = discord_ids[idx]
+                                if draft_user_id in draftmancer_user_picks:
+                                    discord_user_pack_picks[discord_id] = draftmancer_user_picks[draft_user_id]
+                    
+                    # Store the first picks in the database with Discord IDs as keys
+                    draft_session.pack_first_picks = discord_user_pack_picks
+                    logger.info(f"Stored first picks for {len(discord_user_pack_picks)} users with Discord IDs as keys")
+                    
                     if draft_session.victory_message_id_draft_chat and self.discord_client and self.guild_id:
                         logger.info(f"Draft victory message detected. Sending logs for {self.draft_id}")
                         await self.send_magicprotools_embed(draft_data)
@@ -158,6 +189,44 @@ class DraftLogManager:
             
             await db_session.commit()
 
+    def get_pack_first_picks(self, draft_data, user_id):
+        """Extract the first pick card name for each pack for a specific user."""
+        pack_first_picks = {}
+        try:
+            # Get user's picks
+            user_picks = draft_data['users'][user_id]['picks']
+            
+            # Find the first pick for each pack
+            for pick in user_picks:
+                pack_num = pick['packNum']
+                pick_num = pick['pickNum']
+                
+                # Only consider the first pick (pick 0) for each pack
+                if pick_num == 0:
+                    # Get the picked card indices
+                    picked_indices = pick['pick']
+                    if not picked_indices:
+                        pack_first_picks[str(pack_num)] = "Unknown"
+                        continue
+                    
+                    # Get the card ID and name
+                    first_picked_idx = picked_indices[0]
+                    card_id = pick['booster'][first_picked_idx]
+                    card_name = draft_data['carddata'][card_id]['name']
+                    
+                    # Handle split/double-faced cards
+                    if 'back' in draft_data['carddata'][card_id]:
+                        back_name = draft_data['carddata'][card_id]['back']['name']
+                        card_name = f"{card_name} // {back_name}"
+                    
+                    pack_first_picks[str(pack_num)] = card_name
+            
+            return pack_first_picks
+        except Exception as e:
+            # In case of any error, return empty result
+            logger.error(f"Error getting first picks: {e}")
+            return {}
+        
     async def post_links_after_delay(self, draft_data, delay_seconds):
         """Post MagicProTools links after a specified delay."""
         try:
@@ -680,7 +749,7 @@ async def update_victory_messages_with_logs(discord_client, session_id, logs_cha
                                 if not any(field.name == "Draft Logs" for field in embed.fields):
                                     embed.add_field(
                                         name="Draft Logs",
-                                        value=f"[View Logs on Discord]({logs_link})",
+                                        value=f"[View Draft Log]({logs_link})",
                                         inline=False
                                     )
                                     await message.edit(embed=embed)

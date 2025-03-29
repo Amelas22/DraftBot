@@ -33,7 +33,7 @@ intents.members = True
 bot = discord.Client(intents=intents)
 
 # Target draft ID
-TARGET_DRAFT_ID = "C3TKCESZ"
+TARGET_DRAFT_ID = "V9QCLU6T"
 
 async def get_draft_session():
     """Retrieve the draft session information from the database."""
