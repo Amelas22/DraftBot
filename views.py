@@ -1816,10 +1816,20 @@ class StakeOptionsSelect(discord.ui.Select):
                 sign_ups = draft_session.sign_ups or {}
                 sign_ups[user_id] = interaction.user.display_name
                 
+                # Check if this is the 5th person to sign up AND we haven't pinged yet
+                should_ping = False
+                if len(sign_ups) == 5 and not draft_session.should_ping:
+                    should_ping = True
+                
+                # Update draft session with sign_ups and should_ping flag if needed
+                values_to_update = {"sign_ups": sign_ups}
+                if should_ping:
+                    values_to_update["should_ping"] = True
+                
                 await session.execute(
                     update(DraftSession).
                     where(DraftSession.session_id == self.draft_session_id).
-                    values(sign_ups=sign_ups)
+                    values(**values_to_update)
                 )
                 
                 # Check if a stake record already exists for this player
@@ -1846,6 +1856,33 @@ class StakeOptionsSelect(discord.ui.Select):
                 
                 await session.commit()
         
+        # Re-fetch the draft session after commit to get the latest data
+        async with AsyncSessionLocal() as session:
+            draft_stmt = select(DraftSession).where(DraftSession.session_id == self.draft_session_id)
+            draft_result = await session.execute(draft_stmt)
+            draft_session_updated = draft_result.scalars().first()
+            
+            if not draft_session_updated:
+                print("Failed to fetch updated draft session after stake selection.")
+                return
+            
+            # Send ping if needed (5th player and haven't pinged yet)
+            if should_ping:
+                # Get the drafter role from the config
+                from config import get_config
+                guild_config = get_config(interaction.guild_id)
+                drafter_role_name = guild_config["roles"]["drafter"]
+                
+                # Find the role in the guild
+                guild = interaction.guild
+                drafter_role = discord.utils.get(guild.roles, name=drafter_role_name)
+                
+                if drafter_role:
+                    # Get the channel where the draft message is
+                    channel = await interaction.client.fetch_channel(draft_session_updated.draft_channel_id)
+                    if channel:
+                        await channel.send(f"5 Players in queue! {drafter_role.mention}")
+        
         # Confirm stake and provide draft link
         cap_status = "capped at the highest opponent bet" if is_capped else "NOT capped (full action)"
         signup_message = f"You've set your maximum stake to {stake_amount} tix."
@@ -1865,8 +1902,7 @@ class StakeOptionsView(discord.ui.View):
     def __init__(self, draft_session_id, draft_link, user_display_name, min_stake):
         super().__init__(timeout=300)  # 5 minute timeout
         self.add_item(StakeOptionsSelect(draft_session_id, draft_link, user_display_name, min_stake))
-
-
+        
 class StakeModal(discord.ui.Modal):
     def __init__(self, over_100=False):
         super().__init__(title="Enter Maximum Bet")
