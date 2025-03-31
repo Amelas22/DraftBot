@@ -851,12 +851,14 @@ class PersistentView(discord.ui.View):
                     session.session_stage = 'pairings'
                     guild = interaction.guild
                     bot = interaction.client
+
                     if session.session_type != "swiss":
                         await calculate_pairings(session, db_session)
                     else:
                         state_to_save, match_counter = await calculate_pairings(session, db_session)
                         session.match_counter = match_counter
                         session.swiss_matches = state_to_save
+
                     if session.session_type == "random" or session.session_type == "staked":
                         await update_player_stats_for_draft(session.session_id, guild)
                     
@@ -1071,7 +1073,7 @@ class PersistentView(discord.ui.View):
         if team_name in ["Red-Team", "Blue-Team"]:
             if admin_role:
                 # First, give all admins access by default
-                overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True)
+                overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, manage_messages=True)
                 
                 # Then, for each admin who is participating in the draft, adjust permissions individually
                 for member in admin_role.members:
@@ -1081,11 +1083,11 @@ class PersistentView(discord.ui.View):
         else:
             # For the "Draft-chat" channel, add read permissions for admin role
             if admin_role:
-                overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True)
+                overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, manage_messages=True)
 
         # Add team members with read permission (this overrides any role-based permissions)
         for member in team_members:
-            overwrites[member] = discord.PermissionOverwrite(read_messages=True)
+            overwrites[member] = discord.PermissionOverwrite(read_messages=True, manage_messages=True)
         
         # Create the channel with the specified overwrites
         channel = await guild.create_text_channel(name=channel_name, overwrites=overwrites, category=draft_category)

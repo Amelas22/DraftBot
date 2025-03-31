@@ -600,9 +600,10 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
                 if results_channel:
                     await post_or_update_victory_message(session, results_channel, embed, draft_session, 'victory_message_id_results_channel')
-                    from livedrafts import update_live_draft_summary, remove_live_draft_summary_after_delay
-                    await update_live_draft_summary(bot, draft_session_id)
-                    bot.loop.create_task(remove_live_draft_summary_after_delay(bot, draft_session_id, 3600)) 
+                    if not draft_session.victory_message_id_draft_chat and not draft_session.victory_message_id_results_channel:
+                        from livedrafts import update_live_draft_summary, remove_live_draft_summary_after_delay
+                        await update_live_draft_summary(bot, draft_session_id)
+                        bot.loop.create_task(remove_live_draft_summary_after_delay(bot, draft_session_id, 1200)) 
                 else:
                     print(f"Results channel '{results_channel_name}' not found.")
                 await session.execute(update(DraftSession)
