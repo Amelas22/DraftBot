@@ -6,7 +6,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from database.message_management import setup_sticky_handler
 from database.db_session import init_db, ensure_guild_id_in_tables
-from utils import cleanup_sessions_task
+from utils import cleanup_sessions_task, check_inactive_players_task
 from commands import league_commands, scheduled_posts
 
 # Configure loguru for all modules
@@ -54,6 +54,7 @@ async def main():
         await bot.sync_commands()
         
         bot.loop.create_task(cleanup_sessions_task(bot))
+        bot.loop.create_task(check_inactive_players_task(bot))
         from config import migrate_configs
         migrate_configs()
         print(f'Logged in as {bot.user}!')

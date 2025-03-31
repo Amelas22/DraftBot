@@ -39,6 +39,13 @@ class Config:
             "stakes": {
                 "use_optimized_algorithm": True,
                 "stake_multiple": 10
+            },
+            "activity_tracking": {
+                "enabled": False,
+                "active_role": "Active",
+                "exempt_role": "degen",
+                "mod_chat_channel": "mod-chat",
+                "inactivity_months": 3 
             }
         }
         
@@ -75,6 +82,13 @@ class Config:
             "stakes": {
                 "use_optimized_algorithm": True,
                 "stake_multiple": 10
+            },
+            "activity_tracking": {
+                "enabled": False,
+                "active_role": "Active",
+                "exempt_role": "degen",
+                "mod_chat_channel": "mod-chat",
+                "inactivity_months": 3 
             }
         }
         
@@ -179,6 +193,17 @@ def migrate_configs():
             config["roles"]["drafter"] = "Cube Drafters"
             updated = True
             
+        # Ensure activity_tracking section exists
+        if "activity_tracking" not in config:
+            config["activity_tracking"] = {
+                "enabled": False,
+                "active_role": "Active",
+                "exempt_role": "degen",
+                "mod_chat_channel": "mod-chat",
+                "inactivity_months": 3
+            }
+            updated = True
+
         # Save if any updates were made
         if updated:
             bot_config.save_config(guild_id)

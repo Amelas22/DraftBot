@@ -13,6 +13,7 @@ class PlayerStats(Base):
     elo_rating = Column(Float, default=1200)
     true_skill_mu = Column(Float, default=25)
     true_skill_sigma = Column(Float, default=8.333)
+    last_draft_timestamp = Column(DateTime, nullable=True, default=None)
 
     def __repr__(self):
         return f"<PlayerStats(player_id={self.player_id}, display_name={self.display_name})>"

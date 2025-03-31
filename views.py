@@ -862,6 +862,9 @@ class PersistentView(discord.ui.View):
                     if session.session_type == "random" or session.session_type == "staked":
                         await update_player_stats_for_draft(session.session_id, guild)
                     
+                    if session.session_type == "random" or session.session_type == "staked" or session.session_type == "premade":
+                        await update_last_draft_timestamp(session.session_id, guild, self.bot)
+
                     for child in self.children:
                         if isinstance(child, discord.ui.Button) and child.label == "Create Rooms & Post Pairings":
                             child.disabled = True
@@ -1206,6 +1209,73 @@ class UserRemovalSelect(Select):
             await interaction.followup.send(f"Removed {removed_user_name} from the draft.")
         else:
             await interaction.response.send_message("User not found in sign-ups.", ephemeral=True)
+
+
+async def update_last_draft_timestamp(session_id, guild, bot):
+    """Update the last_draft_timestamp and assign Active role to all players in a draft"""
+    guild_id = str(guild.id)
+    current_time = datetime.now()
+    
+    # Get config for this guild to check role name and if activity tracking is enabled
+    from config import get_config
+    config = get_config(guild_id)
+    
+    # Get activity tracking settings
+    activity_tracking_enabled = config.get("activity_tracking", {}).get("enabled", False)
+    active_role_name = config["activity_tracking"].get("active_role", "Active") if activity_tracking_enabled else None
+    
+    # Find the active role if activity tracking is enabled
+    active_role = None
+    if activity_tracking_enabled and active_role_name:
+        active_role = discord.utils.get(guild.roles, name=active_role_name)
+        if not active_role:
+            logger.warning(f"Active role '{active_role_name}' not found in guild {guild.name}")
+    
+    async with AsyncSessionLocal() as db_session:
+        async with db_session.begin():
+            # Get the draft session
+            stmt = select(DraftSession).where(DraftSession.session_id == session_id)
+            draft_session = await db_session.scalar(stmt)
+            
+            if not draft_session:
+                logger.error(f"Draft session {session_id} not found when updating timestamps.")
+                return
+            
+            # Get all players in the draft
+            player_ids = draft_session.team_a + draft_session.team_b
+            
+            # Update last_draft_timestamp for each player and assign Active role if enabled
+            for player_id in player_ids:
+                # Update timestamp in database
+                from models.player import PlayerStats
+                stmt = select(PlayerStats).where(
+                    PlayerStats.player_id == player_id,
+                    PlayerStats.guild_id == guild_id
+                )
+                player_stat = await db_session.scalar(stmt)
+                
+                if player_stat:
+                    player_stat.last_draft_timestamp = current_time
+                    logger.info(f"Updated last_draft_timestamp for player {player_stat.display_name}")
+                else:
+                    logger.warning(f"Player {player_id} not found in PlayerStats.")
+                
+                # Assign Active role if activity tracking is enabled
+                if activity_tracking_enabled and active_role:
+                    try:
+                        # Get the member object
+                        member = guild.get_member(int(player_id))
+                        if member:
+                            # Check if member already has the role
+                            if active_role not in member.roles:
+                                await member.add_roles(active_role)
+                                logger.info(f"Added Active role to {member.display_name}")
+                        else:
+                            logger.warning(f"Member {player_id} not found in guild {guild.name}")
+                    except Exception as e:
+                        logger.error(f"Error assigning Active role to player {player_id}: {e}")
+            
+            await db_session.commit()
 
 
 async def create_pairings_view(bot, guild, session_id, match_results):

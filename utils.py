@@ -10,6 +10,7 @@ from trueskill import Rating, rate_1vs1
 from discord.ui import View
 from league import ChallengeView
 from draft_organization.tournament import Tournament
+from loguru import logger
 
 flags = {}
 locks = {}
@@ -1608,3 +1609,105 @@ async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
             return formatted_lines, total_stake
 
 
+async def check_inactive_players_task(bot):
+    """Weekly task to check for inactive players and remove the Active role"""
+    while True:
+        # Run every week (7 days)
+        await asyncio.sleep(7 * 24 * 60 * 60)
+        logger.info("Running inactive players check")
+        
+        # Process each guild the bot is in
+        for guild in bot.guilds:
+            guild_id = str(guild.id)
+            
+            # Get config for this guild
+            from config import get_config
+            config = get_config(guild_id)
+            
+            # Skip if activity tracking is not enabled for this guild
+            if not config.get("activity_tracking", {}).get("enabled", False):
+                continue
+            
+            # Get role names from config
+            active_role_name = config["activity_tracking"].get("active_role", "Active")
+            exempt_role_name = config["activity_tracking"].get("exempt_role", "degen")
+            mod_chat_channel_name = config["activity_tracking"].get("mod_chat_channel", "mod-chat")
+            inactivity_months = config["activity_tracking"].get("inactivity_months", 3)
+            
+            # Find the roles and channel
+            active_role = discord.utils.get(guild.roles, name=active_role_name)
+            exempt_role = discord.utils.get(guild.roles, name=exempt_role_name)
+            mod_chat_channel = discord.utils.get(guild.text_channels, name=mod_chat_channel_name)
+            
+            if not active_role:
+                logger.warning(f"Active role '{active_role_name}' not found in guild {guild.name}")
+                continue
+                
+            if not mod_chat_channel:
+                logger.warning(f"Mod chat channel '{mod_chat_channel_name}' not found in guild {guild.name}")
+                continue
+            
+            # Calculate the cutoff date (3 months ago)
+            current_time = datetime.now()
+            cutoff_date = current_time - timedelta(days=30 * inactivity_months)
+            
+            # Get all players with the Active role
+            async with AsyncSessionLocal() as db_session:
+                # Fetch all players with last_draft_timestamp before cutoff_date or NULL
+                stmt = select(PlayerStats).where(
+                    PlayerStats.guild_id == guild_id,
+                    or_(
+                        PlayerStats.last_draft_timestamp < cutoff_date,
+                        PlayerStats.last_draft_timestamp == None
+                    )
+                )
+                results = await db_session.execute(stmt)
+                inactive_players = results.scalars().all()
+                
+                # List to store players who had their role removed
+                removed_role_players = []
+                
+                # Process each inactive player
+                for player in inactive_players:
+                    try:
+                        # Find the member in the guild
+                        member = guild.get_member(int(player.player_id))
+                        
+                        # Skip if member not found or has exempt role
+                        if not member:
+                            logger.info(f"Member {player.player_id} not found in guild {guild.name}")
+                            continue
+                            
+                        if exempt_role and exempt_role in member.roles:
+                            logger.info(f"Skipping exempt member {member.display_name}")
+                            continue
+                        
+                        # Check if member has the Active role
+                        if active_role in member.roles:
+                            # Remove the Active role
+                            await member.remove_roles(active_role)
+                            logger.info(f"Removed Active role from {member.display_name} due to inactivity")
+                            removed_role_players.append(member.display_name)
+                    except Exception as e:
+                        logger.error(f"Error processing inactive player {player.player_id}: {e}")
+            
+            # Send message to mod-chat if any players had their role removed
+            if removed_role_players:
+                embed = discord.Embed(
+                    title="Inactive Players - Active Role Removed",
+                    description=f"The following players have not participated in a draft for {inactivity_months} months and have had their Active role removed:",
+                    color=discord.Color.orange()
+                )
+                
+                # Add player names to the embed
+                embed.add_field(
+                    name=f"Players ({len(removed_role_players)})",
+                    value="\n".join(removed_role_players) if removed_role_players else "None",
+                    inline=False
+                )
+                
+                try:
+                    await mod_chat_channel.send(embed=embed)
+                    logger.info(f"Sent inactive players message to {mod_chat_channel.name} in {guild.name}")
+                except Exception as e:
+                    logger.error(f"Error sending inactive players message: {e}")
