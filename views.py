@@ -1087,6 +1087,13 @@ class PersistentView(discord.ui.View):
             # For the "Draft-chat" channel, add read permissions for admin role
             if admin_role:
                 overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, manage_messages=True)
+            
+            # For the combined "Draft-chat" channel, also give read access to anyone with the active role
+            if team_name == "Draft" and config["activity_tracking"]["enabled"]:
+                active_role_name = config["activity_tracking"]["active_role"]
+                active_role = discord.utils.get(guild.roles, name=active_role_name)
+                if active_role:
+                    overwrites[active_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
         # Add team members with read permission (this overrides any role-based permissions)
         for member in team_members:
@@ -1119,6 +1126,7 @@ class PersistentView(discord.ui.View):
                 await db_session.commit()
 
         return channel.id
+
 
 async def generate_ready_check_embed(ready_check_status, sign_ups, draft_link):
     # Define a function to convert user IDs to their names using the sign_ups dictionary
