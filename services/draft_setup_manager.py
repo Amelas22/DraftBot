@@ -95,6 +95,7 @@ class DraftSetupManager:
             await self.sio.emit('setDraftLogRecipients', "delayed")
             await self.sio.emit('setPersonalLogs', True)
             await self.sio.emit('teamDraft', True)  # Added teamDraft setting
+            await self.sio.emit('setPickTimer', 60)
             
             return True
             
