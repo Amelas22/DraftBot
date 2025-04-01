@@ -1065,38 +1065,20 @@ async def scheduled_posts(bot):
 
                     await channel.send(embed=embed)
 
-
-    @aiocron.crontab('0 10 12 5 * 2025', tz=pytz.timezone('US/Eastern')) 
-    async def first_inactive_check():
-        """First inactivity check that runs once on the specified date"""
-        logger.info("Running first inactive players check on May 12, 2025")
+    @aiocron.crontab('0 10 * * 1', tz=pytz.timezone('US/Eastern'))  # Run every Monday at 10 AM Eastern
+    async def inactive_player_check():
+        """Check if inactive players need to have their roles removed"""
+        # Check if we've reached the initial date yet
+        current_time = datetime.now(pytz.timezone('US/Eastern'))
+        target_date = datetime(2025, 5, 12, 10, 0)
+        target_date = pytz.timezone('US/Eastern').localize(target_date)
+        
+        if current_time < target_date:
+            logger.info(f"Inactive player check skipped - waiting until {target_date.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            return
+            
+        logger.info("Running inactive players check")
         await run_inactive_check(bot)
-        
-        # Setup the recurring weekly check after the first one runs
-        setup_weekly_inactive_check()
-
-    # Check if we should register the weekly task immediately
-    current_time = datetime.now()
-    target_date = datetime(2025, 5, 12, 10, 0)  # May 12, 2025 at 10:00 AM
-    eastern_tz = pytz.timezone('US/Eastern')
-    target_date_eastern = eastern_tz.localize(target_date)
-    target_date_utc = target_date_eastern.astimezone(pytz.UTC)
-
-    # If we're already past the target date, set up weekly checks immediately
-    if current_time > target_date_utc:
-        logger.info("Past initial inactive check date - setting up weekly inactive checks immediately")
-        setup_weekly_inactive_check()
-
-    def setup_weekly_inactive_check():
-        """Set up the weekly inactive check to run every Monday at 10 AM"""
-        @aiocron.crontab('0 10 * * 1', tz=pytz.timezone('US/Eastern'))  
-        async def weekly_inactive_check():
-            """Weekly scheduled inactive players check"""
-            logger.info("Running weekly inactive players check")
-            await run_inactive_check(bot)
-        
-        logger.info("Weekly inactive player check scheduled for Mondays at 10 AM Eastern")
-        return weekly_inactive_check
 
     async def run_inactive_check(bot):
         """Run the inactive player check logic"""
