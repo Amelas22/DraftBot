@@ -1337,48 +1337,6 @@ async def calculate_player_standings(limit=None):
             return embeds
         
 
-async def create_winston_draft(bot, interaction):
-    cubes = ["LSVWinston", "ChillWinston", "WinstonDeluxe"]
-    cube_name = random.choice(cubes)
-    draft_start_time = datetime.now().timestamp()
-    session_id = f"{interaction.user.id}-{int(draft_start_time)}"
-    guild = bot.get_guild(interaction.guild_id)
-    channel = discord.utils.get(guild.text_channels, name="winston-draft")
-    draft_id = ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
-    draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
-    embed_title = f"Looking for Players - Winston Draft"
-    embed_description = f"Click sign up below and join the draftmancer (make sure you set up as a Winston Draft). You will be notified after someone joins.\n\n**Chosen Cube: [{cube_name}](https://cubecobra.com/cube/list/{cube_name})** \n**Draftmancer Session**: **[Join Here]({draft_link})**"
-    embed = discord.Embed(title=embed_title, description=embed_description, color=discord.Color.brand_red())
-    embed.add_field(name="Sign-Ups", value="No players yet.", inline=False)
-    from views import PersistentView
-    view = PersistentView(
-            bot=bot,
-            draft_session_id=session_id,
-            session_type="winston"
-        )
-    message = await channel.send(embed=embed, view=view)
-    
-    async with AsyncSessionLocal() as db_session:
-        async with db_session.begin():
-            new_draft_session = DraftSession(
-                session_id=session_id,
-                guild_id=str(interaction.guild_id),
-                draft_link=draft_link,
-                draft_id=draft_id,
-                draft_start_time=datetime.now(),
-                deletion_time=datetime.now() + timedelta(hours=3),
-                session_type="winston",
-                premade_match_id=None,
-                team_a_name=None,
-                team_b_name=None,
-                tracked_draft=True,
-                cube=cube_name,
-                message_id=str(message.id),
-                draft_channel_id=message.channel.id
-            )
-            db_session.add(new_draft_session)
-
-
 async def validate_stakes(session_id, min_stake=10):
     """
     Validate that all players in a staked draft have entered stake information.

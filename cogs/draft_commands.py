@@ -10,15 +10,30 @@ class DraftCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @discord.slash_command(name='startdraft', description='Start a team draft with random teams', guild_id=None)
+    # @commands.Cog.listener()
+    # async def on_application_command_error(self, ctx, error):
+    #     logger.error(f"Command error: {error}", exc_info=True)
+        
+    # # Add this to debug interaction handling
+    # @commands.Cog.listener()
+    # async def on_interaction(self, interaction):
+    #     logger.info(f"Received interaction: {interaction.data}")
+
+    @discord.slash_command(name='start_draft', description='Start a team draft with random teams', guild_ids=None)
     async def start_draft(self, ctx):
-        logger.info("Received startdraft command")
+        logger.info("Received start_draft command")
         view = CubeDraftSelectionView(session_type="random")
         await ctx.response.send_message("Select a cube:", view=view, ephemeral=True)
 
-    @discord.slash_command(name='premadedraft', description='Start a team draft with premade teams', guild_id=None)
+    @discord.slash_command(name='winston_draft', description='Start a winston draft', guild_ids=None)
+    async def winston_draft(self, ctx):
+        logger.info("Received winston_draft command")
+        view = CubeDraftSelectionView(session_type="winston")
+        await ctx.response.send_message("Select a cube:", view=view, ephemeral=True)
+
+    @discord.slash_command(name='premade_draft', description='Start a team draft with premade teams', guild_ids=None)
     async def premade_draft(self, ctx):
-        logger.info("Received premadedraft command")
+        logger.info("Received premade_draft command")
         view = CubeDraftSelectionView(session_type="premade")
         await ctx.response.send_message("Select a cube:", view=view, ephemeral=True)
         

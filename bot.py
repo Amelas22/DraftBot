@@ -51,7 +51,11 @@ async def main():
 
     @bot.event
     async def on_ready():
-        await bot.sync_commands()
+        try:
+            await bot.sync_commands()
+            logger.info("Successfully synced commands")
+        except Exception as e:
+            logger.error(f"Failed to sync commands: {e}")
         
         bot.loop.create_task(cleanup_sessions_task(bot))
         bot.loop.create_task(check_inactive_players_task(bot))
