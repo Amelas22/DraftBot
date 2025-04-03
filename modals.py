@@ -7,6 +7,7 @@ from models.session_details import SessionDetails
 
 from sessions import RandomSession, PremadeSession, SwissSession, BaseSession
 from sessions.staked_session import StakedSession
+from sessions.winston_session import WinstonSession
 
 class CubeDraftModal(discord.ui.Modal):
     @classmethod
@@ -64,10 +65,21 @@ class CubeDraftSelectionView(discord.ui.View):
     def __init__(self, session_type: str):
         super().__init__()
         self.session_type = session_type
-        
-        self.cube_select = discord.ui.Select(
-            placeholder="Select a Cube",
-            options=[
+        if session_type == "winston":
+            self.cube_select = discord.ui.Select(
+                placeholder="Select a Cube",
+                options=[
+                    discord.SelectOption(label="LSVWinston", value="LSVWinston"),
+                    discord.SelectOption(label="ChillWinston", value="ChillWinston"),
+                    discord.SelectOption(label="WinstonDeluxe", value="WinstonDeluxe"),
+                    discord.SelectOption(label="data", value="data"),
+                    discord.SelectOption(label="Custom Cube...", value="custom")
+                ]
+            )
+        else:
+            self.cube_select = discord.ui.Select(
+                placeholder="Select a Cube",
+                options=[
                 discord.SelectOption(label="LSVCube", value="LSVCube"),
                 discord.SelectOption(label="AlphaFrog", value="AlphaFrog"),
                 discord.SelectOption(label="modovintage", value="modovintage"),
@@ -96,6 +108,7 @@ def create_session_instance(session_type: str, session_details: SessionDetails) 
         "premade": PremadeSession,
         "swiss": SwissSession,
         'random': RandomSession,
+        "winston": WinstonSession
     }.get(session_type, BaseSession)
 
     return session_class(session_details)

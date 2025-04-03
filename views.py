@@ -9,7 +9,7 @@ from draft_organization.stake_calculator import calculate_stakes_with_strategy
 from session import StakeInfo, AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
 from sqlalchemy import update, select, and_
 from sqlalchemy.orm import selectinload
-from utils import calculate_pairings, create_winston_draft, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, update_draft_summary_message, check_and_post_victory_or_draw, update_player_stats_and_elo, check_weekly_limits, update_player_stats_for_draft
+from utils import calculate_pairings, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, update_draft_summary_message, check_and_post_victory_or_draw, update_player_stats_and_elo, check_weekly_limits, update_player_stats_for_draft
 from loguru import logger
 
 PROCESSING_ROOMS_PAIRINGS = {}
@@ -256,7 +256,6 @@ class PersistentView(discord.ui.View):
                     guild = self.bot.get_guild(int(interaction.guild_id))
                     channel = discord.utils.get(guild.text_channels, name="winston-draft")
                     await channel.send(f"Winston Draft Ready. Good luck in your match! {sign_up_tags}")
-                    await create_winston_draft(self.bot, interaction)
                 else:
                     guild = interaction.guild
                     message_link = f"https://discord.com/channels/{draft_session_updated.guild_id}/{draft_session_updated.draft_channel_id}/{draft_session_updated.message_id}"

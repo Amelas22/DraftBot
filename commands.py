@@ -286,17 +286,6 @@ async def league_commands(bot):
 
     #         await interaction.response.send_message(embed=embed)
 
-    @bot.slash_command(name='winston_draft', description='Lists all available slash commands')
-    async def winstondraft(interaction: discord.Interaction):
-        from config import is_special_guild, get_config
-    
-        # Only allow this command in your guild
-        if not is_special_guild(interaction.guild_id):
-            await interaction.response.send_message("Winston draft is not available on this server.", ephemeral=True)
-            return
-        from utils import create_winston_draft
-        await create_winston_draft(bot, interaction)
-        await interaction.response.send_message("Queue posted in #winston-draft. Good luck!", ephemeral=True)
     # @bot.slash_command(name='commands', description='Lists all available slash commands')
     # async def list_commands(ctx):
     #     # Manually creating a list of commands and descriptions
