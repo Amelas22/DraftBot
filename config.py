@@ -20,8 +20,10 @@ class Config:
             },
             "roles": {
                 "admin": "Cube Overseer",
-                "drafter": "Cube Drafters"
-                # Basic roles only
+                "drafter": "Cube Drafter",  # Default drafter role
+                "session_roles": {
+                    "winston": "Winston Gamer",
+                }
             },
             "timezone": "US/Eastern",
             "external": {
@@ -64,6 +66,9 @@ class Config:
             "roles": {
                 "admin": "Cube Overseer",
                 "drafter": "Cube Drafter",
+                "session_roles": {
+                    "winston": "Winston Gamer",
+                },
                 "suspected_bot": "suspected bot"
             },
             "timezone": "US/Eastern",

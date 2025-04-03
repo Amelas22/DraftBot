@@ -75,19 +75,40 @@ async def find_notification_channel(guild: discord.Guild) -> Optional[discord.Te
     return None
 
 
-async def find_cube_drafters_role(guild: discord.Guild) -> Optional[discord.Role]:
-    """Find the Cube Drafters role in the guild if it exists."""
+async def find_session_role(guild: discord.Guild, session_type: str) -> Optional[discord.Role]:
+    """Find the appropriate role for the given session type in the guild."""
+    logger.debug(f"Finding session role for session_type '{session_type}' in guild '{guild.name}' (ID: {guild.id})")
+    
     # Get the guild-specific configuration
     from config import get_config
     config = get_config(guild.id)
+    logger.debug(f"Retrieved config for guild {guild.id}: {config.get('roles', {})}")
     
-    # Get the drafter role name from the config
-    drafter_role_name = config["roles"]["drafter"]
+    # Get the roles section first
+    roles_config = config.get("roles", {})
+    logger.debug(f"Full roles config: {roles_config}")
+    
+    # Get both values using the same pattern
+    session_roles = roles_config.get("session_roles", {})
+    default_drafter = roles_config.get("drafter")
+    
+    logger.debug(f"Session roles config: {session_roles}")
+    logger.debug(f"Default drafter role: {default_drafter}")
+    
+    # Get the role name, falling back to default drafter if not specified
+    role_name = session_roles.get(session_type, default_drafter)
+    logger.debug(f"Selected role name for {session_type}: {role_name}")
     
     # Find the role with matching name
+    guild_roles = [role.name for role in guild.roles]
+    logger.debug(f"Available guild roles: {guild_roles}")
+    
     for role in guild.roles:
-        if role.name.lower() == drafter_role_name.lower():
+        if role.name.lower() == role_name.lower():
+            logger.info(f"Found matching role '{role.name}' for session type '{session_type}'")
             return role
+    
+    logger.warning(f"No matching role found for name '{role_name}' in guild '{guild.name}'")
     return None
 
 
@@ -118,11 +139,29 @@ async def post_or_update_notification(
         
         content = f"{message_link}: Looking for Drafters"
         
-        # If this is the first notification, add a mention to the Cube Drafters role
+        # If this is the first notification, add a mention to the appropriate role
         if not notification_message_id:
-            cube_drafters_role = await find_cube_drafters_role(guild)
-            if cube_drafters_role:
-                content = f"{cube_drafters_role.mention} {content}"
+            # Get the sticky message to access its metadata
+            sticky_message = await fetch_sticky_message(draft_channel_id, session)
+            if sticky_message and sticky_message.view_metadata:
+                logger.debug(f"Found sticky message with metadata: {sticky_message.view_metadata}")
+                session_id = sticky_message.view_metadata.get("draft_session_id")
+                if session_id:
+                    logger.debug(f"Found session ID: {session_id}")
+                    draft_session = await get_draft_session(session_id)
+                    if draft_session:
+                        logger.debug(f"Found draft session with type: {draft_session.session_type}")
+                        session_role = await find_session_role(guild, draft_session.session_type)
+                        if session_role:
+                            content = f"{session_role.mention} {content}"
+                        else:
+                            logger.warning(f"No role found for session type {draft_session.session_type}")
+                    else:
+                        logger.warning(f"No draft session found for ID {session_id}")
+                else:
+                    logger.warning("No draft_session_id found in view_metadata")
+            else:
+                logger.warning(f"No sticky message or metadata found for channel {draft_channel_id}")
         
         # Either update existing notification or create a new one
         if notification_message_id:
@@ -142,6 +181,7 @@ async def post_or_update_notification(
             
     except Exception as e:
         logger.error(f"Error posting/updating notification: {str(e)}")
+        logger.exception(e)  # This will log the full stack trace
     
     return None
 
