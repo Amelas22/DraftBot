@@ -95,10 +95,10 @@ class DraftLogManager:
                         eastern = pytz.timezone('US/Eastern')
                         if not self.first_delay and not first_user_picks:
                             
-                            next_fetch_time = datetime.now(pytz.utc) + timedelta(seconds=7500)
+                            next_fetch_time = datetime.now(pytz.utc) + timedelta(seconds=5400)
                             next_fetch_time_eastern = next_fetch_time.astimezone(eastern)
                             logger.info(f"Draft log data for {self.draft_id} has no picks, retrying at {next_fetch_time_eastern.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-                            await asyncio.sleep(7500)  # Wait for 2 hours and 5 minutes
+                            await asyncio.sleep(5400)  # Wait for ninety minutes
                             self.first_delay = True
                             self.fetch_attempts += 1
                             return await self.fetch_draft_log_data()  # Retry fetching the data
@@ -164,11 +164,11 @@ class DraftLogManager:
                         logger.info(f"Draft victory message detected. Sending logs for {self.draft_id}")
                         await self.send_magicprotools_embed(draft_data)
                     elif draft_session.teams_start_time and self.discord_client and self.guild_id:
-                        unlock_time = draft_session.teams_start_time + timedelta(hours=3)
+                        unlock_time = draft_session.teams_start_time + timedelta(seconds=8100)
                         current_time = datetime.now()
                         if current_time >= unlock_time:
-                            # If 3 hours have already passed, post links immediately
-                            logger.info(f"Draft {self.draft_id} logs are available (3+ hours since start)")
+                            # If 2:15 hours have already passed, post links immediately
+                            logger.info(f"Draft {self.draft_id} logs are available (2+ hours since start)")
                             await self.send_magicprotools_embed(draft_data)
                         else:
                             # Schedule a task to post links after the time difference
