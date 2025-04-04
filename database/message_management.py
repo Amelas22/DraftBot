@@ -259,11 +259,15 @@ async def handle_sticky_message_update(sticky_message: Message, bot: discord.Cli
     except discord.NotFound:
         logger.info(f"Old message {old_message_id} was already deleted")
 
+    return True
 
 async def check_channels_for_inactivity(bot: discord.Client) -> None:
     """Background task that periodically checks all channels with sticky messages for inactivity."""
     await bot.wait_until_ready()
     logger.info("Starting background task to check for inactive channels")
+    
+    failure_tracker = {}
+    MAX_CONSECUTIVE_FAILURES = 3
     
     while not bot.is_closed():
         current_time = time.time()
@@ -271,6 +275,14 @@ async def check_channels_for_inactivity(bot: discord.Client) -> None:
             sticky_messages = await fetch_all_sticky_messages(session)
             
             for sticky_message in sticky_messages:
+                # Create a unique key for this sticky message
+                sticky_key = f"{sticky_message.channel_id}-{sticky_message.view_metadata.get('draft_session_id')}"
+                
+                # Skip if this sticky message has failed too many times
+                if failure_tracker.get(sticky_key, 0) >= MAX_CONSECUTIVE_FAILURES:
+                    logger.warning(f"Skipping update for sticky message in channel {sticky_message.channel_id} - too many consecutive failures")
+                    continue
+                
                 elapsed_time = current_time - sticky_message.last_activity
                 time_since_last_update = current_time - (sticky_message.last_update_time or 0)
                 
@@ -289,7 +301,19 @@ async def check_channels_for_inactivity(bot: discord.Client) -> None:
                     should_update = True
                 
                 if should_update:
-                    await handle_sticky_message_update(sticky_message, bot, session)
+                    try:
+                        success = await handle_sticky_message_update(sticky_message, bot, session)
+                        if success:
+                            # Reset failure counter on success
+                            failure_tracker[sticky_key] = 0
+                        else:
+                            # Increment failure counter
+                            failure_tracker[sticky_key] = failure_tracker.get(sticky_key, 0) + 1
+                            logger.warning(f"Failed to update sticky message in channel {sticky_message.channel_id}. Consecutive failures: {failure_tracker[sticky_key]}")
+                    except Exception as e:
+                        # Log and count any exceptions as failures
+                        logger.error(f"Exception during sticky message update: {str(e)}")
+                        failure_tracker[sticky_key] = failure_tracker.get(sticky_key, 0) + 1
         
         # Wait before checking again
         await asyncio.sleep(INACTIVITY_CHECK_INTERVAL)
