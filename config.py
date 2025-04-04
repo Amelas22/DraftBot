@@ -20,10 +20,8 @@ class Config:
             },
             "roles": {
                 "admin": "Cube Overseer",
-                "drafter": "Cube Drafter",  # Default drafter role
-                "session_roles": {
-                    "winston": "Winston Gamer",
-                }
+                "drafter": "Cube Drafters"
+                # Basic roles only
             },
             "timezone": "US/Eastern",
             "external": {
@@ -33,7 +31,8 @@ class Config:
             "features": {
                 "winston_draft": False,
                 "voice_channels": False,
-                "bot_detection": False
+                "bot_detection": False,
+                "money_server": False  
             },
             "matchmaking": {
                 "trueskill_chance": 0  # Default to 0% (always random teams)
@@ -66,9 +65,6 @@ class Config:
             "roles": {
                 "admin": "Cube Overseer",
                 "drafter": "Cube Drafter",
-                "session_roles": {
-                    "winston": "Winston Gamer",
-                },
                 "suspected_bot": "suspected bot"
             },
             "timezone": "US/Eastern",
@@ -79,7 +75,8 @@ class Config:
             "features": {
                 "winston_draft": True,
                 "voice_channels": True,
-                "bot_detection": True
+                "bot_detection": True,
+                "money_server": False  
             },
             "matchmaking": {
                 "trueskill_chance": 60  
@@ -143,7 +140,7 @@ class Config:
         if guild_id != SPECIAL_GUILD_ID and path.startswith("features.") and (
             path == "features.winston_draft" or 
             path == "features.voice_channels" or 
-            path == "features.bot_detection"
+            path == "features.bot_detection"  
         ):
             return False
         
@@ -180,6 +177,11 @@ def update_setting(guild_id, path, value):
     """Update a specific setting in a guild's config"""
     return bot_config.update_guild_setting(guild_id, path, value)
 
+def is_money_server(guild_id):
+    """Helper function to check if this guild is configured for money drafts"""
+    config = get_config(guild_id)
+    return config.get("features", {}).get("money_server", False)
+
 def migrate_configs():
     """Ensure all configs have the latest structure."""
     for guild_id, config in bot_config.configs.items():
@@ -207,6 +209,11 @@ def migrate_configs():
                 "mod_chat_channel": "mod-chat",
                 "inactivity_months": 3
             }
+            updated = True
+            
+        if "features" in config and "money_server" not in config["features"]:
+            # Set money_server to True for special guild, False for others
+            config["features"]["money_server"] = (guild_id == SPECIAL_GUILD_ID)
             updated = True
 
         # Save if any updates were made

@@ -63,8 +63,8 @@ class HistoryCog(commands.Cog):
         self.bot = bot
         logger.info("History cog loaded")
     
-    @discord.slash_command(name="draft_history", description="View your draft history")
-    async def draft_history(self, ctx):
+    @discord.slash_command(name="history", description="View your draft history")
+    async def history(self, ctx):
         """Display draft history for the user."""
         await ctx.defer()  # Defer reply since this might take a while
         

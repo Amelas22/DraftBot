@@ -5,6 +5,7 @@ from modals import CubeDraftSelectionView, StakedCubeDraftSelectionView
 
 from session import DraftSession, MatchResult
 from views import MatchResultSelect
+from config import is_money_server
 
 class DraftCommands(commands.Cog):
     def __init__(self, bot):
@@ -19,11 +20,25 @@ class DraftCommands(commands.Cog):
     # async def on_interaction(self, interaction):
     #     logger.info(f"Received interaction: {interaction.data}")
 
-    @discord.slash_command(name='start_draft', description='Start a team draft with random teams', guild_ids=None)
-    async def start_draft(self, ctx):
-        logger.info("Received start_draft command")
-        view = CubeDraftSelectionView(session_type="random")
-        await ctx.response.send_message("Select a cube:", view=view, ephemeral=True)
+    @discord.slash_command(name='draft', description='Start a cube draft with team settings based on server configuration', guild_ids=None)
+    async def draft(self, ctx):
+        logger.info(f"Received draft command from user {ctx.author.id} in guild {ctx.guild.id}")
+        
+        # Check if this is a money server
+        if is_money_server(ctx.guild.id):
+            logger.info(f"Using staked draft view for money server {ctx.guild.id}")
+            view = StakedCubeDraftSelectionView()
+            await ctx.response.send_message("Select a cube for the staked draft:", view=view, ephemeral=True)
+        else:
+            logger.info(f"Using standard draft view for free server {ctx.guild.id}")
+            view = CubeDraftSelectionView(session_type="random")
+            await ctx.response.send_message("Select a cube:", view=view, ephemeral=True)
+
+    # @discord.slash_command(name='start_draft', description='Start a team draft with random teams', guild_ids=None)
+    # async def start_draft(self, ctx):
+    #     logger.info("Received start_draft command")
+    #     view = CubeDraftSelectionView(session_type="random")
+    #     await ctx.response.send_message("Select a cube:", view=view, ephemeral=True)
 
     @discord.slash_command(name='winston_draft', description='Start a winston draft', guild_ids=None)
     async def winston_draft(self, ctx):
@@ -37,11 +52,11 @@ class DraftCommands(commands.Cog):
         view = CubeDraftSelectionView(session_type="premade")
         await ctx.response.send_message("Select a cube:", view=view, ephemeral=True)
         
-    @discord.slash_command(name='dynamic_stake', description='Start a team draft with random teams and customizable stakes')
-    async def staked_draft(self, ctx):
-        logger.info("Received stakedraft command")
-        view = StakedCubeDraftSelectionView()
-        await ctx.response.send_message("Select a cube for the staked draft:", view=view, ephemeral=True)
+    # @discord.slash_command(name='dynamic_stake', description='Start a team draft with random teams and customizable stakes')
+    # async def staked_draft(self, ctx):
+    #     logger.info("Received stakedraft command")
+    #     view = StakedCubeDraftSelectionView()
+    #     await ctx.response.send_message("Select a cube for the staked draft:", view=view, ephemeral=True)
 
     @discord.slash_command(
         name='report_results', 
