@@ -164,7 +164,7 @@ class DraftLogManager:
                         logger.info(f"Draft victory message detected. Sending logs for {self.draft_id}")
                         await self.send_magicprotools_embed(draft_data)
                     elif draft_session.teams_start_time and self.discord_client and self.guild_id:
-                        unlock_time = draft_session.teams_start_time + timedelta(seconds=8100)
+                        unlock_time = draft_session.teams_start_time + timedelta(seconds=9000)
                         current_time = datetime.now()
                         if current_time >= unlock_time:
                             # If 2:15 hours have already passed, post links immediately
