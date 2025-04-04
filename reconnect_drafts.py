@@ -127,8 +127,8 @@ async def reconnect_recent_draft_sessions(discord_client):
                     guild_id=int(session.guild_id) if session.guild_id else None
                 )
                 
-                # Skip the first connection delay by setting this to False
-                manager.first_connection = False
+                manager.first_connection = False  # Skip the 15-minute wait in keep_draft_session_alive
+                manager.first_delay = True # Skip the 90-minute wait in fetch_draft_log_data
                 
                 # Create and add the task
                 task = asyncio.create_task(manager.keep_draft_session_alive())
