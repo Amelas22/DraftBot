@@ -214,7 +214,7 @@ def migrate_configs():
         if "features" in config and "money_server" not in config["features"]:
             # Set money_server to True for special guild, False for others
             config["features"]["money_server"] = (guild_id == SPECIAL_GUILD_ID)
-            updated = True
+            updated = False
 
         # Save if any updates were made
         if updated:
