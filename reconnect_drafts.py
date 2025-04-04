@@ -4,10 +4,6 @@ from sqlalchemy.future import select
 from session import AsyncSessionLocal, DraftSession
 from datacollections import DraftLogManager
 from loguru import logger
-from dotenv import load_dotenv
-import os
-
-load_dotenv()
 
 async def reconnect_recent_draft_sessions(discord_client):
     """
@@ -84,5 +80,4 @@ async def reconnect_recent_draft_sessions(discord_client):
             except Exception as e:
                 logger.error(f"Error creating reconnection task for session {session.session_id}: {e}")
         
-        # Return the tasks without awaiting them
         return tasks

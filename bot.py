@@ -8,6 +8,7 @@ from database.message_management import setup_sticky_handler
 from database.db_session import init_db, ensure_guild_id_in_tables
 from utils import cleanup_sessions_task, check_inactive_players_task
 from commands import league_commands, scheduled_posts
+from reconnect_drafts import reconnect_recent_draft_sessions
 
 # Configure loguru for all modules
 logger.remove()  # Remove default handler
@@ -59,6 +60,18 @@ async def main():
         
         bot.loop.create_task(cleanup_sessions_task(bot))
         bot.loop.create_task(check_inactive_players_task(bot))
+        try:
+            logger.info("Starting draft session reconnection...")
+            reconnection_tasks = await reconnect_recent_draft_sessions(bot)
+            if reconnection_tasks:
+                logger.info(f"Created {len(reconnection_tasks)} draft reconnection tasks")
+                # Create a monitoring task that doesn't block bot startup
+                bot.loop.create_task(monitor_reconnection_tasks(reconnection_tasks))
+            else:
+                logger.info("No draft sessions to reconnect")
+        except Exception as e:
+            logger.error(f"Error setting up draft reconnections: {e}")
+
         from config import migrate_configs
         migrate_configs()
         print(f'Logged in as {bot.user}!')
@@ -81,7 +94,13 @@ async def main():
             await guild.system_channel.send(
                 "Thanks for adding the Draft Bot! To set up needed channels and roles, an admin should use `/setup`."
             )
-
+    async def monitor_reconnection_tasks(tasks):
+        """Monitor the reconnection tasks without blocking bot startup"""
+        try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+            logger.info("All draft session reconnection tasks have completed")
+        except Exception as e:
+            logger.error(f"Error during draft session reconnection: {e}")
 
     await league_commands(bot)
     await scheduled_posts(bot)
