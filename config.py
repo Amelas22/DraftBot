@@ -20,8 +20,10 @@ class Config:
             },
             "roles": {
                 "admin": "Cube Overseer",
-                "drafter": "Cube Drafters"
-                # Basic roles only
+                "drafter": "Cube Drafter",  # Default drafter role
+                "session_roles": {
+                    "winston": "Winston Gamer",
+                }
             },
             "timezone": "US/Eastern",
             "external": {
@@ -62,9 +64,12 @@ class Config:
                 "draft": "Draft Channels",
                 "voice": "Draft Voice"
             },
-            "roles": {
+             "roles": {
                 "admin": "Cube Overseer",
                 "drafter": "Cube Drafter",
+                "session_roles": {
+                    "winston": "Winston Gamer",
+                },
                 "suspected_bot": "suspected bot"
             },
             "timezone": "US/Eastern",
@@ -214,6 +219,12 @@ def migrate_configs():
         if "features" in config and "money_server" not in config["features"]:
             # Set money_server to True for special guild, False for others
             config["features"]["money_server"] = (guild_id == SPECIAL_GUILD_ID)
+            updated = True
+
+        if "roles" in config and "session_roles" not in config["roles"]:
+            config["roles"]["session_roles"] = {
+                "winston": "Winston Gamer"
+            }
             updated = True
 
         # Save if any updates were made
