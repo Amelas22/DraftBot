@@ -69,8 +69,8 @@ class PersistentView(discord.ui.View):
                     self.add_item(self.create_button("Create Teams", "blurple", f"randomize_teams_{self.draft_session_id}", self.randomize_teams_callback))
                     
                 # Add "How Stakes Work" button for staked drafts when teams haven't been created yet
-                # if self.session_type == "staked" and self.session_stage != "teams":
-                #     self.add_item(self.create_button("How Stakes Work", "secondary", f"explain_stakes_{self.draft_session_id}", self.explain_stakes_callback))
+                if self.session_type == "staked" and self.session_stage != "teams":
+                    self.add_item(self.create_button("How Bets Work 💰", "green", f"explain_stakes_{self.draft_session_id}", self.explain_stakes_callback))
                     
             elif self.session_type == "premade":
                 self.add_item(self.create_button(self.team_a_name, "green", f"Team_A_{self.draft_session_id}", self.team_assignment_callback))
@@ -611,87 +611,101 @@ class PersistentView(discord.ui.View):
         embed = discord.Embed(
             title="How the Dynamic Bet System Works",
             description=(
-                "The dynamic bet draft system allows players to bet the amount they are comfortable with. "
-                "Here's how it works:"
+                "The dynamic bet system allows players to bet different amounts based on their personal preferences "
+                "to ensure all players can bet what they are comfortable with."
             ),
             color=discord.Color.blue()
         )
         
         embed.add_field(
-            name="Step 1: Sign Up & Set Max Individual Bets",
+            name="Core Principles",
             value=(
-                "When players sign up, they will set their individual maximum bet - the most they're willing to bet.\n"
-                "Example with 8 players:\n"
-                "Player A (100 tix), B (75 tix), C (50 tix), D (40 tix), "
-                "E (120 tix), F (60 tix), G (30 tix), H (80 tix)"
+                "• **Max Bet Protection**: You will never be allocated more than your maximum bet amount\n"
+                "• **Team Formation**: Teams are created randomly FIRST, then bets are allocated\n"
+                "• **Flexibility**: The system adapts to different betting situations using two methods"
             ),
             inline=False
         )
         
         embed.add_field(
-            name="Step 2: Random Teams",
+            name="Process Overview",
             value=(
-                "Teams are created randomly **without** considering stakes.\n "
-                "Example: Random assignment creates:\nTeam Red (A, C, F, H)\nTeam Blue (B, D, E, G)."
+                "The betting process works in two phases:\n"
+                "1. **Allocation Phase**: Determine how much each player will bet\n"
+                "2. **Bet Matching Phase**: Create player-to-player betting pairs"
             ),
             inline=False
         )
         
         embed.add_field(
-            name="Step 3: Primary Matches (First Pass)",
+            name="Bet Capping Option",
             value=(
-                "Players on each team are sorted by stake amount (highest first) and matched with their counterpart on the opposing team. "
-                "Example:\n"
-                "Team Red sort: A (100), H (80), F (60), C (50)\n"
-                "Team Blue sort: E (120), B (75), D (40), G (30)\n\n"
-                "*Primary Matching:*\n"
-                "• A (100) vs E (120) = 100 tix bet (E has 20 tix leftover)\n"
-                "• H (80) vs B (75) = 75 tix bet (H has 5 tix leftover)\n"
-                "• F (60) vs D (40) = 40 tix bet (F has 20 tix leftover)\n"
-                "• C (50) vs G (30) = 30 tix bet (C has 20 tix leftover)"
+                "• Players can choose \"capped\" (🧢) or \"uncapped\" (🏎️)\n"
+                "• Capped bets are limited to the highest bet on the opposing team\n"
+                "• This is applied before any calculations occur"
             ),
             inline=False
         )
         
         embed.add_field(
-            name="Step 4: Secondary Stakes (Second Pass)",
+            name="Determining Method Selection",
             value=(
-                "The bot checks for leftover stakes from primary matches and creates additional bets, if able.\n"    
-                "Team Red leftovers (highest first): F (20), C (20), H (5), A (0)  \n"
-                "Team Blue leftovers (highest first): E (20), B (0), D (0), G (0)\n\n"
-                "*Secondary Matching (with min stake = 10)*:\n"
-                "• F (20) vs E (20) = 20 tix bet (both now have 0 tix leftover)\n"
-                "• C (20) has leftover but no more opponents with leftover stakes\n"
-                "• H (5) is below minimum stake, so not matched\n\n"
+                "To decide which allocation method to use, the system:\n"
+                "• Calculates each team's minimum bet requirements:\n"
+                "  - For bets ≤50 tix: Uses the full bet amount for that drafter\n"
+                "  - For bets >50 tix: Uses 50 tix as the minimum for that drafter\n"
+                "• Compares each team's total bet capacity to the opposing team's minimum requirements\n"
+                "• If both teams pass, use the \"Tiered\" approach\n"
+                "• If either team fails this check, switches to \"Proportional\" Approach"
             ),
             inline=False
         )
         
         embed.add_field(
-            name="Step 5: Post Stakes",
+            name="The Allocation Phase",
             value=(
-                "The stakes are posted in the draft summary so everyone can see their bets:\n\n"
-                "**Primary Bets**\n"
-                "**A vs E**: 100 tix\n"
-                "**H vs B**: 75 tix\n"
-                "**F vs D**: 40 tix\n"
-                "**C vs G**: 30 tix\n"
-                "**Secondary/Bonus Bets**\n"
-                "**F vs E**: 20 tix\n\n"
-                
-                "Total: 265 tix\n"
+                "**Initial Team Analysis (Common to Both Methods)**\n"
+                "• Identify Min Team (lower total bets) and Max Team (higher total bets)\n"
+                "• 100% of a drafter's max bet is allocated to Min Team players\n\n"
+                "**Max Team Allocation Methods:**"
             ),
             inline=False
         )
         
         embed.add_field(
-            name="Important Notes",
+            name="Tiered Approach (Primary Method)",
             value=(
-                "• Max stake = the MOST you're willing to bet (you may end up betting less)\n"
-                "• Each bet amount = the LOWER of the two paired players' stakes\n"
-                "• You might have multiple bets against different opponents\n"
-                "• Minimum stakes (typically 10 tix) apply to individual bets\n"
-                "• You can see exact stake calculations after teams are created"
+                "Used when both teams have sufficient capacity to meet minimum requirements:\n"
+                "• Players betting ≤50 tix get 100% bet allocation first\n"
+                "• Remaining capacity is distributed proportionally to higher bets\n"
+                "• Prioritizes filling all 10/20/50 bets first before filling bets >50 tix"
+            ),
+            inline=False
+        )
+        
+        embed.add_field(
+            name="Proportional Approach (Fallback Method)",
+            value=(
+                "Used when minimum bet requirements cannot be met with the Tiered Approach:\n"
+                "• Players with minimum bets get 100% of their bet allocated\n"
+                "• Other players receive proportional allocations based on a bet score:\n"
+                "  - Bet score = remaining Min Team capacity ÷ remaining Max Team capacity\n"
+                "  - Allocation = individual bet × bet score (rounded to nearest 10)"
+            ),
+            inline=False
+        )
+        
+        embed.add_field(
+            name="The Bet Matching Phase",
+            value=(
+                "**1. Identical Allocation Matching (First Priority)**"
+                "• Groups players by their allocation amounts\n"
+                "• Matches players with identical allocations first\n"
+                "• Creates perfect 1:1 matches requiring only one transaction per pair\n"
+                "**2. Smart Matching Algorithm**"
+                "• Uses a scoring system to determine optimal pairings\n"
+                "• Prioritizes matches that completely fulfill a player's allocation\n"
+                "• Balances bet sizes to minimize the total number of transactions"
             ),
             inline=False
         )
