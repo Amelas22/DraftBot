@@ -313,9 +313,9 @@ class PersistentView(discord.ui.View):
         
         # Create a dictionary to store the initial ready check status
         ready_check_status = {
-            "ready": [],
+            "ready": [user_id],  # Add the initiator to ready immediately
             "not_ready": [],
-            "no_response": list(session.sign_ups.keys())
+            "no_response": [uid for uid in session.sign_ups.keys() if uid != user_id]  # All others except initiator
         }
 
         # Save this status in a global sessions dictionary
