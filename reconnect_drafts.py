@@ -90,6 +90,7 @@ async def reconnect_recent_draft_sessions(discord_client):
             DraftSession.teams_start_time.isnot(None),  # teams have been formed
             DraftSession.teams_start_time >= five_hours_ago,  # Started within the last 5 hours
             DraftSession.teams_start_time <= current_time, 
+            DraftSession.session_stage == "pairings",
             DraftSession.session_type != "winston"  
         )
         
