@@ -163,23 +163,12 @@ class DraftLogManager:
                     if draft_session.victory_message_id_draft_chat and self.discord_client and self.guild_id:
                         logger.info(f"Draft victory message detected. Sending logs for {self.draft_id}")
                         await self.send_magicprotools_embed(draft_data)
-                    elif draft_session.teams_start_time and self.discord_client and self.guild_id:
-                        unlock_time = draft_session.teams_start_time + timedelta(seconds=9000)
-                        current_time = datetime.now()
-                        if current_time >= unlock_time:
-                            # If 2:15 hours have already passed, post links immediately
-                            logger.info(f"Draft {self.draft_id} logs are available (2+ hours since start)")
-                            await self.send_magicprotools_embed(draft_data)
-                        else:
-                            # Schedule a task to post links after the time difference
-                            time_to_wait = (unlock_time - current_time).total_seconds()
-                            minutes_to_wait = time_to_wait / 60
-                            logger.info(f"Draft {self.draft_id} logs will be available in {minutes_to_wait:.1f} minutes")
-                            
-                            # Schedule the task
-                            self.discord_client.loop.create_task(self.post_links_after_delay(draft_data, time_to_wait))
                     else:
-                        logger.info(f"Draft {self.draft_id} log data saved but can't determine when to post links")
+                        if self.discord_client and self.guild_id:
+                            logger.info(f"Draft {self.draft_id} log data saved but no victory message yet. Will check every 5 minutes.")
+                            self.discord_client.loop.create_task(self.check_for_victory_message(draft_data))
+                        else:
+                            logger.info(f"Draft {self.draft_id} log data saved but can't determine when to post links (missing client or guild)")
                 
                 elif draft_session:
                     draft_session.draft_data = draft_data
@@ -189,6 +178,26 @@ class DraftLogManager:
             
             await db_session.commit()
 
+    async def check_for_victory_message(self, draft_data, retry_count=0, max_retries=36):  # 36 retries * 5 minutes = 3 hours max
+        """Check if victory message exists, if yes, post logs. Otherwise retry after 5 minutes."""
+        if retry_count >= max_retries:
+            logger.warning(f"Max retries ({max_retries}) reached for draft {self.draft_id}, giving up on checking victory message")
+            return
+        
+        await asyncio.sleep(300)  # Sleep for 5 minutes
+        
+        async with AsyncSessionLocal() as db_session:
+            stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
+            draft_session = await db_session.scalar(stmt)
+            
+            if draft_session and draft_session.victory_message_id_draft_chat:
+                logger.info(f"Victory message detected on retry {retry_count+1} for draft {self.draft_id}, sending logs")
+                await self.send_magicprotools_embed(draft_data)
+                return
+        
+        logger.info(f"No victory message for draft {self.draft_id} on retry {retry_count+1}, checking again in 5 minutes")
+        await self.check_for_victory_message(draft_data, retry_count + 1, max_retries)
+        
     def get_pack_first_picks(self, draft_data, user_id):
         """Extract the first pick card name for each pack for a specific user."""
         pack_first_picks = {}
