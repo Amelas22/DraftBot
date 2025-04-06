@@ -1248,7 +1248,7 @@ async def re_register_views(bot):
                                         match_id=match_result.id,
                                         match_number=match_result.match_number,
                                         label=f"Match {match_result.match_number} Results",
-                                        style=discord.ButtonStyle.primary
+                                        style=discord.ButtonStyle.secondary
                                         # row parameter is optional
                                     )
                                     if draft_session.session_type != "test":
