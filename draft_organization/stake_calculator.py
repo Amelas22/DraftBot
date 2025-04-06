@@ -1015,9 +1015,9 @@ class StakeCalculator:
             return OptimizedStakeCalculator.calculate_stakes(team_a, team_b, stakes, min_stake, multiple)
 
 def calculate_stakes_with_strategy(team_a: List[str], team_b: List[str], 
-                                  stakes: Dict[str, int], min_stake: int = 10,
-                                  multiple: int = 10, use_optimized: bool = False,
-                                  cap_info: Dict[str, bool] = None) -> List[StakePair]:
+                                 stakes: Dict[str, int], min_stake: int = 10,
+                                 multiple: int = 10, use_optimized: bool = False,
+                                 cap_info: Dict[str, bool] = None) -> List[StakePair]:
     """
     Calculate stake pairings using either the original or optimized algorithm.
     
@@ -1033,13 +1033,16 @@ def calculate_stakes_with_strategy(team_a: List[str], team_b: List[str],
     Returns:
         List of StakePair objects representing the stake assignments
     """
+    # Determine the actual minimum bet in the sign-up list
+    actual_min_bet = min(stakes.values())
+
     if cap_info:
-        stake_logger.info(f"Using tiered stake calculation with bet capping. Min stake={min_stake}")
+        stake_logger.info(f"Using tiered stake calculation with bet capping. Min stake={min_stake}, using actual min bet={actual_min_bet}")
         stake_logger.info(f"Capping preferences: {cap_info}")
     else:
-        stake_logger.info(f"Using tiered stake calculation without bet capping. Min stake={min_stake}")
+        stake_logger.info(f"Using tiered stake calculation without bet capping. Min stake={min_stake}, using actual min bet={actual_min_bet}")
         
-    return StakeCalculator.tiered_stakes_calculator(team_a, team_b, stakes, min_stake, multiple, cap_info)
+    return StakeCalculator.tiered_stakes_calculator(team_a, team_b, stakes, actual_min_bet, multiple, cap_info)
 
     
 class OptimizedStakeCalculator:
