@@ -492,13 +492,13 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                                             embed.add_field(name="Standings", value=standings, inline=False)
 
                                             if draft_chat_channel:
-                                                await post_or_update_victory_message(session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat')
+                                                await post_or_update_victory_message(bot, session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat')
 
                                             # Determine the correct results channel
                                             results_channel_name = "team-draft-results" if draft_session.session_type == "random" or draft_session.session_type == "staked" else "league-draft-results"
                                             results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
                                             if results_channel:
-                                                await post_or_update_victory_message(session, results_channel, embed, draft_session, 'victory_message_id_results_channel')
+                                                await post_or_update_victory_message(bot, session, results_channel, embed, draft_session, 'victory_message_id_results_channel')
 
                                             pacific = pytz.timezone('US/Pacific')
                                             utc = pytz.utc
@@ -594,13 +594,13 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 # Handle the draft-chat channel message
                 draft_chat_channel = guild.get_channel(int(draft_session.draft_chat_channel))
                 if draft_chat_channel:
-                    await post_or_update_victory_message(session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat')
+                    await post_or_update_victory_message(bot, session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat')
 
                 # Determine the correct results channel
                 results_channel_name = "team-draft-results" if draft_session.session_type == "random" or draft_session.session_type == "staked" else "league-draft-results"
                 results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
                 if results_channel:
-                    await post_or_update_victory_message(session, results_channel, embed, draft_session, 'victory_message_id_results_channel')
+                    await post_or_update_victory_message(bot, session, results_channel, embed, draft_session, 'victory_message_id_results_channel')
                     if not draft_session.victory_message_id_draft_chat and not draft_session.victory_message_id_results_channel:
                         from livedrafts import update_live_draft_summary, remove_live_draft_summary_after_delay
                         await update_live_draft_summary(bot, draft_session_id)
@@ -620,7 +620,7 @@ async def remove_lock_after_delay(draft_session_id, delay):
     if draft_session_id in flags:
         del flags[draft_session_id]
 
-async def post_or_update_victory_message(session, channel, embed, draft_session, victory_message_attr):
+async def post_or_update_victory_message(bot, session, channel, embed, draft_session, victory_message_attr):
     if not channel:
         print("Channel not found.")
         return
@@ -639,6 +639,10 @@ async def post_or_update_victory_message(session, channel, embed, draft_session,
         message = await channel.send(embed=embed)
         setattr(draft_session, victory_message_attr, str(message.id))
         session.add(draft_session)
+    
+    # Schedule the removal of the live draft summary after 15 minutes (900 seconds)
+    from livedrafts import remove_live_draft_summary_after_delay
+    asyncio.create_task(remove_live_draft_summary_after_delay(bot, draft_session.session_id, 900))
 
 
 async def calculate_three_zero_drafters(session, draft_session_id, guild):
