@@ -135,7 +135,23 @@ async def generate_live_draft_embed(bot, draft_session):
     
     if matches_text:
         embed.add_field(name="Matches\n", value=matches_text, inline=False)
-    
+        
+    # Add bet information if this is a staked draft
+    if draft_session.session_type == "staked":
+        from utils import get_formatted_stake_pairs
+        stake_lines, total_stakes = await get_formatted_stake_pairs(
+            draft_session.session_id, 
+            draft_session.sign_ups
+        )
+        
+        # Add the bet field to the embed
+        if stake_lines:
+            embed.add_field(
+                name=f"**Total Bets: {total_stakes} tix**",
+                value="\n".join(stake_lines),
+                inline=False
+            )
+
     return embed
 
 
