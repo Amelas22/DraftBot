@@ -178,7 +178,7 @@ class DraftLogManager:
             
             await db_session.commit()
 
-    async def check_for_victory_message(self, draft_data, retry_count=0, max_retries=36):  # 36 retries * 5 minutes = 3 hours max
+    async def check_for_victory_message(self, draft_data, retry_count=0, max_retries=48):  # 48 retries * 5 minutes = 4 hours max
         """Check if victory message exists, if yes, post logs. Otherwise retry after 5 minutes."""
         if retry_count >= max_retries:
             logger.warning(f"Max retries ({max_retries}) reached for draft {self.draft_id}, giving up on checking victory message")
