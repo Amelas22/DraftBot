@@ -971,7 +971,6 @@ class PersistentView(discord.ui.View):
                         draft_summary_message = await draft_chat_channel.send(embed=draft_summary_embed, view=stake_view)
                     else:
                         draft_summary_message = await draft_chat_channel.send(embed=draft_summary_embed)
-                    draft_summary_message = await draft_chat_channel.send(embed=draft_summary_embed)
 
                     if self.session_type != "test":
                         await draft_summary_message.pin()
@@ -2381,8 +2380,8 @@ class StakeCalculationButton(discord.ui.Button):
         embed.add_field(
             name="Core Principles",
             value=(
-                "• **Max Bet Protection**: Players never bet more than their maximum specified amount\n"
-                "• **Team Formation**: Teams were created randomly FIRST, then bets were allocated"
+                "• Players never bet more than their maximum specified amount\n"
+                "• Teams were created randomly FIRST, then bets were allocated"
             ),
             inline=False
         )
@@ -2610,7 +2609,7 @@ class StakeCalculationButton(discord.ui.Button):
                     allocation_text.append(f"{player_name}: {original} → {theoretical_max} tix (capped by algorithm)")
             
             # Step 3: Calculate proportional allocation
-            allocation_text.append("\n**Step 3: Calculate Proportional Allocation**")
+            allocation_text.append("\n**Step 3: Calculate Max Team Proportional Allocation**")
 
             # Find the minimum stake value in the draft
             min_stake_value = min([s for s in capped_stakes.values() if s > 0])
@@ -2637,7 +2636,7 @@ class StakeCalculationButton(discord.ui.Button):
                 proportional_percentage = 100
                 proportional_percentage_capped = 100
 
-            allocation_text.append(f"Reserved Amount for Min Bettors on Max Team: {min_bettors_total} tix")
+            allocation_text.append(f"Reserved Bet for Min Bettors: {min_bettors_total} tix")
             allocation_text.append(f"Remaining Min Team Capacity: {min_team_total} - {min_bettors_total} = {remaining_min_capacity} tix")
             allocation_text.append(f"Remaining Max Team Capacity: {remaining_max_capacity} tix")
             allocation_text.append(f"Proportional Allocation: {remaining_min_capacity}/{remaining_max_capacity} = {proportional_percentage_capped:.0f}%\n")
