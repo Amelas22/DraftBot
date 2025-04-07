@@ -139,6 +139,22 @@ class PersistentView(discord.ui.View):
 
 
     async def sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = str(interaction.user.id)
+        
+        # Get the guild config for the interaction's guild
+        from config import get_config
+        config = get_config(interaction.guild_id)
+        roles_config = config.get("roles", {})
+        timeout_role_name = roles_config.get("timeout")
+        
+        # Check if the user has the timeout role
+        if timeout_role_name and discord.utils.get(interaction.user.roles, name=timeout_role_name):
+            await interaction.response.send_message(
+                "You are ineligible to join a queue due to an infraction (Leaving Draft Early/Unpaid Debts). Message a Mod for more details.",
+                ephemeral=True
+            )
+            return
+        
         if self.session_type == "winston":
             now = datetime.now()
             deletion_time = now + timedelta(minutes=10)
@@ -151,7 +167,7 @@ class PersistentView(discord.ui.View):
             return
         
         sign_ups = draft_session.sign_ups or {}
-        user_id = str(interaction.user.id)
+        
 
         if draft_session.session_type == "swiss":
             pacific = pytz.timezone('US/Pacific')
@@ -765,6 +781,20 @@ class PersistentView(discord.ui.View):
         await self.update_team_view(interaction)
 
     async def cancel_draft_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Get the guild config for the interaction's guild
+        from config import get_config
+        config = get_config(interaction.guild_id)
+        roles_config = config.get("roles", {})
+        timeout_role_name = roles_config.get("timeout")
+        
+        # Check if the user has the timeout role
+        if timeout_role_name and discord.utils.get(interaction.user.roles, name=timeout_role_name):
+            await interaction.response.send_message(
+                "You are ineligible due to an infraction (Leaving Draft Early/Unpaid Debts). Message a Mod for more details.",
+                ephemeral=True
+            )
+            return
+        
         session = await get_draft_session(self.draft_session_id)
         if not session:
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)

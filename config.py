@@ -23,7 +23,8 @@ class Config:
                 "drafter": "Cube Drafter",  # Default drafter role
                 "session_roles": {
                     "winston": "Winston Gamer",
-                }
+                },
+                "timeout": "the pit"
             },
             "timezone": "US/Eastern",
             "external": {
@@ -191,42 +192,11 @@ def migrate_configs():
     """Ensure all configs have the latest structure."""
     for guild_id, config in bot_config.configs.items():
         updated = False
-        
-        # Ensure stakes section exists
-        if "stakes" not in config:
-            config["stakes"] = {
-                "use_optimized_algorithm": False, 
-                "stake_multiple": 10
-            }
+                
+        if "roles" in config and "timeout" not in config["roles"]:
+            config["roles"]["timeout"] = "the pit"
             updated = True
             
-        # Ensure drafter role exists in roles section
-        if "roles" in config and "drafter" not in config["roles"]:
-            config["roles"]["drafter"] = "Cube Drafters"
-            updated = True
-            
-        # Ensure activity_tracking section exists
-        if "activity_tracking" not in config:
-            config["activity_tracking"] = {
-                "enabled": False,
-                "active_role": "Active",
-                "exempt_role": "degen",
-                "mod_chat_channel": "mod-chat",
-                "inactivity_months": 3
-            }
-            updated = True
-            
-        if "features" in config and "money_server" not in config["features"]:
-            # Set money_server to True for special guild, False for others
-            config["features"]["money_server"] = (guild_id == SPECIAL_GUILD_ID)
-            updated = False
-
-        if "roles" in config and "session_roles" not in config["roles"]:
-            config["roles"]["session_roles"] = {
-                "winston": "Winston Gamer"
-            }
-            updated = True
-
         # Save if any updates were made
         if updated:
             bot_config.save_config(guild_id)
