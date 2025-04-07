@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 from utils import calculate_pairings, get_formatted_stake_pairs, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, update_draft_summary_message, check_and_post_victory_or_draw, update_player_stats_and_elo, check_weekly_limits, update_player_stats_for_draft
 from loguru import logger
 
+READY_CHECK_COOLDOWNS = {}
 PROCESSING_ROOMS_PAIRINGS = {}
 sessions = {}
 
@@ -316,6 +317,25 @@ class PersistentView(discord.ui.View):
             await update_draft_message(interaction.client, self.draft_session_id)
     
     async def ready_check_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Check if this draft session is in cooldown
+        current_time = datetime.now()
+        cooldown_end_time = READY_CHECK_COOLDOWNS.get(self.draft_session_id)
+        
+        if cooldown_end_time and current_time < cooldown_end_time:
+            # Calculate remaining cooldown time in seconds
+            remaining_seconds = int((cooldown_end_time - current_time).total_seconds())
+            await interaction.response.send_message(
+                f"Ready check is on cooldown. Please wait {remaining_seconds} seconds before initiating another check.",
+                ephemeral=True
+            )
+            return
+        
+        # Set a new cooldown for this draft session (60 seconds)
+        READY_CHECK_COOLDOWNS[self.draft_session_id] = current_time + timedelta(seconds=60)
+        
+        # Schedule the cooldown to be removed after 60 seconds
+        asyncio.create_task(self.remove_cooldown(self.draft_session_id))
+        
         # Fetch the session data from the database
         session = await get_draft_session(self.draft_session_id)
         if not session:
@@ -361,6 +381,10 @@ class PersistentView(discord.ui.View):
 
         asyncio.create_task(self.cleanup_ready_check(self.draft_session_id))
 
+    async def remove_cooldown(self, draft_session_id):
+        await asyncio.sleep(60)  # Wait for 60 seconds
+        if draft_session_id in READY_CHECK_COOLDOWNS:
+            del READY_CHECK_COOLDOWNS[draft_session_id]
 
     async def cleanup_ready_check(self, draft_session_id):
         await asyncio.sleep(600)  # Wait for 10 minutes
