@@ -2395,7 +2395,7 @@ class StakeCalculationButton(discord.ui.Button):
         
         # Team A capping info
         team_a_capping = []
-        team_a_capping.append(f"Team B highest bet: {max_stake_b} tix")
+        team_a_capping.append(f"Team B max bet: {max_stake_b} tix")
         
         for player_id in draft_session.team_a:
             if player_id in original_stakes:
@@ -2418,7 +2418,7 @@ class StakeCalculationButton(discord.ui.Button):
         
         # Team B capping info
         team_b_capping = []
-        team_b_capping.append(f"Team A highest bet: {max_stake_a} tix")
+        team_b_capping.append(f"Team A max bet: {max_stake_a} tix")
         
         for player_id in draft_session.team_b:
             if player_id in original_stakes:
@@ -2441,7 +2441,7 @@ class StakeCalculationButton(discord.ui.Button):
         
         # Add the bet capping section to the embed
         embed.add_field(
-            name="Step 0: Apply Bet Cap Preferences",
+            name="Step 0: Apply Bet Cap",
             value=(
                 "**Team Red**\n" + 
                 "\n".join(team_a_capping) +
@@ -2479,9 +2479,8 @@ class StakeCalculationButton(discord.ui.Button):
         
         # Method Selection
         embed.add_field(
-            name="Method Selection",
+            name=f"**Method Used: {method_name} Approach**",
             value=(
-                f"**Method Used: {method_name} Approach**\n" +
                 ("Each team had sufficient capacity to meet minimum requirements, so the tiered approach was used." 
                 if tiered_method_used else 
                 f"One or both teams couldn't meet minimum requirements: {min_team_name} capacity ({min_team_total} tix) "
