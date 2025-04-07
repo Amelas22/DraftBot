@@ -217,7 +217,11 @@ class PersistentView(discord.ui.View):
 
             # Check if this is the 6th person to sign up AND we haven't pinged yet
             should_ping = False
-            if len(sign_ups) == 5 and not draft_session.should_ping:
+            # 30 min delay
+            now = datetime.now()
+            ping_cooldown = draft_session.draft_start_time + timedelta(minutes=1)
+            
+            if 5 <= len(sign_ups) < 8 and not draft_session.should_ping and now > ping_cooldown:
                 should_ping = True
 
             # Start an asynchronous database session
@@ -262,7 +266,8 @@ class PersistentView(discord.ui.View):
                     # Get the channel where the draft message is
                     channel = await interaction.client.fetch_channel(draft_session_updated.draft_channel_id)
                     if channel:
-                        await channel.send(f"5 Players in queue! {drafter_role.mention}")
+                        player_count = len(sign_ups)
+                        await channel.send(f"{player_count} Players in queue! {drafter_role.mention}")
 
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
@@ -1960,7 +1965,10 @@ class StakeOptionsSelect(discord.ui.Select):
                 
                 # Check if this is the 5th person to sign up AND we haven't pinged yet
                 should_ping = False
-                if len(sign_ups) == 5 and not draft_session.should_ping:
+                now = datetime.now()
+                ping_cooldown = draft_session.draft_start_time + timedelta(minutes=1)
+                
+                if 5 <= len(sign_ups) < 8 and not draft_session.should_ping and now > ping_cooldown:
                     should_ping = True
                 
                 # Update draft session with sign_ups and should_ping flag if needed
@@ -2023,7 +2031,8 @@ class StakeOptionsSelect(discord.ui.Select):
                     # Get the channel where the draft message is
                     channel = await interaction.client.fetch_channel(draft_session_updated.draft_channel_id)
                     if channel:
-                        await channel.send(f"5 Players in queue! {drafter_role.mention}")
+                        player_count = len(sign_ups)
+                        await channel.send(f"{player_count} Players in queue! {drafter_role.mention}")
         
         # Confirm stake and provide draft link
         cap_status = "capped at the highest opponent bet" if is_capped else "NOT capped (full action)"
