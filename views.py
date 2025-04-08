@@ -2252,11 +2252,46 @@ class StakeModal(discord.ui.Modal):
                 except Exception as followup_error:
                     print(f"Failed to send error message to user: {followup_error}")
 
+class PaginatedStakeExplanation(discord.ui.View):
+    def __init__(self, embeds, timeout=180):
+        super().__init__(timeout=timeout)
+        self.embeds = embeds
+        self.current_page = 0
+        self.update_button_states()
+        
+    def update_button_states(self):
+        # Disable previous button if we're on the first page
+        self.children[0].disabled = (self.current_page == 0)
+        # Disable next button if we're on the last page
+        self.children[2].disabled = (self.current_page == len(self.embeds) - 1)
+        # Update page counter
+        self.children[1].label = f"Page {self.current_page + 1}/{len(self.embeds)}"
+    
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
+    async def previous_button(self, button, interaction):
+        # Py-cord has button first, then interaction
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_button_states()
+            await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
+    
+    @discord.ui.button(label="Page 1/1", style=discord.ButtonStyle.gray, disabled=True)
+    async def page_counter(self, button, interaction):
+        # This button just shows the current page and is not meant to be clicked
+        await interaction.response.defer()
+    
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary)
+    async def next_button(self, button, interaction):
+        # Py-cord has button first, then interaction
+        if self.current_page < len(self.embeds) - 1:
+            self.current_page += 1
+            self.update_button_states()
+            await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
 
 class StakeCalculationButton(discord.ui.Button):
     def __init__(self, session_id):
         super().__init__(
-            label="How Bets Were Calculated (WIP)",
+            label="How Bets Were Calculated",
             style=discord.ButtonStyle.green,
             custom_id=f"stake_calculation_{session_id}"
         )
@@ -2400,8 +2435,8 @@ class StakeCalculationButton(discord.ui.Button):
             # Determine which method was actually used based on log analysis
             tiered_method_used = not (min_team_total < max_team_min_required)
             
-            # Create the explanation embed
-            embed = await self.generate_explanation(
+            # Create the explanation embeds
+            embeds = await self.generate_explanation(
                 draft_session, min_team, max_team, min_team_name, max_team_name,
                 min_team_total, max_team_total, capped_stakes, original_stakes,
                 player_names, min_team_min_required, max_team_min_required,
@@ -2409,7 +2444,11 @@ class StakeCalculationButton(discord.ui.Button):
                 final_allocations
             )
             
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            # Create the paginated view
+            view = PaginatedStakeExplanation(embeds)
+            
+            # Send the first embed with the view
+            await interaction.followup.send(embed=embeds[0], view=view, ephemeral=True)
             
         except Exception as e:
             await interaction.followup.send(f"Error generating explanation: {str(e)}", ephemeral=True)
@@ -2422,17 +2461,22 @@ class StakeCalculationButton(discord.ui.Button):
                             player_names, min_team_min_required, max_team_min_required, 
                             cap_info, capped_players, tiered_method_used, stake_lines,
                             final_allocations):
-        """Generate a detailed explanation of the stake calculation following the specified structure"""
+        """Generate a series of explanation embeds with the ORIGINAL content order"""
         
-        # Create the main embed
+        # Method name for titles
         method_name = "Tiered" if tiered_method_used else "Proportional"
-        embed = discord.Embed(
-            title=f"Dynamic Bet System: {method_name} Approach Used",
+        
+        # Create the embeds list
+        embeds = []
+        
+        # PAGE 1: Core Principles and Step 0: Apply Bet Cap
+        embed1 = discord.Embed(
+            title=f"Dynamic Bet System: {method_name} Approach (1/3)",
             color=discord.Color.green() if tiered_method_used else discord.Color.gold()
         )
         
-        # Core Principles section
-        embed.add_field(
+        # Core Principles section - SAME AS ORIGINAL
+        embed1.add_field(
             name="Core Principles",
             value=(
                 "• Players never bet more than their maximum specified amount\n"
@@ -2441,7 +2485,7 @@ class StakeCalculationButton(discord.ui.Button):
             inline=False
         )
         
-        # Bet Capping Section - list each user with their cap status
+        # Bet Capping Section - SAME AS ORIGINAL
         max_stake_a = max([original_stakes.get(player_id, 0) for player_id in draft_session.team_a]) if draft_session.team_a else 0
         max_stake_b = max([original_stakes.get(player_id, 0) for player_id in draft_session.team_b]) if draft_session.team_b else 0
         
@@ -2457,7 +2501,7 @@ class StakeCalculationButton(discord.ui.Button):
                 player_name = player_names.get(player_id, "Unknown")
                 original_stake = original_stakes.get(player_id, 0)
                 
-                # Use cap_info to determine emoji (cap_info now has the is_capped value)
+                # Use cap_info to determine emoji
                 if player_id in cap_info and cap_info[player_id]:
                     # Player opted for capping - use cap emoji
                     if player_id in capped_player_ids:
@@ -2480,7 +2524,7 @@ class StakeCalculationButton(discord.ui.Button):
                 player_name = player_names.get(player_id, "Unknown")
                 original_stake = original_stakes.get(player_id, 0)
                 
-                # Use cap_info to determine emoji (cap_info now has the is_capped value)
+                # Use cap_info to determine emoji
                 if player_id in cap_info and cap_info[player_id]:
                     # Player opted for capping - use cap emoji
                     if player_id in capped_player_ids:
@@ -2494,8 +2538,8 @@ class StakeCalculationButton(discord.ui.Button):
                     # Player opted for uncapped
                     team_b_capping.append(f"🏎️ {player_name}: {original_stake} tix")
         
-        # Add the bet capping section to the embed
-        embed.add_field(
+        # Add the bet capping section to the embed - EXACTLY AS ORIGINAL
+        embed1.add_field(
             name="Step 0: Apply Bet Cap",
             value=(
                 "**Team Red**\n" + 
@@ -2506,7 +2550,15 @@ class StakeCalculationButton(discord.ui.Button):
             inline=False
         )
         
-        # Initial Team Analysis (AFTER capping) - NO cap icons here
+        embeds.append(embed1)
+        
+        # PAGE 2: Determine Min and Max Teams and Method Selection
+        embed2 = discord.Embed(
+            title=f"Dynamic Bet System: {method_name} Approach (2/3)",
+            color=discord.Color.green() if tiered_method_used else discord.Color.gold()
+        )
+        
+        # Initial Team Analysis - SAME AS ORIGINAL
         min_team_stakes = []
         for player_id in min_team:
             if player_id in capped_stakes:
@@ -2521,7 +2573,7 @@ class StakeCalculationButton(discord.ui.Button):
                 stake = capped_stakes.get(player_id, 0)
                 max_team_stakes.append(f"{player_name}: {stake} tix")
         
-        embed.add_field(
+        embed2.add_field(
             name="Determine Min and Max Teams",
             value=(
                 f"**{min_team_name}** (Min Team - Total: {min_team_total} tix):\n" + 
@@ -2532,8 +2584,8 @@ class StakeCalculationButton(discord.ui.Button):
             inline=False
         )
         
-        # Method Selection
-        embed.add_field(
+        # Method Selection - SAME AS ORIGINAL
+        embed2.add_field(
             name=f"**Method Used: {method_name} Approach**",
             value=(
                 ("Each team had sufficient capacity to meet minimum requirements, so the tiered approach was used." 
@@ -2544,7 +2596,15 @@ class StakeCalculationButton(discord.ui.Button):
             inline=False
         )
         
-        # Allocation Phase - with more structured steps
+        embeds.append(embed2)
+        
+        # PAGE 3: Allocation Phase and Bet Matching Phase
+        embed3 = discord.Embed(
+            title=f"Dynamic Bet System: {method_name} Approach (3/3)",
+            color=discord.Color.green() if tiered_method_used else discord.Color.gold()
+        )
+        
+        # Allocation Phase - EXACTLY AS ORIGINAL
         allocation_text = []
         
         # Group max team players by tier
@@ -2644,8 +2704,7 @@ class StakeCalculationButton(discord.ui.Button):
                         allocation_text.append(f"{player_name}: {allocated}/{original_stake} tix ({percentage:.1f}%)")
                 
         else:
-            # For proportional approach
-            # Step 1: Calculate theoretical max bet
+            # For proportional approach - keeping original logic
             allocation_text.append("**Step 1: Calculate Theoretical Maximum Bid**")
             min_stake_value = min([s for s in capped_stakes.values() if s > 0])
             theoretical_max = min_team_total - ((len(min_team) - 1) * min_stake_value)
@@ -2664,7 +2723,8 @@ class StakeCalculationButton(discord.ui.Button):
             
             # Step 3: Calculate proportional allocation
             allocation_text.append("\n**Step 3: Calculate Max Team Proportional Allocation**")
-
+            
+            # Rest of proportional approach logic
             # Find the minimum stake value in the draft
             min_stake_value = min([s for s in capped_stakes.values() if s > 0])
 
@@ -2753,21 +2813,47 @@ class StakeCalculationButton(discord.ui.Button):
                 percentage = (allocated / original * 100) if original > 0 else 0
                 allocation_text.append(f"{player_name}: {allocated}/{original} tix ({percentage:.1f}%)")
         
-        embed.add_field(
-            name="Allocation Phase",
-            value="\n".join(allocation_text),
-            inline=False
-        )
+        # Add allocation text as a field - handle length by splitting if necessary
+        if len("\n".join(allocation_text)) > 1024:
+            # If allocation text is too long, split it into multiple fields
+            first_part = allocation_text[:len(allocation_text)//2]
+            second_part = allocation_text[len(allocation_text)//2:]
+            
+            embed3.add_field(
+                name="Allocation Phase (Part 1)",
+                value="\n".join(first_part),
+                inline=False
+            )
+            
+            embed3.add_field(
+                name="Allocation Phase (Part 2)",
+                value="\n".join(second_part),
+                inline=False
+            )
+        else:
+            embed3.add_field(
+                name="Allocation Phase",
+                value="\n".join(allocation_text),
+                inline=False
+            )
         
-        # Bet Matching Phase - show the actual stake lines
-        embed.add_field(
+        # Bet Matching Phase - SAME AS ORIGINAL
+        # If stake lines are too long, truncate
+        stake_lines_text = "\n".join(stake_lines) if stake_lines else "No pairings created"
+        if len(stake_lines_text) > 1024:
+            # Truncate and add a note
+            stake_lines_to_show = stake_lines[:10]  # Show only first 10 lines
+            stake_lines_text = "\n".join(stake_lines_to_show) + f"\n\n... and {len(stake_lines) - 10} more pairings"
+        
+        embed3.add_field(
             name=f"Bet Matching Phase Results (Total: {sum(final_allocations.values())//2} tix)",
-            value="\n".join(stake_lines) if stake_lines else "No pairings created",
+            value=stake_lines_text,
             inline=False
         )
         
-        return embed
-
+        embeds.append(embed3)
+        
+        return embeds
 
 class PersonalizedCapStatusView(discord.ui.View):
     def __init__(self, draft_session_id, user_id):
