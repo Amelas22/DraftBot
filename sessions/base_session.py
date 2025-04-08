@@ -118,9 +118,10 @@ class BaseSession:
         """Generate common description parts for cube choice and draftmancer link."""
         return (
             f"\n\n**Chosen Cube: [{self.session_details.cube_choice}]"
-            f"(https://cubecobra.com/cube/list/{self.session_details.cube_choice})**\n\n"
+            f"(https://cubecobra.com/cube/list/{self.session_details.cube_choice})**\n"
             # Note: We don't include a generic draft link here anymore
             # Each user will get their own personalized link when they sign up
+            f"**Draftmancer Link**: Click your username below to open your personalized link."
         )
 
     def get_thumbnail_url(self):
