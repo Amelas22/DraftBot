@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from session import AsyncSessionLocal, Team, DraftSession, Match, Challenge, TeamRegistration, SwissChallenge
 from sqlalchemy import select, update, func
 import random
+from config import get_draftmancer_base_url, get_draftmancer_session_url
 
 
 class InitialRangeView(View):
@@ -490,7 +491,7 @@ class ChallengeTimeModal(Modal):
             draft_start_time = datetime.now().timestamp()
             session_id = f"{interaction.user.id}-{int(draft_start_time)}"
             draft_id = ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
-            draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
+            draft_link = f"{get_draftmancer_session_url(draft_id)}"
             async with AsyncSessionLocal() as session:
                 async with session.begin():
                     new_draft_session = DraftSession(
@@ -1047,7 +1048,7 @@ class ChallengeView(View):
                         draft_start_time = datetime.now().timestamp()
                         session_id = f"{interaction.user.id}-{int(draft_start_time)}"
                         draft_id = ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
-                        draft_link = f"https://draftmancer.com/?session=DB{draft_id}"
+                        draft_link = get_draftmancer_session_url(draft_id)
 
                         new_draft_session = DraftSession(
                                             session_id=session_id,

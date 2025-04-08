@@ -3,6 +3,7 @@ import socketio
 from loguru import logger
 from functools import wraps
 import random
+from config import get_draftmancer_websocket_url
 
 def exponential_backoff(max_retries=10, base_delay=1):
     def decorator(func):
@@ -141,9 +142,11 @@ class DraftSetupManager:
     async def keep_connection_alive(self):
         self.logger.info(f"Starting connection task for draft_id: DB{self.draft_id}")
         try:
+            websocket_url = get_draftmancer_websocket_url(self.draft_id)
+            
             # Connect to the websocket
             await self.sio.connect(
-                f'wss://draftmancer.com?userID=DraftBot&sessionID=DB{self.draft_id}&userName=DraftBot',
+                websocket_url,
                 transports='websocket',
                 wait_timeout=10
             )

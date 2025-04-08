@@ -5,6 +5,7 @@ from session import AsyncSessionLocal, DraftSession
 from datacollections import DraftLogManager
 from services.draft_setup_manager import DraftSetupManager
 from loguru import logger
+from config import get_draftmancer_draft_url
 
 async def reconnect_draft_setup_sessions(discord_client):
     """
@@ -114,7 +115,7 @@ async def reconnect_recent_draft_sessions(discord_client):
             logger.info(f"Session {session.session_id} (type: {session.session_type}) started {hours_since_start:.1f} hours ago")
             
             # Create draft link for reference
-            draft_link = f"https://draftmancer.com/draft/DB{session.draft_id}"
+            draft_link = get_draftmancer_draft_url(session.draft_id)
             
             try:
                 # Create a new DraftLogManager for this session
