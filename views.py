@@ -368,8 +368,8 @@ class PersistentView(discord.ui.View):
                 item.disabled = True
                 break
 
-        # Generate the initial embed
-        embed = await generate_ready_check_embed(ready_check_status=ready_check_status, sign_ups=session.sign_ups, draft_link=session.draft_link)
+        # Generate the initial embed with personalized links
+        embed = await generate_ready_check_embed(ready_check_status=ready_check_status, sign_ups=session.sign_ups, draft_link=session.draft_link, draft_session=session)
         
         # Create the view with the buttons
         view = ReadyCheckView(self.draft_session_id)
@@ -516,13 +516,24 @@ class PersistentView(discord.ui.View):
                     # Create the embed message for displaying the teams and seating order
                     embed = discord.Embed(
                         title=f"Draft-{session.draft_id} is Ready!",
-                        description=f"**DRAFTMANCER SESSION:➡️ [JOIN DRAFT HERE]({session.draft_link})** ⬅️"
-                                    f"\n**Chosen Cube: [{session.cube}]"
+                        description=f"**Chosen Cube: [{session.cube}]"
                                     f"(https://cubecobra.com/cube/list/{session.cube})**\n\n" 
                                     "Host of Draftmancer must manually adjust seating as per below. \n**TURN OFF RANDOM SEATING SETTING IN DRAFTMANCER**" 
                                     "\n\n**AFTER THE DRAFT**, select Create Chat Rooms and Post Pairings" 
                                     "\nPairings will post in the created draft-chat room",
                         color=discord.Color.dark_gold() if session.session_type == "swiss" else discord.Color.blue()
+                    )
+                    
+                    # Add personalized draft links for each user
+                    user_links = []
+                    for user_id, display_name in session.sign_ups.items():
+                        personalized_link = session.get_draft_link_for_user(display_name)
+                        user_links.append(f"**{display_name}**: [Your Draft Link]({personalized_link})")
+                    
+                    embed.add_field(
+                        name="Your Personalized Draft Links",
+                        value="\n".join(user_links),
+                        inline=False
                     )
                     
                     if session.session_type != 'swiss':
@@ -561,10 +572,21 @@ class PersistentView(discord.ui.View):
                     # Create the new channel embed for team announcements
                     channel_embed = discord.Embed(
                         title="Teams have been formed. Seating Order Below!",
-                        description=f"**DRAFTMANCER SESSION:➡️ [JOIN DRAFT HERE]({session.draft_link})** ⬅️"
-                                    f"\n**Chosen Cube: [{session.cube}]"
+                        description=f"**Chosen Cube: [{session.cube}]"
                                     f"(https://cubecobra.com/cube/list/{session.cube})**\n\n",
                         color=discord.Color.dark_gold() if session.session_type == "swiss" else discord.Color.green()
+                    )
+                    
+                    # Add personalized draft links for each user in the channel embed
+                    user_links = []
+                    for user_id, display_name in session.sign_ups.items():
+                        personalized_link = session.get_draft_link_for_user(display_name)
+                        user_links.append(f"**{display_name}**: [Your Draft Link]({personalized_link})")
+                    
+                    channel_embed.add_field(
+                        name="Your Personalized Draft Links",
+                        value="\n".join(user_links),
+                        inline=False
                     )
                     
                     # Add team information to channel embed
@@ -1195,7 +1217,7 @@ class PersistentView(discord.ui.View):
         return channel.id
 
 
-async def generate_ready_check_embed(ready_check_status, sign_ups, draft_link):
+async def generate_ready_check_embed(ready_check_status, sign_ups, draft_link, draft_session=None):
     # Define a function to convert user IDs to their names using the sign_ups dictionary
     def get_names(user_ids):
         return "\n".join(sign_ups.get(user_id, "Unknown user") for user_id in user_ids) or "None"
@@ -1205,7 +1227,18 @@ async def generate_ready_check_embed(ready_check_status, sign_ups, draft_link):
     embed.add_field(name="Ready", value=get_names(ready_check_status['ready']), inline=False)
     embed.add_field(name="Not Ready", value=get_names(ready_check_status['not_ready']), inline=False)
     embed.add_field(name="No Response", value=get_names(ready_check_status['no_response']), inline=False)
-    embed.add_field(name="Draftmancer Link", value=f"**➡️ [JOIN DRAFT HERE]({draft_link})⬅️**", inline=False)
+    
+    # Include personalized draft links for each user if draft_session is provided
+    if draft_session:
+        user_links = []
+        for user_id, display_name in sign_ups.items():
+            personalized_link = draft_session.get_draft_link_for_user(display_name)
+            user_links.append(f"**{display_name}**: [Your Draft Link]({personalized_link})")
+        
+        embed.add_field(name="Your Personalized Draft Links", value="\n".join(user_links), inline=False)
+    else:
+        # Fallback if draft_session not provided (backwards compatibility)
+        embed.add_field(name="Draftmancer Link", value=f"**➡️ [JOIN DRAFT HERE]({draft_link})⬅️**", inline=False)
     
     return embed
 
@@ -1245,8 +1278,8 @@ class ReadyCheckView(discord.ui.View):
         # Update the session status in the database if necessary
         # await update_draft_session(self.draft_session_id, session)
         draft_session = await get_draft_session(self.draft_session_id)
-        # Generate the updated embed
-        embed = await generate_ready_check_embed(session, draft_session.sign_ups, draft_session.draft_link)
+        # Generate the updated embed with personalized links
+        embed = await generate_ready_check_embed(session, draft_session.sign_ups, draft_session.draft_link, draft_session)
 
         # Update the message
         await interaction.response.edit_message(embed=embed, view=self)

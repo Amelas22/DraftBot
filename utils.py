@@ -767,9 +767,14 @@ async def send_channel_reminders(bot, session_id):
             stmt = select(DraftSession).where(DraftSession.session_id == session_id)
             result = await db_session.execute(stmt)
             session = result.scalars().first()
-    # Format the mention string and construct the reminder message
-    mentions = " ".join([f"<@{user_id}>" for user_id in session.sign_ups])
-    reminder_message = f"{mentions}\nReminder: Your scheduled draft starts in 15 minutes! Join here: {session.draft_link}"
+    # Format personalized reminders for each user
+    user_reminders = []
+    for user_id, display_name in session.sign_ups.items():
+        user_link = session.get_draft_link_for_user(display_name)
+        user_reminders.append(f"<@{user_id}> - [Your personalized draft link]({user_link})")
+    
+    # Create the reminder message with personalized links
+    reminder_message = "Reminder: Your scheduled draft starts in 15 minutes!\n" + "\n".join(user_reminders)
 
     # Fetch the channel and send the reminder
     guild = bot.get_guild(int(session.guild_id))
