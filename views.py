@@ -247,7 +247,7 @@ class PersistentView(discord.ui.View):
                 return
                     
             # Confirm signup with draft link
-            draft_link = draft_session_updated.draft_link
+            draft_link = draft_session_updated.get_draft_link_for_user(interaction.user.display_name)
             signup_confirmation_message = f"You are now signed up. Join Here: {draft_link}"
             await interaction.response.send_message(signup_confirmation_message, ephemeral=True)
 
@@ -1808,14 +1808,18 @@ async def update_draft_message(bot, session_id):
         if draft_session.session_type == "staked":
             sign_ups_list = []
             for user_id, display_name in draft_session.sign_ups.items():
+                # Create user-specific draft link
+                user_draft_link = draft_session.get_draft_link_for_user(display_name)
+                # Create hyperlink markdown format
+                linked_name = f"[{display_name}]({user_draft_link})"
                 # Default to "Not set" if no stake has been set yet
                 if user_id in stake_info_by_player:
                     stake_amount = stake_info_by_player[user_id]['amount']
                     is_capped = stake_info_by_player[user_id]['is_capped']
                     capped_emoji = "🧢" if is_capped else "🏎️"  # Cap emoji for capped, lightning for uncapped
-                    sign_ups_list.append((user_id, display_name, stake_amount, is_capped, capped_emoji))
+                    sign_ups_list.append((user_id, linked_name, stake_amount, is_capped, capped_emoji))
                 else:
-                    sign_ups_list.append((user_id, display_name, "Not set", True, "❓"))
+                    sign_ups_list.append((user_id, linked_name, "Not set", True, "❓"))
             
             # Sort by stake amount (highest first)
             # Convert "Not set" to -1 for sorting purposes
@@ -1835,7 +1839,15 @@ async def update_draft_message(bot, session_id):
             
             sign_ups_str = '\n'.join(formatted_sign_ups) if formatted_sign_ups else 'No players yet.'
         else:
-            sign_ups_str = '\n'.join(draft_session.sign_ups.values()) if draft_session.sign_ups else 'No players yet.'
+            if draft_session.sign_ups:
+                linked_names = []
+                for user_id, display_name in draft_session.sign_ups.items():
+                    user_draft_link = draft_session.get_draft_link_for_user(display_name)
+                    linked_name = f"[{display_name}]({user_draft_link})"
+                    linked_names.append(linked_name)
+                sign_ups_str = '\n'.join(linked_names)
+            else:
+                sign_ups_str = 'No players yet.'
         
         embed.set_field_at(0, name=sign_ups_field_name, value=sign_ups_str, inline=False)
         await message.edit(embed=embed)
@@ -2185,7 +2197,8 @@ class StakeModal(discord.ui.Modal):
                 signup_message += "\n\nReminder: Your max bet will be used to fill as many opposing team bets as possible."
                 
             if self.draft_link:
-                signup_message += f"\n\nYou are now signed up. Join Here: {self.draft_link}"
+                draft_link = draft_session.get_draft_link_for_user(interaction.user.display_name)
+                signup_message += f"\n\nYou are now signed up. Join Here: {draft_link}"
             
             # Send the confirmation
             await interaction.response.send_message(signup_message, ephemeral=True)

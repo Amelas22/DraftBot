@@ -10,7 +10,7 @@ class StakedSession(RandomSession):
         super().__init__(session_details)
         self.min_stake = session_details.min_stake  
         
-    def create_embed(self):
+    def _create_embed_content(self):
         """Create an embed message for a staked draft session."""
         title = f"{self.session_details.cube_choice} Dynamic Money Draft! Minimum Bet: {self.session_details.min_stake} tix  "
         description = (
@@ -28,9 +28,6 @@ class StakedSession(RandomSession):
             f"{self.get_common_description()}"
         )
         embed = Embed(title=title, description=description, color=Color.gold())
-        embed.add_field(name="Sign-Ups", value="No players yet.", inline=False)
-        
-        embed.set_thumbnail(url=self.get_thumbnail_url())
         return embed
 
     def get_session_type(self):

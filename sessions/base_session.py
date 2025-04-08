@@ -81,8 +81,22 @@ class BaseSession:
         return new_draft_session
 
     def create_embed(self):
-        """Implemented in subclasses."""
+        """Create the base embed that all sessions will extend."""
+        # This will be implemented by subclasses
+        embed = self._create_embed_content()
+        
+        # Add common Sign-Ups field
+        embed.add_field(name="Sign-Ups", value="No players yet.", inline=False)
+        
+        # Add thumbnail
+        embed.set_thumbnail(url=self.get_thumbnail_url())
+        
+        return embed
+
+    def _create_embed_content(self):
+        """Implemented in subclasses to provide session-specific embed content."""
         raise NotImplementedError
+
 
     def get_session_type(self):
         """Implemented in subclasses."""
@@ -105,7 +119,6 @@ class BaseSession:
         return (
             f"\n\n**Chosen Cube: [{self.session_details.cube_choice}]"
             f"(https://cubecobra.com/cube/list/{self.session_details.cube_choice})**\n\n"
-            f"**DRAFTMANCER SESSION: ➡️ [JOIN HERE]({self.session_details.draft_link})** ⬅️"
         )
 
     def get_thumbnail_url(self):

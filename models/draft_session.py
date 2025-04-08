@@ -122,3 +122,20 @@ class DraftSession(Base):
             query = select(cls).filter_by(draft_id=draft_id)
             result = await session.execute(query)
             return result.scalar_one_or_none()
+
+    def get_draft_link_for_user(self, user_name: str) -> str:
+        """
+        Get a personalized draft link for a specific user.
+        
+        Args:
+            user_name (str): The username to add to the draft link
+            
+        Returns:
+            str: The draft link with the username parameter added
+        """
+        if not self.draft_link:
+            return None
+        
+        # Handle case where draft_link might already have parameters
+        separator = '&' if '?' in self.draft_link else '?'
+        return f"{self.draft_link}{separator}userName={user_name}"

@@ -2,7 +2,7 @@ from .base_session import BaseSession
 import discord
 
 class SwissSession(BaseSession):
-    def create_embed(self):
+    def _create_embed_content(self):
         """Create an embed message for a Swiss draft session."""
         session_details = self.session_details
         title = f"AlphaFrog Prelims: Looking for Players! Queue Opened <t:{session_details.draft_start_time}:R>"
@@ -12,8 +12,6 @@ class SwissSession(BaseSession):
         )
         color = discord.Color.dark_gold()
         embed = discord.Embed(title=title, description=description, color=color)
-        embed.add_field(name="Sign-Ups", value="No players yet.", inline=False)
-        embed.set_thumbnail(url=self.get_thumbnail_url())
         return embed
 
     def get_session_type(self):
@@ -23,6 +21,10 @@ class SwissSession(BaseSession):
     def get_premade_match_id(self):
         """Provide a specific premade match ID for Swiss sessions."""
         return 9000
+    
+    def get_session_buttons(self, view):
+        """Add Swiss-specific buttons."""
+        view.add_item(view.create_button("Generate Seating Order", "blurple", f"randomize_teams_{view.draft_session_id}", view.randomize_teams_callback))
     
     async def create_draft_session(self, interaction, bot):
         """Use base class method to handle the creation of the draft session."""
