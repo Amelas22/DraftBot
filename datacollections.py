@@ -12,6 +12,7 @@ from sqlalchemy.future import select
 from aiobotocore.session import get_session
 from session import AsyncSessionLocal, DraftSession
 from loguru import logger
+from config import get_draftmancer_base_url, get_draftmancer_websocket_url
 
 load_dotenv()
 
@@ -49,8 +50,9 @@ class DraftLogManager:
             self.first_connection = False
         while keep_running:
             try:
+                websocket_url = get_draftmancer_websocket_url(self.draft_id)
                 await self.sio.connect(
-                    f'wss://draftmancer.com?userID=DraftBot&sessionID=DB{self.draft_id}&userName=DraftBot',
+                    websocket_url,
                     transports='websocket',
                     wait_timeout=10)
                 
@@ -85,7 +87,8 @@ class DraftLogManager:
                 await asyncio.sleep(120)
 
     async def fetch_draft_log_data(self):
-        url = f"https://draftmancer.com/getDraftLog/DB{self.draft_id}"
+        base_url = get_draftmancer_base_url()
+        url = f"{base_url}/getDraftLog/DB{self.draft_id}"
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.get(url) as response:

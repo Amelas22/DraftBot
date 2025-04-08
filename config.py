@@ -2,9 +2,14 @@
 import json
 import os
 from pathlib import Path
+import logging
 
 # Your specific guild ID
 SPECIAL_GUILD_ID = "336345350535118849"
+
+# Base URL for Draftmancer service
+# Change this to switch between environments (prod, beta, dev)
+DRAFTMANCER_BASE_URL = "https://beta.draftmancer.com"
 
 class Config:
     def __init__(self):
@@ -28,8 +33,7 @@ class Config:
             },
             "timezone": "US/Eastern",
             "external": {
-                "cube_url": "https://cubecobra.com/cube/list/",
-                "draft_url": "https://draftmancer.com/?session=DB"
+                "cube_url": "https://cubecobra.com/cube/list/"
             },
             "features": {
                 "winston_draft": False,
@@ -75,8 +79,7 @@ class Config:
             },
             "timezone": "US/Eastern",
             "external": {
-                "cube_url": "https://cubecobra.com/cube/list/",
-                "draft_url": "https://draftmancer.com/?session=DB"
+                "cube_url": "https://cubecobra.com/cube/list/"
             },
             "features": {
                 "winston_draft": True,
@@ -188,14 +191,34 @@ def is_money_server(guild_id):
     config = get_config(guild_id)
     return config.get("features", {}).get("money_server", False)
 
+def get_draftmancer_base_url():
+    """Return the draftmancer base URL"""
+    return DRAFTMANCER_BASE_URL
+
+def get_draftmancer_session_url(draft_id, guild_id=None):
+    """Get full session URL for a draft ID"""
+    return f"{DRAFTMANCER_BASE_URL}/?session=DB{draft_id}"
+
+def get_draftmancer_draft_url(draft_id, guild_id=None):
+    """Get full draft URL for a draft ID"""
+    return f"{DRAFTMANCER_BASE_URL}/draft/DB{draft_id}"
+
+def get_draftmancer_websocket_url(draft_id, guild_id=None, user_id="DraftBot", user_name="DraftBot"):
+    """Get full websocket URL for a draft ID"""
+    # Convert https:// to wss://
+    websocket_url = DRAFTMANCER_BASE_URL.replace('https://', 'wss://')
+    return f"{websocket_url}?userID={user_id}&sessionID=DB{draft_id}&userName={user_name}"
+
 def migrate_configs():
     """Ensure all configs have the latest structure."""
     for guild_id, config in bot_config.configs.items():
         updated = False
                 
+        # Add timeout role if missing
         if "roles" in config and "timeout" not in config["roles"]:
             config["roles"]["timeout"] = "the pit"
             updated = True
+            
             
         # Save if any updates were made
         if updated:
