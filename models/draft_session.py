@@ -2,7 +2,7 @@ from sqlalchemy import Column, Integer, String, DateTime, JSON, Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy import select
 from datetime import datetime
-
+from urllib.parse import quote
 from database.models_base import Base
 from database.db_session import db_session
 
@@ -136,6 +136,9 @@ class DraftSession(Base):
         if not self.draft_link:
             return None
         
+        # URL-encode the username to handle spaces and special characters
+        encoded_username = quote(user_name)
+        
         # Handle case where draft_link might already have parameters
         separator = '&' if '?' in self.draft_link else '?'
-        return f"{self.draft_link}{separator}userName={user_name}"
+        return f"{self.draft_link}{separator}userName={encoded_username}"
