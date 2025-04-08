@@ -219,7 +219,7 @@ class PersistentView(discord.ui.View):
             should_ping = False
             # 30 min delay
             now = datetime.now()
-            ping_cooldown = draft_session.draft_start_time + timedelta(minutes=1)
+            ping_cooldown = draft_session.draft_start_time + timedelta(minutes=30)
             
             if 5 <= len(sign_ups) < 8 and not draft_session.should_ping and now > ping_cooldown:
                 should_ping = True
@@ -1966,7 +1966,7 @@ class StakeOptionsSelect(discord.ui.Select):
                 # Check if this is the 5th person to sign up AND we haven't pinged yet
                 should_ping = False
                 now = datetime.now()
-                ping_cooldown = draft_session.draft_start_time + timedelta(minutes=1)
+                ping_cooldown = draft_session.draft_start_time + timedelta(minutes=30)
                 
                 if 5 <= len(sign_ups) < 8 and not draft_session.should_ping and now > ping_cooldown:
                     should_ping = True
