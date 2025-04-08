@@ -1070,7 +1070,7 @@ class ChallengeView(View):
                         embed_title = f"AlphaFrog Prelims: Scheduled Queue Opened <t:{int(draft_start_time)}:R>"
                         embed = discord.Embed(title=embed_title,
                             description="Swiss 8 player draft. Draftmancer host must still update the draftmanacer session with the chosen cube. Turn off randomized seating." +
-                            f"\n\n**Weekly Cube: [{challenge.cube}](https://cubecobra.com/cube/list/{challenge.cube})** \n**Draftmancer Session**: **[Join Here]({draft_link})**",
+                            f"\n\n**Weekly Cube: [{challenge.cube}](https://cubecobra.com/cube/list/{challenge.cube})**\n*Click 'Sign Up' to get your personalized draft link*",
                             color=discord.Color.dark_gold()
                             )
                         sign_up_count = len(new_draft_session.sign_ups)

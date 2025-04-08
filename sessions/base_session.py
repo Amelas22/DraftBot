@@ -119,6 +119,8 @@ class BaseSession:
         return (
             f"\n\n**Chosen Cube: [{self.session_details.cube_choice}]"
             f"(https://cubecobra.com/cube/list/{self.session_details.cube_choice})**\n\n"
+            # Note: We don't include a generic draft link here anymore
+            # Each user will get their own personalized link when they sign up
         )
 
     def get_thumbnail_url(self):
