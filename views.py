@@ -51,56 +51,75 @@ class PersistentView(discord.ui.View):
         )
 
     def add_buttons(self):
+        if self.session_type != "premade":
+            self._add_signup_buttons()
+
+        self._add_shared_buttons()
+
         if self.session_type == "winston":
-            self.add_item(self.create_button("Sign Up", "green", f"sign_up_{self.draft_session_id}", self.sign_up_callback))
-            self.add_item(self.create_button("Cancel Sign Up", "red", f"cancel_sign_up_{self.draft_session_id}", self.cancel_sign_up_callback))
-            self.add_item(self.create_button("Cancel Draft", "grey", f"cancel_draft_{self.draft_session_id}", self.cancel_draft_callback))
-            self.add_item(self.create_button("Remove User", "grey", f"remove_user_{self.draft_session_id}", self.remove_user_button_callback))
-            self.add_item(self.create_button("Start Draft", "green", f"start_draft_{self.draft_session_id}", self.start_draft_callback))
+            self._add_winston_specific_buttons()
+        elif self.session_type == "premade":
+            self._add_premade_buttons()
         else:
-            if self.session_type != "premade":
-                self.add_item(self.create_button("Sign Up", "green", f"sign_up_{self.draft_session_id}", self.sign_up_callback))
-                self.add_item(self.create_button("Cancel Sign Up", "red", f"cancel_sign_up_{self.draft_session_id}", self.cancel_sign_up_callback))
-                if self.session_type == "swiss":
-                    self.add_item(self.create_button("Generate Seating Order", "blurple", f"randomize_teams_{self.draft_session_id}", self.randomize_teams_callback))
-                elif self.session_type == "test" or self.session_type == "schedule":
-                    self.add_item(self.create_button("Cancel Draft", "grey", f"cancel_draft_{self.draft_session_id}", self.cancel_draft_callback))
-                    self.add_item(self.create_button("Remove User", "grey", f"remove_user_{self.draft_session_id}", self.remove_user_button_callback))
-                    return
-                else:
-                    self.add_item(self.create_button("Create Teams", "blurple", f"randomize_teams_{self.draft_session_id}", self.randomize_teams_callback))
-                    
-                # Add "How Stakes Work" button for staked drafts when teams haven't been created yet
-                if self.session_type == "staked" and self.session_stage != "teams":
-                    self.add_item(self.create_button("How Bets Work 💰", "green", f"explain_stakes_{self.draft_session_id}", self.explain_stakes_callback))
-                    
-            elif self.session_type == "premade":
-                self.add_item(self.create_button(self.team_a_name, "green", f"Team_A_{self.draft_session_id}", self.team_assignment_callback))
-                self.add_item(self.create_button(self.team_b_name, "red", f"Team_B_{self.draft_session_id}", self.team_assignment_callback))
-                # draft_button_label = "League Draft: ON"
-                # draft_button_style = "green"
-                # self.add_item(self.create_button(draft_button_label, draft_button_style, f"track_draft_{self.draft_session_id}", self.track_draft_callback))
-                self.add_item(self.create_button("Generate Seating Order", "primary", f"generate_seating_{self.draft_session_id}", self.randomize_teams_callback))
-            self.add_item(self.create_button("Cancel Draft", "grey", f"cancel_draft_{self.draft_session_id}", self.cancel_draft_callback))
-            self.add_item(self.create_button("Remove User", "grey", f"remove_user_{self.draft_session_id}", self.remove_user_button_callback))
-            if self.session_type == "staked":
-                # Add bet cap toggle button
-                self.add_item(BetCapToggleButton(self.draft_session_id))
+            self._add_generic_buttons()
 
-            if self.session_type != "test":
-            #    self.add_item(self.create_button("Post Pairings", "primary", f"create_rooms_pairings_{self.draft_session_id}", self.create_rooms_pairings_callback, disabled=True))
-            #else:
-                self.add_item(self.create_button("Ready Check", "green", f"ready_check_{self.draft_session_id}", self.ready_check_callback))
-                self.add_item(self.create_button("Create Rooms & Post Pairings", "primary", f"create_rooms_pairings_{self.draft_session_id}", self.create_rooms_pairings_callback, disabled=True))
+        if self.session_type == "staked":
+            self.add_item(BetCapToggleButton(self.draft_session_id))
 
-            # Logic to enable/disable based on session_stage
+        if self.session_type != "test":
+            self._add_button("Ready Check", "green", "ready_check", self.ready_check_callback)
+            self._add_button("Create Rooms & Post Pairings", "primary", "create_rooms_pairings", self.create_rooms_pairings_callback, disabled=True)
+
+        self._apply_stage_button_disabling()
+
+
+    def _add_button(self, label, style, custom_id_suffix, callback, **kwargs):
+        button = self.create_button(label, style, f"{custom_id_suffix}_{self.draft_session_id}", callback, **kwargs)
+        self.add_item(button)
+
+
+    def _add_signup_buttons(self):
+        self._add_button("Sign Up", "green", "sign_up", self.sign_up_callback)
+        self._add_button("Cancel Sign Up", "red", "cancel_sign_up", self.cancel_sign_up_callback)
+
+
+    def _add_shared_buttons(self):
+        self._add_button("Cancel Draft", "grey", "cancel_draft", self.cancel_draft_callback)
+        self._add_button("Remove User", "grey", "remove_user", self.remove_user_button_callback)
+
+
+    def _add_winston_specific_buttons(self):
+        self._add_button("Start Draft", "green", "start_draft", self.start_draft_callback)
+
+
+    def _add_premade_buttons(self):
+        self._add_button(self.team_a_name, "green", "Team_A", self.team_assignment_callback)
+        self._add_button(self.team_b_name, "red", "Team_B", self.team_assignment_callback)
+        self._add_button("Generate Seating Order", "primary", "generate_seating", self.randomize_teams_callback)
+
+
+    def _add_generic_buttons(self):
+        if self.session_type == "swiss":
+            self._add_button("Generate Seating Order", "blurple", "randomize_teams", self.randomize_teams_callback)
+        elif self.session_type in {"test", "schedule"}:
+            # "Cancel Draft" and "Remove User" already added via shared buttons
+            return
+        else:
+            self._add_button("Create Teams", "blurple", "randomize_teams", self.randomize_teams_callback)
+
+        if self.session_type == "staked" and self.session_stage != "teams":
+            self._add_button("How Bets Work 💰", "green", "explain_stakes", self.explain_stakes_callback)
+
+
+    def _apply_stage_button_disabling(self):
+        if self.session_stage == "teams":
             for item in self.children:
                 if isinstance(item, discord.ui.Button):
-                    if self.session_stage == "teams":
-                        if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}" or item.custom_id == f"cancel_draft_{self.draft_session_id}":
-                            item.disabled = False
-                        else:
-                            item.disabled = True
+                    item.disabled = item.custom_id not in {
+                        f"create_rooms_pairings_{self.draft_session_id}",
+                        f"cancel_draft_{self.draft_session_id}"
+                    }
+
                             
     def create_button(self, label, style, custom_id, custom_callback, disabled=False):
         style = getattr(discord.ButtonStyle, style)
