@@ -12,7 +12,8 @@ class StakedSession(RandomSession):
         
     def _create_embed_content(self):
         """Create an embed message for a staked draft session."""
-        title = f"{self.session_details.cube_choice} Dynamic Money Draft! Minimum Bet: {self.session_details.min_stake} tix  "
+        # Remove the cube from the title since it's now in its own field
+        title = f"Dynamic Money Draft! Minimum Bet: {self.session_details.min_stake} tix"
         description = (
             f"Queue Opened <t:{self.session_details.draft_start_time}:R>\n\n"
             "**Dynamic Money Draft Queue**\n"

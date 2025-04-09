@@ -3,7 +3,8 @@ from discord import Embed, Color
 
 class RandomSession(BaseSession):
     def _create_embed_content(self):
-        title = f"Looking for Players! {self.session_details.cube_choice} Random Team Draft - Queue Opened <t:{self.session_details.draft_start_time}:R>"
+        # Remove the cube from the title since it's now in its own field
+        title = f"Looking for Players! Random Team Draft - Queue Opened <t:{self.session_details.draft_start_time}:R>"
         description = (
             "**How to use bot**:\n"
             "1. Click sign up and click the draftmancer link.\n"

@@ -5,7 +5,8 @@ class SwissSession(BaseSession):
     def _create_embed_content(self):
         """Create an embed message for a Swiss draft session."""
         session_details = self.session_details
-        title = f"AlphaFrog Prelims: Looking for Players! Queue Opened <t:{session_details.draft_start_time}:R>"
+        # Remove hardcoded cube reference in title
+        title = f"Swiss Draft: Looking for Players! Queue Opened <t:{session_details.draft_start_time}:R>"
         description = (
             "Swiss 8 player draft. Draftmancer host must still update the draftmancer session with the chosen cube."
             f"{self.get_common_description()}"

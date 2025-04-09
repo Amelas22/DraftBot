@@ -6,15 +6,52 @@ from datetime import datetime, timedelta
 from discord import SelectOption
 from discord.ui import Button, View, Select, select
 from draft_organization.stake_calculator import calculate_stakes_with_strategy
+from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
 from session import StakeInfo, AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
 from sqlalchemy import update, select, and_
 from sqlalchemy.orm import selectinload
+from helpers.utils import get_cube_thumbnail_url
 from utils import calculate_pairings, get_formatted_stake_pairs, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, split_into_teams, update_draft_summary_message, check_and_post_victory_or_draw, update_player_stats_and_elo, check_weekly_limits, update_player_stats_for_draft
 from loguru import logger
 
 READY_CHECK_COOLDOWNS = {}
 PROCESSING_ROOMS_PAIRINGS = {}
 sessions = {}
+
+class CubeUpdateSelectionView(discord.ui.View):
+    """Selection view for updating cubes, to avoid circular imports with modals.py"""
+    def __init__(self, session_type: str):
+        super().__init__()
+        self.session_type = session_type
+        
+        # Define cube options by type
+        cube_options = {
+            "winston": [
+                discord.SelectOption(label="LSVWinston", value="LSVWinston"),
+                discord.SelectOption(label="ChillWinston", value="ChillWinston"),
+                discord.SelectOption(label="WinstonDeluxe", value="WinstonDeluxe"),
+                discord.SelectOption(label="data", value="data")
+            ],
+            "default": [
+                discord.SelectOption(label="LSVCube", value="LSVCube"),
+                discord.SelectOption(label="AlphaFrog", value="AlphaFrog"),
+                discord.SelectOption(label="modovintage", value="modovintage"),
+                discord.SelectOption(label="LSVRetro", value="LSVRetro"),
+                discord.SelectOption(label="PowerMack", value="PowerMack")
+            ]
+        }
+        
+        # Get the appropriate options for this session type
+        options = cube_options.get(session_type, cube_options["default"])
+        
+        # Create the select dropdown with those options
+        self.cube_select = discord.ui.Select(
+            placeholder="Select a Cube",
+            options=options
+        )
+        
+        # We'll set the callback later in the update_cube_callback method
+        self.add_item(self.cube_select)
 
 class PersistentView(discord.ui.View):
     def __init__(self, bot, draft_session_id, session_type=None, team_a_name=None, team_b_name=None, session_stage=None):
@@ -86,6 +123,7 @@ class PersistentView(discord.ui.View):
     def _add_shared_buttons(self):
         self._add_button("Cancel Draft", "grey", "cancel_draft", self.cancel_draft_callback)
         self._add_button("Remove User", "grey", "remove_user", self.remove_user_button_callback)
+        self._add_button("Update Cube", "blurple", "update_cube", self.update_cube_callback)
 
 
     def _add_winston_specific_buttons(self):
@@ -364,6 +402,114 @@ class PersistentView(discord.ui.View):
             
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
+    
+    async def update_cube_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Callback for the Update Cube button - Shows a selection view for choosing a new cube"""
+        try:
+            draft_session = await get_draft_session(self.draft_session_id)
+            if not draft_session:
+                await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
+                return
+            
+            # Create the appropriate cube selection view based on session type
+            cube_selection = CubeUpdateSelectionView(draft_session.session_type)
+            
+            async def custom_cube_callback(select_interaction):
+                try:
+                    # Get the selected cube choice
+                    cube_choice = select_interaction.data["values"][0]
+                    
+                    # If the cube choice is the same as the current cube, no need to update
+                    if draft_session.cube == cube_choice:
+                        await select_interaction.response.send_message(
+                            f"The draft is already using the {cube_choice} cube.",
+                            ephemeral=True
+                        )
+                        return
+                    
+                    # Confirm the cube update
+                    await select_interaction.response.send_message(
+                        f"Updating draft to use cube: {cube_choice}...", 
+                        ephemeral=True
+                    )
+                    
+                    # Try to get the existing manager
+                    manager = DraftSetupManager.get_active_manager(draft_session.session_id)
+                    
+                    if not manager:
+                        # Even without a manager, we can still update the database
+                        logger.warning(f"No active draft manager found for session {draft_session.session_id}. "
+                                      f"Updating database only.")
+                        
+                        # Update database and message without manager
+                        async with AsyncSessionLocal() as db_session:
+                            async with db_session.begin():
+                                await db_session.execute(
+                                    update(DraftSession)
+                                    .where(DraftSession.session_id == draft_session.session_id)
+                                    .values(cube=cube_choice)
+                                )
+                                await db_session.commit()
+                                
+                        # Update the draft message with the new cube
+                        await update_draft_message(select_interaction.client, draft_session.session_id)
+                        
+                        await select_interaction.followup.send(
+                            f"The draft has been updated to use cube: {cube_choice} (Note: Draft has already started, "
+                            f"so the cube won't be updated in Draftmancer).",
+                            ephemeral=True
+                        )
+                        return
+                    
+                    # If we have a manager, update the cube through it
+                    success = await manager.update_cube(cube_choice)
+                    
+                    if success:
+                        # Update the database with the new cube name
+                        async with AsyncSessionLocal() as db_session:
+                            async with db_session.begin():
+                                await db_session.execute(
+                                    update(DraftSession)
+                                    .where(DraftSession.session_id == draft_session.session_id)
+                                    .values(cube=cube_choice)
+                                )
+                                await db_session.commit()
+                        
+                        # Update the draft message with the new cube info
+                        await update_draft_message(select_interaction.client, draft_session.session_id)
+                        
+                        await select_interaction.followup.send(
+                            f"The draft has been updated to use cube: {cube_choice}",
+                            ephemeral=True
+                        )
+                    else:
+                        await select_interaction.followup.send(
+                            f"Failed to update the cube in Draftmancer. Please try again later.",
+                            ephemeral=True
+                        )
+                
+                except Exception as e:
+                    logger.exception(f"Error in cube update callback: {e}")
+                    await select_interaction.followup.send(
+                        f"An error occurred while updating the cube: {str(e)}",
+                        ephemeral=True
+                    )
+            
+            # Replace the original callback with our custom one
+            cube_selection.cube_select.callback = custom_cube_callback
+            
+            await interaction.response.send_message(
+                f"Select a new cube for this draft (currently using {draft_session.cube}):", 
+                view=cube_selection, 
+                ephemeral=True
+            )
+            
+        except Exception as e:
+            logger.exception(f"Error in update_cube_callback: {e}")
+            await interaction.response.send_message(
+                f"An error occurred while preparing the cube update: {str(e)}",
+                ephemeral=True
+            )
     
     async def ready_check_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Check if this draft session is in cooldown
@@ -1962,6 +2108,21 @@ async def update_draft_message(bot, session_id):
 
         # Update embed with sign-ups
         embed = message.embeds[0]  # Assuming there's at least one embed in the message
+        
+        # Ensure sign_ups is not None before accessing its length
+        if draft_session.sign_ups is None:
+            draft_session.sign_ups = {}
+            # Update the session in the database with the initialized sign_ups
+            async with AsyncSessionLocal() as db_session:
+                async with db_session.begin():
+                    await db_session.execute(
+                        update(DraftSession)
+                        .where(DraftSession.session_id == draft_session.session_id)
+                        .values(sign_ups={})
+                    )
+                    await db_session.commit()
+            logger.info(f"Initialized empty sign_ups for session ID: {session_id}")
+            
         sign_up_count = len(draft_session.sign_ups)
         sign_ups_field_name = f"Sign-Ups ({sign_up_count}):"
         
@@ -2028,7 +2189,37 @@ async def update_draft_message(bot, session_id):
             else:
                 sign_ups_str = 'No players yet.'
         
-        embed.set_field_at(0, name=sign_ups_field_name, value=sign_ups_str, inline=False)
+        # Helper function to update or add fields consistently
+        def update_field(field_name, field_value, inline=False, expected_index=None):
+            field_index = None
+            # Look for the field by name
+            for i, field in enumerate(embed.fields):
+                if field.name == field_name:
+                    field_index = i
+                    break
+            
+            # If field exists, update it
+            if field_index is not None:
+                embed.set_field_at(field_index, name=field_name, value=field_value, inline=inline)
+                logger.info(f"Updated {field_name} field for session {session_id}")
+            else:
+                # Field doesn't exist, add it
+                logger.warning(f"{field_name} field not found in embed for session {session_id}, adding it")
+                embed.add_field(name=field_name, value=field_value, inline=inline)
+        
+        # Update sign-ups field
+        update_field(sign_ups_field_name, sign_ups_str, inline=False)
+        
+        # Update cube field
+        cube_field_name = "Cube:"
+        cube_field_value = f"[{draft_session.cube}](https://cubecobra.com/cube/list/{draft_session.cube})"
+        update_field(cube_field_name, cube_field_value, inline=True)
+                
+        # Get the thumbnail URL for the cube
+        thumbnail_url = get_cube_thumbnail_url(draft_session.cube)
+        embed.set_thumbnail(url=thumbnail_url)
+        logger.info(f"Updated thumbnail for cube: {draft_session.cube}")
+        
         await message.edit(embed=embed)
         logger.info(f"Successfully updated message for session ID: {session_id}")
 
