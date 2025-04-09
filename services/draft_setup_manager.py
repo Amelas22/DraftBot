@@ -125,7 +125,7 @@ class DraftSetupManager:
                 return
                 
             # Check if session stage is "teams"
-            if draft_session.session_stage == "teams":
+            if draft_session.session_stage:
                 self.logger.info("Session stage is 'teams', checking for seating organization")
                 
                 # Get sign_ups from the database
