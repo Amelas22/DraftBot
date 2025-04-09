@@ -22,10 +22,6 @@ class SwissSession(BaseSession):
         """Provide a specific premade match ID for Swiss sessions."""
         return 9000
     
-    def get_session_buttons(self, view):
-        """Add Swiss-specific buttons."""
-        view.add_item(view.create_button("Generate Seating Order", "blurple", f"randomize_teams_{view.draft_session_id}", view.randomize_teams_callback))
-    
     async def create_draft_session(self, interaction, bot):
         """Use base class method to handle the creation of the draft session."""
         await super().create_draft_session(interaction, bot)

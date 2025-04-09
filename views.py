@@ -9,7 +9,7 @@ from draft_organization.stake_calculator import calculate_stakes_with_strategy
 from session import StakeInfo, AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
 from sqlalchemy import update, select, and_
 from sqlalchemy.orm import selectinload
-from utils import calculate_pairings, get_formatted_stake_pairs, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, update_draft_summary_message, check_and_post_victory_or_draw, update_player_stats_and_elo, check_weekly_limits, update_player_stats_for_draft
+from utils import calculate_pairings, get_formatted_stake_pairs, generate_draft_summary_embed ,post_pairings, generate_seating_order, fetch_match_details, split_into_teams, update_draft_summary_message, check_and_post_victory_or_draw, update_player_stats_and_elo, check_weekly_limits, update_player_stats_for_draft
 from loguru import logger
 
 READY_CHECK_COOLDOWNS = {}
@@ -56,6 +56,7 @@ class PersistentView(discord.ui.View):
             self.add_item(self.create_button("Cancel Sign Up", "red", f"cancel_sign_up_{self.draft_session_id}", self.cancel_sign_up_callback))
             self.add_item(self.create_button("Cancel Draft", "grey", f"cancel_draft_{self.draft_session_id}", self.cancel_draft_callback))
             self.add_item(self.create_button("Remove User", "grey", f"remove_user_{self.draft_session_id}", self.remove_user_button_callback))
+            self.add_item(self.create_button("Start Draft", "green", f"start_draft_{self.draft_session_id}", self.start_draft_callback))
         else:
             if self.session_type != "premade":
                 self.add_item(self.create_button("Sign Up", "green", f"sign_up_{self.draft_session_id}", self.sign_up_callback))
@@ -854,6 +855,108 @@ class PersistentView(discord.ui.View):
         # Show confirmation dialog
         confirm_view = CancelConfirmationView(self.bot, self.draft_session_id, interaction.user.display_name)
         await interaction.response.send_message("Are you sure you want to cancel this draft?", view=confirm_view, ephemeral=True)    
+    
+    async def start_draft_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        bot = interaction.client
+        session_id = self.draft_session_id
+        
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                stmt = select(DraftSession).where(DraftSession.session_id == session_id)
+                result = await db_session.execute(stmt)
+                session = result.scalars().first()
+
+                if not session:
+                    await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
+                    return
+                    
+                if len(session.sign_ups) != 2:
+                    await interaction.response.send_message("Winston draft requires exactly 2 players.", ephemeral=True)
+                    return
+
+                # Update the session object
+                session.teams_start_time = datetime.now()
+                session.deletion_time = datetime.now() + timedelta(hours=4)
+                session.session_stage = 'teams'
+                
+                # Create teams for winston draft
+                await split_into_teams(bot, session.session_id)
+                
+                # Re-fetch session to get updated teams
+                updated_session = await get_draft_session(self.draft_session_id)
+                session = updated_session
+
+                # Get display names for participants
+                sign_ups_list = list(session.sign_ups.keys())
+                seating_order = [session.sign_ups[user_id] for user_id in sign_ups_list]
+                team_a_display_names = [session.sign_ups[user_id] for user_id in session.team_a]
+                team_b_display_names = [session.sign_ups[user_id] for user_id in session.team_b]
+                
+                # Create embed for the draft teams and links
+                embed = discord.Embed(
+                    title=f"Winston Draft-{session.draft_id} is Ready!",
+                    description=f"**Chosen Cube: [{session.cube}]"
+                                f"(https://cubecobra.com/cube/list/{session.cube})**\n\n" 
+                                "Host of Draftmancer must manually adjust seating as per below.",
+                    color=discord.Color.blue()
+                )
+                
+                # Add personalized draft links for each user
+                user_links = []
+                for user_id, display_name in session.sign_ups.items():
+                    personalized_link = session.get_draft_link_for_user(display_name)
+                    user_links.append(f"**{display_name}**: [Your Draft Link]({personalized_link})")
+                
+                embed.add_field(
+                    name="Your Personalized Draft Links",
+                    value="\n".join(user_links),
+                    inline=False
+                )
+                
+                # Add team information
+                embed.add_field(name="🔴 Team Red", 
+                                value="\n".join(team_a_display_names), 
+                                inline=True)
+                embed.add_field(name="🔵 Team Blue", 
+                                value="\n".join(team_b_display_names), 
+                                inline=True)
+                
+                embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+                
+                # Create the channel announcement embed
+                channel_embed = discord.Embed(
+                    title="Winston Draft Teams have been formed!",
+                    description=f"**Chosen Cube: [{session.cube}]"
+                                f"(https://cubecobra.com/cube/list/{session.cube})**\n\n",
+                    color=discord.Color.green()
+                )
+                
+                # Add personalized draft links to channel embed
+                channel_embed.add_field(
+                    name="Your Personalized Draft Links",
+                    value="\n".join(user_links),
+                    inline=False
+                )
+                
+                # Add seating order to channel embed
+                channel_embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+                
+                # Update button states
+                for item in self.children:
+                    if isinstance(item, discord.ui.Button):
+                        # Disable all buttons except cancel draft
+                        if item.custom_id == f"cancel_draft_{self.draft_session_id}":
+                            item.disabled = False
+                        else:
+                            item.disabled = True
+                
+                await db_session.commit()
+        
+        # Update the message with the new embed and disabled buttons
+        await interaction.response.edit_message(embed=embed, view=self)
+        
+        # Send the channel announcement
+        await interaction.channel.send(embed=channel_embed)
 
     async def update_team_view(self, interaction: discord.Interaction):
         session = await get_draft_session(self.draft_session_id)
