@@ -183,7 +183,7 @@ class DraftSetupManager:
                     self.logger.error(f"Failed to set seating order after {self.seating_attempts} attempts")
                     await self.notify_seating_failure(missing_users)
 
-    @exponential_backoff(max_retries=1, base_delay=1)
+    @exponential_backoff(max_retries=10, base_delay=1)
     async def set_seating_order(self, desired_username_order):
         """
         Sets the seating order for the draft based on usernames.
