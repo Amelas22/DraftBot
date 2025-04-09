@@ -52,6 +52,7 @@ class DraftSetupManager:
         self._connection_lock = asyncio.Lock()
         self._is_connecting = False
         self._should_disconnect = False
+        self._seating_lock = asyncio.Lock()  # Lock for seating attempts
 
         # Create a contextualized logger for this instance
         self.logger = logger.bind(
@@ -163,20 +164,24 @@ class DraftSetupManager:
 
     async def attempt_seating_order(self, desired_seating_order):
         """Attempt to set the seating order"""
-        self.seating_attempts += 1
-        self.logger.info(f"Attempt {self.seating_attempts}: Setting seating order with {self.users_count} users")
-        
-        success, missing_users = await self.set_seating_order(desired_seating_order)
-        
-        if success:
-            self.logger.success(f"Successfully set seating order!")
-            self.seating_order_set = True
-        else:
-            self.logger.warning(f"Failed to set seating order, missing users: {missing_users}")
+        async with self._seating_lock:
+            if self.seating_order_set or self.seating_attempts >= 4:
+                return
+                
+            self.seating_attempts += 1
+            self.logger.info(f"Attempt {self.seating_attempts}: Setting seating order with {self.users_count} users")
             
-            if self.seating_attempts >= 4:
-                self.logger.error(f"Failed to set seating order after {self.seating_attempts} attempts")
-                await self.notify_seating_failure(missing_users)
+            success, missing_users = await self.set_seating_order(desired_seating_order)
+            
+            if success:
+                self.logger.success(f"Successfully set seating order!")
+                self.seating_order_set = True
+            else:
+                self.logger.warning(f"Failed to set seating order, missing users: {missing_users}")
+                
+                if self.seating_attempts >= 4:
+                    self.logger.error(f"Failed to set seating order after {self.seating_attempts} attempts")
+                    await self.notify_seating_failure(missing_users)
 
     @exponential_backoff(max_retries=1, base_delay=1)
     async def set_seating_order(self, desired_username_order):
@@ -415,10 +420,13 @@ class DraftSetupManager:
                     if self.seating_order_set:
                         self.logger.info("Seating order is set, preparing to disconnect")
                         break
-                        
-                    # If we have enough users but seating isn't set, check more frequently
+                    
+                    # Check if we have enough users and the stage is set
                     if (self.expected_user_count is not None and 
                         self.users_count >= self.expected_user_count):
+                        
+                        self.logger.info("Found enough users, checking session stage")
+                        await self.check_session_stage_and_organize()
                         
                         await asyncio.sleep(5)  # Check more frequently when we have enough users
                     else:
