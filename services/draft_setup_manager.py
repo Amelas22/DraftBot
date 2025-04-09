@@ -48,6 +48,11 @@ class DraftSetupManager:
         self.expected_user_count = None
         self.desired_seating_order = None
 
+        # Add connection state tracking
+        self._connection_lock = asyncio.Lock()
+        self._is_connecting = False
+        self._should_disconnect = False
+
         # Create a contextualized logger for this instance
         self.logger = logger.bind(
             draft_id=self.draft_id,
@@ -82,12 +87,15 @@ class DraftSetupManager:
             
             # Store the complete user data
             self.session_users = users
+            
+            # Count non-bot users
+            non_bot_users = [user for user in users if user.get('userName') != 'DraftBot']
             previous_count = self.users_count
-            self.users_count = len(users)
+            self.users_count = len(non_bot_users)  # Only count non-bot users
             
             self.logger.info(
-                f"Users update: Total users={len(users)}, "
-                f"User IDs={[user.get('userID') for user in users]}"
+                f"Users update: Total users={len(users)}, Non-bot users={self.users_count}, "
+                f"User IDs={[user.get('userID') for user in non_bot_users]}"
             )
             
             # IMPORTANT: If we've reached the expected count of users, check immediately
@@ -134,18 +142,18 @@ class DraftSetupManager:
                     self.logger.warning("No sign-ups found in database")
                     return
                     
-                # Expected user count is the number of sign-ups PLUS ONE (to account for the bot)
-                self.expected_user_count = len(sign_ups) + 1
+                # Expected user count is exactly the number of sign-ups (bot is spectator)
+                self.expected_user_count = len(sign_ups)
                 
                 # Desired seating order is the values from sign_ups dictionary
                 self.desired_seating_order = list(sign_ups.values())
                 
                 # Log our intentions
-                self.logger.info(f"Expected users: {len(sign_ups)}, Current users: {self.users_count}")
+                self.logger.info(f"Expected players: {len(sign_ups)}, Current non-bot users: {self.users_count}")
                 self.logger.info(f"Desired seating order: {self.desired_seating_order}")
                 
                 # Check if we have enough users to attempt setting the order
-                if self.users_count >= self.expected_user_count:
+                if self.users_count >= self.expected_user_count:  # Changed to >= since we're only counting non-bot users
                     await self.attempt_seating_order(self.desired_seating_order)
                 else:
                     self.logger.info(f"Not enough users yet. Waiting for {self.expected_user_count - self.users_count} more")
@@ -163,8 +171,6 @@ class DraftSetupManager:
         if success:
             self.logger.success(f"Successfully set seating order!")
             self.seating_order_set = True
-            # We'll disconnect after some time to ensure order is applied
-            asyncio.create_task(self.disconnect_after_delay(2))
         else:
             self.logger.warning(f"Failed to set seating order, missing users: {missing_users}")
             
@@ -176,6 +182,7 @@ class DraftSetupManager:
     async def set_seating_order(self, desired_username_order):
         """
         Sets the seating order for the draft based on usernames.
+        Bot is a spectator and not included in seating order.
         """
         if not self.sio.connected:
             self.logger.error("Cannot set seating order - socket not connected")
@@ -185,22 +192,13 @@ class DraftSetupManager:
             # Always print out the actual session_users to debug
             self.logger.info(f"Current session users: {[user.get('userName') for user in self.session_users]}")
             
-            # Find the DraftBot user
+            # Find the DraftBot user to exclude from seating
             bot_id = None
             for user in self.session_users:
                 if user.get('userName') == 'DraftBot':
                     bot_id = user.get('userID')
-                    self.logger.info(f"Found DraftBot ID: {bot_id}")
+                    self.logger.info(f"Found DraftBot ID: {bot_id} (will be excluded from seating)")
                     break
-            
-            # If we can't find 'DraftBot', look for any user not in the desired list
-            if not bot_id:
-                for user in self.session_users:
-                    username = user.get('userName', '')
-                    if username and username not in desired_username_order:
-                        bot_id = user.get('userID')
-                        self.logger.info(f"Using {username} as bot (not in desired list)")
-                        break
             
             # Create mapping of usernames to userIDs, excluding the bot
             username_to_userid = {}
@@ -208,7 +206,7 @@ class DraftSetupManager:
                 user_id = user.get('userID')
                 username = user.get('userName')
                 
-                if user_id != bot_id and username:
+                if user_id != bot_id and username:  # Exclude bot from mapping
                     username_to_userid[username] = user_id
                     self.logger.debug(f"Mapped {username} to {user_id}")
             
@@ -224,16 +222,11 @@ class DraftSetupManager:
                     missing_users.append(username)
                     self.logger.warning(f"Username '{username}' not found in session")
             
-            # Add the bot's ID at the end
-            if bot_id:
-                user_id_order.append(bot_id)
-                self.logger.debug(f"Added bot ID {bot_id} to end of seating order")
-            
             if not user_id_order:
                 self.logger.error("No valid userIDs found for the provided usernames")
                 return False, desired_username_order
                 
-            # Set the seating order using userIDs
+            # Set the seating order using userIDs (bot not included)
             self.logger.info(f"Setting seating order: {user_id_order}")
             await self.sio.emit('setSeating', user_id_order)
             
@@ -254,12 +247,34 @@ class DraftSetupManager:
     async def disconnect_after_delay(self, delay_seconds):
         """
         Disconnects from the session after a delay to ensure commands have been processed.
+        Ensures proper cleanup and logging.
         """
         await asyncio.sleep(delay_seconds)
-        if self.sio.connected:
+        await self.disconnect_safely()
+
+    async def disconnect_safely(self):
+        """
+        Central method to handle disconnection safely and consistently.
+        """
+        if not self.sio.connected:
+            return
+        
+        self._should_disconnect = True
+        try:
+            # Reset bot to be a player before disconnecting
+            try:
+                await self.sio.emit('setOwnerIsPlayer', True)
+                self.logger.info("Set owner as player before disconnect")
+                # Brief delay to ensure the setting is processed
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                self.logger.warning(f"Failed to set owner as player before disconnect: {e}")
+            
             await self.sio.disconnect()
-            self.logger.info("Disconnected successfully after setting seating order")
-    
+            self.logger.info("Disconnected successfully")
+        except Exception as e:
+            self.logger.exception(f"Error during disconnect: {e}")
+
     async def notify_seating_failure(self, missing_users):
         """
         Notifies about failure to set the seating order.
@@ -307,6 +322,7 @@ class DraftSetupManager:
             await self.sio.emit('setPersonalLogs', True)
             await self.sio.emit('teamDraft', True)  # Added teamDraft setting
             await self.sio.emit('setPickTimer', 60)
+            await self.sio.emit('setOwnerIsPlayer', False)
             
             return True
             
@@ -350,11 +366,26 @@ class DraftSetupManager:
             return False
 
     async def keep_connection_alive(self):
-        self.logger.info(f"Starting connection task for draft_id: DB{self.draft_id}")
+        """
+        Manages the websocket connection lifecycle, including setup, monitoring, and cleanup.
+        """
+        # Prevent multiple concurrent connection attempts
+        async with self._connection_lock:
+            if self._is_connecting:
+                self.logger.warning("Connection attempt already in progress, skipping...")
+                return
+            self._is_connecting = True
+            self._should_disconnect = False
+
         try:
+            self.logger.info(f"Starting connection task for draft_id: DB{self.draft_id}")
             websocket_url = get_draftmancer_websocket_url(self.draft_id)
             
             # Connect to the websocket
+            if self.sio.connected:
+                self.logger.warning("Socket is already connected, disconnecting first...")
+                await self.disconnect_safely()
+
             await self.sio.connect(
                 websocket_url,
                 transports='websocket',
@@ -371,31 +402,43 @@ class DraftSetupManager:
                 self.logger.error("Failed to update draft settings, ending connection task")
                 return
 
-            # Wait for at least 2 other users
-            while self.users_count < 15:
+            # Monitor the session until conditions are met
+            while not self.seating_order_set:  # Changed condition to be based on seating
                 if not self.sio.connected:
                     self.logger.error("Lost connection, ending connection task")
                     return
                 
-                # Request current users in the session
                 try:
                     await self.sio.emit('getUsers')
-                #    self.logger.debug("Requested current users in session")
-                except Exception as e:
-                    self.logger.exception(f"Failed to request users: {e}")
-                
-                # self.logger.info(f"Waiting for more users... Currently {self.users_count} other users present")
-                await asyncio.sleep(20)
-            
-            self.logger.success(f"At least 2 other users have joined the session ({self.users_count} total). Closing connection...")
                     
+                    # If we have enough users and seating is set, we can exit
+                    if self.seating_order_set:
+                        self.logger.info("Seating order is set, preparing to disconnect")
+                        break
+                        
+                    # If we have enough users but seating isn't set, check more frequently
+                    if (self.expected_user_count is not None and 
+                        self.users_count >= self.expected_user_count):
+                        
+                        await asyncio.sleep(5)  # Check more frequently when we have enough users
+                    else:
+                        await asyncio.sleep(20)  # Check less frequently while waiting for users
+                        
+                except Exception as e:
+                    self.logger.exception(f"Error while monitoring session: {e}")
+                    await asyncio.sleep(5)  # Brief delay on error before retrying
+            
+            # If seating order was set successfully, wait briefly before disconnecting
+            if self.seating_order_set:
+                self.logger.info("Seating order confirmed, waiting briefly before disconnect...")
+                await self.disconnect_after_delay(2)
+            else:
+                self.logger.warning("Ending connection without successful seating order")
+                await self.disconnect_safely()
+                
         except Exception as e:
             self.logger.exception(f"Fatal error in keep_connection_alive: {e}")
         finally:
-            # Always try to disconnect cleanly
-            try:
-                if self.sio.connected:
-                    await self.sio.disconnect()
-                    self.logger.info("Disconnected successfully")
-            except Exception as e:
-                self.logger.exception(f"Error during final disconnect: {e}")
+            self._is_connecting = False
+            # Ensure we always disconnect cleanly
+            await self.disconnect_safely()
