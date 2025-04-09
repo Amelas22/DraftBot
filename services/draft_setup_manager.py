@@ -4,6 +4,8 @@ from loguru import logger
 from functools import wraps
 import random
 from config import get_draftmancer_websocket_url
+from datetime import datetime
+from models.draft_session import DraftSession
 
 def exponential_backoff(max_retries=10, base_delay=1):
     def decorator(func):
@@ -37,6 +39,15 @@ class DraftSetupManager:
         self.cube_imported = False
         self.users_count = 0  # Track number of other users
         
+        # Seating order variables
+        self.session_users = []
+        self.seating_attempts = 0
+        self.seating_order_set = False
+        self.last_db_check_time = None
+        self.db_check_cooldown = 15
+        self.expected_user_count = None
+        self.desired_seating_order = None
+
         # Create a contextualized logger for this instance
         self.logger = logger.bind(
             draft_id=self.draft_id,
@@ -69,17 +80,216 @@ class DraftSetupManager:
         async def on_session_users(users):
             self.logger.debug(f"Raw users data received: {users}")
             
+            # Store the complete user data
+            self.session_users = users
+            previous_count = self.users_count
             self.users_count = len(users)
             
             self.logger.info(
                 f"Users update: Total users={len(users)}, "
-                f"Other users={self.users_count}, "
                 f"User IDs={[user.get('userID') for user in users]}"
             )
+            
+            # IMPORTANT: If we've reached the expected count of users, check immediately
+            if (self.expected_user_count is not None and 
+                previous_count < self.expected_user_count and 
+                self.users_count >= self.expected_user_count):
+                
+                self.logger.info(f"Reached expected user count! Attempting seating order")
+                await self.attempt_seating_order(self.desired_seating_order)
+                return
+            
+            # Otherwise, check on our regular schedule
+            current_time = datetime.now()
+            if (self.last_db_check_time is None or 
+                (current_time - self.last_db_check_time).total_seconds() > self.db_check_cooldown):
+                
+                self.last_db_check_time = current_time
+                await self.check_session_stage_and_organize()
 
         @self.sio.on('storedSessionSettings')
         async def on_stored_settings(data):
             self.logger.info(f"Received updated session settings: {data}")
+
+    async def check_session_stage_and_organize(self):
+        """Check database for session stage and organize seating if appropriate"""
+        if self.seating_order_set or self.seating_attempts >= 4:
+            return  # Already set or max attempts reached
+            
+        try:
+            # Fetch draft session from database
+            draft_session = await DraftSession.get_by_session_id(self.session_id)
+            
+            if not draft_session:
+                self.logger.warning(f"No draft session found for session_id: {self.session_id}")
+                return
+                
+            # Check if session stage is "teams"
+            if draft_session.session_stage == "teams":
+                self.logger.info("Session stage is 'teams', checking for seating organization")
+                
+                # Get sign_ups from the database
+                sign_ups = draft_session.sign_ups
+                if not sign_ups:
+                    self.logger.warning("No sign-ups found in database")
+                    return
+                    
+                # Expected user count is the number of sign-ups PLUS ONE (to account for the bot)
+                self.expected_user_count = len(sign_ups) + 1
+                
+                # Desired seating order is the values from sign_ups dictionary
+                self.desired_seating_order = list(sign_ups.values())
+                
+                # Log our intentions
+                self.logger.info(f"Expected users: {len(sign_ups)}, Current users: {self.users_count}")
+                self.logger.info(f"Desired seating order: {self.desired_seating_order}")
+                
+                # Check if we have enough users to attempt setting the order
+                if self.users_count >= self.expected_user_count:
+                    await self.attempt_seating_order(self.desired_seating_order)
+                else:
+                    self.logger.info(f"Not enough users yet. Waiting for {self.expected_user_count - self.users_count} more")
+                    
+        except Exception as e:
+            self.logger.exception(f"Error checking session stage: {e}")
+
+    async def attempt_seating_order(self, desired_seating_order):
+        """Attempt to set the seating order"""
+        self.seating_attempts += 1
+        self.logger.info(f"Attempt {self.seating_attempts}: Setting seating order with {self.users_count} users")
+        
+        success, missing_users = await self.set_seating_order(desired_seating_order)
+        
+        if success:
+            self.logger.success(f"Successfully set seating order!")
+            self.seating_order_set = True
+            # We'll disconnect after some time to ensure order is applied
+            asyncio.create_task(self.disconnect_after_delay(2))
+        else:
+            self.logger.warning(f"Failed to set seating order, missing users: {missing_users}")
+            
+            if self.seating_attempts >= 4:
+                self.logger.error(f"Failed to set seating order after {self.seating_attempts} attempts")
+                await self.notify_seating_failure(missing_users)
+
+    @exponential_backoff(max_retries=1, base_delay=1)
+    async def set_seating_order(self, desired_username_order):
+        """
+        Sets the seating order for the draft based on usernames.
+        """
+        if not self.sio.connected:
+            self.logger.error("Cannot set seating order - socket not connected")
+            return False, ["Connection lost"]
+            
+        try:
+            # Always print out the actual session_users to debug
+            self.logger.info(f"Current session users: {[user.get('userName') for user in self.session_users]}")
+            
+            # Find the DraftBot user
+            bot_id = None
+            for user in self.session_users:
+                if user.get('userName') == 'DraftBot':
+                    bot_id = user.get('userID')
+                    self.logger.info(f"Found DraftBot ID: {bot_id}")
+                    break
+            
+            # If we can't find 'DraftBot', look for any user not in the desired list
+            if not bot_id:
+                for user in self.session_users:
+                    username = user.get('userName', '')
+                    if username and username not in desired_username_order:
+                        bot_id = user.get('userID')
+                        self.logger.info(f"Using {username} as bot (not in desired list)")
+                        break
+            
+            # Create mapping of usernames to userIDs, excluding the bot
+            username_to_userid = {}
+            for user in self.session_users:
+                user_id = user.get('userID')
+                username = user.get('userName')
+                
+                if user_id != bot_id and username:
+                    username_to_userid[username] = user_id
+                    self.logger.debug(f"Mapped {username} to {user_id}")
+            
+            # Convert the username order to userID order
+            user_id_order = []
+            missing_users = []
+            
+            for username in desired_username_order:
+                if username in username_to_userid:
+                    user_id_order.append(username_to_userid[username])
+                    self.logger.debug(f"Added {username} to seating order")
+                else:
+                    missing_users.append(username)
+                    self.logger.warning(f"Username '{username}' not found in session")
+            
+            # Add the bot's ID at the end
+            if bot_id:
+                user_id_order.append(bot_id)
+                self.logger.debug(f"Added bot ID {bot_id} to end of seating order")
+            
+            if not user_id_order:
+                self.logger.error("No valid userIDs found for the provided usernames")
+                return False, desired_username_order
+                
+            # Set the seating order using userIDs
+            self.logger.info(f"Setting seating order: {user_id_order}")
+            await self.sio.emit('setSeating', user_id_order)
+            
+            # Return success status and any missing users
+            if missing_users:
+                if len(missing_users) < len(desired_username_order) // 2:
+                    self.logger.info(f"Only missing a few users, considering it a success anyway")
+                    return True, []
+                return False, missing_users
+            
+            return True, []
+            
+        except Exception as e:
+            self.logger.error(f"Error while setting seating order: {e}")
+            self.logger.exception("Full exception details:")
+            return False, [str(e)]
+
+    async def disconnect_after_delay(self, delay_seconds):
+        """
+        Disconnects from the session after a delay to ensure commands have been processed.
+        """
+        await asyncio.sleep(delay_seconds)
+        if self.sio.connected:
+            await self.sio.disconnect()
+            self.logger.info("Disconnected successfully after setting seating order")
+    
+    async def notify_seating_failure(self, missing_users):
+        """
+        Notifies about failure to set the seating order.
+        
+        Args:
+            missing_users: List of usernames that couldn't be matched
+        """
+        self.logger.error(f"Seating order failed: Could not match users {missing_users}")
+        
+        # Here we'd ideally send a message back to Discord
+        # Since we don't have a direct connection back to the Discord bot, we could:
+        # 1. Update a field in the database to indicate failure
+        # 2. Create a webhook that the Discord bot checks
+        # 3. Send a direct HTTP request to a Discord webhook URL
+        
+        try:
+            # Update database to indicate failure
+            draft_session = await DraftSession.get_by_session_id(self.draft_id)
+            if draft_session:
+                await draft_session.update(
+                    data_received=True,
+                    draft_data={
+                        "seating_failed": True,
+                        "missing_users": missing_users,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                )
+                self.logger.info("Updated database with seating failure information")
+        except Exception as e:
+            self.logger.exception(f"Failed to update database with seating failure: {e}")
 
     @exponential_backoff(max_retries=10, base_delay=1)
     async def update_draft_settings(self):
@@ -162,7 +372,7 @@ class DraftSetupManager:
                 return
 
             # Wait for at least 2 other users
-            while self.users_count < 3:
+            while self.users_count < 15:
                 if not self.sio.connected:
                     self.logger.error("Lost connection, ending connection task")
                     return

@@ -2085,7 +2085,9 @@ class StakeOptionsSelect(discord.ui.Select):
         signup_message += f"\nYour bet will be {cap_status}."
             
         if self.draft_link:
-            signup_message += f"\n\nYou are now signed up. Join Here: {self.draft_link}"
+            display_name = interaction.user.display_name
+            personalized_link = draft_session_updated.get_draft_link_for_user(display_name)
+            signup_message += f"\n\nYou are now signed up. Join Here: {personalized_link}"
         
         # Send confirmation message
         await interaction.response.send_message(signup_message, ephemeral=True)
