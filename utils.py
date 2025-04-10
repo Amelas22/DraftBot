@@ -663,11 +663,6 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 
                 await session.commit()
 
-                await session.execute(update(DraftSession)
-                                    .where(DraftSession.session_id == draft_session_id)
-                                    .values(winning_gap=gap))
-                
-                await session.commit()
 
 async def remove_lock_after_delay(draft_session_id, delay):
     await asyncio.sleep(delay)
