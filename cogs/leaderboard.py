@@ -26,7 +26,6 @@ class LeaderboardCog(commands.Cog):
             "hot_streak"
         ]
         
-        # TESTING ONLY REMOVE AFTER TESTING ALSO REMOVE BOT.PY CHANGES
         # Get the guild ID
         guild_id = str(ctx.guild.id)
         
@@ -53,7 +52,7 @@ class LeaderboardCog(commands.Cog):
                         try:
                             message = await channel.fetch_message(int(leaderboard_message.message_id))
                             await message.edit(embeds=embeds)
-                            await ctx.followup.send("Leaderboards have been updated!", ephemeral=True)
+                            await ctx.respond("✅")
                             return
                         except discord.NotFound:
                             # Message not found, will create a new one
@@ -63,33 +62,34 @@ class LeaderboardCog(commands.Cog):
                 except Exception as e:
                     logger.error(f"Error updating leaderboard: {e}")
             
-            # Send new embeds
-            await ctx.respond(embeds=embeds)
-            
-            # In py-cord, we need to get the message differently
+            # Create a new message directly in the channel
             try:
-                # For py-cord, we need to fetch the original message after responding
-                message = await ctx.interaction.original_message()
+                channel = ctx.channel
+                new_message = await channel.send(embeds=embeds)
                 
                 # Create or update leaderboard message record
                 if leaderboard_message:
-                    leaderboard_message.channel_id = str(ctx.channel.id)
-                    leaderboard_message.message_id = str(message.id)
+                    leaderboard_message.channel_id = str(channel.id)
+                    leaderboard_message.message_id = str(new_message.id)
                     leaderboard_message.last_updated = datetime.now()
                 else:
                     leaderboard_message = LeaderboardMessage(
                         guild_id=guild_id,
-                        channel_id=str(ctx.channel.id),
-                        message_id=str(message.id),
+                        channel_id=str(channel.id),
+                        message_id=str(new_message.id),
                         last_updated=datetime.now()
                     )
                     session.add(leaderboard_message)
                 
                 await session.commit()
+                
+                # Complete the interaction with a simple response
+                await ctx.respond("✅")
+                
             except Exception as e:
-                logger.error(f"Error getting original message or saving to database: {e}")
+                logger.error(f"Error creating leaderboard: {e}")
+                await ctx.respond("Error creating leaderboards.")
 
-# The rest of the code remains unchanged
 def ensure_datetime(date_value):
     """Convert various date formats to datetime objects"""
     if not date_value:
@@ -213,8 +213,9 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
                             "player_id": player_id,
                             "display_name": display_name,
                             "drafts_played": 0,
-                            "matches_played": 0,
+                            "completed_matches": 0,  # Only count matches with a result
                             "matches_won": 0,
+                            "matches_lost": 0,  # Directly track losses
                             "match_win_percentage": 0,
                             "team_drafts_played": 0,
                             "team_drafts_won": 0,
@@ -222,9 +223,9 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
                             "team_drafts_lost": 0,
                             "team_draft_win_percentage": 0,
                             "last_30_days_drafts": 0,
-                            "last_30_days_matches_played": 0,
+                            "last_30_days_completed_matches": 0,  # Only count matches with a result
                             "last_30_days_matches_won": 0,
-                            "last_30_days_match_win_percentage": 0,
+                            "last_30_days_matches_lost": 0,  # Directly track recent losses
                             "last_30_days_team_drafts_played": 0,
                             "last_30_days_team_drafts_won": 0,
                             "last_30_days_team_drafts_lost": 0,
@@ -241,17 +242,24 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
                     if is_recent:
                         players_data[player_id]["last_30_days_drafts"] += 1
                     
-                    # Update individual matches played/won
+                    # Update individual matches played/won - FIXED MATCH COUNTING
                     for p1_id, p2_id, winner_id in session_matches:
                         if p1_id == player_id or p2_id == player_id:
-                            players_data[player_id]["matches_played"] += 1
-                            if is_recent:
-                                players_data[player_id]["last_30_days_matches_played"] += 1
-                            
-                            if winner_id == player_id:
-                                players_data[player_id]["matches_won"] += 1
+                            # Only count matches that have a determined winner
+                            if winner_id is not None:
+                                players_data[player_id]["completed_matches"] += 1
                                 if is_recent:
-                                    players_data[player_id]["last_30_days_matches_won"] += 1
+                                    players_data[player_id]["last_30_days_completed_matches"] += 1
+                                
+                                if winner_id == player_id:
+                                    players_data[player_id]["matches_won"] += 1
+                                    if is_recent:
+                                        players_data[player_id]["last_30_days_matches_won"] += 1
+                                else:
+                                    # Explicitly count losses when the winner is not the player
+                                    players_data[player_id]["matches_lost"] += 1
+                                    if is_recent:
+                                        players_data[player_id]["last_30_days_matches_lost"] += 1
                     
                     # Update team draft stats
                     if player_id in team_a or player_id in team_b:
@@ -313,11 +321,9 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
                 logger.error(f"Error processing draft {draft_id}: {e}")
         
         for player_id, player_data in players_data.items():
-            # Count matches
-            matches_lost = player_data["matches_played"] - player_data["matches_won"]
-            counted_matches = player_data["matches_won"] + matches_lost
-            if player_data["matches_played"] > 0:
-                player_data["match_win_percentage"] = (player_data["matches_won"] / counted_matches) * 100
+            # FIXED: Count matches with completed matches
+            if player_data["completed_matches"] > 0:
+                player_data["match_win_percentage"] = (player_data["matches_won"] / player_data["completed_matches"]) * 100
             
             # Count team drafts
             team_draft_counted_drafts = player_data["team_drafts_won"] + player_data["team_drafts_lost"]
@@ -329,10 +335,9 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
             if last_30_days_counted_drafts > 0:
                 player_data["last_30_days_team_draft_win_percentage"] = (player_data["last_30_days_team_drafts_won"] / last_30_days_counted_drafts) * 100
             
-            recent_matches_lost = player_data["last_30_days_matches_played"] - player_data["last_30_days_matches_won"]
-            recent_counted_matches = player_data["last_30_days_matches_won"] + recent_matches_lost
-            if player_data["last_30_days_matches_played"] > 0:
-                player_data["last_30_days_match_win_percentage"] = (player_data["last_30_days_matches_won"] / recent_counted_matches) * 100
+            # FIXED: Count recent matches with completed matches
+            if player_data["last_30_days_completed_matches"] > 0:
+                player_data["last_30_days_match_win_percentage"] = (player_data["last_30_days_matches_won"] / player_data["last_30_days_completed_matches"]) * 100
             
 
         # Log some statistics to understand the difference
@@ -352,9 +357,9 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
             sorted_players = sorted(filtered_players, key=lambda p: p["team_draft_win_percentage"], reverse=True)
         
         elif category == "match_win":
-            # Filter to players with at least 5 drafts
-            filtered_players = [p for p in players_list if p["drafts_played"] >= 5 and p["match_win_percentage"] >= 50]
-            logger.info(f"Found {len(filtered_players)} players with at least 5 drafts for match_win")
+            # FIXED: Change to filter using completed_matches
+            filtered_players = [p for p in players_list if p["completed_matches"] >= 5 and p["match_win_percentage"] >= 50]
+            logger.info(f"Found {len(filtered_players)} players with at least 5 completed matches for match_win")
             # Sort by match win percentage (descending)
             sorted_players = sorted(filtered_players, key=lambda p: p["match_win_percentage"], reverse=True)
         
@@ -409,11 +414,11 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
 
         
         elif category == "hot_streak":
-                # Only include players with at least 3 drafts in the last 7 days
-                filtered_players = [p for p in players_list if p["last_30_days_drafts"] >= 3]
-                logger.info(f"Found {len(filtered_players)} players with at least 3 drafts in last 7 days for hot_streak")
-                # Sort by 30-day team draft win percentage
-                sorted_players = sorted(filtered_players, key=lambda p: p["last_30_days_team_draft_win_percentage"], reverse=True)
+                # FIXED: Change to filter using last_30_days_completed_matches
+                filtered_players = [p for p in players_list if p["last_30_days_completed_matches"] >= 3 and p["last_30_days_match_win_percentage"] > 0]
+                logger.info(f"Found {len(filtered_players)} players with at least 3 completed matches in last 7 days for hot_streak")
+                # Sort by 7-day match win percentage
+                sorted_players = sorted(filtered_players, key=lambda p: p["last_30_days_match_win_percentage"], reverse=True)
 
         else:
             # Default to drafts_played if category not recognized
@@ -447,8 +452,8 @@ async def create_leaderboard_embed(guild_id, category="draft_record", limit=20):
         },
         "match_win": {
             "title": "Match Win Leaderboard",
-            "description": "Players with the highest individual match win percentage (min 5 drafts)",
-            "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['matches_won']}/{p['matches_played']} ({p['match_win_percentage']:.1f}%)"
+            "description": "Players with the highest individual match win percentage (min 5 matches)",
+            "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['matches_won']}/{p['completed_matches']} ({p['match_win_percentage']:.1f}%)"
         },
         "drafts_played": {
             "title": "Drafts Played Leaderboard",
@@ -462,8 +467,8 @@ async def create_leaderboard_embed(guild_id, category="draft_record", limit=20):
         },
         "hot_streak": {
             "title": "Hot Streak Leaderboard (Last 7 Days)",
-            "description": "Players with the best performance in the last 7 days (min 3 drafts)",
-            "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['last_30_days_team_drafts_won']}-{p['last_30_days_team_drafts_lost']}-{p['last_30_days_team_drafts_tied']} ({p['last_30_days_team_draft_win_percentage']:.1f}%)"
+            "description": "Players with the best match win % in the last 7 days (min 3 matches)",
+            "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['last_30_days_matches_won']}/{p['last_30_days_completed_matches']} ({p['last_30_days_match_win_percentage']:.1f}%)"
         }
     }
     
