@@ -358,7 +358,7 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
         
         elif category == "match_win":
             # FIXED: Change to filter using completed_matches
-            filtered_players = [p for p in players_list if p["completed_matches"] >= 30 and p["match_win_percentage"] >= 50]
+            filtered_players = [p for p in players_list if p["completed_matches"] >= 15 and p["match_win_percentage"] >= 50]
             logger.info(f"Found {len(filtered_players)} players with at least 5 completed matches for match_win")
             # Sort by match win percentage (descending)
             sorted_players = sorted(filtered_players, key=lambda p: p["match_win_percentage"], reverse=True)
