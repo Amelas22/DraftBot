@@ -27,9 +27,8 @@ class LeaderboardCog(commands.Cog):
         ]
         
         # TESTING ONLY REMOVE AFTER TESTING ALSO REMOVE BOT.PY CHANGES
-        guild_id = "1355718878298116096"  # Override with test guild ID
         # Get the guild ID
-        # guild_id = str(ctx.guild.id)
+        guild_id = str(ctx.guild.id)
         
         logger.info(f"Generating all leaderboards for guild {guild_id}")
         
@@ -315,8 +314,10 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
         
         for player_id, player_data in players_data.items():
             # Count matches
+            matches_lost = player_data["matches_played"] - player_data["matches_won"]
+            counted_matches = player_data["matches_won"] + matches_lost
             if player_data["matches_played"] > 0:
-                player_data["match_win_percentage"] = (player_data["matches_won"] / player_data["matches_played"]) * 100
+                player_data["match_win_percentage"] = (player_data["matches_won"] / counted_matches) * 100
             
             # Count team drafts
             team_draft_counted_drafts = player_data["team_drafts_won"] + player_data["team_drafts_lost"]
@@ -328,8 +329,10 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
             if last_30_days_counted_drafts > 0:
                 player_data["last_30_days_team_draft_win_percentage"] = (player_data["last_30_days_team_drafts_won"] / last_30_days_counted_drafts) * 100
             
+            recent_matches_lost = player_data["last_30_days_matches_played"] - player_data["last_30_days_matches_won"]
+            recent_counted_matches = player_data["last_30_days_matches_won"] + recent_matches_lost
             if player_data["last_30_days_matches_played"] > 0:
-                player_data["last_30_days_match_win_percentage"] = (player_data["last_30_days_matches_won"] / player_data["last_30_days_matches_played"]) * 100
+                player_data["last_30_days_match_win_percentage"] = (player_data["last_30_days_matches_won"] / recent_counted_matches) * 100
             
 
         # Log some statistics to understand the difference
