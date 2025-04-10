@@ -607,6 +607,62 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                         bot.loop.create_task(remove_live_draft_summary_after_delay(bot, draft_session_id, 1200)) 
                 else:
                     print(f"Results channel '{results_channel_name}' not found.")
+
+                # Update leaderboards if they exist
+                from sqlalchemy import select
+                from models.leaderboard_message import LeaderboardMessage
+                
+                # Check if we have a leaderboard message for this guild
+                stmt = select(LeaderboardMessage).where(LeaderboardMessage.guild_id == draft_session.guild_id)
+                result = await session.execute(stmt)
+                leaderboard_message = result.scalar_one_or_none()
+                
+                if leaderboard_message:
+                    logger.info(f"Updating leaderboard for guild {draft_session.guild_id}")
+                    
+                    # Get the channel
+                    channel = guild.get_channel(int(leaderboard_message.channel_id))
+                    if channel:
+                        # Create embeds for all categories
+                        categories = [
+                            "draft_record",
+                            "match_win",
+                            "drafts_played", 
+                            "time_vault_and_key",
+                            "hot_streak"
+                        ]
+                        
+                        embeds = []
+                        for category in categories:
+                            try:
+                                from cogs.leaderboard import create_leaderboard_embed
+                                embed = await create_leaderboard_embed(draft_session.guild_id, category)
+                                embeds.append(embed)
+                            except Exception as e:
+                                logger.error(f"Error creating leaderboard embed for category {category}: {e}")
+                        
+                        try:
+                            # Get the message
+                            message = await channel.fetch_message(int(leaderboard_message.message_id))
+                            
+                            # Edit the message with new embeds
+                            await message.edit(embeds=embeds)
+                            
+                            # Update last_updated
+                            leaderboard_message.last_updated = datetime.now()
+                            
+                            logger.info(f"Updated leaderboard for guild {draft_session.guild_id}")
+                        except discord.NotFound:
+                            logger.warning(f"Leaderboard message not found for guild {draft_session.guild_id}")
+                        except Exception as e:
+                            logger.error(f"Error updating leaderboard: {e}")
+                
+                await session.execute(update(DraftSession)
+                                    .where(DraftSession.session_id == draft_session_id)
+                                    .values(winning_gap=gap))
+                
+                await session.commit()
+
                 await session.execute(update(DraftSession)
                                     .where(DraftSession.session_id == draft_session_id)
                                     .values(winning_gap=gap))

@@ -1,8 +1,9 @@
 import discord
 from discord.ext import commands
 from datetime import datetime, timedelta
-from sqlalchemy import text
+from sqlalchemy import text, select
 from database.db_session import db_session
+from models.leaderboard_message import LeaderboardMessage
 from loguru import logger
 import json
 
@@ -22,11 +23,13 @@ class LeaderboardCog(commands.Cog):
             "match_win",
             "drafts_played", 
             "time_vault_and_key",
-            # "hot_streak"
+            "hot_streak"
         ]
         
+        # TESTING ONLY REMOVE AFTER TESTING ALSO REMOVE BOT.PY CHANGES
+        guild_id = "1355718878298116096"  # Override with test guild ID
         # Get the guild ID
-        guild_id = str(ctx.guild.id)
+        # guild_id = str(ctx.guild.id)
         
         logger.info(f"Generating all leaderboards for guild {guild_id}")
         
@@ -37,9 +40,57 @@ class LeaderboardCog(commands.Cog):
             embed = await create_leaderboard_embed(guild_id, category)
             embeds.append(embed)
         
-        # Send all embeds
-        await ctx.respond(embeds=embeds)
+        # Check if we have an existing leaderboard message
+        async with db_session() as session:
+            stmt = select(LeaderboardMessage).where(LeaderboardMessage.guild_id == guild_id)
+            result = await session.execute(stmt)
+            leaderboard_message = result.scalar_one_or_none()
+            
+            if leaderboard_message:
+                # Try to get the existing message and update it
+                try:
+                    channel = ctx.guild.get_channel(int(leaderboard_message.channel_id))
+                    if channel:
+                        try:
+                            message = await channel.fetch_message(int(leaderboard_message.message_id))
+                            await message.edit(embeds=embeds)
+                            await ctx.followup.send("Leaderboards have been updated!", ephemeral=True)
+                            return
+                        except discord.NotFound:
+                            # Message not found, will create a new one
+                            logger.info("Leaderboard message not found, creating a new one")
+                    else:
+                        logger.info("Leaderboard channel not found, creating a new message")
+                except Exception as e:
+                    logger.error(f"Error updating leaderboard: {e}")
+            
+            # Send new embeds
+            await ctx.respond(embeds=embeds)
+            
+            # In py-cord, we need to get the message differently
+            try:
+                # For py-cord, we need to fetch the original message after responding
+                message = await ctx.interaction.original_message()
+                
+                # Create or update leaderboard message record
+                if leaderboard_message:
+                    leaderboard_message.channel_id = str(ctx.channel.id)
+                    leaderboard_message.message_id = str(message.id)
+                    leaderboard_message.last_updated = datetime.now()
+                else:
+                    leaderboard_message = LeaderboardMessage(
+                        guild_id=guild_id,
+                        channel_id=str(ctx.channel.id),
+                        message_id=str(message.id),
+                        last_updated=datetime.now()
+                    )
+                    session.add(leaderboard_message)
+                
+                await session.commit()
+            except Exception as e:
+                logger.error(f"Error getting original message or saving to database: {e}")
 
+# The rest of the code remains unchanged
 def ensure_datetime(date_value):
     """Convert various date formats to datetime objects"""
     if not date_value:
@@ -292,15 +343,14 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
 
         # CHANGE THE FILTERING FOR CATEGORIES TO USE drafts_played INSTEAD:
         if category == "draft_record":
-            # Use drafts_played instead of team_drafts_played
-            filtered_players = [p for p in players_list if p["drafts_played"] >= 5]
+            filtered_players = [p for p in players_list if p["drafts_played"] >= 5 and p["team_draft_win_percentage"] > 50]
             logger.info(f"Found {len(filtered_players)} players with at least 5 drafts for draft_record")
             # Sort by team draft win percentage (descending)
             sorted_players = sorted(filtered_players, key=lambda p: p["team_draft_win_percentage"], reverse=True)
         
         elif category == "match_win":
             # Filter to players with at least 5 drafts
-            filtered_players = [p for p in players_list if p["drafts_played"] >= 5]
+            filtered_players = [p for p in players_list if p["drafts_played"] >= 5 and p["match_win_percentage"] >= 50]
             logger.info(f"Found {len(filtered_players)} players with at least 5 drafts for match_win")
             # Sort by match win percentage (descending)
             sorted_players = sorted(filtered_players, key=lambda p: p["match_win_percentage"], reverse=True)

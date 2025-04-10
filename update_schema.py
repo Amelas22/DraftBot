@@ -1,6 +1,8 @@
 import asyncio
 import logging
-from sqlalchemy import text
+from sqlalchemy import text, MetaData, Table, Column, Integer, String, DateTime
+from sqlalchemy.ext.asyncio import create_async_engine
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
@@ -10,45 +12,53 @@ logger = logging.getLogger(__name__)
 # Database URL - should match your existing configuration
 DATABASE_URL = "sqlite+aiosqlite:///drafts.db"
 
-async def add_draftmancer_role_users_column_to_draft_sessions():
-    """Add magicprotools_links column to draft_sessions table"""
-    from sqlalchemy.ext.asyncio import create_async_engine
+async def create_leaderboard_messages_table():
+    """Create the leaderboard_messages table if it doesn't exist"""
     engine = create_async_engine(DATABASE_URL, echo=True)
     
     try:
         async with engine.begin() as conn:
-            # Check if the draftmancer_role_users column already exists
+            # Check if the table exists
             result = await conn.execute(text(
-                "PRAGMA table_info(draft_sessions)"
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='leaderboard_messages'"
             ))
-            columns = {row[1]: row for row in result.fetchall()}
             
-            # Check if the column needs to be added
-            if 'draftmancer_role_users' not in columns:
-                # For SQLite, JSON is stored as TEXT
-                alter_table_sql = """
-                ALTER TABLE draft_sessions 
-                ADD COLUMN draftmancer_role_users JSON;
-                """
-                await conn.execute(text(alter_table_sql))
-                logger.info("Added draftmancer_role_users column to draft_sessions table")
+            table_exists = result.scalar() is not None
+            
+            if not table_exists:
+                # Create the table
+                metadata = MetaData()
+                
+                # Define the table structure
+                leaderboard_messages = Table(
+                    'leaderboard_messages', 
+                    metadata,
+                    Column('id', Integer, primary_key=True, autoincrement=True),
+                    Column('guild_id', String(64), nullable=False),
+                    Column('channel_id', String(64), nullable=False),
+                    Column('message_id', String(64), nullable=False),
+                    Column('last_updated', DateTime, default=datetime.now)
+                )
+                
+                # Create the table
+                await conn.run_sync(metadata.create_all, tables=[leaderboard_messages])
+                logger.info("Created leaderboard_messages table")
             else:
-                logger.info("draftmancer_role_users column already exists in draft_sessions table")          
-            
+                logger.info("leaderboard_messages table already exists")
                 
     except Exception as e:
-        logger.error(f"Error adding draftmancer_role_users column to draft_sessions table: {e}")
+        logger.error(f"Error creating leaderboard_messages table: {e}")
         raise
     finally:
         await engine.dispose()
 
 async def migrate_database():
     """Execute all migration steps"""
-    logger.info("Starting database migration to add draftmancer_role_users column to draft_sessions")
+    logger.info("Starting database migration to add leaderboard_messages table")
     
     try:
-        # Add column to the draft_sessions table
-        await add_draftmancer_role_users_column_to_draft_sessions()
+        # Create the leaderboard_messages table
+        await create_leaderboard_messages_table()
         
         logger.info("Database migration completed successfully")
     except Exception as e:

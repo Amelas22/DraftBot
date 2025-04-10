@@ -60,27 +60,27 @@ async def main():
         
         bot.loop.create_task(cleanup_sessions_task(bot))
         bot.loop.create_task(check_inactive_players_task(bot))
-        try:
-            # Reconnect to sessions needing setup
-            logger.info("Starting draft setup reconnection...")
-            setup_tasks = await reconnect_draft_setup_sessions(bot)
-            if setup_tasks:
-                logger.info(f"Created {len(setup_tasks)} draft setup reconnection tasks")
-                bot.loop.create_task(monitor_reconnection_tasks(setup_tasks, "setup"))
-            else:
-                logger.info("No draft setup sessions to reconnect")
+        # try:
+        #     # Reconnect to sessions needing setup
+        #     logger.info("Starting draft setup reconnection...")
+        #     setup_tasks = await reconnect_draft_setup_sessions(bot)
+        #     if setup_tasks:
+        #         logger.info(f"Created {len(setup_tasks)} draft setup reconnection tasks")
+        #         bot.loop.create_task(monitor_reconnection_tasks(setup_tasks, "setup"))
+        #     else:
+        #         logger.info("No draft setup sessions to reconnect")
                 
-            # Reconnect to sessions needing log collection
-            logger.info("Starting draft log collection reconnection...")
-            log_tasks = await reconnect_recent_draft_sessions(bot)
-            if log_tasks:
-                logger.info(f"Created {len(log_tasks)} draft log collection reconnection tasks")
-                bot.loop.create_task(monitor_reconnection_tasks(log_tasks, "log collection"))
-            else:
-                logger.info("No draft log collection sessions to reconnect")
+        #     # Reconnect to sessions needing log collection
+        #     logger.info("Starting draft log collection reconnection...")
+        #     log_tasks = await reconnect_recent_draft_sessions(bot)
+        #     if log_tasks:
+        #         logger.info(f"Created {len(log_tasks)} draft log collection reconnection tasks")
+        #         bot.loop.create_task(monitor_reconnection_tasks(log_tasks, "log collection"))
+        #     else:
+        #         logger.info("No draft log collection sessions to reconnect")
                 
-        except Exception as e:
-            logger.error(f"Error setting up draft reconnections: {e}")
+        # except Exception as e:
+        #     logger.error(f"Error setting up draft reconnections: {e}")
 
         from config import migrate_configs
         migrate_configs()
