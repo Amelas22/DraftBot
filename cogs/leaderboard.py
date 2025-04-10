@@ -130,7 +130,7 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
     """Get leaderboard data for all players in a guild"""
 
     now = datetime.now()
-    month_ago = now - timedelta(days=30)
+    week_ago = now - timedelta(days=7)
     
     # Store player stats here
     players_data = {}
@@ -193,9 +193,9 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
                         except (ValueError, TypeError):
                             logger.error(f"Error converting teams_start_time for draft {draft_id}")
                     
-                    # Compare with month_ago 
+                    # Compare with week_ago 
                     if isinstance(teams_start_time, datetime):
-                        is_recent = teams_start_time >= month_ago
+                        is_recent = teams_start_time >= week_ago
                         if is_recent:
                             logger.debug(f"Draft {draft_id} is recent: {teams_start_time}")
                 
@@ -406,9 +406,9 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
 
         
         elif category == "hot_streak":
-                # Only include players with at least 3 drafts in the last 30 days
+                # Only include players with at least 3 drafts in the last 7 days
                 filtered_players = [p for p in players_list if p["last_30_days_drafts"] >= 3]
-                logger.info(f"Found {len(filtered_players)} players with at least 3 drafts in last 30 days for hot_streak")
+                logger.info(f"Found {len(filtered_players)} players with at least 3 drafts in last 7 days for hot_streak")
                 # Sort by 30-day team draft win percentage
                 sorted_players = sorted(filtered_players, key=lambda p: p["last_30_days_team_draft_win_percentage"], reverse=True)
 
@@ -458,8 +458,8 @@ async def create_leaderboard_embed(guild_id, category="draft_record", limit=20):
             "formatter": lambda p, rank: f"{get_medal(rank)}{p['player_name']} & {p['teammate_name']}: {p['drafts_won']}-{p['drafts_lost']}-{p['drafts_tied']} ({p['win_percentage']:.1f}%)"
         },
         "hot_streak": {
-            "title": "Hot Streak Leaderboard (Last 30 Days)",
-            "description": "Players with the best performance in the last 30 days (min 3 drafts)",
+            "title": "Hot Streak Leaderboard (Last 7 Days)",
+            "description": "Players with the best performance in the last 7 days (min 3 drafts)",
             "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['last_30_days_team_drafts_won']}-{p['last_30_days_team_drafts_lost']}-{p['last_30_days_team_drafts_tied']} ({p['last_30_days_team_draft_win_percentage']:.1f}%)"
         }
     }
