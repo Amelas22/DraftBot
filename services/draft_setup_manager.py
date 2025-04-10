@@ -260,21 +260,70 @@ class DraftSetupManager:
     async def disconnect_safely(self):
         """
         Central method to handle disconnection safely and consistently.
+        Ensures proper sequence of operations: 
+        1. Set owner as player first
+        2. Transfer ownership 
+        3. Disconnect
         """
         if not self.sio.connected:
             return
         
         self._should_disconnect = True
         try:
-            # Reset bot to be a player before disconnecting
             try:
+                self.logger.info("Setting owner as player before transferring ownership")
                 await self.sio.emit('setOwnerIsPlayer', True)
-                self.logger.info("Set owner as player before disconnect")
-                # Brief delay to ensure the setting is processed
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1)  # Increased delay to ensure the setting is processed
             except Exception as e:
-                self.logger.warning(f"Failed to set owner as player before disconnect: {e}")
+                self.logger.warning(f"Failed to set owner as player: {e}")
             
+            ownership_transferred = False
+            
+            # Get the latest session data 
+            draft_session = await DraftSession.get_by_session_id(self.session_id)
+            if draft_session and draft_session.draftmancer_role_users:
+                self.logger.info(f"Found Draftmancer users: {draft_session.draftmancer_role_users}")
+                
+                # Match draftmancer_role_users (display names) with session users
+                potential_owners = []
+                
+                for user in self.session_users:
+                    # Skip the bot itself
+                    if user.get('userName') == 'DraftBot':
+                        continue
+                        
+                    # Check if this user's display name is in draftmancer_role_users
+                    if user.get('userName') in draft_session.draftmancer_role_users:
+                        potential_owners.append(user)
+                        self.logger.info(f"Found potential Draftmancer User: {user.get('userName')}")
+                
+                # If we found potential owners, select one randomly
+                if potential_owners:
+                    selected_owner = random.choice(potential_owners)
+                    new_owner_id = selected_owner.get('userID')
+                    new_owner_name = selected_owner.get('userName')
+                    
+                    self.logger.info(f"Transferring ownership to Draftmancer user: {new_owner_name}")
+                    await self.sio.emit('setSessionOwner', new_owner_id)
+                    await asyncio.sleep(1)  # Increased delay to ensure command processes
+                    ownership_transferred = True
+            
+            # If no Draftmancer users found or transfer failed, choose any random non-bot user
+            if not ownership_transferred:
+                non_bot_users = [user for user in self.session_users if user.get('userName') != 'DraftBot']
+                
+                if non_bot_users:
+                    random_user = random.choice(non_bot_users)
+                    new_owner_id = random_user.get('userID')
+                    new_owner_name = random_user.get('userName')
+                    
+                    self.logger.info(f"No Draftmancer users available. Transferring ownership to random user: {new_owner_name}")
+                    await self.sio.emit('setSessionOwner', new_owner_id)
+                    await asyncio.sleep(1)  # Increased delay
+                else:
+                    self.logger.warning("No eligible users found to transfer ownership")
+            
+            # Disconnect
             await self.sio.disconnect()
             self.logger.info("Disconnected successfully")
         except Exception as e:

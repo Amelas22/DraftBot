@@ -52,6 +52,7 @@ class DraftSession(Base):
     magicprotools_links = Column(JSON)
     should_ping = Column(Boolean, default=False)
     pack_first_picks = Column(JSON)
+    draftmancer_role_users = Column(JSON)
     
     # Relationships
     match_results = relationship("MatchResult", back_populates="draft_session", 

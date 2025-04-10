@@ -157,6 +157,9 @@ class PersistentView(discord.ui.View):
             )
             return
         
+        # Check if user has Draftmancer role
+        has_draftmancer_role = discord.utils.get(interaction.user.roles, name="Draftmancer") is not None
+        
         if self.session_type == "winston":
             now = datetime.now()
             deletion_time = now + timedelta(minutes=10)
@@ -169,6 +172,8 @@ class PersistentView(discord.ui.View):
             return
         
         sign_ups = draft_session.sign_ups or {}
+        # Initialize draftmancer_role_users if it doesn't exist
+        draftmancer_role_users = draft_session.draftmancer_role_users or []
         
 
         if draft_session.session_type == "swiss":
@@ -204,7 +209,8 @@ class PersistentView(discord.ui.View):
                     draft_session_id=self.draft_session_id,
                     draft_link=draft_session.draft_link,
                     user_display_name=interaction.user.display_name,
-                    min_stake=draft_session.min_stake
+                    min_stake=draft_session.min_stake,
+                    has_draftmancer_role=has_draftmancer_role  # Pass the role information
                 )
                 await interaction.response.send_message(
                     f"Min Bet for queue is {draft_session.min_stake}. Select your max bet:",
@@ -215,6 +221,10 @@ class PersistentView(discord.ui.View):
             
             # For non-staked drafts, add them to sign_ups now        
             sign_ups[user_id] = interaction.user.display_name
+            display_name = str(interaction.user.display_name)
+            # If user has Draftmancer role, add them to draftmancer_role_users
+            if has_draftmancer_role and display_name not in draftmancer_role_users:
+                draftmancer_role_users.append(display_name)
 
             # Check if this is the 6th person to sign up AND we haven't pinged yet
             should_ping = False
@@ -229,7 +239,10 @@ class PersistentView(discord.ui.View):
             async with AsyncSessionLocal() as session:
                 async with session.begin():
                     # Update values based on whether we need to ping
-                    values_to_update = {"sign_ups": sign_ups}
+                    values_to_update = {
+                        "sign_ups": sign_ups,
+                        "draftmancer_role_users": draftmancer_role_users
+                    }
                     if should_ping:
                         values_to_update["should_ping"] = True
                         
@@ -292,24 +305,35 @@ class PersistentView(discord.ui.View):
             return
         
         sign_ups = draft_session.sign_ups or {}
+        draftmancer_role_users = draft_session.draftmancer_role_users or []
         user_id = str(interaction.user.id)
+        display_name = str(interaction.user.display_name)
+        
         if user_id not in sign_ups:
             # User is not signed up; inform them
             await interaction.response.send_message("You are not signed up!", ephemeral=True)
         else:
             # User is canceling their sign-up
-            del draft_session.sign_ups[user_id]
+            del sign_ups[user_id]
+            
+            # Remove user from draftmancer_role_users if present
+            if display_name in draftmancer_role_users:
+                draftmancer_role_users.remove(display_name)
 
             # Start an asynchronous database session
             async with AsyncSessionLocal() as session:
                 async with session.begin():
-                    # Directly update the 'sign_ups' of the draft session
+                    # Directly update the 'sign_ups' and 'draftmancer_role_users' of the draft session
                     await session.execute(
                         update(DraftSession).
                         where(DraftSession.session_id == self.draft_session_id).
-                        values(sign_ups=sign_ups)
+                        values(
+                            sign_ups=sign_ups,
+                            draftmancer_role_users=draftmancer_role_users
+                        )
                     )
                     await session.commit()
+                    
             cancel_message = "Your sign up has been canceled!"
             await interaction.response.send_message(cancel_message, ephemeral=True)
 
@@ -2043,11 +2067,12 @@ class CancelConfirmationView(discord.ui.View):
 
 
 class StakeOptionsSelect(discord.ui.Select):
-    def __init__(self, draft_session_id, draft_link, user_display_name, min_stake):
+    def __init__(self, draft_session_id, draft_link, user_display_name, min_stake, has_draftmancer_role=False):
         self.draft_session_id = draft_session_id
         self.draft_link = draft_link
         self.user_display_name = user_display_name
         self.min_stake = min_stake
+        self.has_draftmancer_role = has_draftmancer_role
 
         options = []
         if self.min_stake <= 10:
@@ -2078,6 +2103,7 @@ class StakeOptionsSelect(discord.ui.Select):
             stake_modal.draft_session_id = self.draft_session_id
             stake_modal.draft_link = self.draft_link
             stake_modal.user_display_name = self.user_display_name
+            stake_modal.has_draftmancer_role = self.has_draftmancer_role
             
             # IMPORTANT: Set the default value based on saved preference before showing the modal
             stake_modal.default_cap_setting = is_capped
@@ -2095,6 +2121,7 @@ class StakeOptionsSelect(discord.ui.Select):
     async def handle_stake_submission(self, interaction, stake_amount, is_capped=True):
         user_id = str(interaction.user.id)
         guild_id = str(interaction.guild_id)
+        display_name = str(interaction.user.display_name)
         
         async with AsyncSessionLocal() as session:
             async with session.begin():
@@ -2111,6 +2138,11 @@ class StakeOptionsSelect(discord.ui.Select):
                 sign_ups = draft_session.sign_ups or {}
                 sign_ups[user_id] = interaction.user.display_name
                 
+                # Update draftmancer_role_users if user has the role
+                draftmancer_role_users = draft_session.draftmancer_role_users or []
+                if self.has_draftmancer_role and display_name not in draftmancer_role_users:
+                    draftmancer_role_users.append(display_name)
+                
                 # Check if this is the 5th person to sign up AND we haven't pinged yet
                 should_ping = False
                 now = datetime.now()
@@ -2119,8 +2151,11 @@ class StakeOptionsSelect(discord.ui.Select):
                 if 5 <= len(sign_ups) < 8 and not draft_session.should_ping and now > ping_cooldown:
                     should_ping = True
                 
-                # Update draft session with sign_ups and should_ping flag if needed
-                values_to_update = {"sign_ups": sign_ups}
+                # Update draft session with sign_ups, draftmancer_role_users, and should_ping flag if needed
+                values_to_update = {
+                    "sign_ups": sign_ups,
+                    "draftmancer_role_users": draftmancer_role_users
+                }
                 if should_ping:
                     values_to_update["should_ping"] = True
                 
@@ -2200,16 +2235,23 @@ class StakeOptionsSelect(discord.ui.Select):
 
 
 class StakeOptionsView(discord.ui.View):
-    def __init__(self, draft_session_id, draft_link, user_display_name, min_stake):
+    def __init__(self, draft_session_id, draft_link, user_display_name, min_stake, has_draftmancer_role=False):
         super().__init__(timeout=300)  # 5 minute timeout
-        self.add_item(StakeOptionsSelect(draft_session_id, draft_link, user_display_name, min_stake))
+        self.add_item(StakeOptionsSelect(
+            draft_session_id, 
+            draft_link, 
+            user_display_name, 
+            min_stake,
+            has_draftmancer_role
+        ))
         
 class StakeModal(discord.ui.Modal):
     def __init__(self, over_100=False):
         super().__init__(title="Enter Maximum Bet")
         
         self.over_100 = over_100
-        self.default_cap_setting = True  # Will be set before showing modal
+        self.default_cap_setting = True  
+        self.has_draftmancer_role = False  
         placeholder_text = "Reminder: Your bet can fill multiple bets when possible" if over_100 else "Enter maximum amount you're willing to bet"
         
         self.stake_input = discord.ui.InputText(
@@ -2291,11 +2333,19 @@ class StakeModal(discord.ui.Modal):
                     display_name = self.user_display_name or interaction.user.display_name
                     sign_ups[user_id] = display_name
                     
-                    # Update the draft session with the new sign_ups
+                    # Update draftmancer_role_users if user has the role
+                    draftmancer_role_users = draft_session.draftmancer_role_users or []
+                    if self.has_draftmancer_role and display_name not in draftmancer_role_users:
+                        draftmancer_role_users.append(display_name)
+                    
+                    # Update the draft session with the new sign_ups and draftmancer_role_users
                     await session.execute(
                         update(DraftSession).
                         where(DraftSession.session_id == self.draft_session_id).
-                        values(sign_ups=sign_ups)
+                        values(
+                            sign_ups=sign_ups,
+                            draftmancer_role_users=draftmancer_role_users
+                        )
                     )
                     
                     # Check if a stake record already exists for this player
