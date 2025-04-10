@@ -25,10 +25,8 @@ class LeaderboardCog(commands.Cog):
             # "hot_streak"
         ]
         
-        # TESTING ONLY REMOVE AFTER TESTING ALSO REMOVE BOT.PY CHANGES
-        guild_id = "1355718878298116096"  # Override with test guild ID
         # Get the guild ID
-        # guild_id = str(ctx.guild.id)
+        guild_id = str(ctx.guild.id)
         
         logger.info(f"Generating all leaderboards for guild {guild_id}")
         
