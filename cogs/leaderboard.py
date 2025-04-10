@@ -1,8 +1,9 @@
 import discord
 from discord.ext import commands
 from datetime import datetime, timedelta
-from sqlalchemy import text
+from sqlalchemy import text, select
 from database.db_session import db_session
+from models.leaderboard_message import LeaderboardMessage
 from loguru import logger
 import json
 
@@ -22,9 +23,10 @@ class LeaderboardCog(commands.Cog):
             "match_win",
             "drafts_played", 
             "time_vault_and_key",
-            # "hot_streak"
+            "hot_streak"
         ]
         
+        # TESTING ONLY REMOVE AFTER TESTING ALSO REMOVE BOT.PY CHANGES
         # Get the guild ID
         guild_id = str(ctx.guild.id)
         
@@ -37,9 +39,57 @@ class LeaderboardCog(commands.Cog):
             embed = await create_leaderboard_embed(guild_id, category)
             embeds.append(embed)
         
-        # Send all embeds
-        await ctx.respond(embeds=embeds)
+        # Check if we have an existing leaderboard message
+        async with db_session() as session:
+            stmt = select(LeaderboardMessage).where(LeaderboardMessage.guild_id == guild_id)
+            result = await session.execute(stmt)
+            leaderboard_message = result.scalar_one_or_none()
+            
+            if leaderboard_message:
+                # Try to get the existing message and update it
+                try:
+                    channel = ctx.guild.get_channel(int(leaderboard_message.channel_id))
+                    if channel:
+                        try:
+                            message = await channel.fetch_message(int(leaderboard_message.message_id))
+                            await message.edit(embeds=embeds)
+                            await ctx.followup.send("Leaderboards have been updated!", ephemeral=True)
+                            return
+                        except discord.NotFound:
+                            # Message not found, will create a new one
+                            logger.info("Leaderboard message not found, creating a new one")
+                    else:
+                        logger.info("Leaderboard channel not found, creating a new message")
+                except Exception as e:
+                    logger.error(f"Error updating leaderboard: {e}")
+            
+            # Send new embeds
+            await ctx.respond(embeds=embeds)
+            
+            # In py-cord, we need to get the message differently
+            try:
+                # For py-cord, we need to fetch the original message after responding
+                message = await ctx.interaction.original_message()
+                
+                # Create or update leaderboard message record
+                if leaderboard_message:
+                    leaderboard_message.channel_id = str(ctx.channel.id)
+                    leaderboard_message.message_id = str(message.id)
+                    leaderboard_message.last_updated = datetime.now()
+                else:
+                    leaderboard_message = LeaderboardMessage(
+                        guild_id=guild_id,
+                        channel_id=str(ctx.channel.id),
+                        message_id=str(message.id),
+                        last_updated=datetime.now()
+                    )
+                    session.add(leaderboard_message)
+                
+                await session.commit()
+            except Exception as e:
+                logger.error(f"Error getting original message or saving to database: {e}")
 
+# The rest of the code remains unchanged
 def ensure_datetime(date_value):
     """Convert various date formats to datetime objects"""
     if not date_value:
@@ -79,7 +129,7 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
     """Get leaderboard data for all players in a guild"""
 
     now = datetime.now()
-    month_ago = now - timedelta(days=30)
+    week_ago = now - timedelta(days=7)
     
     # Store player stats here
     players_data = {}
@@ -142,9 +192,9 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
                         except (ValueError, TypeError):
                             logger.error(f"Error converting teams_start_time for draft {draft_id}")
                     
-                    # Compare with month_ago 
+                    # Compare with week_ago 
                     if isinstance(teams_start_time, datetime):
-                        is_recent = teams_start_time >= month_ago
+                        is_recent = teams_start_time >= week_ago
                         if is_recent:
                             logger.debug(f"Draft {draft_id} is recent: {teams_start_time}")
                 
@@ -264,8 +314,10 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
         
         for player_id, player_data in players_data.items():
             # Count matches
+            matches_lost = player_data["matches_played"] - player_data["matches_won"]
+            counted_matches = player_data["matches_won"] + matches_lost
             if player_data["matches_played"] > 0:
-                player_data["match_win_percentage"] = (player_data["matches_won"] / player_data["matches_played"]) * 100
+                player_data["match_win_percentage"] = (player_data["matches_won"] / counted_matches) * 100
             
             # Count team drafts
             team_draft_counted_drafts = player_data["team_drafts_won"] + player_data["team_drafts_lost"]
@@ -277,8 +329,10 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
             if last_30_days_counted_drafts > 0:
                 player_data["last_30_days_team_draft_win_percentage"] = (player_data["last_30_days_team_drafts_won"] / last_30_days_counted_drafts) * 100
             
+            recent_matches_lost = player_data["last_30_days_matches_played"] - player_data["last_30_days_matches_won"]
+            recent_counted_matches = player_data["last_30_days_matches_won"] + recent_matches_lost
             if player_data["last_30_days_matches_played"] > 0:
-                player_data["last_30_days_match_win_percentage"] = (player_data["last_30_days_matches_won"] / player_data["last_30_days_matches_played"]) * 100
+                player_data["last_30_days_match_win_percentage"] = (player_data["last_30_days_matches_won"] / recent_counted_matches) * 100
             
 
         # Log some statistics to understand the difference
@@ -292,15 +346,14 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
 
         # CHANGE THE FILTERING FOR CATEGORIES TO USE drafts_played INSTEAD:
         if category == "draft_record":
-            # Use drafts_played instead of team_drafts_played
-            filtered_players = [p for p in players_list if p["drafts_played"] >= 5]
+            filtered_players = [p for p in players_list if p["drafts_played"] >= 5 and p["team_draft_win_percentage"] > 50]
             logger.info(f"Found {len(filtered_players)} players with at least 5 drafts for draft_record")
             # Sort by team draft win percentage (descending)
             sorted_players = sorted(filtered_players, key=lambda p: p["team_draft_win_percentage"], reverse=True)
         
         elif category == "match_win":
             # Filter to players with at least 5 drafts
-            filtered_players = [p for p in players_list if p["drafts_played"] >= 5]
+            filtered_players = [p for p in players_list if p["drafts_played"] >= 5 and p["match_win_percentage"] >= 50]
             logger.info(f"Found {len(filtered_players)} players with at least 5 drafts for match_win")
             # Sort by match win percentage (descending)
             sorted_players = sorted(filtered_players, key=lambda p: p["match_win_percentage"], reverse=True)
@@ -356,9 +409,9 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
 
         
         elif category == "hot_streak":
-                # Only include players with at least 3 drafts in the last 30 days
+                # Only include players with at least 3 drafts in the last 7 days
                 filtered_players = [p for p in players_list if p["last_30_days_drafts"] >= 3]
-                logger.info(f"Found {len(filtered_players)} players with at least 3 drafts in last 30 days for hot_streak")
+                logger.info(f"Found {len(filtered_players)} players with at least 3 drafts in last 7 days for hot_streak")
                 # Sort by 30-day team draft win percentage
                 sorted_players = sorted(filtered_players, key=lambda p: p["last_30_days_team_draft_win_percentage"], reverse=True)
 
@@ -408,8 +461,8 @@ async def create_leaderboard_embed(guild_id, category="draft_record", limit=20):
             "formatter": lambda p, rank: f"{get_medal(rank)}{p['player_name']} & {p['teammate_name']}: {p['drafts_won']}-{p['drafts_lost']}-{p['drafts_tied']} ({p['win_percentage']:.1f}%)"
         },
         "hot_streak": {
-            "title": "Hot Streak Leaderboard (Last 30 Days)",
-            "description": "Players with the best performance in the last 30 days (min 3 drafts)",
+            "title": "Hot Streak Leaderboard (Last 7 Days)",
+            "description": "Players with the best performance in the last 7 days (min 3 drafts)",
             "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['last_30_days_team_drafts_won']}-{p['last_30_days_team_drafts_lost']}-{p['last_30_days_team_drafts_tied']} ({p['last_30_days_team_draft_win_percentage']:.1f}%)"
         }
     }
