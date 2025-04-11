@@ -125,9 +125,12 @@ async def main():
         # Add an extra safety delay
         await asyncio.sleep(5)
         # Then refresh all leaderboards
-        from cogs.leaderboard import refresh_all_leaderboards
-        await refresh_all_leaderboards(bot)
-        logger.info("Completed leaderboard refresh after startup")
+        try:
+            from cogs.leaderboard import refresh_all_leaderboards
+            await refresh_all_leaderboards(bot)
+            logger.info("Completed leaderboard refresh after startup")
+        except Exception as e:
+            logger.error(f"Error refreshing leaderboards on startup: {e}")
     
     # Add the task to the bot's event loop
     bot.loop.create_task(delayed_refresh())
