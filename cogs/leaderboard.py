@@ -351,7 +351,7 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
 
         # CHANGE THE FILTERING FOR CATEGORIES TO USE drafts_played INSTEAD:
         if category == "draft_record":
-            filtered_players = [p for p in players_list if p["drafts_played"] >= 5 and p["team_draft_win_percentage"] > 50]
+            filtered_players = [p for p in players_list if p["drafts_played"] >= 5 and p["team_draft_win_percentage"] >= 50]
             logger.info(f"Found {len(filtered_players)} players with at least 5 drafts for draft_record")
             # Sort by team draft win percentage (descending)
             sorted_players = sorted(filtered_players, key=lambda p: p["team_draft_win_percentage"], reverse=True)
@@ -414,9 +414,8 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20):
 
         
         elif category == "hot_streak":
-                # FIXED: Change to filter using last_30_days_completed_matches
-                filtered_players = [p for p in players_list if p["last_30_days_completed_matches"] >= 3 and p["last_30_days_match_win_percentage"] > 0]
-                logger.info(f"Found {len(filtered_players)} players with at least 3 completed matches in last 7 days for hot_streak")
+                filtered_players = [p for p in players_list if p["last_30_days_completed_matches"] >= 9 and p["last_30_days_match_win_percentage"] > 50]
+                logger.info(f"Found {len(filtered_players)} players with at least 9 completed matches in last 7 days for hot_streak")
                 # Sort by 7-day match win percentage
                 sorted_players = sorted(filtered_players, key=lambda p: p["last_30_days_match_win_percentage"], reverse=True)
 
