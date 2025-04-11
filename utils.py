@@ -9,6 +9,8 @@ from sqlalchemy.orm import selectinload, joinedload
 from trueskill import Rating, rate_1vs1
 from discord.ui import View
 from league import ChallengeView
+from models.leaderboard_message import LeaderboardMessage
+from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
 from loguru import logger
 
@@ -608,22 +610,19 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 else:
                     print(f"Results channel '{results_channel_name}' not found.")
 
-                # Update leaderboards if they exist
-                from sqlalchemy import select
-                from models.leaderboard_message import LeaderboardMessage
                 
                 # Check if we have a leaderboard message for this guild
                 stmt = select(LeaderboardMessage).where(LeaderboardMessage.guild_id == draft_session.guild_id)
                 result = await session.execute(stmt)
                 leaderboard_message = result.scalar_one_or_none()
-                
+
                 if leaderboard_message:
                     logger.info(f"Updating leaderboard for guild {draft_session.guild_id}")
                     
                     # Get the channel
                     channel = guild.get_channel(int(leaderboard_message.channel_id))
                     if channel:
-                        # Create embeds for all categories
+                        # All categories to display
                         categories = [
                             "draft_record",
                             "match_win",
@@ -632,36 +631,55 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                             "hot_streak"
                         ]
                         
-                        embeds = []
+                        # Get timeframes for each category from database or defaults
+                        timeframes = {}
+                        for category in categories:
+                            if category == "hot_streak":
+                                timeframes[category] = "7d"  # Hot streak is always 7 days
+                            else:
+                                # Get stored timeframe or default to "lifetime"
+                                timeframe_field = f"{category}_timeframe"
+                                if hasattr(leaderboard_message, timeframe_field):
+                                    timeframes[category] = getattr(leaderboard_message, timeframe_field) or "lifetime"
+                                else:
+                                    timeframes[category] = "lifetime"
+                        
+                        # Process each category
                         for category in categories:
                             try:
-                                from cogs.leaderboard import create_leaderboard_embed
-                                embed = await create_leaderboard_embed(draft_session.guild_id, category)
-                                embeds.append(embed)
+                                # Create the embed with the saved timeframe
+                                embed = await create_leaderboard_embed(draft_session.guild_id, category, timeframe=timeframes[category])
+                                
+                                # Get the message ID field name
+                                msg_id_field = f"{category}_view_message_id" if category != "hot_streak" else "message_id"
+                                
+                                # Check if we have a message ID for this category
+                                if hasattr(leaderboard_message, msg_id_field) and getattr(leaderboard_message, msg_id_field):
+                                    try:
+                                        message_id = getattr(leaderboard_message, msg_id_field)
+                                        message = await channel.fetch_message(int(message_id))
+                                        
+                                        # For categories with timeframe buttons, update with view
+                                        if category != "hot_streak":
+                                            view = TimeframeView(bot, draft_session.guild_id, category, current_timeframe=timeframes[category])
+                                            await message.edit(embed=embed, view=view)
+                                        else:
+                                            # Hot streak doesn't have buttons
+                                            await message.edit(embed=embed)
+                                            
+                                        logger.info(f"Updated {category} leaderboard for guild {draft_session.guild_id}")
+                                    except discord.NotFound:
+                                        logger.warning(f"Leaderboard message for {category} not found in guild {draft_session.guild_id}")
+                                    except Exception as e:
+                                        logger.error(f"Error updating {category} leaderboard: {e}")
                             except Exception as e:
-                                logger.error(f"Error creating leaderboard embed for category {category}: {e}")
+                                logger.error(f"Error creating {category} leaderboard embed: {e}")
                         
-                        try:
-                            # Get the message
-                            message = await channel.fetch_message(int(leaderboard_message.message_id))
-                            
-                            # Edit the message with new embeds
-                            await message.edit(embeds=embeds)
-                            
-                            # Update last_updated
-                            leaderboard_message.last_updated = datetime.now()
-                            
-                            logger.info(f"Updated leaderboard for guild {draft_session.guild_id}")
-                        except discord.NotFound:
-                            logger.warning(f"Leaderboard message not found for guild {draft_session.guild_id}")
-                        except Exception as e:
-                            logger.error(f"Error updating leaderboard: {e}")
-                
-                await session.execute(update(DraftSession)
-                                    .where(DraftSession.session_id == draft_session_id)
-                                    .values(winning_gap=gap))
-                
-                await session.commit()
+                        # Update last_updated timestamp
+                        leaderboard_message.last_updated = datetime.now()
+                        await session.commit()
+                        
+                        logger.info(f"Finished updating all leaderboards for guild {draft_session.guild_id}")
 
 
 async def remove_lock_after_delay(draft_session_id, delay):

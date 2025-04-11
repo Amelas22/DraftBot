@@ -1,8 +1,7 @@
 import asyncio
 import logging
-from sqlalchemy import text, MetaData, Table, Column, Integer, String, DateTime
+from sqlalchemy import text, MetaData, Table, Column, String
 from sqlalchemy.ext.asyncio import create_async_engine
-from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
@@ -12,8 +11,8 @@ logger = logging.getLogger(__name__)
 # Database URL - should match your existing configuration
 DATABASE_URL = "sqlite+aiosqlite:///drafts.db"
 
-async def create_leaderboard_messages_table():
-    """Create the leaderboard_messages table if it doesn't exist"""
+async def add_timeframe_columns():
+    """Add columns for timeframe view message IDs and timeframe settings to the leaderboard_messages table"""
     engine = create_async_engine(DATABASE_URL, echo=True)
     
     try:
@@ -26,39 +25,53 @@ async def create_leaderboard_messages_table():
             table_exists = result.scalar() is not None
             
             if not table_exists:
-                # Create the table
-                metadata = MetaData()
+                logger.error("leaderboard_messages table does not exist. Please run create_leaderboard_messages_table first.")
+                return
+            
+            # Get current columns in the table
+            result = await conn.execute(text(
+                "PRAGMA table_info(leaderboard_messages)"
+            ))
+            columns = {row[1] for row in result.fetchall()}
+            
+            # Define new columns to add
+            new_columns = [
+                # View message ID columns
+                ('draft_record_view_message_id', String(64)),
+                ('match_win_view_message_id', String(64)),
+                ('drafts_played_view_message_id', String(64)),
+                ('time_vault_and_key_view_message_id', String(64)),
                 
-                # Define the table structure
-                leaderboard_messages = Table(
-                    'leaderboard_messages', 
-                    metadata,
-                    Column('id', Integer, primary_key=True, autoincrement=True),
-                    Column('guild_id', String(64), nullable=False),
-                    Column('channel_id', String(64), nullable=False),
-                    Column('message_id', String(64), nullable=False),
-                    Column('last_updated', DateTime, default=datetime.now)
-                )
-                
-                # Create the table
-                await conn.run_sync(metadata.create_all, tables=[leaderboard_messages])
-                logger.info("Created leaderboard_messages table")
-            else:
-                logger.info("leaderboard_messages table already exists")
+                # Timeframe setting columns
+                ('draft_record_timeframe', String(20)),
+                ('match_win_timeframe', String(20)),
+                ('drafts_played_timeframe', String(20)),
+                ('time_vault_and_key_timeframe', String(20))
+            ]
+            
+            # Add each column if it doesn't exist
+            for column_name, column_type in new_columns:
+                if column_name not in columns:
+                    logger.info(f"Adding column: {column_name}")
+                    await conn.execute(text(
+                        f"ALTER TABLE leaderboard_messages ADD COLUMN {column_name} {column_type}"
+                    ))
+                else:
+                    logger.info(f"Column {column_name} already exists")
                 
     except Exception as e:
-        logger.error(f"Error creating leaderboard_messages table: {e}")
+        logger.error(f"Error adding columns to leaderboard_messages table: {e}")
         raise
     finally:
         await engine.dispose()
 
 async def migrate_database():
     """Execute all migration steps"""
-    logger.info("Starting database migration to add leaderboard_messages table")
+    logger.info("Starting database migration to add timeframe columns")
     
     try:
-        # Create the leaderboard_messages table
-        await create_leaderboard_messages_table()
+        # Add the new columns
+        await add_timeframe_columns()
         
         logger.info("Database migration completed successfully")
     except Exception as e:
