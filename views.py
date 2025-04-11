@@ -210,7 +210,7 @@ class PersistentView(discord.ui.View):
                     draft_link=draft_session.draft_link,
                     user_display_name=interaction.user.display_name,
                     min_stake=draft_session.min_stake,
-                    has_draftmancer_role=has_draftmancer_role  # Pass the role information
+                    has_draftmancer_role=has_draftmancer_role  
                 )
                 await interaction.response.send_message(
                     f"Min Bet for queue is {draft_session.min_stake}. Select your max bet:",
@@ -232,7 +232,7 @@ class PersistentView(discord.ui.View):
             now = datetime.now()
             ping_cooldown = draft_session.draft_start_time + timedelta(minutes=30)
             
-            if 5 <= len(sign_ups) < 8 and not draft_session.should_ping and now > ping_cooldown:
+            if len(sign_ups) in (5, 7) and not draft_session.should_ping and now > ping_cooldown:
                 should_ping = True
 
             # Start an asynchronous database session
@@ -2148,7 +2148,7 @@ class StakeOptionsSelect(discord.ui.Select):
                 now = datetime.now()
                 ping_cooldown = draft_session.draft_start_time + timedelta(minutes=30)
                 
-                if 5 <= len(sign_ups) < 8 and not draft_session.should_ping and now > ping_cooldown:
+                if len(sign_ups) in (5, 7) and not draft_session.should_ping and now > ping_cooldown:
                     should_ping = True
                 
                 # Update draft session with sign_ups, draftmancer_role_users, and should_ping flag if needed
