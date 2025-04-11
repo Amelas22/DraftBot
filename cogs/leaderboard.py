@@ -479,7 +479,7 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
         # Adjust minimum requirements based on timeframe
         min_drafts = 25
         min_matches = 50
-        min_partnership_drafts = 10
+        min_partnership_drafts = 8
         
         if timeframe == "14d":
             min_drafts = 5
@@ -488,11 +488,11 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
         elif timeframe == "30d":
             min_drafts = 10
             min_matches = 25
-            min_partnership_drafts = 6
+            min_partnership_drafts = 4
         elif timeframe == "90d":
             min_drafts = 20
             min_matches = 45
-            min_partnership_drafts = 8
+            min_partnership_drafts = 6
         
         # Apply category-specific filters and sorting
         if category == "draft_record":
@@ -588,32 +588,49 @@ async def create_leaderboard_embed(guild_id, category="draft_record", limit=20, 
         "90d": "Last 90 Days",
         "lifetime": "Lifetime"
     }.get(timeframe, "Lifetime")
+
+    min_drafts = 25
+    min_matches = 50
+    min_partnership_drafts = 8
     
+    if timeframe == "14d":
+        min_drafts = 5
+        min_matches = 12
+        min_partnership_drafts = 3
+    elif timeframe == "30d":
+        min_drafts = 10
+        min_matches = 25
+        min_partnership_drafts = 4
+    elif timeframe == "90d":
+        min_drafts = 20
+        min_matches = 45
+        min_partnership_drafts = 6
+
     # Define category titles and descriptions
     categories = {
         "draft_record": {
             "title": f"Draft Record Leaderboard ({timeframe_display})",
-            "description": f"Players with the highest team draft win percentage ({timeframe_display})",
+            "description": f"Players with the highest team draft win percentage (min {min_drafts} drafts, 50%+ win rate)",
             "formatter": lambda p, rank: f"{get_medal(rank)}**{p['display_name']}**: {p['team_drafts_won']}-{p['team_drafts_lost']}-{p['team_drafts_tied']} ({p['team_draft_win_percentage']:.1f}%)"
         },
         "match_win": {
             "title": f"Match Win Leaderboard ({timeframe_display})",
-            "description": f"Players with the highest individual match win percentage ({timeframe_display})",
+            "description": f"Players with the highest individual match win percentage (min {min_matches} matches, 50%+ win rate)",
             "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['matches_won']}/{p['completed_matches']} ({p['match_win_percentage']:.1f}%)"
         },
         "drafts_played": {
             "title": f"Drafts Played Leaderboard ({timeframe_display})",
-            "description": f"Players who have participated in the most drafts ({timeframe_display})",
+            "description": f"Players who have participated in the most drafts",
             "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['drafts_played']} drafts"
         },
         "time_vault_and_key": {
             "title": f"Vault / Key Leaderboard ({timeframe_display})",
-            "description": f"Highest Draft Win Rate when paired as teammates ({timeframe_display})",
+            "description": f"Highest Draft Win Rate when paired as teammates (min {min_partnership_drafts} drafts together, 50%+ win rate)",
             "formatter": lambda p, rank: f"{get_medal(rank)}{p['player_name']} & {p['teammate_name']}: {p['drafts_won']}-{p['drafts_lost']}-{p['drafts_tied']} ({p['win_percentage']:.1f}%)"
         },
         "hot_streak": {
             "title": "Hot Streak Leaderboard (Last 7 Days)",
-            "description": "Players with the best match win % in the last 7 days",
+            "description": "Players with the best match win % in the last 7 days (min 9 matches, 50%+ win rate)",
             "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['matches_won']}/{p['completed_matches']} ({p['match_win_percentage']:.1f}%)"
         }
     }
