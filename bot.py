@@ -118,6 +118,19 @@ async def main():
     await init_db()
     await ensure_guild_id_in_tables()
     logger.info("Database initialized")
+    # Create a delayed task for leaderboard refresh
+    async def delayed_refresh():
+        # Wait for the bot to fully connect to all guilds
+        await bot.wait_until_ready()
+        # Add an extra safety delay
+        await asyncio.sleep(5)
+        # Then refresh all leaderboards
+        from cogs.leaderboard import refresh_all_leaderboards
+        await refresh_all_leaderboards(bot)
+        logger.info("Completed leaderboard refresh after startup")
+    
+    # Add the task to the bot's event loop
+    bot.loop.create_task(delayed_refresh())
 
     await setup_sticky_handler(bot)
     # Run the bot

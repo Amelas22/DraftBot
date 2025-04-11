@@ -688,5 +688,117 @@ async def create_leaderboard_embed(guild_id, category="draft_record", limit=20, 
     
     return embed
 
+async def refresh_all_leaderboards(bot):
+    """Refresh all leaderboards for all guilds on bot restart"""
+    logger.info("Starting to refresh all leaderboards...")
+    
+    try:
+        # Get all leaderboard records
+        async with db_session() as session:
+            stmt = select(LeaderboardMessage)
+            result = await session.execute(stmt)
+            all_leaderboards = result.scalars().all()
+            
+            if not all_leaderboards:
+                logger.info("No leaderboards found to refresh")
+                return
+                
+            logger.info(f"Found {len(all_leaderboards)} leaderboards to refresh")
+            
+            # Process each leaderboard
+            for leaderboard in all_leaderboards:
+                try:
+                    guild_id = leaderboard.guild_id
+                    guild = bot.get_guild(int(guild_id))
+                    
+                    if not guild:
+                        logger.warning(f"Could not find guild with ID {guild_id}")
+                        continue
+                        
+                    # Get the channel
+                    channel = guild.get_channel(int(leaderboard.channel_id))
+                    if not channel:
+                        logger.warning(f"Could not find channel with ID {leaderboard.channel_id} in guild {guild.name}")
+                        continue
+                    
+                    # Check permissions
+                    bot_member = guild.get_member(bot.user.id)
+                    permissions = channel.permissions_for(bot_member)
+                    if not (permissions.send_messages and permissions.embed_links and permissions.read_message_history):
+                        logger.warning(f"Missing permissions in channel {channel.name} (ID: {channel.id}) in guild {guild.name}")
+                        continue
+                    
+                    # All categories to display
+                    categories = [
+                        "draft_record",
+                        "match_win",
+                        "drafts_played", 
+                        "time_vault_and_key",
+                        "hot_streak"
+                    ]
+                    
+                    # Get timeframes for each category
+                    timeframes = {}
+                    for category in categories:
+                        if category == "hot_streak":
+                            timeframes[category] = "7d"  # Hot streak is always 7 days
+                        else:
+                            # Get stored timeframe or default to "lifetime"
+                            timeframe_field = f"{category}_timeframe"
+                            if hasattr(leaderboard, timeframe_field):
+                                timeframes[category] = getattr(leaderboard, timeframe_field) or "lifetime"
+                            else:
+                                timeframes[category] = "lifetime"
+                    
+                    # Import here to avoid circular imports
+                    from cogs.leaderboard import create_leaderboard_embed, TimeframeView
+                    
+                    # Process each category
+                    for category in categories:
+                        try:
+                            # Create the embed
+                            embed = await create_leaderboard_embed(guild_id, category, timeframe=timeframes[category])
+                            
+                            # Get the message ID field name
+                            msg_id_field = f"{category}_view_message_id" if category != "hot_streak" else "message_id"
+                            
+                            # Try to update existing message
+                            message_updated = False
+                            if hasattr(leaderboard, msg_id_field) and getattr(leaderboard, msg_id_field):
+                                try:
+                                    message_id = getattr(leaderboard, msg_id_field)
+                                    existing_msg = await channel.fetch_message(int(message_id))
+                                    
+                                    if category != "hot_streak":
+                                        view = TimeframeView(bot, guild_id, category, current_timeframe=timeframes[category])
+                                        await existing_msg.edit(embed=embed, view=view)
+                                    else:
+                                        await existing_msg.edit(embed=embed)
+                                        
+                                    message_updated = True
+                                    logger.info(f"Updated {category} leaderboard for guild {guild.name}")
+                                except discord.NotFound:
+                                    logger.warning(f"Message {message_id} for {category} not found in guild {guild.name}")
+                                except Exception as e:
+                                    logger.error(f"Error updating {category} message in guild {guild.name}: {e}")
+                            
+                            # Skip creation of new messages during startup refresh
+                            if not message_updated:
+                                logger.info(f"Skipping creation of new {category} leaderboard message for guild {guild.name}")
+                        
+                        except Exception as e:
+                            logger.error(f"Error processing {category} leaderboard for guild {guild.name}: {e}")
+                    
+                    # Update last_updated timestamp
+                    leaderboard.last_updated = datetime.now()
+                    await session.commit()
+                    logger.info(f"Finished refreshing leaderboards for guild {guild.name}")
+                    
+                except Exception as e:
+                    logger.error(f"Error refreshing leaderboards for guild ID {guild_id}: {e}")
+        
+    except Exception as e:
+        logger.error(f"Error in refresh_all_leaderboards: {e}")
+        
 def setup(bot):
     bot.add_cog(LeaderboardCog(bot))
