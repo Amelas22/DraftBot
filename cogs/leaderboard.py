@@ -146,7 +146,7 @@ class LeaderboardCog(commands.Cog):
                 async with db_session() as session:
                     leaderboard_message.channel_id = str(ctx.channel.id)
                     await session.commit()
-            
+
             # Try to get the channel
             channel = ctx.guild.get_channel(int(leaderboard_message.channel_id))
             if not channel:
@@ -488,7 +488,7 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
         elif timeframe == "30d":
             min_drafts = 10
             min_matches = 25
-            min_partnership_drafts = 4
+            min_partnership_drafts = 3
         elif timeframe == "90d":
             min_drafts = 20
             min_matches = 45
@@ -600,7 +600,7 @@ async def create_leaderboard_embed(guild_id, category="draft_record", limit=20, 
     elif timeframe == "30d":
         min_drafts = 10
         min_matches = 25
-        min_partnership_drafts = 4
+        min_partnership_drafts = 3
     elif timeframe == "90d":
         min_drafts = 20
         min_matches = 45
