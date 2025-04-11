@@ -140,17 +140,45 @@ class LeaderboardCog(commands.Cog):
                 stmt = select(LeaderboardMessage).where(LeaderboardMessage.guild_id == guild_id)
                 result = await session.execute(stmt)
                 leaderboard_message = result.scalar_one_or_none()
-            
-            # Update channel ID if needed (in case the command is used in a different channel)
-            if leaderboard_message.channel_id != str(ctx.channel.id):
+
+            # Try to get the original channel
+            original_channel = None
+            try:
+                original_channel = ctx.guild.get_channel(int(leaderboard_message.channel_id))
+                if original_channel:
+                    logger.info(f"Found original leaderboard channel: {original_channel.name} (ID: {original_channel.id})")
+                    
+                    # Check permissions in the original channel
+                    bot_member = original_channel.guild.get_member(self.bot.user.id)
+                    permissions = original_channel.permissions_for(bot_member)
+                    if not permissions.send_messages or not permissions.embed_links or not permissions.read_message_history:
+                        logger.warning(f"Missing permissions in channel {original_channel.name}: send_messages={permissions.send_messages}, embed_links={permissions.embed_links}, read_message_history={permissions.read_message_history}")
+                        original_channel = None  # Reset if we don't have permissions
+                        
+            except Exception as e:
+                logger.error(f"Error getting original channel: {e}")
+                original_channel = None
+
+            # If we can't access the original channel, use the current one
+            if not original_channel:
+                logger.info(f"Using current channel for leaderboard: {ctx.channel.name} (ID: {ctx.channel.id})")
+                
+                # Update the channel ID in the database
                 async with db_session() as session:
                     leaderboard_message.channel_id = str(ctx.channel.id)
+                    
+                    # Reset all message IDs since we're changing channels
+                    leaderboard_message.message_id = None
+                    leaderboard_message.draft_record_view_message_id = None
+                    leaderboard_message.match_win_view_message_id = None
+                    leaderboard_message.drafts_played_view_message_id = None
+                    leaderboard_message.time_vault_and_key_view_message_id = None
                     await session.commit()
-
-            # Try to get the channel
-            channel = ctx.guild.get_channel(int(leaderboard_message.channel_id))
-            if not channel:
-                raise ValueError(f"Channel {leaderboard_message.channel_id} not found")
+                
+                # Use current channel
+                channel = ctx.channel
+            else:
+                channel = original_channel
             
             # Process each category
             for category in categories:

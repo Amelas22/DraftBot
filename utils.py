@@ -619,9 +619,20 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 if leaderboard_message:
                     logger.info(f"Updating leaderboard for guild {draft_session.guild_id}")
                     
-                    # Get the channel
-                    channel = guild.get_channel(int(leaderboard_message.channel_id))
-                    if channel:
+                    # Get the original channel
+                    try:
+                        channel = guild.get_channel(int(leaderboard_message.channel_id))
+                        if not channel:
+                            logger.warning(f"Leaderboard channel {leaderboard_message.channel_id} not found")
+                            return
+                        
+                        # Check permissions in the channel
+                        bot_member = guild.get_member(bot.user.id)
+                        permissions = channel.permissions_for(bot_member)
+                        if not (permissions.send_messages and permissions.embed_links and permissions.read_message_history):
+                            logger.warning(f"Missing permissions in leaderboard channel {channel.name}: send_messages={permissions.send_messages}, embed_links={permissions.embed_links}, read_message_history={permissions.read_message_history}")
+                            return
+                            
                         # All categories to display
                         categories = [
                             "draft_record",
@@ -680,6 +691,9 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                         await session.commit()
                         
                         logger.info(f"Finished updating all leaderboards for guild {draft_session.guild_id}")
+                    
+                    except Exception as e:
+                        logger.error(f"Error updating leaderboards: {e}")
 
 
 async def remove_lock_after_delay(draft_session_id, delay):
