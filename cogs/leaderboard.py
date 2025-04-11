@@ -477,8 +477,8 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
         players_list = list(players_data.values())
 
         # Adjust minimum requirements based on timeframe
-        min_drafts = 25
-        min_matches = 50
+        min_drafts = 20
+        min_matches = 45
         min_partnership_drafts = 8
         
         if timeframe == "14d":
@@ -486,13 +486,13 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
             min_matches = 12
             min_partnership_drafts = 3
         elif timeframe == "30d":
-            min_drafts = 10
-            min_matches = 25
+            min_drafts = 8
+            min_matches = 20
             min_partnership_drafts = 3
         elif timeframe == "90d":
-            min_drafts = 20
-            min_matches = 45
-            min_partnership_drafts = 6
+            min_drafts = 15
+            min_matches = 35
+            min_partnership_drafts = 5
         
         # Apply category-specific filters and sorting
         if category == "draft_record":
@@ -589,8 +589,8 @@ async def create_leaderboard_embed(guild_id, category="draft_record", limit=20, 
         "lifetime": "Lifetime"
     }.get(timeframe, "Lifetime")
 
-    min_drafts = 25
-    min_matches = 50
+    min_drafts = 20
+    min_matches = 45
     min_partnership_drafts = 8
     
     if timeframe == "14d":
@@ -598,13 +598,13 @@ async def create_leaderboard_embed(guild_id, category="draft_record", limit=20, 
         min_matches = 12
         min_partnership_drafts = 3
     elif timeframe == "30d":
-        min_drafts = 10
-        min_matches = 25
+        min_drafts = 8
+        min_matches = 20
         min_partnership_drafts = 3
     elif timeframe == "90d":
-        min_drafts = 20
-        min_matches = 45
-        min_partnership_drafts = 6
+        min_drafts = 15
+        min_matches = 35
+        min_partnership_drafts = 5
 
     # Define category titles and descriptions
     categories = {
