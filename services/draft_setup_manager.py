@@ -7,6 +7,9 @@ from config import get_draftmancer_websocket_url
 from datetime import datetime
 from models.draft_session import DraftSession
 
+# Global registry to track active manager instances
+ACTIVE_MANAGERS = {}
+
 def exponential_backoff(max_retries=10, base_delay=1):
     def decorator(func):
         @wraps(func)
@@ -60,6 +63,10 @@ class DraftSetupManager:
             session_id=self.session_id,
             cube_id=self.cube_id
         )
+        
+        # Register this instance in the global registry
+        ACTIVE_MANAGERS[session_id] = self
+        self.logger.info(f"Registered manager for session {session_id} in active managers registry")
         
         @self.sio.event
         async def connect():
@@ -326,8 +333,26 @@ class DraftSetupManager:
             # Disconnect
             await self.sio.disconnect()
             self.logger.info("Disconnected successfully")
+            
+            # Remove from active managers registry
+            if self.session_id in ACTIVE_MANAGERS:
+                del ACTIVE_MANAGERS[self.session_id]
+                self.logger.info(f"Removed manager for session {self.session_id} from active managers registry")
         except Exception as e:
             self.logger.exception(f"Error during disconnect: {e}")
+            
+    @classmethod
+    def get_active_manager(cls, session_id: str):
+        """
+        Get an active manager instance for a session if it exists
+        
+        Args:
+            session_id: The session ID to look up
+            
+        Returns:
+            The DraftSetupManager instance if found, None otherwise
+        """
+        return ACTIVE_MANAGERS.get(session_id)
 
     async def notify_seating_failure(self, missing_users):
         """
@@ -499,3 +524,31 @@ class DraftSetupManager:
             self._is_connecting = False
             # Ensure we always disconnect cleanly
             await self.disconnect_safely()
+
+    async def update_cube(self, new_cube_id: str) -> bool:
+        """
+        Updates the cube ID and imports the new cube.
+        Only updates the cube_id if the import is successful.
+        
+        Args:
+            new_cube_id: The ID of the new cube to import
+            
+        Returns:
+            bool: True if the cube was successfully imported, False otherwise
+        """
+        # Store the original cube_id in case we need to revert
+        original_cube_id = self.cube_id
+        
+        # Temporarily set the new cube_id and reset imported flag
+        self.cube_id = new_cube_id
+        self.cube_imported = False
+        
+        # Attempt to import the new cube
+        success = await self.import_cube()
+        
+        if not success:
+            # Revert to the original cube_id if import failed
+            self.cube_id = original_cube_id
+            self.logger.warning(f"Cube update failed, reverting to original cube: {original_cube_id}")
+            
+        return success
