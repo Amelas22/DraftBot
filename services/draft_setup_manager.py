@@ -6,6 +6,7 @@ import random
 from config import get_draftmancer_websocket_url
 from datetime import datetime
 from models.draft_session import DraftSession
+from bot_registry import get_bot
 
 # Global registry to track active manager instances
 ACTIVE_MANAGERS = {}
@@ -41,8 +42,8 @@ class DraftSetupManager:
         self.sio = socketio.AsyncClient()
         self.cube_imported = False
         self.users_count = 0  # Track number of other users
-        
-        # Seating order variables
+    
+        # Seating Order Variables
         self.session_users = []
         self.seating_attempts = 0
         self.seating_order_set = False
@@ -56,6 +57,14 @@ class DraftSetupManager:
         self._is_connecting = False
         self._should_disconnect = False
         self._seating_lock = asyncio.Lock()  # Lock for seating attempts
+
+        # Ready Check variables 
+        self.ready_check_active = False
+        self.ready_check_message_id = None
+        self.ready_users = set()
+        self.ready_check_timer = None
+        self.draft_channel_id = None  # Will be populated from database
+        self.target_user_count = 0
 
         # Create a contextualized logger for this instance
         self.logger = logger.bind(
@@ -87,6 +96,12 @@ class DraftSetupManager:
         async def on_user_update(data):
             if data.get('userID') != 'DraftBot':
                 self.logger.info(f"Another user joined/updated: {data}")
+
+        # Listen for user changes in ready state status
+        @self.sio.on('setReady')
+        async def on_user_ready(userID, readyState):
+            if self.ready_check_active:
+                await self.handle_user_ready_update(userID, readyState)
 
         # Listen for user changes in the session
         @self.sio.on('sessionUsers')
@@ -127,6 +142,268 @@ class DraftSetupManager:
         async def on_stored_settings(data):
             self.logger.info(f"Received updated session settings: {data}")
 
+    async def fetch_draft_info(self):
+        """Load draft channel and other info from database"""
+        try:
+            # Get draft session info
+            draft_session = await DraftSession.get_by_session_id(self.session_id)
+            if draft_session:
+                self.draft_channel_id = draft_session.draft_channel_id
+                
+                # Calculate target user count from sign_ups
+                if draft_session.sign_ups:
+                    self.target_user_count = len(draft_session.sign_ups)
+                    self.logger.info(f"Target user count from database: {self.target_user_count}")
+                    
+                    # Log the expected users for comparison
+                    self.logger.info(f"Expected users: {list(draft_session.sign_ups.values())}")
+                    
+                    # Also log the current users in the session
+                    non_bot_users = [u.get('userName') for u in self.session_users if u.get('userName') != 'DraftBot']
+                    self.logger.info(f"Current non-bot users: {non_bot_users}")
+                    
+                    return True
+                else:
+                    self.logger.warning("No sign_ups found in database, falling back to session users count")
+                    non_bot_users = [u for u in self.session_users if u.get('userName') != 'DraftBot']
+                    self.target_user_count = len(non_bot_users)
+                    self.logger.info(f"Target user count from current users: {self.target_user_count}")
+                    return True
+            return False
+        except Exception as e:
+            self.logger.error(f"Error fetching draft info: {e}")
+            return False
+
+    async def initiate_ready_check(self, bot):
+        """Initiates the ready check process"""
+        if self.ready_check_active:
+            return False
+            
+        # Make sure we have channel info
+        if not await self.fetch_draft_info():
+            self.logger.error("Failed to fetch draft channel info")
+            return False
+            
+        self.ready_check_active = True
+        self.ready_users.clear()
+        
+        try:
+            # Count expected participants
+            non_bot_users = [u for u in self.session_users if u.get('userName') != 'DraftBot']
+            total_users = len(non_bot_users)
+            
+            # If we couldn't get target count from database, use current users
+            if self.target_user_count == 0:
+                self.target_user_count = total_users
+            
+            # Send initial ready check message to Discord
+            channel = bot.get_channel(int(self.draft_channel_id))
+            if not channel:
+                channel = await bot.fetch_channel(int(self.draft_channel_id))
+                if not channel:
+                    self.logger.error(f"Could not find channel with ID {self.draft_channel_id}")
+                    self.ready_check_active = False
+                    return False
+                    
+            message = await channel.send(
+                f"Seating order set. Draftmancer Readycheck in progress: 0/{self.target_user_count} ready.\n"
+                f"Use `/ready` to initiate another check or `/mutiny` to take control if needed."
+            )
+            
+            # Store message ID safely
+            self.ready_check_message_id = str(message.id)
+            await self.update_draft_session_field('ready_check_message_id', str(message.id))
+            
+            # Start timeout timer
+            self.ready_check_timer = asyncio.create_task(self.ready_check_timeout(30, bot))
+            
+            # Emit ready check to Draftmancer
+            await self.sio.emit('readyCheck')
+            
+            self.logger.info(f"Ready check initiated for session {self.session_id}")
+            return True
+            
+        except Exception as e:
+            self.logger.exception(f"Error initiating ready check: {e}")
+            self.ready_check_active = False
+            return False
+
+    async def handle_user_ready_update(self, userID, readyState):
+        """Handle updates when a user changes their ready state"""
+        self.logger.info(f"Ready state update received: User {userID} set to state {readyState}")
+        
+        if not self.ready_check_active:
+            self.logger.info("Ignoring ready state update - no active ready check")
+            return
+            
+        # Track ready users - checking both numeric (1) and string ("Ready") format
+        if readyState == 1 or readyState == "Ready" or str(readyState).lower() == "ready":
+            self.logger.info(f"User {userID} marked as READY, adding to ready set")
+            self.ready_users.add(userID)
+            
+            # Log the current state
+            non_bot_users = [u for u in self.session_users if u.get('userName') != 'DraftBot']
+            self.logger.info(f"Ready users: {len(self.ready_users)}/{len(non_bot_users)} (target: {self.target_user_count})")
+            
+            # Get bot from registry for message updates
+            bot = get_bot()
+            if bot:
+                await self.update_ready_check_message(bot)
+            
+            # Check if all users are ready
+            if len(self.ready_users) >= self.target_user_count:
+                self.logger.info(f"All users ready! ({len(self.ready_users)}/{self.target_user_count})")
+                await self.complete_ready_check()
+            else:
+                self.logger.info(f"Still waiting for {self.target_user_count - len(self.ready_users)} more users")
+        else:
+            self.logger.info(f"User {userID} marked as NOT READY (state {readyState})")
+                    
+    async def update_ready_check_message(self, bot):
+        """Update the ready check message with current count"""
+        if not self.ready_check_message_id or not self.draft_channel_id:
+            self.logger.error("Cannot update message - missing message ID or channel ID")
+            return False
+            
+        try:
+            self.logger.info(f"Updating ready check message {self.ready_check_message_id} in channel {self.draft_channel_id}")
+            channel = bot.get_channel(int(self.draft_channel_id))
+            if not channel:
+                try:
+                    self.logger.info("Channel not found in cache, attempting to fetch")
+                    channel = await bot.fetch_channel(int(self.draft_channel_id))
+                except Exception as e:
+                    self.logger.error(f"Failed to fetch channel: {e}")
+                    return False
+                
+            if not channel:
+                self.logger.error(f"Channel with ID {self.draft_channel_id} not found")
+                return False
+                
+            try:
+                message = await channel.fetch_message(int(self.ready_check_message_id))
+                if message:
+                    ready_count = len(self.ready_users)
+                    new_content = (
+                        f"Seating order set. Draftmancer Readycheck in progress: {ready_count}/{self.target_user_count} ready.\n"
+                        f"Use `/ready` to initiate another check or `/mutiny` to take control if needed."
+                    )
+                    self.logger.info(f"Updating message to show {ready_count}/{self.target_user_count} ready")
+                    await message.edit(content=new_content)
+                    return True
+                else:
+                    self.logger.error("Message object not found after fetch")
+                    return False
+            except Exception as e:
+                self.logger.error(f"Failed to edit message: {e}")
+                return False
+        except Exception as e:
+            self.logger.error(f"Error updating ready check message: {e}")
+            return False
+
+    async def ready_check_timeout(self, seconds, bot):
+        """Handles timeout for the ready check"""
+        try:
+            await asyncio.sleep(seconds)
+            
+            # If we reach here, the ready check timed out
+            if self.ready_check_active:
+                self.ready_check_active = False
+                
+                try:
+                    channel = bot.get_channel(int(self.draft_channel_id))
+                    if channel:
+                        await channel.send(
+                            "⚠️ Ready Check Failed. Use the command `/ready` to initiate another ready check.\n"
+                            "Use `/mutiny` to take control if needed."
+                        )
+                except Exception as e:
+                    self.logger.error(f"Failed to send timeout message: {e}")
+                
+                # Reset ready check state
+                self.ready_users.clear()
+                self.ready_check_message_id = None
+                
+        except asyncio.CancelledError:
+            # Expected if the timer is cancelled when all users become ready
+            pass
+
+    async def complete_ready_check(self):
+        """Called when all users are ready"""
+        if not self.ready_check_active:
+            self.logger.info("complete_ready_check called but no active ready check")
+            return
+            
+        self.logger.info("All users ready! Completing ready check")
+        self.ready_check_active = False
+        
+        # Cancel the timeout timer
+        if self.ready_check_timer:
+            self.logger.info("Cancelling ready check timeout timer")
+            self.ready_check_timer.cancel()
+            self.ready_check_timer = None
+        
+        try:
+            # Get bot instance
+            bot = get_bot()
+            if bot:
+                channel = bot.get_channel(int(self.draft_channel_id))
+                if not channel:
+                    try:
+                        channel = await bot.fetch_channel(int(self.draft_channel_id))
+                    except Exception as e:
+                        self.logger.error(f"Error fetching channel: {e}")
+                        
+                if channel:
+                    self.logger.info("Sending ready success message")
+                    await channel.send("🎉 All drafters ready! Draft starting in 5 seconds...")
+                else:
+                    self.logger.error(f"Channel not found for ID {self.draft_channel_id}")
+            
+            # Wait before starting
+            self.logger.info("Waiting 5 seconds before starting draft")
+            await asyncio.sleep(5)
+            
+            # Start the draft
+            self.logger.info("Starting draft")
+            await self.start_draft()
+        except Exception as e:
+            self.logger.exception(f"Error completing ready check: {e}")
+
+    async def start_draft(self):
+        """Start the draft after successful ready check"""
+        try:
+            # Define a callback handler for the response
+            callback_future = asyncio.Future()
+            
+            def ack_callback(response):
+                self.logger.info(f"Start draft response: {response}")
+                # Set the future's result
+                callback_future.set_result(response)
+            
+            # Emit the start draft event
+            await self.sio.emit('startDraft', callback=ack_callback)
+            self.logger.info("Draft start requested")
+            
+            # Wait for the response
+            try:
+                response = await asyncio.wait_for(callback_future, timeout=10)
+                if response and 'error' in response:
+                    self.logger.error(f"Error starting draft: {response['error']}")
+                    
+                    # Notify about the error
+                    if hasattr(self, 'bot') and self.bot:
+                        channel = self.bot.get_channel(int(self.draft_channel_id))
+                        if channel:
+                            await channel.send(f"Error starting draft: {response['error']}")
+                else:
+                    self.logger.info("Draft started successfully")
+            except asyncio.TimeoutError:
+                self.logger.warning("Timeout waiting for draft start response")
+                
+        except Exception as e:
+            self.logger.exception(f"Error starting draft: {e}")
+            
     async def check_session_stage_and_organize(self):
         """Check database for session stage and organize seating if appropriate"""
         if self.seating_order_set or self.seating_attempts >= 4:
@@ -174,7 +451,7 @@ class DraftSetupManager:
         async with self._seating_lock:
             if self.seating_order_set or self.seating_attempts >= 4:
                 return
-                
+                    
             self.seating_attempts += 1
             self.logger.info(f"Attempt {self.seating_attempts}: Setting seating order with {self.users_count} users")
             
@@ -183,6 +460,16 @@ class DraftSetupManager:
             if success:
                 self.logger.success(f"Successfully set seating order!")
                 self.seating_order_set = True
+                
+                # Automatically initiate the first ready check after seating is set
+                await asyncio.sleep(1)  # Brief pause to ensure everything is settled
+                
+                bot = get_bot()
+                if bot:
+                    self.logger.info("Seating order set successfully, initiating automatic ready check")
+                    await self.initiate_ready_check(bot)
+                else:
+                    self.logger.error("Could not get bot instance for automatic ready check")
             else:
                 self.logger.warning(f"Failed to set seating order, missing users: {missing_users}")
                 
@@ -445,10 +732,7 @@ class DraftSetupManager:
             return False
 
     async def keep_connection_alive(self):
-        """
-        Manages the websocket connection lifecycle, including setup, monitoring, and cleanup.
-        """
-        # Prevent multiple concurrent connection attempts
+        """Updated method to keep the bot connected after seating order is set"""
         async with self._connection_lock:
             if self._is_connecting:
                 self.logger.warning("Connection attempt already in progress, skipping...")
@@ -482,48 +766,37 @@ class DraftSetupManager:
                 return
 
             # Monitor the session until conditions are met
-            while not self.seating_order_set:  # Changed condition to be based on seating
+            while True:  # Changed to true to stay connected indefinitely
                 if not self.sio.connected:
                     self.logger.error("Lost connection, ending connection task")
                     return
                 
+                if self._should_disconnect:
+                    self.logger.info("Disconnect requested, ending connection task")
+                    break
+                    
                 try:
                     await self.sio.emit('getUsers')
                     
-                    # If we have enough users and seating is set, we can exit
-                    if self.seating_order_set:
-                        self.logger.info("Seating order is set, preparing to disconnect")
-                        break
-                    
-                    # Check if we have enough users and the stage is set
-                    if (self.expected_user_count is not None and 
-                        self.users_count >= self.expected_user_count):
+                    # Check if we need to set seating
+                    if not self.seating_order_set and self.expected_user_count is not None:
+                        if self.users_count >= self.expected_user_count:
+                            self.logger.info("Found enough users, checking session stage")
+                            await self.check_session_stage_and_organize()
                         
-                        self.logger.info("Found enough users, checking session stage")
-                        await self.check_session_stage_and_organize()
-                        
-                        await asyncio.sleep(5)  # Check more frequently when we have enough users
-                    else:
-                        await asyncio.sleep(20)  # Check less frequently while waiting for users
+                    await asyncio.sleep(10)  # Regular check interval
                         
                 except Exception as e:
                     self.logger.exception(f"Error while monitoring session: {e}")
-                    await asyncio.sleep(5)  # Brief delay on error before retrying
-            
-            # If seating order was set successfully, wait briefly before disconnecting
-            if self.seating_order_set:
-                self.logger.info("Seating order confirmed, waiting briefly before disconnect...")
-                await self.disconnect_after_delay(2)
-            else:
-                self.logger.warning("Ending connection without successful seating order")
-                await self.disconnect_safely()
-                
+                    await asyncio.sleep(5)
+                    
         except Exception as e:
             self.logger.exception(f"Fatal error in keep_connection_alive: {e}")
         finally:
             self._is_connecting = False
-            # Ensure we always disconnect cleanly
-            await self.disconnect_safely()
+            # Only disconnect if requested
+            if self._should_disconnect:
+                await self.disconnect_safely()
 
     async def update_cube(self, new_cube_id: str) -> bool:
         """
@@ -552,3 +825,62 @@ class DraftSetupManager:
             self.logger.warning(f"Cube update failed, reverting to original cube: {original_cube_id}")
             
         return success
+    
+    async def periodic_check_status(self, bot):
+        """Periodically check ready check status and update Discord message"""
+        if self.ready_check_active and self.ready_check_message_id:
+            await self.update_ready_check_message(bot)
+
+    def set_bot_instance(self, bot):
+        """Store the bot instance for later use"""
+        self.bot = bot
+        
+    @classmethod
+    async def spawn_for_existing_session(cls, session_id, bot):
+        """Create a manager for an existing session and add the bot reference"""
+        # Get the draft session
+        draft_session = await DraftSession.get_by_session_id(session_id)
+        if not draft_session:
+            return None
+            
+        # Check if there's already an active manager
+        manager = cls.get_active_manager(session_id)
+        if manager:
+            manager.set_bot_instance(bot)
+            return manager
+            
+        # Create a new manager
+        manager = cls(
+            session_id=session_id,
+            draft_id=draft_session.draft_id,
+            cube_id=draft_session.cube
+        )
+        
+        manager.set_bot_instance(bot)
+        
+        # Start connection in background
+        asyncio.create_task(manager.keep_connection_alive())
+        
+        return manager
+    
+    async def update_draft_session_field(self, field_name, field_value):
+        """Helper function to safely update a single field in a draft session"""
+        from database.db_session import db_session
+        from sqlalchemy import select
+        
+        try:
+            async with db_session() as session:
+                # Query for the object directly inside this session context
+                from models.draft_session import DraftSession
+                query = select(DraftSession).filter_by(session_id=self.session_id)
+                result = await session.execute(query)
+                draft_session = result.scalar_one_or_none()
+                
+                if draft_session and hasattr(draft_session, field_name):
+                    setattr(draft_session, field_name, field_value)
+                    session.add(draft_session)
+                    return True
+                return False
+        except Exception as e:
+            self.logger.error(f"Error updating draft session field {field_name}: {e}")
+            return False

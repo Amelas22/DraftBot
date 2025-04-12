@@ -9,6 +9,7 @@ from database.db_session import init_db, ensure_guild_id_in_tables
 from utils import cleanup_sessions_task, check_inactive_players_task
 from commands import league_commands, scheduled_posts
 from reconnect_drafts import reconnect_recent_draft_sessions, reconnect_draft_setup_sessions
+from bot_registry import register_bot
 
 # Configure loguru for all modules
 logger.remove()  # Remove default handler
@@ -50,6 +51,8 @@ async def main():
 
     bot = commands.Bot(command_prefix="!", intents=intents)
 
+    register_bot(bot)
+    
     @bot.event
     async def on_ready():
         try:
