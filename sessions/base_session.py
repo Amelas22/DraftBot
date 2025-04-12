@@ -86,12 +86,13 @@ class BaseSession:
         # This will be implemented by subclasses
         embed = self._create_embed_content()
         
-        # Add common Sign-Ups field
-        embed.add_field(name="Sign-Ups", value="No players yet.", inline=False)
         
         # Add a dedicated Cube field (easier to update in views.py)
         cube_field_value = f"[{self.session_details.cube_choice}](https://cubecobra.com/cube/list/{self.session_details.cube_choice})"
         embed.add_field(name="Cube:", value=cube_field_value, inline=True)
+
+        # Add common Sign-Ups field
+        embed.add_field(name="Sign-Ups:", value="No players yet.", inline=False)
         
         # Add thumbnail
         embed.set_thumbnail(url=get_cube_thumbnail_url(self.session_details.cube_choice))

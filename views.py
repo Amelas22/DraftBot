@@ -2124,7 +2124,7 @@ async def update_draft_message(bot, session_id):
             logger.info(f"Initialized empty sign_ups for session ID: {session_id}")
             
         sign_up_count = len(draft_session.sign_ups)
-        sign_ups_field_name = f"Sign-Ups ({sign_up_count}):"
+        sign_ups_field_name = "Sign-Ups:"
         
         # For staked drafts, fetch the stake information
         stake_info_by_player = {}
@@ -2177,7 +2177,7 @@ async def update_draft_message(bot, session_id):
                 else:
                     formatted_sign_ups.append(f"{emoji} {stake_amount} tix: {display_name}")
             
-            sign_ups_str = '\n'.join(formatted_sign_ups) if formatted_sign_ups else 'No players yet.'
+            sign_ups_str = f"**Players ({sign_up_count}):**\n" + ('\n'.join(formatted_sign_ups) if formatted_sign_ups else 'No players yet.')
         else:
             if draft_session.sign_ups:
                 linked_names = []
@@ -2185,9 +2185,9 @@ async def update_draft_message(bot, session_id):
                     user_draft_link = draft_session.get_draft_link_for_user(display_name)
                     linked_name = f"[{display_name}]({user_draft_link})"
                     linked_names.append(linked_name)
-                sign_ups_str = '\n'.join(linked_names)
+                sign_ups_str = f"**Players ({sign_up_count}):**\n" + '\n'.join(linked_names)
             else:
-                sign_ups_str = 'No players yet.'
+                sign_ups_str = f"**Players (0):**\nNo players yet."
         
         # Helper function to update or add fields consistently
         def update_field(field_name, field_value, inline=False, expected_index=None):
