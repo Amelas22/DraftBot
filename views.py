@@ -2371,8 +2371,6 @@ async def update_draft_message(bot, session_id):
             
             # If field exists, update it
             if field_index is not None:
-                if field_name == sign_ups_field_name:
-                    field_name = f"Sign-Ups ({sign_up_count}):"
                 embed.set_field_at(field_index, name=field_name, value=field_value, inline=inline)
                 logger.info(f"Updated {field_name} field for session {session_id}")
             else:
