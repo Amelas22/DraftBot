@@ -853,7 +853,49 @@ class PersistentView(discord.ui.View):
                         
                         # Return early to avoid the default response
                         await db_session.commit()
-                        
+                        try:
+                            from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
+                            
+                            # Look for an existing manager
+                            manager = DraftSetupManager.get_active_manager(self.draft_session_id)
+                            
+                            if manager:
+                                logger.info(f"TEAMS CREATED: Found existing manager for session {self.draft_session_id}")
+                                logger.info(f"TEAMS CREATED: Manager state - Seating set: {manager.seating_order_set}, "
+                                        f"Users count: {manager.users_count}, Expected count: {manager.expected_user_count}")
+                                # Manager exists, force a check of session stage
+                                await manager.check_session_stage_and_organize()
+                                
+                                # Also force a refresh of users to ensure accurate count
+                                if manager.sio.connected:
+                                    await manager.sio.emit('getUsers')
+                            else:
+                                # No active manager - spawn one asynchronously
+                                # Need to import at function level to avoid circular imports
+                                from services.draft_setup_manager import DraftSetupManager
+                                
+                                # Get session info
+                                async with AsyncSessionLocal() as db_session:
+                                    stmt = select(DraftSession).where(DraftSession.session_id == self.draft_session_id)
+                                    result = await db_session.execute(stmt)
+                                    draft_session = result.scalars().first()
+                                    
+                                    if draft_session:
+                                        # Create a new manager and start connection task
+                                        manager = DraftSetupManager(
+                                            session_id=self.draft_session_id,
+                                            draft_id=draft_session.draft_id,
+                                            cube_id=draft_session.cube
+                                        )
+                                        
+                                        # Start connection in background
+                                        asyncio.create_task(manager.keep_connection_alive())
+                        except Exception as e:
+                            # Log the error but don't disrupt the normal flow
+                            print(f"Error triggering seating order process: {e}")
+                            import traceback
+                            traceback.print_exc()
+
                         if session.tracked_draft and session.premade_match_id is not None:
                             await check_weekly_limits(interaction, session.premade_match_id, session.session_type, session.session_id)
                         return
@@ -874,6 +916,50 @@ class PersistentView(discord.ui.View):
             
             # Send the channel announcement after responding to the interaction
             await interaction.channel.send(embed=channel_embed)
+
+            try:
+                from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
+                
+                # Look for an existing manager
+                manager = DraftSetupManager.get_active_manager(self.draft_session_id)
+                
+                if manager:
+                    logger.info(f"TEAMS CREATED: Found existing manager for session {self.draft_session_id}")
+                    logger.info(f"TEAMS CREATED: Manager state - Seating set: {manager.seating_order_set}, "
+                            f"Users count: {manager.users_count}, Expected count: {manager.expected_user_count}")
+                    # Manager exists, force a check of session stage
+                    await manager.check_session_stage_and_organize()
+                    
+                    # Also force a refresh of users to ensure accurate count
+                    if manager.sio.connected:
+                        await manager.sio.emit('getUsers')
+                else:
+                    # No active manager - spawn one asynchronously
+                    # Need to import at function level to avoid circular imports
+                    from services.draft_setup_manager import DraftSetupManager
+                    
+                    # Get session info
+                    async with AsyncSessionLocal() as db_session:
+                        stmt = select(DraftSession).where(DraftSession.session_id == self.draft_session_id)
+                        result = await db_session.execute(stmt)
+                        draft_session = result.scalars().first()
+                        
+                        if draft_session:
+                            # Create a new manager and start connection task
+                            manager = DraftSetupManager(
+                                session_id=self.draft_session_id,
+                                draft_id=draft_session.draft_id,
+                                cube_id=draft_session.cube
+                            )
+                            
+                            # Start connection in background
+                            asyncio.create_task(manager.keep_connection_alive())
+            except Exception as e:
+                # Log the error but don't disrupt the normal flow
+                print(f"Error triggering seating order process: {e}")
+                import traceback
+                traceback.print_exc()
+                
             
             if session.tracked_draft and session.premade_match_id is not None:
                 await check_weekly_limits(interaction, session.premade_match_id, session.session_type, session.session_id)
