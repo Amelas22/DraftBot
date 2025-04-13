@@ -228,7 +228,7 @@ class DraftSetupManager:
             await self.update_draft_session_field('ready_check_message_id', str(message.id))
             
             # Start timeout timer
-            self.ready_check_timer = asyncio.create_task(self.ready_check_timeout(30, bot))
+            self.ready_check_timer = asyncio.create_task(self.ready_check_timeout(60, bot))
             
             # Emit ready check to Draftmancer
             await self.sio.emit('readyCheck')

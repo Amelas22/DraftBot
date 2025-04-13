@@ -8,9 +8,11 @@ from discord.ui import View, Button
 from database.db_session import db_session
 from models.draft_session import DraftSession
 from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
+from datetime import datetime
 
 # Store active unpause ready checks
 ACTIVE_UNPAUSE_CHECKS = {}
+ACTIVE_SCRAP_VOTES = {}
 
 class DraftMancerReadyCheckView(View):
     def __init__(self, draft_session_id, participants, timeout=90.0):
@@ -20,7 +22,7 @@ class DraftMancerReadyCheckView(View):
         self.message = None
         self.timer_task = None
         self.complete = asyncio.Event()
-        self._start_time = asyncio.get_event_loop().time()
+        self._start_time = datetime.now()
         
     async def start_timer(self):
         """Start the timeout timer for the ready check"""
@@ -105,11 +107,14 @@ class DraftMancerReadyCheckView(View):
             inline=False
         )
         
-        remaining = int(self.timeout - (asyncio.get_event_loop().time() - self._start_time))
-        if remaining < 0:
-            remaining = 0
-            
-        embed.set_footer(text=f"Ready check expires in {remaining} seconds")
+        expiry_time = self._start_time.timestamp() + self.timeout
+        expiry_timestamp = int(expiry_time)
+
+        embed.add_field(
+            name="Time Remaining",
+            value=f"Ready check expires: <t:{expiry_timestamp}:R>",
+            inline=False
+        )
         return embed
         
     async def on_timeout(self):
@@ -133,6 +138,182 @@ class DraftMancerReadyCheckView(View):
         if self.draft_session_id in ACTIVE_UNPAUSE_CHECKS:
             del ACTIVE_UNPAUSE_CHECKS[self.draft_session_id]
 
+class ScrapVoteView(View):
+    def __init__(self, draft_session_id, participants, timeout=90.0):
+        super().__init__(timeout=timeout)
+        self.draft_session_id = draft_session_id
+        # Initialize with all participants set to None (haven't voted)
+        self.votes = {user_id: None for user_id in participants}  # None = not voted, True = yes, False = no
+        self.message = None
+        self.timer_task = None
+        self.complete = asyncio.Event()
+        self._start_time = datetime.now()  # Use time.time() instead of asyncio.get_event_loop().time()
+        
+    async def start_timer(self):
+        """Start the timeout timer for the vote"""
+        try:
+            await asyncio.sleep(self.timeout)
+            if not self.complete.is_set():
+                # Time's up, mark the vote as complete
+                logger.info(f"Scrap vote for session {self.draft_session_id} timed out")
+                await self.on_timeout()
+        except asyncio.CancelledError:
+            logger.debug(f"Timer for scrap vote {self.draft_session_id} was cancelled")
+    
+    def get_vote_result(self):
+        """Check if the vote passed (more than half voted yes)"""
+        yes_votes = sum(1 for vote in self.votes.values() if vote is True)
+        total_participants = len(self.votes)
+        
+        # Vote passes if more than half vote yes
+        needed_votes = (total_participants // 2) + 1
+        return yes_votes >= needed_votes, yes_votes, total_participants
+    
+    @discord.ui.button(label="Yes, Cancel Draft", style=discord.ButtonStyle.danger)
+    async def yes_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+        """Vote yes to cancel the draft"""
+        user_id = str(interaction.user.id)
+        if user_id not in self.votes:
+            await interaction.response.send_message("You are not part of this draft.", ephemeral=True)
+            return
+            
+        # Record vote
+        self.votes[user_id] = True
+        
+        # Update the message
+        embed = await self.generate_status_embed(interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=self)
+        
+        # Check if vote has passed
+        passed, _, _ = self.get_vote_result()
+        if passed:
+            self.complete.set()
+            if self.timer_task:
+                self.timer_task.cancel()
+            
+            # Disable buttons
+            for child in self.children:
+                child.disabled = True
+                
+            await self.message.edit(view=self)
+            # The on_complete callback will handle canceling the draft
+        
+    @discord.ui.button(label="No, Continue Draft", style=discord.ButtonStyle.green)
+    async def no_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+        """Vote no to continue the draft"""
+        user_id = str(interaction.user.id)
+        if user_id not in self.votes:
+            await interaction.response.send_message("You are not part of this draft.", ephemeral=True)
+            return
+            
+        # Record vote
+        self.votes[user_id] = False
+        
+        # Update the message
+        embed = await self.generate_status_embed(interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+        # Check if vote cannot pass anymore
+        no_votes = sum(1 for vote in self.votes.values() if vote is False)
+        total_participants = len(self.votes)
+        needed_votes = (total_participants // 2) + 1
+        remaining_votes = sum(1 for vote in self.votes.values() if vote is None)
+        max_possible_yes = sum(1 for vote in self.votes.values() if vote is True) + remaining_votes
+
+        # If max possible yes votes can't reach threshold, end vote early
+        if max_possible_yes < needed_votes:
+            self.complete.set()
+            if self.timer_task:
+                self.timer_task.cancel()
+            
+            # Disable buttons
+            for child in self.children:
+                child.disabled = True
+                
+            await self.message.edit(view=self)
+    
+    async def generate_status_embed(self, guild):
+        """Generate an embed showing the current vote status"""
+        embed = discord.Embed(
+            title="Draft Cancellation Vote",
+            description="Vote to cancel the current draft.",
+            color=discord.Color.red()
+        )
+        
+        # Add a field showing votes for each participant
+        status_lines = []
+        for user_id, vote in self.votes.items():
+            # Try to get member name
+            member = guild.get_member(int(user_id))
+            name = member.display_name if member else f"User {user_id}"
+            
+            # Add status emoji based on vote
+            if vote is True:
+                status = "✅ Voted to Cancel"
+            elif vote is False:
+                status = "❌ Voted to Continue"
+            else:
+                status = "⏳ Not Voted"
+                
+            status_lines.append(f"{name}: {status}")
+        
+        embed.add_field(
+            name="Participants",
+            value="\n".join(status_lines) or "No participants found",
+            inline=False
+        )
+        
+        # Add vote results field with fixed needed votes calculation
+        passed, yes_votes, total_participants = self.get_vote_result()
+        needed_votes = (total_participants // 2) + 1  # Fix: more than half means (n/2)+1
+        
+        embed.add_field(
+            name="Vote Status",
+            value=f"**{yes_votes}/{needed_votes}** votes needed to cancel\n" +
+                  (f"**Vote will pass!**" if passed else f"**Vote will not pass yet**"),
+            inline=False
+        )
+        
+        # Calculate expiry timestamp correctly
+        expiry_time = self._start_time.timestamp() + self.timeout
+        expiry_timestamp = int(expiry_time)
+        
+        embed.add_field(
+            name="Vote Ends",
+            value=f"<t:{expiry_timestamp}:R>",
+            inline=False
+        )
+        
+        return embed
+        
+    async def on_timeout(self):
+        """Called when the view times out"""
+        # Make sure we set the complete event
+        self.complete.set()
+        
+        # Disable all buttons
+        for child in self.children:
+            child.disabled = True
+            
+        # Update the message if it exists
+        if self.message:
+            embed = discord.Embed(
+                title="Draft Cancellation Vote - Ended",
+                description="The vote has ended.",
+                color=discord.Color.red()
+            )
+            
+            passed, yes_votes, total_participants = self.get_vote_result()
+            needed_votes = (total_participants // 2) + 1
+            
+            embed.add_field(
+                name="Final Results",
+                value=f"**{yes_votes}/{needed_votes}** votes needed to cancel\n" +
+                      (f"**Vote passed!**" if passed else f"**Vote did not pass**"),
+                inline=False
+            )
+            
+            await self.message.edit(embed=embed, view=self)
 
 class DraftControlCog(commands.Cog):
     def __init__(self, bot):
@@ -207,6 +388,126 @@ class DraftControlCog(commands.Cog):
             logger.exception(f"Error in ready command: {e}")
             await ctx.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
 
+    @discord.slash_command(name='scrap', description='Start a vote to cancel the current draft')
+    async def scrap_command(self, ctx):
+        """Start a vote to completely cancel the draft"""
+        await ctx.defer(ephemeral=True)
+        
+        try:
+            result = await self._get_manager_for_channel(ctx)
+            if not result:
+                return
+                
+            manager, draft_session = result
+            
+            # Check if draft has started
+            if not manager.drafting:
+                await ctx.followup.send("Draft hasn't started yet.", ephemeral=True)
+                return
+                
+            # Check if draft is paused
+            if not manager.draftPaused:
+                await ctx.followup.send("The draft must be paused before it can be canceled. Use `/pause` first.", ephemeral=True)
+                return
+            
+            # Check if there's already an active scrap vote
+            if draft_session.session_id in ACTIVE_SCRAP_VOTES:
+                await ctx.followup.send("There's already an active vote to cancel this draft.", ephemeral=True)
+                return
+                
+            # Check if user is in sign_ups
+            user_id = str(ctx.author.id)
+            sign_ups = draft_session.sign_ups or {}
+            
+            is_participant = False
+            for discord_id, display_name in sign_ups.items():
+                if discord_id == user_id:
+                    is_participant = True
+                    break
+                    
+            if not is_participant:
+                await ctx.followup.send("Only draft participants can initiate a vote to cancel.", ephemeral=True)
+                return
+                
+            # Get all participants
+            participants = list(sign_ups.keys())
+            if not participants:
+                await ctx.followup.send("No draft participants found.", ephemeral=True)
+                return
+            
+            # Create scrap vote view
+            view = ScrapVoteView(draft_session.session_id, participants)
+            
+            # Format the pings for the message
+            user_pings = []
+            for player_id in sign_ups:
+                try:
+                    member = ctx.guild.get_member(int(player_id))
+                    if member:
+                        user_pings.append(member.mention)
+                except:
+                    pass
+                    
+            ping_text = " ".join(user_pings) if user_pings else "No players to ping."
+            
+            # Generate initial status embed
+            embed = await view.generate_status_embed(ctx.guild)
+            
+            # Send message with pings and view
+            message = await ctx.channel.send(
+                f"⚠️ **Draft Cancellation Vote** initiated by {ctx.author.mention}\n\n{ping_text}\n\n"
+                f"Please vote on whether to cancel the current draft.",
+                embed=embed,
+                view=view
+            )
+            
+            # Store message reference
+            view.message = message
+            
+            # Store in active votes
+            ACTIVE_SCRAP_VOTES[draft_session.session_id] = view
+            
+            # Start timeout timer
+            view.timer_task = asyncio.create_task(view.start_timer())
+            
+            # Acknowledge command
+            await ctx.followup.send("Cancellation vote initiated.", ephemeral=True)
+            
+            # Wait for completion
+            try:
+                await view.complete.wait()
+                
+                # Check if vote passed
+                passed, yes_votes, total_participants = view.get_vote_result()
+                if passed:
+                    # Vote passed, cancel the draft
+                    final_message = await ctx.channel.send("⚠️ **Vote passed!** Canceling draft in 5 seconds...")
+                    await asyncio.sleep(5)
+                    
+                    # Send stopDraft command to Draftmancer
+                    await manager.sio.emit('stopDraft')
+                    
+                    await final_message.edit(content="🛑 **Draft canceled!** Use `/ready` to beging ready check for a new draft.")
+                else:
+                    # Vote didn't pass
+                    await ctx.channel.send("🛑 **Vote to cancel draft did not pass.** Use `/unpause` to continue the draft.")
+                
+                # Clean up
+                if draft_session.session_id in ACTIVE_SCRAP_VOTES:
+                    del ACTIVE_SCRAP_VOTES[draft_session.session_id]
+                    
+            except Exception as e:
+                logger.exception(f"Error while waiting for scrap vote completion: {e}")
+                await ctx.channel.send("⚠️ An error occurred during the cancellation vote. Please try again.")
+                
+                # Clean up
+                if draft_session.session_id in ACTIVE_SCRAP_VOTES:
+                    del ACTIVE_SCRAP_VOTES[draft_session.session_id]
+                    
+        except Exception as e:
+            logger.exception(f"Error in scrap command: {e}")
+            await ctx.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
+            
     @discord.slash_command(name='mutiny', description='Take control of the Draftmancer session from the bot')
     async def mutiny_command(self, ctx):
         """Transfer draft control to a user and disconnect the bot"""
@@ -311,8 +612,11 @@ class DraftControlCog(commands.Cog):
             await manager.sio.emit('pauseDraft')
             manager.draftPaused = True  # Set pause state to True
             
-            await ctx.followup.send("Draft paused successfully.", ephemeral=True)
-            await ctx.channel.send(f"⏸️ **Draft paused** by {ctx.author.mention}. Use `/unpause` to resume when everyone is ready.")
+            await ctx.followup.send(
+                f"⏸️ **Draft paused** by {ctx.author.mention}.\n\n"
+                f"• Use `/unpause` to resume when everyone is ready.\n"
+                f"• Use `/scrap` to start a vote to cancel the draft."
+            )
                 
         except Exception as e:
             logger.exception(f"Error in pause command: {e}")
