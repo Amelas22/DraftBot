@@ -482,15 +482,20 @@ class DraftControlCog(commands.Cog):
                 if passed:
                     # Vote passed, cancel the draft
                     final_message = await ctx.channel.send("⚠️ **Vote passed!** Canceling draft in 5 seconds...")
+                    manager.drafting = False
                     await asyncio.sleep(5)
                     
                     # Send stopDraft command to Draftmancer
                     await manager.sio.emit('stopDraft')
                     
-                    await final_message.edit(content="🛑 **Draft canceled!** Use `/ready` to beging ready check for a new draft.")
+                    await final_message.edit(content=
+                                             "🛑 **Draft canceled!** \n" \
+                                            "Use `/ready` to begin a ready check for a new draft.\n" \
+                                            "Use `/mutiny` to remove the bot and take control of the session."
+                    )
                 else:
                     # Vote didn't pass
-                    await ctx.channel.send("🛑 **Vote to cancel draft did not pass.** Use `/unpause` to continue the draft.")
+                    await ctx.channel.send("🛑 **Vote to cancel draft did not pass.**\n Use `/unpause` to continue the draft.")
                 
                 # Clean up
                 if draft_session.session_id in ACTIVE_SCRAP_VOTES:
