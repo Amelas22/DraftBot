@@ -196,9 +196,26 @@ class DraftSetupManager:
         if not await self.fetch_draft_info():
             self.logger.error("Failed to fetch draft channel info")
             return False
-            
+        
+        seating_ok, seating_message = await self.verify_seating_order()
+
+        if seating_ok:
+            self.logger.info("Seating verification and reset succeeded")
+        else:
+            self.logger.error(f"Seating verification failed: {seating_message}")
+            # Post failure message in Discord
+            try:
+                await channel.send(
+                    f"⚠️ **Seating order verification failed!** {seating_message}\n\n"
+                    f"Use `/mutiny` to take control and fix the seating manually, "
+                    f"or try `/ready` again when all players have reconnected."
+                )
+            except Exception as e:
+                self.logger.exception(f"Error sending seating failure message: {e}")
+                
         self.ready_check_active = True
         self.ready_users.clear()
+        
         
         try:
             # Count expected participants
@@ -241,6 +258,76 @@ class DraftSetupManager:
             self.ready_check_active = False
             return False
 
+    async def verify_seating_order(self):
+        """
+        Verifies the seating order by forcing a reset to ensure correctness.
+        Returns a tuple of (success, message)
+        """
+        self.logger.info("=== SEATING VERIFICATION START ===")
+        start_time = datetime.now()
+        
+        # First, ensure we have the desired seating order
+        if not self.desired_seating_order:
+            self.logger.info("No desired seating order stored, fetching from database")
+            try:
+                draft_session = await DraftSession.get_by_session_id(self.session_id)
+                if draft_session and draft_session.sign_ups:
+                    self.desired_seating_order = list(draft_session.sign_ups.values())
+                    self.logger.info(f"Fetched desired seating order: {self.desired_seating_order}")
+                else:
+                    self.logger.warning("No sign_ups found in database")
+                    return False, "No seating order defined in database"
+            except Exception as e:
+                self.logger.exception(f"Error fetching draft session: {e}")
+                return False, f"Error fetching draft data: {str(e)}"
+        else:
+            self.logger.info(f"Using existing desired seating order: {self.desired_seating_order}")
+        
+        try:
+            # Map usernames to user IDs
+            username_to_userid = {}
+            for user in self.session_users:
+                if user.get('userName') != 'DraftBot':  # Exclude bot
+                    username = user.get('userName')
+                    user_id = user.get('userID')
+                    if username and user_id:
+                        username_to_userid[username] = user_id
+            
+            # Check if all expected users are present
+            missing_users = []
+            for username in self.desired_seating_order:
+                if username not in username_to_userid:
+                    missing_users.append(username)
+            
+            self.logger.info(f"Current session users: {list(username_to_userid.keys())}")
+            
+            if missing_users:
+                self.logger.warning(f"Missing users: {missing_users}")
+                if len(missing_users) > len(self.desired_seating_order) // 2:
+                    self.logger.error("Too many users missing")
+                    return False, f"Too many users missing from session: {', '.join(missing_users)}"
+            
+            # Instead of trying to get the current order (which times out),
+            # always reset the seating order to ensure it's correct
+            self.logger.info("Resetting seating order to ensure correctness")
+            success, remaining_missing = await self.set_seating_order(self.desired_seating_order)
+            
+            if success:
+                self.logger.info("Successfully reset seating order")
+                return True, "Seating order verified and reset"
+            else:
+                self.logger.error(f"Failed to reset seating order: {remaining_missing}")
+                return False, f"Failed to verify seating order. Missing users: {', '.join(remaining_missing)}"
+            
+        except Exception as e:
+            elapsed = (datetime.now() - start_time).total_seconds()
+            self.logger.exception(f"Error in seating verification after {elapsed:.2f}s: {e}")
+            return False, f"Error checking seating: {str(e)}"
+        
+        finally:
+            elapsed = (datetime.now() - start_time).total_seconds()
+            self.logger.info(f"=== SEATING VERIFICATION END (took {elapsed:.2f}s) ===")
+            
     async def handle_user_ready_update(self, userID, readyState):
         """Handle updates when a user changes their ready state"""
         self.logger.info(f"Ready state update received: User {userID} set to state {readyState}")

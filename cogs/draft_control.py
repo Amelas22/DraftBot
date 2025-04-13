@@ -554,7 +554,7 @@ class DraftControlCog(commands.Cog):
             await ctx.followup.send(f"Transferring control to {requester_name} and disconnecting...", ephemeral=True)
             
             # Public message
-            await ctx.channel.send(f"🔄 **Mutiny!** {ctx.author.mention} is taking control of the draft. Bot disconnecting...")
+            await ctx.channel.send(f"https://tenor.com/view/mutiny-jack-sparrow-pirates-pirates-of-the-caribbean-i-wish-to-report-a-mutiny-gif-26531174 \n\n🔄 **Mutiny!** {ctx.author.mention} is taking control of the draft. Bot disconnecting...")
             
             # Set owner as player (required before transfer)
             await manager.sio.emit('setOwnerIsPlayer', True)
