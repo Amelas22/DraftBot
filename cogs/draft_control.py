@@ -482,7 +482,10 @@ class DraftControlCog(commands.Cog):
                 if passed:
                     # Vote passed, cancel the draft
                     final_message = await ctx.channel.send("⚠️ **Vote passed!** Canceling draft in 5 seconds...")
+                        # Mark as cancelled BEFORE stopping the draft
+                    await manager.mark_draft_cancelled()
                     manager.drafting = False
+                    
                     await asyncio.sleep(5)
                     
                     # Send stopDraft command to Draftmancer
