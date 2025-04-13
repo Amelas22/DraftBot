@@ -65,6 +65,8 @@ class DraftSetupManager:
         self.ready_check_timer = None
         self.draft_channel_id = None  # Will be populated from database
         self.target_user_count = 0
+        self.drafting = False
+        self.draftPaused = False
 
         # Create a contextualized logger for this instance
         self.logger = logger.bind(
@@ -102,7 +104,18 @@ class DraftSetupManager:
         async def on_user_ready(userID, readyState):
             if self.ready_check_active:
                 await self.handle_user_ready_update(userID, readyState)
+        
+        # Listen for Pause or Unpause (Resume)
+        @self.sio.on('draftPaused')
+        async def on_draft_paused(data):
+            self.logger.info(f"Draft paused event received: {data}")
+            self.draftPaused = True
 
+        @self.sio.on('draftResumed')
+        async def on_draft_resumed(data):
+            self.logger.info(f"Draft resumed event received: {data}")
+            self.draftPaused = False
+            
         # Listen for user changes in the session
         @self.sio.on('sessionUsers')
         async def on_session_users(users):
@@ -397,6 +410,7 @@ class DraftSetupManager:
                         if channel:
                             await channel.send(f"Error starting draft: {response['error']}")
                 else:
+                    self.drafting = True
                     self.logger.info("Draft started successfully")
             except asyncio.TimeoutError:
                 self.logger.warning("Timeout waiting for draft start response")

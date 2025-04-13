@@ -83,6 +83,43 @@ class DraftSession(Base):
         return user_id in self.team_a or user_id in self.team_b
     
     @classmethod
+    async def get_active_draft_for_user(cls, channel_id: str, user_id: str):
+        """
+        Find the most recent active draft where:
+        1. The channel matches draft_channel_id
+        2. The user is in the sign_ups
+        3. The draft is not completed
+        
+        Args:
+            channel_id: The Discord channel ID
+            user_id: The Discord user ID
+            
+        Returns:
+            The most recent matching DraftSession or None
+        """
+        async with db_session() as session:
+            from sqlalchemy import select, and_, desc
+            
+            # Create query to find matching drafts
+            stmt = select(cls).where(
+                and_(
+                    cls.draft_channel_id == channel_id,
+                    cls.session_stage.isnot(None)
+                )
+            ).order_by(desc(cls.draft_start_time))  # Most recent first
+            
+            result = await session.execute(stmt)
+            draft_sessions = result.scalars().all()
+            
+            # Filter for drafts where user is in sign_ups
+            for draft in draft_sessions:
+                sign_ups = draft.sign_ups or {}
+                if user_id in sign_ups:
+                    return draft
+                    
+            return None
+        
+    @classmethod
     async def create_session(cls, **kwargs):
         """Create a new draft session with the given attributes"""
         session_obj = cls(**kwargs)
