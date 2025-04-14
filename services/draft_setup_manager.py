@@ -232,6 +232,16 @@ class DraftSetupManager:
         finally:
             self.logs_collection_attempted = True
             self.logs_collection_in_progress = False
+            
+            # If we collected logs successfully, disconnect after a short delay
+            if self.logs_collection_success:
+                self.logger.info("Log collection successful, scheduling disconnection in 10 seconds")
+                # Short delay to allow any final processing/messages to complete
+                await asyncio.sleep(10)
+                self._should_disconnect = True
+                await self.disconnect_safely()
+            else:
+                self.logger.info("Log collection failed, bot will remain connected")
 
     async def fetch_draft_log_data(self):
         """Fetch draft log data from the Draftmancer API"""
@@ -1495,6 +1505,14 @@ class DraftSetupManager:
         await asyncio.sleep(delay_seconds)
         await self.disconnect_safely()
 
+    async def mark_draft_cancelled(self):
+        """Mark that the draft is being cancelled manually, skip log collection"""
+        self.logger.info(f"Marking draft {self.draft_id} as manually cancelled")
+        self.draft_cancelled = True
+        # Set these flags to prevent log collection attempts for cancelled drafts
+        self.logs_collection_attempted = True
+        self.logs_collection_success = False
+        
     async def disconnect_safely(self):
         """
         Central method to handle disconnection safely and consistently.
@@ -1514,52 +1532,6 @@ class DraftSetupManager:
                 await asyncio.sleep(1)  # Increased delay to ensure the setting is processed
             except Exception as e:
                 self.logger.warning(f"Failed to set owner as player: {e}")
-            
-            ownership_transferred = False
-            
-            # Get the latest session data 
-            draft_session = await DraftSession.get_by_session_id(self.session_id)
-            if draft_session and draft_session.draftmancer_role_users:
-                self.logger.info(f"Found Draftmancer users: {draft_session.draftmancer_role_users}")
-                
-                # Match draftmancer_role_users (display names) with session users
-                potential_owners = []
-                
-                for user in self.session_users:
-                    # Skip the bot itself
-                    if user.get('userName') == 'DraftBot':
-                        continue
-                        
-                    # Check if this user's display name is in draftmancer_role_users
-                    if user.get('userName') in draft_session.draftmancer_role_users:
-                        potential_owners.append(user)
-                        self.logger.info(f"Found potential Draftmancer User: {user.get('userName')}")
-                
-                # If we found potential owners, select one randomly
-                if potential_owners:
-                    selected_owner = random.choice(potential_owners)
-                    new_owner_id = selected_owner.get('userID')
-                    new_owner_name = selected_owner.get('userName')
-                    
-                    self.logger.info(f"Transferring ownership to Draftmancer user: {new_owner_name}")
-                    await self.sio.emit('setSessionOwner', new_owner_id)
-                    await asyncio.sleep(1)  # Increased delay to ensure command processes
-                    ownership_transferred = True
-            
-            # If no Draftmancer users found or transfer failed, choose any random non-bot user
-            if not ownership_transferred:
-                non_bot_users = [user for user in self.session_users if user.get('userName') != 'DraftBot']
-                
-                if non_bot_users:
-                    random_user = random.choice(non_bot_users)
-                    new_owner_id = random_user.get('userID')
-                    new_owner_name = random_user.get('userName')
-                    
-                    self.logger.info(f"No Draftmancer users available. Transferring ownership to random user: {new_owner_name}")
-                    await self.sio.emit('setSessionOwner', new_owner_id)
-                    await asyncio.sleep(1)  # Increased delay
-                else:
-                    self.logger.warning("No eligible users found to transfer ownership")
             
             # Disconnect
             await self.sio.disconnect()
@@ -1632,7 +1604,7 @@ class DraftSetupManager:
             self.logger.debug("Updating draft settings...")
             await self.sio.emit('setColorBalance', False)
             await self.sio.emit('setMaxPlayers', 10)
-            await self.sio.emit('setDraftLogUnlockTimer', 7)
+            await self.sio.emit('setDraftLogUnlockTimer', 3)
             await self.sio.emit('setDraftLogRecipients', "delayed")
             await self.sio.emit('setPersonalLogs', True)
             await self.sio.emit('teamDraft', True)  # Added teamDraft setting
@@ -1715,7 +1687,10 @@ class DraftSetupManager:
                 return
 
             # Monitor the session until conditions are met
-            while True:  # Changed to true to stay connected indefinitely
+            draft_ended_time = None
+            last_log_attempt_time = None
+            
+            while True:
                 if not self.sio.connected:
                     self.logger.error("Lost connection, ending connection task")
                     return
@@ -1732,6 +1707,38 @@ class DraftSetupManager:
                         if self.users_count >= self.expected_user_count:
                             self.logger.info("Found enough users, checking session stage")
                             await self.check_session_stage_and_organize()
+                    
+                    # Draft completed logic
+                    if not self.drafting and not self.draft_cancelled:
+                        # If this is the first time we've noticed draft is not active
+                        if draft_ended_time is None:
+                            draft_ended_time = datetime.now()
+                            self.logger.info(f"Draft not active, setting draft_ended_time to {draft_ended_time}")
+                            
+                            # Immediately attempt to collect logs if not attempted yet
+                            if not self.logs_collection_attempted and not self.logs_collection_in_progress:
+                                self.logger.info("Attempting to collect logs immediately")
+                                last_log_attempt_time = datetime.now()
+                                await self.collect_draft_logs()
+                        else:
+                            # If logs were collected successfully, we can disconnect
+                            if self.logs_collection_success:
+                                self.logger.info("Logs collected successfully, disconnecting")
+                                self._should_disconnect = True
+                                break
+                                
+                            # If logs were attempted but failed, retry periodically (every 30 minutes)
+                            if (self.logs_collection_attempted and not self.logs_collection_success and 
+                                last_log_attempt_time and 
+                                (datetime.now() - last_log_attempt_time).total_seconds() > 1800):
+                                
+                                self.logger.info(f"Retrying log collection after {(datetime.now() - last_log_attempt_time).total_seconds()} seconds")
+                                self.logs_collection_attempted = False  # Reset to allow retry
+                                last_log_attempt_time = datetime.now()
+                                await self.collect_draft_logs()
+                    else:
+                        # If draft is active again, reset the ended time
+                        draft_ended_time = None
                         
                     await asyncio.sleep(10)  # Regular check interval
                         
