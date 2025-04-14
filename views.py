@@ -1188,22 +1188,22 @@ class PersistentView(discord.ui.View):
                         from livedrafts import create_live_draft_summary
                         await create_live_draft_summary(bot, session.session_id)
 
-                        draft_link = session.draft_link
-                        guild_id = int(guild.id)
-                        if draft_link:      
-                            from datacollections import DraftLogManager
-                            manager = DraftLogManager(
-                                session.session_id, 
-                                draft_link, 
-                                session.draft_id, 
-                                session.session_type, 
-                                session.cube,
-                                discord_client=bot,
-                                guild_id=guild_id
-                            )
-                            asyncio.create_task(manager.keep_draft_session_alive())
-                        else:
-                            print("Draft link not found in database.")
+                        # draft_link = session.draft_link
+                        # guild_id = int(guild.id)
+                        # if draft_link:      
+                        #     from datacollections import DraftLogManager
+                        #     manager = DraftLogManager(
+                        #         session.session_id, 
+                        #         draft_link, 
+                        #         session.draft_id, 
+                        #         session.session_type, 
+                        #         session.cube,
+                        #         discord_client=bot,
+                        #         guild_id=guild_id
+                        #     )
+                        #     asyncio.create_task(manager.keep_draft_session_alive())
+                        # else:
+                        #     print("Draft link not found in database.")
                 finally:
                     if self.draft_session_id in PROCESSING_ROOMS_PAIRINGS:
                         del PROCESSING_ROOMS_PAIRINGS[self.draft_session_id]
@@ -1578,20 +1578,20 @@ class PersistentView(discord.ui.View):
 
                 draft_link = session.draft_link
                 guild_id = int(interaction.guild_id)
-                if draft_link:      
-                    from datacollections import DraftLogManager
-                    manager = DraftLogManager(
-                        session.session_id, 
-                        draft_link, 
-                        session.draft_id, 
-                        session.session_type, 
-                        session.cube,
-                        discord_client=bot,  # Pass your Discord client
-                        guild_id=guild_id  # Pass the guild ID where you want to send logs
-                    )
-                    asyncio.create_task(manager.keep_draft_session_alive())
-                else:
-                    print("Draft link not found in database.")
+                # if draft_link:      
+                #     from datacollections import DraftLogManager
+                #     manager = DraftLogManager(
+                #         session.session_id, 
+                #         draft_link, 
+                #         session.draft_id, 
+                #         session.session_type, 
+                #         session.cube,
+                #         discord_client=bot,  # Pass your Discord client
+                #         guild_id=guild_id  # Pass the guild ID where you want to send logs
+                #     )
+                #     asyncio.create_task(manager.keep_draft_session_alive())
+                # else:
+                #     print("Draft link not found in database.")
         except discord.errors.NotFound:
             print("Interaction not found or expired.")
         except Exception as e:
