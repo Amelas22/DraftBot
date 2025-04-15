@@ -873,26 +873,7 @@ class PersistentView(discord.ui.View):
                                 if manager.sio.connected:
                                     await manager.sio.emit('getUsers')
                             else:
-                                # No active manager - spawn one asynchronously
-                                # Need to import at function level to avoid circular imports
-                                from services.draft_setup_manager import DraftSetupManager
-                                
-                                # Get session info
-                                async with AsyncSessionLocal() as db_session:
-                                    stmt = select(DraftSession).where(DraftSession.session_id == self.draft_session_id)
-                                    result = await db_session.execute(stmt)
-                                    draft_session = result.scalars().first()
-                                    
-                                    if draft_session:
-                                        # Create a new manager and start connection task
-                                        manager = DraftSetupManager(
-                                            session_id=self.draft_session_id,
-                                            draft_id=draft_session.draft_id,
-                                            cube_id=draft_session.cube
-                                        )
-                                        
-                                        # Start connection in background
-                                        asyncio.create_task(manager.keep_connection_alive())
+                                logger.info(f"DraftSetupManager not found for {self.draft_session_id}")
                         except Exception as e:
                             # Log the error but don't disrupt the normal flow
                             print(f"Error triggering seating order process: {e}")
@@ -940,26 +921,8 @@ class PersistentView(discord.ui.View):
                     if manager.sio.connected:
                         await manager.sio.emit('getUsers')
                 else:
-                    # No active manager - spawn one asynchronously
-                    # Need to import at function level to avoid circular imports
-                    from services.draft_setup_manager import DraftSetupManager
+                    logger.info(f"DraftSetupManager not found for {self.draft_session_id}")
                     
-                    # Get session info
-                    async with AsyncSessionLocal() as db_session:
-                        stmt = select(DraftSession).where(DraftSession.session_id == self.draft_session_id)
-                        result = await db_session.execute(stmt)
-                        draft_session = result.scalars().first()
-                        
-                        if draft_session:
-                            # Create a new manager and start connection task
-                            manager = DraftSetupManager(
-                                session_id=self.draft_session_id,
-                                draft_id=draft_session.draft_id,
-                                cube_id=draft_session.cube
-                            )
-                            
-                            # Start connection in background
-                            asyncio.create_task(manager.keep_connection_alive())
             except Exception as e:
                 # Log the error but don't disrupt the normal flow
                 print(f"Error triggering seating order process: {e}")
@@ -1656,24 +1619,26 @@ class PersistentView(discord.ui.View):
                 # Send confirmation message for manual creation
                 if interaction:
                     await interaction.followup.send("Pairings posted.", ephemeral=True)
-
-                # # Start draft log manager if needed
-                # draft_link = session.draft_link
-                # guild_id = int(guild.id)
-                # if draft_link:      
-                #     from datacollections import DraftLogManager
-                #     manager = DraftLogManager(
-                #         session.session_id, 
-                #         draft_link, 
-                #         session.draft_id, 
-                #         session.session_type, 
-                #         session.cube,
-                #         discord_client=bot,
-                #         guild_id=guild_id
-                #     )
-                #     asyncio.create_task(manager.keep_draft_session_alive())
-                # else:
-                #     print("Draft link not found in database.")
+                    
+                draft_setup_manager = DraftSetupManager.get_active_manager(session_id)
+                if not draft_setup_manager: 
+                    # If no setup manager exists (usually due to mutiny), then connect after draft
+                    draft_link = session.draft_link
+                    guild_id = int(guild.id)
+                    if draft_link:      
+                        from datacollections import DraftLogManager
+                        manager = DraftLogManager(
+                            session.session_id, 
+                            draft_link, 
+                            session.draft_id, 
+                            session.session_type, 
+                            session.cube,
+                            discord_client=bot,
+                            guild_id=guild_id
+                        )
+                        asyncio.create_task(manager.keep_draft_session_alive())
+                    else:
+                        print("Draft link not found in database.")
                     
                 return True
         except Exception as e:
