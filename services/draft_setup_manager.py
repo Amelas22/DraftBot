@@ -1604,11 +1604,11 @@ class DraftSetupManager:
             self.logger.debug("Updating draft settings...")
             await self.sio.emit('setColorBalance', False)
             await self.sio.emit('setMaxPlayers', 10)
-            await self.sio.emit('setDraftLogUnlockTimer', 3)
+            await self.sio.emit('setDraftLogUnlockTimer', 120)
             await self.sio.emit('setDraftLogRecipients', "delayed")
             await self.sio.emit('setPersonalLogs', True)
             await self.sio.emit('teamDraft', True)  # Added teamDraft setting
-            await self.sio.emit('setPickTimer', 1)
+            await self.sio.emit('setPickTimer', 60)
             await self.sio.emit('setOwnerIsPlayer', False)
             
             return True
