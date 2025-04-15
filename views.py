@@ -846,7 +846,10 @@ class PersistentView(discord.ui.View):
                         stake_view.add_item(StakeCalculationButton(session.session_id))
                         
                         # Use the new view instead of self
-                        await interaction.response.edit_message(embed=embed, view=stake_view)
+                        try:
+                            await interaction.response.edit_message(embed=embed, view=stake_view)
+                        except Exception as e:
+                            logger.error(f"Failed to update draft message: {e}")
                         
                         # Send the channel announcement after responding to the interaction
                         await interaction.channel.send(embed=channel_embed)
@@ -912,7 +915,10 @@ class PersistentView(discord.ui.View):
                     await db_session.commit()
         
             # Respond with the embed and updated view
-            await interaction.response.edit_message(embed=embed, view=self)
+            try:
+                 await interaction.response.edit_message(embed=embed, view=self)
+            except Exception as e:
+                logger.error(f"Failed to update draft message: {e}")
             
             # Send the channel announcement after responding to the interaction
             await interaction.channel.send(embed=channel_embed)
