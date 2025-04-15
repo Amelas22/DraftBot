@@ -1098,8 +1098,10 @@ class PersistentView(discord.ui.View):
                 if channel:
                     await channel.send("Rooms and Pairings have been created!")
                 
+
                 # Use the common helper method
                 await self._create_rooms_pairings(bot, guild, session_id)
+
             finally:
                 # Clean up processing flag
                 if session_id in PROCESSING_ROOMS_PAIRINGS:
@@ -1379,6 +1381,7 @@ class PersistentView(discord.ui.View):
 
             # Use the common helper method
             await self._create_rooms_pairings(interaction.client, interaction.guild, session_id, interaction)
+
         finally:
             # Clean up processing flag
             if session_id in PROCESSING_ROOMS_PAIRINGS:
