@@ -53,6 +53,7 @@ class DraftSession(Base):
     should_ping = Column(Boolean, default=False)
     pack_first_picks = Column(JSON)
     draftmancer_role_users = Column(JSON)
+    status_message_id = Column(String, nullable=True)
     
     # Relationships
     match_results = relationship("MatchResult", back_populates="draft_session", 
