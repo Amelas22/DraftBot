@@ -135,7 +135,17 @@ class DraftSetupManager:
                 self.logger.info("Draft was manually cancelled - no additional announcement needed")
                 self.draft_cancelled = False  # Reset the flag for future drafts
             else:
-                self.logger.info("Draft completed naturally - scheduling log collection")
+                self.logger.info("Draft completed naturally - creating rooms and scheduling log collection")
+                bot = get_bot()
+                guild = bot.get_guild(int(self.guild_id))
+                channel = bot.get_channel(int(self.draft_channel_id))
+                from views import PersistentView
+                if guild:
+                    await PersistentView.create_rooms_pairings(bot, guild, self.session_id, session_type=self.session_type)
+                    if channel:
+                        await channel.send("Rooms and Pairings have been created!")
+                else:
+                    self.logger.info("Could not find guild")
                 # Schedule log collection after a delay to ensure all data is available
                 if not self.logs_collection_attempted:
                     asyncio.create_task(self.schedule_log_collection(300))  # 5 minutes delay
