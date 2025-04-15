@@ -858,14 +858,19 @@ class PersistentView(discord.ui.View):
                         await db_session.commit()
                         try:
                             from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
-                            
+    
                             # Look for an existing manager
                             manager = DraftSetupManager.get_active_manager(self.draft_session_id)
                             
                             if manager:
                                 logger.info(f"TEAMS CREATED: Found existing manager for session {self.draft_session_id}")
                                 logger.info(f"TEAMS CREATED: Manager state - Seating set: {manager.seating_order_set}, "
-                                        f"Users count: {manager.users_count}, Expected count: {manager.expected_user_count}")
+                                            f"Users count: {manager.users_count}, Expected count: {manager.expected_user_count}")
+                                
+                                # Make sure bot instance is set properly
+                                manager.set_bot_instance(interaction.client)
+                                logger.info(f"Set bot instance on manager to ensure Discord messaging works")
+                                
                                 # Manager exists, force a check of session stage
                                 await manager.check_session_stage_and_organize()
                                 
@@ -873,12 +878,11 @@ class PersistentView(discord.ui.View):
                                 if manager.sio.connected:
                                     await manager.sio.emit('getUsers')
                             else:
-                                logger.info(f"DraftSetupManager not found for {self.draft_session_id}")
+                                logger.info(f"No existing manager for {self.draft_session_id}")
+
                         except Exception as e:
                             # Log the error but don't disrupt the normal flow
-                            print(f"Error triggering seating order process: {e}")
-                            import traceback
-                            traceback.print_exc()
+                            logger.exception(f"Error setting up draft manager: {e}")
 
                         if session.tracked_draft and session.premade_match_id is not None:
                             await check_weekly_limits(interaction, session.premade_match_id, session.session_type, session.session_id)
