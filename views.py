@@ -55,7 +55,7 @@ class CubeUpdateSelectionView(discord.ui.View):
 
 class PersistentView(discord.ui.View):
 
-    AUTO_PAIRINGS_TASKS = {}  # session_id -> task
+    # AUTO_PAIRINGS_TASKS = {}  # session_id -> task
 
     def __init__(self, bot, draft_session_id, session_type=None, team_a_name=None, team_b_name=None, session_stage=None):
         super().__init__(timeout=None)
@@ -762,18 +762,18 @@ class PersistentView(discord.ui.View):
                                 inline=False
                             )
                             
-                    # Create automatic room creation countdown - this needs to happen for ALL draft types
-                    auto_pairings_time = datetime.now() + timedelta(minutes=10)
-                    auto_pairings_unix = int(auto_pairings_time.timestamp())
-                    countdown_message = f"Rooms and Pairings will be automatically created <t:{auto_pairings_unix}:R>"
-                    embed.add_field(name="Automatic Rooms Creation", value=countdown_message, inline=False)
+                    # # Create automatic room creation countdown - this needs to happen for ALL draft types
+                    # auto_pairings_time = datetime.now() + timedelta(minutes=10)
+                    # auto_pairings_unix = int(auto_pairings_time.timestamp())
+                    # countdown_message = f"Rooms and Pairings will be automatically created <t:{auto_pairings_unix}:R>"
+                    # embed.add_field(name="Automatic Rooms Creation", value=countdown_message, inline=False)
 
-                    # Schedule the auto-pairings task - for ALL draft types
-                    if self.draft_session_id in self.AUTO_PAIRINGS_TASKS:
-                        self.AUTO_PAIRINGS_TASKS[self.draft_session_id].cancel()
-                    self.AUTO_PAIRINGS_TASKS[self.draft_session_id] = asyncio.create_task(
-                        self.auto_create_rooms_pairings(interaction.client, interaction.guild, auto_pairings_time)
-                    )
+                    # # Schedule the auto-pairings task - for ALL draft types
+                    # if self.draft_session_id in self.AUTO_PAIRINGS_TASKS:
+                    #     self.AUTO_PAIRINGS_TASKS[self.draft_session_id].cancel()
+                    # self.AUTO_PAIRINGS_TASKS[self.draft_session_id] = asyncio.create_task(
+                    #     self.auto_create_rooms_pairings(interaction.client, interaction.guild, auto_pairings_time)
+                    # )
 
                     # Create the new channel embed for team announcements
                     channel_embed = discord.Embed(
@@ -795,7 +795,7 @@ class PersistentView(discord.ui.View):
                         inline=False
                     )
                     
-                    channel_embed.add_field(name="Automatic Rooms Creation", value=countdown_message, inline=False)
+                    # channel_embed.add_field(name="Automatic Rooms Creation", value=countdown_message, inline=False)
 
                     # Add team information to channel embed
                     # if session.session_type != 'swiss':
@@ -922,7 +922,7 @@ class PersistentView(discord.ui.View):
                         await manager.sio.emit('getUsers')
                 else:
                     logger.info(f"DraftSetupManager not found for {self.draft_session_id}")
-                    
+
             except Exception as e:
                 # Log the error but don't disrupt the normal flow
                 print(f"Error triggering seating order process: {e}")
@@ -1039,52 +1039,52 @@ class PersistentView(discord.ui.View):
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    async def auto_create_rooms_pairings(self, bot, guild, auto_pairings_time):
-        """Automatically create rooms and pairings after the scheduled time"""
-        session_id = self.draft_session_id
+    # async def auto_create_rooms_pairings(self, bot, guild, auto_pairings_time):
+    #     """Automatically create rooms and pairings after the scheduled time"""
+    #     session_id = self.draft_session_id
         
-        try:
-            # Wait until the scheduled time
-            wait_seconds = (auto_pairings_time - datetime.now()).total_seconds()
-            if wait_seconds > 0:
-                await asyncio.sleep(wait_seconds)
+    #     try:
+    #         # Wait until the scheduled time
+    #         wait_seconds = (auto_pairings_time - datetime.now()).total_seconds()
+    #         if wait_seconds > 0:
+    #             await asyncio.sleep(wait_seconds)
             
-            # Check if session still exists and is in the right stage
-            session = await get_draft_session(session_id)
-            if not session or session.session_stage != 'teams':
-                return
+    #         # Check if session still exists and is in the right stage
+    #         session = await get_draft_session(session_id)
+    #         if not session or session.session_stage != 'teams':
+    #             return
                 
-            # Check if it's already being processed
-            if PROCESSING_ROOMS_PAIRINGS.get(session_id):
-                return
+    #         # Check if it's already being processed
+    #         if PROCESSING_ROOMS_PAIRINGS.get(session_id):
+    #             return
                 
-            # Mark as processing
-            PROCESSING_ROOMS_PAIRINGS[session_id] = True
+    #         # Mark as processing
+    #         PROCESSING_ROOMS_PAIRINGS[session_id] = True
             
-            try:
-                # Announce the auto-creation
-                channel = bot.get_channel(int(session.draft_channel_id))
-                if channel:
-                    await channel.send("Rooms and Pairings have been created!")
+    #         try:
+    #             # Announce the auto-creation
+    #             channel = bot.get_channel(int(session.draft_channel_id))
+    #             if channel:
+    #                 await channel.send("Rooms and Pairings have been created!")
                 
 
-                # Use the common helper method
-                await self._create_rooms_pairings(bot, guild, session_id)
+    #             # Use the common helper method
+    #             await PersistentView.create_rooms_pairings(bot, guild, session_id)
 
-            finally:
-                # Clean up processing flag
-                if session_id in PROCESSING_ROOMS_PAIRINGS:
-                    del PROCESSING_ROOMS_PAIRINGS[session_id]
+    #         finally:
+    #             # Clean up processing flag
+    #             if session_id in PROCESSING_ROOMS_PAIRINGS:
+    #                 del PROCESSING_ROOMS_PAIRINGS[session_id]
             
-        except asyncio.CancelledError:
-            # Task was cancelled, likely because the button was pressed manually
-            pass
-        except Exception as e:
-            print(f"Error in auto-pairings task: {e}")
-        finally:
-            # Clean up task reference
-            if session_id in self.AUTO_PAIRINGS_TASKS:
-                del self.AUTO_PAIRINGS_TASKS[session_id]
+    #     except asyncio.CancelledError:
+    #         # Task was cancelled, likely because the button was pressed manually
+    #         pass
+    #     except Exception as e:
+    #         print(f"Error in auto-pairings task: {e}")
+    #     finally:
+    #         # Clean up task reference
+    #         if session_id in self.AUTO_PAIRINGS_TASKS:
+    #             del self.AUTO_PAIRINGS_TASKS[session_id]
                     
     async def team_assignment_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         session = await get_draft_session(self.draft_session_id)
@@ -1321,10 +1321,10 @@ class PersistentView(discord.ui.View):
     async def create_rooms_pairings_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         session_id = self.draft_session_id
 
-        # Cancel any scheduled auto-pairings task
-        if session_id in self.AUTO_PAIRINGS_TASKS:
-            self.AUTO_PAIRINGS_TASKS[session_id].cancel()
-            del self.AUTO_PAIRINGS_TASKS[session_id]
+        # # Cancel any scheduled auto-pairings task
+        # if session_id in self.AUTO_PAIRINGS_TASKS:
+        #     self.AUTO_PAIRINGS_TASKS[session_id].cancel()
+        #     del self.AUTO_PAIRINGS_TASKS[session_id]
 
         if PROCESSING_ROOMS_PAIRINGS.get(session_id):
             # Immediately inform the user that the process is already underway
@@ -1349,7 +1349,7 @@ class PersistentView(discord.ui.View):
                     break
 
             # Use the common helper method
-            await self._create_rooms_pairings(interaction.client, interaction.guild, session_id, interaction)
+            await PersistentView.create_rooms_pairings(interaction.client, interaction.guild, session_id, interaction)
 
         finally:
             # Clean up processing flag
@@ -1522,8 +1522,9 @@ class PersistentView(discord.ui.View):
 
         return channel.id
 
-    async def _create_rooms_pairings(self, bot, guild, session_id, interaction=None):
-        """Common helper method for creating rooms and posting pairings"""
+    @classmethod
+    async def create_rooms_pairings(cls, bot, guild, session_id, interaction=None, session_type=None):
+        """Class method version of creating rooms and posting pairings"""
         try:
             async with AsyncSessionLocal() as db_session:
                 async with db_session.begin():
@@ -1554,20 +1555,23 @@ class PersistentView(discord.ui.View):
                     if session.session_type == "random" or session.session_type == "staked" or session.session_type == "premade":
                         await update_last_draft_timestamp(session.session_id, guild, bot)
 
+                    # Create a temporary view for channel creation
+                    temp_view = cls(bot, session_id, session_type or session.session_type)
+                    
                     # Create chat channels based on session type
-                    if self.session_type == "swiss":
+                    if session.session_type == "swiss":
                         sign_ups_list = list(session.sign_ups.keys())
                         all_members = [guild.get_member(int(user_id)) for user_id in sign_ups_list]
-                        session.draft_chat_channel = str(await self.create_team_channel(guild, "Draft", all_members))
+                        session.draft_chat_channel = str(await temp_view.create_team_channel(guild, "Draft", all_members))
                         draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
-                    elif self.session_type != "test":
+                    elif session.session_type != "test":
                         team_a_members = [guild.get_member(int(user_id)) for user_id in session.team_a if guild.get_member(int(user_id))]
                         team_b_members = [guild.get_member(int(user_id)) for user_id in session.team_b if guild.get_member(int(user_id))]
                         all_members = team_a_members + team_b_members
 
-                        session.draft_chat_channel = str(await self.create_team_channel(guild, "Draft", all_members, session.team_a, session.team_b))
-                        await self.create_team_channel(guild, "Red-Team", team_a_members, session.team_a, session.team_b)
-                        await self.create_team_channel(guild, "Blue-Team", team_b_members, session.team_a, session.team_b)
+                        session.draft_chat_channel = str(await temp_view.create_team_channel(guild, "Draft", all_members, session.team_a, session.team_b))
+                        await temp_view.create_team_channel(guild, "Red-Team", team_a_members, session.team_a, session.team_b)
+                        await temp_view.create_team_channel(guild, "Blue-Team", team_b_members, session.team_a, session.team_b)
 
                         draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
                     else:
@@ -1590,7 +1594,7 @@ class PersistentView(discord.ui.View):
                     else:
                         draft_summary_message = await draft_chat_channel.send(embed=draft_summary_embed)
 
-                    if self.session_type != "test":
+                    if session.session_type != "test":
                         await draft_summary_message.pin()
                     session.draft_summary_message_id = str(draft_summary_message.id)
 
@@ -1646,6 +1650,7 @@ class PersistentView(discord.ui.View):
             if interaction:
                 await interaction.followup.send(f"An error occurred: {e}", ephemeral=True)
             return False
+        
 async def generate_ready_check_embed(ready_check_status, sign_ups, draft_link, draft_session=None):
     # Define a function to convert user IDs to their names using the sign_ups dictionary
     def get_names(user_ids):
@@ -2403,10 +2408,10 @@ class CancelConfirmationView(discord.ui.View):
                 await db_session.delete(session)
                 await db_session.commit()
 
-        # Cancel any scheduled auto-pairings task
-        if self.draft_session_id in PersistentView.AUTO_PAIRINGS_TASKS:
-            PersistentView.AUTO_PAIRINGS_TASKS[self.draft_session_id].cancel()
-            del PersistentView.AUTO_PAIRINGS_TASKS[self.draft_session_id]
+        # # Cancel any scheduled auto-pairings task
+        # if self.draft_session_id in PersistentView.AUTO_PAIRINGS_TASKS:
+        #     PersistentView.AUTO_PAIRINGS_TASKS[self.draft_session_id].cancel()
+        #     del PersistentView.AUTO_PAIRINGS_TASKS[self.draft_session_id]
 
 
         await interaction.followup.send("The draft has been canceled.", ephemeral=True)
