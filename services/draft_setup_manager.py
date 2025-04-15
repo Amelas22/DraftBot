@@ -67,6 +67,7 @@ class DraftSetupManager:
         self.target_user_count = 0
         self.drafting = False
         self.draftPaused = False
+        self.draft_cancelled = False
 
         # Create a contextualized logger for this instance
         self.logger = logger.bind(
@@ -84,7 +85,7 @@ class DraftSetupManager:
             self.logger.info(f"Connected to websocket for draft_id: DB{self.draft_id}")
             if not self.cube_imported:
                 await self.import_cube()
-
+        
         @self.sio.event
         async def connect_error(data):
             self.logger.error(f"Connection failed for draft_id: DB{self.draft_id}")
@@ -105,6 +106,19 @@ class DraftSetupManager:
             if self.ready_check_active:
                 await self.handle_user_ready_update(userID, readyState)
         
+        # Listen for Draft Completion
+        @self.sio.on('endDraft')
+        async def on_draft_end(data=None):
+            self.logger.info(f"Draft ended event received: {data}")
+            self.drafting = False
+            self.draftPaused = False
+            
+            if self.draft_cancelled:
+                self.logger.info("Draft was manually cancelled - no additional announcement needed")
+                self.draft_cancelled = False  # Reset the flag for future drafts
+            else:
+                self.logger.info("Draft completed naturally")
+
         # Listen for Pause or Unpause (Resume)
         @self.sio.on('draftPaused')
         async def on_draft_paused(data):
@@ -741,7 +755,12 @@ class DraftSetupManager:
             The DraftSetupManager instance if found, None otherwise
         """
         return ACTIVE_MANAGERS.get(session_id)
-
+    
+    async def mark_draft_cancelled(self):
+        """Mark that the draft is being cancelled manually"""
+        self.logger.info(f"Marking draft {self.draft_id} as manually cancelled")
+        self.draft_cancelled = True
+        
     async def notify_seating_failure(self, missing_users):
         """
         Notifies about failure to set the seating order.
@@ -788,7 +807,7 @@ class DraftSetupManager:
             await self.sio.emit('setDraftLogRecipients', "delayed")
             await self.sio.emit('setPersonalLogs', True)
             await self.sio.emit('teamDraft', True)  # Added teamDraft setting
-            await self.sio.emit('setPickTimer', 60)
+            await self.sio.emit('setPickTimer', 1)
             await self.sio.emit('setOwnerIsPlayer', False)
             
             return True
