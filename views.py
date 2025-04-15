@@ -916,7 +916,7 @@ class PersistentView(discord.ui.View):
         
             # Respond with the embed and updated view
             try:
-                 await interaction.response.edit_message(embed=embed, view=self)
+                await interaction.response.edit_message(embed=embed, view=self)
             except Exception as e:
                 logger.error(f"Failed to update draft message: {e}")
             
