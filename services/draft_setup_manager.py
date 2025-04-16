@@ -139,28 +139,43 @@ class DraftSetupManager:
         # Listen for Draft Completion
         @self.sio.on('endDraft')
         async def on_draft_end(data=None):
-            self.logger.info(f"Draft ended event received: {data}")
+            logger.info(f"Draft ended event received: {data}")
             self.drafting = False
             self.draftPaused = False
             
             if self.draft_cancelled:
-                self.logger.info("Draft was manually cancelled - no additional announcement needed")
+                logger.info("Draft was manually cancelled - no additional announcement needed")
                 self.draft_cancelled = False  # Reset the flag for future drafts
             else:
-                self.logger.info("Draft completed naturally - creating rooms and scheduling log collection")
+                logger.info("Draft completed naturally - creating rooms and scheduling log collection")
                 bot = get_bot()
                 guild = bot.get_guild(int(self.guild_id))
                 channel = bot.get_channel(int(self.draft_channel_id))
                 from views import PersistentView
                 if guild:
-                    await PersistentView.create_rooms_pairings(bot, guild, self.session_id, session_type=self.session_type)
+                    # Attempt to create rooms and pairings
+                    result = await PersistentView.create_rooms_pairings(bot, guild, self.session_id, session_type=self.session_type)
                     if channel:
-                        await channel.send("Rooms and Pairings have been created!")
+                        # Only announce if rooms were actually created
+                        if result:
+                            await channel.send("Rooms and Pairings have been created!")
+                        else:
+                            # Check if rooms already existed
+                            from session import AsyncSessionLocal
+                            from sqlalchemy import select
+
+                            async with AsyncSessionLocal() as db_session:
+                                stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
+                                session = await db_session.scalar(stmt)
+                                if session and session.draft_chat_channel:
+                                    self.logger.info(f"Rooms already existed for session {self.session_id} - skipping creation")
+                                else:
+                                    await channel.send("Failed to create rooms and pairings. Check logs for details.")
                 else:
                     self.logger.info("Could not find guild")
                 # Schedule log collection after a delay to ensure all data is available
                 if not self.logs_collection_attempted:
-                    asyncio.create_task(self.schedule_log_collection(300))  # 5 minutes delay
+                    asyncio.create_task(self.schedule_log_collection(300))
 
         # Listen for Pause or Unpause (Resume)
         @self.sio.on('draftPaused')

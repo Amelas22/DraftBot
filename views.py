@@ -1353,7 +1353,15 @@ class PersistentView(discord.ui.View):
                     break
 
             # Use the common helper method
-            await PersistentView.create_rooms_pairings(interaction.client, interaction.guild, session_id, interaction)
+            result = await PersistentView.create_rooms_pairings(interaction.client, interaction.guild, session_id, interaction)
+            
+            # If rooms were already created, the method will return False and handle the message itself
+            # Only need to update the UI when successful or for other failures
+            if result:
+                try:
+                    await self.message.edit(view=self)
+                except discord.errors.NotFound:
+                    print(f"Cannot edit message - not found. Session ID: {session_id}")
 
         finally:
             # Clean up processing flag
@@ -1539,6 +1547,13 @@ class PersistentView(discord.ui.View):
                         print("Draft session not found.")
                         if interaction:
                             await interaction.followup.send("Draft session not found.", ephemeral=True)
+                        return False
+                    
+                    # Check if rooms have already been created
+                    if session.draft_chat_channel:
+                        print(f"Rooms and pairings already exist for session {session_id}")
+                        if interaction:
+                            await interaction.followup.send("Rooms and pairings have already been created for this draft.", ephemeral=True)
                         return False
 
                     session.are_rooms_processing = True
