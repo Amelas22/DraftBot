@@ -1479,28 +1479,18 @@ class PersistentView(discord.ui.View):
             guild.me: discord.PermissionOverwrite(read_messages=True)
         }
 
-        # For team-specific channels (Red-Team or Blue-Team)
-        if team_name in ["Red-Team", "Blue-Team"]:
-            if admin_role:
-                # First, give all admins access by default
-                overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, manage_messages=True)
-                
-                # Then, for each admin who is participating in the draft, adjust permissions individually
-                for member in admin_role.members:
-                    # If admin is on the opposite team, deny access to this team's channel
-                    if (team_name == "Red-Team" and member.id in team_b) or (team_name == "Blue-Team" and member.id in team_a):
-                        overwrites[member] = discord.PermissionOverwrite(read_messages=False)
-        else:
+        # Only add admin roles to the Draft chat, not to team-specific channels
+        if team_name == "Draft":
             # For the "Draft-chat" channel, add read permissions for admin role
             if admin_role:
                 overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, manage_messages=True)
             
-            # For the combined "Draft-chat" channel, also give read access to anyone with the active role
-            if team_name == "Draft" and config["activity_tracking"]["enabled"]:
-                active_role_name = config["activity_tracking"]["active_role"]
-                active_role = discord.utils.get(guild.roles, name=active_role_name)
-                if active_role:
-                    overwrites[active_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            # # For the combined "Draft-chat" channel, also give read access to anyone with the active role
+            # if config["activity_tracking"]["enabled"]:
+            #     active_role_name = config["activity_tracking"]["active_role"]
+            #     active_role = discord.utils.get(guild.roles, name=active_role_name)
+            #     if active_role:
+            #         overwrites[active_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
         # Add team members with read permission (this overrides any role-based permissions)
         for member in team_members:
