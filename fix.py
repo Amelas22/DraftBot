@@ -1,57 +1,55 @@
 import asyncio
-import logging
-from sqlalchemy import text
+from sqlalchemy import update
+from database.db_session import db_session
+from models.draft_session import DraftSession
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, 
-                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-# Database URL - should match your existing configuration
-DATABASE_URL = "sqlite+aiosqlite:///drafts.db"  # Update this if your database is in a different file
-
-async def add_last_update_time_column():
-    """Add last_update_time column to messages table if it doesn't exist"""
-    from sqlalchemy.ext.asyncio import create_async_engine
-    engine = create_async_engine(DATABASE_URL, echo=True)
+async def update_match_counter():
+    """
+    Update the match_counter to 13 for the specified draft session.
+    Uses direct SQL update to avoid session persistence issues.
+    """
+    session_id = "416632328715239434-1744767391"  # The correct session ID
+    new_counter = 13     # The corrected match counter value
     
     try:
-        async with engine.begin() as conn:
-            # Check if the column already exists
-            try:
-                columns_query = """
-                PRAGMA table_info(messages);
-                """
-                result = await conn.execute(text(columns_query))
-                columns = result.fetchall()
+        # First get the current value to confirm what we're changing
+        draft_session = await DraftSession.get_by_session_id(session_id)
+        if draft_session:
+            print(f"Found draft session: {draft_session}")
+            print(f"Current match_counter: {draft_session.match_counter}")
+            
+            # Use direct SQL update with a new session instead of the update() method
+            async with db_session() as session:
+                stmt = update(DraftSession).where(
+                    DraftSession.session_id == session_id
+                ).values(match_counter=new_counter)
                 
-                # Check if last_update_time column exists
-                has_last_update_time = any(col[1] == 'last_update_time' for col in columns)
+                result = await session.execute(stmt)
+                await session.commit()
                 
-                if not has_last_update_time:
-                    # Column doesn't exist, add it
-                    await conn.execute(text("ALTER TABLE messages ADD COLUMN last_update_time REAL DEFAULT 0.0"))
-                    logger.info("Added last_update_time column to messages table")
+                if result.rowcount > 0:
+                    print(f"Successfully updated match_counter to {new_counter}")
+                    
+                    # Verify the update with a fresh query
+                    updated_session = await DraftSession.get_by_session_id(session_id)
+                    print(f"Verified match_counter is now: {updated_session.match_counter}")
+                    return True
                 else:
-                    logger.info("last_update_time column already exists")
-            except Exception as e:
-                logger.error(f"Error checking for last_update_time column: {e}")
-                raise
+                    print(f"No rows updated. Check if session ID exists.")
+                    return False
+        else:
+            print(f"Draft session with ID {session_id} not found.")
+            return False
     except Exception as e:
-        logger.error(f"Error adding last_update_time column: {e}")
-        raise
-    finally:
-        await engine.dispose()
+        print(f"Error updating match_counter: {e}")
+        return False
 
-async def migrate_database():
-    """Execute the migration step"""
-    logger.info("Starting database migration to add last_update_time column")
-    
-    try:
-        await add_last_update_time_column()
-        logger.info("Database migration completed successfully")
-    except Exception as e:
-        logger.error(f"Database migration failed: {e}")
+async def main():
+    success = await update_match_counter()
+    if success:
+        print("Successfully updated the draft session's match_counter.")
+    else:
+        print("Failed to update the draft session's match_counter.")
 
 if __name__ == "__main__":
-    asyncio.run(migrate_database())
+    asyncio.run(main())
