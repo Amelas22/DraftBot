@@ -80,7 +80,7 @@ async def reconnect_recent_draft_sessions(discord_client):
     
     # Calculate the cutoff time (5 hours ago)
     current_time = datetime.now()
-    five_hours_ago = current_time - timedelta(hours=5)
+    five_hours_ago = current_time - timedelta(hours=12)
     
     logger.info(f"Looking for non-winston sessions that started between {five_hours_ago} and {current_time}")
     
