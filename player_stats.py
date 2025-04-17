@@ -52,7 +52,7 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                         OR json_extract(team_a, '$') LIKE :pattern
                         OR json_extract(team_b, '$') LIKE :pattern
                     ) 
-                    AND draft_start_time >= :start_date
+                    AND teams_start_time >= :start_date
                     AND session_type IN ('random', 'staked')
                     AND victory_message_id_results_channel IS NOT NULL
                     AND guild_id = :guild_id
@@ -73,7 +73,7 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                     WHERE winner_id = :user_id
                     AND session_id IN (
                         SELECT session_id FROM draft_sessions 
-                        WHERE draft_start_time >= :start_date
+                        WHERE teams_start_time >= :start_date
                         AND session_type IN ('random', 'staked')
                         AND victory_message_id_results_channel IS NOT NULL
                         AND guild_id = :guild_id
@@ -93,7 +93,7 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                     WHERE json_extract(sign_ups, '$') LIKE :pattern
                     AND guild_id = :guild_id
                 """                
-                name_query_text += " ORDER BY draft_start_time DESC LIMIT 1"
+                name_query_text += " ORDER BY teams_start_time DESC LIMIT 1"
                 name_query = text(name_query_text)
                 
                 name_params = {"pattern": pattern, "guild_id": guild_id}              
@@ -120,7 +120,7 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                 trophies_query_text = """
                     SELECT trophy_drafters FROM draft_sessions 
                     WHERE trophy_drafters IS NOT NULL
-                    AND draft_start_time >= :start_date
+                    AND teams_start_time >= :start_date
                     AND session_type IN ('random', 'staked')
                     AND victory_message_id_results_channel IS NOT NULL
                     AND guild_id = :guild_id
@@ -214,7 +214,7 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                     AND winner_id IS NOT NULL
                     AND session_id IN (
                         SELECT session_id FROM draft_sessions 
-                        WHERE draft_start_time >= :start_date
+                        WHERE teams_start_time >= :start_date
                         AND session_type IN ('random', 'staked')
                         AND victory_message_id_results_channel IS NOT NULL
                         AND guild_id = :guild_id
@@ -238,7 +238,7 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                         OR json_extract(team_a, '$') LIKE :pattern
                         OR json_extract(team_b, '$') LIKE :pattern
                     ) 
-                    AND draft_start_time >= :start_date
+                    AND teams_start_time >= :start_date
                     AND session_type IN ('random', 'staked')
                     AND victory_message_id_results_channel IS NOT NULL
                     AND guild_id = :guild_id
@@ -334,7 +334,7 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                         OR json_extract(team_a, '$') LIKE :pattern
                         OR json_extract(team_b, '$') LIKE :pattern
                     ) 
-                    AND draft_start_time >= :start_date
+                    AND teams_start_time >= :start_date
                     AND cube IS NOT NULL
                     AND session_type IN ('random', 'staked')
                     AND victory_message_id_results_channel IS NOT NULL
@@ -366,7 +366,7 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                         AND session_id IN (
                             SELECT session_id FROM draft_sessions 
                             WHERE LOWER(cube) = :cube_name
-                            AND draft_start_time >= :start_date
+                            AND teams_start_time >= :start_date
                             AND session_type IN ('random', 'staked')
                             AND victory_message_id_results_channel IS NOT NULL
                         )
@@ -386,7 +386,7 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                         AND session_id IN (
                             SELECT session_id FROM draft_sessions 
                             WHERE LOWER(cube) = :cube_name
-                            AND draft_start_time >= :start_date
+                            AND teams_start_time >= :start_date
                             AND session_type IN ('random', 'staked')
                             AND victory_message_id_results_channel IS NOT NULL
                         )
@@ -577,7 +577,7 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
                     # If still don't have names, search in sign_ups
                     if user1_display_name == "Unknown" or user2_display_name == "Unknown":
                         # Find in recent drafts
-                        recent_drafts_query = select(DraftSession).order_by(DraftSession.draft_start_time.desc())
+                        recent_drafts_query = select(DraftSession).order_by(DraftSession.teams_start_time.desc())
                         if guild_id:
                             recent_drafts_query = recent_drafts_query.where(DraftSession.guild_id == guild_id)
                         recent_drafts_query = recent_drafts_query.limit(50)
@@ -626,7 +626,7 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
                         continue
                     
                     # Skip if no draft date
-                    draft_date = draft.draft_start_time
+                    draft_date = draft.teams_start_time
                     if not draft_date:
                         continue
                     
@@ -951,7 +951,7 @@ async def find_discord_id_by_display_name_fuzzy(display_name, guild_id=None):
                 
                 # If none found in database, query recent drafts
                 if not matches:
-                    recent_drafts_query = select(DraftSession).order_by(DraftSession.draft_start_time.desc())
+                    recent_drafts_query = select(DraftSession).order_by(DraftSession.teams_start_time.desc())
                     
                     # Add guild_id filter if provided
                     if guild_id:
