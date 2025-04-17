@@ -9,6 +9,7 @@ from database.db_session import db_session
 from models.draft_session import DraftSession
 from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
 from datetime import datetime
+from sqlalchemy import select
 
 # Store active unpause ready checks
 ACTIVE_UNPAUSE_CHECKS = {}
@@ -576,11 +577,53 @@ class DraftControlCog(commands.Cog):
             # Disconnect
             await manager.sio.disconnect()
             
+            # Save the session ID before removing the manager
+            session_id = manager.session_id
+            
             # Remove from active managers
             if manager.session_id in ACTIVE_MANAGERS:
                 del ACTIVE_MANAGERS[manager.session_id]
                 
             await ctx.channel.send(f"✅ Ownership transferred to {requester_name}. Bot disconnected.")
+            
+            # Update the view to enable the button
+            try:
+                # Get the original draft message
+                from session import AsyncSessionLocal
+                async with AsyncSessionLocal() as db_session:
+                    stmt = select(DraftSession).where(DraftSession.session_id == draft_session.session_id)
+                    draft_session_db = await db_session.scalar(stmt)
+                    
+                    if draft_session_db and draft_session_db.draft_channel_id and draft_session_db.message_id:
+                        # Get the channel and message
+                        channel = ctx.bot.get_channel(int(draft_session_db.draft_channel_id))
+                        if channel:
+                            try:
+                                message = await channel.fetch_message(int(draft_session_db.message_id))
+                                
+                                # Find the view for this message
+                                # Create a new view with the same settings but updated button states
+                                from views import PersistentView
+                                updated_view = PersistentView(
+                                    bot=ctx.bot,
+                                    draft_session_id=draft_session_db.session_id,
+                                    session_type=draft_session_db.session_type,
+                                    team_a_name=draft_session_db.team_a_name,
+                                    team_b_name=draft_session_db.team_b_name,
+                                    session_stage=draft_session_db.session_stage
+                                )
+                                
+                                # Apply button disabling logic - this will enable the button 
+                                # since the manager is now gone
+                                updated_view._apply_stage_button_disabling()
+                                
+                                # Update the message with the new view
+                                await message.edit(view=updated_view)
+                                logger.info(f"Updated view after mutiny for session {draft_session_db.session_id}")
+                            except Exception as view_error:
+                                logger.error(f"Error updating view after mutiny: {view_error}")
+            except Exception as update_error:
+                logger.error(f"Error finding message to update view: {update_error}")
                 
         except Exception as e:
             logger.exception(f"Error in mutiny command: {e}")
