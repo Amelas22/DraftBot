@@ -154,12 +154,18 @@ class PersistentView(discord.ui.View):
 
     def _apply_stage_button_disabling(self):
         if self.session_stage == "teams":
+            from services.draft_setup_manager import ACTIVE_MANAGERS
             for item in self.children:
                 if isinstance(item, discord.ui.Button):
-                    item.disabled = item.custom_id not in {
-                        f"create_rooms_pairings_{self.draft_session_id}",
-                        f"cancel_draft_{self.draft_session_id}"
-                    }
+                    if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}":
+                        if self.draft_session_id in ACTIVE_MANAGERS:
+                            item.disabled = True
+                        else:
+                            item.disabled = False
+                    elif item.custom_id == f"cancel_draft_{self.draft_session_id}":
+                        item.disabled = False
+                    else:
+                        item.disabled = True
 
                             
     def create_button(self, label, style, custom_id, custom_callback, disabled=False):
@@ -836,7 +842,13 @@ class PersistentView(discord.ui.View):
                                 )
                                 
                                 # Set disabled state based on button type
-                                if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}" or item.custom_id == f"cancel_draft_{self.draft_session_id}":
+                                from services.draft_setup_manager import ACTIVE_MANAGERS
+                                if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}":
+                                    if self.draft_session_id in ACTIVE_MANAGERS:
+                                        button_copy.disabled = True
+                                    else:
+                                        button_copy.disabled = False
+                                elif item.custom_id == f"cancel_draft_{self.draft_session_id}":
                                     button_copy.disabled = False
                                 else:
                                     button_copy.disabled = True
@@ -892,7 +904,12 @@ class PersistentView(discord.ui.View):
                     for item in self.children:
                         if isinstance(item, discord.ui.Button):
                             # Enable "Create Rooms" and "Cancel Draft" buttons
-                            if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}" or item.custom_id == f"cancel_draft_{self.draft_session_id}":
+                            if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}":
+                                if self.draft_session_id in ACTIVE_MANAGERS:
+                                    item.disabled = True
+                                else:
+                                    item.disabled = False
+                            elif item.custom_id == f"cancel_draft_{self.draft_session_id}":
                                 item.disabled = False
                             else:
                                 # Disable all other buttons
