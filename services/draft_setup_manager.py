@@ -59,7 +59,7 @@ class DraftSetupManager:
         self.seating_order_set = False
         self.last_db_check_time = None
         self.db_check_cooldown = 15
-        self.expected_user_count = None
+        self.expected_user_count = 0
         self.desired_seating_order = None
 
         # Add connection state tracking
@@ -74,7 +74,6 @@ class DraftSetupManager:
         self.ready_users = set()
         self.ready_check_timer = None
         self.draft_channel_id = None  # Will be populated from database
-        self.target_user_count = 0
         self.drafting = False
         self.draftPaused = False
         self.draft_cancelled = False
@@ -869,10 +868,10 @@ class DraftSetupManager:
                 self.session_type = draft_session.session_type or "team"
                 self.guild_id = draft_session.guild_id
                 
-                # Calculate target user count from sign_ups
+                # Calculate expected user count from sign_ups
                 if draft_session.sign_ups:
-                    self.target_user_count = len(draft_session.sign_ups)
-                    self.logger.info(f"Target user count from database: {self.target_user_count}")
+                    self.expected_user_count = len(draft_session.sign_ups)
+                    self.logger.info(f"Expected user count from database: {self.expected_user_count}")
                     
                     # Log the expected users for comparison
                     self.logger.info(f"Expected users: {list(draft_session.sign_ups.values())}")
@@ -885,8 +884,8 @@ class DraftSetupManager:
                 else:
                     self.logger.warning("No sign_ups found in database, falling back to session users count")
                     non_bot_users = [u for u in self.session_users if u.get('userName') != 'DraftBot']
-                    self.target_user_count = len(non_bot_users)
-                    self.logger.info(f"Target user count from current users: {self.target_user_count}")
+                    self.expected_user_count = len(non_bot_users)
+                    self.logger.info(f"Expected user count from current users: {self.expected_user_count}")
                     return True
             return False
         except Exception as e:
@@ -951,9 +950,9 @@ class DraftSetupManager:
             non_bot_users = [u for u in self.session_users if u.get('userName') != 'DraftBot']
             total_users = len(non_bot_users)
             
-            # If we couldn't get target count from database, use current users
-            if self.target_user_count == 0:
-                self.target_user_count = total_users
+            # If we couldn't get expected count from database, use current users
+            if self.expected_user_count is None or self.expected_user_count == 0:
+                self.expected_user_count = total_users
             
             # Send initial ready check message to Discord
             channel = bot.get_channel(int(self.draft_channel_id))
@@ -965,7 +964,7 @@ class DraftSetupManager:
                     return False
                     
             message = await channel.send(
-                f"Seating order set. Draftmancer Readycheck in progress: 0/{self.target_user_count} ready.\n"
+                f"Seating order set. Draftmancer Readycheck in progress: 0/{self.expected_user_count} ready.\n"
                 f"Use `/ready` to initiate another check or `/mutiny` to take control if needed."
             )
             
@@ -1072,7 +1071,7 @@ class DraftSetupManager:
             
             # Log the current state
             non_bot_users = [u for u in self.session_users if u.get('userName') != 'DraftBot']
-            self.logger.info(f"Ready users: {len(self.ready_users)}/{len(non_bot_users)} (target: {self.target_user_count})")
+            self.logger.info(f"Ready users: {len(self.ready_users)}/{len(non_bot_users)} (expected: {self.expected_user_count})")
             
             # Get bot from registry for message updates
             bot = get_bot()
@@ -1080,11 +1079,11 @@ class DraftSetupManager:
                 await self.update_ready_check_message(bot)
             
             # Check if all users are ready
-            if len(self.ready_users) >= self.target_user_count:
-                self.logger.info(f"All users ready! ({len(self.ready_users)}/{self.target_user_count})")
+            if len(self.ready_users) >= self.expected_user_count:
+                self.logger.info(f"All users ready! ({len(self.ready_users)}/{self.expected_user_count})")
                 await self.complete_ready_check()
             else:
-                self.logger.info(f"Still waiting for {self.target_user_count - len(self.ready_users)} more users")
+                self.logger.info(f"Still waiting for {self.expected_user_count - len(self.ready_users)} more users")
         else:
             self.logger.info(f"User {userID} marked as NOT READY (state {readyState})")
                     
@@ -1114,10 +1113,10 @@ class DraftSetupManager:
                 if message:
                     ready_count = len(self.ready_users)
                     new_content = (
-                        f"Seating order set. Draftmancer Readycheck in progress: {ready_count}/{self.target_user_count} ready.\n"
+                        f"Seating order set. Draftmancer Readycheck in progress: {ready_count}/{self.expected_user_count} ready.\n"
                         f"Use `/ready` to initiate another check or `/mutiny` to take control if needed."
                     )
-                    self.logger.info(f"Updating message to show {ready_count}/{self.target_user_count} ready")
+                    self.logger.info(f"Updating message to show {ready_count}/{self.expected_user_count} ready")
                     await message.edit(content=new_content)
                     return True
                 else:
