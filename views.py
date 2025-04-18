@@ -35,7 +35,7 @@ class CubeUpdateSelectionView(discord.ui.View):
             "default": [
                 discord.SelectOption(label="LSVCube", value="LSVCube"),
                 discord.SelectOption(label="AlphaFrog", value="AlphaFrog"),
-                discord.SelectOption(label="modovintage", value="modovintage"),
+                discord.SelectOption(label="2025 MOCS Vintage Cube", value="APR25"),
                 discord.SelectOption(label="LSVRetro", value="LSVRetro"),
                 discord.SelectOption(label="PowerMack", value="PowerMack")
             ]
