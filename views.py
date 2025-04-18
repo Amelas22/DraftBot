@@ -154,7 +154,6 @@ class PersistentView(discord.ui.View):
 
     def _apply_stage_button_disabling(self):
         if self.session_stage == "teams":
-            from services.draft_setup_manager import ACTIVE_MANAGERS
             for item in self.children:
                 if isinstance(item, discord.ui.Button):
                     if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}":
@@ -842,7 +841,6 @@ class PersistentView(discord.ui.View):
                                 )
                                 
                                 # Set disabled state based on button type
-                                from services.draft_setup_manager import ACTIVE_MANAGERS
                                 if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}":
                                     if self.draft_session_id in ACTIVE_MANAGERS:
                                         button_copy.disabled = True
@@ -868,9 +866,7 @@ class PersistentView(discord.ui.View):
                         
                         # Return early to avoid the default response
                         await db_session.commit()
-                        try:
-                            from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
-    
+                        try:    
                             # Look for an existing manager
                             manager = DraftSetupManager.get_active_manager(self.draft_session_id)
                             
@@ -926,7 +922,6 @@ class PersistentView(discord.ui.View):
             await interaction.channel.send(embed=channel_embed)
 
             try:
-                from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
                 
                 # Look for an existing manager
                 manager = DraftSetupManager.get_active_manager(self.draft_session_id)
