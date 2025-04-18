@@ -10,6 +10,7 @@ from utils import cleanup_sessions_task, check_inactive_players_task
 from commands import league_commands, scheduled_posts
 from reconnect_drafts import reconnect_recent_draft_sessions, reconnect_draft_setup_sessions
 from bot_registry import register_bot
+from preference_service import PlayerPreferences
 
 # Configure loguru for all modules
 logger.remove()  # Remove default handler
