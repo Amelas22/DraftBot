@@ -523,7 +523,20 @@ class PersistentView(discord.ui.View):
         # Check if this draft session is in cooldown
         current_time = datetime.now()
         cooldown_end_time = READY_CHECK_COOLDOWNS.get(self.draft_session_id)
+
+        # Fetch the session data from the database
+        session = await get_draft_session(self.draft_session_id)
+        if not session:
+            await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
+            return        
         
+        sign_up_count = len(session.sign_ups)
+        if sign_up_count not in (6,8,10):
+            await interaction.response.send_message(
+                f"Ready check only available with 6, 8, or 10 players. Currently {sign_up_count} players in queue."
+            )
+            return
+
         if cooldown_end_time and current_time < cooldown_end_time:
             # Calculate remaining cooldown time in seconds
             remaining_seconds = int((cooldown_end_time - current_time).total_seconds())
@@ -539,11 +552,7 @@ class PersistentView(discord.ui.View):
         # Schedule the cooldown to be removed after 60 seconds
         asyncio.create_task(self.remove_cooldown(self.draft_session_id))
         
-        # Fetch the session data from the database
-        session = await get_draft_session(self.draft_session_id)
-        if not session:
-            await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
-            return
+
 
         user_id = str(interaction.user.id)
         if user_id not in session.sign_ups:
