@@ -73,6 +73,7 @@ class DraftSetupManager:
         self.ready_check_message_id = None
         self.ready_users = set()
         self.ready_check_timer = None
+        self.post_timeout_ready_users = set()
         self.draft_channel_id = None  # Will be populated from database
         self.drafting = False
         self.draftPaused = False
@@ -132,8 +133,7 @@ class DraftSetupManager:
         # Listen for user changes in ready state status
         @self.sio.on('setReady')
         async def on_user_ready(userID, readyState):
-            if self.ready_check_active:
-                await self.handle_user_ready_update(userID, readyState)
+            await self.handle_user_ready_update(userID, readyState)
         
         # Listen for Draft Completion
         @self.sio.on('endDraft')
@@ -943,7 +943,7 @@ class DraftSetupManager:
                 
         self.ready_check_active = True
         self.ready_users.clear()
-        
+        self.post_timeout_ready_users.clear()
         
         try:
             # Count expected participants
@@ -973,7 +973,7 @@ class DraftSetupManager:
             await self.update_draft_session_field('ready_check_message_id', str(message.id))
             
             # Start timeout timer
-            self.ready_check_timer = asyncio.create_task(self.ready_check_timeout(60, bot))
+            self.ready_check_timer = asyncio.create_task(self.ready_check_timeout(90, bot))
             
             # Emit ready check to Draftmancer
             await self.sio.emit('readyCheck')
@@ -1060,32 +1060,60 @@ class DraftSetupManager:
         """Handle updates when a user changes their ready state"""
         self.logger.info(f"Ready state update received: User {userID} set to state {readyState}")
         
-        if not self.ready_check_active:
-            self.logger.info("Ignoring ready state update - no active ready check")
+        # Check if user is ready - supporting multiple formats
+        is_ready = readyState == 1 or readyState == "Ready" or str(readyState).lower() == "ready"
+        
+        # Get bot reference for actions
+        bot = get_bot()
+        if not bot:
+            self.logger.warning("Could not get bot instance for ready state handling")
             return
+        
+        if self.ready_check_active:
+            # Normal flow during active ready check
+            if is_ready:
+                self.ready_users.add(userID)
+                self.logger.info(f"User {userID} marked as READY during active check")
+            else:
+                if userID in self.ready_users:
+                    self.ready_users.remove(userID)
+                    self.logger.info(f"User {userID} marked as NOT READY during active check")
             
-        # Track ready users - checking both numeric (1) and string ("Ready") format
-        if readyState == 1 or readyState == "Ready" or str(readyState).lower() == "ready":
-            self.logger.info(f"User {userID} marked as READY, adding to ready set")
-            self.ready_users.add(userID)
+            # Update the ready check message
+            await self.update_ready_check_message(bot)
             
-            # Log the current state
+            # Check if all users are ready
             non_bot_users = [u for u in self.session_users if u.get('userName') != 'DraftBot']
             self.logger.info(f"Ready users: {len(self.ready_users)}/{len(non_bot_users)} (expected: {self.expected_user_count})")
             
-            # Get bot from registry for message updates
-            bot = get_bot()
-            if bot:
-                await self.update_ready_check_message(bot)
-            
-            # Check if all users are ready
             if len(self.ready_users) >= self.expected_user_count:
                 self.logger.info(f"All users ready! ({len(self.ready_users)}/{self.expected_user_count})")
                 await self.complete_ready_check()
             else:
                 self.logger.info(f"Still waiting for {self.expected_user_count - len(self.ready_users)} more users")
+        
         else:
-            self.logger.info(f"User {userID} marked as NOT READY (state {readyState})")
+            # After timeout behavior - track readiness and potentially start new check
+            if is_ready:
+                self.post_timeout_ready_users.add(userID)
+                self.logger.info(f"User {userID} marked as READY after timeout")
+            else:
+                if userID in self.post_timeout_ready_users:
+                    self.post_timeout_ready_users.remove(userID)
+                    self.logger.info(f"User {userID} marked as NOT READY after timeout")
+            
+            # Check if all users are now ready after timeout
+            non_bot_users = [u for u in self.session_users if u.get('userName') != 'DraftBot']
+            self.logger.info(f"Post-timeout ready users: {len(self.post_timeout_ready_users)}/{len(non_bot_users)} (expected: {self.expected_user_count})")
+            
+            if len(self.post_timeout_ready_users) >= self.expected_user_count:
+                self.logger.info(f"All users now ready after timeout! Starting new ready check")
+                
+                # Reset post-timeout tracking
+                self.post_timeout_ready_users.clear()
+                
+                # Start a new ready check
+                await self.initiate_ready_check(bot)
                     
     async def update_ready_check_message(self, bot):
         """Update the ready check message with current count"""
@@ -1136,21 +1164,37 @@ class DraftSetupManager:
             
             # If we reach here, the ready check timed out
             if self.ready_check_active:
+                self.logger.info("Ready check timed out, but continuing to track readiness")
                 self.ready_check_active = False
+                
+                # Initialize post-timeout tracking with currently ready users
+                self.post_timeout_ready_users = self.ready_users.copy()
+                
+                # Identify which users weren't ready at timeout
+                missing_users = []
+                for user in self.session_users:
+                    if (user.get('userName') != 'DraftBot' and  # Exclude bot
+                        user.get('userID') not in self.ready_users):
+                        missing_users.append(user.get('userName'))
+                
+                # Format missing users for display
+                missing_text = ""
+                if missing_users:
+                    missing_text = f"\nWaiting for: **{', '.join(missing_users)}**"
                 
                 try:
                     channel = bot.get_channel(int(self.draft_channel_id))
                     if channel:
                         await channel.send(
-                            "⚠️ Ready Check Failed. Use the command `/ready` to initiate another ready check.\n"
-                            "Use `/mutiny` to take control if needed."
+                            f"⚠️ Ready Check Failed.{missing_text}\n"
+                            f"Use the command `/ready` to initiate another ready check or `/mutiny` to take control if needed."
                         )
                 except Exception as e:
                     self.logger.error(f"Failed to send timeout message: {e}")
                 
-                # Reset ready check state
-                self.ready_users.clear()
+                # Reset message ID but keep tracking readiness
                 self.ready_check_message_id = None
+                self.ready_users.clear()  # Clear the regular ready set
                 
         except asyncio.CancelledError:
             # Expected if the timer is cancelled when all users become ready
