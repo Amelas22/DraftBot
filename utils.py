@@ -781,6 +781,38 @@ async def cleanup_sessions_task(bot):
                 challenge_results = await db_session.execute(challenge_stmt)
                 challenges_to_cleanup = challenge_results.scalars().all()
 
+                # Check for inactive initial queues (no activity for 90 minutes)
+                inactive_stmt = select(DraftSession).where(
+                    DraftSession.session_stage.is_(None),  # Only initial queue stage
+                    DraftSession.deletion_time < current_time  # Past the deletion time
+                )
+                inactive_results = await db_session.execute(inactive_stmt)
+                inactive_sessions = inactive_results.scalars().all()
+
+                # Process inactive sessions for cancellation due to inactivity
+                for session in inactive_sessions:
+                    # Cancel the queue due to inactivity
+                    if session.draft_channel_id and session.message_id:
+                        draft_channel = bot.get_channel(int(session.draft_channel_id))
+                        if draft_channel:
+                            try:
+                                # Send cancellation notification
+                                await draft_channel.send(f"Queue for Draft-{session.draft_id} has been cancelled due to inactivity (no new signups for 90 minutes).")
+                                
+                                # Delete the original message
+                                msg = await draft_channel.fetch_message(int(session.message_id))
+                                await msg.delete()
+                                logger.info(f"Cancelled inactive queue for session {session.session_id} (Draft-{session.draft_id})")
+                            except discord.NotFound:
+                                # If the message is not found, silently continue
+                                pass
+                            except discord.HTTPException as e:
+                                logger.error(f"Failed to delete message ID {session.message_id} in draft channel. Reason: {e}")
+                    
+                    # Delete the session from the database
+                    await db_session.delete(session)
+
+                # Original cleanup code for regular sessions
                 for session in sessions_to_cleanup:
                     # Check if channel_ids is not None and is iterable before attempting to iterate
                     if session.channel_ids:
@@ -825,7 +857,7 @@ async def cleanup_sessions_task(bot):
 
                     print(f"{challenge.id} has been removed.")
         # Sleep for a certain amount of time before running again
-        await asyncio.sleep(3600)  # Sleep for 1 hour
+        await asyncio.sleep(600)  # Sleep for 10 minutes
 
 async def send_channel_reminders(bot, session_id):
     async with AsyncSessionLocal() as db_session:
