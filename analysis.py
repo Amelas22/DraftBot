@@ -46,11 +46,18 @@ except ImportError:
     ANALYSIS_AVAILABLE = False
     logger.warning("pandas not available, detailed analysis will be disabled")
 
+# Target guild ID to analyze
+TARGET_GUILD_ID = "1355718878298116096"
+
 class StakeAnalyzer:
-    def __init__(self):
+    def __init__(self, guild_id=TARGET_GUILD_ID):
         """Initialize the analyzer."""
+        # Set the guild ID
+        self.guild_id = guild_id
+        
         # Results storage
         self.results = {
+            'guild_id': guild_id,
             'total_staked_drafts': 0,
             'valid_drafts': 0,
             'min_team_wins': 0,
@@ -69,6 +76,8 @@ class StakeAnalyzer:
             query = select(DraftSession).join(
                 StakeInfo, DraftSession.session_id == StakeInfo.session_id
             ).where(
+                # Filter for specific guild
+                DraftSession.guild_id == self.guild_id,
                 # Filter for drafts with a victory message
                 or_(
                     DraftSession.victory_message_id_draft_chat.isnot(None),
@@ -79,7 +88,7 @@ class StakeAnalyzer:
             result = await session.execute(query)
             drafts = result.scalars().all()
             
-            logger.info(f"Found {len(drafts)} completed draft sessions with stakes and victory messages")
+            logger.info(f"Found {len(drafts)} completed draft sessions with stakes and victory messages in guild {self.guild_id}")
             return drafts
     
     async def fetch_stakes_for_draft(self, session_id: str) -> List[StakeInfo]:
@@ -250,7 +259,7 @@ class StakeAnalyzer:
     
     def print_summary(self):
         """Print a summary of the analysis results."""
-        print("\n===== STAKE ANALYSIS SUMMARY =====")
+        print(f"\n===== STAKE ANALYSIS SUMMARY FOR GUILD {self.guild_id} =====")
         print(f"Total completed staked drafts analyzed: {self.results['total_staked_drafts']}")
         print(f"Valid drafts with victory messages: {self.results['valid_drafts']}")
         print("\nOverall Outcomes:")
@@ -269,7 +278,7 @@ class StakeAnalyzer:
             logger.warning("Cannot analyze distribution - pandas not available or no results")
             return
             
-        print("\n===== STAKE RATIO DISTRIBUTION ANALYSIS =====")
+        print(f"\n===== STAKE RATIO DISTRIBUTION ANALYSIS (GUILD {self.guild_id}) =====")
         
         df = pd.DataFrame(self.results['detailed_results'])
         
@@ -289,7 +298,7 @@ class StakeAnalyzer:
         if not ANALYSIS_AVAILABLE or not self.results['detailed_results']:
             return
         
-        print("\n===== OUTCOMES BY STAKE RATIO (5 EQUAL-SIZED BUCKETS) =====")
+        print(f"\n===== OUTCOMES BY STAKE RATIO (5 EQUAL-SIZED BUCKETS) =====")
         print("(Drafts divided into 5 equal-sized groups by stake ratio)")
         
         # Create DataFrame and sort by stake ratio
@@ -395,7 +404,7 @@ class StakeAnalyzer:
             df = pd.DataFrame(self.results['detailed_results'])
             
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"stake_analysis_detailed_{timestamp}.csv"
+            filename = f"stake_analysis_guild_{self.guild_id}_{timestamp}.csv"
             
             df.to_csv(filename, index=False)
             logger.info(f"Detailed results exported to {filename}")
@@ -407,7 +416,7 @@ class StakeAnalyzer:
             import csv
             
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"stake_analysis_detailed_{timestamp}.csv"
+            filename = f"stake_analysis_guild_{self.guild_id}_{timestamp}.csv"
             
             with open(filename, 'w', newline='') as csvfile:
                 if self.results['detailed_results']:
@@ -421,13 +430,14 @@ class StakeAnalyzer:
 async def main():
     """Main function to run the analysis."""
     try:
-        analyzer = StakeAnalyzer()
+        # Create analyzer for the specific guild
+        analyzer = StakeAnalyzer(guild_id=TARGET_GUILD_ID)
         
-        logger.info("Starting stake analysis...")
+        logger.info(f"Starting stake analysis for guild {TARGET_GUILD_ID}...")
         await analyzer.analyze_all_drafts()
         
         analyzer.print_summary()
-        analyzer.export_detailed_results()  # Still export the CSV but skip visualizations
+        analyzer.export_detailed_results()
         
         logger.info("Analysis complete!")
         
