@@ -12,6 +12,7 @@ from league import ChallengeView
 from models.leaderboard_message import LeaderboardMessage
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
+from services.draft_setup_manager import DraftSetupManager
 from loguru import logger
 
 flags = {}
@@ -429,6 +430,7 @@ async def update_draft_summary_message(bot, draft_session_id):
 
 
 async def check_and_post_victory_or_draw(bot, draft_session_id):
+    draft_manager = DraftSetupManager.get_active_manager(draft_session_id)
     async with AsyncSessionLocal() as session:
         async with session.begin():
             draft_session = await get_draft_session(draft_session_id)
@@ -582,6 +584,16 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 gap = abs(team_a_wins - team_b_wins)
 
                 draft_session.deletion_time = datetime.now() + timedelta(hours=2)
+
+                if draft_manager:
+                    logger.info(f"Victory/draw determined - unlocking logs for session {draft_session_id}")
+                    await draft_manager.manually_unlock_draft_logs()
+                    
+                    # Small delay to allow logs to process
+                    await asyncio.sleep(2)
+                else:
+                    logger.warning(f"No active manager found for session {draft_session_id} - logs may remain locked")
+
                 embed = await generate_draft_summary_embed(bot, draft_session_id)
                 three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
                 embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
