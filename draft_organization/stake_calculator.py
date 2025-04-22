@@ -1248,50 +1248,40 @@ class OptimizedStakeCalculator:
                 
                 elif adjustment_needed < 0:
                     # Distribute negative adjustment fairly across multiple players
-                    # Sort players by their original max stake (but only include those above min_stake)
-                    sorted_allocations = []
+                    # Find players who can have their allocation reduced
+                    eligible_players = []
                     for i, (player_id, current_allocation) in enumerate(above_min_allocations):
-                        original_max = next(stake for pid, stake in above_min_players if pid == player_id)
-                        # Only include players who aren't already at the minimum multiple
-                        if current_allocation > multiple:  # CHANGED: check against multiple
-                            sorted_allocations.append((i, player_id, current_allocation, original_max))
-                    
-                    # Distribute negative adjustment fairly across multiple players
-                    # Sort players by their original max stake (but only include those above min_stake)
-                    sorted_allocations = []
-                    for i, (player_id, current_allocation) in enumerate(above_min_allocations):
-                        original_max = next(stake for pid, stake in above_min_players if pid == player_id)
-                        # Only include players who aren't already at the minimum multiple
-                        if current_allocation > multiple:  # CHANGED: check against multiple
-                            sorted_allocations.append((i, player_id, current_allocation, original_max))
+                        # Only include players who aren't already at the minimum stake
+                        if current_allocation > min_stake:  # We can't reduce below the min_stake
+                            eligible_players.append((i, player_id, current_allocation))
                     
                     # Calculate how many multiples of adjustment we need to distribute
                     adjustment_units = abs(adjustment_needed) // multiple
                     
                     # Count eligible players for adjustment
-                    num_eligible = len(sorted_allocations)
+                    num_eligible = len(eligible_players)
                     
                     if num_eligible > 0:
                         stake_logger.info(f"Distributing negative adjustment of {abs(adjustment_needed)} across eligible players (in multiples of {multiple})")
                         
-                        # Sort by allocation (highest first)
-                        sorted_allocations.sort(key=lambda x: x[2], reverse=True)
+                        # Sort by allocation (lowest first)
+                        eligible_players.sort(key=lambda x: x[2])
                         
                         # First pass: Apply one multiple of reduction to as many players as needed
                         players_to_adjust = min(adjustment_units, num_eligible)
                         adjustment_applied = 0
                         
                         for j in range(players_to_adjust):
-                            i, player_id, current_allocation, original_max = sorted_allocations[j]
-                            max_reduction = current_allocation - multiple  # CHANGED: check against multiple
+                            i, player_id, current_allocation = eligible_players[j]
                             
-                            if max_reduction >= multiple:
+                            # Check if reducing by multiple would keep them at or above min_stake
+                            if (current_allocation - multiple) >= min_stake:
                                 reduction = multiple
                                 new_allocation = current_allocation - reduction
                                 above_min_allocations[i] = (player_id, new_allocation)
                                 adjustment_needed += reduction
                                 adjustment_applied += reduction
-                                sorted_allocations[j] = (i, player_id, new_allocation, original_max)
+                                eligible_players[j] = (i, player_id, new_allocation)
                                 stake_logger.info(f"Removed {reduction} from bettor {player_id}, now at {new_allocation}")
                         
                         # Second pass: If we need more adjustments, add another multiple to players who can take it
@@ -1300,16 +1290,15 @@ class OptimizedStakeCalculator:
                         while remaining_adjustment >= multiple:
                             adjusted_player = False
                             
-                            for j, (i, player_id, current_allocation, original_max) in enumerate(sorted_allocations):
-                                max_reduction = current_allocation - multiple  # CHANGED: check against multiple
-                                
-                                if max_reduction >= multiple:
+                            for j, (i, player_id, current_allocation) in enumerate(eligible_players):
+                                # Check if reducing by multiple would keep them at or above min_stake
+                                if (current_allocation - multiple) >= min_stake:
                                     reduction = multiple
                                     new_allocation = current_allocation - reduction
                                     above_min_allocations[i] = (player_id, new_allocation)
                                     adjustment_needed += reduction
                                     remaining_adjustment -= reduction
-                                    sorted_allocations[j] = (i, player_id, new_allocation, original_max)
+                                    eligible_players[j] = (i, player_id, new_allocation)
                                     stake_logger.info(f"Removed additional {reduction} from bettor {player_id}, now at {new_allocation}")
                                     adjusted_player = True
                                     break
