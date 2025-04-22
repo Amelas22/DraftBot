@@ -97,6 +97,9 @@ class DraftSetupManager:
             'updated_at': datetime.now().strftime('%H:%M:%S')
         }
 
+        # Add storage for the current draft log
+        self.current_draft_log = None
+            
         # Create a contextualized logger for this instance
         self.logger = logger.bind(
             draft_id=self.draft_id,
@@ -113,7 +116,14 @@ class DraftSetupManager:
             self.logger.info(f"Connected to websocket for draft_id: DB{self.draft_id}")
             if not self.cube_imported:
                 await self.import_cube()
-        
+
+        # Add a listener to capture draft logs
+        @self.sio.on('draftLog')
+        async def on_draft_log(draft_log):
+            self.logger.info(f"Received draft log for session: {draft_log.get('sessionID')}")
+            # Store the draft log
+            self.current_draft_log = draft_log
+            
         @self.sio.event
         async def connect_error(data):
             self.logger.error(f"Connection failed for draft_id: DB{self.draft_id}")
@@ -172,9 +182,9 @@ class DraftSetupManager:
                                     await channel.send("Failed to create rooms and pairings. Check logs for details.")
                 else:
                     self.logger.info("Could not find guild")
-                # Schedule log collection after a delay to ensure all data is available
-                if not self.logs_collection_attempted:
-                    asyncio.create_task(self.schedule_log_collection(300))
+                # # Schedule log collection after a delay to ensure all data is available
+                # if not self.logs_collection_attempted:
+                #     asyncio.create_task(self.schedule_log_collection(300))
 
         # Listen for Pause or Unpause (Resume)
         @self.sio.on('draftPaused')
@@ -1638,7 +1648,7 @@ class DraftSetupManager:
             self.logger.debug("Updating draft settings...")
             await self.sio.emit('setColorBalance', False)
             await self.sio.emit('setMaxPlayers', 10)
-            await self.sio.emit('setDraftLogUnlockTimer', 120)
+            await self.sio.emit('setDraftLogUnlockTimer', 180)
             await self.sio.emit('setDraftLogRecipients', "delayed")
             await self.sio.emit('setPersonalLogs', True)
             await self.sio.emit('teamDraft', True)  # Added teamDraft setting
@@ -1766,11 +1776,11 @@ class DraftSetupManager:
                             draft_ended_time = datetime.now()
                             self.logger.info(f"Draft not active, setting draft_ended_time to {draft_ended_time}")
                             
-                            # Immediately attempt to collect logs if not attempted yet
-                            if not self.logs_collection_attempted and not self.logs_collection_in_progress:
-                                self.logger.info("Attempting to collect logs immediately")
-                                last_log_attempt_time = datetime.now()
-                                await self.collect_draft_logs()
+                            # # Immediately attempt to collect logs if not attempted yet
+                            # if not self.logs_collection_attempted and not self.logs_collection_in_progress:
+                            #     self.logger.info("Attempting to collect logs immediately")
+                            #     last_log_attempt_time = datetime.now()
+                            #     await self.collect_draft_logs()
                         else:
                             # If logs were collected successfully, we can disconnect
                             if self.logs_collection_success:
@@ -1778,15 +1788,15 @@ class DraftSetupManager:
                                 self._should_disconnect = True
                                 break
                                 
-                            # If logs were attempted but failed, retry periodically (every 30 minutes)
-                            if (self.logs_collection_attempted and not self.logs_collection_success and 
-                                last_log_attempt_time and 
-                                (datetime.now() - last_log_attempt_time).total_seconds() > 1800):
+                            # # If logs were attempted but failed, retry periodically (every 30 minutes)
+                            # if (self.logs_collection_attempted and not self.logs_collection_success and 
+                            #     last_log_attempt_time and 
+                            #     (datetime.now() - last_log_attempt_time).total_seconds() > 1800):
                                 
-                                self.logger.info(f"Retrying log collection after {(datetime.now() - last_log_attempt_time).total_seconds()} seconds")
-                                self.logs_collection_attempted = False  # Reset to allow retry
-                                last_log_attempt_time = datetime.now()
-                                await self.collect_draft_logs()
+                            #     self.logger.info(f"Retrying log collection after {(datetime.now() - last_log_attempt_time).total_seconds()} seconds")
+                            #     self.logs_collection_attempted = False  # Reset to allow retry
+                            #     last_log_attempt_time = datetime.now()
+                            #     await self.collect_draft_logs()
                     else:
                         # If draft is active again, reset the ended time
                         draft_ended_time = None
@@ -1804,7 +1814,64 @@ class DraftSetupManager:
             # Only disconnect if requested
             if self._should_disconnect:
                 await self.disconnect_safely()
-
+                
+    async def manually_unlock_draft_logs(self):
+        """
+        Manually unlock draft logs for the currently connected Draftmancer session.
+        """
+        try:
+            self.logger.info("Attempting to unlock draft logs for the connected Draftmancer session")
+            
+            # First, try to request the current draft log if we don't have it
+            if not self.current_draft_log:
+                self.logger.info("No draft log captured yet, attempting to request it")
+                
+                # Try to get the current draft log by requesting it
+                callback_future = asyncio.Future()
+                
+                def on_draft_log_response(draft_log):
+                    if draft_log:
+                        self.logger.info("Received draft log from request")
+                        self.current_draft_log = draft_log
+                    callback_future.set_result(draft_log is not None)
+                
+                # Request the current draft log
+                await self.sio.emit('getCurrentDraftLog', callback=on_draft_log_response)
+                
+                # Wait for response with timeout
+                try:
+                    success = await asyncio.wait_for(callback_future, timeout=5)
+                    if not success:
+                        self.logger.warning("Failed to get current draft log")
+                except asyncio.TimeoutError:
+                    self.logger.warning("Timeout waiting for draft log")
+            
+            # Now try to unlock the logs
+            if self.current_draft_log:
+                # Create a copy of the log to modify
+                draft_log = self.current_draft_log.copy()
+                
+                # Set delayed to false to make it public
+                draft_log['delayed'] = False
+                
+                # Emit the modified log
+                self.logger.info(f"Sharing draft log with delayed=false")
+                await self.sio.emit('shareDraftLog', draft_log)
+                
+                self.logger.info("Logs unlocked using captured draft log")
+            else:
+                # Fallback: try to create a minimal log with just the essential information
+                self.logger.warning("No draft log available, further improvement required")
+            
+            # Continue with log collection as before
+            if not self.logs_collection_attempted and not self.logs_collection_in_progress:
+                asyncio.create_task(self.schedule_log_collection(5))
+            
+            return True
+        except Exception as e:
+            self.logger.error(f"Error unlocking draft logs: {e}")
+            return False
+        
     async def update_cube(self, new_cube_id: str) -> bool:
         """
         Updates the cube ID and imports the new cube.
