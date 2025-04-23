@@ -69,7 +69,7 @@ class BaseSession:
             draft_link=self.session_details.draft_link,
             draft_id=self.session_details.draft_id,
             draft_start_time=datetime.fromtimestamp(self.session_details.draft_start_time),
-            deletion_time=datetime.now() + timedelta(minutes=90),
+            deletion_time=datetime.now() + timedelta(minutes=180),
             session_type=self.get_session_type(),
             premade_match_id=self.get_premade_match_id(),
             team_a_name=self.session_details.team_a_name,

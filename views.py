@@ -313,7 +313,7 @@ class PersistentView(discord.ui.View):
 
                     # Reset the inactivity timer when a user signs up (if still in initial queue)
                     if not draft_session.session_stage:
-                        values_to_update["deletion_time"] = datetime.now() + timedelta(minutes=90)
+                        values_to_update["deletion_time"] = datetime.now() + timedelta(minutes=180)
 
                     # Update the draft session in the database
                     await session.execute(
@@ -2553,7 +2553,7 @@ class StakeOptionsSelect(discord.ui.Select):
 
                 # Reset the inactivity timer when a user signs up (if still in initial queue)
                 if not draft_session.session_stage:
-                    values_to_update["deletion_time"] = datetime.now() + timedelta(minutes=90)
+                    values_to_update["deletion_time"] = datetime.now() + timedelta(minutes=180)
 
                 await session.execute(
                     update(DraftSession).
