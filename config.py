@@ -9,7 +9,7 @@ SPECIAL_GUILD_ID = "336345350535118849"
 
 # Base URL for Draftmancer service
 # Change this to switch between environments (prod, beta, dev)
-DRAFTMANCER_BASE_URL = "https://beta.draftmancer.com"
+DRAFTMANCER_BASE_URL = "https://draftmancer.com"
 
 class Config:
     def __init__(self):
