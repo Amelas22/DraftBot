@@ -1865,7 +1865,7 @@ class DraftSetupManager:
             
             # Continue with log collection as before
             if not self.logs_collection_attempted and not self.logs_collection_in_progress:
-                asyncio.create_task(self.schedule_log_collection(5))
+                asyncio.create_task(self.schedule_log_collection(60))
             
             return True
         except Exception as e:
