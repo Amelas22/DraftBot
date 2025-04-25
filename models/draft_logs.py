@@ -37,10 +37,12 @@ class BackupLog(Base):
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     url = Column(String(512), nullable=False)
-    added_by = Column(String(64), nullable=False)  # Discord user ID
+    added_by = Column(String(64), nullable=False)
     added_on = Column(DateTime, default=datetime.now)
     channel_id = Column(String(64), ForeignKey('log_channels.channel_id'), nullable=False)
     used = Column(Boolean, default=False)
+    cube = Column(String(128), nullable=True)  
+    record = Column(String(16), nullable=True)  
     
     # Relationship
     channel = relationship("LogChannel", back_populates="backup_logs")
@@ -52,11 +54,13 @@ class UserSubmission(Base):
     __tablename__ = 'user_submissions'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    url = Column(String(512), nullable=False)
-    submitted_by = Column(String(64), nullable=False)  # Discord user ID
+    url = Column(String(512), nullable=True)  
+    submitted_by = Column(String(64), nullable=False)
     submitted_on = Column(DateTime, default=datetime.now)
     channel_id = Column(String(64), ForeignKey('log_channels.channel_id'), nullable=False)
     used = Column(Boolean, default=False)
+    cube = Column(String(128), nullable=True)  
+    record = Column(String(16), nullable=True)  
     
     # Relationship
     channel = relationship("LogChannel", back_populates="user_submissions")

@@ -248,7 +248,9 @@ class DraftLogsCog(commands.Cog):
     async def add_backup_log(
         self,
         ctx,
-        url: str
+        url: str,
+        cube: Optional[str] = None,
+        record: Optional[str] = None
     ):
         """
         Add a backup draft log
@@ -256,6 +258,8 @@ class DraftLogsCog(commands.Cog):
         Parameters
         ----------
         url: URL to the draft log
+        cube: The cube that was drafted (optional)
+        record: The W-L record for this draft (optional)
         """
         await ctx.defer(ephemeral=True)
         
@@ -280,7 +284,9 @@ class DraftLogsCog(commands.Cog):
             backup_log = BackupLog(
                 url=url,
                 added_by=str(ctx.author.id),
-                channel_id=str(log_channel.channel_id)
+                channel_id=str(log_channel.channel_id),
+                cube=cube,
+                record=record
             )
             
             session.add(backup_log)
@@ -295,14 +301,18 @@ class DraftLogsCog(commands.Cog):
     async def submit_log(
         self,
         ctx,
-        url: str
+        url: Optional[str] = None,
+        cube: Optional[str] = None,
+        record: Optional[str] = None
     ):
         """
         Submit your MTG draft log
         
         Parameters
         ----------
-        url: URL to your draft log
+        url: URL to your draft log (optional - will use your most recent draft if not provided)
+        cube: The cube that was drafted (optional)
+        record: The W-L record for this draft (optional)
         """
         await ctx.defer(ephemeral=True)
         
@@ -317,7 +327,6 @@ class DraftLogsCog(commands.Cog):
                 return
             
             # If there are multiple channels, use the first one
-            # Alternatively, you could show a selection menu here
             log_channel = log_channels[0]
             channel = ctx.guild.get_channel(int(log_channel.channel_id))
             
@@ -325,18 +334,97 @@ class DraftLogsCog(commands.Cog):
                 await ctx.followup.send("The configured log channel no longer exists. Please ask an admin to set up a new one.", ephemeral=True)
                 return
             
-            # Add user submission
+            # If URL is not provided, search for the user's most recent draft
+            draft_time = None
+            if not url:
+                # Import DraftSession model
+                from models.draft_session import DraftSession
+                from models.match import MatchResult
+                
+                # Find most recent draft that has magicprotools_links with the user's ID
+                # Also filter by the current guild ID
+                draft_stmt = select(DraftSession).where(
+                    and_(
+                        DraftSession.magicprotools_links.is_not(None),
+                        DraftSession.guild_id == str(ctx.guild.id)  # Filter by current guild
+                    )
+                ).order_by(desc(DraftSession.draft_start_time))
+                
+                draft_result = await session.execute(draft_stmt)
+                draft_sessions = draft_result.scalars().all()
+                
+                user_id = str(ctx.author.id)
+                found_draft = None
+                found_url = None
+                found_cube = None
+                
+                # Loop through drafts to find most recent one with user's magicprotools link
+                for draft in draft_sessions:
+                    if draft.magicprotools_links and user_id in draft.magicprotools_links:
+                        found_draft = draft
+                        found_url = draft.magicprotools_links.get(user_id, {}).get("link")
+                        found_cube = draft.cube
+                        
+                        # Get the draft timestamp for the message
+                        if draft.teams_start_time:
+                            draft_time = int(draft.teams_start_time.timestamp())
+                        break
+                
+                if not found_draft or not found_url:
+                    await ctx.followup.send("No recent drafts found for you in this server. Please provide a URL manually.", ephemeral=True)
+                    return
+                
+                # Calculate W-L record for this draft if not provided
+                if not record and found_draft:
+                    # Find match results for this session
+                    match_stmt = select(MatchResult).where(
+                        and_(
+                            MatchResult.session_id == found_draft.session_id,
+                            or_(
+                                MatchResult.player1_id == user_id,
+                                MatchResult.player2_id == user_id
+                            )
+                        )
+                    )
+                    match_result = await session.execute(match_stmt)
+                    match_results = match_result.scalars().all()
+                    
+                    wins = 0
+                    losses = 0
+                    
+                    for match in match_results:
+                        if match.winner_id == user_id:
+                            wins += 1
+                        elif match.winner_id and match.winner_id != user_id:
+                            losses += 1
+                        # Skip matches with no winner (winner_id is NULL)
+                    
+                    calculated_record = f"{wins}-{losses}" if wins > 0 or losses > 0 else None
+                    
+                    # Use the found information
+                    url = found_url
+                    cube = found_cube if not cube else cube
+                    record = calculated_record if not record else record
+            
+            # Add user submission with all available information
             submission = UserSubmission(
                 url=url,
                 submitted_by=str(ctx.author.id),
-                channel_id=str(log_channel.channel_id)
+                channel_id=str(log_channel.channel_id),
+                cube=cube,
+                record=record
             )
             
             session.add(submission)
             await session.commit()
         
-        await ctx.followup.send(f"✅ Your draft log has been submitted and will be posted anonymously in {channel.mention}. Thank you!", ephemeral=True)
-
+        # Create the success message
+        cube_text = f" ({cube} draft)" if cube else ""
+        record_text = f" with record {record}" if record else ""
+        time_text = f" from <t:{draft_time}:f>" if draft_time else ""
+        
+        await ctx.followup.send(f"✅ Your draft log{cube_text}{record_text}{time_text} has been submitted and will be posted anonymously in {channel.mention}. Thank you!", ephemeral=True)
+        
     @discord.slash_command(
         name="post_draft_log_now",
         description="Immediately post a draft log (Admin only)"
@@ -590,7 +678,7 @@ class DraftLogsCog(commands.Cog):
                 session.add(log_channel)
             
             await session.commit()
-            
+                
             # Post the log to the channel
             discord_channel = self.bot.get_channel(int(channel_id))
             if discord_channel:
@@ -599,7 +687,16 @@ class DraftLogsCog(commands.Cog):
                     description="Draft Logs posted twice a day (10am ET / 1pm ET)!",
                     color=discord.Color.purple()
                 )
-                embed.add_field(name="Draft Log URL", value=log_to_use.url, inline=False)
+                
+                # Create the field name with cube and record if available
+                field_name = "Draft Log URL"
+                if hasattr(log_to_use, 'cube') and log_to_use.cube:
+                    field_name = f"{log_to_use.cube} Draft URL"
+                
+                if hasattr(log_to_use, 'record') and log_to_use.record:
+                    field_name += f". Record: {log_to_use.record}"
+                
+                embed.add_field(name=field_name, value=log_to_use.url, inline=False)
                 embed.set_footer(text="Logs are posted anonymously. Submit your own with /submit_draft_log")
                 
                 await discord_channel.send(embed=embed)
