@@ -6,6 +6,7 @@ from .challenge import Challenge, SwissChallenge
 from .utility import TeamFinder
 from .stake import StakeInfo
 from .leaderboard_message import LeaderboardMessage
+from .draft_logs import LogChannel, BackupLog, UserSubmission, PostSchedule
 
 # Export all models
 __all__ = [
@@ -21,5 +22,9 @@ __all__ = [
     'SwissChallenge',
     'TeamFinder',
     'StakeInfo',
-    'LeaderboardMessage'
+    'LeaderboardMessage',
+    'log_channels',
+    'backup_logs',
+    'user_submissions',
+    'post_schedules'
 ]
