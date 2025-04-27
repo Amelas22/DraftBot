@@ -11,10 +11,6 @@ SPECIAL_GUILD_ID = "336345350535118849"
 # Change this to switch between environments (prod, beta, dev)
 DRAFTMANCER_BASE_URL = "https://draftmancer.com"
 
-# Global flag to enable test features
-# Set to True during development to enable test buttons, False for production
-TEST_MODE_ENABLED = False
-
 class Config:
     def __init__(self):
         # Base configuration for all guilds
@@ -43,7 +39,7 @@ class Config:
                 "winston_draft": False,
                 "voice_channels": False,
                 "bot_detection": False,
-                "money_server": False
+                "money_server": False  
             },
             "matchmaking": {
                 "trueskill_chance": 0  # Default to 0% (always random teams)

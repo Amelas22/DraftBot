@@ -5,7 +5,6 @@ import pytz
 from datetime import datetime, timedelta
 from discord import SelectOption
 from discord.ui import Button, View, Select, select
-from config import TEST_MODE_ENABLED
 from draft_organization.stake_calculator import calculate_stakes_with_strategy
 from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
 from session import StakeInfo, AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
@@ -118,10 +117,6 @@ class PersistentView(discord.ui.View):
 
         if self.session_type == "staked" and self.session_stage != "teams":
             self._add_button("How Bets Work 💰", "green", "explain_stakes", self.explain_stakes_callback)
-            
-            # Add test button only if global test mode is enabled
-            if TEST_MODE_ENABLED:
-                self._add_button("🧪 Add Test Users", "grey", "add_test_users", self.add_test_users_callback)
 
 
     def _apply_stage_button_disabling(self):
@@ -175,181 +170,6 @@ class PersistentView(discord.ui.View):
 
             # Optionally, confirm the update to the user
             await interaction.followup.send(f"League draft status updated: {'ON' if draft_session.tracked_draft else 'OFF'}", ephemeral=True)
-            
-    async def add_test_users_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Add 9 fake users to the draft for testing purposes."""
-        # Only allow admins to use this feature
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("Only server administrators can use this test feature.", ephemeral=True)
-            return
-                    
-        logger.info(f"Adding test users to draft {self.draft_session_id}")
-        
-        # Get the current draft session
-        draft_session = await get_draft_session(self.draft_session_id)
-        if not draft_session:
-            logger.error(f"Draft session {self.draft_session_id} not found")
-            await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
-            return
-            
-        if draft_session.session_stage == "teams":
-            logger.warning(f"Cannot add test users after teams have been created for draft {self.draft_session_id}")
-            await interaction.response.send_message("Cannot add test users after teams have been created.", ephemeral=True)
-            return
-        
-        # First acknowledge the interaction so it doesn't time out
-        await interaction.response.defer(ephemeral=True)
-
-        # Generate unique user IDs starting from a high number to avoid conflicts
-        start_id = 900000000000000000
-        
-        # Create fake users with long names to test the character limit
-        test_names = [
-            "SuperLongUserName_Testing_Character_Limits_One",
-            "AnotherVeryLongUsername_For_Testing_Two", 
-            "ThirdLongUsername_With_Extra_Characters_Three",
-            "FourthLongUsername_To_Test_UI_Rendering_Four",
-            "FifthLongUsername_With_Special_Chars_Five",
-            "SixthLongUsername_Testing_Overflow_Six",
-            "SeventhLongUsername_With_Multiple_Words_Seven",
-            "EighthLongUsername_That_Is_Extremely_Long_Eight",
-            "NinthLongUsername_To_Ensure_We_Hit_The_Limit_Nine",
-        ]
-        
-        logger.info(f"Adding {len(test_names)} test users to draft {self.draft_session_id}")
-        
-        # Create a simpler direct approach - add all test users at once
-        fake_users = {}
-        for i, name in enumerate(test_names):
-            user_id = str(start_id + i)
-            fake_users[user_id] = name
-            logger.info(f"Generated test user: {name} with ID {user_id}")
-            
-        # Get existing sign-ups and add our new users
-        sign_ups = draft_session.sign_ups or {}
-        original_count = len(sign_ups)
-        sign_ups.update(fake_users)
-        logger.info(f"Updated sign_ups from {original_count} to {len(sign_ups)} users")
-        
-        # Database updates - handle stake info for staked drafts
-        async with AsyncSessionLocal() as db_session:
-            async with db_session.begin():
-                # Update the draft session with new sign-ups
-                await db_session.execute(
-                    update(DraftSession).
-                    where(DraftSession.session_id == self.draft_session_id).
-                    values(sign_ups=sign_ups)
-                )
-                
-                # For staked drafts, create stake info entries
-                if draft_session.session_type == "staked":
-                    logger.info(f"Adding stake info for {len(fake_users)} test users")
-                    for user_id, name in fake_users.items():
-                        stake_amount = random.randint(5, 20) * 10
-                        stake_info = StakeInfo(
-                            session_id=draft_session.session_id,
-                            player_id=user_id,
-                            max_stake=stake_amount,
-                            assigned_stake=0,
-                            is_capped=random.choice([True, False])
-                        )
-                        db_session.add(stake_info)
-                        logger.info(f"Added stake info for {name}: max stake {stake_amount}")
-                
-                logger.info(f"Committing changes to database")
-                await db_session.commit()
-        
-        # Fully regenerate the embed with updated information
-        # This is a more reliable approach than trying to patch the existing embed
-        logger.info(f"Regenerating embed with updated user information")
-        
-        # Re-fetch to get the updated session data
-        updated_session = await get_draft_session(self.draft_session_id)
-        if not updated_session:
-            logger.error(f"Failed to fetch updated draft session {self.draft_session_id}")
-            await interaction.followup.send("Error: Could not refresh draft data after adding test users", ephemeral=True)
-            return
-            
-        # Create a new embed with the same properties as the original
-        original_embed = interaction.message.embeds[0]
-        new_embed = discord.Embed(
-            title=original_embed.title,
-            color=original_embed.color
-        )
-        
-        # Update the description with the new user count
-        current_users = len(updated_session.sign_ups)
-        max_users = 8
-        if "Winston Draft" in original_embed.title:
-            max_users = 2
-        
-        # Update user count in description
-        if original_embed.description:
-            lines = original_embed.description.split('\n')
-            user_count_updated = False
-            
-            for i, line in enumerate(lines):
-                if "Current Users:" in line:
-                    lines[i] = f"Current Users: {current_users}/{max_users}"
-                    user_count_updated = True
-                    break
-                    
-            if user_count_updated:
-                new_embed.description = '\n'.join(lines)
-            else:
-                new_embed.description = f"Current Users: {current_users}/{max_users}\n{original_embed.description}"
-        else:
-            new_embed.description = f"Current Users: {current_users}/{max_users}"
-            
-        # Add participants field
-        user_list = [f"{'👤' if i < original_count else '🧪'} {name}" 
-                    for i, name in enumerate(updated_session.sign_ups.values())]
-        
-        # Copy existing fields from original embed except for Participants
-        participant_field_found = False
-        for field in original_embed.fields:
-            if field.name == "Participants":
-                participant_field_found = True
-                new_embed.add_field(
-                    name="Participants",
-                    value="\n".join(user_list) if user_list else "No participants yet",
-                    inline=False
-                )
-            else:
-                new_embed.add_field(
-                    name=field.name,
-                    value=field.value,
-                    inline=field.inline
-                )
-                
-        # If no participants field was found, add it
-        if not participant_field_found:
-            new_embed.add_field(
-                name="Participants",
-                value="\n".join(user_list) if user_list else "No participants yet",
-                inline=False
-            )
-        
-        logger.info(f"Updating message with new embed showing {current_users} participants")
-        
-        # Update the message with the new embed
-        try:
-            await interaction.followup.edit_message(
-                message_id=interaction.message.id,
-                embed=new_embed,
-                view=self
-            )
-            logger.info(f"Successfully updated embed")
-        except Exception as e:
-            logger.error(f"Error updating embed: {e}")
-            
-        # Report success to the user
-        success_msg = f"Added {len(fake_users)} test users to the draft."
-        if draft_session.session_type == "staked":
-            success_msg += " Each user has different stake amounts and preferences."
-            
-        logger.info(f"Test users added successfully: {success_msg}")
-        await interaction.followup.send(success_msg, ephemeral=True)
 
 
     async def sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
