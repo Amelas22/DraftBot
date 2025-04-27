@@ -185,7 +185,7 @@ class PersistentView(discord.ui.View):
                     
         logger.info(f"Adding test users to draft {self.draft_session_id}")
         
-        # Get the current draft session
+        # Fetch the current draft session to ensure it's up to date
         draft_session = await get_draft_session(self.draft_session_id)
         if not draft_session:
             logger.error(f"Draft session {self.draft_session_id} not found")
@@ -256,12 +256,10 @@ class PersistentView(discord.ui.View):
                         db_session.add(stake_info)
                         logger.info(f"Added stake info for {name}: max stake {stake_amount}")
                 
-                logger.info(f"Committing changes to database")
                 await db_session.commit()
         
-        # Fully regenerate the embed with updated information
-        # This is a more reliable approach than trying to patch the existing embed
-        logger.info(f"Regenerating embed with updated user information")
+        # Update the draft message to reflect the new list of sign-ups
+        await update_draft_message(interaction.client, self.draft_session_id)
         
         # Re-fetch to get the updated session data
         updated_session = await get_draft_session(self.draft_session_id)
@@ -269,80 +267,7 @@ class PersistentView(discord.ui.View):
             logger.error(f"Failed to fetch updated draft session {self.draft_session_id}")
             await interaction.followup.send("Error: Could not refresh draft data after adding test users", ephemeral=True)
             return
-            
-        # Create a new embed with the same properties as the original
-        original_embed = interaction.message.embeds[0]
-        new_embed = discord.Embed(
-            title=original_embed.title,
-            color=original_embed.color
-        )
         
-        # Update the description with the new user count
-        current_users = len(updated_session.sign_ups)
-        max_users = 8
-        if "Winston Draft" in original_embed.title:
-            max_users = 2
-        
-        # Update user count in description
-        if original_embed.description:
-            lines = original_embed.description.split('\n')
-            user_count_updated = False
-            
-            for i, line in enumerate(lines):
-                if "Current Users:" in line:
-                    lines[i] = f"Current Users: {current_users}/{max_users}"
-                    user_count_updated = True
-                    break
-                    
-            if user_count_updated:
-                new_embed.description = '\n'.join(lines)
-            else:
-                new_embed.description = f"Current Users: {current_users}/{max_users}\n{original_embed.description}"
-        else:
-            new_embed.description = f"Current Users: {current_users}/{max_users}"
-            
-        # Add participants field
-        user_list = [f"{'👤' if i < original_count else '🧪'} {name}" 
-                    for i, name in enumerate(updated_session.sign_ups.values())]
-        
-        # Copy existing fields from original embed except for Participants
-        participant_field_found = False
-        for field in original_embed.fields:
-            if field.name == "Participants":
-                participant_field_found = True
-                new_embed.add_field(
-                    name="Participants",
-                    value="\n".join(user_list) if user_list else "No participants yet",
-                    inline=False
-                )
-            else:
-                new_embed.add_field(
-                    name=field.name,
-                    value=field.value,
-                    inline=field.inline
-                )
-                
-        # If no participants field was found, add it
-        if not participant_field_found:
-            new_embed.add_field(
-                name="Participants",
-                value="\n".join(user_list) if user_list else "No participants yet",
-                inline=False
-            )
-        
-        logger.info(f"Updating message with new embed showing {current_users} participants")
-        
-        # Update the message with the new embed
-        try:
-            await interaction.followup.edit_message(
-                message_id=interaction.message.id,
-                embed=new_embed,
-                view=self
-            )
-            logger.info(f"Successfully updated embed")
-        except Exception as e:
-            logger.error(f"Error updating embed: {e}")
-            
         # Report success to the user
         success_msg = f"Added {len(fake_users)} test users to the draft."
         if draft_session.session_type == "staked":
