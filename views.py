@@ -873,17 +873,45 @@ class PersistentView(discord.ui.View):
                         color=discord.Color.dark_gold() if session.session_type == "swiss" else discord.Color.green()
                     )
                     
-                    # Add personalized draft links for each user in the channel embed
-                    user_links = []
+                    # Add personalized draft links for each user in the channel embed, separated by teams
+                    # This helps avoid hitting Discord's 1024 character limit per field
+                    team_a_links = []
+                    team_b_links = []
+                    
                     for user_id, display_name in session.sign_ups.items():
                         personalized_link = session.get_draft_link_for_user(display_name)
-                        user_links.append(f"**{display_name}**: [Your Draft Link]({personalized_link})")
+                        link_entry = f"**{display_name}**: [Your Draft Link]({personalized_link})"
+                        
+                        # Sort into appropriate team
+                        if session.session_type == 'swiss':
+                            # For swiss, just put everyone in team_a_links
+                            team_a_links.append(link_entry)
+                        else:
+                            # For team drafts, split by team
+                            if user_id in session.team_a:
+                                team_a_links.append(link_entry)
+                            elif user_id in session.team_b:
+                                team_b_links.append(link_entry)
                     
-                    channel_embed.add_field(
-                        name="Your Personalized Draft Links",
-                        value="\n".join(user_links),
-                        inline=False
-                    )
+                    # Add team A links
+                    if team_a_links:
+                        team_name = "Team Red" if session.session_type in ["random", "staked"] else session.team_a_name
+                        team_name = team_name if team_name else "Team A"
+                        channel_embed.add_field(
+                            name=f"🔴 {team_name} Draft Links",
+                            value="\n".join(team_a_links),
+                            inline=False
+                        )
+                    
+                    # Add team B links
+                    if team_b_links:
+                        team_name = "Team Blue" if session.session_type in ["random", "staked"] else session.team_b_name
+                        team_name = team_name if team_name else "Team B"
+                        channel_embed.add_field(
+                            name=f"🔵 {team_name} Draft Links",
+                            value="\n".join(team_b_links),
+                            inline=False
+                        )
                     
                     # channel_embed.add_field(name="Automatic Rooms Creation", value=countdown_message, inline=False)
 
