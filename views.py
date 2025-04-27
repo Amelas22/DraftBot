@@ -20,6 +20,106 @@ READY_CHECK_COOLDOWNS = {}
 PROCESSING_ROOMS_PAIRINGS = {}
 sessions = {}
 
+def split_content_for_embed(content, include_header=False, max_length=1000):
+    """
+    Helper function to split content into chunks that fit within Discord's embed field value limits.
+    
+    Args:
+        content: Either a list of strings or a single string with newlines
+        include_header: If True, keeps the first line in all chunks
+        max_length: Max character length per chunk (default 1000)
+        
+    Returns:
+        List of content chunks, each under max_length characters
+    """
+    # Handle both list input and string input
+    if isinstance(content, str):
+        lines = content.split('\n')
+    else:
+        lines = content
+        
+    if not lines:
+        return []
+        
+    chunks = []
+    header = lines[0] if include_header else None
+    content_lines = lines[1:] if include_header else lines
+    
+    current_chunk = header if include_header else ""
+    
+    # Helper to check if adding a line would exceed the limit
+    def would_exceed_limit(chunk, line):
+        if not chunk:
+            return False
+        if line:
+            return len(chunk + '\n' + line) > max_length
+        return len(chunk) > max_length
+    
+    for line in content_lines:
+        if not current_chunk:
+            current_chunk = line
+            continue
+            
+        if would_exceed_limit(current_chunk, line):
+            # Current chunk is full
+            chunks.append(current_chunk)
+            current_chunk = header if header else ""
+            
+            # Add the current line to the new chunk
+            if current_chunk:
+                current_chunk += '\n' + line
+            else:
+                current_chunk = line
+        else:
+            # Add line to current chunk
+            current_chunk += '\n' + line
+    
+    # Add the last chunk if it has content
+    if current_chunk:
+        chunks.append(current_chunk)
+        
+    return chunks
+
+def add_links_to_embed_safely(embed, links, base_name, team_color=""):
+    """
+    Helper function to add links to an embed, splitting them into multiple fields if needed
+    to avoid exceeding Discord's 1024 character limit per field.
+    
+    Args:
+        embed: The discord.Embed object to add fields to
+        links: List of link strings to add
+        base_name: Base name for the embed field
+        team_color: Optional color indicator ('red', 'blue', or '') for emoji prefixing
+    """
+    if not links:
+        return
+    
+    # Join links into a single string for processing
+    content = "\n".join(links)
+    
+    # If all links fit in one field, add them directly
+    if len(content) <= 1000:
+        emoji = "🔴 " if team_color == "red" else "🔵 " if team_color == "blue" else ""
+        embed.add_field(
+            name=f"{emoji}{base_name}",
+            value=content,
+            inline=False
+        )
+        return
+    
+    # Otherwise, split into chunks and add as multiple fields
+    chunks = split_content_for_embed(links)
+    emoji = "🔴 " if team_color == "red" else "🔵 " if team_color == "blue" else ""
+    
+    for i, chunk in enumerate(chunks):
+        suffix = "" if i == 0 else f" (part {i+1})"
+        value = chunk if isinstance(chunk, str) else "\n".join(chunk)
+        embed.add_field(
+            name=f"{emoji}{base_name}{suffix}",
+            value=value,
+            inline=False
+        )
+
 
 class PersistentView(discord.ui.View):
 
@@ -811,13 +911,10 @@ class PersistentView(discord.ui.View):
                     user_links = []
                     for user_id, display_name in session.sign_ups.items():
                         personalized_link = session.get_draft_link_for_user(display_name)
-                        user_links.append(f"**{display_name}**: [Your Draft Link]({personalized_link})")
+                        user_links.append(f"**{display_name}**: [Draft Link]({personalized_link})")
                     
-                    embed.add_field(
-                        name="Your Personalized Draft Links",
-                        value="\n".join(user_links),
-                        inline=False
-                    )
+                    # Use the helper function to safely add links to the embed
+                    add_links_to_embed_safely(embed, user_links, "Your Personalized Draft Links")
                     
                     if session.session_type != 'swiss':
                         # Change to Team Red and Team Blue with emojis
@@ -846,10 +943,10 @@ class PersistentView(discord.ui.View):
                         
                         # Add the stakes field to the embed
                         if formatted_lines:
-                            embed.add_field(
-                                name=f"Bets (Total: {total_stakes} tix)",
-                                value="\n".join(formatted_lines),
-                                inline=False
+                            add_links_to_embed_safely(
+                                embed, 
+                                formatted_lines, 
+                                f"Bets (Total: {total_stakes} tix)"
                             )
                             
                     # # Create automatic room creation countdown - this needs to happen for ALL draft types
@@ -880,7 +977,8 @@ class PersistentView(discord.ui.View):
                     
                     for user_id, display_name in session.sign_ups.items():
                         personalized_link = session.get_draft_link_for_user(display_name)
-                        link_entry = f"**{display_name}**: [Your Draft Link]({personalized_link})"
+                        # Use shorter format to save characters
+                        link_entry = f"**{display_name}**: [Draft Link]({personalized_link})"
                         
                         # Sort into appropriate team
                         if session.session_type == 'swiss':
@@ -897,20 +995,22 @@ class PersistentView(discord.ui.View):
                     if team_a_links:
                         team_name = "Team Red" if session.session_type in ["random", "staked"] else session.team_a_name
                         team_name = team_name if team_name else "Team A"
-                        channel_embed.add_field(
-                            name=f"🔴 {team_name} Draft Links",
-                            value="\n".join(team_a_links),
-                            inline=False
+                        add_links_to_embed_safely(
+                            channel_embed, 
+                            team_a_links, 
+                            f"{team_name} Draft Links", 
+                            "red" if session.session_type in ["random", "staked"] else ""
                         )
                     
                     # Add team B links
                     if team_b_links:
                         team_name = "Team Blue" if session.session_type in ["random", "staked"] else session.team_b_name
                         team_name = team_name if team_name else "Team B"
-                        channel_embed.add_field(
-                            name=f"🔵 {team_name} Draft Links",
-                            value="\n".join(team_b_links),
-                            inline=False
+                        add_links_to_embed_safely(
+                            channel_embed, 
+                            team_b_links, 
+                            f"{team_name} Draft Links", 
+                            "blue" if session.session_type in ["random", "staked"] else ""
                         )
                     
                     # channel_embed.add_field(name="Automatic Rooms Creation", value=countdown_message, inline=False)
@@ -1801,9 +1901,10 @@ async def generate_ready_check_embed(ready_check_status, sign_ups, draft_link, d
         user_links = []
         for user_id, display_name in sign_ups.items():
             personalized_link = draft_session.get_draft_link_for_user(display_name)
-            user_links.append(f"**{display_name}**: [Your Draft Link]({personalized_link})")
+            user_links.append(f"**{display_name}**: [Draft Link]({personalized_link})")
         
-        embed.add_field(name="Your Personalized Draft Links", value="\n".join(user_links), inline=False)
+        # Use our helper function that safely splits fields if they're too long
+        add_links_to_embed_safely(embed, user_links, "Your Personalized Draft Links")
     else:
         # Fallback if draft_session not provided (backwards compatibility)
         embed.add_field(name="Draftmancer Link", value=f"**➡️ [JOIN DRAFT HERE]({draft_link})⬅️**", inline=False)
@@ -2483,8 +2584,28 @@ async def update_draft_message(bot, session_id):
                 logger.warning(f"{field_name} field not found in embed for session {session_id}, adding it")
                 embed.add_field(name=field_name, value=field_value, inline=inline)
         
-        # Update sign-ups field
-        update_field(sign_ups_field_name, sign_ups_str, inline=False)
+        # Find and remove any existing sign-up continuation fields to start fresh
+        fields_to_remove = []
+        for i, field in enumerate(embed.fields):
+            if field.name.startswith(sign_ups_field_name) and field.name != sign_ups_field_name:
+                fields_to_remove.append(i)
+        
+        # Remove fields in reverse order
+        for idx in sorted(fields_to_remove, reverse=True):
+            embed.remove_field(idx)
+        
+        # Check if the sign-ups string is too long
+        if len(sign_ups_str) > 1000:  # Using 1000 to be safe (Discord limit is 1024)
+            # Split the sign-ups into parts using our helper function
+            parts = split_content_for_embed(sign_ups_str, include_header=True)
+            
+            # Update or add fields with standardized names
+            for i, part in enumerate(parts):
+                field_name = sign_ups_field_name if i == 0 else f"{sign_ups_field_name} (cont. {i})"
+                update_field(field_name, part, inline=False)
+        else:
+            # Use the original approach for short sign-ups lists
+            update_field(sign_ups_field_name, sign_ups_str, inline=False)
         
         # Update cube field
         cube_field_name = "Cube:"
