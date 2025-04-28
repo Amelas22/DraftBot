@@ -15,6 +15,12 @@ from config import get_draftmancer_websocket_url, get_draftmancer_base_url
 from models.draft_session import DraftSession
 from bot_registry import get_bot
 
+# Constants
+READY_CHECK_INSTRUCTIONS = (
+    "If the seating order is wrong, or if someone missed the ready check, please run `/ready` again — this will reset the seating order and start a new ready check. "
+    "You can also use `/mutiny` to take control if needed."
+)
+
 # Load environment variables
 load_dotenv()
 
@@ -975,7 +981,7 @@ class DraftSetupManager:
                     
             message = await channel.send(
                 f"Seating order set. Draftmancer Readycheck in progress: 0/{self.expected_user_count} ready.\n"
-                f"Use `/ready` to initiate another check or `/mutiny` to take control if needed."
+                f"{READY_CHECK_INSTRUCTIONS}"
             )
             
             # Store message ID safely
@@ -1152,7 +1158,7 @@ class DraftSetupManager:
                     ready_count = len(self.ready_users)
                     new_content = (
                         f"Seating order set. Draftmancer Readycheck in progress: {ready_count}/{self.expected_user_count} ready.\n"
-                        f"Use `/ready` to initiate another check or `/mutiny` to take control if needed."
+                        f"{READY_CHECK_INSTRUCTIONS}"
                     )
                     self.logger.info(f"Updating message to show {ready_count}/{self.expected_user_count} ready")
                     await message.edit(content=new_content)
@@ -1197,7 +1203,7 @@ class DraftSetupManager:
                     if channel:
                         await channel.send(
                             f"⚠️ Ready Check Failed.{missing_text}\n"
-                            f"Use the command `/ready` to initiate another ready check or `/mutiny` to take control if needed."
+                            f"{READY_CHECK_INSTRUCTIONS}"
                         )
                 except Exception as e:
                     self.logger.error(f"Failed to send timeout message: {e}")
