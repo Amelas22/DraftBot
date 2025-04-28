@@ -1113,24 +1113,19 @@ class OptimizedStakeCalculator:
             else:
                 above_min_players.append((player_id, max_stake))
         
-        # Step 2: For above_min_players, cap bets based on theoretical maximum allocation
+        # Step 2: For above_min_players, cap bets based on highest bet on min team
         if above_min_players and min_team:
-            # Calculate the theoretical max a single player could be allocated
-            min_team_count = len(min_team)
-            min_team_total_stakes = sum(stake for _, stake in min_team)
+            # Find the highest bet on the min team
+            highest_min_team_bet = max(stake for _, stake in min_team) if min_team else min_stake
             
-            # Formula: Min team total - ((min_team_count - 1) * min_stake)
-            theoretical_max = min_team_total_stakes - ((min_team_count - 1) * min_stake)
-            theoretical_max = max(theoretical_max, min_stake)  # Ensure at least min_stake
+            stake_logger.info(f"Highest min team bet: {highest_min_team_bet}")
             
-            stake_logger.info(f"Theoretical max bet: {theoretical_max} (min team total: {min_team_total_stakes}, players: {min_team_count})")
-            
-            # Iterate through above_min_players and cap any whose bet exceeds theoretical_max
+            # Iterate through above_min_players and cap any whose bet exceeds highest_min_team_bet
             for i in range(len(above_min_players)):
                 player_id, max_stake = above_min_players[i]
-                if max_stake > theoretical_max:
-                    above_min_players[i] = (player_id, theoretical_max)
-                    stake_logger.info(f"Capped bettor {player_id} from {max_stake} to {theoretical_max}")
+                if max_stake > highest_min_team_bet:
+                    above_min_players[i] = (player_id, highest_min_team_bet)
+                    stake_logger.info(f"Capped bettor {player_id} from {max_stake} to {highest_min_team_bet}")
         
         # Step 3: Calculate total allocated to min stake players
         min_stake_allocation = sum(min(stake, min_stake) for _, stake in min_stake_players)

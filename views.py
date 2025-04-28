@@ -3477,42 +3477,37 @@ class StakeCalculationButton(discord.ui.Button):
                 
         else:
             # For proportional approach - keeping original logic
-            allocation_text.append("**Step 1: Calculate Theoretical Maximum Bid**")
+            allocation_text.append("**Step 1: Calculate Highest Min Team Bet**")
+            highest_min_team_bet = max([capped_stakes.get(p, 0) for p in min_team if p in capped_stakes])
             min_stake_value = min([s for s in capped_stakes.values() if s > 0])
-            theoretical_max = min_team_total - ((len(min_team) - 1) * min_stake_value)
-            theoretical_max = max(theoretical_max, min_stake_value)  # Ensure at least min_stake
             
-            allocation_text.append(f"Theoretical Max Bid = Min Team Total - (Min Team Count - 1) × Minimum Stake")
-            allocation_text.append(f"Theoretical Max Bid = {min_team_total} - ({len(min_team) - 1} × {min_stake_value}) = {theoretical_max} tix")
+            allocation_text.append(f"Highest Min Team Bet = {highest_min_team_bet} tix")
             
-            # Step 2: Apply caps to high bettors
-            allocation_text.append("\n**Step 2: Apply Theoretical Maximum Cap**")
+            # Step 2: Apply caps to high bettors based on highest min team bet
+            allocation_text.append("\n**Step 2: Apply Highest Min Team Bet Cap**")
             for player_id, original in sorted([(p, capped_stakes.get(p, 0)) for p in max_team if p in capped_stakes], 
                                             key=lambda x: x[1], reverse=True):
                 player_name = player_names.get(player_id, "Unknown")
-                if original > theoretical_max:
-                    allocation_text.append(f"{player_name}: {original} → {theoretical_max} tix (capped by algorithm)")
+                if original > highest_min_team_bet:
+                    allocation_text.append(f"{player_name}: {original} → {highest_min_team_bet} tix (capped by algorithm)")
             
             # Step 3: Calculate proportional allocation
             allocation_text.append("\n**Step 3: Calculate Max Team Proportional Allocation**")
             
             # Rest of proportional approach logic
-            # Find the minimum stake value in the draft
-            min_stake_value = min([s for s in capped_stakes.values() if s > 0])
-
             # Identify min bettors on max team (players betting exactly min_stake_value)
             min_bettors = [(p, capped_stakes.get(p, 0)) for p in max_team 
                         if p in capped_stakes and capped_stakes.get(p, 0) == min_stake_value]
             min_bettors_total = sum(stake for _, stake in min_bettors)
 
             # Identify all other max team players (those betting more than min_stake_value)
-            above_min_bettors = [(p, capped_stakes.get(p, 0)) for p in max_team 
+            above_min_bettors = [(p, min(capped_stakes.get(p, 0), highest_min_team_bet)) for p in max_team 
                                 if p in capped_stakes and capped_stakes.get(p, 0) > min_stake_value]
             above_min_bettors.sort(key=lambda x: x[1], reverse=True)  # Sort by stake amount
 
             # Calculate remaining capacities
             remaining_min_capacity = min_team_total - min_bettors_total
-            remaining_max_capacity = sum(min(stake, theoretical_max) for _, stake in above_min_bettors)
+            remaining_max_capacity = sum(stake for _, stake in above_min_bettors)
 
             # Calculate the proportional allocation percentage
             if remaining_max_capacity > 0:
@@ -3534,7 +3529,7 @@ class StakeCalculationButton(discord.ui.Button):
 
             for player_id, stake in above_min_bettors:
                 player_name = player_names.get(player_id, "Unknown")
-                capped_stake = min(stake, theoretical_max)
+                capped_stake = min(stake, highest_min_team_bet)  # Using highest min team bet
                 
                 # Calculate raw allocation before rounding
                 raw_allocation = capped_stake * proportional_percentage_capped / 100
@@ -3580,7 +3575,7 @@ class StakeCalculationButton(discord.ui.Button):
             for player_id, original in sorted([(p, capped_stakes.get(p, 0)) for p in max_team if p in capped_stakes], 
                                             key=lambda x: x[1], reverse=True):
                 player_name = player_names.get(player_id, "Unknown")
-                stake = min(original, theoretical_max)  # Apply theoretical max
+                stake = min(original, highest_min_team_bet)  # Apply highest min team bet cap
                 allocated = final_allocations.get(player_id, 0)
                 percentage = (allocated / original * 100) if original > 0 else 0
                 allocation_text.append(f"{player_name}: {allocated}/{original} tix ({percentage:.1f}%)")
