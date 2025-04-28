@@ -142,8 +142,15 @@ class DraftSetupManager:
         @self.sio.on('updateUser')
         async def on_user_update(data):
             if data.get('userID') != 'DraftBot':
+                user_name = data.get('userName', 'Unknown')
                 self.logger.info(f"Another user joined/updated: {data}")
+                # Check if this is during an active ready check
+                if self.ready_check_active:
+                    self.logger.info(f"User {user_name} joined/left during active ready check - invalidating ready check")
+                    # Just invalidate the ready check without trying to restart it
+                    await self.invalidate_ready_check(user_name)
                 # Update Discord status message immediately
+                # This will auto-initiate a new ready check when all users are present
                 await self.update_status_message_after_user_change()
 
         # Listen for user changes in ready state status
@@ -210,11 +217,16 @@ class DraftSetupManager:
             
             # Store the complete user data
             previous_users = self.session_users.copy() if hasattr(self, 'session_users') else []
+            
+            # Get previous non-bot users for comparison
+            previous_non_bot_users = [user for user in previous_users if user.get('userName') != 'DraftBot']
+            previous_count = self.users_count
+            
+            # Update to new users list
             self.session_users = users
             
-            # Count non-bot users
+            # Count current non-bot users
             non_bot_users = [user for user in users if user.get('userName') != 'DraftBot']
-            previous_count = self.users_count
             self.users_count = len(non_bot_users)  # Only count non-bot users
             
             self.logger.info(
@@ -222,17 +234,32 @@ class DraftSetupManager:
                 f"User IDs={[user.get('userID') for user in non_bot_users]}"
             )
             
+            # Check if user count decreased (someone left)
+            if self.ready_check_active and previous_count > self.users_count:
+                # Someone left during an active ready check - identify who left
+                previous_usernames = {user.get('userName') for user in previous_non_bot_users}
+                current_usernames = {user.get('userName') for user in non_bot_users}
+                left_users = previous_usernames - current_usernames
+                
+                left_user_name = next(iter(left_users)) if left_users else "Unknown"
+                self.logger.info(f"User {left_user_name} left during active ready check - invalidating ready check")
+                await self.invalidate_ready_check(left_user_name)
+            
             # Check if user list changed and update status message if needed
             if previous_count != self.users_count or len(previous_users) != len(users):
                 self.logger.info(f"User count changed from {previous_count} to {self.users_count}, updating status message")
                 await self.update_status_message_after_user_change()
             
-            # IMPORTANT: If we've reached the expected count of users, check immediately
-            if (self.expected_user_count is not None and 
+            # IMPORTANT: If we've reached the expected count of users or seating order 
+            # is not set and we have all users, check immediately
+            if ((self.expected_user_count is not None and 
                 previous_count < self.expected_user_count and 
-                self.users_count >= self.expected_user_count):
+                self.users_count >= self.expected_user_count) or
+                (not self.seating_order_set and 
+                 self.users_count >= self.expected_user_count and
+                 self.expected_user_count > 0)):
                 
-                self.logger.info(f"Reached expected user count! Attempting seating order")
+                self.logger.info(f"Reached expected user count or need to reset seating! Attempting seating order")
                 await self.check_session_stage_and_organize()
                 return
             
@@ -1198,15 +1225,38 @@ class DraftSetupManager:
                 if missing_users:
                     missing_text = f"\nWaiting for: **{', '.join(missing_users)}**"
                 
+                # Prepare the timeout message
+                timeout_message = f"⚠️ **Ready check failed!** Timed out after {seconds} seconds.{missing_text}\n" \
+                                  f"A new ready check will start automatically when all players are present."
+                
+                # Get the channel - needed for either approach
                 try:
                     channel = bot.get_channel(int(self.draft_channel_id))
-                    if channel:
-                        await channel.send(
-                            f"⚠️ Ready Check Failed.{missing_text}\n"
-                            f"{READY_CHECK_INSTRUCTIONS}"
-                        )
+                    if not channel:
+                        self.logger.error(f"Could not find channel with ID {self.draft_channel_id}")
+                    else:
+                        # Try to update existing message first
+                        message_updated = False
+                        if self.ready_check_message_id:
+                            try:
+                                message = await channel.fetch_message(int(self.ready_check_message_id))
+                                await message.edit(content=timeout_message)
+                                message_updated = True
+                                self.logger.info("Ready check message updated successfully for timeout")
+                            except Exception as e:
+                                self.logger.error(f"Failed to update ready check message on timeout: {e}")
+                                # Continue to fallback
+                        
+                        # Always send a new notification for timeout with instructions
+                        try:
+                            await channel.send(
+                                f"⚠️ Ready Check Failed.{missing_text}\n"
+                                f"{READY_CHECK_INSTRUCTIONS}"
+                            )
+                        except Exception as e:
+                            self.logger.error(f"Failed to send timeout message: {e}")
                 except Exception as e:
-                    self.logger.error(f"Failed to send timeout message: {e}")
+                    self.logger.error(f"Error handling ready check timeout: {e}")
                 
                 # Reset message ID but keep tracking readiness
                 self.ready_check_message_id = None
@@ -1258,6 +1308,77 @@ class DraftSetupManager:
         except Exception as e:
             self.logger.exception(f"Error completing ready check: {e}")
 
+    async def invalidate_ready_check(self, user_name):
+        """
+        Invalidates the current ready check when a user joins or leaves during the ready check.
+        This only cancels the current ready check without trying to restart it.
+        The update_status_message_after_user_change method will handle restarting when all users are present.
+        """
+        self.logger.info(f"Invalidating ready check due to user change from {user_name}")
+        
+        # Cancel the current ready check timer if it exists
+        if self.ready_check_timer:
+            try:
+                self.ready_check_timer.cancel()
+                self.ready_check_timer = None
+            except Exception as e:
+                self.logger.error(f"Error cancelling ready check timer during invalidation: {e}")
+                
+        # Get the bot instance
+        bot = get_bot()
+        if not bot:
+            self.logger.error("Could not get bot instance for ready check invalidation")
+            return
+            
+        # Prepare the failure message
+        failure_message = f"⚠️ **Ready check failed!** User {user_name} joined or left during the ready check.\n" \
+                         f"A new ready check will start automatically when all players are present."
+                         
+        # Get the channel - needed for either approach
+        try:
+            channel = bot.get_channel(int(self.draft_channel_id))
+            if not channel:
+                self.logger.error(f"Could not find channel with ID {self.draft_channel_id}")
+                return
+        except Exception as e:
+            self.logger.error(f"Error getting channel: {e}")
+            return
+            
+        # Try to update existing message first
+        message_updated = False
+        if self.ready_check_message_id:
+            try:
+                message = await channel.fetch_message(int(self.ready_check_message_id))
+                await message.edit(content=failure_message)
+                message_updated = True
+                self.logger.info("Ready check message updated successfully")
+            except Exception as e:
+                self.logger.error(f"Failed to update ready check message: {e}")
+                # Continue to fallback
+        
+        # Fallback: If we couldn't update the message or don't have message ID, send a new one
+        if not message_updated:
+            try:
+                await channel.send(failure_message)
+                self.logger.info("Sent new ready check failure message")
+            except Exception as e:
+                self.logger.error(f"Failed to send ready check failure message: {e}")
+            
+        # Reset the ready check state
+        self.ready_check_active = False
+        self.ready_users.clear()
+        self.post_timeout_ready_users.clear()
+        self.ready_check_message_id = None
+        
+        # Also reset the seating order flag so it will be re-verified
+        self.seating_order_set = False
+        self.seating_attempts = 0  # Reset attempt counter
+        
+        # Note: We don't try to restart the ready check here.
+        # The update_status_message_after_user_change method will detect when
+        # all expected users are present and call check_session_stage_and_organize,
+        # which will verify seating and automatically start a new ready check
+            
     async def start_draft(self):
         """Start the draft after successful ready check"""
         try:
