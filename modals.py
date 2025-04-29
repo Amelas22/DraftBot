@@ -49,10 +49,10 @@ class CubeDraftModal(discord.ui.Modal):
         details: SessionDetails = SessionDetails(interaction)
         
         # If custom cube, get name from input, otherwise use preset choice
-        if hasattr(self, 'cube_choice'):
-            details.cube_choice = self.cube_choice
-        else:
+        if self.cube_choice == "custom":
             details.cube_choice = self.children[0].value
+        else:
+            details.cube_choice = self.cube_choice
 
         if self.session_type == "premade":
             input_offset = 0 if hasattr(self, 'cube_choice') else 1
