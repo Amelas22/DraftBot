@@ -301,9 +301,7 @@ class DraftLogsCog(commands.Cog):
     async def submit_log(
         self,
         ctx,
-        url: Optional[str] = None,
-        cube: Optional[str] = None,
-        record: Optional[str] = None
+        url: Optional[str] = None
     ):
         """
         Submit your MTG draft log
@@ -311,8 +309,6 @@ class DraftLogsCog(commands.Cog):
         Parameters
         ----------
         url: URL to your draft log (optional - will use your most recent draft if not provided)
-        cube: The cube that was drafted (optional)
-        record: The W-L record for this draft (optional)
         """
         await ctx.defer(ephemeral=True)
         
@@ -334,77 +330,35 @@ class DraftLogsCog(commands.Cog):
                 await ctx.followup.send("The configured log channel no longer exists. Please ask an admin to set up a new one.", ephemeral=True)
                 return
             
-            # If URL is not provided, search for the user's most recent draft
+            user_id = str(ctx.author.id)
+            draft = None
+            cube = None
+            record = None
             draft_time = None
-            if not url:
-                # Import DraftSession model
-                from models.draft_session import DraftSession
-                from models.match import MatchResult
+            
+            # CASE 1 & 2: URL is provided - check if it's in the database
+            if url:
+                # Look for drafts with this URL in magicprotools_links
+                draft, player_id, cube, draft_time = await self.find_draft_by_url(session, url, str(ctx.guild.id))
                 
-                # Find most recent draft that has magicprotools_links with the user's ID
-                # Also filter by the current guild ID
-                draft_stmt = select(DraftSession).where(
-                    and_(
-                        DraftSession.magicprotools_links.is_not(None),
-                        DraftSession.guild_id == str(ctx.guild.id)  # Filter by current guild
-                    )
-                ).order_by(desc(DraftSession.draft_start_time))
+                # CASE 1: URL found in database - Calculate W-L record
+                if draft:
+                    user_id = player_id  # Use the ID of the player who drafted this deck
+                    record = await self.calculate_record_for_draft(session, draft, user_id)
                 
-                draft_result = await session.execute(draft_stmt)
-                draft_sessions = draft_result.scalars().all()
+                # CASE 2: URL submitted but not found in database
+                # All values remain as initially set (None)
+            
+            # CASE 3: No URL submitted - use most recent draft
+            else:
+                draft, url, cube, draft_time = await self.find_recent_draft_for_user(session, user_id, str(ctx.guild.id))
                 
-                user_id = str(ctx.author.id)
-                found_draft = None
-                found_url = None
-                found_cube = None
-                
-                # Loop through drafts to find most recent one with user's magicprotools link
-                for draft in draft_sessions:
-                    if draft.magicprotools_links and user_id in draft.magicprotools_links:
-                        found_draft = draft
-                        found_url = draft.magicprotools_links.get(user_id, {}).get("link")
-                        found_cube = draft.cube
-                        
-                        # Get the draft timestamp for the message
-                        if draft.teams_start_time:
-                            draft_time = int(draft.teams_start_time.timestamp())
-                        break
-                
-                if not found_draft or not found_url:
-                    await ctx.followup.send("No recent drafts found for you in this server. Please provide a URL manually.", ephemeral=True)
+                if not draft or not url:
+                    await ctx.followup.send("No recent drafts found for you in this server. Please provide a URL.", ephemeral=True)
                     return
                 
-                # Calculate W-L record for this draft if not provided
-                if not record and found_draft:
-                    # Find match results for this session
-                    match_stmt = select(MatchResult).where(
-                        and_(
-                            MatchResult.session_id == found_draft.session_id,
-                            or_(
-                                MatchResult.player1_id == user_id,
-                                MatchResult.player2_id == user_id
-                            )
-                        )
-                    )
-                    match_result = await session.execute(match_stmt)
-                    match_results = match_result.scalars().all()
-                    
-                    wins = 0
-                    losses = 0
-                    
-                    for match in match_results:
-                        if match.winner_id == user_id:
-                            wins += 1
-                        elif match.winner_id and match.winner_id != user_id:
-                            losses += 1
-                        # Skip matches with no winner (winner_id is NULL)
-                    
-                    calculated_record = f"{wins}-{losses}" if wins > 0 or losses > 0 else None
-                    
-                    # Use the found information
-                    url = found_url
-                    cube = found_cube if not cube else cube
-                    record = calculated_record if not record else record
+                # Calculate W-L record
+                record = await self.calculate_record_for_draft(session, draft, user_id)
             
             # Add user submission with all available information
             submission = UserSubmission(
@@ -423,8 +377,12 @@ class DraftLogsCog(commands.Cog):
         record_text = f" with record {record}" if record else ""
         time_text = f" from <t:{draft_time}:f>" if draft_time else ""
         
-        await ctx.followup.send(f"✅ Your draft log{cube_text}{record_text}{time_text} has been submitted and will be posted anonymously in {channel.mention}. Thank you!", ephemeral=True)
-        
+        # Change message based on which case was used
+        if url and not draft:  # CASE 2
+            await ctx.followup.send(f"✅ Your custom draft log URL has been submitted and will be posted anonymously in {channel.mention}. Thank you!", ephemeral=True)
+        else:  # CASE 1 or 3
+            await ctx.followup.send(f"✅ Your draft log{cube_text}{record_text}{time_text} has been submitted and will be posted anonymously in {channel.mention}. Thank you!", ephemeral=True)
+                    
     @discord.slash_command(
         name="post_draft_log_now",
         description="Immediately post a draft log (Admin only)"
@@ -703,7 +661,84 @@ class DraftLogsCog(commands.Cog):
                 return True
             
             return False
+        
+    async def find_draft_by_url(self, session, url, guild_id):
+        """Find a draft by URL in the database"""
+        from models.draft_session import DraftSession
+        
+        draft_sessions_stmt = select(DraftSession).where(
+            DraftSession.guild_id == guild_id
+        ).order_by(desc(DraftSession.draft_start_time))
+        
+        draft_result = await session.execute(draft_sessions_stmt)
+        all_draft_sessions = draft_result.scalars().all()
+        
+        for draft in all_draft_sessions:
+            if draft.magicprotools_links:
+                for player_id, link_data in draft.magicprotools_links.items():
+                    if link_data.get("link") == url:
+                        draft_time = None
+                        if draft.teams_start_time:
+                            draft_time = int(draft.teams_start_time.timestamp())
+                        return draft, player_id, draft.cube, draft_time
+        
+        return None, None, None, None
 
+    async def find_recent_draft_for_user(self, session, user_id, guild_id):
+        """Find the most recent draft for a user"""
+        from models.draft_session import DraftSession
+        
+        draft_stmt = select(DraftSession).where(
+            and_(
+                DraftSession.magicprotools_links.is_not(None),
+                DraftSession.guild_id == guild_id
+            )
+        ).order_by(desc(DraftSession.draft_start_time))
+        
+        draft_result = await session.execute(draft_stmt)
+        draft_sessions = draft_result.scalars().all()
+        
+        for draft in draft_sessions:
+            if draft.magicprotools_links and user_id in draft.magicprotools_links:
+                url = draft.magicprotools_links.get(user_id, {}).get("link")
+                draft_time = None
+                if draft.teams_start_time:
+                    draft_time = int(draft.teams_start_time.timestamp())
+                return draft, url, draft.cube, draft_time
+        
+        return None, None, None, None
+
+    async def calculate_record_for_draft(self, session, draft, user_id):
+        """Calculate the W-L record for a user in a draft"""
+        from models.match import MatchResult
+        
+        match_stmt = select(MatchResult).where(
+            and_(
+                MatchResult.session_id == draft.session_id,
+                or_(
+                    MatchResult.player1_id == user_id,
+                    MatchResult.player2_id == user_id
+                )
+            )
+        )
+        match_result = await session.execute(match_stmt)
+        match_results = match_result.scalars().all()
+        
+        wins = 0
+        losses = 0
+        
+        for match in match_results:
+            if match.winner_id == user_id:
+                wins += 1
+            elif match.winner_id and match.winner_id != user_id:
+                losses += 1
+            # Skip matches with no winner (winner_id is NULL)
+        
+        if wins > 0 or losses > 0:
+            return f"{wins}-{losses}"
+        else:
+            return None
+            
     @tasks.loop(minutes=1)
     async def check_and_post(self):
         """Check if it's time to post a log in any channels"""
