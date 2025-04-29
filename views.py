@@ -744,6 +744,8 @@ class PersistentView(discord.ui.View):
 
         # Save this status in a global sessions dictionary
         sessions[self.draft_session_id] = ready_check_status
+        logger.info(f"✅ Ready check initiated - registered session ID {self.draft_session_id} in sessions dictionary")
+        logger.debug(f"Sessions dictionary now contains {list(sessions.keys())}")
 
         # Disable the "Ready Check" button
         for item in self.children:
@@ -775,392 +777,398 @@ class PersistentView(discord.ui.View):
             del READY_CHECK_COOLDOWNS[draft_session_id]
 
     async def cleanup_ready_check(self, draft_session_id):
-        await asyncio.sleep(600)  # Wait for 10 minutes
+        await asyncio.sleep(1800)  # Wait for 30 minutes
         try:
             if draft_session_id in sessions:
+                logger.warning(f"⚠️ Removing session {draft_session_id} from sessions dictionary due to timeout")
                 del sessions[draft_session_id]  # Clean up the session data
-        except discord.NotFound:
-            # The message was already deleted or not found
-            pass
+                logger.debug(f"Sessions dictionary after cleanup: {list(sessions.keys())}")
+            else:
+                logger.info(f"Session {draft_session_id} already removed from sessions dictionary")
         except Exception as e:
-            print(f"Failed to delete ready check message: {e}")
+            logger.error(f"Failed during ready check cleanup: {e}")
 
     async def randomize_teams_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-            bot = interaction.client
-            session_id = self.draft_session_id
-
-            # Check for stake-related requirements first
-            if self.session_type == "staked":
-                # First, check if a ready check has been performed
-                ready_check_performed = session_id in sessions
-                if not ready_check_performed:
-                    await interaction.response.send_message(
-                        "You must perform a Ready Check before creating teams for a money draft.",
-                        ephemeral=True
-                    )
-                    return
+        bot = interaction.client
+        session_id = self.draft_session_id
+        logger.info(f"Create teams initiated for session {self.draft_session_id} of type {self.session_type}")
+        logger.info(f"Create teams - checking sessions dict: {list(sessions.keys())}")
+        
+        if self.session_type == "staked":
+            # First, check if a ready check has been performed
+            ready_check_performed = session_id in sessions
+            logger.info(f"Ready check verification: session_id={session_id}, in sessions dict={ready_check_performed}")
+            logger.debug(f"Current sessions in dictionary: {list(sessions.keys())}")
+            
+            if not ready_check_performed:
+                logger.warning(f"❌ Ready check verification failed for session {session_id}")
+                await interaction.response.send_message(
+                    "You must perform a Ready Check before creating teams for a money draft.",
+                    ephemeral=True
+                )
+                return
+            
+            # Check that all players have set their stakes
+            from utils import get_missing_stake_players
+            missing_players = await get_missing_stake_players(session_id)
+            if missing_players:
+                # Get display names for the missing players
+                guild = bot.get_guild(int(interaction.guild_id))
+                missing_names = []
+                for pid in missing_players:
+                    member = guild.get_member(int(pid))
+                    if member:
+                        missing_names.append(member.display_name)
                 
-                # Check that all players have set their stakes
-                from utils import get_missing_stake_players
-                missing_players = await get_missing_stake_players(session_id)
-                if missing_players:
-                    # Get display names for the missing players
-                    guild = bot.get_guild(int(interaction.guild_id))
-                    missing_names = []
-                    for pid in missing_players:
-                        member = guild.get_member(int(pid))
-                        if member:
-                            missing_names.append(member.display_name)
-                    
-                    # Format error message
-                    players_str = ", ".join(missing_names)
-                    await interaction.response.send_message(
-                        f"Cannot create teams yet. The following players need to set their stakes: {players_str}",
-                        ephemeral=True
-                    )
+                # Format error message
+                players_str = ", ".join(missing_names)
+                await interaction.response.send_message(
+                    f"Cannot create teams yet. The following players need to set their stakes: {players_str}",
+                    ephemeral=True
+                )
+                return
+            
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                stmt = select(DraftSession).where(DraftSession.session_id == session_id)
+                result = await db_session.execute(stmt)
+                session = result.scalars().first()
+
+                if not session:
+                    await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
                     return
-                
-            async with AsyncSessionLocal() as db_session:
-                async with db_session.begin():
-                    stmt = select(DraftSession).where(DraftSession.session_id == session_id)
-                    result = await db_session.execute(stmt)
-                    session = result.scalars().first()
-
-                    if not session:
-                        await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
-                        return
-                        
-                    if len(session.sign_ups) % 2 != 0:
-                        await interaction.response.send_message("There must be an even number of players to fire.")
-                        return
-
-                    # Update the session object
-                    session.teams_start_time = datetime.now()
-                    if session.session_type == 'premade':
-                        # 7 days for premade drafts (league matches)
-                        session.deletion_time = datetime.now() + timedelta(days=7)
-                    else:
-                        # 4 hours for other draft types
-                        session.deletion_time = datetime.now() + timedelta(hours=4)
-                    session.session_stage = 'teams'
                     
-                    # Check session type and prepare teams if necessary
-                    if session.session_type == 'random' or session.session_type == 'test' or session.session_type == 'staked':
-                        from utils import split_into_teams
-                        await split_into_teams(bot, session.session_id)
-                        # Re-fetch session to get updated teams
-                        updated_session = await get_draft_session(self.draft_session_id)
-                        
-                        # Now that teams exist, calculate stakes for staked drafts
-                        stake_pairs = []
-                        stake_info_by_player = {}
-                        
-                        if self.session_type == "staked" and updated_session and updated_session.team_a and updated_session.team_b:
-                            # Load player preferences for all participants
-                            all_players = updated_session.team_a + updated_session.team_b
-                            
-                            # Get cap info from database
-                            from preference_service import get_players_bet_capping_preferences
-                            cap_info = await get_players_bet_capping_preferences(all_players, guild_id=str(interaction.guild_id))
-                            
-                            # Calculate and store stakes
-                            await self.calculate_and_store_stakes(interaction, updated_session, cap_info)
-                            
-                            # Fetch the calculated stakes for display
-                            stake_stmt = select(StakeInfo).where(StakeInfo.session_id == session_id)
-                            stake_results = await db_session.execute(stake_stmt)
-                            stake_infos = stake_results.scalars().all()
-                            
-                            # Create a lookup for stake info by player ID
-                            for stake_info in stake_infos:
-                                stake_info_by_player[stake_info.player_id] = stake_info
-                        
-                        session = updated_session
+                if len(session.sign_ups) % 2 != 0:
+                    await interaction.response.send_message("There must be an even number of players to fire.")
+                    return
 
-                    if session.session_type != "swiss":
-                        sign_ups_list = list(session.sign_ups.keys())
-                        if session.session_type == "premade":
-                            seating_order = await generate_seating_order(bot, session)
-                        else:
-                            seating_order = [session.sign_ups[user_id] for user_id in sign_ups_list]
-                        team_a_display_names = [session.sign_ups[user_id] for user_id in session.team_a]
-                        team_b_display_names = [session.sign_ups[user_id] for user_id in session.team_b]
-                        random.shuffle(team_a_display_names)
-                        random.shuffle(team_b_display_names)
+                # Update the session object
+                session.teams_start_time = datetime.now()
+                if session.session_type == 'premade':
+                    # 7 days for premade drafts (league matches)
+                    session.deletion_time = datetime.now() + timedelta(days=7)
+                else:
+                    # 4 hours for other draft types
+                    session.deletion_time = datetime.now() + timedelta(hours=4)
+                session.session_stage = 'teams'
+                
+                # Check session type and prepare teams if necessary
+                if session.session_type == 'random' or session.session_type == 'test' or session.session_type == 'staked':
+                    from utils import split_into_teams
+                    await split_into_teams(bot, session.session_id)
+                    # Re-fetch session to get updated teams
+                    updated_session = await get_draft_session(self.draft_session_id)
+                    
+                    # Now that teams exist, calculate stakes for staked drafts
+                    stake_pairs = []
+                    stake_info_by_player = {}
+                    
+                    if self.session_type == "staked" and updated_session and updated_session.team_a and updated_session.team_b:
+                        # Load player preferences for all participants
+                        all_players = updated_session.team_a + updated_session.team_b
+                        
+                        # Get cap info from database
+                        from preference_service import get_players_bet_capping_preferences
+                        cap_info = await get_players_bet_capping_preferences(all_players, guild_id=str(interaction.guild_id))
+                        
+                        # Calculate and store stakes
+                        await self.calculate_and_store_stakes(interaction, updated_session, cap_info)
+                        
+                        # Fetch the calculated stakes for display
+                        stake_stmt = select(StakeInfo).where(StakeInfo.session_id == session_id)
+                        stake_results = await db_session.execute(stake_stmt)
+                        stake_infos = stake_results.scalars().all()
+                        
+                        # Create a lookup for stake info by player ID
+                        for stake_info in stake_infos:
+                            stake_info_by_player[stake_info.player_id] = stake_info
+                    
+                    session = updated_session
+
+                if session.session_type != "swiss":
+                    sign_ups_list = list(session.sign_ups.keys())
+                    if session.session_type == "premade":
+                        seating_order = await generate_seating_order(bot, session)
                     else:
-                        sign_ups_list = list(session.sign_ups.keys())
-                        random.shuffle(sign_ups_list)  # This shuffles the list in-place
                         seating_order = [session.sign_ups[user_id] for user_id in sign_ups_list]
-                        new_sign_ups = {user_id: session.sign_ups[user_id] for user_id in sign_ups_list}
-                        await db_session.execute(update(DraftSession)
-                                            .where(DraftSession.session_id == session.session_id)
-                                            .values(sign_ups=new_sign_ups))
+                    team_a_display_names = [session.sign_ups[user_id] for user_id in session.team_a]
+                    team_b_display_names = [session.sign_ups[user_id] for user_id in session.team_b]
+                    random.shuffle(team_a_display_names)
+                    random.shuffle(team_b_display_names)
+                else:
+                    sign_ups_list = list(session.sign_ups.keys())
+                    random.shuffle(sign_ups_list)  # This shuffles the list in-place
+                    seating_order = [session.sign_ups[user_id] for user_id in sign_ups_list]
+                    new_sign_ups = {user_id: session.sign_ups[user_id] for user_id in sign_ups_list}
+                    await db_session.execute(update(DraftSession)
+                                        .where(DraftSession.session_id == session.session_id)
+                                        .values(sign_ups=new_sign_ups))
 
-                    # Create the embed message for displaying the teams and seating order
-                    embed = discord.Embed(
-                        title=f"Draft-{session.draft_id} is Ready!",
-                        description=f"**Chosen Cube: [{session.cube}]"
-                                    f"(https://cubecobra.com/cube/list/{session.cube})**\n\n" 
-                                    "Host of Draftmancer must manually adjust seating as per below. \n**TURN OFF RANDOM SEATING SETTING IN DRAFTMANCER**" 
-                                    "\n\n**AFTER THE DRAFT**, select Create Chat Rooms and Post Pairings" 
-                                    "\nPairings will post in the created draft-chat room",
-                        color=discord.Color.dark_gold() if session.session_type == "swiss" else discord.Color.blue()
+                # Create the embed message for displaying the teams and seating order
+                embed = discord.Embed(
+                    title=f"Draft-{session.draft_id} is Ready!",
+                    description=f"**Chosen Cube: [{session.cube}]"
+                                f"(https://cubecobra.com/cube/list/{session.cube})**\n\n" 
+                                "Host of Draftmancer must manually adjust seating as per below. \n**TURN OFF RANDOM SEATING SETTING IN DRAFTMANCER**" 
+                                "\n\n**AFTER THE DRAFT**, select Create Chat Rooms and Post Pairings" 
+                                "\nPairings will post in the created draft-chat room",
+                    color=discord.Color.dark_gold() if session.session_type == "swiss" else discord.Color.blue()
+                )
+                
+                # Add personalized draft links for each user
+                user_links = []
+                for user_id, display_name in session.sign_ups.items():
+                    personalized_link = session.get_draft_link_for_user(display_name)
+                    user_links.append(f"**{display_name}**: [Draft Link]({personalized_link})")
+                
+                # Use the helper function to safely add links to the embed
+                add_links_to_embed_safely(embed, user_links, "Your Personalized Draft Links")
+                
+                if session.session_type != 'swiss':
+                    # Change to Team Red and Team Blue with emojis
+                    embed.add_field(name="🔴 Team Red" if session.session_type == "random" or session.session_type == "staked" else f"{session.team_a_name}", 
+                                    value="\n".join(team_a_display_names), 
+                                    inline=True)
+                    embed.add_field(name="🔵 Team Blue" if session.session_type == "random" or session.session_type == "staked" else f"{session.team_b_name}", 
+                                    value="\n".join(team_b_display_names), 
+                                    inline=True)
+                
+                embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+                
+                # Add stakes information for staked drafts
+                if self.session_type == "staked" and updated_session:
+                    stake_lines, total_stakes = await get_formatted_stake_pairs(
+                        updated_session.session_id,
+                        updated_session.sign_ups
                     )
                     
-                    # Add personalized draft links for each user
-                    user_links = []
-                    for user_id, display_name in session.sign_ups.items():
-                        personalized_link = session.get_draft_link_for_user(display_name)
-                        user_links.append(f"**{display_name}**: [Draft Link]({personalized_link})")
+                    # Format with bold names for the initial display
+                    formatted_lines = []
+                    for line in stake_lines:
+                        parts = line.split(': ')
+                        names = parts[0].split(' vs ')
+                        formatted_lines.append(f"**{names[0]}** vs **{names[1]}**: {parts[1]}")
                     
-                    # Use the helper function to safely add links to the embed
-                    add_links_to_embed_safely(embed, user_links, "Your Personalized Draft Links")
-                    
-                    if session.session_type != 'swiss':
-                        # Change to Team Red and Team Blue with emojis
-                        embed.add_field(name="🔴 Team Red" if session.session_type == "random" or session.session_type == "staked" else f"{session.team_a_name}", 
-                                        value="\n".join(team_a_display_names), 
-                                        inline=True)
-                        embed.add_field(name="🔵 Team Blue" if session.session_type == "random" or session.session_type == "staked" else f"{session.team_b_name}", 
-                                        value="\n".join(team_b_display_names), 
-                                        inline=True)
-                    
-                    embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
-                    
-                    # Add stakes information for staked drafts
-                    if self.session_type == "staked" and updated_session:
-                        stake_lines, total_stakes = await get_formatted_stake_pairs(
-                            updated_session.session_id,
-                            updated_session.sign_ups
+                    # Add the stakes field to the embed
+                    if formatted_lines:
+                        add_links_to_embed_safely(
+                            embed, 
+                            formatted_lines, 
+                            f"Bets (Total: {total_stakes} tix)"
                         )
                         
-                        # Format with bold names for the initial display
-                        formatted_lines = []
-                        for line in stake_lines:
-                            parts = line.split(': ')
-                            names = parts[0].split(' vs ')
-                            formatted_lines.append(f"**{names[0]}** vs **{names[1]}**: {parts[1]}")
-                        
-                        # Add the stakes field to the embed
-                        if formatted_lines:
-                            add_links_to_embed_safely(
-                                embed, 
-                                formatted_lines, 
-                                f"Bets (Total: {total_stakes} tix)"
-                            )
-                            
-                    # # Create automatic room creation countdown - this needs to happen for ALL draft types
-                    # auto_pairings_time = datetime.now() + timedelta(minutes=10)
-                    # auto_pairings_unix = int(auto_pairings_time.timestamp())
-                    # countdown_message = f"Rooms and Pairings will be automatically created <t:{auto_pairings_unix}:R>"
-                    # embed.add_field(name="Automatic Rooms Creation", value=countdown_message, inline=False)
+                # # Create automatic room creation countdown - this needs to happen for ALL draft types
+                # auto_pairings_time = datetime.now() + timedelta(minutes=10)
+                # auto_pairings_unix = int(auto_pairings_time.timestamp())
+                # countdown_message = f"Rooms and Pairings will be automatically created <t:{auto_pairings_unix}:R>"
+                # embed.add_field(name="Automatic Rooms Creation", value=countdown_message, inline=False)
 
-                    # # Schedule the auto-pairings task - for ALL draft types
-                    # if self.draft_session_id in self.AUTO_PAIRINGS_TASKS:
-                    #     self.AUTO_PAIRINGS_TASKS[self.draft_session_id].cancel()
-                    # self.AUTO_PAIRINGS_TASKS[self.draft_session_id] = asyncio.create_task(
-                    #     self.auto_create_rooms_pairings(interaction.client, interaction.guild, auto_pairings_time)
-                    # )
+                # # Schedule the auto-pairings task - for ALL draft types
+                # if self.draft_session_id in self.AUTO_PAIRINGS_TASKS:
+                #     self.AUTO_PAIRINGS_TASKS[self.draft_session_id].cancel()
+                # self.AUTO_PAIRINGS_TASKS[self.draft_session_id] = asyncio.create_task(
+                #     self.auto_create_rooms_pairings(interaction.client, interaction.guild, auto_pairings_time)
+                # )
 
-                    # Create the new channel embed for team announcements
-                    channel_embed = discord.Embed(
-                        title="Teams have been formed. Seating Order Below!",
-                        description=f"**Chosen Cube: [{session.cube}]"
-                                    f"(https://cubecobra.com/cube/list/{session.cube})**\n\n",
-                        color=discord.Color.dark_gold() if session.session_type == "swiss" else discord.Color.green()
-                    )
+                # Create the new channel embed for team announcements
+                channel_embed = discord.Embed(
+                    title="Teams have been formed. Seating Order Below!",
+                    description=f"**Chosen Cube: [{session.cube}]"
+                                f"(https://cubecobra.com/cube/list/{session.cube})**\n\n",
+                    color=discord.Color.dark_gold() if session.session_type == "swiss" else discord.Color.green()
+                )
+                
+                # Add personalized draft links for each user in the channel embed, separated by teams
+                # This helps avoid hitting Discord's 1024 character limit per field
+                team_a_links = []
+                team_b_links = []
+                
+                for user_id, display_name in session.sign_ups.items():
+                    personalized_link = session.get_draft_link_for_user(display_name)
+                    # Use shorter format to save characters
+                    link_entry = f"**{display_name}**: [Draft Link]({personalized_link})"
                     
-                    # Add personalized draft links for each user in the channel embed, separated by teams
-                    # This helps avoid hitting Discord's 1024 character limit per field
-                    team_a_links = []
-                    team_b_links = []
-                    
-                    for user_id, display_name in session.sign_ups.items():
-                        personalized_link = session.get_draft_link_for_user(display_name)
-                        # Use shorter format to save characters
-                        link_entry = f"**{display_name}**: [Draft Link]({personalized_link})"
-                        
-                        # Sort into appropriate team
-                        if session.session_type == 'swiss':
-                            # For swiss, just put everyone in team_a_links
+                    # Sort into appropriate team
+                    if session.session_type == 'swiss':
+                        # For swiss, just put everyone in team_a_links
+                        team_a_links.append(link_entry)
+                    else:
+                        # For team drafts, split by team
+                        if user_id in session.team_a:
                             team_a_links.append(link_entry)
-                        else:
-                            # For team drafts, split by team
-                            if user_id in session.team_a:
-                                team_a_links.append(link_entry)
-                            elif user_id in session.team_b:
-                                team_b_links.append(link_entry)
-                    
-                    # Add team A links
-                    if team_a_links:
-                        team_name = "Team Red" if session.session_type in ["random", "staked"] else session.team_a_name
-                        team_name = team_name if team_name else "Team A"
-                        add_links_to_embed_safely(
-                            channel_embed, 
-                            team_a_links, 
-                            f"{team_name} Draft Links", 
-                            "red" if session.session_type in ["random", "staked"] else ""
-                        )
-                    
-                    # Add team B links
-                    if team_b_links:
-                        team_name = "Team Blue" if session.session_type in ["random", "staked"] else session.team_b_name
-                        team_name = team_name if team_name else "Team B"
-                        add_links_to_embed_safely(
-                            channel_embed, 
-                            team_b_links, 
-                            f"{team_name} Draft Links", 
-                            "blue" if session.session_type in ["random", "staked"] else ""
-                        )
-                    
-                    # channel_embed.add_field(name="Automatic Rooms Creation", value=countdown_message, inline=False)
+                        elif user_id in session.team_b:
+                            team_b_links.append(link_entry)
+                
+                # Add team A links
+                if team_a_links:
+                    team_name = "Team Red" if session.session_type in ["random", "staked"] else session.team_a_name
+                    team_name = team_name if team_name else "Team A"
+                    add_links_to_embed_safely(
+                        channel_embed, 
+                        team_a_links, 
+                        f"{team_name} Draft Links", 
+                        "red" if session.session_type in ["random", "staked"] else ""
+                    )
+                
+                # Add team B links
+                if team_b_links:
+                    team_name = "Team Blue" if session.session_type in ["random", "staked"] else session.team_b_name
+                    team_name = team_name if team_name else "Team B"
+                    add_links_to_embed_safely(
+                        channel_embed, 
+                        team_b_links, 
+                        f"{team_name} Draft Links", 
+                        "blue" if session.session_type in ["random", "staked"] else ""
+                    )
+                
+                # channel_embed.add_field(name="Automatic Rooms Creation", value=countdown_message, inline=False)
 
-                    # Add team information to channel embed
-                    # if session.session_type != 'swiss':
-                    #     channel_embed.add_field(name="🔴 Team Red" if session.session_type == "random" or session.session_type == "staked" else f"{session.team_a_name}", 
-                    #                 value="\n".join(team_a_display_names), 
-                    #                 inline=True)
-                    #     channel_embed.add_field(name="🔵 Team Blue" if session.session_type == "random" or session.session_type == "staked" else f"{session.team_b_name}", 
-                    #                 value="\n".join(team_b_display_names), 
-                    #                 inline=True)
+                # Add team information to channel embed
+                # if session.session_type != 'swiss':
+                #     channel_embed.add_field(name="🔴 Team Red" if session.session_type == "random" or session.session_type == "staked" else f"{session.team_a_name}", 
+                #                 value="\n".join(team_a_display_names), 
+                #                 inline=True)
+                #     channel_embed.add_field(name="🔵 Team Blue" if session.session_type == "random" or session.session_type == "staked" else f"{session.team_b_name}", 
+                #                 value="\n".join(team_b_display_names), 
+                #                 inline=True)
+                
+                # Add seating order to channel embed
+                channel_embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+                
+                # # Add stakes information to channel embed for staked drafts
+                # if self.session_type == "staked" and updated_session:
+                #     # We already have the formatted lines from above
+                #     if formatted_lines:
+                #         channel_embed.add_field(
+                #             name=f"Stakes (Total: {total_stakes} tix)",
+                #             value="\n".join(formatted_lines),
+                #             inline=False
+                #         )
+                
+                # If this is a staked draft, add a button to explain the stake calculations
+                if self.session_type == "staked":
+                    # Create a view with the stake calculation button
+                    stake_view = discord.ui.View(timeout=None)
                     
-                    # Add seating order to channel embed
-                    channel_embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
-                    
-                    # # Add stakes information to channel embed for staked drafts
-                    # if self.session_type == "staked" and updated_session:
-                    #     # We already have the formatted lines from above
-                    #     if formatted_lines:
-                    #         channel_embed.add_field(
-                    #             name=f"Stakes (Total: {total_stakes} tix)",
-                    #             value="\n".join(formatted_lines),
-                    #             inline=False
-                    #         )
-                    
-                    # If this is a staked draft, add a button to explain the stake calculations
-                    if self.session_type == "staked":
-                        # Create a view with the stake calculation button
-                        stake_view = discord.ui.View(timeout=None)
-                        
-                        # Add the existing buttons from self.children to the new view
-                        for item in self.children:
-                            if isinstance(item, discord.ui.Button):
-                                # Clone the button with the same properties
-                                button_copy = CallbackButton(
-                                    label=item.label,
-                                    style=item.style,
-                                    custom_id=item.custom_id,
-                                    custom_callback=item.custom_callback
-                                )
-                                
-                                # Set disabled state based on button type
-                                if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}":
-                                    if self.draft_session_id in ACTIVE_MANAGERS:
-                                        button_copy.disabled = True
-                                    else:
-                                        button_copy.disabled = False
-                                elif item.custom_id == f"cancel_draft_{self.draft_session_id}":
-                                    button_copy.disabled = False
-                                else:
-                                    button_copy.disabled = True
-                                    
-                                stake_view.add_item(button_copy)
-                        
-                        stake_view.add_item(StakeCalculationButton(session.session_id))
-                        
-                        # Use the new view instead of self
-                        try:
-                            await interaction.response.edit_message(embed=embed, view=stake_view)
-                        except Exception as e:
-                            logger.error(f"Failed to update draft message: {e}")
-                        
-                        # Send the channel announcement after responding to the interaction
-                        await interaction.channel.send(embed=channel_embed)
-                        
-                        # Return early to avoid the default response
-                        await db_session.commit()
-                        try:    
-                            # Look for an existing manager
-                            manager = DraftSetupManager.get_active_manager(self.draft_session_id)
-                            
-                            if manager:
-                                logger.info(f"TEAMS CREATED: Found existing manager for session {self.draft_session_id}")
-                                logger.info(f"TEAMS CREATED: Manager state - Seating set: {manager.seating_order_set}, "
-                                            f"Users count: {manager.users_count}, Expected count: {manager.expected_user_count}")
-                                
-                                # Make sure bot instance is set properly
-                                manager.set_bot_instance(interaction.client)
-                                logger.info(f"Set bot instance on manager to ensure Discord messaging works")
-                                
-                                # Manager exists, force a check of session stage
-                                await manager.check_session_stage_and_organize()
-                                
-                                # Also force a refresh of users to ensure accurate count
-                                if manager.sio.connected:
-                                    await manager.sio.emit('getUsers')
-                            else:
-                                logger.info(f"No existing manager for {self.draft_session_id}")
-
-                        except Exception as e:
-                            # Log the error but don't disrupt the normal flow
-                            logger.exception(f"Error setting up draft manager: {e}")
-
-                        if session.tracked_draft and session.premade_match_id is not None:
-                            await check_weekly_limits(interaction, session.premade_match_id, session.session_type, session.session_id)
-                        return
-                    
-                    # Iterate over the view's children (buttons) to update their disabled status
+                    # Add the existing buttons from self.children to the new view
                     for item in self.children:
                         if isinstance(item, discord.ui.Button):
-                            # Enable "Create Rooms" and "Cancel Draft" buttons
+                            # Clone the button with the same properties
+                            button_copy = CallbackButton(
+                                label=item.label,
+                                style=item.style,
+                                custom_id=item.custom_id,
+                                custom_callback=item.custom_callback
+                            )
+                            
+                            # Set disabled state based on button type
                             if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}":
                                 if self.draft_session_id in ACTIVE_MANAGERS:
-                                    item.disabled = True
+                                    button_copy.disabled = True
                                 else:
-                                    item.disabled = False
+                                    button_copy.disabled = False
                             elif item.custom_id == f"cancel_draft_{self.draft_session_id}":
-                                item.disabled = False
+                                button_copy.disabled = False
                             else:
-                                # Disable all other buttons
-                                item.disabled = True
-                    await db_session.commit()
-        
-            # Respond with the embed and updated view
-            try:
-                await interaction.response.edit_message(embed=embed, view=self)
-            except Exception as e:
-                logger.error(f"Failed to update draft message: {e}")
-            
-            # Send the channel announcement after responding to the interaction
-            await interaction.channel.send(embed=channel_embed)
-
-            try:
-                
-                # Look for an existing manager
-                manager = DraftSetupManager.get_active_manager(self.draft_session_id)
-                
-                if manager:
-                    logger.info(f"TEAMS CREATED: Found existing manager for session {self.draft_session_id}")
-                    logger.info(f"TEAMS CREATED: Manager state - Seating set: {manager.seating_order_set}, "
-                            f"Users count: {manager.users_count}, Expected count: {manager.expected_user_count}")
-                    # Manager exists, force a check of session stage
-                    await manager.check_session_stage_and_organize()
+                                button_copy.disabled = True
+                                
+                            stake_view.add_item(button_copy)
                     
-                    # Also force a refresh of users to ensure accurate count
-                    if manager.sio.connected:
-                        await manager.sio.emit('getUsers')
-                else:
-                    logger.info(f"DraftSetupManager not found for {self.draft_session_id}")
+                    stake_view.add_item(StakeCalculationButton(session.session_id))
+                    
+                    # Use the new view instead of self
+                    try:
+                        await interaction.response.edit_message(embed=embed, view=stake_view)
+                    except Exception as e:
+                        logger.error(f"Failed to update draft message: {e}")
+                    
+                    # Send the channel announcement after responding to the interaction
+                    await interaction.channel.send(embed=channel_embed)
+                    
+                    # Return early to avoid the default response
+                    await db_session.commit()
+                    try:    
+                        # Look for an existing manager
+                        manager = DraftSetupManager.get_active_manager(self.draft_session_id)
+                        
+                        if manager:
+                            logger.info(f"TEAMS CREATED: Found existing manager for session {self.draft_session_id}")
+                            logger.info(f"TEAMS CREATED: Manager state - Seating set: {manager.seating_order_set}, "
+                                        f"Users count: {manager.users_count}, Expected count: {manager.expected_user_count}")
+                            
+                            # Make sure bot instance is set properly
+                            manager.set_bot_instance(interaction.client)
+                            logger.info(f"Set bot instance on manager to ensure Discord messaging works")
+                            
+                            # Manager exists, force a check of session stage
+                            await manager.check_session_stage_and_organize()
+                            
+                            # Also force a refresh of users to ensure accurate count
+                            if manager.sio.connected:
+                                await manager.sio.emit('getUsers')
+                        else:
+                            logger.info(f"No existing manager for {self.draft_session_id}")
 
-            except Exception as e:
-                # Log the error but don't disrupt the normal flow
-                print(f"Error triggering seating order process: {e}")
-                import traceback
-                traceback.print_exc()
+                    except Exception as e:
+                        # Log the error but don't disrupt the normal flow
+                        logger.exception(f"Error setting up draft manager: {e}")
+
+                    if session.tracked_draft and session.premade_match_id is not None:
+                        await check_weekly_limits(interaction, session.premade_match_id, session.session_type, session.session_id)
+                    return
                 
+                # Iterate over the view's children (buttons) to update their disabled status
+                for item in self.children:
+                    if isinstance(item, discord.ui.Button):
+                        # Enable "Create Rooms" and "Cancel Draft" buttons
+                        if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}":
+                            if self.draft_session_id in ACTIVE_MANAGERS:
+                                item.disabled = True
+                            else:
+                                item.disabled = False
+                        elif item.custom_id == f"cancel_draft_{self.draft_session_id}":
+                            item.disabled = False
+                        else:
+                            # Disable all other buttons
+                            item.disabled = True
+                await db_session.commit()
+    
+        # Respond with the embed and updated view
+        try:
+            await interaction.response.edit_message(embed=embed, view=self)
+        except Exception as e:
+            logger.error(f"Failed to update draft message: {e}")
+        
+        # Send the channel announcement after responding to the interaction
+        await interaction.channel.send(embed=channel_embed)
+
+        try:
             
-            if session.tracked_draft and session.premade_match_id is not None:
-                await check_weekly_limits(interaction, session.premade_match_id, session.session_type, session.session_id)
+            # Look for an existing manager
+            manager = DraftSetupManager.get_active_manager(self.draft_session_id)
+            
+            if manager:
+                logger.info(f"TEAMS CREATED: Found existing manager for session {self.draft_session_id}")
+                logger.info(f"TEAMS CREATED: Manager state - Seating set: {manager.seating_order_set}, "
+                        f"Users count: {manager.users_count}, Expected count: {manager.expected_user_count}")
+                # Manager exists, force a check of session stage
+                await manager.check_session_stage_and_organize()
+                
+                # Also force a refresh of users to ensure accurate count
+                if manager.sio.connected:
+                    await manager.sio.emit('getUsers')
+            else:
+                logger.info(f"DraftSetupManager not found for {self.draft_session_id}")
+
+        except Exception as e:
+            # Log the error but don't disrupt the normal flow
+            print(f"Error triggering seating order process: {e}")
+            import traceback
+            traceback.print_exc()
+            
+        
+        if session.tracked_draft and session.premade_match_id is not None:
+            await check_weekly_limits(interaction, session.premade_match_id, session.session_type, session.session_id)
 
     async def explain_stakes_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Explain how the stake system works"""
