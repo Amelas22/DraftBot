@@ -138,21 +138,6 @@ class DraftSetupManager:
         async def disconnect():
             self.logger.info(f"Disconnected from draft_id: DB{self.draft_id}")
 
-        # Listen for user updates
-        @self.sio.on('updateUser')
-        async def on_user_update(data):
-            if data.get('userID') != 'DraftBot':
-                user_name = data.get('userName', 'Unknown')
-                self.logger.info(f"Another user joined/updated: {data}")
-                # Check if this is during an active ready check
-                if self.ready_check_active:
-                    self.logger.info(f"User {user_name} joined/left during active ready check - invalidating ready check")
-                    # Just invalidate the ready check without trying to restart it
-                    await self.invalidate_ready_check(user_name)
-                # Update Discord status message immediately
-                # This will auto-initiate a new ready check when all users are present
-                await self.update_status_message_after_user_change()
-
         # Listen for user changes in ready state status
         @self.sio.on('setReady')
         async def on_user_ready(userID, readyState):
