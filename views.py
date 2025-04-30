@@ -769,24 +769,24 @@ class PersistentView(discord.ui.View):
         # Send the mention message as a follow-up to ensure it gets sent after the embed
         await interaction.followup.send(mention_message, ephemeral=False)
 
-        asyncio.create_task(self.cleanup_ready_check(self.draft_session_id))
+        # asyncio.create_task(self.cleanup_ready_check(self.draft_session_id))
 
     async def remove_cooldown(self, draft_session_id):
         await asyncio.sleep(60)  # Wait for 60 seconds
         if draft_session_id in READY_CHECK_COOLDOWNS:
             del READY_CHECK_COOLDOWNS[draft_session_id]
 
-    async def cleanup_ready_check(self, draft_session_id):
-        await asyncio.sleep(1800)  # Wait for 30 minutes
-        try:
-            if draft_session_id in sessions:
-                logger.warning(f"⚠️ Removing session {draft_session_id} from sessions dictionary due to timeout")
-                del sessions[draft_session_id]  # Clean up the session data
-                logger.debug(f"Sessions dictionary after cleanup: {list(sessions.keys())}")
-            else:
-                logger.info(f"Session {draft_session_id} already removed from sessions dictionary")
-        except Exception as e:
-            logger.error(f"Failed during ready check cleanup: {e}")
+    # async def cleanup_ready_check(self, draft_session_id):
+    #     await asyncio.sleep(1800)  # Wait for 30 minutes
+    #     try:
+    #         if draft_session_id in sessions:
+    #             logger.warning(f"⚠️ Removing session {draft_session_id} from sessions dictionary due to timeout")
+    #             del sessions[draft_session_id]  # Clean up the session data
+    #             logger.debug(f"Sessions dictionary after cleanup: {list(sessions.keys())}")
+    #         else:
+    #             logger.info(f"Session {draft_session_id} already removed from sessions dictionary")
+    #     except Exception as e:
+    #         logger.error(f"Failed during ready check cleanup: {e}")
 
     async def randomize_teams_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         bot = interaction.client
@@ -859,6 +859,11 @@ class PersistentView(discord.ui.View):
                     # Re-fetch session to get updated teams
                     updated_session = await get_draft_session(self.draft_session_id)
                     
+                    if session_id in sessions:
+                        logger.info(f"✅ Teams created - removing ready check data for session {session_id}")
+                        del sessions[session_id]
+                        logger.debug(f"Sessions dictionary after cleanup: {list(sessions.keys())}")
+
                     # Now that teams exist, calculate stakes for staked drafts
                     stake_pairs = []
                     stake_info_by_player = {}
