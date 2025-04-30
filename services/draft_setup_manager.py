@@ -8,12 +8,17 @@ import json
 import os
 import pytz
 import urllib.parse
+import discord
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from aiobotocore.session import get_session
 from config import get_draftmancer_websocket_url, get_draftmancer_base_url
+from database.db_session import db_session
 from models.draft_session import DraftSession
+from models.match import MatchResult
 from bot_registry import get_bot
+from session import AsyncSessionLocal
+from sqlalchemy import select
 
 # Constants
 READY_CHECK_INSTRUCTIONS = (
@@ -168,8 +173,6 @@ class DraftSetupManager:
                             await channel.send("Rooms and Pairings have been created!")
                         else:
                             # Check if rooms already existed
-                            from session import AsyncSessionLocal
-                            from sqlalchemy import select
 
                             async with AsyncSessionLocal() as db_session:
                                 stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
@@ -351,9 +354,6 @@ class DraftSetupManager:
     async def save_draft_log_data(self, draft_data):
         """Save draft log data to database and process it"""
         try:
-            from database.db_session import db_session
-            from sqlalchemy import select
-            from models.draft_session import DraftSession
 
             # Save to DigitalOcean Spaces
             upload_successful = await self.save_to_digitalocean_spaces(draft_data)
@@ -611,12 +611,6 @@ class DraftSetupManager:
     async def send_magicprotools_embed(self, draft_data):
         """Find draft-logs channel and send the embed if found."""
         try:
-            # Import locally to avoid circular imports
-            import discord
-            from database.db_session import db_session
-            from sqlalchemy import select
-            from models.draft_session import DraftSession
-            
             # Find the guild
             guild = self.discord_client.get_guild(int(self.guild_id))
             if not guild:
@@ -665,11 +659,6 @@ class DraftSetupManager:
     async def generate_magicprotools_embed(self, draft_data):
         """Generate a Discord embed with MagicProTools links for all drafters"""
         try:
-            import discord
-            from models.match import MatchResult
-            from database.db_session import db_session
-            from sqlalchemy import select
-            from models.draft_session import DraftSession
             
             DO_SPACES_REGION = os.getenv("DO_SPACES_REGION")
             DO_SPACES_BUCKET = os.getenv("DO_SPACES_BUCKET")
@@ -842,7 +831,6 @@ class DraftSetupManager:
         except Exception as e:
             self.logger.error(f"Error generating Discord embed: {e}")
             # Return a basic embed if there's an error
-            import discord
             return discord.Embed(
                 title=f"Draft Log: {draft_data.get('sessionID')}",
                 description="Error generating MagicProTools links. Check logs for details.",
@@ -2079,13 +2067,10 @@ class DraftSetupManager:
     
     async def update_draft_session_field(self, field_name, field_value):
         """Helper function to safely update a single field in a draft session"""
-        from database.db_session import db_session
-        from sqlalchemy import select
         
         try:
             async with db_session() as session:
                 # Query for the object directly inside this session context
-                from models.draft_session import DraftSession
                 query = select(DraftSession).filter_by(session_id=self.session_id)
                 result = await session.execute(query)
                 draft_session = result.scalar_one_or_none()
