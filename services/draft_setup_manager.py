@@ -89,6 +89,7 @@ class DraftSetupManager:
         self.drafting = False
         self.draftPaused = False
         self.draft_cancelled = False
+        self.removing_unexpected_user = False
 
         # Draft logs variables
         self.logs_collection_attempted = False
@@ -1495,8 +1496,11 @@ class DraftSetupManager:
                 
                 # Check if we have all expected users to attempt setting the order
                 if not missing_users and self.users_count >= self.expected_user_count:
-                    self.logger.info("All expected users are present, attempting to set seating order")
-                    await self.attempt_seating_order(self.desired_seating_order)
+                    if self.removing_unexpected_user:
+                        self.logger.info("All expected users present, but we're removing an unexpected user. Delaying seating attempt.")
+                    else:
+                        self.logger.info("All expected users are present, attempting to set seating order")
+                        await self.attempt_seating_order(self.desired_seating_order)
                 else:
                     self.logger.info(f"Not all users present. Missing: {missing_users}")
                     # Don't attempt seating until all users are present
@@ -2294,6 +2298,10 @@ class DraftSetupManager:
             username: The username of the unexpected user
             user_id: The user ID in the Draftmancer session
         """
+        # Set a flag to indicate we're removing a user
+        # This will prevent triggering ready checks during this process
+        self.removing_unexpected_user = True
+        
         try:
             # Get the Discord channel
             bot = get_bot()
@@ -2303,12 +2311,14 @@ class DraftSetupManager:
                     channel = await bot.fetch_channel(int(self.draft_channel_id))
                 except Exception as e:
                     self.logger.error(f"Error fetching channel: {e}")
+                    self.removing_unexpected_user = False  # Reset flag on error
                     return
                     
             if not channel:
                 self.logger.error(f"Channel with ID {self.draft_channel_id} not found")
+                self.removing_unexpected_user = False  # Reset flag on error
                 return
-                
+                    
             # Post initial warning message
             warning_message = await channel.send(f"⚠️ **Unexpected User Joined: {username}**. This user will be removed in 5 seconds.")
             self.logger.info(f"Posted warning message for unexpected user {username}")
@@ -2324,7 +2334,33 @@ class DraftSetupManager:
             await warning_message.edit(content=f"🚫 **Unexpected User ({username}) has been removed**.")
             self.logger.info(f"Successfully removed unexpected user {username}")
 
+            # Update status after user change, but don't trigger ready checks yet
             await self.update_status_message_after_user_change()
+            
+            # Wait a brief moment to ensure user removal is processed
+            await asyncio.sleep(1)
             
         except Exception as e:
             self.logger.exception(f"Error handling unexpected user {username}: {e}")
+        finally:
+            # Reset the flag after user removal is complete
+            self.removing_unexpected_user = False
+            
+            # After removing user and resetting flag, check if we need to initiate a ready check
+            if not self.ready_check_active and self.expected_user_count > 0:
+                # Get current users
+                session_users = [u for u in self.session_users if u.get('userName') != 'DraftBot']
+                session_usernames = {user.get('userName') for user in session_users}
+                
+                # Get draft session to check expected users
+                draft_session = await DraftSession.get_by_session_id(self.session_id)
+                if draft_session and draft_session.sign_ups:
+                    signup_usernames = set(draft_session.sign_ups.values())
+                    missing_users = signup_usernames - session_usernames
+                    unexpected_users = session_usernames - signup_usernames
+                    
+                    # If all expected users are present and no unexpected users remain,
+                    # check session stage which may trigger a ready check if appropriate
+                    if not missing_users and not unexpected_users:
+                        self.logger.info("All users correct after removal, checking session stage")
+                        await self.check_session_stage_and_organize()
