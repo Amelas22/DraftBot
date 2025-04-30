@@ -259,7 +259,7 @@ class DraftSetupManager:
                  self.users_count >= self.expected_user_count and
                  self.expected_user_count > 0)):
                 
-                self.logger.info(f"Reached expected user count or need to reset seating! Attempting seating order")
+                self.logger.info(f"Reached expected user count or need to reset seating! Attempting seating order. on_session_users")
                 await self.check_session_stage_and_organize()
                 return
             
@@ -269,6 +269,7 @@ class DraftSetupManager:
                 (current_time - self.last_db_check_time).total_seconds() > self.db_check_cooldown):
                 
                 self.last_db_check_time = current_time
+                self.logger.info("check session stage from on_session_users")
                 await self.check_session_stage_and_organize()
 
         @self.sio.on('storedSessionSettings')
@@ -1888,6 +1889,7 @@ class DraftSetupManager:
                                 (current_time - self.last_db_check_time).total_seconds() > self.db_check_cooldown):
                                 
                                 self.last_db_check_time = current_time
+                                self.logger("check session stage from keep connection alive for user count >= expected user count")
                                 await self.check_session_stage_and_organize()
                                     
                         # Try to emit getUsers regularly for accurate counts
@@ -2289,7 +2291,7 @@ class DraftSetupManager:
                     
                 # If we now have all expected users, check seating order
                 if not missing_users and self.users_count >= self.expected_user_count:
-                    self.logger.info("All expected users are now present, checking seating order")
+                    self.logger.info("All expected users are now present, checking seating order. checking session stage from update_status_message_after_user_change")
                     await self.check_session_stage_and_organize()
                     
             except Exception as e:

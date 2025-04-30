@@ -1101,6 +1101,7 @@ class PersistentView(discord.ui.View):
                             logger.info(f"Set bot instance on manager to ensure Discord messaging works")
                             
                             # Manager exists, force a check of session stage
+                            logger.info("Check Session Stage from randomize teams callback for staked draft")
                             await manager.check_session_stage_and_organize()
                             
                             # Also force a refresh of users to ensure accurate count
@@ -1152,6 +1153,7 @@ class PersistentView(discord.ui.View):
                 logger.info(f"TEAMS CREATED: Manager state - Seating set: {manager.seating_order_set}, "
                         f"Users count: {manager.users_count}, Expected count: {manager.expected_user_count}")
                 # Manager exists, force a check of session stage
+                logger.info("Check session from randomize teams normal draft")
                 await manager.check_session_stage_and_organize()
                 
                 # Also force a refresh of users to ensure accurate count
