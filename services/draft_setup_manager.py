@@ -1889,7 +1889,7 @@ class DraftSetupManager:
                                 (current_time - self.last_db_check_time).total_seconds() > self.db_check_cooldown):
                                 
                                 self.last_db_check_time = current_time
-                                self.logger("check session stage from keep connection alive for user count >= expected user count")
+                                self.logger.info("check session stage from keep connection alive for user count >= expected user count")
                                 await self.check_session_stage_and_organize()
                                     
                         # Try to emit getUsers regularly for accurate counts
