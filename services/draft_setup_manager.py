@@ -233,6 +233,16 @@ class DraftSetupManager:
                 self.logger.info(f"User {left_user_name} left during active ready check - invalidating ready check")
                 await self.invalidate_ready_check(left_user_name)
             
+            if self.ready_check_active and previous_count < self.users_count:
+                # Someone joined during an active ready check - identify who joined
+                previous_usernames = {user.get('userName') for user in previous_non_bot_users}
+                current_usernames = {user.get('userName') for user in non_bot_users}
+                left_users = current_usernames - previous_usernames
+                
+                left_user_name = next(iter(left_users)) if left_users else "Unknown"
+                self.logger.info(f"User {left_user_name} joined during active ready check - invalidating ready check")
+                await self.invalidate_ready_check(left_user_name)
+            
             # Check if user list changed and update status message if needed
             if previous_count != self.users_count or len(previous_users) != len(users):
                 self.logger.info(f"User count changed from {previous_count} to {self.users_count}, updating status message")
@@ -1453,8 +1463,8 @@ class DraftSetupManager:
                     self.logger.info(f"Updated draft_channel_id from database: {self.draft_channel_id}")
                 
                 # Send/update status message to Discord channel if available
-                if self.draft_channel_id and hasattr(self, "discord_client") and self.discord_client:
-                    bot = self.discord_client
+                if self.draft_channel_id:
+                    bot = get_bot()
                     try:
                         self.logger.info(f"Attempting to get channel with ID: {self.draft_channel_id}")
                         channel = bot.get_channel(int(self.draft_channel_id))
@@ -2219,10 +2229,8 @@ class DraftSetupManager:
                     return
                     
                 # Get username sets 
-                session_usernames = {
-                    user.get('userName') for user in self.session_users 
-                    if user.get('userName') != 'DraftBot'
-                }
+                session_users = [u for u in self.session_users if u.get('userName') != 'DraftBot']
+                session_usernames = {user.get('userName') for user in session_users}
                 signup_usernames = set(draft_session.sign_ups.values())
                 missing_users = signup_usernames - session_usernames
                 unexpected_users = session_usernames - signup_usernames
@@ -2236,29 +2244,38 @@ class DraftSetupManager:
                     'updated_at': datetime.now().strftime('%H:%M:%S')
                 }
                 
-                # Check if we have a Discord client and channel
-                if hasattr(self, "discord_client") and self.discord_client:
-                    bot = self.discord_client
-                    try:
-                        channel = bot.get_channel(int(self.draft_channel_id))
-                        if channel:
-                            self.logger.info(f"Updating status message after user change in channel #{channel.name}")
-                            await self.send_session_status_message(channel)
-                        else:
-                            # Try to fetch the channel if it's not in cache
-                            try:
-                                channel = await bot.fetch_channel(int(self.draft_channel_id))
-                                if channel:
-                                    await self.send_session_status_message(channel)
-                                else:
-                                    self.logger.warning(f"Could not fetch channel with ID {self.draft_channel_id}")
-                            except Exception as e:
-                                self.logger.error(f"Error fetching channel: {e}")
-                    except Exception as e:
-                        self.logger.error(f"Error updating status message after user change: {e}")
-                else:
-                    self.logger.debug("Cannot update status message - Discord client not available")
+                # Check for unexpected users if we have expected users defined
+                if self.expected_user_count > 0 and unexpected_users:
+                    self.logger.warning(f"Detected unexpected users: {unexpected_users}")
                     
+                    # Find user IDs for unexpected users and schedule removal
+                    for user in session_users:
+                        username = user.get('userName')
+                        user_id = user.get('userID')
+                        if username in unexpected_users:
+                            self.logger.info(f"Scheduling removal of unexpected user: {username}")
+                            # Schedule removal task
+                            asyncio.create_task(self.handle_unexpected_user(username, user_id))
+                
+                bot = get_bot()
+                try:
+                    channel = bot.get_channel(int(self.draft_channel_id))
+                    if channel:
+                        self.logger.info(f"Updating status message after user change in channel #{channel.name}")
+                        await self.send_session_status_message(channel)
+                    else:
+                        # Try to fetch the channel if it's not in cache
+                        try:
+                            channel = await bot.fetch_channel(int(self.draft_channel_id))
+                            if channel:
+                                await self.send_session_status_message(channel)
+                            else:
+                                self.logger.warning(f"Could not fetch channel with ID {self.draft_channel_id}")
+                        except Exception as e:
+                            self.logger.error(f"Error fetching channel: {e}")
+                except Exception as e:
+                    self.logger.error(f"Error updating status message after user change: {e}")
+                
                 # If we now have all expected users, check seating order
                 if not missing_users and self.users_count >= self.expected_user_count:
                     self.logger.info("All expected users are now present, checking seating order. checking session stage from update_status_message_after_user_change")
@@ -2268,3 +2285,46 @@ class DraftSetupManager:
                 self.logger.exception(f"Error in update_status_message_after_user_change: {e}")
         else:
             self.logger.debug("Skipping status update - seating already set or no channel ID")
+
+    async def handle_unexpected_user(self, username, user_id):
+        """
+        Handles unexpected user by posting a warning message, waiting 5 seconds, then removing them.
+        
+        Args:
+            username: The username of the unexpected user
+            user_id: The user ID in the Draftmancer session
+        """
+        try:
+            # Get the Discord channel
+            bot = get_bot()
+            channel = bot.get_channel(int(self.draft_channel_id))
+            if not channel:
+                try:
+                    channel = await bot.fetch_channel(int(self.draft_channel_id))
+                except Exception as e:
+                    self.logger.error(f"Error fetching channel: {e}")
+                    return
+                    
+            if not channel:
+                self.logger.error(f"Channel with ID {self.draft_channel_id} not found")
+                return
+                
+            # Post initial warning message
+            warning_message = await channel.send(f"⚠️ **Unexpected User Joined: {username}**. This user will be removed in 5 seconds.")
+            self.logger.info(f"Posted warning message for unexpected user {username}")
+            
+            # Wait 5 seconds
+            await asyncio.sleep(5)
+            
+            # Remove the user
+            self.logger.info(f"Removing unexpected user {username} with ID {user_id}")
+            await self.sio.emit('removePlayer', user_id)
+            
+            # Update the message
+            await warning_message.edit(content=f"🚫 **Unexpected User ({username}) has been removed**.")
+            self.logger.info(f"Successfully removed unexpected user {username}")
+
+            await self.update_status_message_after_user_change()
+            
+        except Exception as e:
+            self.logger.exception(f"Error handling unexpected user {username}: {e}")
