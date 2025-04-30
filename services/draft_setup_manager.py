@@ -1883,7 +1883,7 @@ class DraftSetupManager:
                             
                         # If we already have enough users, check session stage
                         # This is a fallback in case any event updates were missed
-                        if self.users_count >= self.expected_user_count:
+                        if self.users_count >= self.expected_user_count and self.expected_user_count != 0:
                             current_time = datetime.now()
                             if (self.last_db_check_time is None or 
                                 (current_time - self.last_db_check_time).total_seconds() > self.db_check_cooldown):
