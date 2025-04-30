@@ -19,7 +19,8 @@ async def manage_live_drafts_channel(bot, guild):
         
         # Create the channel in the appropriate category
         overwrites = {
-            guild.default_role: discord.PermissionOverwrite(send_messages=False, read_messages=True)
+            guild.default_role: discord.PermissionOverwrite(send_messages=False, read_messages=True),
+            guild.me: discord.PermissionOverwrite(send_messages=True, read_messages=True, embed_links=True)
         }
         live_drafts_channel = await guild.create_text_channel(
             "live-drafts", 
@@ -30,6 +31,19 @@ async def manage_live_drafts_channel(bot, guild):
         
         # Send an initial message
         await live_drafts_channel.send("# Live Draft Updates\nThis channel shows all currently active drafts.")
+    else:
+        # Make sure the bot has the necessary permissions in existing channels
+        current_perms = live_drafts_channel.overwrites_for(guild.me)
+        if not current_perms.send_messages or not current_perms.embed_links:
+            try:
+                await live_drafts_channel.set_permissions(
+                    guild.me,
+                    send_messages=True,
+                    read_messages=True,
+                    embed_links=True
+                )
+            except Exception as e:
+                print(f"Could not update bot permissions in live-drafts channel: {e}")
     
     return live_drafts_channel
 
@@ -44,21 +58,28 @@ async def create_live_draft_summary(bot, draft_session_id):
         guild = bot.get_guild(int(draft_session.guild_id))
         if not guild:
             return None
+        
+        try:    
+            live_drafts_channel = await manage_live_drafts_channel(bot, guild)
             
-        live_drafts_channel = await manage_live_drafts_channel(bot, guild)
-        
-        # Generate embed similar to the draft summary but with more details
-        embed = await generate_live_draft_embed(bot, draft_session)
-        
-        # Send the message and store its ID in the draft session for updates
-        message = await live_drafts_channel.send(embed=embed)
-        
-        # Store the message ID in the draft session
-        draft_session.live_draft_message_id = str(message.id)
-        session.add(draft_session)
-        await session.commit()
-        
-        return message
+            # Generate embed similar to the draft summary but with more details
+            embed = await generate_live_draft_embed(bot, draft_session)
+            
+            # Send the message and store its ID in the draft session for updates
+            message = await live_drafts_channel.send(embed=embed)
+            
+            # Store the message ID in the draft session
+            draft_session.live_draft_message_id = str(message.id)
+            session.add(draft_session)
+            await session.commit()
+            
+            return message
+        except discord.Forbidden as e:
+            logger.error(f"Permission error creating live draft summary for {draft_session_id}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Error creating live draft summary for {draft_session_id}: {e}")
+            return None
     
 
 async def generate_live_draft_embed(bot, draft_session):
@@ -68,8 +89,8 @@ async def generate_live_draft_embed(bot, draft_session):
         return None
         
     # Get team names and players
-    team_a_names = [guild.get_member(int(user_id)).display_name for user_id in draft_session.team_a if guild.get_member(int(user_id))]
-    team_b_names = [guild.get_member(int(user_id)).display_name for user_id in draft_session.team_b if guild.get_member(int(user_id))]
+    team_a_names = [getattr(guild.get_member(int(user_id)), 'display_name', "Unknown User") for user_id in draft_session.team_a]
+    team_b_names = [getattr(guild.get_member(int(user_id)), 'display_name', "Unknown User") for user_id in draft_session.team_b]
     
     # Calculate team wins
     team_a_wins, team_b_wins = await calculate_team_wins(draft_session.session_id)
@@ -105,8 +126,8 @@ async def generate_live_draft_embed(bot, draft_session):
         for match in match_results:
             player1 = guild.get_member(int(match.player1_id))
             player2 = guild.get_member(int(match.player2_id))
-            player1_name = player1.display_name if player1 else 'Unknown'
-            player2_name = player2.display_name if player2 else 'Unknown'
+            player1_name = getattr(player1, 'display_name', 'Unknown User')
+            player2_name = getattr(player2, 'display_name', 'Unknown User')
             
             # Determine if there's a winner
             if match.winner_id:
@@ -168,23 +189,33 @@ async def update_live_draft_summary(bot, draft_session_id):
         if not guild:
             return
             
-        live_drafts_channel = await manage_live_drafts_channel(bot, guild)
-        
         try:
-            # Get the message
-            message = await live_drafts_channel.fetch_message(int(draft_session.live_draft_message_id))
+            live_drafts_channel = await manage_live_drafts_channel(bot, guild)
             
-            # Generate updated embed
-            updated_embed = await generate_live_draft_embed(bot, draft_session)
-            
-            # Update the message
-            await message.edit(embed=updated_embed)
-        except discord.NotFound:
-            pass
-            # If message was deleted, create a new one
-            # await create_live_draft_summary(bot, draft_session_id)
+            try:
+                # Get the message
+                message = await live_drafts_channel.fetch_message(int(draft_session.live_draft_message_id))
+                
+                # Generate updated embed
+                updated_embed = await generate_live_draft_embed(bot, draft_session)
+                
+                # Update the message
+                await message.edit(embed=updated_embed)
+            except discord.NotFound:
+                # If message was deleted, create a new one (if needed)
+                # Uncomment the line below if you want to recreate deleted messages
+                # await create_live_draft_summary(bot, draft_session_id)
+                logger.info(f"Live draft message not found for {draft_session_id}, skipping update")
+            except discord.Forbidden as e:
+                logger.error(f"Permission error updating live draft summary for {draft_session_id}: {e}")
+                # Clear the stored message ID to prevent further errors
+                draft_session.live_draft_message_id = None
+                session.add(draft_session)
+                await session.commit()
+            except Exception as e:
+                logger.error(f"Failed to update live draft summary: {e}")
         except Exception as e:
-            print(f"Failed to update live draft summary: {e}")
+            logger.error(f"Error accessing live-drafts channel: {e}")
 
 
 async def remove_live_draft_summary_after_delay(bot, draft_session_id, delay_seconds):
