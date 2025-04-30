@@ -962,19 +962,6 @@ class PersistentView(discord.ui.View):
                             f"Bets (Total: {total_stakes} tix)"
                         )
                         
-                # # Create automatic room creation countdown - this needs to happen for ALL draft types
-                # auto_pairings_time = datetime.now() + timedelta(minutes=10)
-                # auto_pairings_unix = int(auto_pairings_time.timestamp())
-                # countdown_message = f"Rooms and Pairings will be automatically created <t:{auto_pairings_unix}:R>"
-                # embed.add_field(name="Automatic Rooms Creation", value=countdown_message, inline=False)
-
-                # # Schedule the auto-pairings task - for ALL draft types
-                # if self.draft_session_id in self.AUTO_PAIRINGS_TASKS:
-                #     self.AUTO_PAIRINGS_TASKS[self.draft_session_id].cancel()
-                # self.AUTO_PAIRINGS_TASKS[self.draft_session_id] = asyncio.create_task(
-                #     self.auto_create_rooms_pairings(interaction.client, interaction.guild, auto_pairings_time)
-                # )
-
                 # Create the new channel embed for team announcements
                 channel_embed = discord.Embed(
                     title="Teams have been formed. Seating Order Below!",
@@ -1283,52 +1270,6 @@ class PersistentView(discord.ui.View):
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # async def auto_create_rooms_pairings(self, bot, guild, auto_pairings_time):
-    #     """Automatically create rooms and pairings after the scheduled time"""
-    #     session_id = self.draft_session_id
-        
-    #     try:
-    #         # Wait until the scheduled time
-    #         wait_seconds = (auto_pairings_time - datetime.now()).total_seconds()
-    #         if wait_seconds > 0:
-    #             await asyncio.sleep(wait_seconds)
-            
-    #         # Check if session still exists and is in the right stage
-    #         session = await get_draft_session(session_id)
-    #         if not session or session.session_stage != 'teams':
-    #             return
-                
-    #         # Check if it's already being processed
-    #         if PROCESSING_ROOMS_PAIRINGS.get(session_id):
-    #             return
-                
-    #         # Mark as processing
-    #         PROCESSING_ROOMS_PAIRINGS[session_id] = True
-            
-    #         try:
-    #             # Announce the auto-creation
-    #             channel = bot.get_channel(int(session.draft_channel_id))
-    #             if channel:
-    #                 await channel.send("Rooms and Pairings have been created!")
-                
-
-    #             # Use the common helper method
-    #             await PersistentView.create_rooms_pairings(bot, guild, session_id)
-
-    #         finally:
-    #             # Clean up processing flag
-    #             if session_id in PROCESSING_ROOMS_PAIRINGS:
-    #                 del PROCESSING_ROOMS_PAIRINGS[session_id]
-            
-    #     except asyncio.CancelledError:
-    #         # Task was cancelled, likely because the button was pressed manually
-    #         pass
-    #     except Exception as e:
-    #         print(f"Error in auto-pairings task: {e}")
-    #     finally:
-    #         # Clean up task reference
-    #         if session_id in self.AUTO_PAIRINGS_TASKS:
-    #             del self.AUTO_PAIRINGS_TASKS[session_id]
                     
     async def team_assignment_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         session = await get_draft_session(self.draft_session_id)
@@ -1565,11 +1506,6 @@ class PersistentView(discord.ui.View):
     async def create_rooms_pairings_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         session_id = self.draft_session_id
 
-        # # Cancel any scheduled auto-pairings task
-        # if session_id in self.AUTO_PAIRINGS_TASKS:
-        #     self.AUTO_PAIRINGS_TASKS[session_id].cancel()
-        #     del self.AUTO_PAIRINGS_TASKS[session_id]
-
         if PROCESSING_ROOMS_PAIRINGS.get(session_id):
             # Immediately inform the user that the process is already underway
             await interaction.response.send_message("The rooms and pairings are currently being created. Please wait.", ephemeral=True)
@@ -1767,75 +1703,111 @@ class PersistentView(discord.ui.View):
     @classmethod
     async def create_rooms_pairings(cls, bot, guild, session_id, interaction=None, session_type=None):
         """Class method version of creating rooms and posting pairings"""
+        logger.info("Starting create_rooms_pairings for session_id={}, session_type={}", session_id, session_type)
         try:
             async with AsyncSessionLocal() as db_session:
                 async with db_session.begin():
-                    stmt = select(DraftSession).options(selectinload(DraftSession.match_results)).filter(DraftSession.session_id == session_id)
+                    logger.debug("Querying DraftSession from DB")
+                    stmt = select(DraftSession).options(selectinload(DraftSession.match_results))\
+                           .filter(DraftSession.session_id == session_id)
                     session = await db_session.scalar(stmt)
 
                     if not session:
-                        print("Draft session not found.")
+                        logger.warning("Draft session not found for session_id={}", session_id)
                         if interaction:
                             await interaction.followup.send("Draft session not found.", ephemeral=True)
                         return False
-                    
-                    # Check if rooms have already been created
+
                     if session.draft_chat_channel:
-                        print(f"Rooms and pairings already exist for session {session_id}")
+                        logger.info("Rooms already exist for session_id={}, channel={}", session_id, session.draft_chat_channel)
                         if interaction:
-                            await interaction.followup.send("Rooms and pairings have already been created for this draft.", ephemeral=True)
+                            await interaction.followup.send(
+                                "Rooms and pairings have already been created for this draft.", ephemeral=True)
                         return False
 
                     session.are_rooms_processing = True
                     session.session_stage = 'pairings'
+                    logger.debug("Set session_stage to 'pairings' and are_rooms_processing=True")
 
-                    # Calculate pairings based on session type
+                    # Calculate pairings
+                    logger.debug("Calculating pairings for session_type={}", session.session_type)
                     if session.session_type != "swiss":
                         await calculate_pairings(session, db_session)
                     else:
                         state_to_save, match_counter = await calculate_pairings(session, db_session)
                         session.match_counter = match_counter
                         session.swiss_matches = state_to_save
+                        logger.debug("Swiss pairings calculated: match_counter={}", match_counter)
 
-                    # Update player stats if needed
-                    if session.session_type == "random" or session.session_type == "staked":
+                    # Update player stats
+                    if session.session_type in ("random", "staked"):
+                        logger.debug("Updating player stats for session_id={}", session_id)
                         await update_player_stats_for_draft(session.session_id, guild)
-                    
-                    if session.session_type == "random" or session.session_type == "staked" or session.session_type == "premade":
+
+                    if session.session_type in ("random", "staked", "premade"):
+                        logger.debug("Updating last draft timestamp for session_id={}", session_id)
                         await update_last_draft_timestamp(session.session_id, guild, bot)
 
-                    # Create a temporary view for channel creation
+                    # Prepare view for channel creation
                     temp_view = cls(bot, session_id, session_type or session.session_type)
-                    
-                    # Create chat channels based on session type
+
+                    # Create chat channels
+                    draft_chat_channel = None
                     if session.session_type == "swiss":
                         sign_ups_list = list(session.sign_ups.keys())
-                        all_members = [guild.get_member(int(user_id)) for user_id in sign_ups_list]
-                        session.draft_chat_channel = str(await temp_view.create_team_channel(guild, "Draft", all_members))
+                        logger.debug("Swiss sign-ups: {}", sign_ups_list)
+                        all_members = []
+                        for user_id in sign_ups_list:
+                            member = guild.get_member(int(user_id))
+                            if not member:
+                                logger.warning("Member not found in guild for user_id={}", user_id)
+                            else:
+                                all_members.append(member)
+                        channel = await temp_view.create_team_channel(guild, "Draft", all_members)
+                        session.draft_chat_channel = str(channel)
                         draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
-                    elif session.session_type != "test":
-                        team_a_members = [guild.get_member(int(user_id)) for user_id in session.team_a if guild.get_member(int(user_id))]
-                        team_b_members = [guild.get_member(int(user_id)) for user_id in session.team_b if guild.get_member(int(user_id))]
-                        all_members = team_a_members + team_b_members
+                        logger.info("Created swiss draft channel {}", session.draft_chat_channel)
 
-                        session.draft_chat_channel = str(await temp_view.create_team_channel(guild, "Draft", all_members, session.team_a, session.team_b))
+                    elif session.session_type != "test":
+                        logger.debug("Team A: {}, Team B: {}", session.team_a, session.team_b)
+                        team_a_members, team_b_members = [], []
+                        for user_id in session.team_a:
+                            member = guild.get_member(int(user_id))
+                            if member:
+                                team_a_members.append(member)
+                            else:
+                                logger.warning("Team A member not found for user_id={}", user_id)
+                        for user_id in session.team_b:
+                            member = guild.get_member(int(user_id))
+                            if member:
+                                team_b_members.append(member)
+                            else:
+                                logger.warning("Team B member not found for user_id={}", user_id)
+
+                        all_members = team_a_members + team_b_members
+                        channel = await temp_view.create_team_channel(
+                            guild, "Draft", all_members, session.team_a, session.team_b
+                        )
+                        session.draft_chat_channel = str(channel)
+                        draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
+                        logger.info("Created draft and team channels for session_id={}", session_id)
                         await temp_view.create_team_channel(guild, "Red-Team", team_a_members, session.team_a, session.team_b)
                         await temp_view.create_team_channel(guild, "Blue-Team", team_b_members, session.team_a, session.team_b)
 
-                        draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
                     else:
                         draft_chat_channel = guild.get_channel(int(session.draft_channel_id))
                         session.draft_chat_channel = session.draft_channel_id
-                    
-                    # Generate draft summary
-                    draft_summary_embed = await generate_draft_summary_embed(bot, session.session_id)
-                    sign_up_tags = ' '.join([f"<@{user_id}>" for user_id in session.sign_ups.keys()])
-                    
-                    # Customize message for auto or manual creation
-                    auto_text = " (Auto-created)" if interaction is None else ""
-                    await draft_chat_channel.send(f"Pairings posted below{auto_text}. Good luck in your matches! {sign_up_tags}")
+                        logger.debug("Using test channel {}", session.draft_channel_id)
 
-                    # Handle staked sessions differently
+                    # Generate and send summary
+                    draft_summary_embed = await generate_draft_summary_embed(bot, session.session_id)
+                    sign_up_tags = ' '.join(f"<@{user_id}>" for user_id in session.sign_ups.keys())
+                    auto_text = " (Auto-created)" if interaction is None else ""
+                    logger.debug("Sending pairing announcement")
+                    await draft_chat_channel.send(
+                        f"Pairings posted below{auto_text}. Good luck in your matches! {sign_up_tags}"
+                    )
+
                     if session.session_type == "staked":
                         stake_view = discord.ui.View(timeout=None)
                         stake_view.add_item(StakeCalculationButton(session.session_id))
@@ -1845,61 +1817,67 @@ class PersistentView(discord.ui.View):
 
                     if session.session_type != "test":
                         await draft_summary_message.pin()
+                        logger.debug("Pinned draft summary message {}", draft_summary_message.id)
                     session.draft_summary_message_id = str(draft_summary_message.id)
 
                     # Delete original message
-                    draft_channel_id = int(session.draft_channel_id) 
+                    draft_channel_id = int(session.draft_channel_id)
                     original_message_id = int(session.message_id)
                     draft_channel = bot.get_channel(draft_channel_id)
-
                     if draft_channel:
                         try:
-                            original_message = await draft_channel.fetch_message(original_message_id)
-                            await original_message.delete()
+                            orig = await draft_channel.fetch_message(original_message_id)
+                            await orig.delete()
+                            logger.debug("Deleted original message {} in channel {}", original_message_id, draft_channel_id)
                         except discord.NotFound:
-                            print(f"Original message {original_message_id} not found in channel {draft_channel_id}.")
+                            logger.warning("Original message {} not found in channel {}", original_message_id, draft_channel_id)
                         except discord.HTTPException as e:
-                            print(f"Failed to delete message {original_message_id}: {e}")
+                            logger.error("Failed to delete message {}: {}", original_message_id, e)
 
                     session.deletion_time = datetime.now() + timedelta(days=7)
+                    logger.debug("Scheduled deletion time {}", session.deletion_time)
                     await db_session.commit()
-                    
-                # Post-commit operations
+                    logger.info("Database commit complete for session_id={}", session_id)
+
+                # Post-commit
+                logger.debug("Running post_pairings tasks")
                 await post_pairings(bot, guild, session.session_id)
                 from livedrafts import create_live_draft_summary
                 await create_live_draft_summary(bot, session.session_id)
 
-                # Send confirmation message for manual creation
                 if interaction:
                     await interaction.followup.send("Pairings posted.", ephemeral=True)
-                    
+                    logger.debug("Sent confirmation to interaction")
+
                 draft_setup_manager = DraftSetupManager.get_active_manager(session_id)
-                if not draft_setup_manager: 
-                    # If no setup manager exists (usually due to mutiny), then connect after draft
+                if not draft_setup_manager:
                     draft_link = session.draft_link
                     guild_id = int(guild.id)
-                    if draft_link:      
+                    if draft_link:
+                        logger.debug("Starting DraftLogManager for live session keep-alive")
                         from datacollections import DraftLogManager
                         manager = DraftLogManager(
-                            session.session_id, 
-                            draft_link, 
-                            session.draft_id, 
-                            session.session_type, 
+                            session.session_id,
+                            draft_link,
+                            session.draft_id,
+                            session.session_type,
                             session.cube,
                             discord_client=bot,
                             guild_id=guild_id
                         )
                         asyncio.create_task(manager.keep_draft_session_alive())
                     else:
-                        print("Draft link not found in database.")
-                    
+                        logger.warning("Draft link not found for session_id={}", session_id)
+
+                logger.info("create_rooms_pairings completed successfully for session_id={}", session_id)
                 return True
-        except Exception as e:
-            print(f"Error in create_rooms_pairings: {e}")
+
+        except Exception:
+            logger.exception("Unhandled exception in create_rooms_pairings for session_id={}", session_id)
             if interaction:
-                await interaction.followup.send(f"An error occurred: {e}", ephemeral=True)
+                await interaction.followup.send("An error occurred.", ephemeral=True)
             return False
-        
+
 async def generate_ready_check_embed(ready_check_status, sign_ups, draft_link, draft_session=None):
     # Define a function to convert user IDs to their names using the sign_ups dictionary
     def get_names(user_ids):
@@ -2063,7 +2041,9 @@ async def update_last_draft_timestamp(session_id, guild, bot):
                                 await member.add_roles(active_role)
                                 logger.info(f"Added Active role to {member.display_name}")
                         else:
-                            logger.warning(f"Member {player_id} not found in guild {guild.name}")
+                            # Get username from draft session sign_ups if possible
+                            username = draft_session.sign_ups.get(player_id, "Unknown")
+                            logger.warning(f"Member {player_id} ({username}) not found in guild {guild.name}")
                     except Exception as e:
                         logger.error(f"Error assigning Active role to player {player_id}: {e}")
             
@@ -2073,11 +2053,6 @@ async def update_last_draft_timestamp(session_id, guild, bot):
 async def create_pairings_view(bot, guild, session_id, match_results):
     view = View(timeout=None)
     for match_result in match_results:
-        # Fetch player names for the button labels
-        player1 = guild.get_member(int(match_result.player1_id))
-        player2 = guild.get_member(int(match_result.player2_id))
-        player1_name = player1.display_name if player1 else 'Unknown Player'
-        player2_name = player2.display_name if player2 else 'Unknown Player'
         
         # Initialize a MatchResultButton for each match
         button = MatchResultButton(

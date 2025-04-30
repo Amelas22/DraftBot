@@ -62,9 +62,9 @@ async def generate_seating_order(bot, draft_session, command_type=None):
     seating_order = []
     for i in range(max(len(team_a_members), len(team_b_members))):
         if i < len(team_a_members) and team_a_members[i]:
-            seating_order.append(team_a_members[i].display_name)
+            seating_order.append(getattr(team_a_members[i], 'display_name', "Unknown User"))
         if i < len(team_b_members) and team_b_members[i]:
-            seating_order.append(team_b_members[i].display_name)
+            seating_order.append(getattr(team_b_members[i], 'display_name', "Unknown User"))
 
 
     return seating_order
@@ -185,8 +185,8 @@ async def post_pairings(bot, guild, session_id):
                 view = await create_pairings_view(bot, guild, session_id, match_results)
 
                 for match_result in match_results:
-                    player_name = guild.get_member(int(match_result.player1_id)).display_name if guild.get_member(int(match_result.player1_id)) else 'Unknown'
-                    opponent_name = guild.get_member(int(match_result.player2_id)).display_name if guild.get_member(int(match_result.player2_id)) else 'Unknown'
+                    player_name = getattr(guild.get_member(int(match_result.player1_id)), 'display_name', 'Unknown User')
+                    opponent_name = getattr(guild.get_member(int(match_result.player2_id)), 'display_name', 'Unknown User')
 
                     # Formatting the pairings without wins - add black circle emoji for all initial matches
                     match_info = f"⚫ **Match {match_result.match_number}**\n{player_name} v.\n{opponent_name}"
@@ -214,8 +214,8 @@ async def post_pairings(bot, guild, session_id):
                 view = await create_pairings_view(bot, guild, session_id, match_results)
                 
                 for match_result in match_results:
-                    player_name = guild.get_member(int(match_result.player1_id)).display_name if guild.get_member(int(match_result.player1_id)) else 'Unknown'
-                    opponent_name = guild.get_member(int(match_result.player2_id)).display_name if guild.get_member(int(match_result.player2_id)) else 'Unknown'
+                    player_name = getattr(guild.get_member(int(match_result.player1_id)), 'display_name', 'Unknown User')
+                    opponent_name = getattr(guild.get_member(int(match_result.player2_id)), 'display_name', 'Unknown User')
 
                     # Formatting the pairings without wins - add black circle emoji for all initial matches
                     match_info = f"⚫ **Match {match_result.match_number}**\n{player_name} v.\n{opponent_name}"
@@ -262,8 +262,8 @@ async def generate_draft_summary_embed(bot, draft_session_id):
 
             guild = bot.get_guild(int(draft_session.guild_id))
             if draft_session.session_type != "swiss":
-                team_a_names = [guild.get_member(int(user_id)).display_name for user_id in draft_session.team_a]
-                team_b_names = [guild.get_member(int(user_id)).display_name for user_id in draft_session.team_b]
+                team_a_names = [getattr(guild.get_member(int(user_id)), 'display_name', "Unknown User") for user_id in draft_session.team_a]
+                team_b_names = [getattr(guild.get_member(int(user_id)), 'display_name', "Unknown User") for user_id in draft_session.team_b]
                 sign_ups_list = list(draft_session.sign_ups.keys())
                 if draft_session.session_type != "premade":
                     seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
@@ -347,16 +347,16 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
         winner_team = [guild.get_member(int(member_id)) for member_id in winner_team_ids]
 
         if draft_session.session_type == "random":
-            title = "Congratulations to " + ", ".join(member.display_name for member in winner_team if member) + " on winning the draft!"
+            title = "Congratulations to " + ", ".join(getattr(member, 'display_name', "Unknown User") for member in winner_team if member) + " on winning the draft!"
             description = f"Draft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
             discord_color = discord.Color.gold()
         elif draft_session.session_type == "premade":
             team_name = draft_session.team_a_name if winner_team_ids == draft_session.team_a else draft_session.team_b_name
             title = f"{team_name} has won the match!"
-            description = f"Congratulations to " + ", ".join(member.display_name for member in winner_team if member) + f" on winning the draft!\nDraft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
+            description = f"Congratulations to " + ", ".join(getattr(member, 'display_name', "Unknown User") for member in winner_team if member) + f" on winning the draft!\nDraft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
             discord_color = discord.Color.gold()
         elif draft_session.session_type == "staked":
-            title = "Congratulations to " + ", ".join(member.display_name for member in winner_team if member) + " on winning the draft!"
+            title = "Congratulations to " + ", ".join(getattr(member, 'display_name', "Unknown User") for member in winner_team if member) + " on winning the draft!"
             description = f"Draft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
             discord_color = discord.Color.gold()
         else:
@@ -404,8 +404,8 @@ async def fetch_match_details(bot, session_id: str, match_number: int):
 
     player1 = guild.get_member(int(match_result.player1_id))
     player2 = guild.get_member(int(match_result.player2_id))
-    player1_name = player1.display_name if player1 else "Player Not Found"
-    player2_name = player2.display_name if player2 else "Player Not Found"
+    player1_name = getattr(player1, 'display_name', "Unknown User")
+    player2_name = getattr(player2, 'display_name', "Unknown User")
 
     return player1_name, player2_name
 
@@ -758,7 +758,7 @@ async def calculate_three_zero_drafters(session, draft_session_id, guild):
             three_zero_drafters = [player_id for player_id, win_count in win_counts.items() if win_count == 3]
 
             # Convert player IDs to names using the guild object
-            three_zero_names = [guild.get_member(int(player_id)).display_name for player_id in three_zero_drafters if guild.get_member(int(player_id))]
+            three_zero_names = [getattr(guild.get_member(int(player_id)), 'display_name', "Unknown User") for player_id in three_zero_drafters]
 
             if three_zero_names:
                 draft_session_stmt = select(DraftSession).where(DraftSession.session_id == draft_session_id)

@@ -11,7 +11,6 @@ import urllib.parse
 import discord
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from aiobotocore.session import get_session
 from config import get_draftmancer_websocket_url, get_draftmancer_base_url
 from database.db_session import db_session
 from models.draft_session import DraftSession
@@ -19,6 +18,7 @@ from models.match import MatchResult
 from bot_registry import get_bot
 from session import AsyncSessionLocal
 from sqlalchemy import select
+from helpers.digital_ocean_helper import DigitalOceanHelper
 
 # Constants
 READY_CHECK_INSTRUCTIONS = (
@@ -184,9 +184,6 @@ class DraftSetupManager:
                                     await channel.send("Failed to create rooms and pairings. Check logs for details.")
                 else:
                     self.logger.info("Could not find guild")
-                # # Schedule log collection after a delay to ensure all data is available
-                # if not self.logs_collection_attempted:
-                #     asyncio.create_task(self.schedule_log_collection(300))
 
         # Listen for Pause or Unpause (Resume)
         @self.sio.on('draftPaused')
@@ -275,14 +272,6 @@ class DraftSetupManager:
         async def on_stored_settings(data):
             self.logger.info(f"Received updated session settings: {data}")
 
-    async def schedule_log_collection(self, delay_seconds):
-        """Schedule log collection after a delay to ensure all data is available"""
-        try:
-            self.logger.info(f"Scheduling log collection in {delay_seconds} seconds")
-            await asyncio.sleep(delay_seconds)
-            await self.collect_draft_logs()
-        except Exception as e:
-            self.logger.exception(f"Error scheduling log collection: {e}")
     
     async def collect_draft_logs(self):
         """Collect draft logs and process them"""
@@ -431,52 +420,41 @@ class DraftSetupManager:
 
     async def save_to_digitalocean_spaces(self, draft_data):
         """Upload draft log data to DigitalOcean Spaces"""
-        DO_SPACES_REGION = os.getenv("DO_SPACES_REGION")
-        DO_SPACES_ENDPOINT = os.getenv("DO_SPACES_ENDPOINT")
-        DO_SPACES_KEY = os.getenv("DO_SPACES_KEY")
-        DO_SPACES_SECRET = os.getenv("DO_SPACES_SECRET")
-        DO_SPACES_BUCKET = os.getenv("DO_SPACES_BUCKET")
-        
-        if not all([DO_SPACES_REGION, DO_SPACES_ENDPOINT, DO_SPACES_KEY, DO_SPACES_SECRET, DO_SPACES_BUCKET]):
-            self.logger.warning("Missing DigitalOcean Spaces configuration, skipping upload")
-            return False
-        
         start_time = draft_data.get("time")
         draft_id = draft_data.get("sessionID")
         
-        session = get_session()
-        async with session.create_client(
-            's3',
-            region_name=DO_SPACES_REGION,
-            endpoint_url=DO_SPACES_ENDPOINT,
-            aws_access_key_id=DO_SPACES_KEY,
-            aws_secret_access_key=DO_SPACES_SECRET
-        ) as s3_client:
-            try:
-                folder = "swiss" if self.session_type == "swiss" else "team"
-                object_name = f'{folder}/{self.cube_id}-{start_time}-{draft_id}.json'
-                await s3_client.put_object(
-                    Bucket=DO_SPACES_BUCKET,
-                    Key=object_name,
-                    Body=json.dumps(draft_data),
-                    ContentType='application/json',
-                    ACL='public-read'
-                )
-                self.logger.info(f"Draft log data uploaded to DigitalOcean Space: {object_name}")
+        # Create DigitalOcean helper
+        do_helper = DigitalOceanHelper()
+        
+        try:
+            # Determine folder based on session type
+            folder = "swiss" if self.session_type == "swiss" else "team"
+            filename = f'{self.cube_id}-{start_time}-{draft_id}.json'
+            
+            # Upload the JSON data
+            success, object_path = await do_helper.upload_json(draft_data, folder, filename)
+            
+            if success:
+                self.logger.info(f"Draft log data uploaded to DigitalOcean Space: {object_path}")
                 
                 # If upload successful, also generate and upload MagicProTools format logs
-                await self.process_draft_logs_for_magicprotools(draft_data, s3_client, DO_SPACES_BUCKET)
+                await self.process_draft_logs_for_magicprotools(draft_data, do_helper)
                 
                 return True
-            except Exception as e:
-                self.logger.error(f"Error uploading to DigitalOcean Space: {e}")
+            else:
+                self.logger.warning("Failed to upload draft log data to DigitalOcean Spaces")
                 return False
+                
+        except Exception as e:
+            self.logger.error(f"Error uploading to DigitalOcean Space: {e}")
+            return False
 
-    async def process_draft_logs_for_magicprotools(self, draft_data, s3_client, bucket_name):
+    async def process_draft_logs_for_magicprotools(self, draft_data, do_helper):
         """Process the draft log and generate formatted logs for each player."""
         try:
             session_id = draft_data.get("sessionID")
             folder = "swiss" if self.session_type == "swiss" else "team"
+            folder_path = f"draft_logs/{folder}/{session_id}"
             
             # Process each user
             for user_id, user_data in draft_data["users"].items():
@@ -488,17 +466,17 @@ class DraftSetupManager:
                 # Create file name for this user's log
                 user_filename = f"DraftLog_{user_id}.txt"
                 
-                # Upload to DO Spaces
-                txt_key = f"draft_logs/{folder}/{session_id}/{user_filename}"
-                await s3_client.put_object(
-                    Bucket=bucket_name,
-                    Key=txt_key,
-                    Body=mpt_format,
-                    ContentType='text/plain',
-                    ACL='public-read'
+                # Upload to DO Spaces using the helper
+                success, object_path = await do_helper.upload_text(
+                    mpt_format,
+                    folder_path,
+                    user_filename
                 )
                 
-                self.logger.info(f"MagicProTools format log for {user_name} uploaded: {txt_key}")
+                if success:
+                    self.logger.info(f"MagicProTools format log for {user_name} uploaded: {object_path}")
+                else:
+                    self.logger.warning(f"Failed to upload MagicProTools format log for {user_name}")
                 
             self.logger.info(f"All MagicProTools format logs generated and uploaded for draft {session_id}")
             return True
@@ -670,9 +648,8 @@ class DraftSetupManager:
     async def generate_magicprotools_embed(self, draft_data):
         """Generate a Discord embed with MagicProTools links for all drafters"""
         try:
-            
-            DO_SPACES_REGION = os.getenv("DO_SPACES_REGION")
-            DO_SPACES_BUCKET = os.getenv("DO_SPACES_BUCKET")
+            # Create DigitalOcean helper for getting URLs
+            do_helper = DigitalOceanHelper()
             session_id = draft_data.get("sessionID")
             folder = "swiss" if self.session_type == "swiss" else "team"
             
@@ -783,7 +760,7 @@ class DraftSetupManager:
                 
                 # Generate URLs
                 txt_key = f"draft_logs/{folder}/{session_id}/DraftLog_{user_id}.txt"
-                txt_url = f"https://{DO_SPACES_BUCKET}.{DO_SPACES_REGION}.digitaloceanspaces.com/{txt_key}"
+                txt_url = do_helper.get_public_url(txt_key)
                 mpt_url = f"https://magicprotools.com/draft/import?url={urllib.parse.quote(txt_url)}"
                 
                 # Direct API method
@@ -1981,7 +1958,7 @@ class DraftSetupManager:
             
             # Continue with log collection as before
             if not self.logs_collection_attempted and not self.logs_collection_in_progress:
-                asyncio.create_task(self.schedule_log_collection(60))
+                await self.collect_draft_logs()
             
             return True
         except Exception as e:
