@@ -276,8 +276,11 @@ class PersistentView(discord.ui.View):
             # Optionally, confirm the update to the user
             await interaction.followup.send(f"League draft status updated: {'ON' if draft_session.tracked_draft else 'OFF'}", ephemeral=True)
             
+    # Maximum number of test users to add
+    NUM_TEST_USERS_TO_ADD = 6
+    
     async def add_test_users_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Add 9 fake users to the draft for testing purposes."""
+        """Add test users to the draft for testing purposes, up to NUM_TEST_USERS_TO_ADD."""
         # Only allow admins to use this feature
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("Only server administrators can use this test feature.", ephemeral=True)
@@ -316,18 +319,32 @@ class PersistentView(discord.ui.View):
             "NinthLongUsername_To_Ensure_We_Hit_The_Limit_Nine",
         ]
         
-        logger.info(f"Adding {len(test_names)} test users to draft {self.draft_session_id}")
+        # Get existing sign-ups
+        sign_ups = draft_session.sign_ups or {}
+        original_count = len(sign_ups)
         
-        # Create a simpler direct approach - add all test users at once
+        # Calculate how many users to add (limited by NUM_TEST_USERS_TO_ADD)
+        # If we already have users, only add enough to reach NUM_TEST_USERS_TO_ADD total
+        users_to_add = max(0, self.NUM_TEST_USERS_TO_ADD - original_count)
+        
+        # Limit to available test names
+        users_to_add = min(users_to_add, len(test_names))
+        
+        if users_to_add <= 0:
+            await interaction.followup.send(f"Already have {original_count} users (limit is {self.NUM_TEST_USERS_TO_ADD}).", ephemeral=True)
+            return
+            
+        logger.info(f"Adding {users_to_add} test users to draft {self.draft_session_id}")
+        
+        # Create a simpler direct approach - add test users up to the limit
         fake_users = {}
-        for i, name in enumerate(test_names):
+        for i in range(users_to_add):
             user_id = str(start_id + i)
+            name = test_names[i]
             fake_users[user_id] = name
             logger.info(f"Generated test user: {name} with ID {user_id}")
             
-        # Get existing sign-ups and add our new users
-        sign_ups = draft_session.sign_ups or {}
-        original_count = len(sign_ups)
+        # Add our new users to existing sign-ups
         sign_ups.update(fake_users)
         logger.info(f"Updated sign_ups from {original_count} to {len(sign_ups)} users")
         
@@ -342,7 +359,7 @@ class PersistentView(discord.ui.View):
                 )
                 
                 # For staked drafts, create stake info entries
-                if draft_session.session_type == "staked":
+                if draft_session.session_type == "staked" and fake_users:
                     logger.info(f"Adding stake info for {len(fake_users)} test users")
                     for user_id, name in fake_users.items():
                         stake_amount = random.randint(5, 20) * 10
@@ -369,12 +386,15 @@ class PersistentView(discord.ui.View):
             return
         
         # Report success to the user
-        success_msg = f"Added {len(fake_users)} test users to the draft."
-        if draft_session.session_type == "staked":
-            success_msg += " Each user has different stake amounts and preferences."
+        if len(fake_users) > 0:
+            success_msg = f"Added {len(fake_users)} test users to the draft (total: {len(sign_ups)})."
+            if draft_session.session_type == "staked":
+                success_msg += " Each user has different stake amounts and preferences."
             
-        logger.info(f"Test users added successfully: {success_msg}")
-        await interaction.followup.send(success_msg, ephemeral=True)
+            logger.info(f"Test users added successfully: {success_msg}")
+            await interaction.followup.send(success_msg, ephemeral=True)
+        else:
+            await interaction.followup.send(f"No additional test users were added. The draft already has {len(sign_ups)} users (limit is {self.NUM_TEST_USERS_TO_ADD}).", ephemeral=True)
 
 
     async def sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
