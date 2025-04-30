@@ -19,6 +19,7 @@ from bot_registry import get_bot
 from session import AsyncSessionLocal
 from sqlalchemy import select
 from helpers.digital_ocean_helper import DigitalOceanHelper
+from helpers.magicprotools_helper import MagicProtoolsHelper
 
 # Constants
 READY_CHECK_INSTRUCTIONS = (
@@ -97,6 +98,9 @@ class DraftSetupManager:
         self.logs_collection_success = False
         self.session_type = "team"  # Default to team drafts
         self.guild_id = None
+        
+        # Initialize helpers
+        self.mpt_helper = MagicProtoolsHelper()
         self.discord_client = None
 
         # Status tracking variables
@@ -453,149 +457,27 @@ class DraftSetupManager:
         """Process the draft log and generate formatted logs for each player."""
         try:
             session_id = draft_data.get("sessionID")
-            folder = "swiss" if self.session_type == "swiss" else "team"
-            folder_path = f"draft_logs/{folder}/{session_id}"
             
-            # Process each user
-            for user_id, user_data in draft_data["users"].items():
-                user_name = user_data["userName"]
-                
-                # Convert to MagicProTools format
-                mpt_format = self.convert_to_magicprotools_format(draft_data, user_id)
-                
-                # Create file name for this user's log
-                user_filename = f"DraftLog_{user_id}.txt"
-                
-                # Upload to DO Spaces using the helper
-                success, object_path = await do_helper.upload_text(
-                    mpt_format,
-                    folder_path,
-                    user_filename
-                )
-                
-                if success:
-                    self.logger.info(f"MagicProTools format log for {user_name} uploaded: {object_path}")
-                else:
-                    self.logger.warning(f"Failed to upload MagicProTools format log for {user_name}")
-                
-            self.logger.info(f"All MagicProTools format logs generated and uploaded for draft {session_id}")
-            return True
+            # Use the MagicProtoolsHelper to upload draft logs
+            user_mpt_data = await self.mpt_helper.upload_draft_logs(
+                draft_data,
+                session_id,
+                self.session_type
+            )
+            
+            if user_mpt_data:
+                self.logger.info(f"All MagicProTools format logs generated and uploaded for draft {session_id}")
+                return True
+            else:
+                self.logger.warning(f"No MagicProTools format logs were generated for draft {session_id}")
+                return False
         except Exception as e:
             self.logger.error(f"Error generating MagicProTools format logs: {e}")
             return False
 
-    def convert_to_magicprotools_format(self, draft_log, user_id):
-        """Convert a draft log JSON to MagicProTools format for a specific user."""
-        output = []
-        
-        # Basic draft info
-        output.append(f"Event #: {draft_log['sessionID']}_{draft_log['time']}")
-        output.append(f"Time: {datetime.fromtimestamp(draft_log['time']/1000).strftime('%a, %d %b %Y %H:%M:%S GMT')}")
-        output.append(f"Players:")
-        
-        # Add player names
-        for player_id, user_data in draft_log['users'].items():
-            if player_id == user_id:
-                output.append(f"--> {user_data['userName']}")
-            else:
-                output.append(f"    {user_data['userName']}")
-        
-        output.append("")
-        
-        # Determine booster header
-        if (draft_log.get('setRestriction') and 
-            len(draft_log['setRestriction']) == 1 and
-            len([card for card in draft_log['carddata'].values() if card['set'] == draft_log['setRestriction'][0]]) >= 
-            0.5 * len(draft_log['carddata'])):
-            booster_header = f"------ {draft_log['setRestriction'][0].upper()} ------"
-        else:
-            booster_header = "------ Cube ------"
-        
-        # Group picks by pack
-        picks = draft_log['users'][user_id]['picks']
-        picks_by_pack = {}
-        
-        for pick in picks:
-            pack_num = pick['packNum']
-            if pack_num not in picks_by_pack:
-                picks_by_pack[pack_num] = []
-            picks_by_pack[pack_num].append(pick)
-        
-        # Sort packs and picks
-        for pack_num in picks_by_pack:
-            picks_by_pack[pack_num].sort(key=lambda x: x['pickNum'])
-        
-        # Process each pack
-        for pack_num in sorted(picks_by_pack.keys()):
-            output.append(booster_header)
-            output.append("")
-            
-            for pick in picks_by_pack[pack_num]:
-                output.append(f"Pack {pick['packNum'] + 1} pick {pick['pickNum'] + 1}:")
-                
-                # Get the picked card indices
-                picked_indices = pick['pick']
-                
-                for idx, card_id in enumerate(pick['booster']):
-                    # Get card name
-                    card_name = draft_log['carddata'][card_id]['name']
-                    
-                    # Handle split/double-faced cards
-                    if 'back' in draft_log['carddata'][card_id]:
-                        back_name = draft_log['carddata'][card_id]['back']['name']
-                        card_name = f"{card_name} // {back_name}"
-                    
-                    # Check if this card was picked
-                    if idx in picked_indices:
-                        prefix = "--> "
-                    else:
-                        prefix = "    "
-                    
-                    output.append(f"{prefix}{card_name}")
-                
-                output.append("")
-        
-        return "\n".join(output)
+    # This method has been replaced by using the MagicProtoolsHelper.convert_to_magicprotools_format method
 
-    async def submit_to_mpt_api(self, user_id, draft_data, api_key):
-        """Submit draft data directly to MagicProTools API."""
-        try:
-            # Convert to MagicProTools format
-            mpt_format = self.convert_to_magicprotools_format(draft_data, user_id)
-            
-            # Create the API request
-            url = "https://magicprotools.com/api/draft/add"
-            headers = {
-                "Accept": "application/json, text/plain, */*",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Referer": "https://draftmancer.com"
-            }
-            data = {
-                "draft": mpt_format,
-                "apiKey": api_key,
-                "platform": "mtgadraft"
-            }
-            
-            # Encode the data
-            encoded_data = "&".join([f"{k}={urllib.parse.quote(v)}" for k, v in data.items()])
-            
-            # Make the request
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, data=encoded_data) as response:
-                    if response.status == 200:
-                        json_response = await response.json()
-                        if "url" in json_response and not json_response.get("error"):
-                            self.logger.info(f"Successfully submitted to MagicProTools API for user {user_id}")
-                            return json_response["url"]
-                        else:
-                            self.logger.warning(f"MagicProTools API error: {json_response.get('error', 'Unknown error')}")
-                    else:
-                        self.logger.warning(f"MagicProTools API returned status {response.status}")
-            
-            return None  # Return None if unsuccessful
-        except Exception as e:
-            self.logger.error(f"Error submitting to MagicProTools API: {e}")
-            return None
+    # This method has been replaced by using the MagicProtoolsHelper.submit_to_api method
 
     async def send_magicprotools_embed(self, draft_data):
         """Find draft-logs channel and send the embed if found."""
@@ -758,40 +640,54 @@ class DraftSetupManager:
                 if discord_name:
                     display_name = f"{team_emoji} {user_name} - {discord_name}{record_str} {trophy_emoji}"
                 
-                # Generate URLs
-                txt_key = f"draft_logs/{folder}/{session_id}/DraftLog_{user_id}.txt"
+                # Get paths for MagicProTools
+                folder_path = f"draft_logs/{folder}/{session_id}"
+                filename = f"DraftLog_{user_id}.txt"
+                
+                # Get the URLs from the DigitalOcean helper
+                txt_key = f"{folder_path}/{filename}"
                 txt_url = do_helper.get_public_url(txt_key)
+                # Fallback: Generate import URL
+
+                
+                # Try to get or generate URL from MagicProTools helper
+                self.logger.info(f"Attempting to get MagicProTools URL for user {user_name} (ID: {user_id})")
+                try:
+                    # Try to get a direct URL from MagicProTools API
+                    self.logger.debug(f"Calling mpt_helper.submit_to_api for user {user_name}")
+                    direct_mpt_url = await self.mpt_helper.submit_to_api(user_id, draft_data)
+                    
+                    if direct_mpt_url:
+                        self.logger.info(f"SUCCESS: Got direct MagicProTools URL for {user_name}: {direct_mpt_url}")
+                        # If API call successful, use the direct URL
+                        final_mpt_url = direct_mpt_url
+                        embed.add_field(
+                            name=display_name,
+                            value=f"[View Raw Log]({txt_url}) | [View on MagicProTools]({direct_mpt_url})",
+                            inline=False
+                        )
+                        
+                        # Get Discord ID and store the link in our dictionary
+                        if discord_id:
+                            magicprotools_links[discord_id] = {
+                                "name": discord_name_by_user_id.get(user_id, user_name),
+                                "link": direct_mpt_url
+                            }
+                            self.logger.debug(f"Stored MagicProTools link for Discord user {discord_id}")
+                        else:
+                            self.logger.warning(f"No Discord ID mapping found for user {user_name} (ID: {user_id})")
+                        
+                        self.logger.debug(f"Using DIRECT URL for {user_name} - skipping fallback code")
+                        continue
+                    else:
+                        self.logger.warning(f"API call succeeded but returned no URL for user {user_name} - falling back to import URL")
+                except Exception as e:
+                    self.logger.error(f"ERROR submitting to MagicProTools API for {user_name}: {str(e)}")
+                    self.logger.debug(f"Exception details for {user_name}: {repr(e)}")
+                
+                # Fallback: Add field with raw log link and import link (only executed if API method failed or didn't return a URL)
                 mpt_url = f"https://magicprotools.com/draft/import?url={urllib.parse.quote(txt_url)}"
-                
-                # Direct API method
-                mpt_api_key = os.getenv("MPT_API_KEY")
-                final_mpt_url = mpt_url  # Default to import URL
-                
-                if mpt_api_key:
-                    try:
-                        direct_mpt_url = await self.submit_to_mpt_api(user_id, draft_data, mpt_api_key)
-                        if direct_mpt_url:
-                            # If API call successful, use the direct URL
-                            final_mpt_url = direct_mpt_url
-                            embed.add_field(
-                                name=display_name,
-                                value=f"[View Raw Log]({txt_url}) | [View on MagicProTools]({direct_mpt_url})",
-                                inline=False
-                            )
-                            
-                            # Get Discord ID and store the link in our dictionary
-                            if discord_id:
-                                magicprotools_links[discord_id] = {
-                                    "name": discord_name_by_user_id.get(user_id, user_name),
-                                    "link": direct_mpt_url
-                                }
-                            
-                            continue
-                    except Exception as e:
-                        self.logger.error(f"Error submitting to MagicProTools API for {user_name}: {e}")
-                        # Fall back to URL method
-                
-                # Fallback: Add field with raw log link and import link
+                final_mpt_url = mpt_url  # Default to import URL                self.logger.info(f"Using FALLBACK import URL for {user_name}: {mpt_url}")
                 embed.add_field(
                     name=display_name,
                     value=f"[View Raw Log]({txt_url}) | [Import to MagicProTools]({mpt_url})",
@@ -804,6 +700,9 @@ class DraftSetupManager:
                         "name": discord_name_by_user_id.get(user_id, user_name),
                         "link": final_mpt_url
                     }
+                    self.logger.debug(f"Stored fallback MagicProTools link for Discord user {discord_id}")
+                else:
+                    self.logger.warning(f"No Discord ID mapping found for user {user_name} during fallback (ID: {user_id})")
             
             # Update the database with the MagicProTools links
             if magicprotools_links and draft_session:
@@ -827,37 +726,9 @@ class DraftSetupManager:
 
     def get_pack_first_picks(self, draft_data, user_id):
         """Extract the first pick card name for each pack for a specific user."""
-        pack_first_picks = {}
         try:
-            # Get user's picks
-            user_picks = draft_data['users'][user_id]['picks']
-            
-            # Find the first pick for each pack
-            for pick in user_picks:
-                pack_num = pick['packNum']
-                pick_num = pick['pickNum']
-                
-                # Only consider the first pick (pick 0) for each pack
-                if pick_num == 0:
-                    # Get the picked card indices
-                    picked_indices = pick['pick']
-                    if not picked_indices:
-                        pack_first_picks[str(pack_num)] = "Unknown"
-                        continue
-                    
-                    # Get the card ID and name
-                    first_picked_idx = picked_indices[0]
-                    card_id = pick['booster'][first_picked_idx]
-                    card_name = draft_data['carddata'][card_id]['name']
-                    
-                    # Handle split/double-faced cards
-                    if 'back' in draft_data['carddata'][card_id]:
-                        back_name = draft_data['carddata'][card_id]['back']['name']
-                        card_name = f"{card_name} // {back_name}"
-                    
-                    pack_first_picks[str(pack_num)] = card_name
-            
-            return pack_first_picks
+            # Use the MagicProtoolsHelper to get the first picks
+            return self.mpt_helper.get_pack_first_picks(draft_data, user_id)
         except Exception as e:
             # In case of any error, return empty result
             self.logger.error(f"Error getting first picks: {e}")
