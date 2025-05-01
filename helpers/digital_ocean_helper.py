@@ -1,8 +1,8 @@
 import os
 import json
-import boto3
 import logging
 from typing import Dict, Any, Optional, Tuple
+import aiobotocore.session
 
 
 class DigitalOceanHelper:
@@ -36,8 +36,8 @@ class DigitalOceanHelper:
         if not self.config_valid:
             return None
             
-        session = boto3.session.Session()
-        return session.client(
+        session = aiobotocore.session.AioSession()
+        return session.create_client(
             's3',
             region_name=self.region,
             endpoint_url=self.endpoint,
@@ -73,13 +73,14 @@ class DigitalOceanHelper:
                 
             object_path = f'{folder}/{filename}'
             
-            client.put_object(
-                Bucket=self.bucket,
-                Key=object_path,
-                Body=json.dumps(data),
-                ContentType='application/json',
-                ACL='public-read'
-            )
+            async with client as s3:
+                await s3.put_object(
+                    Bucket=self.bucket,
+                    Key=object_path,
+                    Body=json.dumps(data),
+                    ContentType='application/json',
+                    ACL='public-read'
+                )
             
             self.logger.info(f"Data uploaded to DigitalOcean Space: {object_path}")
             return True, object_path
@@ -116,13 +117,14 @@ class DigitalOceanHelper:
                 
             object_path = f'{folder}/{filename}'
             
-            client.put_object(
-                Bucket=self.bucket,
-                Key=object_path,
-                Body=content,
-                ContentType='text/plain',
-                ACL='public-read'
-            )
+            async with client as s3:
+                await s3.put_object(
+                    Bucket=self.bucket,
+                    Key=object_path,
+                    Body=content,
+                    ContentType='text/plain',
+                    ACL='public-read'
+                )
             
             self.logger.info(f"Text uploaded to DigitalOcean Space: {object_path}")
             return True, object_path
