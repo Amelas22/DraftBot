@@ -585,15 +585,6 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
 
                 draft_session.deletion_time = datetime.now() + timedelta(hours=2)
 
-                if draft_manager:
-                    logger.info(f"Victory/draw determined - unlocking logs for session {draft_session_id}")
-                    await draft_manager.manually_unlock_draft_logs()
-                    
-                    # Small delay to allow logs to process
-                    await asyncio.sleep(2)
-                else:
-                    logger.warning(f"No active manager found for session {draft_session_id} - logs may remain locked")
-
                 embed = await generate_draft_summary_embed(bot, draft_session_id)
                 three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
                 embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
@@ -622,7 +613,16 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 else:
                     print(f"Results channel '{results_channel_name}' not found.")
 
-                
+                # Unlock logs for posting
+                if draft_manager:
+                    logger.info(f"Victory/draw determined - unlocking logs for session {draft_session_id}")
+                    await draft_manager.manually_unlock_draft_logs()
+                    
+                    # Small delay to allow logs to process
+                    await asyncio.sleep(2)
+                else:
+                    logger.warning(f"No active manager found for session {draft_session_id} - logs may remain locked")
+
                 # Check if we have a leaderboard message for this guild
                 stmt = select(LeaderboardMessage).where(LeaderboardMessage.guild_id == draft_session.guild_id)
                 result = await session.execute(stmt)

@@ -413,7 +413,7 @@ class DraftSetupManager:
                 await session.commit()
             
             # Send MagicProTools embed to Discord if bot is available
-            if self.discord_client and self.guild_id:
+            if self.guild_id:
                 await self.send_magicprotools_embed(draft_data)
             
             return upload_successful
@@ -483,7 +483,8 @@ class DraftSetupManager:
         """Find draft-logs channel and send the embed if found."""
         try:
             # Find the guild
-            guild = self.discord_client.get_guild(int(self.guild_id))
+            bot = get_bot()
+            guild = bot.get_guild(int(self.guild_id))
             if not guild:
                 self.logger.warning(f"Could not find guild with ID {self.guild_id}")
                 return
@@ -518,7 +519,7 @@ class DraftSetupManager:
                         # Import the function here to avoid circular imports
                         from utils import check_and_post_victory_or_draw
                         try:
-                            await check_and_post_victory_or_draw(self.discord_client, self.session_id)
+                            await check_and_post_victory_or_draw(bot, self.session_id)
                             self.logger.info(f"Successfully updated victory messages with logs link for session {self.session_id}")
                         except Exception as e:
                             self.logger.error(f"Error updating victory messages with logs link: {e}")
@@ -1615,7 +1616,7 @@ class DraftSetupManager:
             await self.sio.emit('setDraftLogRecipients', "delayed")
             await self.sio.emit('setPersonalLogs', True)
             await self.sio.emit('teamDraft', True)  # Added teamDraft setting
-            await self.sio.emit('setPickTimer', 60)
+            await self.sio.emit('setPickTimer', 1)
             await self.sio.emit('setOwnerIsPlayer', False)
             
             return True
@@ -1829,13 +1830,22 @@ class DraftSetupManager:
             
             # Continue with log collection as before
             if not self.logs_collection_attempted and not self.logs_collection_in_progress:
-                await self.collect_draft_logs()
+                asyncio.create_task(self.schedule_log_collection(60))
             
             return True
         except Exception as e:
             self.logger.error(f"Error unlocking draft logs: {e}")
             return False
-        
+
+    async def schedule_log_collection(self, delay_seconds):
+        """Schedule log collection after a delay to ensure all data is available"""
+        try:
+            self.logger.info(f"Scheduling log collection in {delay_seconds} seconds")
+            await asyncio.sleep(delay_seconds)
+            await self.collect_draft_logs()
+        except Exception as e:
+            self.logger.exception(f"Error scheduling log collection: {e}")
+                
     async def update_cube(self, new_cube_id: str) -> bool:
         """
         Updates the cube ID and imports the new cube.
