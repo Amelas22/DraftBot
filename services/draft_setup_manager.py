@@ -664,7 +664,7 @@ class DraftSetupManager:
                         final_mpt_url = direct_mpt_url
                         embed.add_field(
                             name=display_name,
-                            value=f"[View Raw Log]({txt_url}) | [View on MagicProTools]({direct_mpt_url})",
+                            value=f"[View on MagicProTools]({direct_mpt_url})",
                             inline=False
                         )
                         
@@ -691,7 +691,7 @@ class DraftSetupManager:
                 final_mpt_url = mpt_url  # Default to import URL                self.logger.info(f"Using FALLBACK import URL for {user_name}: {mpt_url}")
                 embed.add_field(
                     name=display_name,
-                    value=f"[View Raw Log]({txt_url}) | [Import to MagicProTools]({mpt_url})",
+                    value=f"[Import to MagicProTools]({mpt_url})",
                     inline=False
                 )
                 
