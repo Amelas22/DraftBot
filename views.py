@@ -1156,14 +1156,18 @@ class PersistentView(discord.ui.View):
         await interaction.channel.send(embed=channel_embed)
 
         try:
-            
             # Look for an existing manager
             manager = DraftSetupManager.get_active_manager(self.draft_session_id)
             
             if manager:
                 logger.info(f"TEAMS CREATED: Found existing manager for session {self.draft_session_id}")
                 logger.info(f"TEAMS CREATED: Manager state - Seating set: {manager.seating_order_set}, "
-                        f"Users count: {manager.users_count}, Expected count: {manager.expected_user_count}")
+                            f"Users count: {manager.users_count}, Expected count: {manager.expected_user_count}")
+                        
+                # Make sure bot instance is set
+                manager.set_bot_instance(interaction.client)
+                logger.info(f"Set bot instance on manager to ensure Discord messaging works")
+                        
                 # Manager exists, force a check of session stage
                 logger.info("Check session from randomize teams normal draft")
                 await manager.check_session_stage_and_organize()
@@ -1173,6 +1177,12 @@ class PersistentView(discord.ui.View):
                     await manager.sio.emit('getUsers')
             else:
                 logger.info(f"DraftSetupManager not found for {self.draft_session_id}")
+
+        except Exception as e:
+            # Log the error but don't disrupt the normal flow
+            print(f"Error triggering seating order process: {e}")
+            import traceback
+            traceback.print_exc()
 
         except Exception as e:
             # Log the error but don't disrupt the normal flow
