@@ -91,6 +91,7 @@ class DraftSetupManager:
         self.draftPaused = False
         self.draft_cancelled = False
         self.removing_unexpected_user = False
+        self.timeout_message_id = None
 
         # Draft logs variables
         self.logs_collection_attempted = False
@@ -839,15 +840,22 @@ class DraftSetupManager:
                     self.logger.error(f"Could not find channel with ID {self.draft_channel_id}")
                     self.ready_check_active = False
                     return False
-                    
+            
+            # Calculate the timestamp 90 seconds from now
+            future_time = datetime.now() + timedelta(seconds=90)
+            timeout = int(future_time.timestamp())
+
             message = await channel.send(
-                f"Seating order set. Draftmancer Readycheck in progress: 0/{self.expected_user_count} ready.\n"
+                f"🔔🔔 Seating order set. Draftmancer Readycheck in progress: 0/{self.expected_user_count} ready.\n"
                 f"{READY_CHECK_INSTRUCTIONS}"
             )
-            
-            # Store message ID safely
+            # Store initial message ID safely
             self.ready_check_message_id = str(message.id)
             await self.update_draft_session_field('ready_check_message_id', str(message.id))
+
+            # Store the timeout message ID
+            timeout_message = await channel.send(f"Readycheck will timeout <t:{timeout}:R>")
+            self.timeout_message_id = str(timeout_message.id)
             
             # Start timeout timer
             self.ready_check_timer = asyncio.create_task(self.ready_check_timeout(90, bot))
@@ -1038,6 +1046,21 @@ class DraftSetupManager:
         """Handles timeout for the ready check"""
         try:
             await asyncio.sleep(seconds)
+
+            # Always try to delete the timeout message after the time expires
+            try:
+                if self.timeout_message_id:
+                    channel = bot.get_channel(int(self.draft_channel_id))
+                    if channel:
+                        try:
+                            timeout_msg = await channel.fetch_message(int(self.timeout_message_id))
+                            await timeout_msg.delete()
+                            self.logger.info("Timeout message successfully deleted")
+                        except Exception as e:
+                            self.logger.error(f"Failed to delete timeout message: {e}")
+                    self.timeout_message_id = None
+            except Exception as e:
+                self.logger.error(f"Error handling timeout message deletion: {e}")
             
             # If we reach here, the ready check timed out
             if self.ready_check_active:
@@ -1061,7 +1084,8 @@ class DraftSetupManager:
                 
                 # Prepare the timeout message
                 timeout_message = f"⚠️ **Ready check failed!** Timed out after {seconds} seconds.{missing_text}\n" \
-                                  f"A new ready check will start automatically when all players are present."
+                                  f"A new ready check will start automatically when all players are present." \
+                                  f"{READY_CHECK_INSTRUCTIONS}"
                 
                 # Get the channel - needed for either approach
                 try:
@@ -1079,16 +1103,7 @@ class DraftSetupManager:
                                 self.logger.info("Ready check message updated successfully for timeout")
                             except Exception as e:
                                 self.logger.error(f"Failed to update ready check message on timeout: {e}")
-                                # Continue to fallback
-                        
-                        # Always send a new notification for timeout with instructions
-                        try:
-                            await channel.send(
-                                f"⚠️ Ready Check Failed.{missing_text}\n"
-                                f"{READY_CHECK_INSTRUCTIONS}"
-                            )
-                        except Exception as e:
-                            self.logger.error(f"Failed to send timeout message: {e}")
+
                 except Exception as e:
                     self.logger.error(f"Error handling ready check timeout: {e}")
                 
@@ -1115,6 +1130,23 @@ class DraftSetupManager:
             self.ready_check_timer.cancel()
             self.ready_check_timer = None
         
+        # Delete the timeout message
+        try:
+            if self.timeout_message_id:
+                bot = get_bot()
+                if bot:
+                    channel = bot.get_channel(int(self.draft_channel_id))
+                    if channel:
+                        try:
+                            timeout_msg = await channel.fetch_message(int(self.timeout_message_id))
+                            await timeout_msg.delete()
+                            self.logger.info("Timeout message deleted on successful ready check")
+                        except Exception as e:
+                            self.logger.error(f"Failed to delete timeout message: {e}")
+                    self.timeout_message_id = None
+        except Exception as e:
+            self.logger.error(f"Error deleting timeout message: {e}")
+            
         try:
             # Get bot instance
             bot = get_bot()
