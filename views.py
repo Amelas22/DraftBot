@@ -1164,7 +1164,7 @@ class PersistentView(discord.ui.View):
                 logger.info(f"TEAMS CREATED: Manager state - Seating set: {manager.seating_order_set}, "
                             f"Users count: {manager.users_count}, Expected count: {manager.expected_user_count}")
                         
-                # Make sure bot instance is set
+                # Make sure bot instance is set 
                 manager.set_bot_instance(interaction.client)
                 logger.info(f"Set bot instance on manager to ensure Discord messaging works")
                         
@@ -2016,17 +2016,19 @@ async def update_last_draft_timestamp(session_id, guild, bot):
     guild_id = str(guild.id)
     current_time = datetime.now()
     
-    # Get config for this guild to check role name and if activity tracking is enabled
+    # Get config for this guild to check role name
     from config import get_config
     config = get_config(guild_id)
     
-    # Get activity tracking settings
+    # Get activity tracking settings (for database update purposes only)
     activity_tracking_enabled = config.get("activity_tracking", {}).get("enabled", False)
-    active_role_name = config["activity_tracking"].get("active_role", "Active") if activity_tracking_enabled else None
     
-    # Find the active role if activity tracking is enabled
+    # Always get the active role name regardless of activity tracking setting
+    active_role_name = config.get("activity_tracking", {}).get("active_role", "Active")
+    
+    # Find the active role if it exists
     active_role = None
-    if activity_tracking_enabled and active_role_name:
+    if active_role_name:
         active_role = discord.utils.get(guild.roles, name=active_role_name)
         if not active_role:
             logger.warning(f"Active role '{active_role_name}' not found in guild {guild.name}")
@@ -2044,7 +2046,7 @@ async def update_last_draft_timestamp(session_id, guild, bot):
             # Get all players in the draft
             player_ids = draft_session.team_a + draft_session.team_b
             
-            # Update last_draft_timestamp for each player and assign Active role if enabled
+            # Update last_draft_timestamp for each player and assign Active role if it exists
             for player_id in player_ids:
                 # Update timestamp in database
                 from models.player import PlayerStats
@@ -2060,8 +2062,8 @@ async def update_last_draft_timestamp(session_id, guild, bot):
                 else:
                     logger.warning(f"Player {player_id} not found in PlayerStats.")
                 
-                # Assign Active role if activity tracking is enabled
-                if activity_tracking_enabled and active_role:
+                # Always assign Active role if it exists, regardless of activity tracking setting
+                if active_role:
                     try:
                         # Get the member object
                         member = guild.get_member(int(player_id))
