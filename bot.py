@@ -121,8 +121,9 @@ async def main():
             logger.info(f"Starting to run {len(managers)} draft {task_type} reconnection tasks sequentially")
             for i, manager in enumerate(managers):
                 try:
+
                     # Start this specific connection and create a task to monitor it
-                    task = asyncio.create_task(manager.keep_connection_alive())
+                    task = asyncio.create_task(manager.keep_connection_alive()) if task_type == "setup" else asyncio.create_task(manager.keep_draft_session_alive())
                     logger.info(f"Started task {i+1}/{len(managers)} for draft ID: {manager.draft_id}")
                     
                     # Add a 1-second delay before the next task
