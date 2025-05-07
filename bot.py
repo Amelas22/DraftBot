@@ -67,22 +67,13 @@ async def main():
         try:
             # Reconnect to sessions needing setup
             logger.info("Starting draft setup reconnection...")
-            setup_tasks = await reconnect_draft_setup_sessions(bot)
-            if setup_tasks:
-                logger.info(f"Created {len(setup_tasks)} draft setup reconnection tasks")
-                bot.loop.create_task(monitor_reconnection_tasks(setup_tasks, "setup"))
+            setup_managers = await reconnect_draft_setup_sessions(bot)
+            if setup_managers:
+                logger.info(f"Created {len(setup_managers)} draft setup reconnection managers")
+                bot.loop.create_task(monitor_reconnection_tasks(setup_managers, "setup"))
             else:
                 logger.info("No draft setup sessions to reconnect")
-                
-            # Reconnect to sessions needing log collection
-            logger.info("Starting draft log collection reconnection...")
-            log_tasks = await reconnect_recent_draft_sessions(bot)
-            if log_tasks:
-                logger.info(f"Created {len(log_tasks)} draft log collection reconnection tasks")
-                bot.loop.create_task(monitor_reconnection_tasks(log_tasks, "log collection"))
-            else:
-                logger.info("No draft log collection sessions to reconnect")
-                
+                      
         except Exception as e:
             logger.error(f"Error setting up draft reconnections: {e}")
 
@@ -94,6 +85,7 @@ async def main():
         from livedrafts import re_register_live_drafts
         await re_register_live_drafts(bot)
         logger.info("Re-registered team finder")
+        bot.loop.create_task(delayed_log_collection(bot))
 
     @bot.event
     async def on_guild_join(guild):
@@ -108,13 +100,41 @@ async def main():
             await guild.system_channel.send(
                 "Thanks for adding the Draft Bot! To set up needed channels and roles, an admin should use `/setup`."
             )
-    async def monitor_reconnection_tasks(tasks, task_type=""):
-        """Monitor the reconnection tasks without blocking bot startup"""
+    async def delayed_log_collection(bot):
+        # Wait 65 seconds
+        await asyncio.sleep(65)
         try:
-            await asyncio.gather(*tasks, return_exceptions=True)
-            logger.info(f"All draft {task_type} reconnection tasks have completed")
+            # Reconnect to sessions needing log collection
+            logger.info("Starting draft log collection reconnection...")
+            log_tasks = await reconnect_recent_draft_sessions(bot)
+            if log_tasks:
+                logger.info(f"Created {len(log_tasks)} draft log collection reconnection tasks")
+                await monitor_reconnection_tasks(log_tasks, "log collection")
+            else:
+                logger.info("No draft log collection sessions to reconnect")
         except Exception as e:
-            logger.error(f"Error during draft {task_type} reconnection: {e}")
+            logger.error(f"Error setting up draft reconnections: {e}")
+            
+    async def monitor_reconnection_tasks(managers, task_type=""):
+        """Process managers sequentially with a 1-second delay between each"""
+        try:
+            logger.info(f"Starting to run {len(managers)} draft {task_type} reconnection tasks sequentially")
+            for i, manager in enumerate(managers):
+                try:
+                    # Start this specific connection and create a task to monitor it
+                    task = asyncio.create_task(manager.keep_connection_alive())
+                    logger.info(f"Started task {i+1}/{len(managers)} for draft ID: {manager.draft_id}")
+                    
+                    # Add a 1-second delay before the next task
+                    if i < len(managers) - 1:  # Don't delay after the last manager
+                        await asyncio.sleep(3)
+                        
+                except Exception as e:
+                    logger.error(f"Error starting task {i+1}/{len(managers)}: {e}")
+            
+            logger.info(f"All draft {task_type} reconnection managers have been started sequentially")
+        except Exception as e:
+            logger.error(f"Error during draft {task_type} reconnection sequence: {e}")
 
     await league_commands(bot)
     await scheduled_posts(bot)
