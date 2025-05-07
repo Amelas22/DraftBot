@@ -1707,11 +1707,6 @@ class DraftSetupManager:
                 
             # Log the URL to help with debugging
             self.logger.debug(f"Attempting connection to URL: {websocket_url}")
-            
-            # Connect to the websocket with retries
-            if self.sio.connected:
-                self.logger.warning("Socket is already connected, disconnecting first...")
-                await self.disconnect_safely()
 
             connection_successful = await self.connect_with_retry(websocket_url)
             if not connection_successful:
