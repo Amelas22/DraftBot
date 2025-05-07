@@ -148,7 +148,7 @@ async def main():
         # Wait for the bot to fully connect to all guilds
         await bot.wait_until_ready()
         # Add an extra safety delay
-        await asyncio.sleep(30)
+        await asyncio.sleep(120)
         # Then refresh all leaderboards
         try:
             from cogs.leaderboard import refresh_all_leaderboards
