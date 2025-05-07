@@ -1704,14 +1704,17 @@ class DraftSetupManager:
         try:
             self.logger.info(f"Starting connection task for draft_id: DB{self.draft_id}")
             websocket_url = get_draftmancer_websocket_url(self.draft_id)
-                
-            # Log the URL to help with debugging
-            self.logger.debug(f"Attempting connection to URL: {websocket_url}")
+            
+            # Connect to the websocket
+            if self.sio.connected:
+                self.logger.warning("Socket is already connected, disconnecting first...")
+                await self.disconnect_safely()
 
-            connection_successful = await self.connect_with_retry(websocket_url)
-            if not connection_successful:
-                self.logger.error("Failed to connect after multiple retries, aborting connection task")
-                return
+            await self.sio.connect(
+                websocket_url,
+                transports='websocket',
+                wait_timeout=10
+            )
             
             # If initial cube import fails, end the task
             if not self.cube_imported and not await self.import_cube():
@@ -1763,10 +1766,37 @@ class DraftSetupManager:
                         except Exception as e:
                             self.logger.error(f"Error getting users: {e}")
                     
-                    # If logs were collected successfully, we can disconnect
-                    if self.logs_collection_success:
-                        self.logger.info("Logs collected successfully, disconnecting")
-                        self._should_disconnect = True
+                    # Draft completed logic
+                    if not self.drafting and not self.draft_cancelled:
+                        # If this is the first time we've noticed draft is not active
+                        if draft_ended_time is None:
+                            draft_ended_time = datetime.now()
+                            self.logger.info(f"Draft not active, setting draft_ended_time to {draft_ended_time}")
+                            
+                            # # Immediately attempt to collect logs if not attempted yet
+                            # if not self.logs_collection_attempted and not self.logs_collection_in_progress:
+                            #     self.logger.info("Attempting to collect logs immediately")
+                            #     last_log_attempt_time = datetime.now()
+                            #     await self.collect_draft_logs()
+                        else:
+                            # If logs were collected successfully, we can disconnect
+                            if self.logs_collection_success:
+                                self.logger.info("Logs collected successfully, disconnecting")
+                                self._should_disconnect = True
+                                break
+                                
+                            # # If logs were attempted but failed, retry periodically (every 30 minutes)
+                            # if (self.logs_collection_attempted and not self.logs_collection_success and 
+                            #     last_log_attempt_time and 
+                            #     (datetime.now() - last_log_attempt_time).total_seconds() > 1800):
+                                
+                            #     self.logger.info(f"Retrying log collection after {(datetime.now() - last_log_attempt_time).total_seconds()} seconds")
+                            #     self.logs_collection_attempted = False  # Reset to allow retry
+                            #     last_log_attempt_time = datetime.now()
+                            #     await self.collect_draft_logs()
+                    else:
+                        # If draft is active again, reset the ended time
+                        draft_ended_time = None
                         
                     await asyncio.sleep(10)  # Regular check interval
                         
@@ -1781,24 +1811,6 @@ class DraftSetupManager:
             # Only disconnect if requested
             if self._should_disconnect:
                 await self.disconnect_safely()
-
-    @exponential_backoff(max_retries=5, base_delay=2)
-    async def connect_with_retry(self, url):
-        """Handle Socket.IO connection with retries and better error reporting"""
-        try:
-            await self.sio.connect(
-                url,
-                transports='websocket',
-                wait_timeout=10
-            )
-            self.logger.info(f"Successfully connected to {url}")
-            return True
-        except socketio.exceptions.ConnectionError as e:
-            self.logger.error(f"Socket.IO connection error: {str(e)}")
-            return False
-        except Exception as e:
-            self.logger.error(f"Unexpected error during connection: {str(e)}")
-            return False
                 
     async def manually_unlock_draft_logs(self):
         """
