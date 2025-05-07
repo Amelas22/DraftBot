@@ -10,9 +10,7 @@ from config import get_draftmancer_draft_url
 async def reconnect_draft_setup_sessions(discord_client):
     """
     Reconnect to sessions that need draft setup after bot restart.
-    Only reconnects to sessions that:
-    1. Have session_stage as NULL (teams not created)
-    2. Were created within the last 5 hours
+    Running each connection sequentially with a 1-second delay between them.
     """
     logger.info("Reconnecting to recent draft setup sessions after bot restart...")
     
@@ -21,6 +19,9 @@ async def reconnect_draft_setup_sessions(discord_client):
     five_hours_ago = current_time - timedelta(hours=5)
     
     logger.info(f"Looking for draft sessions needing setup created between {five_hours_ago} and {current_time}")
+    
+    # List to track successful connections for monitoring
+    successful_connections = []
     
     async with AsyncSessionLocal() as db_session:
         # Query for draft sessions that need setup
@@ -35,8 +36,8 @@ async def reconnect_draft_setup_sessions(discord_client):
         
         logger.info(f"Found {len(active_sessions)} recent draft sessions needing setup")
         
-        # Create tasks for each session
-        tasks = []
+        # Instead of creating tasks, we'll return manager objects that will be processed one by one
+        managers = []
         for session in active_sessions:
             # Skip if missing required fields
             if not all([session.session_id, session.draft_id, session.cube]):
@@ -57,19 +58,19 @@ async def reconnect_draft_setup_sessions(discord_client):
                     cube_id=session.cube
                 )
                 
-                # Create and add the task
-                task = asyncio.create_task(manager.keep_connection_alive())
-                tasks.append(task)
+                # Add to our list
+                managers.append(manager)
                 
-                logger.info(f"Created setup reconnection task for draft ID: DB{session.draft_id} (type: {session.session_type})")
+                logger.info(f"Created setup manager for draft ID: DB{session.draft_id} (type: {session.session_type})")
             except Exception as e:
-                logger.error(f"Error creating setup reconnection task for session {session.session_id}: {e}")
+                logger.error(f"Error creating setup manager for session {session.session_id}: {e}")
         
-        return tasks
+        return managers
 
 async def reconnect_recent_draft_sessions(discord_client):
     """
     Reconnect to recent active draft sessions to pull logs after restart.
+    Returns managers instead of tasks to allow sequential processing.
     Only reconnects to sessions that:
     1. Don't have data received yet
     2. Have a teams_start_time that isn't NULL
@@ -83,6 +84,9 @@ async def reconnect_recent_draft_sessions(discord_client):
     five_hours_ago = current_time - timedelta(hours=12)
     
     logger.info(f"Looking for non-winston sessions that started between {five_hours_ago} and {current_time}")
+    
+    # List to hold managers instead of tasks
+    managers = []
     
     async with AsyncSessionLocal() as db_session:
         # Query for draft sessions that meet our criteria
@@ -100,8 +104,7 @@ async def reconnect_recent_draft_sessions(discord_client):
         
         logger.info(f"Found {len(active_sessions)} recent active draft sessions to reconnect")
         
-        # Create tasks for each session
-        tasks = []
+        # Create managers for each session
         for session in active_sessions:
             # Skip if missing required fields
             if not all([session.session_id, session.draft_id, session.session_type, session.cube]):
@@ -132,12 +135,11 @@ async def reconnect_recent_draft_sessions(discord_client):
                 manager.first_connection = False  # Skip the 15-minute wait in keep_draft_session_alive
                 manager.first_delay = True # Skip the 90-minute wait in fetch_draft_log_data
                 
-                # Create and add the task
-                task = asyncio.create_task(manager.keep_draft_session_alive())
-                tasks.append(task)
+                # Add manager to our list 
+                managers.append(manager)
                 
-                logger.info(f"Created reconnection task for draft ID: DB{session.draft_id} (type: {session.session_type}, started {hours_since_start:.1f} hours ago)")
+                logger.info(f"Created reconnection manager for draft ID: DB{session.draft_id} (type: {session.session_type}, started {hours_since_start:.1f} hours ago)")
             except Exception as e:
-                logger.error(f"Error creating reconnection task for session {session.session_id}: {e}")
+                logger.error(f"Error creating reconnection manager for session {session.session_id}: {e}")
         
-        return tasks
+        return managers
