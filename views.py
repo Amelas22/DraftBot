@@ -1882,7 +1882,7 @@ class ReadyCheckView(discord.ui.View):
     async def handle_vote(self, interaction: discord.Interaction, vote_type):
         session = sessions.get(self.draft_session_id)
         if not session:
-            await interaction.response.send_message("Session data is missing.", ephemeral=True)
+            await interaction.response.send_message("No Active Ready Check.", ephemeral=True)
             return
 
         user_id = str(interaction.user.id)
