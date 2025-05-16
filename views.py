@@ -796,6 +796,21 @@ class PersistentView(discord.ui.View):
         
         logger.info(f"Create teams button clicked for session {self.draft_session_id} of type {self.session_type}")
         
+        # Check if teams have already been created
+        draft_session = await get_draft_session(session_id)
+        if not draft_session:
+            await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
+            return
+            
+        # Check if teams have already been created
+        if draft_session.session_stage == "teams":
+            logger.info(f"Teams already exist for session {session_id} - ignoring create teams request")
+            await interaction.response.send_message(
+                "Teams have already been created for this draft.",
+                ephemeral=True
+            )
+            return
+        
         if self.session_type == "staked":
             # Check if a ready check has been performed 
             ready_check_performed = session_id in sessions
@@ -1902,6 +1917,28 @@ class ReadyCheckView(discord.ui.View):
         # Get the draft session to access the sign_ups
         draft_session = await get_draft_session(self.draft_session_id)
         
+        if not draft_session:
+            await interaction.response.send_message("Draft session not found.", ephemeral=True)
+            return
+            
+        # If teams were already created, don't auto-create again
+        if draft_session.session_stage == "teams":
+            logger.info(f"Teams already created for session {self.draft_session_id} - skipping auto team creation")
+            
+            # If everyone has now voted, announce that teams were already created
+            if not session['no_response']:
+                await interaction.channel.send(
+                    "⚠️ Note: Teams were already created manually. This vote no longer affects team creation."
+                )
+                # Clean up the sessions data since we're done with it
+                if self.draft_session_id in sessions:
+                    del sessions[self.draft_session_id]
+                    
+            # Generate the updated embed showing votes, but don't auto-create teams
+            embed = await generate_vote_check_embed(session, draft_session.sign_ups, draft_session.draft_link, draft_session)
+            await interaction.response.edit_message(embed=embed, view=self)
+            return
+
         # Generate the updated embed showing votes
         embed = await generate_vote_check_embed(session, draft_session.sign_ups, draft_session.draft_link, draft_session)
 
@@ -1922,8 +1959,19 @@ class ReadyCheckView(discord.ui.View):
                 await interaction.channel.send(
                     f"Vote complete! The majority wants to wait for {queue_size + 2} players."
                 )
+                # Clean up the sessions data since we're done with it
+                if self.draft_session_id in sessions:
+                    del sessions[self.draft_session_id]
                 
     async def auto_create_teams(self, interaction, draft_session, queue_size):
+        # Double-check that teams haven't already been created
+        if draft_session.session_stage == "teams":
+            logger.warning(f"Teams already exist for session {self.draft_session_id} - skipping auto-creation")
+            await interaction.channel.send(
+                "⚠️ Note: Teams were already created manually. This vote no longer affects team creation."
+            )
+            return
+        
         bot = interaction.client
         guild = bot.get_guild(int(draft_session.guild_id))
         
