@@ -1884,7 +1884,12 @@ class ReadyCheckView(discord.ui.View):
             custom_id=f"ready_check_wait_{self.draft_session_id}"
         )
         self.wait_button.callback = self.wait_button_callback
-        
+
+        if queue_size == 10:
+            # Only show Fire button for 10 players
+            self.fire_button.label = f"🔥 Fire on 10"
+            self.wait_button.label = f"❌ Not Ready"
+
         self.add_item(self.fire_button)
         self.add_item(self.wait_button)
 
@@ -1897,7 +1902,7 @@ class ReadyCheckView(discord.ui.View):
     async def handle_vote(self, interaction: discord.Interaction, vote_type):
         session = sessions.get(self.draft_session_id)
         if not session:
-            await interaction.response.send_message("No Active Ready Check.", ephemeral=True)
+            await interaction.response.send_message("No active ready check found. The check may have timed out or been completed.", ephemeral=True)
             return
 
         user_id = str(interaction.user.id)
@@ -1950,15 +1955,34 @@ class ReadyCheckView(discord.ui.View):
             # Everyone has voted, check for majority
             queue_size = session.get("queue_size", 6)
             required_votes = 4 if queue_size == 6 else 5  # 4 out of 6, or 5 out of 8
+            for voter_id in session['fire'] + session['wait']:
+                if voter_id not in draft_session.sign_ups:
+                    await interaction.channel.send(
+                        "Vote complete! However, some voters are no longer in the queue. Aborting auto team creation."
+                    )
+                    if self.draft_session_id in sessions:
+                        del sessions[self.draft_session_id]
+                    return
             
             if len(session['fire']) >= required_votes and len(draft_session.sign_ups) == queue_size:
-                # Majority wants to fire! Auto-trigger team creation
-                await self.auto_create_teams(interaction, draft_session, queue_size)
+                # Vote Passes, create teams automatically
+                try:
+                    await self.auto_create_teams(interaction, draft_session, queue_size)
+                except Exception as e:
+                    logger.error(f"Error auto-creating teams: {e}")
+                    await interaction.channel.send(
+                        "❌ An error occurred while creating teams automatically. Please try clicking the 'Create Teams' button manually."
+                    )
+                    # Ensure cleanup happens even if there's an error
+                    if self.draft_session_id in sessions:
+                        del sessions[self.draft_session_id]
             elif len(draft_session.sign_ups) != queue_size:
                 # Queue size not correct
                 await interaction.channel.send(
                     f"Vote complete! However, someone has left and/or joined the queue. Aborting auto team creation. Currently {len(draft_session.sign_ups)} people in queue."
                 )
+                if self.draft_session_id in sessions:
+                    del sessions[self.draft_session_id]
             else:
                 # Not enough votes to fire, inform users
                 await interaction.channel.send(
