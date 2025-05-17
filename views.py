@@ -1951,9 +1951,14 @@ class ReadyCheckView(discord.ui.View):
             queue_size = session.get("queue_size", 6)
             required_votes = 4 if queue_size == 6 else 5  # 4 out of 6, or 5 out of 8
             
-            if len(session['fire']) >= required_votes:
+            if len(session['fire']) >= required_votes and len(draft_session.sign_ups) == queue_size:
                 # Majority wants to fire! Auto-trigger team creation
                 await self.auto_create_teams(interaction, draft_session, queue_size)
+            elif len(draft_session.sign_ups) != queue_size:
+                # Queue size not correct
+                await interaction.channel.send(
+                    f"Vote complete! However, someone has left and/or joined the queue. Aborting auto team creation. Currently {len(draft_session.sign_ups)} people in queue."
+                )
             else:
                 # Not enough votes to fire, inform users
                 await interaction.channel.send(
