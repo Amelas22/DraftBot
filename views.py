@@ -1884,20 +1884,32 @@ class ReadyCheckView(discord.ui.View):
             custom_id=f"ready_check_wait_{self.draft_session_id}"
         )
         self.wait_button.callback = self.wait_button_callback
+        
+        # Add the new Either Option button
+        self.either_button = discord.ui.Button(
+            label="👍 Either Option", 
+            style=discord.ButtonStyle.primary,  # Blue color to distinguish it
+            custom_id=f"ready_check_either_{self.draft_session_id}"
+        )
+        self.either_button.callback = self.either_button_callback
 
         if queue_size == 10:
-            # Only show Fire button for 10 players
+            # Only show Fire button and Either button for 10 players
             self.fire_button.label = f"🔥 Fire on 10"
             self.wait_button.label = f"❌ Not Ready"
 
         self.add_item(self.fire_button)
         self.add_item(self.wait_button)
+        self.add_item(self.either_button)  # Add the new button
 
     async def fire_button_callback(self, interaction: discord.Interaction):
         await self.handle_vote(interaction, "fire")
 
     async def wait_button_callback(self, interaction: discord.Interaction):
         await self.handle_vote(interaction, "wait")
+        
+    async def either_button_callback(self, interaction: discord.Interaction):
+        await self.handle_vote(interaction, "either")
 
     async def handle_vote(self, interaction: discord.Interaction, vote_type):
         session = sessions.get(self.draft_session_id)
@@ -1908,15 +1920,19 @@ class ReadyCheckView(discord.ui.View):
         user_id = str(interaction.user.id)
         
         # Check if user is authorized to vote (is in the draft)
-        if user_id not in session['fire'] and user_id not in session['wait'] and user_id not in session['no_response']:
+        if user_id not in session.get('fire', []) and user_id not in session.get('wait', []) and user_id not in session.get('either', []) and user_id not in session.get('no_response', []):
             await interaction.response.send_message("You are not authorized to vote in this ready check.", ephemeral=True)
             return
 
         # Update the vote status
-        for state in ['fire', 'wait', 'no_response']:
-            if user_id in session[state]:
+        for state in ['fire', 'wait', 'either', 'no_response']:
+            if state in session and user_id in session[state]:
                 session[state].remove(user_id)
         
+        # Ensure the state exists before appending
+        if vote_type not in session:
+            session[vote_type] = []
+            
         session[vote_type].append(user_id)
 
         # Get the draft session to access the sign_ups
@@ -1931,7 +1947,7 @@ class ReadyCheckView(discord.ui.View):
             logger.info(f"Teams already created for session {self.draft_session_id} - skipping auto team creation")
             
             # If everyone has now voted, announce that teams were already created
-            if not session['no_response']:
+            if not session.get('no_response', []):
                 await interaction.channel.send(
                     "⚠️ Note: Teams were already created manually. This vote no longer affects team creation."
                 )
@@ -1951,11 +1967,13 @@ class ReadyCheckView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
         
         # Check if everyone has voted
-        if not session['no_response']:
+        if not session.get('no_response', []):
             # Everyone has voted, check for majority
             queue_size = session.get("queue_size", 6)
             required_votes = 4 if queue_size == 6 else 5  # 4 out of 6, or 5 out of 8
-            for voter_id in session['fire'] + session['wait']:
+            
+            # Check for voters who left
+            for voter_id in session.get('fire', []) + session.get('wait', []) + session.get('either', []):
                 if voter_id not in draft_session.sign_ups:
                     await interaction.channel.send(
                         "Vote complete! However, some voters are no longer in the queue. Aborting auto team creation."
@@ -1964,9 +1982,20 @@ class ReadyCheckView(discord.ui.View):
                         del sessions[self.draft_session_id]
                     return
             
-            if len(session['fire']) >= required_votes and len(draft_session.sign_ups) == queue_size:
+            # Calculate effective fire votes (fire + either)
+            effective_fire_votes = len(session.get('fire', [])) + len(session.get('either', []))
+            
+            if effective_fire_votes >= required_votes and len(draft_session.sign_ups) == queue_size:
                 # Vote Passes, create teams automatically
                 try:
+                    # Log vote details
+                    logger.info(f"Vote passed for session {self.draft_session_id}: Fire={len(session.get('fire', []))}, Either={len(session.get('either', []))}, Wait={len(session.get('wait', []))}")
+                    
+                    # Show message that includes either votes
+                    await interaction.channel.send(
+                        f"✅ **Vote passed!** {len(session.get('fire', []))} voted to fire now, {len(session.get('either', []))} voted for either option. Creating Teams now..."
+                    )
+                    
                     await self.auto_create_teams(interaction, draft_session, queue_size)
                 except Exception as e:
                     logger.error(f"Error auto-creating teams: {e}")
@@ -1986,7 +2015,7 @@ class ReadyCheckView(discord.ui.View):
             else:
                 # Not enough votes to fire, inform users
                 await interaction.channel.send(
-                    f"Vote complete! The majority wants to wait for {queue_size + 2} players."
+                    f"Vote complete! The majority wants to wait for {queue_size + 2} players. ({len(session.get('fire', []))} fire, {len(session.get('either', []))} either, {len(session.get('wait', []))} wait)"
                 )
                 # Clean up the sessions data since we're done with it
                 if self.draft_session_id in sessions:
@@ -2007,11 +2036,6 @@ class ReadyCheckView(discord.ui.View):
         if not guild:
             await interaction.channel.send("❌ Error: Could not find guild.")
             return
-        
-        # First announce the result
-        await interaction.channel.send(
-            f"✅ **Vote passed!** The majority has voted to fire on {queue_size} players. Creating teams now..."
-        )
         
         # Create a temporary view to access the handler
         temp_view = PersistentView(
@@ -2047,36 +2071,56 @@ async def generate_vote_check_embed(ready_check_status, sign_ups, draft_link, dr
     # Calculate required votes for majority (4 out of 6, 5 out of 8, etc.)
     required_votes = 4 if queue_size == 6 else 5
     
+    # Calculate effective fire votes (fire + either)
+    fire_count = len(ready_check_status.get('fire', []))
+    either_count = len(ready_check_status.get('either', []))
+    effective_fire_count = fire_count + either_count
+    
     # Generate the embed with fields for votes
     embed = discord.Embed(
         title=f"Ready Check: Fire on {queue_size} or Wait for {target_size}?", 
-        description=f"A majority of {required_votes} votes is needed to proceed with {queue_size} players. Once everyone votes and if the vote passes, teams will be created.",
+        description=f"A majority of votes ({required_votes}) is needed to proceed with {queue_size} players.",
         color=discord.Color.gold()
     )
     
     # Add fire votes with count
-    fire_count = len(ready_check_status['fire'])
     embed.add_field(
-        name=f"🔥 Fire on {queue_size} ({fire_count}/{required_votes} votes)",
-        value=get_names(ready_check_status['fire']),
+        name=f"🔥 Fire on {queue_size} ({fire_count} votes)",
+        value=get_names(ready_check_status.get('fire', [])),
+        inline=False
+    )
+    
+    # Add either option votes with count
+    embed.add_field(
+        name=f"👍 Either Option ({either_count} votes)",
+        value=get_names(ready_check_status.get('either', [])),
         inline=False
     )
     
     # Add wait votes with count
-    wait_count = len(ready_check_status['wait'])
+    wait_count = len(ready_check_status.get('wait', []))
     embed.add_field(
         name=f"⏳ Wait for {target_size} ({wait_count} votes)",
-        value=get_names(ready_check_status['wait']),
+        value=get_names(ready_check_status.get('wait', [])),
+        inline=False
+    )
+    
+    # Add the status line showing progress toward firing
+    embed.add_field(
+        name="Status",
+        value=f"Progress toward firing: {effective_fire_count}/{required_votes} votes" + 
+              (f" ✅\n**Teams will be auto created once everyone votes.**" if effective_fire_count >= required_votes else ""),
         inline=False
     )
     
     # Add no response list
-    no_response_count = len(ready_check_status['no_response'])
-    embed.add_field(
-        name=f"❌ No Response / Not Ready ({no_response_count} players)",
-        value=get_names(ready_check_status['no_response']),
-        inline=False
-    )
+    no_response_count = len(ready_check_status.get('no_response', []))
+    if no_response_count > 0:
+        embed.add_field(
+            name=f"No Response ({no_response_count} players)",
+            value=get_names(ready_check_status.get('no_response', [])),
+            inline=False
+        )
     
     # Include personalized draft links for each user if draft_session is provided
     if draft_session:
