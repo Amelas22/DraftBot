@@ -2106,7 +2106,7 @@ async def generate_vote_check_embed(ready_check_status, sign_ups, draft_link, dr
     # Generate the embed with fields for votes
     embed = discord.Embed(
         title=f"Ready Check: Fire on {queue_size} or Wait for {target_size}?", 
-        description=f"A majority of {required_votes} votes is needed to proceed with {queue_size} players.",
+        description=f"A majority of votes is needed to proceed with {queue_size} players. Teams will be auto created if the vote passes and all drafters have voted.",
         color=discord.Color.gold()
     )
     
