@@ -1982,18 +1982,28 @@ class ReadyCheckView(discord.ui.View):
                         del sessions[self.draft_session_id]
                     return
             
-            # Calculate effective fire votes (fire + either)
-            effective_fire_votes = len(session.get('fire', [])) + len(session.get('either', []))
+            # Count votes with the new logic
+            fire_votes = len(session.get('fire', []))
+            wait_votes = len(session.get('wait', []))
+            either_votes = len(session.get('either', []))
             
-            if effective_fire_votes >= required_votes and len(draft_session.sign_ups) == queue_size:
+            # Calculate effective totals including "either" votes for both options
+            effective_fire_votes = fire_votes + either_votes
+            effective_wait_votes = wait_votes + either_votes
+            
+            # Only fire if there are enough votes AND effective fire votes > effective wait votes
+            if (effective_fire_votes >= required_votes and 
+                effective_fire_votes >= effective_wait_votes and 
+                len(draft_session.sign_ups) == queue_size):
                 # Vote Passes, create teams automatically
                 try:
                     # Log vote details
-                    logger.info(f"Vote passed for session {self.draft_session_id}: Fire={len(session.get('fire', []))}, Either={len(session.get('either', []))}, Wait={len(session.get('wait', []))}")
+                    logger.info(f"Vote passed for session {self.draft_session_id}: Fire={fire_votes}, Either={either_votes}, Wait={wait_votes}")
                     
-                    # Show message that includes either votes
+                    # Show message that includes vote counts
                     await interaction.channel.send(
-                        f"✅ **Vote passed!** {len(session.get('fire', []))} voted to fire now, {len(session.get('either', []))} voted for either option. Creating Teams now..."
+                        f"✅ **Vote passed!** More players prefer to fire now. " 
+                        f"({fire_votes} fire, {either_votes} either, {wait_votes} wait)"
                     )
                     
                     await self.auto_create_teams(interaction, draft_session, queue_size)
@@ -2005,6 +2015,7 @@ class ReadyCheckView(discord.ui.View):
                     # Ensure cleanup happens even if there's an error
                     if self.draft_session_id in sessions:
                         del sessions[self.draft_session_id]
+            
             elif len(draft_session.sign_ups) != queue_size:
                 # Queue size not correct
                 await interaction.channel.send(
@@ -2012,10 +2023,22 @@ class ReadyCheckView(discord.ui.View):
                 )
                 if self.draft_session_id in sessions:
                     del sessions[self.draft_session_id]
+            
+            elif effective_fire_votes >= required_votes and effective_fire_votes <= effective_wait_votes:
+                # Enough votes to fire, but stronger preference for waiting
+                await interaction.channel.send(
+                    f"Vote complete! While {effective_fire_votes} would accept firing now (including 'either' votes), " 
+                    f"more players overall prefer to wait ({effective_wait_votes} including 'either' votes). "
+                    f"Waiting for {queue_size + 2} players."
+                )
+                if self.draft_session_id in sessions:
+                    del sessions[self.draft_session_id]
+            
             else:
                 # Not enough votes to fire, inform users
                 await interaction.channel.send(
-                    f"Vote complete! The majority wants to wait for {queue_size + 2} players. ({len(session.get('fire', []))} fire, {len(session.get('either', []))} either, {len(session.get('wait', []))} wait)"
+                    f"Vote complete! The majority wants to wait for {queue_size + 2} players. "
+                    f"({fire_votes} fire, {either_votes} either, {wait_votes} wait)"
                 )
                 # Clean up the sessions data since we're done with it
                 if self.draft_session_id in sessions:
@@ -2071,15 +2094,19 @@ async def generate_vote_check_embed(ready_check_status, sign_ups, draft_link, dr
     # Calculate required votes for majority (4 out of 6, 5 out of 8, etc.)
     required_votes = 4 if queue_size == 6 else 5
     
-    # Calculate effective fire votes (fire + either)
+     # Calculate vote counts
     fire_count = len(ready_check_status.get('fire', []))
+    wait_count = len(ready_check_status.get('wait', []))
     either_count = len(ready_check_status.get('either', []))
+    
+    # Calculate effective totals
     effective_fire_count = fire_count + either_count
+    effective_wait_count = wait_count + either_count
     
     # Generate the embed with fields for votes
     embed = discord.Embed(
         title=f"Ready Check: Fire on {queue_size} or Wait for {target_size}?", 
-        description=f"A majority of votes ({required_votes}) is needed to proceed with {queue_size} players.",
+        description=f"A majority of {required_votes} votes is needed to proceed with {queue_size} players.",
         color=discord.Color.gold()
     )
     
@@ -2098,18 +2125,21 @@ async def generate_vote_check_embed(ready_check_status, sign_ups, draft_link, dr
     )
     
     # Add wait votes with count
-    wait_count = len(ready_check_status.get('wait', []))
     embed.add_field(
         name=f"⏳ Wait for {target_size} ({wait_count} votes)",
         value=get_names(ready_check_status.get('wait', [])),
         inline=False
     )
     
-    # Add the status line showing progress toward firing
+    # Add status lines showing the voting logic
+    status_text = (
+        f"**Fire votes total**: {fire_count} + {either_count} (either) = {effective_fire_count}\n"
+        f"**Wait votes total**: {wait_count} + {either_count} (either) = {effective_wait_count}\n"
+    )
+    
     embed.add_field(
-        name="Status",
-        value=f"Progress toward firing: {effective_fire_count}/{required_votes} votes" + 
-              (f" ✅\n**Teams will be auto created once everyone votes.**" if effective_fire_count >= required_votes else ""),
+        name="Current Status",
+        value=status_text,
         inline=False
     )
     
