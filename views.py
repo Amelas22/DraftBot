@@ -229,10 +229,7 @@ class PersistentView(discord.ui.View):
             for item in self.children:
                 if isinstance(item, discord.ui.Button):
                     if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}":
-                        if self.draft_session_id in ACTIVE_MANAGERS:
-                            item.disabled = True
-                        else:
-                            item.disabled = False
+                        item.disabled = False
                     elif item.custom_id == f"cancel_draft_{self.draft_session_id}":
                         item.disabled = False
                     else:
@@ -1075,10 +1072,7 @@ class PersistentView(discord.ui.View):
                             
                             # Set disabled state based on button type
                             if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}":
-                                if self.draft_session_id in ACTIVE_MANAGERS:
-                                    button_copy.disabled = True
-                                else:
-                                    button_copy.disabled = False
+                                button_copy.disabled = False
                             elif item.custom_id == f"cancel_draft_{self.draft_session_id}":
                                 button_copy.disabled = False
                             else:
@@ -1135,10 +1129,7 @@ class PersistentView(discord.ui.View):
                     if isinstance(item, discord.ui.Button):
                         # Enable "Create Rooms" and "Cancel Draft" buttons
                         if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}":
-                            if self.draft_session_id in ACTIVE_MANAGERS:
-                                item.disabled = True
-                            else:
-                                item.disabled = False
+                            item.disabled = False
                         elif item.custom_id == f"cancel_draft_{self.draft_session_id}":
                             item.disabled = False
                         else:
