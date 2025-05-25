@@ -18,6 +18,7 @@ from loguru import logger
 
 READY_CHECK_COOLDOWNS = {}
 PROCESSING_ROOMS_PAIRINGS = {}
+PROCESSING_TEAMS_CREATION = {}
 sessions = {}
 
 def split_content_for_embed(content, include_header=False, max_length=1000):
@@ -219,9 +220,9 @@ class PersistentView(discord.ui.View):
         if self.session_type == "staked" and self.session_stage != "teams":
             self._add_button("How Bets Work 💰", "green", "explain_stakes", self.explain_stakes_callback)
             
-            # Add test button only if global test mode is enabled
-            if TEST_MODE_ENABLED:
-                self._add_button("🧪 Add Test Users", "grey", "add_test_users", self.add_test_users_callback)
+        # Add test button only if global test mode is enabled
+        if TEST_MODE_ENABLED:
+            self._add_button("🧪 Add Test Users", "grey", "add_test_users", self.add_test_users_callback)
 
 
     def _apply_stage_button_disabling(self):
@@ -808,43 +809,22 @@ class PersistentView(discord.ui.View):
     async def randomize_teams_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         bot = interaction.client
         session_id = self.draft_session_id
-        logger.info(f"Create teams initiated for session {self.draft_session_id} of type {self.session_type}")
-        logger.info(f"Create teams - checking sessions dict: {list(sessions.keys())}")
+        user_id = str(interaction.user.id)
+
+        # Check for race condition - is someone already creating teams?
+        if PROCESSING_TEAMS_CREATION.get(session_id):
+            await interaction.response.send_message(
+                "Teams are already being created. Please wait.", 
+                ephemeral=True
+            )
+            return
         
-        if self.session_type == "staked":
-            # First, check if a ready check has been performed
-            ready_check_performed = session_id in sessions
-            logger.info(f"Ready check verification: session_id={session_id}, in sessions dict={ready_check_performed}")
-            logger.debug(f"Current sessions in dictionary: {list(sessions.keys())}")
-            
-            if not ready_check_performed:
-                logger.warning(f"❌ Ready check verification failed for session {session_id}")
-                await interaction.response.send_message(
-                    "You must perform a Ready Check before creating teams for a money draft.",
-                    ephemeral=True
-                )
-                return
-            
-            # Check that all players have set their stakes
-            from utils import get_missing_stake_players
-            missing_players = await get_missing_stake_players(session_id)
-            if missing_players:
-                # Get display names for the missing players
-                guild = bot.get_guild(int(interaction.guild_id))
-                missing_names = []
-                for pid in missing_players:
-                    member = guild.get_member(int(pid))
-                    if member:
-                        missing_names.append(member.display_name)
-                
-                # Format error message
-                players_str = ", ".join(missing_names)
-                await interaction.response.send_message(
-                    f"Cannot create teams yet. The following players need to set their stakes: {players_str}",
-                    ephemeral=True
-                )
-                return
-            
+        # Mark as processing to prevent race conditions
+        PROCESSING_TEAMS_CREATION[session_id] = True
+
+        logger.info(f"Create teams initiated for session {self.draft_session_id} of type {self.session_type}")
+        
+        # Check if the user is in the sign-ups queue
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
                 stmt = select(DraftSession).where(DraftSession.session_id == session_id)
@@ -854,58 +834,124 @@ class PersistentView(discord.ui.View):
                 if not session:
                     await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
                     return
-                    
-                if len(session.sign_ups) % 2 != 0:
-                    await interaction.response.send_message("There must be an even number of players to fire.")
-                    return
-
-                # Update the session object
-                session.teams_start_time = datetime.now()
-                if session.session_type == 'premade':
-                    # 7 days for premade drafts (league matches)
-                    session.deletion_time = datetime.now() + timedelta(days=7)
-                else:
-                    # 4 hours for other draft types
-                    session.deletion_time = datetime.now() + timedelta(hours=4)
-                session.session_stage = 'teams'
                 
-                # Check session type and prepare teams if necessary
-                if session.session_type == 'random' or session.session_type == 'test' or session.session_type == 'staked':
-                    from utils import split_into_teams
-                    await split_into_teams(bot, session.session_id)
-                    # Re-fetch session to get updated teams
-                    updated_session = await get_draft_session(self.draft_session_id)
+                # Check if user is in the queue
+                if user_id not in session.sign_ups:
+                    await interaction.response.send_message(
+                        "You are not eligible to create teams as you are not in the queue.", 
+                        ephemeral=True
+                    )
+                    return
+        
+        try:
+            # Defer the response early since team creation might take time
+            await interaction.response.defer()
+            
+            logger.info(f"Create teams - checking sessions dict: {list(sessions.keys())}")
+            
+            if self.session_type == "staked":
+                # First, check if a ready check has been performed
+                ready_check_performed = session_id in sessions
+                logger.info(f"Ready check verification: session_id={session_id}, in sessions dict={ready_check_performed}")
+                logger.debug(f"Current sessions in dictionary: {list(sessions.keys())}")
+                
+                if not ready_check_performed:
+                    logger.warning(f"❌ Ready check verification failed for session {session_id}")
+                    await interaction.followup.send(
+                        "You must perform a Ready Check before creating teams for a money draft.",
+                        ephemeral=True
+                    )
+                    # Clean up processing flag
+                    del PROCESSING_TEAMS_CREATION[session_id]
+                    return
+                
+                # Check that all players have set their stakes
+                from utils import get_missing_stake_players
+                missing_players = await get_missing_stake_players(session_id)
+                if missing_players:
+                    # Get display names for the missing players
+                    guild = bot.get_guild(int(interaction.guild_id))
+                    missing_names = []
+                    for pid in missing_players:
+                        member = guild.get_member(int(pid))
+                        if member:
+                            missing_names.append(member.display_name)
                     
-                    if session_id in sessions:
-                        logger.info(f"✅ Teams created - removing ready check data for session {session_id}")
-                        del sessions[session_id]
-                        logger.debug(f"Sessions dictionary after cleanup: {list(sessions.keys())}")
+                    # Format error message
+                    players_str = ", ".join(missing_names)
+                    await interaction.followup.send(
+                        f"Cannot create teams yet. The following players need to set their stakes: {players_str}",
+                        ephemeral=True
+                    )
+                    # Clean up processing flag
+                    del PROCESSING_TEAMS_CREATION[session_id]
+                    return
+                
+            async with AsyncSessionLocal() as db_session:
+                async with db_session.begin():
+                    stmt = select(DraftSession).where(DraftSession.session_id == session_id)
+                    result = await db_session.execute(stmt)
+                    session = result.scalars().first()
 
-                    # Now that teams exist, calculate stakes for staked drafts
-                    stake_pairs = []
-                    stake_info_by_player = {}
+                    if not session:
+                        await interaction.followup.send("The draft session could not be found.", ephemeral=True)
+                        # Clean up processing flag
+                        del PROCESSING_TEAMS_CREATION[session_id]
+                        return
+                        
+                    if len(session.sign_ups) % 2 != 0:
+                        await interaction.followup.send("There must be an even number of players to fire.")
+                        # Clean up processing flag
+                        del PROCESSING_TEAMS_CREATION[session_id]
+                        return
+
+                    # Update the session object
+                    session.teams_start_time = datetime.now()
+                    if session.session_type == 'premade':
+                        # 7 days for premade drafts (league matches)
+                        session.deletion_time = datetime.now() + timedelta(days=7)
+                    else:
+                        # 4 hours for other draft types
+                        session.deletion_time = datetime.now() + timedelta(hours=4)
+                    session.session_stage = 'teams'
                     
-                    if self.session_type == "staked" and updated_session and updated_session.team_a and updated_session.team_b:
-                        # Load player preferences for all participants
-                        all_players = updated_session.team_a + updated_session.team_b
+                    # Check session type and prepare teams if necessary
+                    if session.session_type == 'random' or session.session_type == 'test' or session.session_type == 'staked':
+                        from utils import split_into_teams
+                        await split_into_teams(bot, session.session_id)
+                        # Re-fetch session to get updated teams
+                        updated_session = await get_draft_session(self.draft_session_id)
                         
-                        # Get cap info from database
-                        from preference_service import get_players_bet_capping_preferences
-                        cap_info = await get_players_bet_capping_preferences(all_players, guild_id=str(interaction.guild_id))
+                        if session_id in sessions:
+                            logger.info(f"✅ Teams created - removing ready check data for session {session_id}")
+                            del sessions[session_id]
+                            logger.debug(f"Sessions dictionary after cleanup: {list(sessions.keys())}")
+
+                        # Now that teams exist, calculate stakes for staked drafts
+                        stake_pairs = []
+                        stake_info_by_player = {}
                         
-                        # Calculate and store stakes
-                        await self.calculate_and_store_stakes(interaction, updated_session, cap_info)
+                        if self.session_type == "staked" and updated_session and updated_session.team_a and updated_session.team_b:
+                            # Load player preferences for all participants
+                            all_players = updated_session.team_a + updated_session.team_b
+                            
+                            # Get cap info from database
+                            from preference_service import get_players_bet_capping_preferences
+                            cap_info = await get_players_bet_capping_preferences(all_players, guild_id=str(interaction.guild_id))
+                            
+                            # Calculate and store stakes
+                            await self.calculate_and_store_stakes(interaction, updated_session, cap_info)
+                            
+                            # Fetch the calculated stakes for display
+                            stake_stmt = select(StakeInfo).where(StakeInfo.session_id == session_id)
+                            stake_results = await db_session.execute(stake_stmt)
+                            stake_infos = stake_results.scalars().all()
+                            
+                            # Create a lookup for stake info by player ID
+                            for stake_info in stake_infos:
+                                stake_info_by_player[stake_info.player_id] = stake_info
                         
-                        # Fetch the calculated stakes for display
-                        stake_stmt = select(StakeInfo).where(StakeInfo.session_id == session_id)
-                        stake_results = await db_session.execute(stake_stmt)
-                        stake_infos = stake_results.scalars().all()
-                        
-                        # Create a lookup for stake info by player ID
-                        for stake_info in stake_infos:
-                            stake_info_by_player[stake_info.player_id] = stake_info
-                    
-                    session = updated_session
+                        session = updated_session
 
                 if session.session_type != "swiss":
                     sign_ups_list = list(session.sign_ups.keys())
@@ -1084,7 +1130,7 @@ class PersistentView(discord.ui.View):
                     
                     # Use the new view instead of self
                     try:
-                        await interaction.response.edit_message(embed=embed, view=stake_view)
+                        await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=self)
                     except Exception as e:
                         logger.error(f"Failed to update draft message: {e}")
                     
@@ -1137,14 +1183,29 @@ class PersistentView(discord.ui.View):
                             item.disabled = True
                 await db_session.commit()
     
-        # Respond with the embed and updated view
-        try:
-            await interaction.response.edit_message(embed=embed, view=self)
-        except Exception as e:
-            logger.error(f"Failed to update draft message: {e}")
+            # Respond with the embed and updated view
+            try:
+                await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=self)
+            except Exception as e:
+                logger.error(f"Failed to update draft message: {e}")
         
-        # Send the channel announcement after responding to the interaction
-        await interaction.channel.send(embed=channel_embed)
+        
+            # Send the channel announcement after responding to the interaction
+            await interaction.channel.send(embed=channel_embed)
+
+        except Exception as e:
+            logger.exception(f"Error in randomize_teams_callback: {e}")
+            try:
+                await interaction.followup.send(
+                    "An error occurred while creating teams. Please try again.",
+                    ephemeral=True
+                )
+            except:
+                pass
+        finally:
+            # Always clean up the processing flag
+            if session_id in PROCESSING_TEAMS_CREATION:
+                del PROCESSING_TEAMS_CREATION[session_id]
 
         try:
             # Look for an existing manager
@@ -1184,7 +1245,7 @@ class PersistentView(discord.ui.View):
         
         if session.tracked_draft and session.premade_match_id is not None:
             await check_weekly_limits(interaction, session.premade_match_id, session.session_type, session.session_id)
-
+        
     async def explain_stakes_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Explain how the stake system works"""
         embed = discord.Embed(
