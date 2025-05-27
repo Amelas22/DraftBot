@@ -4,7 +4,7 @@ from loguru import logger
 from modals import CubeDraftSelectionView, StakedCubeDraftSelectionView
 
 from session import DraftSession, MatchResult
-from views.match_result_views import MatchResultSelect
+from views import MatchResultSelect
 from config import is_money_server
 
 class DraftCommands(commands.Cog):
