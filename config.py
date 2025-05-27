@@ -13,7 +13,7 @@ DRAFTMANCER_BASE_URL = "https://draftmancer.com"
 
 # Global flag to enable test features
 # Set to True during development to enable test buttons, False for production
-TEST_MODE_ENABLED = False
+TEST_MODE_ENABLED = True
 
 class Config:
     def __init__(self):

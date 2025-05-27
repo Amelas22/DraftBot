@@ -1373,7 +1373,7 @@ async def re_register_views(bot):
                                 
                                 # Add a button for each match result in this group
                                 for match_result in match_results:
-                                    from views.match_result_views import MatchResultButton
+                                    from views import MatchResultButton
                                     
                                     # Determine button style based on match result
                                     button_style = discord.ButtonStyle.secondary  # Default for no result

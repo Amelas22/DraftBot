@@ -11,7 +11,7 @@ from .view_helpers import (
 )
 from .ready_check_views import ReadyCheckManager
 from .stake_views import StakeOptionsView, BetCapToggleButton
-from .match_result_views import create_pairings_view
+from .match_result_views import create_pairings_view, MatchResultSelect, MatchResultButton
 from .draft_message_utils import update_draft_message
 
 __all__ = [
@@ -26,5 +26,7 @@ __all__ = [
     'StakeOptionsView',
     'BetCapToggleButton', 
     'create_pairings_view',
-    'update_draft_message'
+    'update_draft_message',
+    'MatchResultSelect',
+    'MatchResultButton'
 ]

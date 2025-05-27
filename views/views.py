@@ -1056,55 +1056,68 @@ class PersistentView(BaseView):
         # Create announcement embeds
         embed, channel_embed = await self._create_team_embeds(session)
         
-        # Handle staked drafts with special view
-        if self.session_type == "staked":
-            # Create view with stake calculation button
-            stake_view = discord.ui.View(timeout=None)
-            
-            # Add existing buttons to the new view
-            for item in self.children:
-                if isinstance(item, discord.ui.Button):
-                    button_copy = CallbackButton(
-                        label=item.label,
-                        style=item.style,
-                        custom_id=item.custom_id,
-                        custom_callback=item.custom_callback
-                    )
-                    
-                    # Set disabled state based on button type
-                    if item.custom_id == f"create_rooms_pairings_{self.draft_session_id}":
-                        button_copy.disabled = False
-                    elif item.custom_id == f"cancel_draft_{self.draft_session_id}":
-                        button_copy.disabled = False
-                    else:
-                        button_copy.disabled = True
-                        
-                    stake_view.add_item(button_copy)
-            
-            stake_view.add_item(StakeCalculationButton(session.session_id))
-            
-            # Update the message with the new view
-            try:
-                await interaction.followup.edit_message(
-                    message_id=interaction.message.id, 
-                    embed=embed, 
-                    view=stake_view
-                )
-            except Exception as e:
-                logger.error(f"Failed to update draft message: {e}")
-        else:
-            # Regular team announcement
-            try:
-                await interaction.followup.edit_message(
-                    message_id=interaction.message.id, 
-                    embed=embed, 
-                    view=self
-                )
-            except Exception as e:
-                logger.error(f"Failed to update draft message: {e}")
+        # Create fresh view with properly set button states for all session types
+        fresh_view = self._create_fresh_view_with_team_buttons(session)
+        
+        # Update the message with the new view
+        try:
+            await interaction.followup.edit_message(
+                message_id=interaction.message.id, 
+                embed=embed, 
+                view=fresh_view
+            )
+        except Exception as e:
+            logger.error(f"Failed to update draft message: {e}")
         
         # Send the channel announcement
         await interaction.channel.send(embed=channel_embed)
+
+    def _create_fresh_view_with_team_buttons(self, session: DraftSession) -> discord.ui.View:
+        """Create a fresh view with properly configured button states for the teams stage."""
+        fresh_view = discord.ui.View(timeout=None)
+        
+        # Copy existing buttons with proper state management
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                button_copy = CallbackButton(
+                    label=item.label,
+                    style=item.style,
+                    custom_id=item.custom_id,
+                    custom_callback=item.custom_callback
+                )
+                
+                # Set disabled state based on button type and session stage
+                button_copy.disabled = self._should_button_be_disabled(item.custom_id, session)
+                fresh_view.add_item(button_copy)
+        
+        # Add special buttons for staked sessions
+        if session.session_type == "staked":
+            fresh_view.add_item(StakeCalculationButton(session.session_id))
+        
+        return fresh_view
+
+    def _should_button_be_disabled(self, custom_id: str, session: DraftSession) -> bool:
+        """Determine if a button should be disabled based on session state."""
+        # Buttons that should remain enabled after team creation
+        enabled_buttons = [
+            f"create_rooms_pairings_{self.draft_session_id}",
+            f"cancel_draft_{self.draft_session_id}"
+        ]
+        
+        # Special case: stake calculation button should be enabled for staked sessions
+        if session.session_type == "staked" and "explain_stakes" in custom_id:
+            return False
+        
+        # Enable rooms/pairings button (it was disabled initially)
+        if custom_id == f"create_rooms_pairings_{self.draft_session_id}":
+            return False
+        
+        # Keep cancel draft button enabled
+        if custom_id == f"cancel_draft_{self.draft_session_id}":
+            return False
+        
+        # Disable all other buttons after teams are created
+        return True
 
     async def _create_team_embeds(self, session: DraftSession) -> tuple[discord.Embed, discord.Embed]:
         """Create team announcement embeds."""
