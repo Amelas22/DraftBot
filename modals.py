@@ -85,6 +85,7 @@ class CubeDraftSelectionView(discord.ui.View):
                 discord.SelectOption(label="2025 MOCS Vintage Cube", value="APR25"),
                 discord.SelectOption(label="LSVRetro", value="LSVRetro"),
                 discord.SelectOption(label="PowerMack", value="PowerMack"),
+                discord.SelectOption(label="Powerslax", value="Powerslax"),
                 discord.SelectOption(label="Custom Cube...", value="custom")
             ]
         )
@@ -145,6 +146,7 @@ class StakedCubeDraftSelectionView(discord.ui.View):
                 discord.SelectOption(label="2025 MOCS Vintage Cube", value="APR25"),
                 discord.SelectOption(label="LSVRetro", value="LSVRetro"),
                 discord.SelectOption(label="PowerMack", value="PowerMack"),
+                discord.SelectOption(label="Powerslax", value="Powerslax"),
                 discord.SelectOption(label="Custom Cube...", value="custom")
             ]
         )
