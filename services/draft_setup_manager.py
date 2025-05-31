@@ -116,7 +116,13 @@ class DraftSetupManager:
 
         # Add storage for the current draft log
         self.current_draft_log = None
-            
+        
+        # Connection status
+        self.periodic_reconnection_task = None
+        self.has_non_bot_users = False
+        self.session_owner_id = None  # Track the current session owner
+        self.ownership_check_completed = False
+
         # Create a contextualized logger for this instance
         self.logger = logger.bind(
             draft_id=self.draft_id,
@@ -131,6 +137,7 @@ class DraftSetupManager:
         @self.sio.event
         async def connect():
             self.logger.info(f"Connected to websocket for draft_id: DB{self.draft_id}")
+            await self.fetch_draft_info()
             if not self.cube_imported:
                 await self.import_cube()
 
@@ -200,7 +207,16 @@ class DraftSetupManager:
         async def on_draft_resumed(data):
             self.logger.info(f"Draft resumed event received: {data}")
             self.draftPaused = False
+        
+        @self.sio.on('sessionOwner')
+        async def on_session_owner(ownerID, ownerUserName=None):
+            self.logger.info(f"Session owner update: {ownerID} ({ownerUserName})")
+            self.session_owner_id = ownerID
             
+            # If we have non-bot users, check ownership
+            if self.has_non_bot_users:
+                await self.check_and_handle_session_ownership()
+
         # Listen for user changes in the session
         @self.sio.on('sessionUsers')
         async def on_session_users(users):
@@ -218,12 +234,42 @@ class DraftSetupManager:
             
             # Count current non-bot users
             non_bot_users = [user for user in users if user.get('userName') != 'DraftBot']
-            self.users_count = len(non_bot_users)  # Only count non-bot users
+            self.users_count = len(non_bot_users)
+            
+            # Check if we now have non-bot users
+            previous_has_non_bot_users = self.has_non_bot_users
+            self.has_non_bot_users = self.users_count > 0
             
             self.logger.info(
                 f"Users update: Total users={len(users)}, Non-bot users={self.users_count}, "
                 f"User IDs={[user.get('userID') for user in non_bot_users]}"
             )
+            
+            # Handle state transitions for non-bot users
+            if not previous_has_non_bot_users and self.has_non_bot_users:
+                # First non-bot users detected
+                self.logger.info("First non-bot users detected, stopping periodic reconnection")
+                await self.stop_periodic_reconnection()
+                
+                # Check session ownership
+                await self.check_and_handle_session_ownership()
+                
+            elif previous_has_non_bot_users and not self.has_non_bot_users:
+                # All non-bot users left, restart periodic reconnection
+                self.logger.info("All non-bot users left, restarting periodic reconnection")
+                
+                # Reset ownership check flags so we'll check again when new users join
+                self.ownership_check_completed = False
+                self.session_owner_id = None
+                self.session_owner_username = None
+                
+                # Reset expected user count and seating flags since teams are no longer relevant
+                self.expected_user_count = 0
+                self.seating_order_set = False
+                self.seating_attempts = 0
+                
+                # Restart periodic reconnection
+                await self.start_periodic_reconnection()
             
             # Check if user count decreased (someone left)
             if self.ready_check_active and previous_count > self.users_count:
@@ -240,11 +286,11 @@ class DraftSetupManager:
                 # Someone joined during an active ready check - identify who joined
                 previous_usernames = {user.get('userName') for user in previous_non_bot_users}
                 current_usernames = {user.get('userName') for user in non_bot_users}
-                left_users = current_usernames - previous_usernames
+                joined_users = current_usernames - previous_usernames
                 
-                left_user_name = next(iter(left_users)) if left_users else "Unknown"
-                self.logger.info(f"User {left_user_name} joined during active ready check - invalidating ready check")
-                await self.invalidate_ready_check(left_user_name)
+                joined_user_name = next(iter(joined_users)) if joined_users else "Unknown"
+                self.logger.info(f"User {joined_user_name} joined during active ready check - invalidating ready check")
+                await self.invalidate_ready_check(joined_user_name)
             
             # Check if user list changed and update status message if needed
             if previous_count != self.users_count or len(previous_users) != len(users):
@@ -253,12 +299,12 @@ class DraftSetupManager:
             
             # IMPORTANT: If we've reached the expected count of users or seating order 
             # is not set and we have all users, check immediately
-            if ((self.expected_user_count is not None and 
-                previous_count < self.expected_user_count and 
+            # BUT ONLY if expected_user_count > 0 (meaning teams stage is active)
+            if (self.expected_user_count > 0 and  
+                ((previous_count < self.expected_user_count and 
                 self.users_count >= self.expected_user_count) or
                 (not self.seating_order_set and 
-                 self.users_count >= self.expected_user_count and
-                 self.expected_user_count > 0)):
+                self.users_count >= self.expected_user_count))):
                 
                 self.logger.info(f"Reached expected user count or need to reset seating! Attempting seating order. on_session_users")
                 await self.check_session_stage_and_organize()
@@ -273,11 +319,161 @@ class DraftSetupManager:
                 self.logger.info("check session stage from on_session_users")
                 await self.check_session_stage_and_organize()
 
-        @self.sio.on('storedSessionSettings')
-        async def on_stored_settings(data):
-            self.logger.info(f"Received updated session settings: {data}")
+    async def start_periodic_reconnection(self):
+        """Start periodic reconnection every 5 minutes until non-bot users are present"""
+        if self.periodic_reconnection_task and not self.periodic_reconnection_task.done():
+            self.logger.info("Periodic reconnection task already running, skipping start")
+            return  # Already running
+            
+        self.logger.info("Starting periodic reconnection task (every 5 minutes)")
+        self.periodic_reconnection_task = asyncio.create_task(self._periodic_reconnection_loop())
 
-    
+    async def stop_periodic_reconnection(self):
+        """Stop the periodic reconnection task"""
+        if self.periodic_reconnection_task and not self.periodic_reconnection_task.done():
+            self.logger.info("Stopping periodic reconnection task")
+            self.periodic_reconnection_task.cancel()
+            try:
+                await self.periodic_reconnection_task
+            except asyncio.CancelledError:
+                pass
+            self.periodic_reconnection_task = None
+
+    async def _periodic_reconnection_loop(self):
+        """Internal method that handles the reconnection loop"""
+        try:
+            while not self.has_non_bot_users and not self._should_disconnect:
+                self.logger.info("Performing periodic reconnection check...")
+                
+                # Wait 5 minutes
+                await asyncio.sleep(300)  # 5 minutes
+                
+                # If we still don't have non-bot users, reconnect
+                if not self.has_non_bot_users and not self._should_disconnect:
+                    self.logger.info("No non-bot users detected, performing reconnection")
+                    await self._perform_reconnection()
+                else:
+                    self.logger.info("Non-bot users present or disconnect requested, stopping periodic reconnection")
+                    break
+                    
+        except asyncio.CancelledError:
+            self.logger.info("Periodic reconnection task cancelled")
+        except Exception as e:
+            self.logger.exception(f"Error in periodic reconnection loop: {e}")
+
+    async def _perform_reconnection(self):
+        """Perform the actual reconnection process"""
+        try:
+            self.logger.info("Starting reconnection process...")
+            
+            # Disconnect if connected
+            if self.sio.connected:
+                await self.sio.disconnect()
+                self.logger.info("Disconnected for reconnection")
+            
+            # Wait a moment before reconnecting
+            await asyncio.sleep(2)
+            
+            # Reconnect
+            websocket_url = get_draftmancer_websocket_url(self.draft_id)
+            connection_successful = await self.connect_with_retry(websocket_url)
+            
+            if connection_successful:
+                self.logger.info("Reconnection successful")
+                
+                # Fetch draft info immediately after reconnection
+                await self.fetch_draft_info()
+                
+                # Re-import cube if needed
+                if not self.cube_imported:
+                    await self.import_cube()
+                
+                # Re-apply settings
+                await self.update_draft_settings()
+                
+                # Request current session state
+                await self.sio.emit('getUsers')
+                
+            else:
+                self.logger.error("Reconnection failed")
+                
+        except Exception as e:
+           self.logger.exception(f"Error during reconnection: {e}")
+
+    async def check_and_handle_session_ownership(self):
+        """Check if bot is session owner and handle accordingly"""
+        try:
+            if self.ownership_check_completed:
+                return  # Already checked
+                
+            # Ensure we have draft channel info before proceeding
+            if not self.draft_channel_id:
+                self.logger.info("No draft channel ID available, fetching draft info...")
+                await self.fetch_draft_info()
+                
+            # We need to check if DraftBot is the session owner
+            # Find DraftBot in the session users
+            bot_user = None
+            for user in self.session_users:
+                if user.get('userName') == 'DraftBot':
+                    bot_user = user
+                    break
+            
+            if not bot_user:
+                self.logger.warning("DraftBot not found in session users")
+                return
+                
+            bot_user_id = bot_user.get('userID')
+            
+            # Check if bot is the session owner
+            if self.session_owner_id and self.session_owner_id != bot_user_id:
+                self.logger.warning(f"DraftBot is not the session owner. Current owner: {self.session_owner_id}")
+                await self._post_ownership_message()
+            elif self.session_owner_id == bot_user_id:
+                self.logger.info("DraftBot is confirmed as session owner")
+            else:
+                self.logger.info("Session owner not yet determined, will check again later")
+                return  # Don't mark as completed yet
+                
+            self.ownership_check_completed = True
+            
+        except Exception as e:
+            self.logger.exception(f"Error checking session ownership: {e}")
+
+    async def _post_ownership_message(self):
+        """Post message in Discord asking for crown to be granted"""
+        try:
+            if not self.draft_channel_id:
+                self.logger.warning("No draft channel ID available for ownership message")
+                return
+                
+            bot = get_bot()
+            if not bot:
+                self.logger.warning("No bot instance available for ownership message")
+                return
+                
+            channel = bot.get_channel(int(self.draft_channel_id))
+            if not channel:
+                try:
+                    channel = await bot.fetch_channel(int(self.draft_channel_id))
+                except Exception as e:
+                    self.logger.error(f"Could not fetch channel: {e}")
+                    return
+                    
+            if channel:
+                message = (
+                    "👑 **Unknown is the session owner.** "
+                    "Please grant DraftBot the crown (click the crown icon next to DraftBot's name) "
+                    "or kick DraftBot from the queue."
+                )
+                await channel.send(message)
+                self.logger.info("Posted ownership request message to Discord")
+            else:
+                self.logger.error("Could not find Discord channel for ownership message")
+                
+        except Exception as e:
+            self.logger.exception(f"Error posting ownership message: {e}")
+            
     async def collect_draft_logs(self):
         """Collect draft logs and process them"""
         if self.logs_collection_attempted or self.logs_collection_in_progress:
@@ -1292,9 +1488,12 @@ class DraftSetupManager:
             if not draft_session:
                 self.logger.warning(f"No draft session found for session_id: {self.session_id}")
                 return
-                
-            # Check if session stage is "teams"
-            if draft_session.session_stage:
+            
+            if draft_session.session_stage != "teams":
+                self.logger.debug(f"Session stage is '{draft_session.session_stage}', not 'teams' - skipping seating organization")
+                return
+            
+            else:
                 self.logger.info("Session stage is 'teams', checking for seating organization")
                 
                 # Get sign_ups from the database
@@ -1713,15 +1912,18 @@ class DraftSetupManager:
                 self.logger.error("Failed to connect after multiple retries, aborting connection task")
                 return
             
-            # If initial cube import fails, end the task
+            # Import cube and update settings
             if not self.cube_imported and not await self.import_cube():
                 self.logger.error("Initial cube import failed, ending connection task")
                 return
 
-            # Update draft settings after successful cube import
             if not await self.update_draft_settings():
                 self.logger.error("Failed to update draft settings, ending connection task")
                 return
+
+            # Start periodic reconnection if no non-bot users are present
+            if not self.has_non_bot_users:
+                await self.start_periodic_reconnection()
 
             # Monitor the session until conditions are met
             draft_ended_time = None
@@ -1748,7 +1950,8 @@ class DraftSetupManager:
                             
                         # If we already have enough users, check session stage
                         # This is a fallback in case any event updates were missed
-                        if self.users_count >= self.expected_user_count and self.expected_user_count != 0:
+                        if (self.expected_user_count > 0 and  
+                            self.users_count >= self.expected_user_count):
                             current_time = datetime.now()
                             if (self.last_db_check_time is None or 
                                 (current_time - self.last_db_check_time).total_seconds() > self.db_check_cooldown):
@@ -2101,13 +2304,23 @@ class DraftSetupManager:
         """
         Update status message in Discord after a user joins or leaves.
         This is called from event handlers to provide real-time updates.
+        Only posts status messages when session stage is 'teams'.
         """
         if not self.seating_order_set and self.draft_channel_id:
             try:
-                # Get the draft session to compare sign-ups with current users
+                # Get the draft session to check if we're in the teams stage
                 draft_session = await DraftSession.get_by_session_id(self.session_id)
-                if not draft_session or not draft_session.sign_ups:
-                    self.logger.warning("No draft session or sign-ups found for status update")
+                if not draft_session:
+                    self.logger.warning("No draft session found for status update")
+                    return
+                    
+                # Only proceed if session stage is "teams" - meaning teams have been made
+                if not draft_session.session_stage:
+                    self.logger.debug("Session stage is not 'teams', skipping status message update")
+                    return
+                    
+                if not draft_session.sign_ups:
+                    self.logger.warning("No sign-ups found for status update")
                     return
                     
                 # Get username sets 
@@ -2159,7 +2372,10 @@ class DraftSetupManager:
                     self.logger.error(f"Error updating status message after user change: {e}")
                 
                 # If we now have all expected users, check seating order
-                if not missing_users and self.users_count >= self.expected_user_count:
+                # BUT ONLY if expected_user_count > 0 (teams stage is active)
+                if (self.expected_user_count > 0 and 
+                    not missing_users and 
+                    self.users_count >= self.expected_user_count):
                     self.logger.info("All expected users are now present, checking seating order. checking session stage from update_status_message_after_user_change")
                     await self.check_session_stage_and_organize()
                     
