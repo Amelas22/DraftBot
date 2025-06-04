@@ -86,6 +86,7 @@ class CubeDraftSelectionView(discord.ui.View):
                 discord.SelectOption(label="LSVRetro", value="LSVRetro"),
                 discord.SelectOption(label="PowerMack", value="PowerMack"),
                 discord.SelectOption(label="Powerslax", value="Powerslax"),
+                discord.SelectOption(label="PowerSam", value="PowerSam"),
                 discord.SelectOption(label="Custom Cube...", value="custom")
             ]
         )
@@ -147,6 +148,7 @@ class StakedCubeDraftSelectionView(discord.ui.View):
                 discord.SelectOption(label="LSVRetro", value="LSVRetro"),
                 discord.SelectOption(label="PowerMack", value="PowerMack"),
                 discord.SelectOption(label="Powerslax", value="Powerslax"),
+                discord.SelectOption(label="PowerSam", value="PowerSam"),
                 discord.SelectOption(label="Custom Cube...", value="custom")
             ]
         )
