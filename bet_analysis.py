@@ -17,6 +17,7 @@ async def get_last_ten_10tix_max_stakes():
     """
     Analyze the last 10 times someone set their max_stake to 10 tix in completed drafts
     for guild 1355718878298116096
+    Only counts users who are still in the sign_ups for that draft (didn't leave)
     """
     guild_id = "1355718878298116096"
     
@@ -37,24 +38,36 @@ async def get_last_ten_10tix_max_stakes():
         
         if not records:
             print("No users found who set max_stake to 10 tix in completed drafts for this guild.")
-            return
+            return 0
         
-        # Get the last 10 records
-        last_ten = records[:10]
+        # Filter to only include users who are still in the sign_ups dictionary
+        valid_records = []
+        for draft_session, stake_info in records:
+            # Check if the user is still in the sign_ups (didn't leave the draft)
+            if (draft_session.sign_ups and 
+                stake_info.player_id in draft_session.sign_ups):
+                valid_records.append((draft_session, stake_info))
         
-        print("Last 10 times someone set their max stake to 10 tix:")
-        print("=" * 70)
+        if not valid_records:
+            print("No users found who set max_stake to 10 tix AND stayed in completed drafts.")
+            return 0
+        
+        # Get the last 10 valid records
+        last_ten = valid_records[:10]
+        
+        print("Last 10 times someone set their max stake to 10 tix (and stayed in the draft):")
+        print("=" * 80)
         
         dates = []
         for i, (draft_session, stake_info) in enumerate(last_ten, 1):
-            # Get user name from sign_ups JSON field
-            user_name = draft_session.sign_ups.get(stake_info.player_id, "Unknown User")
+            # Get user name from sign_ups JSON field (we know it exists since we filtered for it)
+            user_name = draft_session.sign_ups[stake_info.player_id]
             date_str = draft_session.draft_start_time.strftime("%Y-%m-%d %H:%M:%S")
             dates.append(draft_session.draft_start_time)
             
             print(f"{i}. {date_str} - {user_name} - {draft_session.draft_id}")
         
-        print("\n" + "=" * 70)
+        print("\n" + "=" * 80)
         
         if len(dates) >= 2:
             # Get date range from oldest to newest of these 10
@@ -78,18 +91,22 @@ async def get_last_ten_10tix_max_stakes():
             print(f"Total completed drafts in this period: {total_count}")
             
             # Also show the breakdown of 10 tix max stakes vs total
-            print(f"Users who set max stake to 10 tix in this period: {len(last_ten)}")
+            print(f"Users who set max stake to 10 tix (and stayed) in this period: {len(last_ten)}")
             if total_count > 0:
                 print(f"Percentage of these instances vs total drafts: {(len(last_ten)/total_count)*100:.1f}%")
             
         else:
             print("Not enough data to calculate date range statistics.")
-            print(f"Only found {len(last_ten)} records of users setting max stake to 10 tix.")
+            print(f"Only found {len(last_ten)} records of users setting max stake to 10 tix and staying.")
+        
+        # Return the valid records count for use in additional stats if needed
+        return len(valid_records)
 
 
 async def get_additional_stats():
     """
     Get some additional statistics about users setting max_stake to 10 tix
+    Only counts users who stayed in the draft (are in sign_ups)
     """
     guild_id = "1355718878298116096"
     
@@ -103,9 +120,9 @@ async def get_additional_stats():
         )
         total_drafts = await session.scalar(total_drafts_stmt)
         
-        # Get total number of instances where users set max_stake to 10 tix
-        total_10tix_max_stmt = select(func.count(StakeInfo.id)).join(
-            DraftSession, StakeInfo.session_id == DraftSession.session_id
+        # Get all instances where users set max_stake to 10 tix and filter for those still in sign_ups
+        all_10tix_stmt = select(DraftSession, StakeInfo).join(
+            StakeInfo, DraftSession.session_id == StakeInfo.session_id
         ).where(
             and_(
                 DraftSession.guild_id == guild_id,
@@ -113,29 +130,37 @@ async def get_additional_stats():
                 StakeInfo.max_stake == 10
             )
         )
-        total_10tix_max = await session.scalar(total_10tix_max_stmt)
         
-        # Get count of unique users who have set max_stake to 10 tix
-        unique_users_stmt = select(func.count(func.distinct(StakeInfo.player_id))).join(
-            DraftSession, StakeInfo.session_id == DraftSession.session_id
-        ).where(
-            and_(
-                DraftSession.guild_id == guild_id,
-                DraftSession.victory_message_id_draft_chat.isnot(None),
-                StakeInfo.max_stake == 10
-            )
-        )
-        unique_users = await session.scalar(unique_users_stmt)
+        result = await session.execute(all_10tix_stmt)
+        all_records = result.fetchall()
+        
+        # Filter to only include users who are still in the sign_ups dictionary
+        valid_records = []
+        unique_users = set()
+        for draft_session, stake_info in all_records:
+            if (draft_session.sign_ups and 
+                stake_info.player_id in draft_session.sign_ups):
+                valid_records.append((draft_session, stake_info))
+                unique_users.add(stake_info.player_id)
+        
+        total_10tix_max = len(valid_records)
+        unique_users_count = len(unique_users)
         
         print(f"\nADDITIONAL STATISTICS:")
-        print("=" * 40)
+        print("=" * 50)
         print(f"Total completed drafts in guild: {total_drafts}")
-        print(f"Total instances of users setting max stake to 10 tix: {total_10tix_max}")
-        print(f"Unique users who have set max stake to 10 tix: {unique_users}")
+        print(f"Total instances of users setting max stake to 10 tix (and staying): {total_10tix_max}")
+        print(f"Unique users who have set max stake to 10 tix (and stayed): {unique_users_count}")
         if total_drafts > 0:
             print(f"Average 10 tix max stakes per completed draft: {total_10tix_max/total_drafts:.2f}")
-        if unique_users > 0:
-            print(f"Average times each user sets max stake to 10 tix: {total_10tix_max/unique_users:.2f}")
+        if unique_users_count > 0:
+            print(f"Average times each user sets max stake to 10 tix: {total_10tix_max/unique_users_count:.2f}")
+        
+        # Show some additional insights
+        if len(all_records) > total_10tix_max:
+            left_draft_count = len(all_records) - total_10tix_max
+            print(f"\nUsers who set 10 tix but left before completion: {left_draft_count}")
+            print(f"Percentage of 10 tix users who stayed in draft: {(total_10tix_max/len(all_records))*100:.1f}%")
 
 
 async def main():
