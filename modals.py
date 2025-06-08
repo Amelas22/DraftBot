@@ -158,12 +158,22 @@ class StakedCubeDraftSelectionView(discord.ui.View):
     async def cube_select_callback(self, interaction: discord.Interaction):
         cube_choice = self.cube_select.values[0]
         
-        # Always show the staked draft modal
-        modal = StakedCubeDraftModal(cube_choice)
-        await interaction.response.send_modal(modal)
+        if modal := StakedCubeDraftModal.create_if_needed(cube_choice):
+            await interaction.response.send_modal(modal)
+        else:
+            session_details = SessionDetails(interaction)
+            session_details.cube_choice = cube_choice
+            session_details.min_stake = 20  # Set fixed min stake to 20
+            await handle_staked_draft_session(interaction, session_details)
 
 
 class StakedCubeDraftModal(discord.ui.Modal):
+    @classmethod
+    def create_if_needed(cls, cube_choice: str) -> Optional['StakedCubeDraftModal']:
+        """Create a modal only if it would have input fields."""
+        modal = cls(cube_choice)
+        return modal if modal.children else None
+
     def __init__(self, cube_choice: str, *args, **kwargs) -> None:
         super().__init__(title="Staked Draft Setup", *args, **kwargs)
         self.cube_choice = cube_choice
@@ -174,41 +184,28 @@ class StakedCubeDraftModal(discord.ui.Modal):
                 placeholder="Enter your cube name",
                 custom_id="cube_name_input"
             ))
-
-        # Add min stake input
-        self.add_item(discord.ui.InputText(
-            label="Minimum Stake (tix)",
-            placeholder="Enter minimum stake (default: 10)",
-            custom_id="min_stake_input",
-            required=False
-        ))
             
     async def callback(self, interaction: discord.Interaction) -> None:
-        # Configure session details
+        session_details = self.configure_session_details(interaction)
+        await handle_staked_draft_session(interaction, session_details)
+
+    def configure_session_details(self, interaction: discord.Interaction) -> SessionDetails:
+        """Prepare the session details based on the user input."""
         session_details = SessionDetails(interaction)
         
         # If custom cube, get name from input, otherwise use preset choice
         if self.cube_choice == "custom":
             session_details.cube_choice = self.children[0].value
-            input_offset = 1
         else:
             session_details.cube_choice = self.cube_choice
-            input_offset = 0
         
-        # Get min stake if provided
-        min_stake_str = self.children[input_offset].value
-        min_stake = 10  
-        if min_stake_str:
-            try:
-                min_stake = int(min_stake_str)
-                if min_stake < 1:
-                    min_stake = 10 
-            except ValueError:
-                pass  
+        # Set fixed min stake to 20
+        session_details.min_stake = 20
         
-        # Store min stake in session details
-        session_details.min_stake = min_stake
-        
-        # Create and start the draft session
-        session_instance = StakedSession(session_details)
-        await session_instance.create_draft_session(interaction, interaction.client)
+        return session_details
+
+
+async def handle_staked_draft_session(interaction: discord.Interaction, session_details: SessionDetails) -> None:
+    """Handle staked draft session creation."""
+    session_instance = StakedSession(session_details)
+    await session_instance.create_draft_session(interaction, interaction.client)
