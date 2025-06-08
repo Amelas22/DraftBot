@@ -642,7 +642,7 @@ class DraftLogsCog(commands.Cog):
             if discord_channel:
                 embed = discord.Embed(
                     title="📊 Anonymous Draft Log Review",
-                    description="Draft Logs posted twice a day (10am ET / 1pm ET)!",
+                    description="Draft Logs posted at 9am daily!",
                     color=discord.Color.purple()
                 )
                 

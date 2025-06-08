@@ -22,10 +22,9 @@ class StakedSession(RandomSession):
             "3. Teams will be created randomly. Max bets are **NOT** factored in when making teams\n"
             f"4. Minimum bet: {self.session_details.min_stake} tix\n\n"
             "**How it works:**\n"
-            "• To be written when a methodology is finalized\n"
-            "• Basic rules: Ensure both teams can fulfill all 10/20/50 bets on opposing team\n"
-            "• If a team cannot, process using Proportional Method\n"
-            "• If both teams can, allocate all 10/20/50 bets, then proportionaly distribute all remaining bets\n"
+            "• Basic rules: Ensure both teams can fulfill all 20/50 bets on opposing team\n"
+            "• If a team cannot, process using a Proportional Method\n"
+            "• If both teams can, allocate all 20/50 bets, then proportionaly distribute all remaining bets\n"
             f"{self.get_common_description()}"
         )
         embed = Embed(title=title, description=description, color=Color.gold())
