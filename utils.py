@@ -19,36 +19,55 @@ flags = {}
 locks = {}
 
 async def split_into_teams(bot, draft_session_id):
-    # Fetch the current draft session to ensure it's up to date.
-    draft_session = await get_draft_session(draft_session_id)
-    if not draft_session:
-        print("The draft session could not be found.")
-        return
+    # Create session-specific lock if it doesn't exist
+    if draft_session_id not in locks:
+        locks[draft_session_id] = asyncio.Lock()
     
-    sign_ups = draft_session.sign_ups
-
-    if sign_ups:
-        # Get list of sign-up keys and shuffle it
-        sign_ups_list = list(sign_ups.keys())
-        random.shuffle(sign_ups_list)
-        
-        # Create a new dictionary with the same key-value pairs but in the shuffled order
-        # This is important for preserving the shuffled order for seating
-        shuffled_sign_ups = {}
-        for user_id in sign_ups_list:
-            shuffled_sign_ups[user_id] = sign_ups[user_id]
-        
-        # Create teams by alternating players
-        team_a = sign_ups_list[0::2]  # Elements at indices 0, 2, 4, etc.
-        team_b = sign_ups_list[1::2]  # Elements at indices 1, 3, 5, etc.
-
+    # Use lock to prevent race conditions
+    async with locks[draft_session_id]:
+        # Fetch the current draft session to ensure it's up to date with row-level locking
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
-                # Update the draft session with the new teams AND the shuffled sign-ups
-                await db_session.execute(update(DraftSession)
-                                        .where(DraftSession.session_id == draft_session_id)
-                                        .values(team_a=team_a, team_b=team_b, sign_ups=shuffled_sign_ups))
-                await db_session.commit()
+                # Use row-level locking to prevent concurrent modifications
+                stmt = select(DraftSession).where(DraftSession.session_id == draft_session_id).with_for_update()
+                draft_session = await db_session.scalar(stmt)
+                
+                if not draft_session:
+                    print("The draft session could not be found.")
+                    return
+                
+                # Check if teams are already created (idempotent check)
+                if draft_session.team_a and draft_session.team_b:
+                    print(f"Teams already exist for session {draft_session_id}")
+                    return
+                
+                print(f"Starting team creation for session {draft_session_id}...")
+                
+                sign_ups = draft_session.sign_ups
+
+                if sign_ups:
+                    # Get list of sign-up keys and shuffle it
+                    sign_ups_list = list(sign_ups.keys())
+                    random.shuffle(sign_ups_list)
+                    
+                    # Create a new dictionary with the same key-value pairs but in the shuffled order
+                    # This is important for preserving the shuffled order for seating
+                    shuffled_sign_ups = {}
+                    for user_id in sign_ups_list:
+                        shuffled_sign_ups[user_id] = sign_ups[user_id]
+                    
+                    # Create teams by alternating players
+                    team_a = sign_ups_list[0::2]  # Elements at indices 0, 2, 4, etc.
+                    team_b = sign_ups_list[1::2]  # Elements at indices 1, 3, 5, etc.
+
+                    # Update the draft session with the new teams AND the shuffled sign-ups
+                    await db_session.execute(update(DraftSession)
+                                            .where(DraftSession.session_id == draft_session_id)
+                                            .values(team_a=team_a, team_b=team_b, sign_ups=shuffled_sign_ups))
+                    await db_session.commit()
+                    print(f"Successfully created teams for session {draft_session_id}")
+                else:
+                    print(f"No sign-ups found for session {draft_session_id}")
 
 async def generate_seating_order(bot, draft_session, command_type=None):
     guild = bot.get_guild(int(draft_session.guild_id))
