@@ -806,6 +806,64 @@ class PersistentView(discord.ui.View):
     #     except Exception as e:
     #         logger.error(f"Failed during ready check cleanup: {e}")
 
+    async def _validate_team_creation_request(self, interaction: discord.Interaction, session_id: str, user_id: str):
+        """Validate initial conditions for team creation"""
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                stmt = select(DraftSession).where(DraftSession.session_id == session_id)
+                result = await db_session.execute(stmt)
+                session = result.scalars().first()
+
+                if not session:
+                    await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
+                    return False, None
+                
+                # Check if user is in the queue
+                if user_id not in session.sign_ups:
+                    await interaction.response.send_message(
+                        "You are not eligible to create teams as you are not in the queue.", 
+                        ephemeral=True
+                    )
+                    return False, None
+                    
+                return True, session
+
+    async def _validate_staked_draft_requirements(self, interaction: discord.Interaction, session_id: str):
+        """Validate staked draft specific requirements"""
+        # Check if a ready check has been performed
+        ready_check_performed = session_id in sessions
+        logger.info(f"Ready check verification: session_id={session_id}, in sessions dict={ready_check_performed}")
+        
+        if not ready_check_performed:
+            logger.warning(f"❌ Ready check verification failed for session {session_id}")
+            await interaction.followup.send(
+                "You must perform a Ready Check before creating teams for a money draft.",
+                ephemeral=True
+            )
+            return False
+        
+        # Check that all players have set their stakes
+        from utils import get_missing_stake_players
+        missing_players = await get_missing_stake_players(session_id)
+        if missing_players:
+            # Get display names for the missing players
+            guild = interaction.client.get_guild(int(interaction.guild_id))
+            missing_names = []
+            for pid in missing_players:
+                member = guild.get_member(int(pid))
+                if member:
+                    missing_names.append(member.display_name)
+            
+            # Format error message
+            players_str = ", ".join(missing_names)
+            await interaction.followup.send(
+                f"Cannot create teams yet. The following players need to set their stakes: {players_str}",
+                ephemeral=True
+            )
+            return False
+            
+        return True
+
     async def randomize_teams_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         bot = interaction.client
         session_id = self.draft_session_id
@@ -822,69 +880,22 @@ class PersistentView(discord.ui.View):
         # Mark as processing to prevent race conditions
         PROCESSING_TEAMS_CREATION[session_id] = True
 
-        logger.info(f"Create teams initiated for session {self.draft_session_id} of type {self.session_type}")
-        
-        # Check if the user is in the sign-ups queue
-        async with AsyncSessionLocal() as db_session:
-            async with db_session.begin():
-                stmt = select(DraftSession).where(DraftSession.session_id == session_id)
-                result = await db_session.execute(stmt)
-                session = result.scalars().first()
-
-                if not session:
-                    await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
-                    return
-                
-                # Check if user is in the queue
-                if user_id not in session.sign_ups:
-                    await interaction.response.send_message(
-                        "You are not eligible to create teams as you are not in the queue.", 
-                        ephemeral=True
-                    )
-                    return
-        
         try:
+            logger.info(f"Create teams initiated for session {self.draft_session_id} of type {self.session_type}")
+            
+            # Validate initial request
+            is_valid, session = await self._validate_team_creation_request(interaction, session_id, user_id)
+            if not is_valid:
+                return
+            
             # Defer the response early since team creation might take time
             await interaction.response.defer()
             
             logger.info(f"Create teams - checking sessions dict: {list(sessions.keys())}")
             
+            # Validate staked draft requirements if needed
             if self.session_type == "staked":
-                # First, check if a ready check has been performed
-                ready_check_performed = session_id in sessions
-                logger.info(f"Ready check verification: session_id={session_id}, in sessions dict={ready_check_performed}")
-                logger.debug(f"Current sessions in dictionary: {list(sessions.keys())}")
-                
-                if not ready_check_performed:
-                    logger.warning(f"❌ Ready check verification failed for session {session_id}")
-                    await interaction.followup.send(
-                        "You must perform a Ready Check before creating teams for a money draft.",
-                        ephemeral=True
-                    )
-                    # Clean up processing flag
-                    del PROCESSING_TEAMS_CREATION[session_id]
-                    return
-                
-                # Check that all players have set their stakes
-                from utils import get_missing_stake_players
-                missing_players = await get_missing_stake_players(session_id)
-                if missing_players:
-                    # Get display names for the missing players
-                    guild = bot.get_guild(int(interaction.guild_id))
-                    missing_names = []
-                    for pid in missing_players:
-                        member = guild.get_member(int(pid))
-                        if member:
-                            missing_names.append(member.display_name)
-                    
-                    # Format error message
-                    players_str = ", ".join(missing_names)
-                    await interaction.followup.send(
-                        f"Cannot create teams yet. The following players need to set their stakes: {players_str}",
-                        ephemeral=True
-                    )
-                    # Clean up processing flag
-                    del PROCESSING_TEAMS_CREATION[session_id]
+                if not await self._validate_staked_draft_requirements(interaction, session_id):
                     return
                 
             async with AsyncSessionLocal() as db_session:
@@ -895,14 +906,10 @@ class PersistentView(discord.ui.View):
 
                     if not session:
                         await interaction.followup.send("The draft session could not be found.", ephemeral=True)
-                        # Clean up processing flag
-                        del PROCESSING_TEAMS_CREATION[session_id]
                         return
                         
                     if len(session.sign_ups) % 2 != 0:
                         await interaction.followup.send("There must be an even number of players to fire.")
-                        # Clean up processing flag
-                        del PROCESSING_TEAMS_CREATION[session_id]
                         return
 
                     # Update the session object
@@ -1202,49 +1209,44 @@ class PersistentView(discord.ui.View):
                 )
             except:
                 pass
+            # Setup draft manager (moved inside main try block to ensure cleanup)
+            try:
+                manager = DraftSetupManager.get_active_manager(self.draft_session_id)
+                
+                if manager:
+                    logger.info(f"TEAMS CREATED: Found existing manager for session {self.draft_session_id}")
+                    logger.info(f"TEAMS CREATED: Manager state - Seating set: {manager.seating_order_set}, "
+                                f"Users count: {manager.users_count}, Expected count: {manager.expected_user_count}")
+                            
+                    # Make sure bot instance is set 
+                    manager.set_bot_instance(interaction.client)
+                    logger.info(f"Set bot instance on manager to ensure Discord messaging works")
+                            
+                    # Manager exists, force a check of session stage
+                    logger.info("Check session from randomize teams normal draft")
+                    await manager.check_session_stage_and_organize()
+                    
+                    # Also force a refresh of users to ensure accurate count
+                    if manager.sio.connected:
+                        await manager.sio.emit('getUsers')
+                else:
+                    logger.info(f"DraftSetupManager not found for {self.draft_session_id}")
+
+            except Exception as e:
+                # Log the error but don't disrupt the normal flow
+                logger.exception(f"Error triggering seating order process: {e}")
+
         finally:
             # Always clean up the processing flag
             if session_id in PROCESSING_TEAMS_CREATION:
                 del PROCESSING_TEAMS_CREATION[session_id]
 
+        # Handle weekly limits check outside the try block since we need session data
         try:
-            # Look for an existing manager
-            manager = DraftSetupManager.get_active_manager(self.draft_session_id)
-            
-            if manager:
-                logger.info(f"TEAMS CREATED: Found existing manager for session {self.draft_session_id}")
-                logger.info(f"TEAMS CREATED: Manager state - Seating set: {manager.seating_order_set}, "
-                            f"Users count: {manager.users_count}, Expected count: {manager.expected_user_count}")
-                        
-                # Make sure bot instance is set 
-                manager.set_bot_instance(interaction.client)
-                logger.info(f"Set bot instance on manager to ensure Discord messaging works")
-                        
-                # Manager exists, force a check of session stage
-                logger.info("Check session from randomize teams normal draft")
-                await manager.check_session_stage_and_organize()
-                
-                # Also force a refresh of users to ensure accurate count
-                if manager.sio.connected:
-                    await manager.sio.emit('getUsers')
-            else:
-                logger.info(f"DraftSetupManager not found for {self.draft_session_id}")
-
+            if session.tracked_draft and session.premade_match_id is not None:
+                await check_weekly_limits(interaction, session.premade_match_id, session.session_type, session.session_id)
         except Exception as e:
-            # Log the error but don't disrupt the normal flow
-            print(f"Error triggering seating order process: {e}")
-            import traceback
-            traceback.print_exc()
-
-        except Exception as e:
-            # Log the error but don't disrupt the normal flow
-            print(f"Error triggering seating order process: {e}")
-            import traceback
-            traceback.print_exc()
-            
-        
-        if session.tracked_draft and session.premade_match_id is not None:
-            await check_weekly_limits(interaction, session.premade_match_id, session.session_type, session.session_id)
+            logger.exception(f"Error checking weekly limits: {e}")
         
     async def explain_stakes_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Explain how the stake system works"""
