@@ -3,7 +3,7 @@ import discord
 import time
 import asyncio
 from loguru import logger
-from sqlalchemy import Column, String, Float, Boolean, select
+from sqlalchemy import Column, String, Float, Boolean, select, text
 from database.models_base import Base
 from session import db_session, AsyncSessionLocal
 from datetime import datetime
@@ -12,12 +12,12 @@ from datetime import datetime
 class RolePingCooldown(Base):
     __tablename__ = 'role_ping_cooldowns'
     
-    id = Column(String(64), primary_key=True)  # Composite of guild_id and role_id
+    id = Column(String(64), primary_key=True, nullable=True)  # Composite of guild_id and role_id
     role_id = Column(String(64), nullable=False)
     guild_id = Column(String(64), nullable=False)
-    last_ping_time = Column(Float, default=0.0)
-    cooldown_period = Column(Float, default=3600.0)  # Default 1 hour in seconds
-    is_managed = Column(Boolean, default=True)  # Whether we should control mentionable permission
+    last_ping_time = Column(Float, default=0.0, server_default=text('0.0'))
+    cooldown_period = Column(Float, default=3600.0, server_default=text('3600.0'))  # Default 1 hour in seconds
+    is_managed = Column(Boolean, default=True, server_default=text('1'))  # Whether we should control mentionable permission
 
 # Use the same admin role name as in other cogs
 ADMIN_ROLE_NAME = "Bot Manager"

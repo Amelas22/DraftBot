@@ -42,6 +42,7 @@ class MatchResult(Base):
     player2_wins = Column(Integer, default=0)
     winner_id = Column(String(64), nullable=True)
     pairing_message_id = Column(String(64))
+    guild_id = Column(String(64))
     
     # Relationship with DraftSession
     draft_session = relationship("DraftSession", back_populates="match_results")

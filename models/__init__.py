@@ -23,8 +23,8 @@ __all__ = [
     'TeamFinder',
     'StakeInfo',
     'LeaderboardMessage',
-    'log_channels',
-    'backup_logs',
-    'user_submissions',
-    'post_schedules'
+    'LogChannel',
+    'BackupLog',
+    'UserSubmission',
+    'PostSchedule'
 ]
