@@ -1,0 +1,17 @@
+[Unit]
+Description=Draft Bot Discord Service
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/DraftBot
+ExecStartPre=/bin/sleep 5
+ExecStartPre=/usr/local/bin/pipenv run alembic upgrade head
+ExecStart=/usr/local/bin/pipenv run python bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
