@@ -19,6 +19,7 @@ loguru = "*"
 win32-setctime = {version = "*", markers = "sys_platform == 'win32'"}
 colorama = "*"
 openpyxl = "*"
+alembic = "*"
 
 [dev-packages]
 
