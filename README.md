@@ -204,4 +204,116 @@ pipenv run alembic check
 6. Test migration locally
 7. Deploy to production
 
+Droplet Service Management
+-------------------------
+
+DraftBot runs as a systemd service on the DigitalOcean droplet, providing improved reliability and automated database management.
+
+### Key Benefits
+- Automatic restarts if the bot crashes
+- Proper logging through systemd
+- Starts automatically on server reboot
+- **Automatic database migrations on restart**
+- Environment variables managed through `.env` file
+
+### Service Installation
+
+To install the service on a new server, use the provided deployment script:
+
+```bash
+# Deploy service (run from repository root)
+sudo ./deploy_service.sh
+```
+
+**The script automatically:**
+- Copies service file to `/etc/systemd/system/`
+- Sets proper permissions
+- Reloads systemd daemon
+- Enables the service
+- Starts the service (if it was previously running)
+- Provides status feedback and useful commands
+
+**Manual installation** (if needed):
+```bash
+# Copy service file to systemd directory
+sudo cp systemd/draftbot.service /etc/systemd/system/
+
+# Enable the service
+sudo systemctl daemon-reload
+sudo systemctl enable draftbot.service
+
+# Start the service
+sudo systemctl start draftbot.service
+```
+
+### Common Commands
+
+1. **Check Service Status**:
+   ```bash
+   sudo systemctl status draftbot.service
+   ```
+
+2. **Start/Stop/Restart the Bot**:
+   ```bash
+   sudo systemctl start draftbot.service
+   sudo systemctl stop draftbot.service
+   sudo systemctl restart draftbot.service
+   ```
+
+3. **View Service Logs**:
+   ```bash
+   sudo journalctl -u draftbot.service
+   # For real-time log following:
+   sudo journalctl -u draftbot.service -f
+   ```
+
+### Deployment Process
+
+The deployment process is now fully automated:
+
+```bash
+# On production server
+cd /root/DraftBot
+git pull origin main
+sudo systemctl restart draftbot.service
+```
+
+**The service automatically:**
+1. Stops the bot
+2. Applies any pending database migrations
+3. Starts the bot with updated schema and code
+
+### Safety Features
+
+- **Migration failures prevent bot startup** - protects against broken deployments
+- **Migrations run before bot starts** - ensures schema consistency
+- **Automatic rollback available** - check logs and use `alembic downgrade` if needed
+
+### Troubleshooting
+
+**Service fails to start after update:**
+1. Check service logs: `sudo journalctl -u draftbot.service`
+2. Look for migration errors or Python import issues
+3. If migration failed, fix the issue and restart: `sudo systemctl restart draftbot.service`
+
+**Manual migration management:**
+```bash
+# Check current migration status
+cd /root/DraftBot
+pipenv run alembic current
+
+# Manually run migrations
+pipenv run alembic upgrade head
+
+# Rollback if needed
+pipenv run alembic downgrade -1
+```
+
+**Service file updates:**
+If you modify the service file:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart draftbot.service
+```
+
 This README provides an overview and guidance for using and contributing to the DraftBot project. For any further details or specific functionality, users and contributors should refer to the source code comments or contact the project maintainers.
