@@ -7,6 +7,7 @@ from .utility import TeamFinder
 from .stake import StakeInfo
 from .leaderboard_message import LeaderboardMessage
 from .draft_logs import LogChannel, BackupLog, UserSubmission, PostSchedule
+from .sign_up_history import SignUpHistory
 
 # Export all models
 __all__ = [
@@ -26,5 +27,6 @@ __all__ = [
     'LogChannel',
     'BackupLog',
     'UserSubmission',
-    'PostSchedule'
+    'PostSchedule',
+    'SignUpHistory'
 ]
