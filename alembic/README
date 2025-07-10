@@ -1,0 +1,114 @@
+DraftBot Alembic Configuration
+==============================
+
+This directory contains the Alembic migration environment for DraftBot's SQLite database.
+
+Configuration
+-------------
+
+- **Database**: SQLite (`drafts.db`)
+- **Migrations**: Stored in `versions/` directory
+- **Environment**: Configured in `env.py`
+- **Settings**: Defined in `alembic.ini`
+
+Important Files
+---------------
+
+- `env.py` - Migration environment configuration
+  - Imports all models from `models/` package
+  - Configures SQLAlchemy metadata for autogeneration
+  - Handles both online and offline migration modes
+  - Uses batch operations for SQLite compatibility
+
+- `script.py.mako` - Template for new migration files
+- `alembic.ini` - Configuration file with database URL and settings
+
+Migration Workflow
+------------------
+
+### Creating Migrations
+
+```bash
+# Auto-generate migration from model changes
+pipenv run alembic revision --autogenerate -m "description"
+
+# Create empty migration (for data migrations)
+pipenv run alembic revision -m "description"
+```
+
+### Applying Migrations
+
+```bash
+# Upgrade to latest
+pipenv run alembic upgrade head
+
+# Upgrade to specific revision
+pipenv run alembic upgrade <revision_id>
+
+# Downgrade one revision
+pipenv run alembic downgrade -1
+```
+
+### Inspection Commands
+
+```bash
+# Show current revision
+pipenv run alembic current
+
+# Show all revisions
+pipenv run alembic history
+
+# Show pending migrations
+pipenv run alembic show <revision_id>
+```
+
+Model Registration
+------------------
+
+For models to be detected by Alembic autogeneration:
+
+1. Models must inherit from `database.models_base.Base`
+2. Models must be imported in `models/__init__.py`
+3. Models must be included in the `__all__` list
+4. The import is handled automatically in `env.py`
+
+SQLite Considerations
+---------------------
+
+- **Batch Operations**: All table alterations use `render_as_batch=True`
+- **Foreign Key Support**: Enabled in migration context
+- **Transaction Handling**: Migrations run in transactions
+- **Data Types**: Uses SQLite-compatible type mappings
+
+Baseline Migration
+------------------
+
+- **Initial revision**: `a9c77df9cda3_initial_baseline_no_changes`
+- **Purpose**: Establishes baseline for existing production database
+- **Usage**: Stamp existing databases before applying new migrations
+
+Troubleshooting
+---------------
+
+**Issue**: Migration generates unwanted changes
+**Solution**: Ensure model definitions match database schema exactly
+
+**Issue**: "Target database is not up to date"
+**Solution**: Check `alembic current` and upgrade if needed
+
+**Issue**: SQLite constraint errors
+**Solution**: Verify batch operations are enabled in migration
+
+**Issue**: Model not detected in autogeneration
+**Solution**: Confirm model is imported in `models/__init__.py`
+
+Development Notes
+-----------------
+
+- Always review auto-generated migrations before applying
+- Test migrations with production data copies
+- Use descriptive migration messages
+- Keep one logical change per migration when possible
+- Backup database before running migrations in production
+
+For more information, see the main README.md Database Management section.
