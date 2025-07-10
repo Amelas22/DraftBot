@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Float, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Float, ForeignKey, text, Text
 from database.models_base import Base
 
 class PlayerStats(Base):
@@ -7,12 +7,12 @@ class PlayerStats(Base):
     player_id = Column(String(64), primary_key=True)
     guild_id = Column(String(64), primary_key=True)
     display_name = Column(String(128))  
-    drafts_participated = Column(Integer, default=0)
-    games_won = Column(Integer, default=0)
-    games_lost = Column(Integer, default=0)
-    elo_rating = Column(Float, default=1200)
-    true_skill_mu = Column(Float, default=25)
-    true_skill_sigma = Column(Float, default=8.333)
+    drafts_participated = Column(Integer, default=0, server_default=text('0'))
+    games_won = Column(Integer, default=0, server_default=text('0'))
+    games_lost = Column(Integer, default=0, server_default=text('0'))
+    elo_rating = Column(Float, default=1200.0, server_default=text('1200.0'))
+    true_skill_mu = Column(Float, default=25.0, server_default=text('25.0'))
+    true_skill_sigma = Column(Float, default=8.333, server_default=text('8.333'))
     last_draft_timestamp = Column(DateTime, nullable=True, default=None)
 
     def __repr__(self):
@@ -21,11 +21,11 @@ class PlayerStats(Base):
 class PlayerLimit(Base):
     __tablename__ = 'player_limits'
 
-    player_id = Column(String(64), primary_key=True)
-    display_name = Column(String(128))  
-    drafts_participated = Column(Integer, default=0)
+    player_id = Column(Text, primary_key=True)
+    display_name = Column(Text)  
+    drafts_participated = Column(Integer, default=0, server_default=text('0'))
     WeekStartDate = Column(DateTime, nullable=False, primary_key=True)
-    match_one_points = Column(Integer, default=0)
-    match_two_points = Column(Integer, default=0)
-    match_three_points = Column(Integer, default=0)
-    match_four_points = Column(Integer, default=0) 
+    match_one_points = Column(Integer, default=0, server_default=text('0'))
+    match_two_points = Column(Integer, default=0, server_default=text('0'))
+    match_three_points = Column(Integer, default=0, server_default=text('0'))
+    match_four_points = Column(Integer, default=0, server_default=text('0')) 

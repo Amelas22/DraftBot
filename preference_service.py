@@ -4,16 +4,20 @@ from session import AsyncSessionLocal
 from database.models_base import Base
 from loguru import logger
 
-from sqlalchemy import Column, String, Boolean, DateTime
+from sqlalchemy import Column, String, Boolean, DateTime, Index, func, text, TIMESTAMP
 
 class PlayerPreferences(Base):
     __tablename__ = 'player_preferences'
     
-    id = Column(String(128), primary_key=True)  # Composite ID from player_id and guild_id
+    id = Column(String(128), primary_key=True, nullable=True)  # Composite ID from player_id and guild_id
     player_id = Column(String(64), nullable=False)
     guild_id = Column(String(64), nullable=False)
-    is_bet_capped = Column(Boolean, default=True)
-    last_updated = Column(DateTime, default=datetime.now)
+    is_bet_capped = Column(Boolean, default=True, server_default=text('1'))
+    last_updated = Column(TIMESTAMP, default=datetime.now, server_default=text('CURRENT_TIMESTAMP'))
+    
+    __table_args__ = (
+        Index('idx_player_guild', 'player_id', 'guild_id'),
+    )
 
 async def get_player_bet_capping_preference(player_id, guild_id):
     """

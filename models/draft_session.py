@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, JSON, Boolean
+from sqlalchemy import Column, Integer, String, DateTime, JSON, Boolean, text
 from sqlalchemy.orm import relationship
 from sqlalchemy import select
 from datetime import datetime
@@ -46,7 +46,7 @@ class DraftSession(Base):
     data_received = Column(Boolean, default=False)
     cube = Column(String(128))
     live_draft_message_id = Column(String(64))
-    min_stake = Column(Integer, default=10)
+    min_stake = Column(Integer, default=10, server_default=text('10'))
     logs_channel_id = Column(String(64))
     logs_message_id = Column(String(64))
     magicprotools_links = Column(JSON)

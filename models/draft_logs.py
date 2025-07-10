@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey, text, func, Text, TIMESTAMP
 from sqlalchemy.orm import relationship
 from database.models_base import Base
 from datetime import datetime
@@ -6,10 +6,10 @@ from datetime import datetime
 class LogChannel(Base):
     __tablename__ = 'log_channels'
     
-    channel_id = Column(String(64), primary_key=True)
-    guild_id = Column(String(64), nullable=False)
-    last_post = Column(DateTime, nullable=True)
-    time_zone = Column(String(64), default="UTC")
+    channel_id = Column(Text, primary_key=True, nullable=True)
+    guild_id = Column(Text, nullable=False)
+    last_post = Column(TIMESTAMP, nullable=True)
+    time_zone = Column(Text, default="UTC", server_default=text("'UTC'"))
     
     # Relationships
     backup_logs = relationship("BackupLog", back_populates="channel", cascade="all, delete-orphan")
@@ -22,9 +22,9 @@ class LogChannel(Base):
 class PostSchedule(Base):
     __tablename__ = 'post_schedules'
     
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    channel_id = Column(String(64), ForeignKey('log_channels.channel_id'), nullable=False)
-    post_time = Column(String(10), nullable=False)  # Format: "HH:MM"
+    id = Column(Integer, primary_key=True, nullable=True, autoincrement=True)
+    channel_id = Column(Text, ForeignKey('log_channels.channel_id', ondelete='CASCADE'), nullable=False)
+    post_time = Column(Text, nullable=False)  # Format: "HH:MM"
     
     # Relationship
     channel = relationship("LogChannel", back_populates="post_schedules")
@@ -35,14 +35,14 @@ class PostSchedule(Base):
 class BackupLog(Base):
     __tablename__ = 'backup_logs'
     
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    url = Column(String(512), nullable=False)
-    added_by = Column(String(64), nullable=False)
-    added_on = Column(DateTime, default=datetime.now)
-    channel_id = Column(String(64), ForeignKey('log_channels.channel_id'), nullable=False)
-    used = Column(Boolean, default=False)
-    cube = Column(String(128), nullable=True)  
-    record = Column(String(16), nullable=True)  
+    id = Column(Integer, primary_key=True, nullable=True, autoincrement=True)
+    url = Column(Text, nullable=False)
+    added_by = Column(Text, nullable=False)
+    added_on = Column(TIMESTAMP, default=datetime.now, server_default=text('CURRENT_TIMESTAMP'))
+    channel_id = Column(Text, ForeignKey('log_channels.channel_id', ondelete='CASCADE'), nullable=False)
+    used = Column(Boolean, default=False, server_default=text('0'))
+    cube = Column(Text, nullable=True)  
+    record = Column(Text, nullable=True)  
     
     # Relationship
     channel = relationship("LogChannel", back_populates="backup_logs")
@@ -53,14 +53,14 @@ class BackupLog(Base):
 class UserSubmission(Base):
     __tablename__ = 'user_submissions'
     
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    url = Column(String(512), nullable=True)  
-    submitted_by = Column(String(64), nullable=False)
-    submitted_on = Column(DateTime, default=datetime.now)
-    channel_id = Column(String(64), ForeignKey('log_channels.channel_id'), nullable=False)
-    used = Column(Boolean, default=False)
-    cube = Column(String(128), nullable=True)  
-    record = Column(String(16), nullable=True)  
+    id = Column(Integer, primary_key=True, nullable=True, autoincrement=True)
+    url = Column(Text, nullable=True)  
+    submitted_by = Column(Text, nullable=False)
+    submitted_on = Column(TIMESTAMP, default=datetime.now, server_default=text('CURRENT_TIMESTAMP'))
+    channel_id = Column(Text, ForeignKey('log_channels.channel_id', ondelete='CASCADE'), nullable=False)
+    used = Column(Boolean, default=False, server_default=text('0'))
+    cube = Column(Text, nullable=True)  
+    record = Column(Text, nullable=True)  
     
     # Relationship
     channel = relationship("LogChannel", back_populates="user_submissions")

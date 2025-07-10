@@ -1,6 +1,6 @@
 from typing import Optional, Union
 import discord
-from sqlalchemy import JSON, Column, Integer, String, Boolean, Float, select
+from sqlalchemy import JSON, Column, Integer, String, Boolean, Float, select, text, REAL
 from sqlalchemy.ext.asyncio import AsyncSession
 from views import PersistentView
 from database.models_base import Base
@@ -28,9 +28,9 @@ class Message(Base):
     view_metadata = Column(JSON, nullable=True)
     is_sticky = Column(Boolean, default=False)
     message_count = Column(Integer, default=0)
-    last_activity = Column(Float, default=0.0)  # Timestamp of last message in channel
+    last_activity = Column(Float, nullable=False, default=0.0, server_default=text('0.0'))  # Timestamp of last message in channel
     notification_message_id = Column(String(64), nullable=True)  # ID of the notification message in wheres-the-draft channel
-    last_update_time = Column(Float, default=0.0)  # Timestamp of when we last updated the sticky message
+    last_update_time = Column(REAL, default=0.0, server_default=text('0.0'))  # Timestamp of when we last updated the sticky message
 
     def __repr__(self) -> str:
         return (
