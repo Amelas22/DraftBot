@@ -5,7 +5,7 @@ from database.models_base import Base
 class StakeInfo(Base):
     __tablename__ = 'stake_info'
     
-    id = Column(Integer, primary_key=True, nullable=True, autoincrement=True)
+    id = Column(Integer, primary_key=True, nullable=False, autoincrement=True)
     session_id = Column(String(64), ForeignKey('draft_sessions.session_id'))
     player_id = Column(String(64), nullable=False)
     max_stake = Column(Integer, nullable=False)
