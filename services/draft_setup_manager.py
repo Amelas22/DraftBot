@@ -27,6 +27,11 @@ READY_CHECK_INSTRUCTIONS = (
     "You can also use `/mutiny` to take control if needed."
 )
 
+# Victory detection constants
+VICTORY_CHECK_TIMEOUT = 600  # Maximum 10 minutes to wait for victory
+VICTORY_CHECK_INTERVAL = 30  # Check every 30 seconds
+VICTORY_CHECK_INITIAL_DELAY = 10  # Initial delay for immediate victory detection
+
 # Load environment variables
 load_dotenv()
 
@@ -312,13 +317,10 @@ class DraftSetupManager:
             self.logs_collection_attempted = True
             self.logs_collection_in_progress = False
             
-            # If we collected logs successfully, disconnect after a short delay
+            # If we collected logs successfully, check victory status before disconnect
             if self.logs_collection_success:
-                self.logger.info("Log collection successful, scheduling disconnection in 10 seconds")
-                # Short delay to allow any final processing/messages to complete
-                await asyncio.sleep(10)
-                self._should_disconnect = True
-                await self.disconnect_safely()
+                self.logger.info("Log collection successful, checking victory status before disconnect")
+                await self._handle_victory_aware_disconnect()
             else:
                 self.logger.info("Log collection failed, bot will remain connected")
 
@@ -1596,6 +1598,95 @@ class DraftSetupManager:
             The DraftSetupManager instance if found, None otherwise
         """
         return ACTIVE_MANAGERS.get(session_id)
+    
+    async def _handle_victory_aware_disconnect(self):
+        """
+        Handle disconnect with victory detection awareness.
+        
+        Waits for victory detection to complete before disconnecting,
+        but includes fallback timer to prevent indefinite connections.
+        """
+        try:
+            self.logger.debug(f"Starting victory-aware disconnect with {VICTORY_CHECK_TIMEOUT}s timeout")
+            await asyncio.wait_for(self._wait_for_victory(), timeout=VICTORY_CHECK_TIMEOUT)
+            self.logger.info("Victory detected, proceeding with disconnect")
+        except asyncio.TimeoutError:
+            self.logger.info(f"Victory check timeout ({VICTORY_CHECK_TIMEOUT}s) reached, disconnecting without victory confirmation")
+        except Exception as e:
+            self.logger.exception(f"Unexpected error during victory-aware disconnect: {e}")
+        finally:
+            # Always ensure disconnect happens
+            self._should_disconnect = True
+            await self.disconnect_safely()
+    
+    async def _wait_for_victory(self):
+        """
+        Continuously check for victory until detected.
+        
+        This method will run until victory is detected or cancelled by timeout.
+        """
+        # Initial short delay for immediate victory detection
+        self.logger.debug(f"Initial {VICTORY_CHECK_INITIAL_DELAY}s delay for immediate victory detection")
+        await asyncio.sleep(VICTORY_CHECK_INITIAL_DELAY)
+        
+        check_count = 0
+        while True:
+            victory_detected = await self._check_victory_status()
+            
+            if victory_detected:
+                return  # Victory found, exit the loop
+            
+            check_count += 1
+            self.logger.debug(f"Victory not yet detected (check #{check_count}), waiting {VICTORY_CHECK_INTERVAL}s")
+            await asyncio.sleep(VICTORY_CHECK_INTERVAL)
+    
+    async def _check_victory_status(self):
+        """
+        Check if victory has been detected for this draft session.
+        
+        Returns:
+            bool: True if victory detected, False otherwise
+        """
+        try:
+            async with AsyncSessionLocal() as db_session:
+                # Check if victory message has been posted
+                stmt = select(DraftSession).where(DraftSession.session_id == self.session_id)
+                draft_session = await db_session.scalar(stmt)
+                
+                if not draft_session:
+                    self.logger.warning(f"Draft session {self.session_id} not found in database")
+                    return False
+                
+                # Victory is considered detected if any victory message ID is set
+                victory_fields = [
+                    'victory_message_id_draft_chat',
+                    'victory_message_id_lobby',
+                    'draw_message_id_draft_chat', 
+                    'draw_message_id_lobby'
+                ]
+                
+                for field in victory_fields:
+                    if hasattr(draft_session, field) and getattr(draft_session, field) is not None:
+                        self.logger.debug(f"Victory detected via {field}")
+                        return True
+                
+                return False
+                
+        except ImportError as e:
+            self.logger.error(f"Import error checking victory status - database module unavailable: {e}")
+            # Import errors suggest configuration issue, continue checking
+            return False
+        except Exception as e:
+            # Check for specific database-related errors that might indicate temporary issues
+            error_message = str(e).lower()
+            if any(db_error in error_message for db_error in ['database is locked', 'connection', 'timeout']):
+                self.logger.warning(f"Temporary database error checking victory status: {e}")
+                # For temporary DB issues, continue checking (don't assume victory)
+                return False
+            else:
+                # For other unexpected errors, log and continue checking
+                self.logger.exception(f"Unexpected error checking victory status: {e}")
+                return False
     
     async def mark_draft_cancelled(self):
         """Mark that the draft is being cancelled manually"""
