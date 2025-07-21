@@ -47,6 +47,8 @@ Technical Details
 -   The bot uses Pycord for interaction handling and managing Discord components like buttons and embeds.
 -   Session data is stored in memory and can be persisted to disk as JSON for recovery or archival purposes.
 -   The bot handles asynchronous operations, such as creating channels and posting messages, to ensure a responsive user experience.
+-   Uses SQLite database with SQLAlchemy ORM for persistent data storage.
+-   Database schema management is handled through Alembic migrations.
 
 Setup and Deployment
 --------------------
@@ -77,5 +79,129 @@ License
 DraftBot is released under the GNU General Public License v3.0 License. See the LICENSE file for more details.
 
 * * * * *
+
+Database Management & Alembic
+=============================
+
+DraftBot uses SQLite with SQLAlchemy ORM for data persistence and Alembic for database migrations.
+
+Database Models
+---------------
+
+Models are located in the `models/` directory:
+- `draft_session.py` - Draft session data
+- `match.py` - Match results and history
+- `player.py` - Player statistics and limits
+- `team.py` - Team information and weekly limits
+- `stake.py` - Betting/stake information
+- `sign_up_history.py` - User join/leave tracking
+- `challenge.py` - Challenge management
+- `draft_logs.py` - Logging and backup data
+- `leaderboard_message.py` - Leaderboard tracking
+- `utility.py` - Utility models
+
+All models must be imported in `models/__init__.py` to be recognized by Alembic.
+
+Alembic Migrations
+------------------
+
+### Initial Setup
+
+When fetching a copy of production database:
+
+```bash
+# 1. Copy production database to local
+./fetch_prod_db.sh
+
+# 2. Check if database already has alembic version table
+sqlite3 drafts.db "SELECT name FROM sqlite_master WHERE type='table' AND name='alembic_version';"
+
+# 3a. If alembic_version table exists (production has migrations):
+#     No additional setup needed - database is already migration-ready
+
+# 3b. If alembic_version table does NOT exist (production never had alembic):
+#     Stamp the database with the baseline revision (one-time only)
+pipenv run alembic stamp a9c77df9cda3
+```
+
+### Creating New Migrations
+
+When you modify models or add new tables:
+
+```bash
+# 1. Make your model changes in the appropriate files
+# 2. Ensure models are imported in models/__init__.py
+# 3. Generate migration
+pipenv run alembic revision --autogenerate -m "description of changes"
+
+# 4. Review the generated migration file in alembic/versions/
+# 5. Test migration locally
+pipenv run alembic upgrade head
+```
+
+### Common Migration Commands
+
+```bash
+# Check current database revision
+pipenv run alembic current
+
+# Show migration history
+pipenv run alembic history
+
+# Upgrade to latest
+pipenv run alembic upgrade head
+
+# Downgrade one revision
+pipenv run alembic downgrade -1
+
+# Check if database is up to date
+pipenv run alembic check
+```
+
+### Production Deployment
+
+1. **Backup production database**:
+   ```bash
+   cp drafts.db drafts.db.backup.$(date +%Y%m%d_%H%M%S)
+   ```
+
+2. **Deploy code changes**:
+   ```bash
+   git pull origin main
+   pipenv install  # if dependencies changed
+   ```
+
+3. **Run migration** (if production already has alembic set up):
+   ```bash
+   pipenv run alembic upgrade head
+   ```
+
+4. **First-time migration setup** (if production never had alembic):
+   ```bash
+   # Stamp with baseline, then upgrade
+   pipenv run alembic stamp a9c77df9cda3
+   pipenv run alembic upgrade head
+   ```
+
+5. **Restart application**
+
+### Best Practices
+
+- **Always test locally first** with a copy of production data
+- **Review generated migrations** - Alembic may detect unintended changes
+- **Keep models aligned with database** - avoid nullable/constraint mismatches
+- **Use descriptive migration messages**
+- **Check if production has alembic before stamping**
+
+### Development Workflow
+
+#### Adding a New Model
+1. Create model file in `models/new_model.py`
+2. Define SQLAlchemy model class inheriting from `Base`
+3. Import model in `models/__init__.py`
+4. Add model to `__all__` list
+5. Generate migration: `pipenv run alembic revision --autogenerate -m "add new_model table"`
+6. Test migration locally
+7. Deploy to production
 
 This README provides an overview and guidance for using and contributing to the DraftBot project. For any further details or specific functionality, users and contributors should refer to the source code comments or contact the project maintainers.
