@@ -10,11 +10,11 @@ import datetime
 from sqlalchemy import create_engine, and_
 from sqlalchemy.orm import sessionmaker
 from models import DraftSession
-from datacollections import DataCollections
 import discord
-from config import DISCORD_BOT_TOKEN, SPECIAL_GUILD_ID
+from config import SPECIAL_GUILD_ID
 import json
 import sys
+import os
 
 class LogRetrigger:
     def __init__(self):
@@ -24,10 +24,14 @@ class LogRetrigger:
         
     async def init_discord(self):
         """Initialize Discord client"""
+        bot_token = os.getenv("BOT_TOKEN")
+        if not bot_token:
+            raise ValueError("BOT_TOKEN environment variable not set")
+            
         intents = discord.Intents.default()
         intents.message_content = True
         self.client = discord.Client(intents=intents)
-        await self.client.login(DISCORD_BOT_TOKEN)
+        await self.client.login(bot_token)
         
     async def find_unposted_drafts(self, days_back=7):
         """Find drafts from the last N days that don't have logs posted"""
@@ -60,6 +64,42 @@ class LogRetrigger:
                 return channel
         return None
         
+    async def generate_simple_embed(self, draft_session, links):
+        """Generate a simple embed with MagicProTools links"""
+        import discord
+        
+        embed = discord.Embed(
+            title=f"Draft Logs - {draft_session.cube or 'Unknown Cube'}",
+            color=0x00ff00,
+            timestamp=draft_session.draft_start_time
+        )
+        
+        # Format start time
+        if draft_session.teams_start_time:
+            start_timestamp = int(draft_session.teams_start_time.timestamp())
+            formatted_time = f"<t:{start_timestamp}:F>"
+        else:
+            formatted_time = "Unknown"
+            
+        embed.add_field(name="Draft Started", value=formatted_time, inline=True)
+        embed.add_field(name="Session Type", value=draft_session.session_type or "team", inline=True)
+        
+        # Add links
+        if links:
+            links_text = "\n".join([f"• {link}" for link in links[:10]])  # Limit to 10 links
+            if len(links) > 10:
+                links_text += f"\n... and {len(links) - 10} more"
+            embed.add_field(name="MagicProTools Links", value=links_text, inline=False)
+        
+        # Add player info if available
+        sign_ups = draft_session.sign_ups or {}
+        if sign_ups:
+            player_count = len(sign_ups)
+            embed.add_field(name="Players", value=str(player_count), inline=True)
+            
+        embed.set_footer(text=f"Session ID: {draft_session.session_id}")
+        return embed
+
     async def retrigger_logs_for_draft(self, draft_session, dry_run=True):
         """Attempt to retrigger log posting for a single draft"""
         print(f"\n{'[DRY RUN] ' if dry_run else ''}Processing Draft {draft_session.id}")
@@ -87,11 +127,8 @@ class LogRetrigger:
                 print(f"  🔗 Has {len(links)} MagicProTools links")
                 
                 if not dry_run:
-                    # Use existing DataCollections infrastructure to generate and post embed
-                    dc = DataCollections()
-                    
-                    # Generate the embed using existing method
-                    embed = await dc.generate_magicprotools_embed(draft_session, links)
+                    # Generate and post embed
+                    embed = await self.generate_simple_embed(draft_session, links)
                     
                     # Post the embed
                     message = await logs_channel.send(embed=embed)
