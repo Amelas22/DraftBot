@@ -9,6 +9,7 @@ from config import TEST_MODE_ENABLED
 from draft_organization.stake_calculator import calculate_stakes_with_strategy
 from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
 from session import StakeInfo, AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
+from models import SignUpHistory
 from sqlalchemy import update, select, and_
 from sqlalchemy.orm import selectinload
 from helpers.utils import get_cube_thumbnail_url
@@ -477,6 +478,16 @@ class PersistentView(discord.ui.View):
             # For non-staked drafts, add them to sign_ups now        
             sign_ups[user_id] = interaction.user.display_name
             display_name = str(interaction.user.display_name)
+            
+            # Record the signup event in history
+            await SignUpHistory.record_signup_event(
+                session_id=self.draft_session_id,
+                user_id=user_id,
+                display_name=display_name,
+                action="join",
+                guild_id=str(interaction.guild_id)
+            )
+            
             # If user has Draftmancer role, add them to draftmancer_role_users
             if has_draftmancer_role and display_name not in draftmancer_role_users:
                 draftmancer_role_users.append(display_name)
@@ -574,6 +585,15 @@ class PersistentView(discord.ui.View):
         else:
             # User is canceling their sign-up
             del sign_ups[user_id]
+            
+            # Record the leave event in history
+            await SignUpHistory.record_signup_event(
+                session_id=self.draft_session_id,
+                user_id=user_id,
+                display_name=display_name,
+                action="leave",
+                guild_id=str(interaction.guild_id)
+            )
             
             # Remove user from draftmancer_role_users if present
             if display_name in draftmancer_role_users:
@@ -2047,6 +2067,15 @@ class UserRemovalSelect(Select):
         if user_id_to_remove in session.sign_ups:
             removed_user_name = session.sign_ups.pop(user_id_to_remove)
             
+            # Record the leave event in history
+            await SignUpHistory.record_signup_event(
+                session_id=self.session_id,
+                user_id=user_id_to_remove,
+                display_name=removed_user_name,
+                action="leave",
+                guild_id=str(interaction.guild_id)
+            )
+            
             async with AsyncSessionLocal() as db_session:
                 async with db_session.begin():
                     # Update the session in the database
@@ -2847,6 +2876,15 @@ class StakeOptionsSelect(discord.ui.Select):
                 # Update sign_ups
                 sign_ups = draft_session.sign_ups or {}
                 sign_ups[user_id] = interaction.user.display_name
+                
+                # Record the signup event in history
+                await SignUpHistory.record_signup_event(
+                    session_id=self.draft_session_id,
+                    user_id=user_id,
+                    display_name=display_name,
+                    action="join",
+                    guild_id=str(interaction.guild_id)
+                )
                 
                 # Update draftmancer_role_users if user has the role
                 draftmancer_role_users = draft_session.draftmancer_role_users or []
