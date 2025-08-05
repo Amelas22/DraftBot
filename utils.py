@@ -822,6 +822,10 @@ async def cleanup_sessions_task(bot):
 
                 # Process inactive sessions for cancellation due to inactivity
                 for session in inactive_sessions:
+                    # Skip queue cleanup for guild ID 1229863996929216686
+                    if session.guild_id == 1229863996929216686:
+                        continue
+                    
                     # Cancel the queue due to inactivity
                     if session.draft_channel_id and session.message_id:
                         draft_channel = bot.get_channel(int(session.draft_channel_id))
