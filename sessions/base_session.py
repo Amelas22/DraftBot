@@ -63,13 +63,19 @@ class BaseSession:
             await self.draft_manager.sio.disconnect()
 
     def setup_draft_session(self, session):
+        # Set deletion time, but don't set it for guild ID 1229863996929216686
+        if str(self.session_details.guild_id) == "1229863996929216686":
+            deletion_time = datetime.now() + timedelta(days=7)  # Set to 1 week for this guild
+        else:
+            deletion_time = datetime.now() + timedelta(minutes=180)
+            
         new_draft_session = DraftSession(
             session_id=self.session_details.session_id,
             guild_id=str(self.session_details.guild_id),
             draft_link=self.session_details.draft_link,
             draft_id=self.session_details.draft_id,
             draft_start_time=datetime.fromtimestamp(self.session_details.draft_start_time),
-            deletion_time=datetime.now() + timedelta(minutes=180),
+            deletion_time=deletion_time,
             session_type=self.get_session_type(),
             premade_match_id=self.get_premade_match_id(),
             team_a_name=self.session_details.team_a_name,

@@ -513,7 +513,8 @@ class PersistentView(discord.ui.View):
                         values_to_update["should_ping"] = True
 
                     # Reset the inactivity timer when a user signs up (if still in initial queue)
-                    if not draft_session.session_stage:
+                    # Skip resetting deletion_time for guild ID 1229863996929216686
+                    if not draft_session.session_stage and draft_session.guild_id != "1229863996929216686":
                         values_to_update["deletion_time"] = datetime.now() + timedelta(minutes=180)
 
                     # Update the draft session in the database
@@ -2908,7 +2909,8 @@ class StakeOptionsSelect(discord.ui.Select):
                     values_to_update["should_ping"] = True
 
                 # Reset the inactivity timer when a user signs up (if still in initial queue)
-                if not draft_session.session_stage:
+                # Skip resetting deletion_time for guild ID 1229863996929216686
+                if not draft_session.session_stage and draft_session.guild_id != "1229863996929216686":
                     values_to_update["deletion_time"] = datetime.now() + timedelta(minutes=180)
 
                 await session.execute(
