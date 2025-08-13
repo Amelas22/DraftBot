@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from session import AsyncSessionLocal, Team, DraftSession, Match, Challenge, TeamRegistration, SwissChallenge
 from sqlalchemy import select, update, func
 import random
-from config import get_draftmancer_base_url, get_draftmancer_session_url
+from config import get_draftmancer_base_url, get_draftmancer_session_url, get_league_challenge_hours
 
 
 class InitialRangeView(View):
@@ -500,7 +500,7 @@ class ChallengeTimeModal(Modal):
                         draft_link=draft_link,
                         draft_id=draft_id,
                         draft_start_time=utc_start_dt,
-                        deletion_time=utc_start_dt + timedelta(days=7) if str(interaction.guild_id) == "1229863996929216686" else utc_start_dt + timedelta(hours=6),
+                        deletion_time=utc_start_dt + timedelta(hours=get_league_challenge_hours(interaction.guild_id)),
                         session_type=self.command_type,
                         premade_match_id=None,
                         team_a_name=None,

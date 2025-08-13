@@ -5,7 +5,7 @@ import pytz
 from datetime import datetime, timedelta
 from discord import SelectOption
 from discord.ui import Button, View, Select, select
-from config import TEST_MODE_ENABLED
+from config import TEST_MODE_ENABLED, should_reset_on_signup, get_queue_inactivity_minutes
 from draft_organization.stake_calculator import calculate_stakes_with_strategy
 from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
 from session import StakeInfo, AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
@@ -513,9 +513,10 @@ class PersistentView(discord.ui.View):
                         values_to_update["should_ping"] = True
 
                     # Reset the inactivity timer when a user signs up (if still in initial queue)
-                    # Skip resetting deletion_time for guild ID 1229863996929216686
-                    if not draft_session.session_stage and draft_session.guild_id != "1229863996929216686":
-                        values_to_update["deletion_time"] = datetime.now() + timedelta(minutes=180)
+                    # Check guild config to see if deletion timer should reset on signup
+                    if not draft_session.session_stage and should_reset_on_signup(draft_session.guild_id):
+                        queue_inactivity_minutes = get_queue_inactivity_minutes(draft_session.guild_id)
+                        values_to_update["deletion_time"] = datetime.now() + timedelta(minutes=queue_inactivity_minutes)
 
                     # Update the draft session in the database
                     await session.execute(
@@ -2909,9 +2910,10 @@ class StakeOptionsSelect(discord.ui.Select):
                     values_to_update["should_ping"] = True
 
                 # Reset the inactivity timer when a user signs up (if still in initial queue)
-                # Skip resetting deletion_time for guild ID 1229863996929216686
-                if not draft_session.session_stage and draft_session.guild_id != "1229863996929216686":
-                    values_to_update["deletion_time"] = datetime.now() + timedelta(minutes=180)
+                # Check guild config to see if deletion timer should reset on signup
+                if not draft_session.session_stage and should_reset_on_signup(draft_session.guild_id):
+                    queue_inactivity_minutes = get_queue_inactivity_minutes(draft_session.guild_id)
+                    values_to_update["deletion_time"] = datetime.now() + timedelta(minutes=queue_inactivity_minutes)
 
                 await session.execute(
                     update(DraftSession).

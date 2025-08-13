@@ -14,6 +14,7 @@ from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
 from services.draft_setup_manager import DraftSetupManager
 from loguru import logger
+from config import is_cleanup_exempt
 
 flags = {}
 locks = {}
@@ -822,8 +823,8 @@ async def cleanup_sessions_task(bot):
 
                 # Process inactive sessions for cancellation due to inactivity
                 for session in inactive_sessions:
-                    # Skip queue cleanup for guild ID 1229863996929216686
-                    if session.guild_id == 1229863996929216686:
+                    # Skip queue cleanup for guilds marked as cleanup_exempt
+                    if is_cleanup_exempt(session.guild_id):
                         continue
                     
                     # Cancel the queue due to inactivity
