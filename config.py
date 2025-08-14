@@ -58,6 +58,14 @@ class Config:
                 "exempt_role": "degen",
                 "mod_chat_channel": "mod-chat",
                 "inactivity_months": 3 
+            },
+            "timeouts": {
+                "queue_inactivity_minutes": 180,      # 3 hours default
+                "session_deletion_hours": 4,          # 4 hours default  
+                "league_challenge_hours": 6,          # 6 hours default
+                "premade_draft_days": 7,              # Always 7 days for leagues
+                "cleanup_exempt": False,              # Skip cleanup entirely
+                "reset_on_signup": True               # Reset timer when users sign up
             }
         }
         
@@ -213,6 +221,48 @@ def get_draftmancer_websocket_url(draft_id, guild_id=None, user_id="DraftBot", u
     websocket_url = DRAFTMANCER_BASE_URL.replace('https://', 'wss://')
     return f"{websocket_url}?userID={user_id}&sessionID=DB{draft_id}&userName={user_name}"
 
+def get_timeout_config(guild_id):
+    """Get timeout configuration for a guild"""
+    config = get_config(guild_id)
+    return config.get("timeouts", {
+        "queue_inactivity_minutes": 180,      # 3 hours default
+        "session_deletion_hours": 4,          # 4 hours default  
+        "league_challenge_hours": 6,          # 6 hours default
+        "premade_draft_days": 7,              # Always 7 days for leagues
+        "cleanup_exempt": False,              # Skip cleanup entirely
+        "reset_on_signup": True               # Reset timer when users sign up
+    })
+
+def is_cleanup_exempt(guild_id):
+    """Check if guild is exempt from cleanup"""
+    timeout_config = get_timeout_config(guild_id)
+    return timeout_config.get("cleanup_exempt", False)
+
+def should_reset_on_signup(guild_id):
+    """Check if deletion timer should reset on signup"""
+    timeout_config = get_timeout_config(guild_id)
+    return timeout_config.get("reset_on_signup", True)
+
+def get_queue_inactivity_minutes(guild_id):
+    """Get queue inactivity timeout in minutes"""
+    timeout_config = get_timeout_config(guild_id)
+    return timeout_config.get("queue_inactivity_minutes", 180)
+
+def get_session_deletion_hours(guild_id):
+    """Get session deletion timeout in hours"""
+    timeout_config = get_timeout_config(guild_id)
+    return timeout_config.get("session_deletion_hours", 4)
+
+def get_league_challenge_hours(guild_id):
+    """Get league challenge timeout in hours"""
+    timeout_config = get_timeout_config(guild_id)
+    return timeout_config.get("league_challenge_hours", 6)
+
+def get_premade_draft_days(guild_id):
+    """Get premade draft timeout in days"""
+    timeout_config = get_timeout_config(guild_id)
+    return timeout_config.get("premade_draft_days", 7)
+
 def migrate_configs():
     """Ensure all configs have the latest structure."""
     for guild_id, config in bot_config.configs.items():
@@ -223,6 +273,29 @@ def migrate_configs():
             config["roles"]["timeout"] = "the pit"
             updated = True
             
+        # Add timeout configuration if missing
+        if "timeouts" not in config:
+            # Special handling for test guild - give it longer timeouts and cleanup exemption
+            if guild_id == "1229863996929216686":
+                config["timeouts"] = {
+                    "queue_inactivity_minutes": 10080,   # 7 days 
+                    "session_deletion_hours": 168,       # 7 days
+                    "league_challenge_hours": 168,       # 7 days  
+                    "premade_draft_days": 7,             # Same as default
+                    "cleanup_exempt": True,              # Skip cleanup entirely
+                    "reset_on_signup": False             # Don't reset timers
+                }
+            else:
+                # All other guilds get standard defaults
+                config["timeouts"] = {
+                    "queue_inactivity_minutes": 180,     # 3 hours default
+                    "session_deletion_hours": 4,         # 4 hours default  
+                    "league_challenge_hours": 6,         # 6 hours default
+                    "premade_draft_days": 7,             # Always 7 days for leagues
+                    "cleanup_exempt": False,             # Skip cleanup entirely
+                    "reset_on_signup": True              # Reset timer when users sign up
+                }
+            updated = True
             
         # Save if any updates were made
         if updated:

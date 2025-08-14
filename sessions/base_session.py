@@ -7,6 +7,7 @@ from views import PersistentView
 import discord
 from services.draft_setup_manager import DraftSetupManager
 import asyncio
+from config import get_session_deletion_hours
 
 class BaseSession:
     def __init__(self, session_details: SessionDetails):
@@ -63,11 +64,9 @@ class BaseSession:
             await self.draft_manager.sio.disconnect()
 
     def setup_draft_session(self, session):
-        # Set deletion time, but don't set it for guild ID 1229863996929216686
-        if str(self.session_details.guild_id) == "1229863996929216686":
-            deletion_time = datetime.now() + timedelta(days=7)  # Set to 1 week for this guild
-        else:
-            deletion_time = datetime.now() + timedelta(minutes=180)
+        # Set deletion time based on guild configuration
+        session_deletion_hours = get_session_deletion_hours(self.session_details.guild_id)
+        deletion_time = datetime.now() + timedelta(hours=session_deletion_hours)
             
         new_draft_session = DraftSession(
             session_id=self.session_details.session_id,
