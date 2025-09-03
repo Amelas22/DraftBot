@@ -747,9 +747,9 @@ class PersistentView(discord.ui.View):
             return        
         
         sign_up_count = len(session.sign_ups)
-        if sign_up_count not in (6,8,10):
+        if sign_up_count < 6:
             await interaction.response.send_message(
-                f"Ready check only available with 6, 8, or 10 players. Currently {sign_up_count} players in queue."
+                f"Ready check only available with 6 or more players. Currently {sign_up_count} players in queue."
             )
             return
 
