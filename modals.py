@@ -82,7 +82,7 @@ class CubeDraftSelectionView(discord.ui.View):
                 options=[
                 discord.SelectOption(label="LSVCube", value="LSVCube"),
                 discord.SelectOption(label="AlphaFrog", value="AlphaFrog"),
-                discord.SelectOption(label="2025 MOCS Vintage Cube", value="3txn8"),
+                discord.SelectOption(label="MODO Cube (Updated October 2025)", value="OCT25"),
                 discord.SelectOption(label="LSVRetro", value="LSVRetro"),
                 discord.SelectOption(label="PowerLSV", value="PowerLSV"),
                 discord.SelectOption(label="Powerslax", value="Powerslax"),
@@ -144,7 +144,7 @@ class StakedCubeDraftSelectionView(discord.ui.View):
             options=[
                 discord.SelectOption(label="LSVCube", value="LSVCube"),
                 discord.SelectOption(label="AlphaFrog", value="AlphaFrog"),
-                discord.SelectOption(label="2025 MOCS Vintage Cube", value="3txn8"),
+                discord.SelectOption(label="MODO Cube (Updated October 2025)", value="OCT25"),
                 discord.SelectOption(label="LSVRetro", value="LSVRetro"),
                 discord.SelectOption(label="PowerLSV", value="PowerLSV"),
                 discord.SelectOption(label="Powerslax", value="Powerslax"),
