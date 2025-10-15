@@ -20,6 +20,7 @@ from session import AsyncSessionLocal
 from sqlalchemy import select
 from helpers.digital_ocean_helper import DigitalOceanHelper
 from helpers.magicprotools_helper import MagicProtoolsHelper
+from notification_service import send_ready_check_dms
 
 # Constants
 READY_CHECK_INSTRUCTIONS = (
@@ -858,7 +859,18 @@ class DraftSetupManager:
             # Store the timeout message ID
             timeout_message = await channel.send(f"Readycheck will timeout <t:{timeout}:R>")
             self.timeout_message_id = str(timeout_message.id)
-            
+
+            # Send DM notifications to users who have opted in
+            if draft_session and draft_session.sign_ups:
+                await send_ready_check_dms(
+                    bot_or_client=bot,
+                    draft_session=draft_session,
+                    guild_id=str(channel.guild.id),
+                    channel_id=str(channel.id),
+                    channel_name=channel.name,
+                    guild_name=channel.guild.name
+                )
+
             # Start timeout timer
             self.ready_check_timer = asyncio.create_task(self.ready_check_timeout(90, bot))
             

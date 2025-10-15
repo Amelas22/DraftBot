@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from discord import SelectOption
 from discord.ui import Button, View, Select, select
 from config import TEST_MODE_ENABLED, should_reset_on_signup, get_queue_inactivity_minutes
+from notification_service import send_ready_check_dms
 from draft_organization.stake_calculator import calculate_stakes_with_strategy
 from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
 from session import StakeInfo, AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
@@ -220,10 +221,13 @@ class PersistentView(discord.ui.View):
 
         if self.session_type == "staked" and self.session_stage != "teams":
             self._add_button("How Bets Work 💰", "green", "explain_stakes", self.explain_stakes_callback)
-            
+
         # Add test button only if global test mode is enabled
         if TEST_MODE_ENABLED:
+            logger.debug(f"🧪 TEST_MODE_ENABLED=True - Adding 'Add Test Users' button for session {self.draft_session_id}")
             self._add_button("🧪 Add Test Users", "grey", "add_test_users", self.add_test_users_callback)
+        else:
+            logger.debug(f"TEST_MODE_ENABLED=False - Skipping 'Add Test Users' button for session {self.draft_session_id}")
 
 
     def _apply_stage_button_disabling(self):
@@ -808,6 +812,16 @@ class PersistentView(discord.ui.View):
 
         # Send the mention message as a follow-up to ensure it gets sent after the embed
         await interaction.followup.send(mention_message, ephemeral=False)
+
+        # Send DM notifications to users who have opted in
+        await send_ready_check_dms(
+            bot_or_client=interaction.client,
+            draft_session=session,
+            guild_id=str(interaction.guild.id),
+            channel_id=str(interaction.channel.id),
+            channel_name=interaction.channel.name,
+            guild_name=interaction.guild.name
+        )
 
         # asyncio.create_task(self.cleanup_ready_check(self.draft_session_id))
 
