@@ -6,6 +6,7 @@ from modals import CubeDraftSelectionView, StakedCubeDraftSelectionView
 from session import DraftSession, MatchResult
 from views import MatchResultSelect
 from config import is_money_server
+from preference_service import get_player_dm_notification_preference, update_player_dm_notification_preference
 
 class DraftCommands(commands.Cog):
     def __init__(self, bot):
@@ -119,10 +120,51 @@ class DraftCommands(commands.Cog):
         
         # Send the response with the select menu
         await ctx.followup.send(
-            f"Report result for Match {match.match_number}: {player1_name} vs {player2_name}", 
+            f"Report result for Match {match.match_number}: {player1_name} vs {player2_name}",
             view=view,
             ephemeral=True
         )
+
+    @discord.slash_command(
+        name='toggle_dm_notifications',
+        description='Toggle whether you receive DM notifications for draft ready checks',
+        guild_ids=None
+    )
+    async def toggle_dm_notifications(self, ctx):
+        """Toggle DM notifications for ready checks"""
+        logger.info(f"📱 Received toggle_dm_notifications command from user {ctx.author.id} ({ctx.author.display_name}) in guild {ctx.guild.id}")
+        await ctx.response.defer(ephemeral=True)
+
+        user_id = str(ctx.author.id)
+        guild_id = str(ctx.guild.id)
+
+        # Get current preference
+        logger.debug(f"🔍 Getting current DM notification preference for user {user_id} in guild {guild_id}")
+        current_preference = await get_player_dm_notification_preference(user_id, guild_id)
+        logger.info(f"Current preference for {ctx.author.display_name}: {current_preference}")
+
+        # Toggle the preference
+        new_preference = not current_preference
+        logger.info(f"🔄 Toggling preference from {current_preference} to {new_preference}")
+
+        # Update the preference
+        logger.debug(f"💾 Updating preference in database...")
+        success = await update_player_dm_notification_preference(user_id, guild_id, new_preference)
+
+        if success:
+            status_text = "enabled" if new_preference else "disabled"
+            logger.success(f"✅ Successfully updated DM notification preference for {ctx.author.display_name} to {new_preference}")
+            await ctx.followup.send(
+                f"DM notifications for draft ready checks have been **{status_text}**.\n"
+                f"You will {'now' if new_preference else 'no longer'} receive a DM when a ready check is initiated for drafts you've signed up for.",
+                ephemeral=True
+            )
+        else:
+            logger.error(f"❌ Failed to update DM notification preference for {ctx.author.display_name}")
+            await ctx.followup.send(
+                "Failed to update your DM notification preference. Please try again later.",
+                ephemeral=True
+            )
 
 def setup(bot):
     bot.add_cog(DraftCommands(bot))
