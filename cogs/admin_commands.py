@@ -155,5 +155,89 @@ class AdminCommands(commands.Cog):
         except Exception as e:
             await ctx.followup.send(f"❌ Error removing role: {str(e)}", ephemeral=True)
 
+    @discord.slash_command(
+        name='post_message',
+        description='Post a message to any channel as the bot'
+    )
+    @has_bot_manager_role()
+    async def post_message(self, ctx, channel: discord.TextChannel, message: str):
+        """Allow Bot Managers to post messages to any channel via the bot"""
+        await ctx.defer(ephemeral=True)
+        try:
+            # Check if bot has permission to send messages in the target channel
+            bot_member = ctx.guild.get_member(self.bot.user.id)
+            permissions = channel.permissions_for(bot_member)
+
+            if not permissions.send_messages:
+                await ctx.followup.send(
+                    f"Bot doesn't have permission to send messages in {channel.mention}",
+                    ephemeral=True
+                )
+                return
+
+            # Send the message to the target channel
+            await channel.send(message)
+
+            logger.info(f"Bot Manager {ctx.author.name} ({ctx.author.id}) posted message to {channel.name} in {ctx.guild.name}")
+            await ctx.followup.send(
+                f"✅ Message posted to {channel.mention}",
+                ephemeral=True
+            )
+        except discord.Forbidden:
+            await ctx.followup.send(
+                f"Bot doesn't have permission to send messages in {channel.mention}",
+                ephemeral=True
+            )
+        except Exception as e:
+            logger.error(f"Error posting message to channel: {e}")
+            await ctx.followup.send(f"❌ Error posting message: {str(e)}", ephemeral=True)
+
+    @discord.slash_command(
+        name='post_announcement',
+        description='Post the announcement from announcement.md file'
+    )
+    @has_bot_manager_role()
+    async def post_announcement(self, ctx, channel: discord.TextChannel):
+        """Post an announcement from the announcement.md file"""
+        await ctx.defer(ephemeral=True)
+        try:
+            # Read the announcement file
+            announcement_path = "announcement.md"
+            with open(announcement_path, 'r', encoding='utf-8') as f:
+                announcement = f.read()
+
+            # Check if bot has permission to send messages in the target channel
+            bot_member = ctx.guild.get_member(self.bot.user.id)
+            permissions = channel.permissions_for(bot_member)
+
+            if not permissions.send_messages:
+                await ctx.followup.send(
+                    f"Bot doesn't have permission to send messages in {channel.mention}",
+                    ephemeral=True
+                )
+                return
+
+            # Send the announcement to the target channel
+            await channel.send(announcement)
+
+            logger.info(f"Bot Manager {ctx.author.name} ({ctx.author.id}) posted announcement to {channel.name} in {ctx.guild.name}")
+            await ctx.followup.send(
+                f"✅ Announcement posted to {channel.mention}",
+                ephemeral=True
+            )
+        except FileNotFoundError:
+            await ctx.followup.send(
+                f"❌ Announcement file not found: {announcement_path}\nMake sure announcement.md exists in the bot directory.",
+                ephemeral=True
+            )
+        except discord.Forbidden:
+            await ctx.followup.send(
+                f"Bot doesn't have permission to send messages in {channel.mention}",
+                ephemeral=True
+            )
+        except Exception as e:
+            logger.error(f"Error posting announcement: {e}")
+            await ctx.followup.send(f"❌ Error posting announcement: {str(e)}", ephemeral=True)
+
 def setup(bot):
     bot.add_cog(AdminCommands(bot)) 
