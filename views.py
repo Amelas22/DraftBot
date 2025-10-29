@@ -999,13 +999,30 @@ class PersistentView(discord.ui.View):
                 if session.session_type != "swiss":
                     sign_ups_list = list(session.sign_ups.keys())
                     if session.session_type == "premade":
+                        # Generate the seating order (shuffled teams, alternating A/B)
                         seating_order = await generate_seating_order(bot, session)
+
+                        # Update sign_ups dictionary to match seating order
+                        # so DraftSetupManager sends the correct order to Draftmancer
+                        # Create reverse lookup: display_name -> user_id
+                        name_to_id = {name: user_id for user_id, name in session.sign_ups.items()}
+
+                        # Build new sign_ups in the order of seating_order
+                        new_sign_ups = {name_to_id[name]: name for name in seating_order}
+
+                        # Update database with correct order
+                        await db_session.execute(update(DraftSession)
+                                            .where(DraftSession.session_id == session.session_id)
+                                            .values(sign_ups=new_sign_ups))
+
+                        # Update session object for immediate use
+                        session.sign_ups = new_sign_ups
                     else:
                         seating_order = [session.sign_ups[user_id] for user_id in sign_ups_list]
+
+                    # Get team display names for the embed (no need to shuffle - already done)
                     team_a_display_names = [session.sign_ups[user_id] for user_id in session.team_a]
                     team_b_display_names = [session.sign_ups[user_id] for user_id in session.team_b]
-                    random.shuffle(team_a_display_names)
-                    random.shuffle(team_b_display_names)
                 else:
                     sign_ups_list = list(session.sign_ups.keys())
                     random.shuffle(sign_ups_list)  # This shuffles the list in-place
