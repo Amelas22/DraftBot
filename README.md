@@ -68,6 +68,35 @@ Setup and Deployment
       python bot.py
       ```
 
+Testing
+-------
+
+DraftBot includes a test suite to validate functionality. Tests are located in the `tests/` directory.
+
+### Running Tests
+
+**IMPORTANT:** Always use `python -m pytest` instead of `pytest` to ensure proper module imports:
+
+```bash
+# Run all tests
+pipenv run python -m pytest
+
+# Run specific test file
+pipenv run python -m pytest tests/test_seating_order.py
+
+# Run with verbose output
+pipenv run python -m pytest -v
+
+# Run specific test
+pipenv run python -m pytest tests/test_seating_order.py::TestSeatingOrder::test_generate_seating_order_premade
+```
+
+### Why `python -m pytest`?
+
+Using `python -m pytest` runs pytest as a module, which automatically adds the current directory to Python's path. This allows tests to import project modules (like `models`, `utils`, etc.) without additional configuration.
+
+Using just `pytest` will result in import errors because the project root won't be in the Python path.
+
 Contribution
 ------------
 
