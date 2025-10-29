@@ -209,6 +209,13 @@ class PersistentView(discord.ui.View):
         self._add_button(self.team_b_name, "red", "Team_B", self.team_assignment_callback)
         self._add_button("Generate Seating Order", "primary", "generate_seating", self.randomize_teams_callback)
 
+        # Add test button only if global test mode is enabled
+        if TEST_MODE_ENABLED:
+            logger.debug(f"🧪 TEST_MODE_ENABLED=True - Adding 'Add Test Users' button for premade draft {self.draft_session_id}")
+            self._add_button("🧪 Add Test Users", "grey", "add_test_users_premade", self.add_test_users_premade_callback)
+        else:
+            logger.debug(f"TEST_MODE_ENABLED=False - Skipping 'Add Test Users' button for premade draft {self.draft_session_id}")
+
 
     def _add_generic_buttons(self):
         if self.session_type == "swiss":
@@ -398,6 +405,134 @@ class PersistentView(discord.ui.View):
             await interaction.followup.send(success_msg, ephemeral=True)
         else:
             await interaction.followup.send(f"No additional test users were added. The draft already has {len(sign_ups)} users (limit is {self.NUM_TEST_USERS_TO_ADD}).", ephemeral=True)
+
+
+    async def add_test_users_premade_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Add test users to a premade draft, distributing them to balance teams at 3 users each."""
+        # Only allow admins to use this feature
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Only server administrators can use this test feature.", ephemeral=True)
+            return
+
+        logger.info(f"Adding test users to premade draft {self.draft_session_id}")
+
+        # Fetch the current draft session to ensure it's up to date
+        draft_session = await get_draft_session(self.draft_session_id)
+        if not draft_session:
+            logger.error(f"Draft session {self.draft_session_id} not found")
+            await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
+            return
+
+        if draft_session.session_stage == "teams":
+            logger.warning(f"Cannot add test users after seating order has been generated for draft {self.draft_session_id}")
+            await interaction.response.send_message("Cannot add test users after seating order has been generated.", ephemeral=True)
+            return
+
+        # First acknowledge the interaction so it doesn't time out
+        await interaction.response.defer(ephemeral=True)
+
+        # Generate unique user IDs starting from a high number to avoid conflicts
+        start_id = 900000000000000000
+
+        # Get existing sign-ups and team assignments
+        sign_ups = draft_session.sign_ups or {}
+        team_a = draft_session.team_a or []
+        team_b = draft_session.team_b or []
+
+        # Calculate how many users each team needs to reach 3
+        team_a_needed = max(0, 3 - len(team_a))
+        team_b_needed = max(0, 3 - len(team_b))
+        users_to_add = team_a_needed + team_b_needed
+
+        if users_to_add <= 0:
+            await interaction.followup.send(f"Both teams are already full (3 users each).", ephemeral=True)
+            return
+
+        logger.info(f"Adding {users_to_add} test users to premade draft {self.draft_session_id} ({team_a_needed} to Team A, {team_b_needed} to Team B)")
+
+        # Long name suffixes for variety (similar to random draft test users)
+        long_suffixes = [
+            "Testing Character Limits Long Name",
+            "Another Very Long Username For Testing",
+            "With Extra Characters And Words",
+            "To Test UI Rendering Properly",
+            "With Special Characters Here",
+            "Testing Overflow And Display",
+        ]
+
+        # Create test users with team-specific names
+        fake_users = {}
+        team_a_name = draft_session.team_a_name or "Team A"
+        team_b_name = draft_session.team_b_name or "Team B"
+        suffix_index = 0
+
+        # Add users to Team A first
+        for i in range(team_a_needed):
+            user_id = str(start_id + len(fake_users))
+            team_index = len(team_a) + i + 1
+            suffix = long_suffixes[suffix_index % len(long_suffixes)]
+            name = f"{team_a_name} User {team_index} {suffix}"
+            team_a.append(user_id)
+            fake_users[user_id] = name
+            logger.info(f"Generated test user: {name} with ID {user_id}")
+            suffix_index += 1
+
+        # Add users to Team B
+        for i in range(team_b_needed):
+            user_id = str(start_id + len(fake_users))
+            team_index = len(team_b) + i + 1
+            suffix = long_suffixes[suffix_index % len(long_suffixes)]
+            name = f"{team_b_name} User {team_index} {suffix}"
+            team_b.append(user_id)
+            fake_users[user_id] = name
+            logger.info(f"Generated test user: {name} with ID {user_id}")
+            suffix_index += 1
+
+        # Add our new users to existing sign-ups
+        sign_ups.update(fake_users)
+        logger.info(f"Updated sign_ups to {len(sign_ups)} total users")
+        logger.info(f"Team A now has {len(team_a)} users, Team B now has {len(team_b)} users")
+
+        # Database update
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                # Update the draft session with new sign-ups and team assignments
+                await db_session.execute(
+                    update(DraftSession).
+                    where(DraftSession.session_id == self.draft_session_id).
+                    values(sign_ups=sign_ups, team_a=team_a, team_b=team_b)
+                )
+                await db_session.commit()
+
+        # Debug logging to verify data was saved
+        logger.info(f"After database update - sign_ups keys: {list(sign_ups.keys())}")
+        logger.info(f"After database update - team_a: {team_a}")
+        logger.info(f"After database update - team_b: {team_b}")
+
+        # Update the team view to reflect the new team rosters
+        await self.update_team_view(interaction)
+
+        # Re-fetch to get the updated session data
+        updated_session = await get_draft_session(self.draft_session_id)
+        if not updated_session:
+            logger.error(f"Failed to fetch updated draft session {self.draft_session_id}")
+            await interaction.followup.send("Error: Could not refresh draft data after adding test users", ephemeral=True)
+            return
+
+        # Debug logging to verify data was retrieved
+        logger.info(f"After refetch - sign_ups keys: {list(updated_session.sign_ups.keys()) if updated_session.sign_ups else 'None'}")
+        logger.info(f"After refetch - team_a: {updated_session.team_a}")
+        logger.info(f"After refetch - team_b: {updated_session.team_b}")
+
+        # Report success to the user
+        if len(fake_users) > 0:
+            success_msg = f"Added {len(fake_users)} test users to the premade draft."
+            success_msg += f" {team_a_name}: {len(team_a)}/3, {team_b_name}: {len(team_b)}/3."
+
+            logger.info(f"Test users added successfully: {success_msg}")
+            await interaction.followup.send(success_msg, ephemeral=True)
+        else:
+            await interaction.followup.send(f"No additional test users were added. Both teams are already full.", ephemeral=True)
 
 
     async def sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
