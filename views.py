@@ -2704,7 +2704,7 @@ async def update_draft_message(bot, session_id):
             else:
                 sign_ups_str = f"**Players (0):**\nNo players yet."
         
-        # Helper function to update or add fields consistently
+        # Helper function to update fields only if they exist
         def update_field(field_name, field_value, inline=False, expected_index=None):
             field_index = None
             # Look for the field by name
@@ -2712,15 +2712,14 @@ async def update_draft_message(bot, session_id):
                 if field.name == field_name:
                     field_index = i
                     break
-            
+
             # If field exists, update it
             if field_index is not None:
                 embed.set_field_at(field_index, name=field_name, value=field_value, inline=inline)
                 logger.info(f"Updated {field_name} field for session {session_id}")
             else:
-                # Field doesn't exist, add it
-                logger.warning(f"{field_name} field not found in embed for session {session_id}, adding it")
-                embed.add_field(name=field_name, value=field_value, inline=inline)
+                # Field doesn't exist, skip it (don't add new fields)
+                logger.debug(f"{field_name} field not found in embed for session {session_id}, skipping update")
         
         # Find and remove any existing sign-up continuation fields to start fresh
         fields_to_remove = []
