@@ -24,6 +24,13 @@ AsyncSessionLocal = sessionmaker(
     class_=AsyncSession
 )
 
+def get_session_factory():
+    """
+    Factory function to get the session maker.
+    This allows tests to inject a different session factory.
+    """
+    return AsyncSessionLocal
+
 @asynccontextmanager
 async def db_session():
     """Context manager for database sessions with automatic commit/rollback"""
