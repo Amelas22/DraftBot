@@ -6,8 +6,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 class StakedSession(RandomSession):
-    def __init__(self, session_details):
-        super().__init__(session_details)
+    def __init__(self, session_details, session_factory=None):
+        super().__init__(session_details, session_factory=session_factory)
         self.min_stake = session_details.min_stake  
         
     def _create_embed_content(self):

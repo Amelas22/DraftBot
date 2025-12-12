@@ -10,13 +10,18 @@ import asyncio
 from config import get_session_deletion_hours
 
 class BaseSession:
-    def __init__(self, session_details: SessionDetails):
+    def __init__(self, session_details: SessionDetails, session_factory=None):
         self.session_details = session_details
         self.draft_manager = None
         self.connection_task = None
+        # Use injected session factory or default to production factory
+        if session_factory is None:
+            from database.db_session import get_session_factory
+            session_factory = get_session_factory()
+        self.session_factory = session_factory
 
     async def create_draft_session(self, interaction, bot):
-        async with AsyncSessionLocal() as session:
+        async with self.session_factory() as session:
             async with session.begin():
                 # Step 1: Set up the draft session
                 new_draft_session = self.setup_draft_session(session)
@@ -121,7 +126,7 @@ class BaseSession:
         return None
 
     async def update_message_info(self, draft_session, message):
-        async with AsyncSessionLocal() as session:
+        async with self.session_factory() as session:
             async with session.begin():
                 draft_session = await session.get(DraftSession, draft_session.id)  # Refetch session
                 draft_session.message_id = str(message.id)
