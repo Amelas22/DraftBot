@@ -37,15 +37,17 @@ class PremadeSession(BaseSession):
             f"{self.get_common_description()}"
         )
         embed = discord.Embed(title=title, description=description, color=discord.Color.blue())
-        
-        embed.add_field(
-            name=session_details.team_a_name or "Team A",
-            value="No players yet.",
-            inline=True,
-        )
-        embed.add_field(
-            name=session_details.team_b_name or "Team B",
-            value="No players yet.",
-            inline=True,
-        )
         return embed
+
+    def _add_signup_fields(self, embed):
+        """Add team-specific fields for premade drafts instead of generic sign-ups."""
+        embed.add_field(
+            name=self.session_details.team_a_name or "Team A",
+            value="No players yet.",
+            inline=True,
+        )
+        embed.add_field(
+            name=self.session_details.team_b_name or "Team B",
+            value="No players yet.",
+            inline=True,
+        )

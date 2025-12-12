@@ -90,24 +90,27 @@ class BaseSession:
         """Create the base embed that all sessions will extend."""
         # This will be implemented by subclasses
         embed = self._create_embed_content()
-        
-        
+
+
         # Add a dedicated Cube field (easier to update in views.py)
         cube_field_value = f"[{self.session_details.cube_choice}](https://cubecobra.com/cube/list/{self.session_details.cube_choice})"
         embed.add_field(name="Cube:", value=cube_field_value, inline=True)
 
-        # Add common Sign-Ups field
-        embed.add_field(name="Sign-Ups:", value="No players yet.", inline=False)
-        
+        # Add signup fields (can be overridden by subclasses)
+        self._add_signup_fields(embed)
+
         # Add thumbnail
         embed.set_thumbnail(url=get_cube_thumbnail_url(self.session_details.cube_choice))
-        
+
         return embed
 
     def _create_embed_content(self):
         """Implemented in subclasses to provide session-specific embed content."""
         raise NotImplementedError
 
+    def _add_signup_fields(self, embed):
+        """Add signup-related fields to the embed. Override in subclasses for custom behavior."""
+        embed.add_field(name="Sign-Ups:", value="No players yet.", inline=False)
 
     def get_session_type(self):
         """Implemented in subclasses."""
