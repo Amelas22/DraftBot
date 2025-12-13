@@ -1,9 +1,10 @@
 import discord
 from datetime import datetime
-from .leaderboard_service import get_leaderboard_data, get_minimum_requirements
+from .leaderboard_service import get_leaderboard_data, get_minimum_requirements, STREAK_MINIMUMS
 
 # Default leaderboard timeframe display names
 TIMEFRAME_DISPLAY = {
+    "active": "Active Streaks",
     "7d": "Last 7 Days",
     "14d": "Last 14 Days",
     "30d": "Last 30 Days",
@@ -22,6 +23,16 @@ def get_medal(rank):
         return "3. 🥉 "
     else:
         return f"{rank}. "
+
+def format_streak_status(player):
+    """Format the status portion of a streak entry (active or ended)."""
+    if player.get('is_active'):
+        return "🔥 (ACTIVE)"
+    elif player.get('ended_at'):
+        timestamp = int(player['ended_at'].timestamp())
+        return f"(ended <t:{timestamp}:R>)"
+    else:
+        return ""
 
 # Define category configurations
 LEADERBOARD_CATEGORIES = {
@@ -55,6 +66,14 @@ LEADERBOARD_CATEGORIES = {
         "description_template": "Players with the best match win % in the last 7 days (min 9 matches, 50%+ win rate)",
         "color": discord.Color.red(),
         "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['matches_won']}/{p['completed_matches']} ({p['match_win_percentage']:.1f}%)"
+    },
+    "longest_win_streak": {
+        "title": "Win Streak Leaderboard",
+        "description_template": "Longest consecutive match win streaks (min {streak_min}-win streak)",
+        "color": discord.Color.orange(),
+        "formatter": lambda p, rank: (
+            f"{get_medal(rank)}{p['display_name']}: {p['longest_win_streak']}-win streak {format_streak_status(p)}"
+        )
     }
 }
 
@@ -84,9 +103,14 @@ async def create_leaderboard_embed(guild_id, category="draft_record", limit=20, 
     
     # Format title and description with timeframe
     title = f"{category_config['title']} ({timeframe_display})"
-    
+
     # Format description with minimum requirements where needed
-    description = category_config['description_template'].format(**min_requirements)
+    if category == "longest_win_streak":
+        # Use streak-specific minimums instead of match count minimums
+        min_streak = STREAK_MINIMUMS.get(effective_timeframe, 10)
+        description = category_config['description_template'].format(streak_min=min_streak)
+    else:
+        description = category_config['description_template'].format(**min_requirements)
     
     # Create the embed
     embed = discord.Embed(
@@ -100,12 +124,12 @@ async def create_leaderboard_embed(guild_id, category="draft_record", limit=20, 
     if not leaderboard_data:
         embed.add_field(name="No Data", value="No players found matching the criteria")
     else:
-        # Format leaderboard entries
+        # Format leaderboard entries (limit to top 10 to avoid Discord field size limits)
         entries = []
-        for i, player in enumerate(leaderboard_data, 1):
+        for i, player in enumerate(leaderboard_data[:10], 1):
             entry = category_config['formatter'](player, i)
             entries.append(entry)
-        
+
         # Add all entries in a single field
         embed.add_field(name="Rankings", value="\n".join(entries), inline=False)
     

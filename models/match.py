@@ -79,7 +79,8 @@ class MatchResult(Base):
     async def update_result(self, **kwargs):
         """Update match result with new values"""
         async with db_session() as session:
+            self = session.merge(self)
             for key, value in kwargs.items():
                 if hasattr(self, key):
                     setattr(self, key, value)
-            session.add(self) 
+            await session.commit() 

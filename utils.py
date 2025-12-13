@@ -15,6 +15,8 @@ from draft_organization.tournament import Tournament
 from services.draft_setup_manager import DraftSetupManager
 from loguru import logger
 from config import is_cleanup_exempt
+from datetime import datetime
+from models.win_streak_history import WinStreakHistory
 
 flags = {}
 locks = {}
@@ -1214,6 +1216,40 @@ async def update_player_stats_and_elo(match_result):
                 # Update games won and lost
                 winner.games_won += 1
                 loser.games_lost += 1
+
+                # === Update win streaks ===
+
+                # Handle LOSER's streak
+                if loser.current_win_streak > 0:
+                    # Loser had an active streak - record it to history
+                    streak_history = WinStreakHistory(
+                        player_id=loser.player_id,
+                        guild_id=guild_id,
+                        streak_length=loser.current_win_streak,
+                        started_at=loser.current_win_streak_started_at,
+                        ended_at=datetime.now()
+                    )
+                    session.add(streak_history)
+
+                    # Update lifetime longest if this was their best
+                    if loser.current_win_streak > loser.longest_win_streak:
+                        loser.longest_win_streak = loser.current_win_streak
+
+                # Reset loser's current streak
+                loser.current_win_streak = 0
+                loser.current_win_streak_started_at = None
+
+                # Handle WINNER's streak
+                if winner.current_win_streak == 0:
+                    # Starting a new streak - record the start time
+                    winner.current_win_streak_started_at = datetime.now()
+
+                # Increment winner's streak
+                winner.current_win_streak += 1
+
+                # Update lifetime longest if current exceeds it
+                if winner.current_win_streak > winner.longest_win_streak:
+                    winner.longest_win_streak = winner.current_win_streak
 
                 await session.commit()
 
