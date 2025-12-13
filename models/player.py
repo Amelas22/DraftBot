@@ -14,6 +14,9 @@ class PlayerStats(Base):
     true_skill_mu = Column(Float, default=25.0, server_default=text('25.0'))
     true_skill_sigma = Column(Float, default=8.333, server_default=text('8.333'))
     last_draft_timestamp = Column(DateTime, nullable=True, default=None)
+    current_win_streak = Column(Integer, default=0, server_default=text('0'))
+    current_win_streak_started_at = Column(DateTime, nullable=True)
+    longest_win_streak = Column(Integer, default=0, server_default=text('0'))
 
     def __repr__(self):
         return f"<PlayerStats(player_id={self.player_id}, display_name={self.display_name})>"

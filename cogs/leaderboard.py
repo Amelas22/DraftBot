@@ -13,9 +13,10 @@ from loguru import logger
 LEADERBOARD_CATEGORIES = [
     "draft_record",
     "match_win",
-    "drafts_played", 
+    "drafts_played",
     "time_vault_and_key",
-    "hot_streak"
+    "hot_streak",
+    "longest_win_streak"
 ]
 
 class TimeframeView(View):
@@ -28,13 +29,23 @@ class TimeframeView(View):
         self.current_timeframe = current_timeframe
         
         # Add timeframe buttons
-        timeframes = [
-            ("14d", "14 Days"),
-            ("30d", "30 Days"),
-            ("90d", "90 Days"),
-            ("lifetime", "Lifetime")
-        ]
-        
+        if category == "longest_win_streak":
+            # Win streak category gets Active button + standard timeframes
+            timeframes = [
+                ("active", "Active"),
+                ("30d", "30 Days"),
+                ("90d", "90 Days"),
+                ("lifetime", "Lifetime")
+            ]
+        else:
+            # Standard timeframes for other categories
+            timeframes = [
+                ("14d", "14 Days"),
+                ("30d", "30 Days"),
+                ("90d", "90 Days"),
+                ("lifetime", "Lifetime")
+            ]
+
         for value, label in timeframes:
             # Make the current timeframe button appear selected
             button = Button(
@@ -119,6 +130,7 @@ class LeaderboardCog(commands.Cog):
             
             # Update last_updated timestamp
             async with db_session() as session:
+                leaderboard_record = await session.merge(leaderboard_record)
                 leaderboard_record.last_updated = datetime.now()
                 await session.commit()
             
@@ -128,7 +140,7 @@ class LeaderboardCog(commands.Cog):
         except Exception as e:
             logger.error(f"Error processing leaderboards: {e}")
             await ctx.respond(f"Error creating leaderboards: {str(e)}")
-    
+
     async def _get_leaderboard_setup(self, ctx, guild_id):
         """Get or create leaderboard record, timeframes, and channel for posting"""
         # Get the existing leaderboard message record
@@ -216,10 +228,11 @@ class LeaderboardCog(commands.Cog):
     async def _update_leaderboard_channel(self, leaderboard_record, new_channel_id):
         """Update the channel ID in the leaderboard record"""
         async with db_session() as session:
+            leaderboard_record = await session.merge(leaderboard_record)
             leaderboard_record.channel_id = str(new_channel_id)
-            
+
             # Reset all message IDs since we're changing channels
-            leaderboard_record.message_id = None
+            leaderboard_record.message_id = "placeholder"  # Can't be None - column is NOT NULL
             leaderboard_record.draft_record_view_message_id = None
             leaderboard_record.match_win_view_message_id = None
             leaderboard_record.drafts_played_view_message_id = None
@@ -267,9 +280,9 @@ class LeaderboardCog(commands.Cog):
                 else:
                     new_msg = await channel.send(embed=embed)
                     leaderboard_record.message_id = str(new_msg.id)
-                
+
                 async with db_session() as session:
-                    session.add(leaderboard_record)
+                    leaderboard_record = await session.merge(leaderboard_record)
                     await session.commit()
                 logger.info(f"Created new {category} message")
             except Exception as e:

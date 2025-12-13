@@ -132,15 +132,15 @@ class DraftSession(Base):
     async def update(self, **kwargs):
         """Update this draft session with the given attributes"""
         async with db_session() as session:
-            # Refresh the object from the database
-            await session.refresh(self)
-            
+            # Merge object into this session (handles detached objects)
+            self = session.merge(self)
+
             # Update attributes
             for key, value in kwargs.items():
                 if hasattr(self, key):
                     setattr(self, key, value)
-            
-            session.add(self)
+
+            await session.commit()
     
     @classmethod
     async def get_active_sessions(cls, guild_id: str = None):

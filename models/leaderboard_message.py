@@ -18,6 +18,8 @@ class LeaderboardMessage(Base):
     match_win_timeframe = Column(String(20))
     drafts_played_timeframe = Column(String(20))
     time_vault_and_key_timeframe = Column(String(20))
+    longest_win_streak_view_message_id = Column(String(64))
+    longest_win_streak_timeframe = Column(String(20), default='lifetime')
 
     def __repr__(self):
         return f"<LeaderboardMessage(guild_id={self.guild_id}, message_id={self.message_id})>"

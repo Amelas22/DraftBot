@@ -8,6 +8,7 @@ from .stake import StakeInfo
 from .leaderboard_message import LeaderboardMessage
 from .draft_logs import LogChannel, BackupLog, UserSubmission, PostSchedule
 from .sign_up_history import SignUpHistory
+from .win_streak_history import WinStreakHistory
 
 # Export all models
 __all__ = [
@@ -28,5 +29,6 @@ __all__ = [
     'BackupLog',
     'UserSubmission',
     'PostSchedule',
-    'SignUpHistory'
+    'SignUpHistory',
+    'WinStreakHistory'
 ]

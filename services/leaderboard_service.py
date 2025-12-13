@@ -3,6 +3,16 @@ from datetime import datetime, timedelta
 from loguru import logger
 from sqlalchemy import text, select, bindparam
 from database.db_session import db_session
+from models.win_streak_history import WinStreakHistory
+from models.player import PlayerStats
+
+# Win Streak minimum requirements by timeframe
+STREAK_MINIMUMS = {
+    'active': 6,
+    '30d': 6,
+    '90d': 8,
+    'lifetime': 10
+}
 
 def ensure_datetime(date_value):
     """Convert various date formats to datetime objects"""
@@ -340,9 +350,136 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
             logger.info(f"Found {len(filtered_players)} players with at least 9 completed matches for hot_streak")
             # Sort by match win percentage
             sorted_players = sorted(filtered_players, key=lambda p: p["match_win_percentage"], reverse=True)
+
+        elif category == "longest_win_streak":
+            # Use dedicated function for streak queries (doesn't need draft aggregation)
+            sorted_players = await get_win_streak_leaderboard_data(guild_id, timeframe, limit, session)
+
         else:
             # Default to drafts_played if category not recognized
             sorted_players = sorted(players_list, key=lambda p: p["drafts_played"], reverse=True)
-        
+
         # Limit to requested number
         return sorted_players[:limit]
+
+
+async def get_win_streak_leaderboard_data(guild_id, timeframe, limit, session):
+    """
+    Get win streak leaderboard data.
+    Separated from main function because it doesn't need draft aggregation.
+    """
+    min_streak = STREAK_MINIMUMS.get(timeframe, 10)
+
+    # Calculate date cutoff for timeframe
+    if timeframe == "active":
+        cutoff_date = None  # Show all active streaks
+    elif timeframe == "lifetime":
+        cutoff_date = None  # No date filter
+    elif timeframe == "90d":
+        cutoff_date = datetime.now() - timedelta(days=90)
+    elif timeframe == "30d":
+        cutoff_date = datetime.now() - timedelta(days=30)
+    else:
+        cutoff_date = None
+
+    # === Part 1: Get completed streaks from history ===
+    if timeframe == "active":
+        # For "active" timeframe, exclude all completed streaks
+        history_streaks = []
+    else:
+        history_stmt = select(WinStreakHistory).where(
+            WinStreakHistory.guild_id == guild_id,
+            WinStreakHistory.ended_at.isnot(None)  # Only completed streaks
+        )
+
+        if cutoff_date:
+            # Streak must have ENDED within timeframe (recently completed)
+            history_stmt = history_stmt.where(
+                WinStreakHistory.ended_at >= cutoff_date
+            )
+
+        history_result = await session.execute(history_stmt)
+        history_streaks = history_result.scalars().all()
+
+    # === Part 1.5: Bulk load PlayerStats for all streak players (avoid N+1 queries) ===
+    if history_streaks:
+        streak_player_ids = list(set(s.player_id for s in history_streaks))
+        players_bulk_stmt = select(PlayerStats).where(
+            PlayerStats.guild_id == guild_id,
+            PlayerStats.player_id.in_(streak_player_ids)
+        )
+        players_bulk_result = await session.execute(players_bulk_stmt)
+        players_bulk = players_bulk_result.scalars().all()
+        players_lookup = {p.player_id: p for p in players_bulk}
+    else:
+        players_lookup = {}
+
+    # === Part 2: Get active streaks from PlayerStats ===
+    # Active streaks are always included (they're happening NOW)
+    # No date filtering needed - if it's active, it's current
+    players_stmt = select(PlayerStats).where(
+        PlayerStats.guild_id == guild_id,
+        PlayerStats.current_win_streak > 0
+    )
+
+    players_result = await session.execute(players_stmt)
+    active_players = players_result.scalars().all()
+
+    # === Part 3: Combine into unified format ===
+    streak_entries = []
+
+    # Add completed streaks (using bulk-loaded players)
+    for streak in history_streaks:
+        player = players_lookup.get(streak.player_id)
+
+        if player and streak.streak_length >= min_streak:
+            streak_entries.append({
+                "player_id": streak.player_id,
+                "display_name": player.display_name,
+                "longest_win_streak": streak.streak_length,
+                "games_won": player.games_won,
+                "games_lost": player.games_lost,
+                "completed_matches": player.games_won + player.games_lost,
+                "is_active": False,
+                "started_at": streak.started_at,
+                "ended_at": streak.ended_at
+            })
+
+    # Add active streaks
+    for player in active_players:
+        if player.current_win_streak >= min_streak:
+            streak_entries.append({
+                "player_id": player.player_id,
+                "display_name": player.display_name,
+                "longest_win_streak": player.current_win_streak,
+                "games_won": player.games_won,
+                "games_lost": player.games_lost,
+                "completed_matches": player.games_won + player.games_lost,
+                "is_active": True,
+                "started_at": player.current_win_streak_started_at,
+                "ended_at": None
+            })
+
+    # === Part 4: Deduplicate - keep best per player ===
+    player_best_streaks = {}
+    for entry in streak_entries:
+        player_id = entry["player_id"]
+        if player_id not in player_best_streaks:
+            player_best_streaks[player_id] = entry
+        else:
+            # Keep the longer streak
+            if entry["longest_win_streak"] > player_best_streaks[player_id]["longest_win_streak"]:
+                player_best_streaks[player_id] = entry
+
+    # === Part 5: Sort by streak length, then win % ===
+    sorted_players = sorted(
+        player_best_streaks.values(),
+        key=lambda p: (
+            p["longest_win_streak"],
+            p["games_won"] / p["completed_matches"] if p["completed_matches"] > 0 else 0
+        ),
+        reverse=True
+    )
+
+    # Apply limit
+    return sorted_players[:limit]

@@ -62,8 +62,9 @@ async def update_draft_session_message(draft_session_id: str, message_id: str, s
         logger.error(f"DraftSession with ID {draft_session_id} not found in database.")
         return
 
+    # Merge the draft_session into the provided session (it was fetched in a different session)
+    draft_session = session.merge(draft_session)
     draft_session.message_id = message_id
-    session.add(draft_session)
     await session.commit()
 
 
