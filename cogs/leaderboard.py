@@ -8,21 +8,12 @@ from models.leaderboard_message import LeaderboardMessage
 from services.leaderboard_service import get_timeframe_date
 from services.leaderboard_formatter import create_leaderboard_embed
 from loguru import logger
-
-# Define all leaderboard categories
-LEADERBOARD_CATEGORIES = [
-    "draft_record",
-    "match_win",
-    "drafts_played",
-    "time_vault_and_key",
-    "hot_streak",
-    "longest_win_streak"
-]
+from leaderboard_config import ALL_CATEGORIES as LEADERBOARD_CATEGORIES
 
 class TimeframeView(View):
     """Interactive view for selecting leaderboard timeframes"""
     def __init__(self, bot, guild_id, category, current_timeframe="lifetime"):
-        super().__init__(timeout=600)  # 10 minute timeout
+        super().__init__(timeout=None)  # No timeout - buttons work indefinitely
         self.bot = bot
         self.guild_id = guild_id
         self.category = category

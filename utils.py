@@ -17,6 +17,7 @@ from loguru import logger
 from config import is_cleanup_exempt
 from datetime import datetime
 from models.win_streak_history import WinStreakHistory
+from leaderboard_config import AUTO_UPDATE_CATEGORIES
 
 flags = {}
 locks = {}
@@ -666,15 +667,9 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                         if not (permissions.send_messages and permissions.embed_links and permissions.read_message_history):
                             logger.warning(f"Missing permissions in leaderboard channel {channel.name}: send_messages={permissions.send_messages}, embed_links={permissions.embed_links}, read_message_history={permissions.read_message_history}")
                             return
-                            
-                        # All categories to display
-                        categories = [
-                            "draft_record",
-                            "match_win",
-                            "drafts_played", 
-                            "time_vault_and_key",
-                            "hot_streak"
-                        ]
+
+                        # All categories to display (imported from central config)
+                        categories = AUTO_UPDATE_CATEGORIES
                         
                         # Get timeframes for each category from database or defaults
                         timeframes = {}
