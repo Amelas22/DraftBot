@@ -81,7 +81,8 @@ async def send_ready_check_dms(bot_or_client, draft_session, guild_id, channel_i
                         f"🔔 **Ready Check Initiated**\n\n"
                         f"A ready check has been started for the draft you signed up for in **{guild_name}**.\n\n"
                         f"Click here to jump to the channel: [#{channel_name}]({channel_link})\n\n"
-                        f"Please respond by clicking the Ready button!"
+                        f"Please respond by clicking the Ready button!\n\n"
+                        f"_To disable these notifications, use `/toggle_dm_notifications` in {guild_name}_"
                     )
 
                     # Send DM

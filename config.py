@@ -61,11 +61,14 @@ class Config:
             },
             "timeouts": {
                 "queue_inactivity_minutes": 180,      # 3 hours default
-                "session_deletion_hours": 4,          # 4 hours default  
+                "session_deletion_hours": 4,          # 4 hours default
                 "league_challenge_hours": 6,          # 6 hours default
                 "premade_draft_days": 7,              # Always 7 days for leagues
                 "cleanup_exempt": False,              # Skip cleanup entirely
                 "reset_on_signup": True               # Reset timer when users sign up
+            },
+            "notifications": {
+                "dm_notifications_default": True      # DM notifications enabled by default
             }
         }
         
@@ -111,10 +114,13 @@ class Config:
                 "active_role": "Active",
                 "exempt_role": "degen",
                 "mod_chat_channel": "mod-chat",
-                "inactivity_months": 3 
+                "inactivity_months": 3
+            },
+            "notifications": {
+                "dm_notifications_default": True      # DM notifications enabled by default
             }
         }
-        
+
         self.configs = {}
         self.load_configs()
     
@@ -253,6 +259,11 @@ def get_session_deletion_hours(guild_id):
     timeout_config = get_timeout_config(guild_id)
     return timeout_config.get("session_deletion_hours", 4)
 
+def get_dm_notifications_default(guild_id):
+    """Get the default DM notifications setting for a guild"""
+    config = get_config(guild_id)
+    return config.get("notifications", {}).get("dm_notifications_default", True)
+
 def get_league_challenge_hours(guild_id):
     """Get league challenge timeout in hours"""
     timeout_config = get_timeout_config(guild_id)
@@ -278,9 +289,9 @@ def migrate_configs():
             # Special handling for test guild - give it longer timeouts and cleanup exemption
             if guild_id == "1229863996929216686":
                 config["timeouts"] = {
-                    "queue_inactivity_minutes": 10080,   # 7 days 
+                    "queue_inactivity_minutes": 10080,   # 7 days
                     "session_deletion_hours": 168,       # 7 days
-                    "league_challenge_hours": 168,       # 7 days  
+                    "league_challenge_hours": 168,       # 7 days
                     "premade_draft_days": 7,             # Same as default
                     "cleanup_exempt": True,              # Skip cleanup entirely
                     "reset_on_signup": False             # Don't reset timers
@@ -289,14 +300,21 @@ def migrate_configs():
                 # All other guilds get standard defaults
                 config["timeouts"] = {
                     "queue_inactivity_minutes": 180,     # 3 hours default
-                    "session_deletion_hours": 4,         # 4 hours default  
+                    "session_deletion_hours": 4,         # 4 hours default
                     "league_challenge_hours": 6,         # 6 hours default
                     "premade_draft_days": 7,             # Always 7 days for leagues
                     "cleanup_exempt": False,             # Skip cleanup entirely
                     "reset_on_signup": True              # Reset timer when users sign up
                 }
             updated = True
-            
+
+        # Add notifications configuration if missing
+        if "notifications" not in config:
+            config["notifications"] = {
+                "dm_notifications_default": True  # DM notifications enabled by default
+            }
+            updated = True
+
         # Save if any updates were made
         if updated:
             bot_config.save_config(guild_id)

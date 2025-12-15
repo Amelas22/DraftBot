@@ -127,7 +127,7 @@ class DraftCommands(commands.Cog):
 
     @discord.slash_command(
         name='toggle_dm_notifications',
-        description='Toggle whether you receive DM notifications for draft ready checks',
+        description='Toggle DM notifications for ready checks',
         guild_ids=None
     )
     async def toggle_dm_notifications(self, ctx):
@@ -152,13 +152,19 @@ class DraftCommands(commands.Cog):
         success = await update_player_dm_notification_preference(user_id, guild_id, new_preference)
 
         if success:
-            status_text = "enabled" if new_preference else "disabled"
             logger.success(f"✅ Successfully updated DM notification preference for {ctx.author.display_name} to {new_preference}")
-            await ctx.followup.send(
-                f"DM notifications for draft ready checks have been **{status_text}**.\n"
-                f"You will {'now' if new_preference else 'no longer'} receive a DM when a ready check is initiated for drafts you've signed up for.",
-                ephemeral=True
-            )
+            if new_preference:
+                await ctx.followup.send(
+                    f"✅ DM notifications **enabled** for {ctx.guild.name}.\n"
+                    f"You'll receive DMs when ready checks start for drafts you've signed up for.",
+                    ephemeral=True
+                )
+            else:
+                await ctx.followup.send(
+                    f"🔕 DM notifications **disabled** for {ctx.guild.name}.\n"
+                    f"Use `/toggle_dm_notifications` to re-enable if you change your mind.",
+                    ephemeral=True
+                )
         else:
             logger.error(f"❌ Failed to update DM notification preference for {ctx.author.display_name}")
             await ctx.followup.send(
