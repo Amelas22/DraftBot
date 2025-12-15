@@ -1,6 +1,7 @@
 import discord
 from datetime import datetime
 from .leaderboard_service import get_leaderboard_data, get_minimum_requirements, STREAK_MINIMUMS
+from leaderboard_config import CATEGORY_CONFIGS as LEADERBOARD_CATEGORIES
 
 # Default leaderboard timeframe display names
 TIMEFRAME_DISPLAY = {
@@ -12,70 +13,7 @@ TIMEFRAME_DISPLAY = {
     "lifetime": "Lifetime"
 }
 
-# Helper function to add medals
-def get_medal(rank):
-    """Return rank with medal emoji for top 3 positions"""
-    if rank == 1:
-        return "1. 🥇 "
-    elif rank == 2:
-        return "2. 🥈 "
-    elif rank == 3:
-        return "3. 🥉 "
-    else:
-        return f"{rank}. "
 
-def format_streak_status(player):
-    """Format the status portion of a streak entry (active or ended)."""
-    if player.get('is_active'):
-        return "🔥 (ACTIVE)"
-    elif player.get('ended_at'):
-        timestamp = int(player['ended_at'].timestamp())
-        return f"(ended <t:{timestamp}:R>)"
-    else:
-        return ""
-
-# Define category configurations
-LEADERBOARD_CATEGORIES = {
-    "draft_record": {
-        "title": "Draft Record Leaderboard",
-        "description_template": "Players with the highest team draft win percentage (min {drafts} drafts, 50%+ win rate)",
-        "color": discord.Color.blue(),
-        "formatter": lambda p, rank: f"{get_medal(rank)}**{p['display_name']}**: {p['team_drafts_won']}-{p['team_drafts_lost']}-{p['team_drafts_tied']} ({p['team_draft_win_percentage']:.1f}%)"
-    },
-    "match_win": {
-        "title": "Match Win Leaderboard",
-        "description_template": "Players with the highest individual match win percentage (min {matches} matches, 50%+ win rate)",
-        "color": discord.Color.green(),
-        "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['matches_won']}/{p['completed_matches']} ({p['match_win_percentage']:.1f}%)"
-    },
-    "drafts_played": {
-        "title": "Drafts Played Leaderboard",
-        "description_template": "Players who have participated in the most drafts",
-        "color": discord.Color.purple(),
-        "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['drafts_played']} drafts"
-    },
-    "time_vault_and_key": {
-        "title": "Vault / Key Leaderboard",
-        "description_template": "Highest Draft Win Rate when paired as teammates (min {partnership_drafts} drafts together, 50%+ win rate)",
-        "color": discord.Color.gold(),
-        "formatter": lambda p, rank: f"{get_medal(rank)}{p['player_name']} & {p['teammate_name']}: {p['drafts_won']}-{p['drafts_lost']}-{p['drafts_tied']} ({p['win_percentage']:.1f}%)"
-    },
-    "hot_streak": {
-        "title": "Hot Streak Leaderboard",
-        # Hot streak always uses 7 days, so we hardcode that in the description
-        "description_template": "Players with the best match win % in the last 7 days (min 9 matches, 50%+ win rate)",
-        "color": discord.Color.red(),
-        "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['matches_won']}/{p['completed_matches']} ({p['match_win_percentage']:.1f}%)"
-    },
-    "longest_win_streak": {
-        "title": "Win Streak Leaderboard",
-        "description_template": "Longest consecutive match win streaks (min {streak_min}-win streak)",
-        "color": discord.Color.orange(),
-        "formatter": lambda p, rank: (
-            f"{get_medal(rank)}{p['display_name']}: {p['longest_win_streak']}-win streak {format_streak_status(p)}"
-        )
-    }
-}
 
 async def create_leaderboard_embed(guild_id, category="draft_record", limit=20, timeframe="lifetime"):
     """Create an embed with leaderboard data"""
