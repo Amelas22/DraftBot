@@ -11,6 +11,7 @@ class PerfectStreakHistory(Base):
     streak_length = Column(Integer, nullable=False)
     started_at = Column(DateTime, nullable=False)  # When streak began
     ended_at = Column(DateTime, nullable=True)     # When streak ended (NULL = active)
+    ended_by_player_id = Column(String(64), nullable=True)  # Player who ended this streak
 
     # Indexes for fast timeframe queries
     __table_args__ = (

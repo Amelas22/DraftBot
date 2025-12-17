@@ -377,6 +377,30 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
         return sorted_players[:limit]
 
 
+async def _get_ender_players_lookup(guild_id, history_streaks, session):
+    """
+    Helper to bulk load PlayerStats for players who ended a streak.
+    """
+    if not history_streaks:
+        return {}
+
+    ender_player_ids = list(set(
+        s.ended_by_player_id for s in history_streaks
+        if s.ended_by_player_id is not None
+    ))
+
+    if not ender_player_ids:
+        return {}
+
+    enders_bulk_stmt = select(PlayerStats).where(
+        PlayerStats.guild_id == guild_id,
+        PlayerStats.player_id.in_(ender_player_ids)
+    )
+    enders_bulk_result = await session.execute(enders_bulk_stmt)
+    enders_bulk = enders_bulk_result.scalars().all()
+    return {p.player_id: p for p in enders_bulk}
+
+
 async def get_win_streak_leaderboard_data(guild_id, timeframe, limit, session):
     """
     Get win streak leaderboard data.
@@ -425,8 +449,12 @@ async def get_win_streak_leaderboard_data(guild_id, timeframe, limit, session):
         players_bulk_result = await session.execute(players_bulk_stmt)
         players_bulk = players_bulk_result.scalars().all()
         players_lookup = {p.player_id: p for p in players_bulk}
+
+        # Bulk load PlayerStats for players who ended these streaks
+        enders_lookup = await _get_ender_players_lookup(guild_id, history_streaks, session)
     else:
         players_lookup = {}
+        enders_lookup = {}
 
     # === Part 2: Get active streaks from PlayerStats ===
     # Active streaks are always included (they're happening NOW)
@@ -447,6 +475,10 @@ async def get_win_streak_leaderboard_data(guild_id, timeframe, limit, session):
         player = players_lookup.get(streak.player_id)
 
         if player and streak.streak_length >= min_streak:
+            # Get the display name of the player who ended this streak
+            ender_player = enders_lookup.get(streak.ended_by_player_id)
+            ended_by_name = ender_player.display_name if ender_player else None
+
             streak_entries.append({
                 "player_id": streak.player_id,
                 "display_name": player.display_name,
@@ -456,7 +488,9 @@ async def get_win_streak_leaderboard_data(guild_id, timeframe, limit, session):
                 "completed_matches": player.games_won + player.games_lost,
                 "is_active": False,
                 "started_at": streak.started_at,
-                "ended_at": streak.ended_at
+                "ended_at": streak.ended_at,
+                "ended_by_player_id": streak.ended_by_player_id,
+                "ended_by_name": ended_by_name
             })
 
     # Add active streaks
@@ -547,8 +581,12 @@ async def get_perfect_streak_leaderboard_data(guild_id, timeframe, limit, sessio
         players_bulk_result = await session.execute(players_bulk_stmt)
         players_bulk = players_bulk_result.scalars().all()
         players_lookup = {p.player_id: p for p in players_bulk}
+
+        # Bulk load PlayerStats for players who ended these streaks
+        enders_lookup = await _get_ender_players_lookup(guild_id, history_streaks, session)
     else:
         players_lookup = {}
+        enders_lookup = {}
 
     # === Part 2: Get active streaks from PlayerStats ===
     # Active streaks are always included (they're happening NOW)
@@ -569,6 +607,10 @@ async def get_perfect_streak_leaderboard_data(guild_id, timeframe, limit, sessio
         player = players_lookup.get(streak.player_id)
 
         if player and streak.streak_length >= min_streak:
+            # Get the display name of the player who ended this streak
+            ender_player = enders_lookup.get(streak.ended_by_player_id)
+            ended_by_name = ender_player.display_name if ender_player else None
+
             streak_entries.append({
                 "player_id": streak.player_id,
                 "display_name": player.display_name,
@@ -578,7 +620,9 @@ async def get_perfect_streak_leaderboard_data(guild_id, timeframe, limit, sessio
                 "completed_matches": player.games_won + player.games_lost,
                 "is_active": False,
                 "started_at": streak.started_at,
-                "ended_at": streak.ended_at
+                "ended_at": streak.ended_at,
+                "ended_by_player_id": streak.ended_by_player_id,
+                "ended_by_name": ended_by_name
             })
 
     # Add active streaks

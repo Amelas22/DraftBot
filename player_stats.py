@@ -3,6 +3,8 @@ import json
 from datetime import datetime, timedelta
 from sqlalchemy import select, func, and_, or_, text
 from session import AsyncSessionLocal, DraftSession, MatchResult, PlayerStats
+from models.win_streak_history import WinStreakHistory
+from models.perfect_streak_history import PerfectStreakHistory
 from loguru import logger
 
 async def get_player_statistics(user_id, time_frame=None, user_display_name=None, guild_id=None):
@@ -53,6 +55,56 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                     longest_win_streak = player_stats.longest_win_streak or 0
                     current_perfect_streak = player_stats.current_perfect_streak or 0
                     longest_perfect_streak = player_stats.longest_perfect_streak or 0
+
+                # Get historical streak "ended by" information for longest streaks
+                longest_win_streak_ender = None
+                longest_perfect_streak_ender = None
+
+                if longest_win_streak > 0:
+                    # Query for the longest completed win streak
+                    win_streak_query = select(WinStreakHistory).where(
+                        WinStreakHistory.player_id == user_id,
+                        WinStreakHistory.guild_id == guild_id,
+                        WinStreakHistory.streak_length == longest_win_streak,
+                        WinStreakHistory.ended_at.isnot(None)
+                    ).order_by(WinStreakHistory.ended_at.desc()).limit(1)
+
+                    win_streak_result = await session.execute(win_streak_query)
+                    longest_win_streak_record = win_streak_result.scalar_one_or_none()
+
+                    if longest_win_streak_record and longest_win_streak_record.ended_by_player_id:
+                        # Get the ender's display name
+                        ender_query = select(PlayerStats).where(
+                            PlayerStats.player_id == longest_win_streak_record.ended_by_player_id,
+                            PlayerStats.guild_id == guild_id
+                        )
+                        ender_result = await session.execute(ender_query)
+                        ender_stats = ender_result.scalar_one_or_none()
+                        if ender_stats:
+                            longest_win_streak_ender = ender_stats.display_name
+
+                if longest_perfect_streak > 0:
+                    # Query for the longest completed perfect streak
+                    perfect_streak_query = select(PerfectStreakHistory).where(
+                        PerfectStreakHistory.player_id == user_id,
+                        PerfectStreakHistory.guild_id == guild_id,
+                        PerfectStreakHistory.streak_length == longest_perfect_streak,
+                        PerfectStreakHistory.ended_at.isnot(None)
+                    ).order_by(PerfectStreakHistory.ended_at.desc()).limit(1)
+
+                    perfect_streak_result = await session.execute(perfect_streak_query)
+                    longest_perfect_streak_record = perfect_streak_result.scalar_one_or_none()
+
+                    if longest_perfect_streak_record and longest_perfect_streak_record.ended_by_player_id:
+                        # Get the ender's display name
+                        ender_query = select(PlayerStats).where(
+                            PlayerStats.player_id == longest_perfect_streak_record.ended_by_player_id,
+                            PlayerStats.guild_id == guild_id
+                        )
+                        ender_result = await session.execute(ender_query)
+                        ender_stats = ender_result.scalar_one_or_none()
+                        if ender_stats:
+                            longest_perfect_streak_ender = ender_stats.display_name
 
                 # Define the pattern for JSON searches
                 pattern = f'%"{user_id}"%'  # Pattern to match user_id in JSON string
@@ -439,7 +491,9 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                     "current_win_streak": current_win_streak,
                     "longest_win_streak": longest_win_streak,
                     "current_perfect_streak": current_perfect_streak,
-                    "longest_perfect_streak": longest_perfect_streak
+                    "longest_perfect_streak": longest_perfect_streak,
+                    "longest_win_streak_ender": longest_win_streak_ender,
+                    "longest_perfect_streak_ender": longest_perfect_streak_ender
                 }
                 
     except Exception as e:
@@ -531,7 +585,12 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
     else:
         lifetime_value += f"Current Win Streak: {stats_lifetime['current_win_streak']}\n"
 
-    lifetime_value += f"Longest Win Streak: {stats_lifetime['longest_win_streak']}\n"
+    # Show longest win streak with "ended by" if available
+    longest_win = stats_lifetime['longest_win_streak']
+    if stats_lifetime.get('longest_win_streak_ender'):
+        lifetime_value += f"Longest Win Streak: {longest_win} (ended by {stats_lifetime['longest_win_streak_ender']})\n"
+    else:
+        lifetime_value += f"Longest Win Streak: {longest_win}\n"
 
     # Add perfect streak info
     if stats_lifetime['current_perfect_streak'] > 0:
@@ -539,7 +598,12 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
     else:
         lifetime_value += f"Current Perfect Streak: {stats_lifetime['current_perfect_streak']}\n"
 
-    lifetime_value += f"Longest Perfect Streak: {stats_lifetime['longest_perfect_streak']}"
+    # Show longest perfect streak with "ended by" if available
+    longest_perfect = stats_lifetime['longest_perfect_streak']
+    if stats_lifetime.get('longest_perfect_streak_ender'):
+        lifetime_value += f"Longest Perfect Streak: {longest_perfect} (ended by {stats_lifetime['longest_perfect_streak_ender']})"
+    else:
+        lifetime_value += f"Longest Perfect Streak: {longest_perfect}"
 
     embed.add_field(
         name="Lifetime Stats",
