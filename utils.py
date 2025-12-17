@@ -17,6 +17,7 @@ from loguru import logger
 from config import is_cleanup_exempt
 from datetime import datetime
 from models.win_streak_history import WinStreakHistory
+from models.perfect_streak_history import PerfectStreakHistory
 from leaderboard_config import AUTO_UPDATE_CATEGORIES
 
 flags = {}
@@ -1346,6 +1347,63 @@ async def update_player_stats_and_elo(match_result):
                 # Update lifetime longest if current exceeds it
                 if winner.current_win_streak > winner.longest_win_streak:
                     winner.longest_win_streak = winner.current_win_streak
+
+                # === Update perfect streaks (2-0 wins only) ===
+
+                # Determine if winner won 2-0
+                if winner_id == match_result.player1_id:
+                    winner_wins = match_result.player1_wins
+                    loser_wins = match_result.player2_wins
+                else:
+                    winner_wins = match_result.player2_wins
+                    loser_wins = match_result.player1_wins
+
+                is_perfect_win = (winner_wins == 2 and loser_wins == 0)
+
+                # Handle LOSER's perfect streak (always breaks)
+                if loser.current_perfect_streak > 0:
+                    streak_history = PerfectStreakHistory(
+                        player_id=loser.player_id,
+                        guild_id=guild_id,
+                        streak_length=loser.current_perfect_streak,
+                        started_at=loser.current_perfect_streak_started_at,
+                        ended_at=datetime.now()
+                    )
+                    session.add(streak_history)
+
+                    if loser.current_perfect_streak > loser.longest_perfect_streak:
+                        loser.longest_perfect_streak = loser.current_perfect_streak
+
+                loser.current_perfect_streak = 0
+                loser.current_perfect_streak_started_at = None
+
+                # Handle WINNER's perfect streak
+                if is_perfect_win:
+                    # Winner achieved 2-0 - continue/start streak
+                    if winner.current_perfect_streak == 0:
+                        winner.current_perfect_streak_started_at = datetime.now()
+
+                    winner.current_perfect_streak += 1
+
+                    if winner.current_perfect_streak > winner.longest_perfect_streak:
+                        winner.longest_perfect_streak = winner.current_perfect_streak
+                else:
+                    # Winner won 2-1 or other - breaks perfect streak
+                    if winner.current_perfect_streak > 0:
+                        streak_history = PerfectStreakHistory(
+                            player_id=winner.player_id,
+                            guild_id=guild_id,
+                            streak_length=winner.current_perfect_streak,
+                            started_at=winner.current_perfect_streak_started_at,
+                            ended_at=datetime.now()
+                        )
+                        session.add(streak_history)
+
+                        if winner.current_perfect_streak > winner.longest_perfect_streak:
+                            winner.longest_perfect_streak = winner.current_perfect_streak
+
+                    winner.current_perfect_streak = 0
+                    winner.current_perfect_streak_started_at = None
 
                 await session.commit()
 

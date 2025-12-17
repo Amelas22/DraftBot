@@ -70,6 +70,16 @@ CATEGORY_CONFIGS = {
             ("🔥 (ACTIVE)" if p.get('is_active') else
              (f"(ended <t:{int(p['ended_at'].timestamp())}:R>)" if p.get('ended_at') else ""))
         )
+    },
+    "perfect_streak": {
+        "title": "Perfect Streak Leaderboard",
+        "description_template": "Longest consecutive 2-0 match win streaks (min {streak_min} 2-0 wins)",
+        "color": discord.Color.from_rgb(255, 215, 0),
+        "formatter": lambda p, rank: (
+            f"{get_medal(rank)}{p['display_name']}: {p['perfect_streak']}-win perfect streak " +
+            ("🔥🔥 (ACTIVE)" if p.get('is_active') else
+             (f"(ended <t:{int(p['ended_at'].timestamp())}:R>)" if p.get('ended_at') else ""))
+        )
     }
 }
 
