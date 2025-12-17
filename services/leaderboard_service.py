@@ -4,6 +4,7 @@ from loguru import logger
 from sqlalchemy import text, select, bindparam
 from database.db_session import db_session
 from models.win_streak_history import WinStreakHistory
+from models.perfect_streak_history import PerfectStreakHistory
 from models.player import PlayerStats
 
 # Win Streak minimum requirements by timeframe
@@ -12,6 +13,15 @@ STREAK_MINIMUMS = {
     '30d': 6,
     '90d': 8,
     'lifetime': 10
+}
+
+# Perfect Streak minimum requirements by timeframe
+# Higher than regular streaks since 2-0 is harder
+PERFECT_STREAK_MINIMUMS = {
+    'active': 4,
+    '30d': 4,
+    '90d': 5,
+    'lifetime': 6
 }
 
 def ensure_datetime(date_value):
@@ -355,6 +365,10 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
             # Use dedicated function for streak queries (doesn't need draft aggregation)
             sorted_players = await get_win_streak_leaderboard_data(guild_id, timeframe, limit, session)
 
+        elif category == "perfect_streak":
+            # Use dedicated function for perfect streak queries (2-0 wins only)
+            sorted_players = await get_perfect_streak_leaderboard_data(guild_id, timeframe, limit, session)
+
         else:
             # Default to drafts_played if category not recognized
             sorted_players = sorted(players_list, key=lambda p: p["drafts_played"], reverse=True)
@@ -476,6 +490,128 @@ async def get_win_streak_leaderboard_data(guild_id, timeframe, limit, session):
         player_best_streaks.values(),
         key=lambda p: (
             p["longest_win_streak"],
+            p["games_won"] / p["completed_matches"] if p["completed_matches"] > 0 else 0
+        ),
+        reverse=True
+    )
+
+    # Apply limit
+    return sorted_players[:limit]
+
+
+async def get_perfect_streak_leaderboard_data(guild_id, timeframe, limit, session):
+    """
+    Get perfect streak (2-0 wins only) leaderboard data.
+    Tracks consecutive 2-0 match wins.
+    """
+    min_streak = PERFECT_STREAK_MINIMUMS.get(timeframe, 8)
+
+    # Calculate date cutoff for timeframe
+    if timeframe == "active":
+        cutoff_date = None  # Show all active streaks
+    elif timeframe == "lifetime":
+        cutoff_date = None  # No date filter
+    elif timeframe == "90d":
+        cutoff_date = datetime.now() - timedelta(days=90)
+    elif timeframe == "30d":
+        cutoff_date = datetime.now() - timedelta(days=30)
+    else:
+        cutoff_date = None
+
+    # === Part 1: Get completed streaks from history ===
+    if timeframe == "active":
+        # For "active" timeframe, exclude all completed streaks
+        history_streaks = []
+    else:
+        history_stmt = select(PerfectStreakHistory).where(
+            PerfectStreakHistory.guild_id == guild_id,
+            PerfectStreakHistory.ended_at.isnot(None)  # Only completed streaks
+        )
+
+        if cutoff_date:
+            # Streak must have ENDED within timeframe (recently completed)
+            history_stmt = history_stmt.where(
+                PerfectStreakHistory.ended_at >= cutoff_date
+            )
+
+        history_result = await session.execute(history_stmt)
+        history_streaks = history_result.scalars().all()
+
+    # === Part 1.5: Bulk load PlayerStats for all streak players (avoid N+1 queries) ===
+    if history_streaks:
+        streak_player_ids = list(set(s.player_id for s in history_streaks))
+        players_bulk_stmt = select(PlayerStats).where(
+            PlayerStats.guild_id == guild_id,
+            PlayerStats.player_id.in_(streak_player_ids)
+        )
+        players_bulk_result = await session.execute(players_bulk_stmt)
+        players_bulk = players_bulk_result.scalars().all()
+        players_lookup = {p.player_id: p for p in players_bulk}
+    else:
+        players_lookup = {}
+
+    # === Part 2: Get active streaks from PlayerStats ===
+    # Active streaks are always included (they're happening NOW)
+    # No date filtering needed - if it's active, it's current
+    players_stmt = select(PlayerStats).where(
+        PlayerStats.guild_id == guild_id,
+        PlayerStats.current_perfect_streak > 0
+    )
+
+    players_result = await session.execute(players_stmt)
+    active_players = players_result.scalars().all()
+
+    # === Part 3: Combine into unified format ===
+    streak_entries = []
+
+    # Add completed streaks (using bulk-loaded players)
+    for streak in history_streaks:
+        player = players_lookup.get(streak.player_id)
+
+        if player and streak.streak_length >= min_streak:
+            streak_entries.append({
+                "player_id": streak.player_id,
+                "display_name": player.display_name,
+                "perfect_streak": streak.streak_length,
+                "games_won": player.games_won,
+                "games_lost": player.games_lost,
+                "completed_matches": player.games_won + player.games_lost,
+                "is_active": False,
+                "started_at": streak.started_at,
+                "ended_at": streak.ended_at
+            })
+
+    # Add active streaks
+    for player in active_players:
+        if player.current_perfect_streak >= min_streak:
+            streak_entries.append({
+                "player_id": player.player_id,
+                "display_name": player.display_name,
+                "perfect_streak": player.current_perfect_streak,
+                "games_won": player.games_won,
+                "games_lost": player.games_lost,
+                "completed_matches": player.games_won + player.games_lost,
+                "is_active": True,
+                "started_at": player.current_perfect_streak_started_at,
+                "ended_at": None
+            })
+
+    # === Part 4: Deduplicate - keep best per player ===
+    player_best_streaks = {}
+    for entry in streak_entries:
+        player_id = entry["player_id"]
+        if player_id not in player_best_streaks:
+            player_best_streaks[player_id] = entry
+        else:
+            # Keep the longer streak
+            if entry["perfect_streak"] > player_best_streaks[player_id]["perfect_streak"]:
+                player_best_streaks[player_id] = entry
+
+    # === Part 5: Sort by streak length, then win % ===
+    sorted_players = sorted(
+        player_best_streaks.values(),
+        key=lambda p: (
+            p["perfect_streak"],
             p["games_won"] / p["completed_matches"] if p["completed_matches"] > 0 else 0
         ),
         reverse=True
