@@ -1324,7 +1324,8 @@ async def update_player_stats_and_elo(match_result):
                         guild_id=guild_id,
                         streak_length=loser.current_win_streak,
                         started_at=loser.current_win_streak_started_at,
-                        ended_at=datetime.now()
+                        ended_at=datetime.now(),
+                        ended_by_player_id=winner.player_id
                     )
                     session.add(streak_history)
 
@@ -1367,7 +1368,8 @@ async def update_player_stats_and_elo(match_result):
                         guild_id=guild_id,
                         streak_length=loser.current_perfect_streak,
                         started_at=loser.current_perfect_streak_started_at,
-                        ended_at=datetime.now()
+                        ended_at=datetime.now(),
+                        ended_by_player_id=winner.player_id
                     )
                     session.add(streak_history)
 
@@ -1395,7 +1397,8 @@ async def update_player_stats_and_elo(match_result):
                             guild_id=guild_id,
                             streak_length=winner.current_perfect_streak,
                             started_at=winner.current_perfect_streak_started_at,
-                            ended_at=datetime.now()
+                            ended_at=datetime.now(),
+                            ended_by_player_id=loser.player_id
                         )
                         session.add(streak_history)
 

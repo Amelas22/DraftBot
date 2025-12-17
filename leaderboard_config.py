@@ -29,6 +29,17 @@ def get_medal(rank):
         return f"{rank}. "
 
 
+def _format_ended_streak(p):
+    """Format the 'ended by' text for completed streaks."""
+    ended_time = f"<t:{int(p['ended_at'].timestamp())}:R>"
+
+    if p.get('ended_by_name'):
+        return f"(ended {ended_time} by {p['ended_by_name']})"
+    else:
+        # Fallback for old records or deleted players
+        return f"(ended {ended_time})"
+
+
 # Category configuration - SINGLE SOURCE OF TRUTH
 CATEGORY_CONFIGS = {
     "draft_record": {
@@ -68,7 +79,7 @@ CATEGORY_CONFIGS = {
         "formatter": lambda p, rank: (
             f"{get_medal(rank)}{p['display_name']}: {p['longest_win_streak']}-win streak " +
             ("🔥 (ACTIVE)" if p.get('is_active') else
-             (f"(ended <t:{int(p['ended_at'].timestamp())}:R>)" if p.get('ended_at') else ""))
+             (_format_ended_streak(p) if p.get('ended_at') else ""))
         )
     },
     "perfect_streak": {
@@ -78,7 +89,7 @@ CATEGORY_CONFIGS = {
         "formatter": lambda p, rank: (
             f"{get_medal(rank)}{p['display_name']}: {p['perfect_streak']}-win perfect streak " +
             ("🔥🔥 (ACTIVE)" if p.get('is_active') else
-             (f"(ended <t:{int(p['ended_at'].timestamp())}:R>)" if p.get('ended_at') else ""))
+             (_format_ended_streak(p) if p.get('ended_at') else ""))
         )
     }
 }
