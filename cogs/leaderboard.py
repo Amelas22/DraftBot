@@ -20,7 +20,7 @@ class TimeframeView(View):
         self.current_timeframe = current_timeframe
         
         # Add timeframe buttons
-        if category == "longest_win_streak":
+        if category in ["longest_win_streak", "perfect_streak"]:
             # Win streak category gets Active button + standard timeframes
             timeframes = [
                 ("active", "Active"),
