@@ -3,6 +3,7 @@ from datetime import datetime
 from session import AsyncSessionLocal
 from database.models_base import Base
 from loguru import logger
+from config import get_dm_notifications_default
 
 from sqlalchemy import Column, String, Boolean, DateTime, Index, func, text, TIMESTAMP
 
@@ -188,8 +189,9 @@ async def get_player_dm_notification_preference(player_id, guild_id):
             logger.debug(f"Found existing DM notification preference for player {player_id} in guild {guild_id}: {preference.dm_notifications}")
             return preference.dm_notifications
         else:
-            logger.debug(f"No DM notification preference found for player {player_id} in guild {guild_id}, defaulting to disabled")
-            return False
+            guild_default = get_dm_notifications_default(guild_id)
+            logger.debug(f"No DM notification preference found for player {player_id} in guild {guild_id}, using guild default: {guild_default}")
+            return guild_default
 
     return await execute_db_operation(_query, default_value=False, error_message="Error getting DM notification preference")
 
@@ -247,8 +249,9 @@ async def get_players_dm_notification_preferences(player_ids, guild_id):
     """
     logger.debug(f"get_players_dm_notification_preferences called for {len(player_ids)} players in guild {guild_id}")
 
-    # Set default preferences (all disabled)
-    default_preferences = {player_id: False for player_id in player_ids}
+    # Set default preferences based on guild configuration
+    guild_default = get_dm_notifications_default(guild_id)
+    default_preferences = {player_id: guild_default for player_id in player_ids}
 
     # If no player IDs, return default preferences
     if not player_ids:
