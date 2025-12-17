@@ -22,6 +22,107 @@ from leaderboard_config import AUTO_UPDATE_CATEGORIES
 flags = {}
 locks = {}
 
+def split_content_for_embed(content, include_header=False, max_length=1000):
+    """
+    Helper function to split content into chunks that fit within Discord's embed field value limits.
+    
+    Args:
+        content: Either a list of strings or a single string with newlines
+        include_header: If True, keeps the first line in all chunks
+        max_length: Max character length per chunk (default 1000)
+        
+    Returns:
+        List of content chunks, each under max_length characters
+    """
+    # Handle both list input and string input
+    if isinstance(content, str):
+        lines = content.split('\n')
+    else:
+        lines = content
+        
+    if not lines:
+        return []
+        
+    chunks = []
+    header = lines[0] if include_header else None
+    content_lines = lines[1:] if include_header else lines
+    
+    current_chunk = header if include_header else ""
+    
+    # Helper to check if adding a line would exceed the limit
+    def would_exceed_limit(chunk, line):
+        if not chunk:
+            return False
+        if line:
+            return len(chunk + '\n' + line) > max_length
+        return len(chunk) > max_length
+    
+    for line in content_lines:
+        if not current_chunk:
+            current_chunk = line
+            continue
+            
+        if would_exceed_limit(current_chunk, line):
+            # Current chunk is full
+            chunks.append(current_chunk)
+            current_chunk = header if header else ""
+            
+            # Add the current line to the new chunk
+            if current_chunk:
+                current_chunk += '\n' + line
+            else:
+                current_chunk = line
+        else:
+            # Add line to current chunk
+            current_chunk += '\n' + line
+    
+    # Add the last chunk if it has content
+    if current_chunk:
+        chunks.append(current_chunk)
+        
+    return chunks
+
+def add_links_to_embed_safely(embed, links, base_name, team_color=""):
+    """
+    Helper function to add links to an embed, splitting them into multiple fields if needed
+    to avoid exceeding Discord's 1024 character limit per field.
+    
+    Args:
+        embed: The discord.Embed object to add fields to
+        links: List of link strings to add
+        base_name: Base name for the embed field
+        team_color: Optional color indicator ('red', 'blue', or '') for emoji prefixing
+    """
+    if not links:
+        return
+    
+    # Join links into a single string for processing
+    content = "\n".join(links)
+    
+    # If all links fit in one field, add them directly
+    if len(content) <= 1000:
+        emoji = "🔴 " if team_color == "red" else "🔵 " if team_color == "blue" else ""
+        embed.add_field(
+            name=f"{emoji}{base_name}",
+            value=content,
+            inline=False
+        )
+        return
+    
+    # Otherwise, split into chunks and add as multiple fields
+    chunks = split_content_for_embed(links)
+    emoji = "🔴 " if team_color == "red" else "🔵 " if team_color == "blue" else ""
+    
+    for i, chunk in enumerate(chunks):
+        suffix = "" if i == 0 else f" (part {i+1})"
+        value = chunk if isinstance(chunk, str) else "\n".join(chunk)
+        embed.add_field(
+            name=f"{emoji}{base_name}{suffix}",
+            value=value,
+            inline=False
+        )
+
+
 async def split_into_teams(bot, draft_session_id):
     # Create session-specific lock if it doesn't exist
     if draft_session_id not in locks:
