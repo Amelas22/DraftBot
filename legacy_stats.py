@@ -412,7 +412,12 @@ async def get_player_statistics_with_legacy(user_id, time_frame=None, user_displ
             "team_drafts_won": current_stats.get("team_drafts_won", 0) + legacy_stats.get("team_drafts_won", 0),
             "team_drafts_tied": current_stats.get("team_drafts_tied", 0) + legacy_stats.get("team_drafts_tied", 0),
             "display_name": current_stats.get("display_name", user_display_name),
-            "cube_stats": current_stats.get("cube_stats", {})
+            "cube_stats": current_stats.get("cube_stats", {}),
+            # Preserve streak data from current stats (not in legacy)
+            "current_win_streak": current_stats.get("current_win_streak", 0),
+            "longest_win_streak": current_stats.get("longest_win_streak", 0),
+            "current_perfect_streak": current_stats.get("current_perfect_streak", 0),
+            "longest_perfect_streak": current_stats.get("longest_perfect_streak", 0)
         }
         
         # Recalculate percentages

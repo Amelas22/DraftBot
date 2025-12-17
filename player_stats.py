@@ -41,7 +41,19 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                 if player_stats:
                     if player_stats.display_name:
                         display_name = player_stats.display_name
-                
+
+                # Extract streak data from PlayerStats
+                current_win_streak = 0
+                longest_win_streak = 0
+                current_perfect_streak = 0
+                longest_perfect_streak = 0
+
+                if player_stats:
+                    current_win_streak = player_stats.current_win_streak or 0
+                    longest_win_streak = player_stats.longest_win_streak or 0
+                    current_perfect_streak = player_stats.current_perfect_streak or 0
+                    longest_perfect_streak = player_stats.longest_perfect_streak or 0
+
                 # Define the pattern for JSON searches
                 pattern = f'%"{user_id}"%'  # Pattern to match user_id in JSON string
                 
@@ -422,7 +434,12 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                     "team_drafts_played": team_drafts_played,
                     "team_drafts_won": team_drafts_won,
                     "team_drafts_tied": team_drafts_tied,
-                    "team_draft_win_percentage": team_draft_win_percentage
+                    "team_draft_win_percentage": team_draft_win_percentage,
+                    # Add streak data
+                    "current_win_streak": current_win_streak,
+                    "longest_win_streak": longest_win_streak,
+                    "current_perfect_streak": current_perfect_streak,
+                    "longest_perfect_streak": longest_perfect_streak
                 }
                 
     except Exception as e:
@@ -440,7 +457,12 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
             "team_drafts_played": 0,
             "team_drafts_won": 0,
             "team_drafts_tied": 0,
-            "team_draft_win_percentage": 0
+            "team_draft_win_percentage": 0,
+            # Add default streak values
+            "current_win_streak": 0,
+            "longest_win_streak": 0,
+            "current_perfect_streak": 0,
+            "longest_perfect_streak": 0
         }
     
 async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
@@ -492,17 +514,36 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
     )
     
     # Lifetime stats
+    lifetime_value = (
+        f"Drafts Played: {stats_lifetime['drafts_played']}\n"
+        f"Matches Won: {stats_lifetime['matches_won']}/{stats_lifetime['matches_played']}\n"
+        f"Win %: {stats_lifetime['match_win_percentage']:.1f}%\n"
+        f"Trophies: {stats_lifetime['trophies_won']}\n"
+    #    f"Current ELO: {stats_lifetime['current_elo']:.0f}\n"
+        f"Draft Record: {stats_lifetime['team_drafts_won']}-{lifetime_losses}-{stats_lifetime['team_drafts_tied']}"
+        + (f" (Win %: {stats_lifetime['team_draft_win_percentage']:.1f}%)" if stats_lifetime['team_drafts_played'] > 0 else "")
+        + "\n\n**Streaks:**\n"
+    )
+
+    # Add win streak info
+    if stats_lifetime['current_win_streak'] > 0:
+        lifetime_value += f"🔥 Current Win Streak: **{stats_lifetime['current_win_streak']}**\n"
+    else:
+        lifetime_value += f"Current Win Streak: {stats_lifetime['current_win_streak']}\n"
+
+    lifetime_value += f"Longest Win Streak: {stats_lifetime['longest_win_streak']}\n"
+
+    # Add perfect streak info
+    if stats_lifetime['current_perfect_streak'] > 0:
+        lifetime_value += f"🔥🔥 Current Perfect Streak: **{stats_lifetime['current_perfect_streak']}**\n"
+    else:
+        lifetime_value += f"Current Perfect Streak: {stats_lifetime['current_perfect_streak']}\n"
+
+    lifetime_value += f"Longest Perfect Streak: {stats_lifetime['longest_perfect_streak']}"
+
     embed.add_field(
         name="Lifetime Stats",
-        value=(
-            f"Drafts Played: {stats_lifetime['drafts_played']}\n"
-            f"Matches Won: {stats_lifetime['matches_won']}/{stats_lifetime['matches_played']}\n"
-            f"Win %: {stats_lifetime['match_win_percentage']:.1f}%\n"
-            f"Trophies: {stats_lifetime['trophies_won']}\n"
-        #    f"Current ELO: {stats_lifetime['current_elo']:.0f}\n"
-            f"Draft Record: {stats_lifetime['team_drafts_won']}-{lifetime_losses}-{stats_lifetime['team_drafts_tied']}"
-            + (f" (Win %: {stats_lifetime['team_draft_win_percentage']:.1f}%)" if stats_lifetime['team_drafts_played'] > 0 else "")
-        ),
+        value=lifetime_value,
         inline=False
     )
     
