@@ -1352,7 +1352,7 @@ async def update_player_stats_and_elo(match_result):
                 # === Update perfect streaks (2-0 wins only) ===
 
                 # Determine if winner won 2-0
-                if winner_id == match_result.player1_id:
+                if match_result.winner_id == match_result.player1_id:
                     winner_wins = match_result.player1_wins
                     loser_wins = match_result.player2_wins
                 else:
