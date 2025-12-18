@@ -83,7 +83,7 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
 
                         cap_info = await get_players_bet_capping_preferences(all_players, guild_id=guild_id)
 
-                        await calculate_and_store_stakes(interaction, updated_session, cap_info)
+                        await calculate_and_store_stakes(guild_id, updated_session, cap_info)
 
                         stake_stmt = select(StakeInfo).where(StakeInfo.session_id == session_id)
                         stake_results = await db_session.execute(stake_stmt)
@@ -303,6 +303,8 @@ async def _handle_staked_draft_completion(interaction, db_session, session, embe
 
     try:
         await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=stake_view)
+    except discord.errors.NotFound:
+        logger.warning("Original draft message not found when updating for staked draft - likely deleted by automation.")
     except Exception as e:
         logger.error(f"Failed to update draft message: {e}")
 

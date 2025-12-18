@@ -33,6 +33,8 @@ from cube_views.CubeSelectionView import CubeUpdateSelectionView
 from loguru import logger
 
 from services.state_manager import state_manager
+from services.stake_service import calculate_and_store_stakes
+from preference_service import get_players_bet_capping_preferences
 
 
 
@@ -1308,6 +1310,12 @@ class PersistentView(discord.ui.View):
                         session.swiss_matches = state_to_save
                         logger.debug("Swiss pairings calculated: match_counter={}", match_counter)
 
+                    if session.session_type == "staked":
+                        logger.info("Calculating stakes for staked draft in create_rooms_pairings")
+                        all_players = session.team_a + session.team_b
+                        cap_info = await get_players_bet_capping_preferences(all_players, guild_id=str(guild.id))
+                        await calculate_and_store_stakes(str(guild.id), session, cap_info)
+
                     # Update player stats
                     if session.session_type in ("random", "staked"):
                         logger.debug("Updating player stats for session_id={}", session_id)
@@ -1752,22 +1760,30 @@ class MatchResultButton(Button):
     async def callback(self, interaction):
         await interaction.response.defer()
 
-        # Fetch player names and IDs
-        player1_name, player2_name = await fetch_match_details(self.bot, self.session_id, self.match_number)
-        
-        # Create a Select menu for reporting the result
-        match_result_select = MatchResultSelect(
-            match_number=self.match_number,
-            bot = self.bot,
-            session_id=self.session_id, 
-            player1_name=player1_name, 
-            player2_name=player2_name
-        )
+        try:
+            # Fetch player names and IDs
+            player1_name, player2_name = await fetch_match_details(self.bot, self.session_id, self.match_number)
+            
+            if not player1_name or not player2_name:
+                await interaction.followup.send("Error: Could not fetch match details.", ephemeral=True)
+                return
 
-        # Create and send a new View containing the Select menu
-        view = View(timeout=None)
-        view.add_item(match_result_select)
-        await interaction.followup.send("Please select the match result:", view=view, ephemeral=True)
+            # Create a Select menu for reporting the result
+            match_result_select = MatchResultSelect(
+                match_number=self.match_number,
+                bot = self.bot,
+                session_id=self.session_id, 
+                player1_name=player1_name, 
+                player2_name=player2_name
+            )
+
+            # Create and send a new View containing the Select menu
+            view = View(timeout=None)
+            view.add_item(match_result_select)
+            await interaction.followup.send("Please select the match result:", view=view, ephemeral=True)
+        except Exception as e:
+            logger.exception(f"Error in match result button: {e}")
+            await interaction.followup.send("An error occurred while fetching match details.", ephemeral=True)
 
 
 class MatchResultSelect(Select):
@@ -1788,39 +1804,60 @@ class MatchResultSelect(Select):
     async def callback(self, interaction):
         # Splitting the selected value to get the result details
         await interaction.response.defer()
-        player1_wins, player2_wins, winner_indicator = self.values[0].split('-')
-        player1_wins = int(player1_wins)
-        player2_wins = int(player2_wins)
-        winner_id = None  # Default to None in case of a draw
+        try:
+            player1_wins, player2_wins, winner_indicator = self.values[0].split('-')
+            player1_wins = int(player1_wins)
+            player2_wins = int(player2_wins)
+            winner_id = None  # Default to None in case of a draw
 
-        async with AsyncSessionLocal() as session:  # Use your session creation method here
-            async with session.begin():
-                # Fetch the match result entry from the database
-                stmt = select(MatchResult, DraftSession).join(DraftSession).where(
-                    MatchResult.session_id == self.session_id,
-                    MatchResult.match_number == self.match_number
-                )
-                result = await session.execute(stmt)
-                match_result, draft_session = result.first()
-                if match_result:
-                    # Update the match result based on the selection
-                    match_result.player1_wins = player1_wins
-                    match_result.player2_wins = player2_wins
-                    if winner_indicator != '0':  
-                        winner_id = match_result.player1_id if winner_indicator == '1' else match_result.player2_id
-                    match_result.winner_id = winner_id
+            draft_session = None
 
-                    await session.commit()  # Commit the changes to the database
+            async with AsyncSessionLocal() as session:  # Use your session creation method here
+                async with session.begin():
+                    # Fetch the match result entry from the database
+                    stmt = select(MatchResult, DraftSession).join(DraftSession).where(
+                        MatchResult.session_id == self.session_id,
+                        MatchResult.match_number == self.match_number
+                    )
+                    result = await session.execute(stmt)
+                    row = result.first()
                     
-                    if draft_session and (draft_session.session_type == "random" or draft_session.session_type == "staked"):
-                        await update_player_stats_and_elo(match_result)
-                   
-        await update_draft_summary_message(self.bot, self.session_id)
-        from livedrafts import update_live_draft_summary
-        await update_live_draft_summary(self.bot, self.session_id)
-        if draft_session.session_type != "test":
-            await check_and_post_victory_or_draw(self.bot, self.session_id)
-        await self.update_pairings_posting(interaction, self.bot, self.session_id, self.match_number) 
+                    if not row:
+                        await interaction.followup.send("Error: Match result or session not found.", ephemeral=True)
+                        return
+                        
+                    match_result, draft_session = row
+
+                    if match_result:
+                        # Update the match result based on the selection
+                        match_result.player1_wins = player1_wins
+                        match_result.player2_wins = player2_wins
+                        if winner_indicator != '0':  
+                            winner_id = match_result.player1_id if winner_indicator == '1' else match_result.player2_id
+                        match_result.winner_id = winner_id
+
+                        await session.commit()  # Commit the changes to the database
+                        
+                        if draft_session and (draft_session.session_type == "random" or draft_session.session_type == "staked"):
+                            await update_player_stats_and_elo(match_result)
+            
+            if draft_session:
+                await update_draft_summary_message(self.bot, self.session_id)
+                from livedrafts import update_live_draft_summary
+                await update_live_draft_summary(self.bot, self.session_id)
+                if draft_session.session_type != "test":
+                    await check_and_post_victory_or_draw(self.bot, self.session_id)
+                await self.update_pairings_posting(interaction, self.bot, self.session_id, self.match_number)
+            else:
+                 logger.error(f"Draft session data missing for session {self.session_id}")
+                 await interaction.followup.send("Error: Could not retrieve draft session data.", ephemeral=True)
+
+        except Exception as e:
+            logger.exception(f"Error in match result selection: {e}")
+            try:
+                await interaction.followup.send("An error occurred while updating the match result.", ephemeral=True)
+            except:
+                pass 
 
     async def update_pairings_posting(self, interaction, bot, draft_session_id, match_number):
         guild = bot.get_guild(int(interaction.guild_id))

@@ -7,7 +7,7 @@ from session import AsyncSessionLocal, StakeInfo
 from draft_organization.stake_calculator import calculate_stakes_with_strategy
 from config import get_config
 
-async def calculate_and_store_stakes(interaction, draft_session, cap_info=None):
+async def calculate_and_store_stakes(guild_id, draft_session, cap_info=None):
     """Calculate and store stakes for a staked draft session."""
     logger.info(f"Calculating stakes for session {draft_session.session_id}")
     async with AsyncSessionLocal() as db_session:
@@ -26,7 +26,7 @@ async def calculate_and_store_stakes(interaction, draft_session, cap_info=None):
                 cap_info = {record.player_id: getattr(record, 'is_capped', True) for record in stake_info_records}
             
             # Get configuration
-            config = get_config(interaction.guild_id)
+            config = get_config(guild_id)
             use_optimized = config.get("stakes", {}).get("use_optimized_algorithm", False)
             stake_multiple = config.get("stakes", {}).get("stake_multiple", 10)
             
