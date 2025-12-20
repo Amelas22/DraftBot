@@ -44,6 +44,7 @@ class DraftSession(Base):
     swiss_matches = Column(JSON)
     draft_data = Column(JSON)
     data_received = Column(Boolean, default=False)
+    spaces_object_key = Column(String(256), nullable=True)  # DigitalOcean Spaces object path
     cube = Column(String(128))
     live_draft_message_id = Column(String(64))
     min_stake = Column(Integer, default=10, server_default=text('10'))
