@@ -10,6 +10,9 @@ from .draft_logs import LogChannel, BackupLog, UserSubmission, PostSchedule
 from .sign_up_history import SignUpHistory
 from .win_streak_history import WinStreakHistory
 from .perfect_streak_history import PerfectStreakHistory
+from .quiz_session import QuizSession
+from .quiz_submission import QuizSubmission
+from .quiz_stats import QuizStats
 
 # Export all models
 __all__ = [
@@ -32,5 +35,8 @@ __all__ = [
     'PostSchedule',
     'SignUpHistory',
     'WinStreakHistory',
-    'PerfectStreakHistory'
+    'PerfectStreakHistory',
+    'QuizSession',
+    'QuizSubmission',
+    'QuizStats'
 ]
