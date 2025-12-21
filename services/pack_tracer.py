@@ -63,13 +63,19 @@ class PackTracer:
             PackTrace with picks in order, or None if not found
         """
         # Phase 2: Use seat-based tracing if seating is available
+        chain = None
         if self._indexer.has_seating:
             if debug:
                 logger.debug(f"Using seat-based tracing for pack {pack_num}")
             chain = self._trace_by_seats(pack_num, length, debug)
-        else:
+
+        # Fall back to booster matching if seat-based tracing failed
+        if not chain:
             if debug:
-                logger.debug(f"No seating available, using booster matching for pack {pack_num}")
+                if self._indexer.has_seating:
+                    logger.debug(f"Seat-based tracing failed, falling back to booster matching")
+                else:
+                    logger.debug(f"No seating available, using booster matching for pack {pack_num}")
             chain = self._trace_by_booster_matching(pack_num, length, debug)
 
         if chain:
@@ -127,13 +133,60 @@ class PackTracer:
                 current_seat = self._get_next_seat(current_seat, pack_num, num_players)
                 pick_num += 1
 
-            # If we found a complete chain, return it
+            # If we found a complete chain, validate it by checking booster overlap
             if len(chain) == length:
-                if debug:
-                    logger.debug(f"Seat-based trace: {[p.user_name for p in chain]}")
-                return chain
+                if self._validate_chain(chain, debug):
+                    if debug:
+                        logger.debug(f"Seat-based trace: {[p.user_name for p in chain]}")
+                    return chain
+                elif debug:
+                    logger.debug(f"Seat-based chain failed validation, trying next starting seat")
 
         return None
+
+    def _validate_chain(self, chain: List[Pick], debug: bool = False) -> bool:
+        """
+        Validate a traced chain by checking booster overlap.
+
+        For each consecutive pair of picks, verify that:
+        booster[n+1] should equal booster[n] minus picked_card[n]
+        (allowing for 1-2 card differences due to potential swaps)
+
+        Args:
+            chain: List of picks to validate
+            debug: Enable debug logging
+
+        Returns:
+            True if chain is valid, False otherwise
+        """
+        for i in range(len(chain) - 1):
+            current = chain[i]
+            next_pick = chain[i + 1]
+
+            # Calculate expected booster for next pick
+            expected = set(current.booster_ids) - {current.picked_id}
+            actual = set(next_pick.booster_ids)
+
+            # Check overlap - should be nearly identical (allowing 1-2 card swaps)
+            overlap = expected & actual
+            expected_overlap = len(expected)  # Should be all cards except picked
+            actual_overlap = len(overlap)
+
+            # Allow up to 2 cards difference for swaps/burns
+            if abs(expected_overlap - actual_overlap) > 2:
+                if debug:
+                    missing = expected - actual
+                    extra = actual - expected
+                    logger.debug(
+                        f"Chain validation failed at step {i}->{i+1}: "
+                        f"Expected {expected_overlap} overlap, got {actual_overlap}. "
+                        f"Missing: {len(missing)} cards, Extra: {len(extra)} cards"
+                    )
+                return False
+
+        if debug:
+            logger.debug(f"Chain validation passed for {len(chain)} picks")
+        return True
 
     def _get_next_seat(self, current_seat: int, pack_num: int, num_players: int) -> int:
         """
