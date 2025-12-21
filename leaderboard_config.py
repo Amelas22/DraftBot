@@ -91,6 +91,12 @@ CATEGORY_CONFIGS = {
             ("🔥🔥 (ACTIVE)" if p.get('is_active') else
              (_format_ended_streak(p) if p.get('ended_at') else ""))
         )
+    },
+    "quiz_points": {
+        "title": "Quiz Points Leaderboard",
+        "description_template": "Players with the most quiz points (min {quizzes} quizzes completed)",
+        "color": discord.Color.from_rgb(138, 43, 226),  # Blue-violet
+        "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['total_points']} points ({p['total_quizzes']} quizzes, {p['accuracy_percentage']:.1f}% accuracy)"
     }
 }
 

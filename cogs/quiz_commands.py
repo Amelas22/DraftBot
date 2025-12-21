@@ -26,42 +26,42 @@ class QuizCommands(commands.Cog):
         logger.info(f"Post quiz command received from user {ctx.author.id} in guild {ctx.guild.id}")
         await ctx.response.defer(ephemeral=True)  # Mod sees ephemeral confirmation
 
-        # TESTING: Use a specific draft ID for consistent testing
-        # TODO: Remove this and restore random draft selection for production
-        HARDCODED_DRAFT_ID = "38WEXI13"  # PowerLSV draft from 2025-07-10
+        # Select a random draft from the last year for this guild
+        one_year_ago = datetime.now() - timedelta(days=365)
 
         async with db_session() as session:
             stmt = select(DraftSession).where(
-                DraftSession.draft_id == HARDCODED_DRAFT_ID
+                and_(
+                    DraftSession.guild_id == str(ctx.guild.id),
+                    DraftSession.spaces_object_key.isnot(None),
+                    DraftSession.draft_start_time >= one_year_ago
+                )
             )
             result = await session.execute(stmt)
-            selected_draft = result.scalar_one_or_none()
+            eligible_drafts = result.scalars().all()
 
-        if not selected_draft:
-            # Fallback: try to find any recent draft with data_received
-            logger.warning(f"Hardcoded draft {HARDCODED_DRAFT_ID} not found, trying fallback")
-            async with db_session() as session:
-                stmt = select(DraftSession).where(
-                    and_(
-                        DraftSession.data_received == True,
-                        DraftSession.session_stage == "teams"
-                    )
-                ).order_by(DraftSession.draft_start_time.desc()).limit(1)
-                result = await session.execute(stmt)
-                selected_draft = result.scalar_one_or_none()
-
-        if not selected_draft:
+        if not eligible_drafts:
             await ctx.followup.send(
-                "No eligible drafts found for testing.",
+                "No eligible drafts found from the last year in this guild.\n"
+                "Drafts must have stored data in Spaces.",
                 ephemeral=True
             )
             return
 
-        logger.info(f"Selected draft {selected_draft.session_id} (cube: {selected_draft.cube})")
+        # Randomly select one draft from the eligible ones
+        selected_draft = random.choice(eligible_drafts)
+        logger.info(f"Selected draft {selected_draft.session_id} (cube: {selected_draft.cube}) from {len(eligible_drafts)} eligible drafts")
 
         # 2. Load draft analysis
         try:
             analysis = await DraftAnalysis.from_session(selected_draft)
+            if analysis is None:
+                logger.error(f"DraftAnalysis.from_session returned None for draft {selected_draft.session_id}")
+                await ctx.followup.send(
+                    "Failed to load draft data (no analysis data available). Please try again.",
+                    ephemeral=True
+                )
+                return
         except Exception as e:
             logger.error(f"Failed to load draft analysis: {e}", exc_info=True)
             await ctx.followup.send(

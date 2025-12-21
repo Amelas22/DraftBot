@@ -1,6 +1,6 @@
 import discord
 from datetime import datetime
-from .leaderboard_service import get_leaderboard_data, get_minimum_requirements, STREAK_MINIMUMS, PERFECT_STREAK_MINIMUMS
+from .leaderboard_service import get_leaderboard_data, get_minimum_requirements, STREAK_MINIMUMS, PERFECT_STREAK_MINIMUMS, QUIZ_MINIMUMS
 from leaderboard_config import CATEGORY_CONFIGS as LEADERBOARD_CATEGORIES
 
 # Default leaderboard timeframe display names
@@ -51,6 +51,10 @@ async def create_leaderboard_embed(guild_id, category="draft_record", limit=20, 
         # Use perfect streak-specific minimums
         min_streak = PERFECT_STREAK_MINIMUMS.get(effective_timeframe, 8)
         description = category_config['description_template'].format(streak_min=min_streak)
+    elif category == "quiz_points":
+        # Use quiz-specific minimums
+        min_quizzes = QUIZ_MINIMUMS['quizzes']
+        description = category_config['description_template'].format(quizzes=min_quizzes)
     else:
         description = category_config['description_template'].format(**min_requirements)
     
