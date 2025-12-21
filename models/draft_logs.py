@@ -10,7 +10,8 @@ class LogChannel(Base):
     guild_id = Column(Text, nullable=False)
     last_post = Column(TIMESTAMP, nullable=True)
     time_zone = Column(Text, default="UTC", server_default=text("'UTC'"))
-    
+    enabled = Column(Boolean, default=True, server_default=text('1'))
+
     # Relationships
     backup_logs = relationship("BackupLog", back_populates="channel", cascade="all, delete-orphan")
     user_submissions = relationship("UserSubmission", back_populates="channel", cascade="all, delete-orphan")

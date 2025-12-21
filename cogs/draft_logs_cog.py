@@ -162,23 +162,41 @@ class DraftLogsCog(commands.Cog):
     ):
         """
         List all posting schedules for a channel
-        
+
         Parameters
         ----------
         channel: The channel to list schedules for
         """
         await ctx.defer(ephemeral=True)
-        
+
+        # Get the LogChannel to check enabled status
+        async with db_session() as session:
+            stmt = select(LogChannel).where(LogChannel.channel_id == str(channel.id))
+            result = await session.execute(stmt)
+            log_channel = result.scalar_one_or_none()
+
+            if not log_channel:
+                await ctx.followup.send(
+                    f"❌ {channel.mention} is not set up for draft logs. Use `/setup_draft_logs` first.",
+                    ephemeral=True
+                )
+                return
+
+            enabled_status = "✅ Enabled" if log_channel.enabled else "🔴 Disabled"
+
         schedules = await self.get_channel_schedules(channel.id)
-        
+
         if not schedules:
-            await ctx.followup.send(f"No schedules found for {channel.mention}. Add one with `/add_log_schedule`.", ephemeral=True)
+            await ctx.followup.send(
+                f"**Status:** {enabled_status}\n\nNo schedules found for {channel.mention}. Add one with `/add_log_schedule`.",
+                ephemeral=True
+            )
             return
-        
+
         schedule_list = "\n".join([f"• ID: {schedule[0]} - Time: {schedule[1]}" for schedule in schedules])
-        
+
         await ctx.followup.send(
-            f"Posting schedules for {channel.mention}:\n{schedule_list}",
+            f"**Status:** {enabled_status}\n\nPosting schedules for {channel.mention}:\n{schedule_list}",
             ephemeral=True
         )
 
@@ -542,6 +560,99 @@ class DraftLogsCog(commands.Cog):
         
         await ctx.followup.send(f"✅ Reset {log_type} logs for {channel.mention}", ephemeral=True)
 
+    @discord.slash_command(
+        name="enable_draft_logs",
+        description="Enable automatic draft log posting for a channel"
+    )
+    @commands.has_permissions(manage_channels=True)
+    async def enable_draft_logs(
+        self,
+        ctx,
+        channel: Optional[discord.TextChannel] = None
+    ):
+        """
+        Enable automatic draft log posting for a channel
+
+        Parameters
+        ----------
+        channel: Channel to enable (defaults to current channel)
+        """
+        await ctx.defer(ephemeral=True)
+
+        # Use current channel if not specified
+        if channel is None:
+            channel = ctx.channel
+
+        async with db_session() as session:
+            # Check if channel is set up
+            stmt = select(LogChannel).where(LogChannel.channel_id == str(channel.id))
+            result = await session.execute(stmt)
+            log_channel = result.scalar_one_or_none()
+
+            if not log_channel:
+                await ctx.followup.send(
+                    f"❌ {channel.mention} is not set up for draft logs. Use `/setup_draft_logs` first.",
+                    ephemeral=True
+                )
+                return
+
+            # Enable the channel
+            log_channel.enabled = True
+            session.add(log_channel)
+            await session.commit()
+
+        await ctx.followup.send(
+            f"✅ Draft log posting enabled for {channel.mention}",
+            ephemeral=True
+        )
+
+    @discord.slash_command(
+        name="disable_draft_logs",
+        description="Disable automatic draft log posting for a channel"
+    )
+    @commands.has_permissions(manage_channels=True)
+    async def disable_draft_logs(
+        self,
+        ctx,
+        channel: Optional[discord.TextChannel] = None
+    ):
+        """
+        Disable automatic draft log posting for a channel
+
+        Parameters
+        ----------
+        channel: Channel to disable (defaults to current channel)
+        """
+        await ctx.defer(ephemeral=True)
+
+        # Use current channel if not specified
+        if channel is None:
+            channel = ctx.channel
+
+        async with db_session() as session:
+            # Check if channel is set up
+            stmt = select(LogChannel).where(LogChannel.channel_id == str(channel.id))
+            result = await session.execute(stmt)
+            log_channel = result.scalar_one_or_none()
+
+            if not log_channel:
+                await ctx.followup.send(
+                    f"❌ {channel.mention} is not set up for draft logs.",
+                    ephemeral=True
+                )
+                return
+
+            # Disable the channel
+            log_channel.enabled = False
+            session.add(log_channel)
+            await session.commit()
+
+        await ctx.followup.send(
+            f"🔴 Draft log posting disabled for {channel.mention}. "
+            f"Schedules are preserved and can be re-enabled with `/enable_draft_logs`.",
+            ephemeral=True
+        )
+
     async def post_draft_log(self, channel_id):
         """Post a draft log to the specified channel"""
         async with db_session() as session:
@@ -755,10 +866,14 @@ class DraftLogsCog(commands.Cog):
                 
                 for log_channel, schedule in channel_schedules:
                     try:
+                        # Skip disabled channels
+                        if not log_channel.enabled:
+                            continue
+
                         # Get current time in the channel's time zone
                         tz = pytz.timezone(log_channel.time_zone)
                         current_time = datetime.now(tz).strftime("%H:%M")
-                        
+
                         # Check if it's time to post
                         if current_time == schedule.post_time:
                             logger.info(f"Posting draft log in channel {log_channel.channel_id} at {current_time} {log_channel.time_zone}")
