@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 import asyncio
 from datetime import datetime
 from loguru import logger
@@ -10,13 +10,13 @@ from database.db_session import db_session
 from models.draft_logs import LogChannel, BackupLog, UserSubmission, PostSchedule
 
 class DraftLogsCog(commands.Cog):
+    """
+    Draft logs cog - handles draft log posting and management.
+    Note: Scheduling moved to unified_scheduler_cog.py
+    """
     def __init__(self, bot):
         self.bot = bot
         logger.info("Draft Logs cog initialized")
-        self.check_and_post.start()
-    
-    def cog_unload(self):
-        self.check_and_post.cancel()
 
     @discord.slash_command(
         name="setup_draft_logs",
@@ -849,40 +849,6 @@ class DraftLogsCog(commands.Cog):
             return f"{wins}-{losses}"
         else:
             return None
-            
-    @tasks.loop(minutes=1)
-    async def check_and_post(self):
-        """Check if it's time to post a log in any channels"""
-        try:
-            await self.bot.wait_until_ready()
-            
-            async with db_session() as session:
-                # Get all log channels and their schedules
-                stmt = select(LogChannel, PostSchedule).join(
-                    PostSchedule, LogChannel.channel_id == PostSchedule.channel_id
-                )
-                result = await session.execute(stmt)
-                channel_schedules = result.all()
-                
-                for log_channel, schedule in channel_schedules:
-                    try:
-                        # Skip disabled channels
-                        if not log_channel.enabled:
-                            continue
-
-                        # Get current time in the channel's time zone
-                        tz = pytz.timezone(log_channel.time_zone)
-                        current_time = datetime.now(tz).strftime("%H:%M")
-
-                        # Check if it's time to post
-                        if current_time == schedule.post_time:
-                            logger.info(f"Posting draft log in channel {log_channel.channel_id} at {current_time} {log_channel.time_zone}")
-                            await self.post_draft_log(log_channel.channel_id)
-                    except Exception as e:
-                        logger.error(f"Error posting scheduled log to channel {log_channel.channel_id}: {e}")
-                        
-        except Exception as e:
-            logger.error(f"Error in check_and_post task: {e}")
 
 def setup(bot):
     bot.add_cog(DraftLogsCog(bot))
