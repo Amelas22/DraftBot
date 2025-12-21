@@ -13,6 +13,7 @@ from .perfect_streak_history import PerfectStreakHistory
 from .quiz_session import QuizSession
 from .quiz_submission import QuizSubmission
 from .quiz_stats import QuizStats
+from .quiz_scheduling import QuizChannel, QuizSchedule
 
 # Export all models
 __all__ = [
@@ -38,5 +39,7 @@ __all__ = [
     'PerfectStreakHistory',
     'QuizSession',
     'QuizSubmission',
-    'QuizStats'
+    'QuizStats',
+    'QuizChannel',
+    'QuizSchedule'
 ]
