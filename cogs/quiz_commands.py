@@ -177,7 +177,12 @@ class QuizCommands(commands.Cog):
                 logger.warning(f"Could not find user {first_pick_data.user_name} in draft data")
                 return None
 
-            # Create a modified draft data that shows the pack but NOT the pick
+            # Duplicate the first card and mark the duplicate as picked
+            # This shows all 15 real cards while hiding the duplicate
+            duplicate_card_id = first_pick_data.booster_ids[0]  # Duplicate first card
+            booster_with_duplicate = first_pick_data.booster_ids + [duplicate_card_id]
+
+            # Create a modified draft data that shows all 15 cards by picking the duplicate
             modified_draft_data = {
                 "sessionID": draft_data["sessionID"],
                 "time": draft_data["time"],
@@ -189,8 +194,8 @@ class QuizCommands(commands.Cog):
                             {
                                 "packNum": 0,
                                 "pickNum": 0,
-                                "booster": first_pick_data.booster_ids,
-                                "pick": []  # Empty array = no card marked as picked
+                                "booster": booster_with_duplicate,  # 16 cards (15 real + 1 duplicate)
+                                "pick": [15]  # Pick the duplicate at index 15 (last card)
                             }
                         ]
                     }
