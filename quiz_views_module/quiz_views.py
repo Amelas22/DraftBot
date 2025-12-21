@@ -17,7 +17,10 @@ TEAM_BONUS = 1  # Points for correct card picked by the right team, wrong seat
 class QuizCardSelect(discord.ui.Select):
     """Custom Select for card selection with interaction acknowledgment"""
 
-    def __init__(self, pick_number: int, pick_user_name: str, card_options: list, row: int):
+    def __init__(self, pick_number: int, pick_user_name: str, card_options: list, row: int, parent_view):
+        self.pick_number = pick_number
+        self.parent_view = parent_view
+
         options = [
             discord.SelectOption(
                 label=name[:100],  # Truncate if needed
@@ -28,14 +31,18 @@ class QuizCardSelect(discord.ui.Select):
 
         super().__init__(
             placeholder=f"Pick {pick_number + 1}: {pick_user_name}",
-            custom_id=f"quiz_pick_{pick_number}",
             options=options,
             row=row
         )
+        # Discord auto-generates custom_id for ephemeral views
 
     async def callback(self, interaction: discord.Interaction):
-        """Acknowledge the selection interaction"""
-        # Just acknowledge the interaction - the actual processing happens on submit
+        """Store the selection and acknowledge the interaction"""
+        # Store the selected value in the parent view
+        if self.values:
+            self.parent_view.selections[self.pick_number] = self.values[0]
+            logger.debug(f"User {interaction.user.id} selected card for pick {self.pick_number + 1}: {self.values[0]}")
+
         await interaction.response.defer()
 
 
@@ -107,6 +114,8 @@ class QuizGuessView(discord.ui.View):
         self.analysis = analysis
         self.pack_trace = pack_trace
         self.user = user
+        self.selections = {}  # Store user selections {pick_number: card_id}
+        logger.debug(f"Created new QuizGuessView for user {user.id} (quiz {quiz_id})")
 
         # Get card options (all 15 cards from first pick)
         first_pick = pack_trace.picks[0]
@@ -122,7 +131,8 @@ class QuizGuessView(discord.ui.View):
                 pick_number=i,
                 pick_user_name=pick.user_name,
                 card_options=card_options,
-                row=i
+                row=i,
+                parent_view=self
             )
             self.add_item(select)
 
@@ -130,23 +140,35 @@ class QuizGuessView(discord.ui.View):
         label="Submit Guesses",
         style=discord.ButtonStyle.success,
         row=4  # Place in last row (after 4 dropdowns)
+        # Note: custom_id for buttons in ephemeral views doesn't need to be unique per user
     )
     async def submit_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         """Process submission and show results"""
         await interaction.response.defer(ephemeral=True)
 
-        # Extract guesses from dropdowns (filter to only Select components)
-        dropdowns = [child for child in self.children if isinstance(child, QuizCardSelect)]
+        # Check if view has any selections at all (detects stale/restarted views)
+        if not self.selections:
+            logger.warning(f"User {interaction.user.id} submitted with no selections stored (possible bot restart or timeout)")
+            await interaction.followup.send(
+                "❌ Your quiz session has expired or was lost (possibly due to bot restart).\n\n"
+                "Please click **Make Your Guesses** again to start a fresh quiz!",
+                ephemeral=True
+            )
+            return
 
+        # Check that all 4 picks have been selected using stored selections
         guesses = []
-        for i, dropdown in enumerate(dropdowns):
-            if not dropdown.values:
+        for i in range(4):
+            if i not in self.selections:
+                logger.warning(f"User {interaction.user.id} missing selection for pick {i+1} (has {len(self.selections)} selections)")
                 await interaction.followup.send(
                     f"Please select a card for Pick {i+1}!",
                     ephemeral=True
                 )
                 return
-            guesses.append(dropdown.values[0])
+            guesses.append(self.selections[i])
+
+        logger.info(f"User {interaction.user.id} submitting guesses: {guesses}")
 
         # Load correct answers from database
         async with db_session() as session:
@@ -290,6 +312,25 @@ class QuizGuessView(discord.ui.View):
                   f"**Best Score:** {stats.highest_quiz_score} points\n"
                   f"**Accuracy:** {stats.accuracy_percentage:.1f}% (exact matches)\n"
                   f"**Perfect Streak:** {stats.current_perfect_streak} (longest: {stats.longest_perfect_streak})",
+            inline=False
+        )
+
+        # Generate shareable text with emoji indicators
+        emoji_line = ""
+        for is_correct, points in zip(pick_results, pick_points):
+            if is_correct:
+                emoji_line += "✅"  # Exact match
+            elif points == TEAM_BONUS:
+                emoji_line += "🔀"  # Team bonus (twisted rightwards arrows)
+            else:
+                emoji_line += "❌"  # Incorrect
+
+        share_text = f"🎯 Draft Pick Quiz\n{emoji_line} {total_points} pts"
+
+        # Add share field with code block for easy copying
+        embed.add_field(
+            name="📤 Share Your Result",
+            value=f"```\n{share_text}\n```\n",
             inline=False
         )
 
