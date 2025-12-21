@@ -440,10 +440,10 @@ class DraftSetupManager:
             filename = f'{self.cube_id}-{start_time}-{draft_id}.json'
             
             # Upload the JSON data
-            success, object_path = await do_helper.upload_json(draft_data, folder, filename)
-            
-            if success:
-                self.logger.info(f"Draft log data uploaded to DigitalOcean Space: {object_path}")
+            result = await do_helper.upload_json(draft_data, folder, filename)
+
+            if result.success:
+                self.logger.info(f"Draft log data uploaded to DigitalOcean Space: {result.object_path}")
                 
                 # If upload successful, also generate and upload MagicProTools format logs
                 await self.process_draft_logs_for_magicprotools(draft_data, do_helper)

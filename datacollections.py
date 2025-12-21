@@ -122,14 +122,16 @@ class DraftLogManager:
                 self.fetch_attempts += 1
                 return False
 
-    async def save_draft_log_data(self, draft_data):    
+    async def save_draft_log_data(self, draft_data):
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
-                upload_successful = await self.save_to_digitalocean_spaces(draft_data)
+                upload_successful, object_key = await self.save_to_digitalocean_spaces(draft_data)
                 stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
                 draft_session = await db_session.scalar(stmt)
-                
+
                 if upload_successful and draft_session:
+                    # Store the Spaces object key for easy retrieval
+                    draft_session.spaces_object_key = object_key
                     draft_session.data_received = True
                     
                     # Extract and store first picks for each user and pack
@@ -172,8 +174,12 @@ class DraftLogManager:
                             self.discord_client.loop.create_task(self.check_for_victory_message(draft_data))
                         else:
                             logger.info(f"Draft {self.draft_id} log data saved but can't determine when to post links (missing client or guild)")
-                
-                elif draft_session:
+
+                # Save draft_data to database regardless of upload success for:
+                # 1. Local testing when Spaces config missing
+                # 2. Quiz generation which reads from DB
+                # 3. Backup in case Spaces data is lost
+                if draft_session:
                     draft_session.draft_data = draft_data
                     logger.info(f"Draft log data saved in database for {self.draft_id}; SessionID: {self.session_id}")
                 else:
@@ -339,14 +345,14 @@ class DraftLogManager:
                     ACL='public-read'
                 )
                 logger.info(f"Draft log data uploaded to DigitalOcean Space: {object_name}")
-                
+
                 # If upload successful, also generate and upload MagicProTools format logs
                 await self.process_draft_logs_for_magicprotools(draft_data, s3_client, DO_SPACES_BUCKET)
-                
-                return True
+
+                return True, object_name  # Return object key for storage
             except Exception as e:
                 logger.error(f"Error uploading to DigitalOcean Space: {e}")
-                return False
+                return False, None
 
     async def process_draft_logs_for_magicprotools(self, draft_data, s3_client, bucket_name):
         """Process the draft log and generate formatted logs for each player."""
