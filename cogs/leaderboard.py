@@ -129,7 +129,7 @@ class LeaderboardCog(commands.Cog):
             await ctx.respond("✅")
             
         except Exception as e:
-            logger.error(f"Error processing leaderboards: {e}")
+            logger.error(f"Error processing leaderboards: {e}", exc_info=True)
             await ctx.respond(f"Error creating leaderboards: {str(e)}")
 
     async def _get_leaderboard_setup(self, ctx, guild_id):
@@ -260,7 +260,7 @@ class LeaderboardCog(commands.Cog):
             except discord.NotFound:
                 logger.warning(f"Message {message_id} for {category} not found, will create new one")
             except Exception as e:
-                logger.error(f"Error updating {category} message: {e}")
+                logger.error(f"Error updating {category} message: {e}", exc_info=True)
         
         # Send new message if needed
         if not message_updated:
@@ -277,7 +277,7 @@ class LeaderboardCog(commands.Cog):
                     await session.commit()
                 logger.info(f"Created new {category} message")
             except Exception as e:
-                logger.error(f"Error creating new {category} message: {e}")
+                logger.error(f"Error creating new {category} message: {e}", exc_info=True)
     
     async def _check_missing_columns(self, session, leaderboard_message):
         """Check if any required columns are missing from the leaderboard_messages table"""

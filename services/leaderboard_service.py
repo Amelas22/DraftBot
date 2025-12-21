@@ -6,6 +6,7 @@ from database.db_session import db_session
 from models.win_streak_history import WinStreakHistory
 from models.perfect_streak_history import PerfectStreakHistory
 from models.player import PlayerStats
+from models import QuizStats, QuizSubmission
 
 # Win Streak minimum requirements by timeframe
 STREAK_MINIMUMS = {
@@ -22,6 +23,11 @@ PERFECT_STREAK_MINIMUMS = {
     '30d': 4,
     '90d': 5,
     'lifetime': 6
+}
+
+# Quiz minimum requirements
+QUIZ_MINIMUMS = {
+    'quizzes': 3  # Minimum quizzes to appear on leaderboard
 }
 
 def ensure_datetime(date_value):
@@ -369,6 +375,10 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
             # Use dedicated function for perfect streak queries (2-0 wins only)
             sorted_players = await get_perfect_streak_leaderboard_data(guild_id, timeframe, limit, session)
 
+        elif category == "quiz_points":
+            # Use dedicated function for quiz stats (doesn't need draft aggregation)
+            sorted_players = await get_quiz_points_leaderboard_data(guild_id, timeframe, limit, session)
+
         else:
             # Default to drafts_played if category not recognized
             sorted_players = sorted(players_list, key=lambda p: p["drafts_played"], reverse=True)
@@ -663,3 +673,100 @@ async def get_perfect_streak_leaderboard_data(guild_id, timeframe, limit, sessio
 
     # Apply limit
     return sorted_players[:limit]
+
+
+async def get_quiz_points_leaderboard_data(guild_id, timeframe, limit, session):
+    """
+    Get quiz points leaderboard data with true time-based point aggregation.
+    Ranks players by total quiz points earned within the timeframe.
+    """
+    min_quizzes = QUIZ_MINIMUMS['quizzes']
+
+    # Calculate date cutoff for timeframe
+    if timeframe == "lifetime":
+        cutoff_date = None
+    elif timeframe == "90d":
+        cutoff_date = datetime.now() - timedelta(days=90)
+    elif timeframe == "30d":
+        cutoff_date = datetime.now() - timedelta(days=30)
+    elif timeframe == "14d":
+        cutoff_date = datetime.now() - timedelta(days=14)
+    else:
+        cutoff_date = None
+
+    if cutoff_date:
+        # Time-based filtering: Query QuizSubmission and aggregate
+        stmt = select(QuizSubmission).join(
+            QuizStats,
+            (QuizSubmission.player_id == QuizStats.player_id) &
+            (QuizStats.guild_id == guild_id)
+        ).where(
+            QuizSubmission.submitted_at >= cutoff_date
+        )
+
+        result = await session.execute(stmt)
+        submissions = result.scalars().all()
+
+        # Aggregate by player
+        player_aggregates = {}
+        for sub in submissions:
+            if sub.player_id not in player_aggregates:
+                player_aggregates[sub.player_id] = {
+                    "player_id": sub.player_id,
+                    "display_name": sub.display_name,
+                    "total_points": 0,
+                    "total_quizzes": 0,
+                    "total_picks_correct": 0,
+                    "total_picks_attempted": 0,
+                    "highest_quiz_score": 0
+                }
+
+            agg = player_aggregates[sub.player_id]
+            agg["total_points"] += sub.points_earned
+            agg["total_quizzes"] += 1
+            agg["total_picks_correct"] += sub.correct_count
+            agg["total_picks_attempted"] += 4
+            if sub.points_earned > agg["highest_quiz_score"]:
+                agg["highest_quiz_score"] = sub.points_earned
+
+        # Calculate derived stats and filter by minimum
+        leaderboard_data = []
+        for player_id, agg in player_aggregates.items():
+            if agg["total_quizzes"] >= min_quizzes:
+                agg["average_points_per_quiz"] = agg["total_points"] / agg["total_quizzes"]
+                agg["accuracy_percentage"] = (agg["total_picks_correct"] / agg["total_picks_attempted"] * 100) if agg["total_picks_attempted"] > 0 else 0
+                # Note: Streaks aren't time-scoped, so we don't include them for time-based views
+                agg["current_perfect_streak"] = 0
+                agg["longest_perfect_streak"] = 0
+                leaderboard_data.append(agg)
+
+        # Sort by total points
+        leaderboard_data.sort(key=lambda p: p["total_points"], reverse=True)
+
+    else:
+        # Lifetime: Use QuizStats (already aggregated)
+        stmt = select(QuizStats).where(
+            QuizStats.guild_id == guild_id,
+            QuizStats.total_quizzes >= min_quizzes
+        ).order_by(QuizStats.total_points.desc())
+
+        result = await session.execute(stmt)
+        quiz_stats = result.scalars().all()
+
+        # Convert to leaderboard format
+        leaderboard_data = []
+        for stats in quiz_stats:
+            leaderboard_data.append({
+                "player_id": stats.player_id,
+                "display_name": stats.display_name,
+                "total_points": stats.total_points,
+                "total_quizzes": stats.total_quizzes,
+                "accuracy_percentage": stats.accuracy_percentage,
+                "average_points_per_quiz": stats.average_points_per_quiz,
+                "highest_quiz_score": stats.highest_quiz_score,
+                "current_perfect_streak": stats.current_perfect_streak,
+                "longest_perfect_streak": stats.longest_perfect_streak
+            })
+
+    # Apply limit
+    return leaderboard_data[:limit]
