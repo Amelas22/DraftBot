@@ -3,7 +3,7 @@ from datetime import datetime
 from loguru import logger
 from sqlalchemy import select, update, and_
 from database.db_session import db_session
-from models import QuizSession, QuizSubmission, QuizStats
+from models import QuizSession, QuizSubmission, QuizStats, DraftSession
 from services.draft_analysis import DraftAnalysis
 from models.draft_domain import PackTrace
 
@@ -50,13 +50,67 @@ class QuizPublicView(discord.ui.View):
     """
     Public view with persistent 'Make Your Guesses' button.
     Attached to the quiz message, survives bot restarts.
+    Compatible with sticky message system.
     """
 
-    def __init__(self, quiz_id: str, analysis: DraftAnalysis, pack_trace: PackTrace):
+    def __init__(self, quiz_id: str, analysis: DraftAnalysis = None, pack_trace: PackTrace = None):
         super().__init__(timeout=None)  # Persistent across restarts
         self.quiz_id = quiz_id
         self.analysis = analysis
         self.pack_trace = pack_trace
+
+    async def _load_quiz_data(self) -> bool:
+        """
+        Lazy load analysis and pack_trace from database.
+        Returns True if successful, False otherwise.
+        """
+        if self.analysis is not None and self.pack_trace is not None:
+            return True  # Already loaded
+
+        async with db_session() as session:
+            stmt = select(QuizSession).where(QuizSession.quiz_id == self.quiz_id)
+            result = await session.execute(stmt)
+            quiz_session = result.scalar_one_or_none()
+
+            if not quiz_session:
+                logger.error(f"QuizSession {self.quiz_id} not found")
+                return False
+
+            stmt = select(DraftSession).where(DraftSession.session_id == quiz_session.draft_session_id)
+            result = await session.execute(stmt)
+            draft_session = result.scalar_one_or_none()
+
+        if not draft_session:
+            logger.error(f"DraftSession not found for quiz {self.quiz_id}")
+            return False
+
+        try:
+            self.analysis = await DraftAnalysis.from_session(draft_session)
+            if self.analysis:
+                self.pack_trace = self.analysis.trace_pack(pack_num=0, length=4)
+                return self.pack_trace is not None
+        except Exception as e:
+            logger.error(f"Error loading quiz data for {self.quiz_id}: {e}", exc_info=True)
+
+        return False
+
+    def to_metadata(self) -> dict:
+        """Convert view properties to a dictionary for JSON storage (sticky message system)."""
+        return {
+            "quiz_id": self.quiz_id,
+            "view_type": "quiz"
+        }
+
+    @classmethod
+    async def from_metadata(cls, bot, metadata: dict):
+        """
+        Recreate QuizPublicView from stored metadata (sticky message system).
+        Reloads quiz data from database and regenerates analysis/pack_trace.
+        """
+        quiz_id = metadata.get("quiz_id")
+        view = cls(quiz_id=quiz_id)
+        await view._load_quiz_data()  # Load data (may fail silently)
+        return view
 
     @discord.ui.button(
         label="Make Your Guesses",
@@ -66,6 +120,14 @@ class QuizPublicView(discord.ui.View):
     async def make_guesses_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         """User clicks to participate - show ephemeral guess view"""
         user_id = str(interaction.user.id)
+
+        # Lazy load quiz data if not available (happens after sticky message repost)
+        if not await self._load_quiz_data():
+            await interaction.response.send_message(
+                "Error: Could not load quiz data. Please try again later.",
+                ephemeral=True
+            )
+            return
 
         # Check if user already submitted
         async with db_session() as session:

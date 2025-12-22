@@ -10,15 +10,20 @@ from trueskill import Rating, rate_1vs1
 from discord.ui import View
 from league import ChallengeView
 from models.leaderboard_message import LeaderboardMessage
+from models.win_streak_history import WinStreakHistory
+from models.perfect_streak_history import PerfectStreakHistory
+from models import QuizSession
+from quiz_views_module.quiz_views import QuizPublicView
+from services.draft_analysis import DraftAnalysis
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
 from services.draft_setup_manager import DraftSetupManager
 from loguru import logger
 from config import is_cleanup_exempt
-from datetime import datetime
-from models.win_streak_history import WinStreakHistory
-from models.perfect_streak_history import PerfectStreakHistory
 from leaderboard_config import AUTO_UPDATE_CATEGORIES
+
+# Configuration constants
+QUIZ_REREGISTER_DAYS = 7  # Re-register quiz views from last 7 days
 
 flags = {}
 locks = {}
@@ -1621,6 +1626,41 @@ async def re_register_views(bot):
                                 print(f"Pairing message or channel not found for pairing message ID: {pairing_message_id}")
                             except Exception as e:
                                 print(f"Failed to re-register view for pairing message ID: {pairing_message_id}, error: {e}")
+
+        # Re-register quiz views for all recent quizzes
+        # Get all quiz sessions from the last N days
+        cutoff_date = current_time - timedelta(days=QUIZ_REREGISTER_DAYS)
+        async with db_session.begin():
+            stmt = select(QuizSession).where(
+                QuizSession.posted_at >= cutoff_date
+            ).order_by(desc(QuizSession.posted_at))
+            result = await db_session.execute(stmt)
+            quiz_sessions = result.scalars().all()
+
+        logger.info(f"Found {len(quiz_sessions)} recent quiz sessions to re-register")
+
+        for quiz_session in quiz_sessions:
+            if not quiz_session.message_id or not quiz_session.channel_id:
+                continue
+
+            channel = bot.get_channel(int(quiz_session.channel_id))
+            if not channel:
+                continue
+
+            try:
+                message = await channel.fetch_message(int(quiz_session.message_id))
+
+                # Use from_metadata to recreate view (reuses existing logic)
+                metadata = {"quiz_id": quiz_session.quiz_id, "view_type": "quiz"}
+                view = await QuizPublicView.from_metadata(bot, metadata)
+
+                await message.edit(view=view)
+                logger.info(f"Re-registered quiz view for quiz: {quiz_session.quiz_id}")
+
+            except discord.NotFound:
+                logger.warning(f"Quiz message or channel not found for quiz: {quiz_session.quiz_id}")
+            except Exception as e:
+                logger.error(f"Failed to re-register quiz view: {quiz_session.quiz_id}, error: {e}", exc_info=True)
 
 async def calculate_player_standings(limit=None):
     time = datetime.now()
