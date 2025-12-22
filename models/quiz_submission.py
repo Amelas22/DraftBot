@@ -31,5 +31,25 @@ class QuizSubmission(Base):
     # Timestamp
     submitted_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
 
+    @property
+    def pick_results_array(self) -> list[bool]:
+        """Returns pick results as an array."""
+        return [
+            self.pick_1_correct,
+            self.pick_2_correct,
+            self.pick_3_correct,
+            self.pick_4_correct
+        ]
+
+    @property
+    def pick_points_array(self) -> list[int]:
+        """Returns pick points as an array."""
+        return [
+            self.pick_1_points,
+            self.pick_2_points,
+            self.pick_3_points,
+            self.pick_4_points
+        ]
+
     def __repr__(self):
         return f"<QuizSubmission(quiz_id={self.quiz_id}, player_id={self.player_id}, points={self.points_earned})>"
