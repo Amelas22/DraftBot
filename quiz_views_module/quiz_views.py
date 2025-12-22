@@ -16,7 +16,7 @@ TEAM_BONUS = 1  # Points for correct card picked by the right team, wrong seat
 
 # Emoji constants
 EMOJI_CORRECT = "✅"
-EMOJI_TEAM_BONUS = ":twisted_rightwards_arrows:"
+EMOJI_TEAM_BONUS = "🔀"
 EMOJI_INCORRECT = "❌"
 NUM_PICKS = 4  # Number of picks in the quiz
 
