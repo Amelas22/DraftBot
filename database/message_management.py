@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from views import PersistentView
 from database.models_base import Base
 from session import AsyncSessionLocal, DraftSession, get_draft_session
+from quiz_views_module.quiz_views import QuizPublicView
 from loguru import logger
 import time
 import asyncio
@@ -218,7 +219,16 @@ async def handle_sticky_message_update(sticky_message: Message, bot: discord.Cli
         return
 
     # Create view with updated metadata including the current session stage
-    view = PersistentView.from_metadata(bot, view_metadata)
+    # Support both sync and async from_metadata methods
+    view_type = view_metadata.get("view_type", "draft")  # Default to draft for backward compatibility
+
+    if view_type == "quiz":
+        # Quiz views require async recreation
+        view = await QuizPublicView.from_metadata(bot, view_metadata)
+    else:
+        # Draft views use sync recreation
+        view = PersistentView.from_metadata(bot, view_metadata)
+
     new_message = await channel.send(content=sticky_message.content, embed=embed, view=view)
     await new_message.pin()
     logger.info(f"Pinned new sticky message with ID {new_message.id} in channel {channel.id}")

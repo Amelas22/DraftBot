@@ -1,38 +1,45 @@
 import discord
 import random
+from typing import Optional, Tuple
 from discord.ext import commands
 from datetime import datetime, timedelta
 from loguru import logger
 from sqlalchemy import select, update, and_
 from database.db_session import db_session
+from database.message_management import make_message_sticky
 from models import DraftSession, QuizSession
+from models.draft_domain import PackTrace
 from services.draft_analysis import DraftAnalysis
+from services.draft_data_loader import load_from_spaces
 from quiz_views_module.quiz_views import QuizPublicView
 from helpers.magicprotools_helper import MagicProtoolsHelper
+
+# Quiz configuration constants
+QUIZ_PACK_NUMBER = 0  # First pack
+QUIZ_NUM_PICKS = 4  # Number of picks to quiz on
+ELIGIBLE_DRAFT_DAYS = 365  # Look back 1 year for eligible drafts
 
 
 class QuizCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @discord.slash_command(
-        name='post_quiz',
-        description='[MOD] Post a draft pick quiz for the channel',
-        guild_ids=None
-    )
-    @commands.has_permissions(manage_channels=True)  # Mod permission check
-    async def post_quiz(self, ctx):
-        """Post a public quiz that all users can participate in"""
-        logger.info(f"Post quiz command received from user {ctx.author.id} in guild {ctx.guild.id}")
-        await ctx.response.defer(ephemeral=True)  # Mod sees ephemeral confirmation
+    async def _select_random_draft(self, guild_id: str) -> Optional[DraftSession]:
+        """
+        Select a random eligible draft from the last year.
 
-        # Select a random draft from the last year for this guild
-        one_year_ago = datetime.now() - timedelta(days=365)
+        Args:
+            guild_id: Guild ID to search drafts for
+
+        Returns:
+            Random DraftSession or None if no eligible drafts found
+        """
+        one_year_ago = datetime.now() - timedelta(days=ELIGIBLE_DRAFT_DAYS)
 
         async with db_session() as session:
             stmt = select(DraftSession).where(
                 and_(
-                    DraftSession.guild_id == str(ctx.guild.id),
+                    DraftSession.guild_id == str(guild_id),
                     DraftSession.spaces_object_key.isnot(None),
                     DraftSession.draft_start_time >= one_year_ago
                 )
@@ -41,67 +48,83 @@ class QuizCommands(commands.Cog):
             eligible_drafts = result.scalars().all()
 
         if not eligible_drafts:
-            await ctx.followup.send(
-                "No eligible drafts found from the last year in this guild.\n"
-                "Drafts must have stored data in Spaces.",
-                ephemeral=True
-            )
-            return
+            logger.warning(f"No eligible drafts found for guild {guild_id}")
+            return None
 
-        # Randomly select one draft from the eligible ones
         selected_draft = random.choice(eligible_drafts)
         logger.info(f"Selected draft {selected_draft.session_id} (cube: {selected_draft.cube}) from {len(eligible_drafts)} eligible drafts")
+        return selected_draft
 
-        # 2. Load draft analysis
+    async def _prepare_quiz_data(self, draft_session: DraftSession):
+        """
+        Load draft analysis, trace pack, and create visualization.
+
+        Args:
+            draft_session: Draft session to prepare quiz from
+
+        Returns:
+            Tuple of (analysis, pack_trace, mpt_url) or None if preparation fails
+        """
+        # Load draft analysis
         try:
-            analysis = await DraftAnalysis.from_session(selected_draft)
+            analysis = await DraftAnalysis.from_session(draft_session)
             if analysis is None:
-                logger.error(f"DraftAnalysis.from_session returned None for draft {selected_draft.session_id}")
-                await ctx.followup.send(
-                    "Failed to load draft data (no analysis data available). Please try again.",
-                    ephemeral=True
-                )
-                return
+                logger.error(f"DraftAnalysis.from_session returned None for draft {draft_session.session_id}")
+                return None
         except Exception as e:
             logger.error(f"Failed to load draft analysis: {e}", exc_info=True)
-            await ctx.followup.send(
-                "Failed to load draft data. Please try again.",
-                ephemeral=True
-            )
-            return
+            return None
 
-        # 3. Trace Pack 0, first 4 picks
+        # Trace pack
         try:
-            pack_trace = analysis.trace_pack(pack_num=0, length=4)
+            pack_trace = analysis.trace_pack(pack_num=QUIZ_PACK_NUMBER, length=QUIZ_NUM_PICKS)
         except Exception as e:
             logger.error(f"Failed to trace pack: {e}", exc_info=True)
-            await ctx.followup.send(
-                "Could not trace pack rotation. Please try again.",
-                ephemeral=True
-            )
-            return
+            return None
 
-        if not pack_trace or len(pack_trace.picks) < 4:
+        if not pack_trace or len(pack_trace.picks) < QUIZ_NUM_PICKS:
             logger.warning(f"Pack trace incomplete: {len(pack_trace.picks) if pack_trace else 0} picks")
-            await ctx.followup.send(
-                "Could not trace pack rotation. Please try again.",
-                ephemeral=True
-            )
-            return
+            return None
 
-        # 4. Load raw draft data and create MagicProTools visualization
-        from services.draft_data_loader import load_from_spaces
-
-        draft_data = None
+        # Create MagicProTools visualization
         mpt_url = None
-        if selected_draft.spaces_object_key:
-            draft_data = await load_from_spaces(selected_draft.spaces_object_key)
+        if draft_session.spaces_object_key:
+            draft_data = await load_from_spaces(draft_session.spaces_object_key)
             if draft_data:
                 mpt_url = await self.create_pack_visualization_url(pack_trace, draft_data)
                 logger.info(f"Generated MagicProTools URL: {mpt_url}")
 
-        # 5. Create QuizSession in database
-        quiz_id = f"{ctx.guild.id}-{int(datetime.now().timestamp())}"
+        return (analysis, pack_trace, mpt_url)
+
+    async def _create_and_post_quiz(
+        self,
+        guild_id: str,
+        channel_id: str,
+        channel: discord.TextChannel,
+        draft_session: DraftSession,
+        analysis: DraftAnalysis,
+        pack_trace: PackTrace,
+        mpt_url: Optional[str],
+        posted_by: str
+    ) -> Optional[discord.Message]:
+        """
+        Create quiz session in database and post quiz message.
+
+        Args:
+            guild_id: Guild ID
+            channel_id: Channel ID
+            channel: Discord channel object
+            draft_session: Source draft session
+            analysis: Draft analysis
+            pack_trace: Traced pack
+            mpt_url: MagicProTools URL (optional)
+            posted_by: User ID or "scheduler"
+
+        Returns:
+            Posted message or None on failure
+        """
+        # Create QuizSession in database
+        quiz_id = f"{guild_id}-{int(datetime.now().timestamp())}"
 
         # Serialize pack trace and correct answers
         pack_trace_data = {
@@ -119,25 +142,25 @@ class QuizCommands(commands.Cog):
         async with db_session() as session:
             quiz_session = QuizSession(
                 quiz_id=quiz_id,
-                guild_id=str(ctx.guild.id),
-                channel_id=str(ctx.channel.id),
-                draft_session_id=selected_draft.session_id,
+                guild_id=str(guild_id),
+                channel_id=str(channel_id),
+                draft_session_id=draft_session.session_id,
                 pack_trace_data=pack_trace_data,
                 correct_answers=correct_answers,
-                posted_by=str(ctx.author.id)
+                posted_by=str(posted_by)
             )
             session.add(quiz_session)
             await session.commit()
 
         logger.info(f"Created quiz session {quiz_id}")
 
-        # 6. Post public message with quiz
-        embed = self.create_quiz_embed(selected_draft, pack_trace, analysis, mpt_url)
+        # Post public message with quiz
+        embed = self.create_quiz_embed(draft_session, pack_trace, analysis, mpt_url)
         view = QuizPublicView(quiz_id, analysis, pack_trace)
 
-        message = await ctx.channel.send(embed=embed, view=view)
+        message = await channel.send(embed=embed, view=view)
 
-        # 6. Update QuizSession with message_id
+        # Update QuizSession with message_id
         async with db_session() as session:
             await session.execute(
                 update(QuizSession)
@@ -146,11 +169,73 @@ class QuizCommands(commands.Cog):
             )
             await session.commit()
 
-        logger.info(f"Posted quiz message {message.id} in channel {ctx.channel.id}")
+        logger.info(f"Posted quiz message {message.id} in channel {channel_id}")
 
-        # 7. Confirm to mod
+        # Make the message sticky (auto-reposts at bottom of channel)
+        await make_message_sticky(
+            guild_id=str(guild_id),
+            channel_id=str(channel_id),
+            message=message,
+            view=view
+        )
+        logger.info(f"Made quiz message {message.id} sticky")
+
+        return message
+
+    @discord.slash_command(
+        name='post_quiz',
+        description='[MOD] Post a draft pick quiz for the channel',
+        guild_ids=None
+    )
+    @commands.has_permissions(manage_roles=True)  # Mod permission check
+    async def post_quiz(self, ctx):
+        """Post a public quiz that all users can participate in"""
+        logger.info(f"Post quiz command received from user {ctx.author.id} in guild {ctx.guild.id}")
+        await ctx.response.defer(ephemeral=True)
+
+        # Select random draft
+        draft_session = await self._select_random_draft(ctx.guild.id)
+        if not draft_session:
+            await ctx.followup.send(
+                "No eligible drafts found from the last year in this guild.\n"
+                "Drafts must have stored data in Spaces.",
+                ephemeral=True
+            )
+            return
+
+        # Prepare quiz data
+        quiz_data = await self._prepare_quiz_data(draft_session)
+        if not quiz_data:
+            await ctx.followup.send(
+                "Failed to load draft data. Please try again.",
+                ephemeral=True
+            )
+            return
+
+        analysis, pack_trace, mpt_url = quiz_data
+
+        # Create and post quiz
+        message = await self._create_and_post_quiz(
+            guild_id=str(ctx.guild.id),
+            channel_id=str(ctx.channel.id),
+            channel=ctx.channel,
+            draft_session=draft_session,
+            analysis=analysis,
+            pack_trace=pack_trace,
+            mpt_url=mpt_url,
+            posted_by=str(ctx.author.id)
+        )
+
+        if not message:
+            await ctx.followup.send(
+                "Failed to post quiz. Please try again.",
+                ephemeral=True
+            )
+            return
+
+        # Confirm to mod
         await ctx.followup.send(
-            f"✅ Quiz posted! Draft: {selected_draft.cube} from {selected_draft.draft_start_time.strftime('%Y-%m-%d')}",
+            f"✅ Quiz posted! Draft: {draft_session.cube} from {draft_session.draft_start_time.strftime('%Y-%m-%d')}",
             ephemeral=True
         )
 
@@ -173,108 +258,31 @@ class QuizCommands(commands.Cog):
                 logger.error(f"Guild not found for channel {channel_id}")
                 return False
 
-            # Select a random draft from the last year for this guild
-            one_year_ago = datetime.now() - timedelta(days=365)
-
-            async with db_session() as session:
-                stmt = select(DraftSession).where(
-                    and_(
-                        DraftSession.guild_id == str(guild.id),
-                        DraftSession.spaces_object_key.isnot(None),
-                        DraftSession.draft_start_time >= one_year_ago
-                    )
-                )
-                result = await session.execute(stmt)
-                eligible_drafts = result.scalars().all()
-
-            if not eligible_drafts:
-                logger.warning(f"No eligible drafts found for guild {guild.id}")
+            # Select random draft
+            draft_session = await self._select_random_draft(guild.id)
+            if not draft_session:
                 return False
 
-            # Randomly select one draft from the eligible ones
-            selected_draft = random.choice(eligible_drafts)
-            logger.info(f"Selected draft {selected_draft.session_id} (cube: {selected_draft.cube}) from {len(eligible_drafts)} eligible drafts")
-
-            # Load draft analysis
-            try:
-                analysis = await DraftAnalysis.from_session(selected_draft)
-                if analysis is None:
-                    logger.error(f"DraftAnalysis.from_session returned None for draft {selected_draft.session_id}")
-                    return False
-            except Exception as e:
-                logger.error(f"Failed to load draft analysis: {e}", exc_info=True)
+            # Prepare quiz data
+            quiz_data = await self._prepare_quiz_data(draft_session)
+            if not quiz_data:
                 return False
 
-            # Trace Pack 0, first 4 picks
-            try:
-                pack_trace = analysis.trace_pack(pack_num=0, length=4)
-            except Exception as e:
-                logger.error(f"Failed to trace pack: {e}", exc_info=True)
-                return False
+            analysis, pack_trace, mpt_url = quiz_data
 
-            if not pack_trace or len(pack_trace.picks) < 4:
-                logger.warning(f"Pack trace incomplete: {len(pack_trace.picks) if pack_trace else 0} picks")
-                return False
+            # Create and post quiz
+            message = await self._create_and_post_quiz(
+                guild_id=str(guild.id),
+                channel_id=str(channel_id),
+                channel=channel,
+                draft_session=draft_session,
+                analysis=analysis,
+                pack_trace=pack_trace,
+                mpt_url=mpt_url,
+                posted_by="scheduler"
+            )
 
-            # Load raw draft data and create MagicProTools visualization
-            from services.draft_data_loader import load_from_spaces
-
-            draft_data = None
-            mpt_url = None
-            if selected_draft.spaces_object_key:
-                draft_data = await load_from_spaces(selected_draft.spaces_object_key)
-                if draft_data:
-                    mpt_url = await self.create_pack_visualization_url(pack_trace, draft_data)
-                    logger.info(f"Generated MagicProTools URL: {mpt_url}")
-
-            # Create QuizSession in database
-            quiz_id = f"{guild.id}-{int(datetime.now().timestamp())}"
-
-            # Serialize pack trace and correct answers
-            pack_trace_data = {
-                "picks": [
-                    {
-                        "user_name": pick.user_name,
-                        "booster_ids": pick.booster_ids,
-                        "picked_id": pick.picked_id
-                    }
-                    for pick in pack_trace.picks
-                ]
-            }
-            correct_answers = [pick.picked_id for pick in pack_trace.picks]
-
-            async with db_session() as session:
-                quiz_session = QuizSession(
-                    quiz_id=quiz_id,
-                    guild_id=str(guild.id),
-                    channel_id=str(channel_id),
-                    draft_session_id=selected_draft.session_id,
-                    pack_trace_data=pack_trace_data,
-                    correct_answers=correct_answers,
-                    posted_by="scheduler"  # Automated post
-                )
-                session.add(quiz_session)
-                await session.commit()
-
-            logger.info(f"Created quiz session {quiz_id}")
-
-            # Post public message with quiz
-            embed = self.create_quiz_embed(selected_draft, pack_trace, analysis, mpt_url)
-            view = QuizPublicView(quiz_id, analysis, pack_trace)
-
-            message = await channel.send(embed=embed, view=view)
-
-            # Update QuizSession with message_id
-            async with db_session() as session:
-                await session.execute(
-                    update(QuizSession)
-                    .where(QuizSession.quiz_id == quiz_id)
-                    .values(message_id=str(message.id))
-                )
-                await session.commit()
-
-            logger.info(f"Posted scheduled quiz message {message.id} in channel {channel_id}")
-            return True
+            return message is not None
 
         except Exception as e:
             logger.error(f"Error posting scheduled quiz to channel {channel_id}: {e}", exc_info=True)
