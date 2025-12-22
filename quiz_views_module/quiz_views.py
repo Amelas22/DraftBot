@@ -1,4 +1,5 @@
 import discord
+import random
 from datetime import datetime
 from loguru import logger
 from sqlalchemy import select, update, and_
@@ -48,6 +49,48 @@ def _generate_result_emoji_line(pick_results: list[bool], pick_points: list[int]
         EMOJI_CORRECT if is_correct else EMOJI_TEAM_BONUS if points == TEAM_BONUS else EMOJI_INCORRECT
         for is_correct, points in zip(pick_results, pick_points)
     )
+
+
+def _get_congratulatory_message(total_points: int, correct_count: int) -> str:
+    """Generate a random congratulatory message based on performance."""
+    if correct_count == NUM_PICKS:  # Perfect score (14+ points)
+        messages = [
+            "🌟 **PERFECT SCORE!** Absolutely flawless!",
+            "🎯 **PERFECT!** You're a mind reader!",
+            "✨ **PERFECTION!** Not a single mistake!",
+            "🏆 **FLAWLESS VICTORY!** Incredible performance!",
+            "⭐ **ALL CORRECT!** You've mastered the draft!",
+            "🎊 **PERFECT SCORE!** Outstanding work!",
+        ]
+    elif total_points >= 10:  # Great score (10-13 points)
+        messages = [
+            "🎉 **Excellent work!** Really impressive!",
+            "💪 **Great job!** You know your stuff!",
+            "🔥 **Fantastic!** That's some serious skill!",
+            "👏 **Well done!** Very impressive score!",
+            "⚡ **Awesome!** You're getting good at this!",
+            "🌟 **Nice work!** That's a great score!",
+        ]
+    elif total_points >= 6:  # Good score (6-9 points)
+        messages = [
+            "👍 **Good job!** Not bad at all!",
+            "🙂 **Well done!** Solid performance!",
+            "✅ **Nice!** You're getting the hang of it!",
+            "💚 **Good effort!** Keep it up!",
+            "🎯 **Decent score!** You're improving!",
+            "👌 **Not bad!** Keep practicing!",
+        ]
+    else:  # Okay score (0-5 points)
+        messages = [
+            "💙 **Good try!** You'll get better with practice!",
+            "🌱 **Keep going!** Every quiz helps you learn!",
+            "📚 **Learning experience!** You'll improve!",
+            "🎲 **Nice attempt!** Better luck next time!",
+            "🔄 **Keep trying!** Practice makes perfect!",
+            "💫 **Good effort!** You'll nail it next time!",
+        ]
+
+    return random.choice(messages)
 
 
 async def _display_results(
@@ -133,7 +176,63 @@ async def _display_results(
         inline=False
     )
 
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    # Add share button view
+    share_view = ShareResultView(
+        user=interaction.user,
+        emoji_line=emoji_line,
+        total_points=total_points,
+        correct_count=correct_count
+    )
+
+    await interaction.followup.send(embed=embed, view=share_view, ephemeral=True)
+
+
+class ShareResultView(discord.ui.View):
+    """View with a button to share quiz results publicly."""
+
+    def __init__(self, user: discord.User, emoji_line: str, total_points: int, correct_count: int):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.user = user
+        self.emoji_line = emoji_line
+        self.total_points = total_points
+        self.correct_count = correct_count
+
+    @discord.ui.button(
+        label="📤 Share Results Publicly",
+        style=discord.ButtonStyle.primary,
+        custom_id="share_quiz_results"
+    )
+    async def share_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+        """Post results publicly to the channel."""
+        # Ensure only the quiz taker can share their own results
+        if interaction.user.id != self.user.id:
+            await interaction.response.send_message(
+                "You can only share your own results!",
+                ephemeral=True
+            )
+            return
+
+        # Generate congratulatory message
+        congrats = _get_congratulatory_message(self.total_points, self.correct_count)
+
+        # Create public message
+        message = (
+            f"{congrats}\n\n"
+            f"**{self.user.display_name}** scored **{self.total_points} points** on the Draft Pick Quiz!\n\n"
+            f"```\n🎯 Draft Pick Quiz\n{self.emoji_line} {self.total_points} pts\n```"
+        )
+
+        # Disable the button before sharing
+        button.disabled = True
+        button.label = "✓ Shared!"
+
+        # Edit the original message first to update the button
+        await interaction.response.edit_message(view=self)
+
+        # Then post publicly as a followup
+        await interaction.followup.send(message)
+
+        logger.info(f"User {self.user.id} ({self.user.display_name}) shared quiz results publicly: {self.total_points} points")
 
 
 class QuizCardSelect(discord.ui.Select):
