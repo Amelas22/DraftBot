@@ -1,12 +1,12 @@
 import json
 from datetime import datetime, timedelta
 from loguru import logger
-from sqlalchemy import text, select, bindparam
+from sqlalchemy import text, select, bindparam, and_
 from database.db_session import db_session
 from models.win_streak_history import WinStreakHistory
 from models.perfect_streak_history import PerfectStreakHistory
 from models.player import PlayerStats
-from models import QuizStats, QuizSubmission
+from models import QuizStats, QuizSubmission, QuizSession
 
 # Win Streak minimum requirements by timeframe
 STREAK_MINIMUMS = {
@@ -696,12 +696,15 @@ async def get_quiz_points_leaderboard_data(guild_id, timeframe, limit, session):
 
     if cutoff_date:
         # Time-based filtering: Query QuizSubmission and aggregate
+        # Join through QuizSession to filter by guild
         stmt = select(QuizSubmission).join(
-            QuizStats,
-            (QuizSubmission.player_id == QuizStats.player_id) &
-            (QuizStats.guild_id == guild_id)
+            QuizSession,
+            QuizSubmission.quiz_id == QuizSession.quiz_id
         ).where(
-            QuizSubmission.submitted_at >= cutoff_date
+            and_(
+                QuizSession.guild_id == str(guild_id),
+                QuizSubmission.submitted_at >= cutoff_date
+            )
         )
 
         result = await session.execute(stmt)
