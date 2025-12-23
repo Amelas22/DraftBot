@@ -13,6 +13,8 @@ from services.draft_analysis import DraftAnalysis
 from services.draft_data_loader import load_from_spaces
 from quiz_views_module.quiz_views import QuizPublicView
 from helpers.magicprotools_helper import MagicProtoolsHelper
+from helpers.pack_compositor import PackCompositor
+from config import get_config
 
 # Quiz configuration constants
 QUIZ_PACK_NUMBER = 0  # First pack
@@ -63,7 +65,7 @@ class QuizCommands(commands.Cog):
             draft_session: Draft session to prepare quiz from
 
         Returns:
-            Tuple of (analysis, pack_trace, mpt_url) or None if preparation fails
+            Tuple of (analysis, pack_trace, mpt_url, draft_data) or None if preparation fails
         """
         # Load draft analysis
         try:
@@ -86,15 +88,16 @@ class QuizCommands(commands.Cog):
             logger.warning(f"Pack trace incomplete: {len(pack_trace.picks) if pack_trace else 0} picks")
             return None
 
-        # Create MagicProTools visualization
+        # Create MagicProTools visualization and load draft data
         mpt_url = None
+        draft_data = None
         if draft_session.spaces_object_key:
             draft_data = await load_from_spaces(draft_session.spaces_object_key)
             if draft_data:
                 mpt_url = await self.create_pack_visualization_url(pack_trace, draft_data)
                 logger.info(f"Generated MagicProTools URL: {mpt_url}")
 
-        return (analysis, pack_trace, mpt_url)
+        return (analysis, pack_trace, mpt_url, draft_data)
 
     async def _create_and_post_quiz(
         self,
@@ -105,6 +108,7 @@ class QuizCommands(commands.Cog):
         analysis: DraftAnalysis,
         pack_trace: PackTrace,
         mpt_url: Optional[str],
+        draft_data: Optional[dict],
         posted_by: str
     ) -> Optional[discord.Message]:
         """
@@ -118,6 +122,7 @@ class QuizCommands(commands.Cog):
             analysis: Draft analysis
             pack_trace: Traced pack
             mpt_url: MagicProTools URL (optional)
+            draft_data: Draft data from Spaces (optional)
             posted_by: User ID or "scheduler"
 
         Returns:
@@ -158,7 +163,53 @@ class QuizCommands(commands.Cog):
         embed = self.create_quiz_embed(draft_session, pack_trace, analysis, mpt_url)
         view = QuizPublicView(quiz_id, analysis, pack_trace)
 
-        message = await channel.send(embed=embed, view=view)
+        # Generate pack composite image if enabled and draft data available
+        pack_image_file = None
+        config = get_config(guild_id)
+        quiz_images_config = config.get("features", {}).get("quiz_pack_images", {})
+
+        logger.info(f"[QUIZ_IMAGE] Feature enabled: {quiz_images_config.get('enabled', False)}, draft_data available: {draft_data is not None}")
+
+        if quiz_images_config.get("enabled", False) and draft_data:
+            try:
+                logger.info(f"[QUIZ_IMAGE] Starting pack composite generation for quiz {quiz_id}")
+                compositor = PackCompositor(
+                    card_width=quiz_images_config.get("card_width", 244),
+                    card_height=quiz_images_config.get("card_height", 340),
+                    border_pixels=quiz_images_config.get("border_pixels", 5)
+                )
+                first_pick = pack_trace.picks[0]
+                carddata = draft_data.get("carddata", {})
+                logger.info(f"[QUIZ_IMAGE] Carddata has {len(carddata)} cards, pack has {len(first_pick.booster_ids)} cards")
+
+                image_bytes = await compositor.create_pack_composite(
+                    first_pick.booster_ids,
+                    carddata
+                )
+
+                if image_bytes:
+                    logger.info(f"[QUIZ_IMAGE] Composite created successfully, size: {len(image_bytes.getvalue())} bytes")
+                    pack_image_file = discord.File(
+                        fp=image_bytes,
+                        filename=f"quiz_pack_{quiz_id}.png"
+                    )
+                    # Update embed to reference the attachment
+                    embed.set_image(url=f"attachment://quiz_pack_{quiz_id}.png")
+                    logger.info(f"[QUIZ_IMAGE] Discord.File created and embed.set_image() called for quiz {quiz_id}")
+                else:
+                    logger.warning(f"[QUIZ_IMAGE] Composite generation returned None")
+            except Exception as e:
+                logger.error(f"[QUIZ_IMAGE] Pack composite generation failed: {e}", exc_info=True)
+        else:
+            logger.info(f"[QUIZ_IMAGE] Skipping pack image generation")
+
+        # Post message with embed and optional pack image
+        if pack_image_file:
+            logger.info(f"[QUIZ_IMAGE] Posting quiz with pack image attachment")
+            message = await channel.send(embed=embed, file=pack_image_file, view=view)
+        else:
+            logger.info(f"[QUIZ_IMAGE] Posting quiz without pack image")
+            message = await channel.send(embed=embed, view=view)
 
         # Update QuizSession with message_id
         async with db_session() as session:
@@ -212,7 +263,7 @@ class QuizCommands(commands.Cog):
             )
             return
 
-        analysis, pack_trace, mpt_url = quiz_data
+        analysis, pack_trace, mpt_url, draft_data = quiz_data
 
         # Create and post quiz
         message = await self._create_and_post_quiz(
@@ -223,6 +274,7 @@ class QuizCommands(commands.Cog):
             analysis=analysis,
             pack_trace=pack_trace,
             mpt_url=mpt_url,
+            draft_data=draft_data,
             posted_by=str(ctx.author.id)
         )
 
@@ -268,7 +320,7 @@ class QuizCommands(commands.Cog):
             if not quiz_data:
                 return False
 
-            analysis, pack_trace, mpt_url = quiz_data
+            analysis, pack_trace, mpt_url, draft_data = quiz_data
 
             # Create and post quiz
             message = await self._create_and_post_quiz(
@@ -279,6 +331,7 @@ class QuizCommands(commands.Cog):
                 analysis=analysis,
                 pack_trace=pack_trace,
                 mpt_url=mpt_url,
+                draft_data=draft_data,
                 posted_by="scheduler"
             )
 
