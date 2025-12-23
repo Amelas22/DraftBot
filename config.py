@@ -43,7 +43,14 @@ class Config:
                 "winston_draft": False,
                 "voice_channels": False,
                 "bot_detection": False,
-                "money_server": False
+                "money_server": False,
+                "quiz_pack_images": {
+                    "enabled": True,
+                    "timeout_seconds": 10,
+                    "card_width": 244,
+                    "card_height": 340,
+                    "border_pixels": 5
+                }
             },
             "matchmaking": {
                 "trueskill_chance": 0  # Default to 0% (always random teams)
@@ -100,7 +107,14 @@ class Config:
                 "winston_draft": True,
                 "voice_channels": True,
                 "bot_detection": True,
-                "money_server": False  
+                "money_server": False,
+                "quiz_pack_images": {
+                    "enabled": True,
+                    "timeout_seconds": 10,
+                    "card_width": 244,
+                    "card_height": 340,
+                    "border_pixels": 5
+                }
             },
             "matchmaking": {
                 "trueskill_chance": 60  
@@ -312,6 +326,17 @@ def migrate_configs():
         if "notifications" not in config:
             config["notifications"] = {
                 "dm_notifications_default": True  # DM notifications enabled by default
+            }
+            updated = True
+
+        # Add quiz_pack_images feature if missing
+        if "features" in config and "quiz_pack_images" not in config["features"]:
+            config["features"]["quiz_pack_images"] = {
+                "enabled": True,
+                "timeout_seconds": 10,
+                "card_width": 244,
+                "card_height": 340,
+                "border_pixels": 5
             }
             updated = True
 
