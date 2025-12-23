@@ -186,11 +186,21 @@ class PackCompositor:
                 canvas.paste(img, (x, y))
 
             # Save to BytesIO
+            # Use JPEG with quality=85 to reduce file size significantly
+            # PNG was too large (2.4MB) and caused Discord upload timeouts
             output = BytesIO()
-            canvas.save(output, format='PNG', optimize=True)
+
+            # Convert RGBA to RGB for JPEG (JPEG doesn't support transparency)
+            if canvas.mode == 'RGBA':
+                # Create white background
+                rgb_canvas = Image.new('RGB', canvas.size, (255, 255, 255))
+                rgb_canvas.paste(canvas, mask=canvas.split()[3] if len(canvas.split()) == 4 else None)
+                canvas = rgb_canvas
+
+            canvas.save(output, format='JPEG', quality=85, optimize=True)
             output.seek(0)
 
-            logger.info(f"Successfully created pack composite: {canvas_width}x{canvas_height}px")
+            logger.info(f"Successfully created pack composite: {canvas_width}x{canvas_height}px, size: {len(output.getvalue())} bytes")
             return output
 
         except Exception as e:
