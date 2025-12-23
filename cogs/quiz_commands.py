@@ -191,10 +191,10 @@ class QuizCommands(commands.Cog):
                     logger.info(f"[QUIZ_IMAGE] Composite created successfully, size: {len(image_bytes.getvalue())} bytes")
                     pack_image_file = discord.File(
                         fp=image_bytes,
-                        filename=f"quiz_pack_{quiz_id}.png"
+                        filename=f"quiz_pack_{quiz_id}.jpg"
                     )
                     # Update embed to reference the attachment
-                    embed.set_image(url=f"attachment://quiz_pack_{quiz_id}.png")
+                    embed.set_image(url=f"attachment://quiz_pack_{quiz_id}.jpg")
                     logger.info(f"[QUIZ_IMAGE] Discord.File created and embed.set_image() called for quiz {quiz_id}")
                 else:
                     logger.warning(f"[QUIZ_IMAGE] Composite generation returned None")
