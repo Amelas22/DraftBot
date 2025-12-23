@@ -217,6 +217,15 @@ class DraftAnalysis:
         picks.sort(key=lambda p: (p.pick_num, p.user_name))
         return picks
 
+    def get_carddata(self) -> dict:
+        """
+        Get the carddata dictionary for image lookups.
+
+        Returns:
+            Dictionary mapping card UUIDs to card information including Scryfall image URLs
+        """
+        return self._indexer._data.get("carddata", {})
+
     def get_picks_at(self, pack_num: int, pick_num: int) -> List[Pick]:
         """
         Get all picks at a specific pack and pick number.

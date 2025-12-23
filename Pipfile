@@ -6,7 +6,6 @@ name = "pypi"
 [packages]
 aiobotocore = "==2.5.0"
 aiocron = "==1.8"
-aiohttp = "==3.8.5"
 aiosqlite = "==0.20.0"
 py-cord = "==2.6.1"
 pandas = "==2.2.3"
@@ -20,6 +19,8 @@ win32-setctime = {version = "*", markers = "sys_platform == 'win32'"}
 colorama = "*"
 openpyxl = "*"
 alembic = "*"
+pillow = "*"
+aiohttp = "*"
 
 [dev-packages]
 
