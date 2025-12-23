@@ -1,5 +1,7 @@
 import discord
 import random
+import asyncio
+from io import BytesIO
 from typing import Optional, Tuple
 from discord.ext import commands
 from datetime import datetime, timedelta
@@ -188,9 +190,16 @@ class QuizCommands(commands.Cog):
                 )
 
                 if image_bytes:
-                    logger.info(f"[QUIZ_IMAGE] Composite created successfully, size: {len(image_bytes.getvalue())} bytes")
+                    # Get the image data and create a fresh BytesIO
+                    # This ensures Discord can read it without any pointer issues
+                    image_data = image_bytes.getvalue()
+                    logger.info(f"[QUIZ_IMAGE] Composite created successfully, size: {len(image_data)} bytes")
+
+                    # Create a fresh BytesIO from the data for Discord
+                    fresh_bytes = BytesIO(image_data)
+
                     pack_image_file = discord.File(
-                        fp=image_bytes,
+                        fp=fresh_bytes,
                         filename=f"quiz_pack_{quiz_id}.jpg"
                     )
                     # Update embed to reference the attachment
@@ -206,10 +215,25 @@ class QuizCommands(commands.Cog):
         # Post message with embed and optional pack image
         if pack_image_file:
             logger.info(f"[QUIZ_IMAGE] Posting quiz with pack image attachment")
-            message = await channel.send(embed=embed, file=pack_image_file, view=view)
-        else:
-            logger.info(f"[QUIZ_IMAGE] Posting quiz without pack image")
-            message = await channel.send(embed=embed, view=view)
+            logger.info(f"[QUIZ_IMAGE] About to call channel.send() - embed={type(embed).__name__}, file={type(pack_image_file).__name__}, view={type(view).__name__}")
+
+            # TEMPORARY: Try posting without view to isolate the issue
+            try:
+                logger.info(f"[QUIZ_IMAGE] Attempting send WITHOUT view first...")
+                message = await channel.send(embed=embed, file=pack_image_file)
+                logger.info(f"[QUIZ_IMAGE] Send WITHOUT view succeeded! message_id={message.id}")
+
+                # Now try to edit to add the view
+                logger.info(f"[QUIZ_IMAGE] Now trying to add view via edit...")
+                message = await message.edit(view=view)
+                logger.info(f"[QUIZ_IMAGE] Added view successfully!")
+            except Exception as e:
+                logger.error(f"[QUIZ_IMAGE] Error in split send/edit approach: {e}", exc_info=True)
+                # Fall back to original approach
+                logger.info(f"[QUIZ_IMAGE] Falling back to original approach...")
+                message = await channel.send(embed=embed, file=pack_image_file, view=view)
+
+            logger.info(f"[QUIZ_IMAGE] channel.send() completed, message_id={message.id}")
 
         # Update QuizSession with message_id
         async with db_session() as session:
