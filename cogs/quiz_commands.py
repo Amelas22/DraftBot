@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 from loguru import logger
 from sqlalchemy import select, update, and_
 from database.db_session import db_session
-from database.message_management import make_message_sticky
 from models import DraftSession, QuizSession
 from models.draft_domain import PackTrace
 from services.draft_analysis import DraftAnalysis
@@ -217,21 +216,22 @@ class QuizCommands(commands.Cog):
             logger.info(f"[QUIZ_IMAGE] Posting quiz with pack image attachment")
             logger.info(f"[QUIZ_IMAGE] About to call channel.send() - embed={type(embed).__name__}, file={type(pack_image_file).__name__}, view={type(view).__name__}")
 
-            # TEMPORARY: Try posting without view to isolate the issue
+            # Try posting with image
             try:
-                logger.info(f"[QUIZ_IMAGE] Attempting send WITHOUT view first...")
-                message = await channel.send(embed=embed, file=pack_image_file)
-                logger.info(f"[QUIZ_IMAGE] Send WITHOUT view succeeded! message_id={message.id}")
-
-                # Now try to edit to add the view
-                logger.info(f"[QUIZ_IMAGE] Now trying to add view via edit...")
-                message = await message.edit(view=view)
-                logger.info(f"[QUIZ_IMAGE] Added view successfully!")
-            except Exception as e:
-                logger.error(f"[QUIZ_IMAGE] Error in split send/edit approach: {e}", exc_info=True)
-                # Fall back to original approach
-                logger.info(f"[QUIZ_IMAGE] Falling back to original approach...")
+                logger.info(f"[QUIZ_IMAGE] Attempting to post with image...")
                 message = await channel.send(embed=embed, file=pack_image_file, view=view)
+                logger.info(f"[QUIZ_IMAGE] Successfully posted with image! message_id={message.id}")
+            except discord.Forbidden as e:
+                logger.error(f"[QUIZ_IMAGE] Permission denied (403) posting with image: {e}. Falling back to no image.")
+                logger.warning(f"[QUIZ_IMAGE] Bot needs 'Attach Files' permission in channel {channel_id}")
+                # Fall back to posting without image
+                message = await channel.send(embed=embed, view=view)
+                logger.info(f"[QUIZ_IMAGE] Posted without image due to permissions. message_id={message.id}")
+            except Exception as e:
+                logger.error(f"[QUIZ_IMAGE] Unexpected error posting with image: {e}", exc_info=True)
+                # Fall back to posting without image
+                message = await channel.send(embed=embed, view=view)
+                logger.info(f"[QUIZ_IMAGE] Posted without image due to error. message_id={message.id}")
 
             logger.info(f"[QUIZ_IMAGE] channel.send() completed, message_id={message.id}")
 
@@ -246,14 +246,14 @@ class QuizCommands(commands.Cog):
 
         logger.info(f"Posted quiz message {message.id} in channel {channel_id}")
 
-        # Make the message sticky (auto-reposts at bottom of channel)
-        await make_message_sticky(
-            guild_id=str(guild_id),
-            channel_id=str(channel_id),
-            message=message,
-            view=view
-        )
-        logger.info(f"Made quiz message {message.id} sticky")
+        # Pin the quiz message
+        try:
+            await message.pin()
+            logger.info(f"Pinned quiz message {message.id}")
+        except discord.Forbidden:
+            logger.warning(f"Bot lacks permission to pin messages in channel {channel_id}")
+        except Exception as e:
+            logger.error(f"Failed to pin quiz message: {e}")
 
         return message
 
