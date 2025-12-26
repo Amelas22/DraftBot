@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, text, JSON
+from sqlalchemy import Column, Integer, String, DateTime, text, JSON, Index
 from database.models_base import Base
 
 class QuizSession(Base):
@@ -6,6 +6,9 @@ class QuizSession(Base):
 
     # Primary key
     quiz_id = Column(String(64), primary_key=True)  # Format: guild_id-timestamp
+
+    # Human-friendly sequential ID per guild
+    display_id = Column(Integer, nullable=False)
 
     # Location
     guild_id = Column(String(64), nullable=False)
@@ -26,5 +29,10 @@ class QuizSession(Base):
     # Stats
     total_participants = Column(Integer, default=0, server_default=text('0'))
 
+    # Table constraints
+    __table_args__ = (
+        Index('ix_quiz_sessions_guild_display_id', 'guild_id', 'display_id', unique=True),
+    )
+
     def __repr__(self):
-        return f"<QuizSession(quiz_id={self.quiz_id}, guild_id={self.guild_id})>"
+        return f"<QuizSession(quiz_id={self.quiz_id}, display_id=#{self.display_id}, guild_id={self.guild_id})>"

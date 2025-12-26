@@ -104,7 +104,9 @@ async def _display_results(
     total_points: int,
     correct_count: int,
     stats: QuizStats = None,
-    is_existing_submission: bool = False
+    is_existing_submission: bool = False,
+    display_id: int = None,
+    quiz_id: str = None
 ) -> None:
     """
     Unified function to display quiz results.
@@ -121,9 +123,16 @@ async def _display_results(
         correct_count: Number of exact matches
         stats: Player's quiz stats (optional)
         is_existing_submission: True if showing previously submitted results
+        display_id: Human-friendly quiz number (optional)
+        quiz_id: Quiz session ID for creating message link (optional)
     """
+    # Update title to include quiz number
+    title = f"{'Your ' if is_existing_submission else ''}Quiz Results: {total_points} Points!"
+    if display_id:
+        title = f"{'Your ' if is_existing_submission else ''}Quiz #{display_id} Results: {total_points} Points!"
+
     embed = discord.Embed(
-        title=f"{'Your ' if is_existing_submission else ''}Quiz Results: {total_points} Points!",
+        title=title,
         description=(
             f"**{correct_count}/{NUM_PICKS}** exact matches" +
             ("\n*(You submitted this quiz earlier)*" if is_existing_submission else "")
@@ -169,6 +178,8 @@ async def _display_results(
     # Generate shareable text with emoji indicators
     emoji_line = _generate_result_emoji_line(pick_results, pick_points)
     share_text = f"🎯 Draft Pick Quiz\n{emoji_line} {total_points} pts"
+    if display_id:
+        share_text = f"🎯 Draft Pick Quiz #{display_id}\n{emoji_line} {total_points} pts"
 
     embed.add_field(
         name="📤 Share Your Result",
@@ -181,7 +192,9 @@ async def _display_results(
         user=interaction.user,
         emoji_line=emoji_line,
         total_points=total_points,
-        correct_count=correct_count
+        correct_count=correct_count,
+        display_id=display_id,
+        quiz_id=quiz_id
     )
 
     await interaction.followup.send(embed=embed, view=share_view, ephemeral=True)
@@ -190,12 +203,14 @@ async def _display_results(
 class ShareResultView(discord.ui.View):
     """View with a button to share quiz results publicly."""
 
-    def __init__(self, user: discord.User, emoji_line: str, total_points: int, correct_count: int):
+    def __init__(self, user: discord.User, emoji_line: str, total_points: int, correct_count: int, display_id: int = None, quiz_id: str = None):
         super().__init__(timeout=300)  # 5 minute timeout
         self.user = user
         self.emoji_line = emoji_line
         self.total_points = total_points
         self.correct_count = correct_count
+        self.display_id = display_id
+        self.quiz_id = quiz_id
 
     @discord.ui.button(
         label="📤 Share Results Publicly",
@@ -215,11 +230,32 @@ class ShareResultView(discord.ui.View):
         # Generate congratulatory message
         congrats = _get_congratulatory_message(self.total_points, self.correct_count)
 
-        # Create public message
+        # Load quiz session to create message link
+        quiz_ref = "the Draft Pick Quiz"  # Default fallback
+        if self.quiz_id and self.display_id:
+            async with db_session() as session:
+                stmt = select(QuizSession).where(QuizSession.quiz_id == self.quiz_id)
+                result = await session.execute(stmt)
+                quiz_session = result.scalar_one_or_none()
+
+            if quiz_session and quiz_session.message_id:
+                # Create Discord message link
+                message_link = f"https://discord.com/channels/{quiz_session.guild_id}/{quiz_session.channel_id}/{quiz_session.message_id}"
+                quiz_ref = f"[Quiz #{self.display_id}]({message_link})"
+            elif self.display_id:
+                quiz_ref = f"Quiz #{self.display_id}"
+        elif self.display_id:
+            quiz_ref = f"Quiz #{self.display_id}"
+
+        # Create public message with clickable link
+        share_text = f"🎯 Draft Pick Quiz\n{self.emoji_line} {self.total_points} pts"
+        if self.display_id:
+            share_text = f"🎯 Draft Pick Quiz #{self.display_id}\n{self.emoji_line} {self.total_points} pts"
+
         message = (
             f"{congrats}\n\n"
-            f"**{self.user.display_name}** scored **{self.total_points} points** on the Draft Pick Quiz!\n\n"
-            f"```\n🎯 Draft Pick Quiz\n{self.emoji_line} {self.total_points} pts\n```"
+            f"**{self.user.display_name}** scored **{self.total_points} points** on {quiz_ref}!\n\n"
+            f"```\n{share_text}\n```"
         )
 
         # Disable the button before sharing
@@ -382,7 +418,9 @@ class QuizPublicView(discord.ui.View):
             total_points=submission.points_earned,
             correct_count=submission.correct_count,
             stats=stats,
-            is_existing_submission=True
+            is_existing_submission=True,
+            display_id=quiz_session.display_id,
+            quiz_id=self.quiz_id
         )
 
     @discord.ui.button(
@@ -623,6 +661,14 @@ class QuizGuessView(discord.ui.View):
 
     async def show_results(self, interaction, guesses, correct_answers, pick_results, pick_points, total_points, correct_count, stats):
         """Display results to user"""
+        # Load quiz session to get display_id
+        async with db_session() as session:
+            stmt = select(QuizSession).where(QuizSession.quiz_id == self.quiz_id)
+            result = await session.execute(stmt)
+            quiz_session = result.scalar_one_or_none()
+
+        display_id = quiz_session.display_id if quiz_session else None
+
         await _display_results(
             interaction,
             self.analysis,
@@ -634,5 +680,7 @@ class QuizGuessView(discord.ui.View):
             total_points=total_points,
             correct_count=correct_count,
             stats=stats,
-            is_existing_submission=False
+            is_existing_submission=False,
+            display_id=display_id,
+            quiz_id=self.quiz_id
         )

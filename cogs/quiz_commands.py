@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 from discord.ext import commands
 from datetime import datetime, timedelta
 from loguru import logger
-from sqlalchemy import select, update, and_
+from sqlalchemy import select, update, and_, func
 from database.db_session import db_session
 from models import DraftSession, QuizSession
 from models.draft_domain import PackTrace
@@ -21,6 +21,26 @@ from config import get_config
 QUIZ_PACK_NUMBER = 0  # First pack
 QUIZ_NUM_PICKS = 4  # Number of picks to quiz on
 ELIGIBLE_DRAFT_DAYS = 365  # Look back 1 year for eligible drafts
+
+
+async def _generate_next_display_id(guild_id: str) -> int:
+    """
+    Generate the next sequential display ID for a guild.
+    Returns the next available ID (max + 1), or 1 if no quizzes exist.
+
+    Args:
+        guild_id: Guild ID to generate display_id for
+
+    Returns:
+        Next sequential display_id for the guild
+    """
+    async with db_session() as session:
+        stmt = select(func.max(QuizSession.display_id)).where(
+            QuizSession.guild_id == str(guild_id)
+        )
+        result = await session.execute(stmt)
+        max_id = result.scalar()
+        return (max_id or 0) + 1
 
 
 class QuizCommands(commands.Cog):
@@ -132,6 +152,13 @@ class QuizCommands(commands.Cog):
         # Create QuizSession in database
         quiz_id = f"{guild_id}-{int(datetime.now().timestamp())}"
 
+        # Generate sequential display ID
+        try:
+            display_id = await _generate_next_display_id(guild_id)
+        except Exception as e:
+            logger.error(f"Failed to generate display_id: {e}")
+            return None  # Abort quiz creation
+
         # Serialize pack trace and correct answers
         pack_trace_data = {
             "picks": [
@@ -148,6 +175,7 @@ class QuizCommands(commands.Cog):
         async with db_session() as session:
             quiz_session = QuizSession(
                 quiz_id=quiz_id,
+                display_id=display_id,
                 guild_id=str(guild_id),
                 channel_id=str(channel_id),
                 draft_session_id=draft_session.session_id,
@@ -158,10 +186,10 @@ class QuizCommands(commands.Cog):
             session.add(quiz_session)
             await session.commit()
 
-        logger.info(f"Created quiz session {quiz_id}")
+        logger.info(f"Created quiz session {quiz_id} with display_id=#{display_id}")
 
         # Post public message with quiz
-        embed = self.create_quiz_embed(draft_session, pack_trace, analysis, mpt_url)
+        embed = self.create_quiz_embed(draft_session, pack_trace, analysis, mpt_url, display_id)
         view = QuizPublicView(quiz_id, analysis, pack_trace)
 
         # Generate pack composite image if enabled and draft data available
@@ -421,10 +449,15 @@ class QuizCommands(commands.Cog):
             logger.error(f"Error creating pack visualization: {e}", exc_info=True)
             return None
 
-    def create_quiz_embed(self, draft_session, pack_trace, analysis, mpt_url=None):
+    def create_quiz_embed(self, draft_session, pack_trace, analysis, mpt_url=None, display_id=None):
         """Create the public quiz embed"""
+        # Update title to include quiz number
+        title = "🎯 Draft Pick Quiz Challenge"
+        if display_id:
+            title = f"🎯 Draft Pick Quiz #{display_id}"
+
         embed = discord.Embed(
-            title="🎯 Draft Pick Quiz Challenge",
+            title=title,
             description="Can you predict which cards these players picked?\n\n"
                         "Click **Make Your Guesses** below to participate!",
             color=discord.Color.blue()
@@ -469,7 +502,11 @@ class QuizCommands(commands.Cog):
             inline=False
         )
 
-        embed.set_footer(text="Submit your guesses and see your results instantly!")
+        # Update footer to include quiz number
+        footer_text = "Submit your guesses and see your results instantly!"
+        if display_id:
+            footer_text = f"Quiz #{display_id} • {footer_text}"
+        embed.set_footer(text=footer_text)
 
         return embed
 
