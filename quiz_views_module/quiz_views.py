@@ -12,6 +12,7 @@ from models.draft_domain import PackTrace
 # Quiz scoring constants
 PICK_WEIGHTS = [2, 3, 4, 5]  # Points for exact matches on picks 1-4
 PERFECT_BONUS = 5  # Bonus points for getting all 4 picks exactly correct
+ALL_CARDS_BONUS = 2  # Bonus for guessing all 4 correct cards (not in perfect positions)
 TEAM_BONUS = 1  # Points for correct card picked by the right team, wrong seat
 
 # Emoji constants
@@ -93,6 +94,70 @@ def _get_congratulatory_message(total_points: int, correct_count: int) -> str:
     return random.choice(messages)
 
 
+def _detect_bonus_type(correct_count: int, guesses: list, correct_answers: list) -> str:
+    """
+    Detect which bonus type was earned.
+
+    Returns: "perfect", "all_cards", or None
+    """
+    if correct_count == NUM_PICKS:
+        return "perfect"
+    elif correct_count < NUM_PICKS and set(guesses) == set(correct_answers):
+        return "all_cards"
+    return None
+
+
+def _calculate_bonus_points(bonus_type: str) -> int:
+    """Calculate bonus points for a given bonus type."""
+    if bonus_type == "perfect":
+        return PERFECT_BONUS
+    elif bonus_type == "all_cards":
+        return ALL_CARDS_BONUS
+    return 0
+
+
+def _format_quiz_title(total_points: int, display_id: int = None, is_existing: bool = False) -> str:
+    """Format quiz result title with optional display ID."""
+    prefix = "Your " if is_existing else ""
+    quiz_num = f"#{display_id}" if display_id else ""
+    quiz_ref = f"Quiz {quiz_num} " if quiz_num else "Quiz "
+    return f"{prefix}{quiz_ref}Results: {total_points} Points!"
+
+
+def _format_share_text(emoji_line: str, total_points: int, display_id: int = None) -> str:
+    """Format shareable quiz result text."""
+    quiz_num = f" #{display_id}" if display_id else ""
+    return f"🎯 Draft Pick Quiz{quiz_num}\n{emoji_line} {total_points} pts"
+
+
+async def _format_quiz_reference(quiz_id: str = None, display_id: int = None) -> str:
+    """
+    Get formatted quiz reference with optional message link.
+
+    Returns clickable markdown link if quiz_id and display_id available,
+    otherwise returns plain text reference.
+    """
+    # No display_id - return generic reference
+    if not display_id:
+        return "the Draft Pick Quiz"
+
+    # No quiz_id - return plain number
+    if not quiz_id:
+        return f"Quiz #{display_id}"
+
+    # Try to create clickable link
+    async with db_session() as session:
+        stmt = select(QuizSession).where(QuizSession.quiz_id == quiz_id)
+        result = await session.execute(stmt)
+        quiz_session = result.scalar_one_or_none()
+
+    if quiz_session and quiz_session.message_id:
+        message_link = f"https://discord.com/channels/{quiz_session.guild_id}/{quiz_session.channel_id}/{quiz_session.message_id}"
+        return f"[Quiz #{display_id}]({message_link})"
+
+    return f"Quiz #{display_id}"
+
+
 async def _display_results(
     interaction: discord.Interaction,
     analysis: DraftAnalysis,
@@ -126,10 +191,8 @@ async def _display_results(
         display_id: Human-friendly quiz number (optional)
         quiz_id: Quiz session ID for creating message link (optional)
     """
-    # Update title to include quiz number
-    title = f"{'Your ' if is_existing_submission else ''}Quiz Results: {total_points} Points!"
-    if display_id:
-        title = f"{'Your ' if is_existing_submission else ''}Quiz #{display_id} Results: {total_points} Points!"
+    # Format title with optional quiz number
+    title = _format_quiz_title(total_points, display_id, is_existing_submission)
 
     embed = discord.Embed(
         title=title,
@@ -161,9 +224,14 @@ async def _display_results(
 
         results_text += f"{icon} **Pick {i+1}**: {result_text}\n"
 
-    # Add perfect bonus note if applicable
-    if correct_count == NUM_PICKS:
+    # Detect bonus type once (used for both display and sharing)
+    bonus_type = _detect_bonus_type(correct_count, guesses, correct_answers)
+
+    # Add bonus notes if applicable
+    if bonus_type == "perfect":
         results_text += f"\n🌟 **Perfect Score Bonus: +{PERFECT_BONUS}pts**"
+    elif bonus_type == "all_cards":
+        results_text += f"\n✅ **All Cards Bonus: +{ALL_CARDS_BONUS}pts** (identified all correct cards!)"
 
     embed.add_field(name="Your Guesses", value=results_text, inline=False)
 
@@ -177,9 +245,7 @@ async def _display_results(
 
     # Generate shareable text with emoji indicators
     emoji_line = _generate_result_emoji_line(pick_results, pick_points)
-    share_text = f"🎯 Draft Pick Quiz\n{emoji_line} {total_points} pts"
-    if display_id:
-        share_text = f"🎯 Draft Pick Quiz #{display_id}\n{emoji_line} {total_points} pts"
+    share_text = _format_share_text(emoji_line, total_points, display_id)
 
     embed.add_field(
         name="📤 Share Your Result",
@@ -194,7 +260,8 @@ async def _display_results(
         total_points=total_points,
         correct_count=correct_count,
         display_id=display_id,
-        quiz_id=quiz_id
+        quiz_id=quiz_id,
+        bonus_type=bonus_type
     )
 
     await interaction.followup.send(embed=embed, view=share_view, ephemeral=True)
@@ -203,7 +270,7 @@ async def _display_results(
 class ShareResultView(discord.ui.View):
     """View with a button to share quiz results publicly."""
 
-    def __init__(self, user: discord.User, emoji_line: str, total_points: int, correct_count: int, display_id: int = None, quiz_id: str = None):
+    def __init__(self, user: discord.User, emoji_line: str, total_points: int, correct_count: int, display_id: int = None, quiz_id: str = None, bonus_type: str = None):
         super().__init__(timeout=300)  # 5 minute timeout
         self.user = user
         self.emoji_line = emoji_line
@@ -211,6 +278,7 @@ class ShareResultView(discord.ui.View):
         self.correct_count = correct_count
         self.display_id = display_id
         self.quiz_id = quiz_id
+        self.bonus_type = bonus_type
 
     @discord.ui.button(
         label="📤 Share Results Publicly",
@@ -230,32 +298,24 @@ class ShareResultView(discord.ui.View):
         # Generate congratulatory message
         congrats = _get_congratulatory_message(self.total_points, self.correct_count)
 
-        # Load quiz session to create message link
-        quiz_ref = "the Draft Pick Quiz"  # Default fallback
-        if self.quiz_id and self.display_id:
-            async with db_session() as session:
-                stmt = select(QuizSession).where(QuizSession.quiz_id == self.quiz_id)
-                result = await session.execute(stmt)
-                quiz_session = result.scalar_one_or_none()
-
-            if quiz_session and quiz_session.message_id:
-                # Create Discord message link
-                message_link = f"https://discord.com/channels/{quiz_session.guild_id}/{quiz_session.channel_id}/{quiz_session.message_id}"
-                quiz_ref = f"[Quiz #{self.display_id}]({message_link})"
-            elif self.display_id:
-                quiz_ref = f"Quiz #{self.display_id}"
-        elif self.display_id:
-            quiz_ref = f"Quiz #{self.display_id}"
+        # Get formatted quiz reference (with clickable link if available)
+        quiz_ref = await _format_quiz_reference(self.quiz_id, self.display_id)
 
         # Create public message with clickable link
-        share_text = f"🎯 Draft Pick Quiz\n{self.emoji_line} {self.total_points} pts"
-        if self.display_id:
-            share_text = f"🎯 Draft Pick Quiz #{self.display_id}\n{self.emoji_line} {self.total_points} pts"
+        share_text = _format_share_text(self.emoji_line, self.total_points, self.display_id)
+
+        # Add bonus line if applicable
+        bonus_line = ""
+        if self.bonus_type == "perfect":
+            bonus_line = "🌟 Perfect Score Bonus earned!\n"
+        elif self.bonus_type == "all_cards":
+            bonus_line = "✅ All Cards Bonus earned!\n"
 
         message = (
             f"{congrats}\n\n"
-            f"**{self.user.display_name}** scored **{self.total_points} points** on {quiz_ref}!\n\n"
-            f"```\n{share_text}\n```"
+            f"**{self.user.display_name}** scored **{self.total_points} points** on {quiz_ref}!\n"
+            f"{bonus_line}"
+            f"\n```\n{share_text}\n```"
         )
 
         # Disable the button before sharing
@@ -550,10 +610,12 @@ class QuizGuessView(discord.ui.View):
             pick_results.append(is_correct)
             pick_points.append(points)
 
-        # Calculate total points with perfect bonus
+        # Calculate total points with bonuses
         total_points = sum(pick_points)
-        if correct_count == NUM_PICKS:
-            total_points += PERFECT_BONUS
+
+        # Add bonus points
+        bonus_type = _detect_bonus_type(correct_count, guesses, correct_answers)
+        total_points += _calculate_bonus_points(bonus_type)
 
         return pick_results, pick_points, total_points, correct_count
 
