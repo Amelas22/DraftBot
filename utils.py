@@ -1662,6 +1662,40 @@ async def re_register_views(bot):
             except Exception as e:
                 logger.error(f"Failed to re-register quiz view: {quiz_session.quiz_id}, error: {e}", exc_info=True)
 
+        # Cleanup: Unpin quiz messages older than the rejoin cutoff
+        logger.info("Cleaning up old quiz messages (unpinning messages older than rejoin cutoff)")
+        old_quiz_cutoff = current_time - timedelta(days=QUIZ_REREGISTER_DAYS)
+
+        async with db_session.begin():
+            # Find quiz messages older than the cutoff
+            stmt = select(QuizSession).where(
+                QuizSession.posted_at < old_quiz_cutoff
+            )
+            result = await db_session.execute(stmt)
+            old_quiz_sessions = result.scalars().all()
+
+        logger.info(f"Found {len(old_quiz_sessions)} old quiz sessions to potentially unpin")
+
+        for old_quiz in old_quiz_sessions:
+            if not old_quiz.message_id or not old_quiz.channel_id:
+                continue
+
+            channel = bot.get_channel(int(old_quiz.channel_id))
+            if not channel:
+                continue
+
+            try:
+                message = await channel.fetch_message(int(old_quiz.message_id))
+                if message.pinned:
+                    await message.unpin()
+                    logger.info(f"Unpinned old quiz message {old_quiz.message_id} from {old_quiz.posted_at}")
+            except discord.NotFound:
+                logger.debug(f"Old quiz message {old_quiz.message_id} not found (already deleted)")
+            except discord.Forbidden:
+                logger.warning(f"Bot lacks permission to unpin message {old_quiz.message_id}")
+            except Exception as e:
+                logger.error(f"Error unpinning old quiz message {old_quiz.message_id}: {e}")
+
 async def calculate_player_standings(limit=None):
     time = datetime.now()
     async with AsyncSessionLocal() as db_session:
