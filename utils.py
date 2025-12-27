@@ -183,19 +183,32 @@ async def split_into_teams(bot, draft_session_id):
 async def generate_seating_order(bot, draft_session, command_type=None):
     guild = bot.get_guild(int(draft_session.guild_id))
 
-    team_a_members = [guild.get_member(int(user_id)) for user_id in draft_session.team_a]
-    team_b_members = [guild.get_member(int(user_id)) for user_id in draft_session.team_b]
+    # Create lists pairing user_id with member object (or None for test users)
+    team_a_pairs = [(user_id, guild.get_member(int(user_id))) for user_id in draft_session.team_a]
+    team_b_pairs = [(user_id, guild.get_member(int(user_id))) for user_id in draft_session.team_b]
 
-    random.shuffle(team_a_members)
-    random.shuffle(team_b_members)
+    random.shuffle(team_a_pairs)
+    random.shuffle(team_b_pairs)
 
     seating_order = []
-    for i in range(max(len(team_a_members), len(team_b_members))):
-        if i < len(team_a_members) and team_a_members[i]:
-            seating_order.append(getattr(team_a_members[i], 'display_name', "Unknown User"))
-        if i < len(team_b_members) and team_b_members[i]:
-            seating_order.append(getattr(team_b_members[i], 'display_name', "Unknown User"))
+    for i in range(max(len(team_a_pairs), len(team_b_pairs))):
+        if i < len(team_a_pairs):
+            user_id, member = team_a_pairs[i]
+            if member:
+                # Real Discord member - use their display name
+                seating_order.append(member.display_name)
+            else:
+                # Not a guild member (test user) - fall back to sign_ups dictionary
+                seating_order.append(draft_session.sign_ups.get(user_id, "Unknown User"))
 
+        if i < len(team_b_pairs):
+            user_id, member = team_b_pairs[i]
+            if member:
+                # Real Discord member - use their display name
+                seating_order.append(member.display_name)
+            else:
+                # Not a guild member (test user) - fall back to sign_ups dictionary
+                seating_order.append(draft_session.sign_ups.get(user_id, "Unknown User"))
 
     return seating_order
 
