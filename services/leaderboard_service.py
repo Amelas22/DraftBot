@@ -752,18 +752,6 @@ async def get_draft_win_streak_leaderboard_data(guild_id, timeframe, limit, sess
     for streak in history_streaks:
         player = players_lookup.get(streak.player_id)
         if player and streak.streak_length >= min_streak:
-            # Get ender's name
-            ender_name = None
-            if streak.ended_by_player_id:
-                ender_stmt = select(PlayerStats).where(
-                    PlayerStats.player_id == streak.ended_by_player_id,
-                    PlayerStats.guild_id == guild_id
-                )
-                ender_result = await session.execute(ender_stmt)
-                ender = ender_result.scalar_one_or_none()
-                if ender:
-                    ender_name = ender.display_name
-
             streak_entries.append({
                 "player_id": streak.player_id,
                 "display_name": player.display_name,
@@ -771,8 +759,7 @@ async def get_draft_win_streak_leaderboard_data(guild_id, timeframe, limit, sess
                 "team_drafts_won": player.team_drafts_won,
                 "is_active": False,
                 "started_at": streak.started_at,
-                "ended_at": streak.ended_at,
-                "ended_by_name": ender_name
+                "ended_at": streak.ended_at
             })
 
     # Add active streaks
@@ -785,8 +772,7 @@ async def get_draft_win_streak_leaderboard_data(guild_id, timeframe, limit, sess
                 "team_drafts_won": player.team_drafts_won,
                 "is_active": True,
                 "started_at": player.current_draft_win_streak_started_at,
-                "ended_at": None,
-                "ended_by_name": None
+                "ended_at": None
             })
 
     # Deduplicate - keep best per player

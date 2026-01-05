@@ -105,7 +105,7 @@ CATEGORY_CONFIGS = {
         "formatter": lambda p, rank: (
             f"{get_medal(rank)}{p['display_name']}: {p['draft_win_streak']}-draft streak " +
             ("᪥ (ACTIVE)" if p.get('is_active') else
-             (_format_ended_streak(p) if p.get('ended_at') else ""))
+             (f"(ended <t:{int(p['ended_at'].timestamp())}:R>)" if p.get('ended_at') else ""))
         )
     }
 }
