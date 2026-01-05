@@ -5,6 +5,7 @@ from sqlalchemy import text, select, bindparam, and_
 from database.db_session import db_session
 from models.win_streak_history import WinStreakHistory
 from models.perfect_streak_history import PerfectStreakHistory
+from models.draft_streak_history import DraftStreakHistory
 from models.player import PlayerStats
 from models import QuizStats, QuizSubmission, QuizSession
 
@@ -28,6 +29,14 @@ PERFECT_STREAK_MINIMUMS = {
 # Quiz minimum requirements
 QUIZ_MINIMUMS = {
     'quizzes': 3  # Minimum quizzes to appear on leaderboard
+}
+
+# Order of the White Lotus (draft win streak) minimum requirements
+DRAFT_WIN_STREAK_MINIMUMS = {
+    'active': 3,
+    '30d': 3,
+    '90d': 5,
+    'lifetime': 8
 }
 
 def ensure_datetime(date_value):
@@ -379,6 +388,10 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
             # Use dedicated function for quiz stats (doesn't need draft aggregation)
             sorted_players = await get_quiz_points_leaderboard_data(guild_id, timeframe, limit, session)
 
+        elif category == "draft_win_streak":
+            # Use dedicated function for draft win streak (Order of the White Lotus)
+            sorted_players = await get_draft_win_streak_leaderboard_data(guild_id, timeframe, limit, session)
+
         else:
             # Default to drafts_played if category not recognized
             sorted_players = sorted(players_list, key=lambda p: p["drafts_played"], reverse=True)
@@ -672,6 +685,127 @@ async def get_perfect_streak_leaderboard_data(guild_id, timeframe, limit, sessio
     )
 
     # Apply limit
+    return sorted_players[:limit]
+
+
+async def get_draft_win_streak_leaderboard_data(guild_id, timeframe, limit, session):
+    """
+    Get Order of the White Lotus (draft win streak) leaderboard data.
+    Tracks consecutive draft wins (losses break, ties continue).
+    """
+    min_streak = DRAFT_WIN_STREAK_MINIMUMS.get(timeframe, 8)
+
+    # Calculate date cutoff
+    if timeframe == "active":
+        cutoff_date = None
+    elif timeframe == "lifetime":
+        cutoff_date = None
+    elif timeframe == "90d":
+        cutoff_date = datetime.now() - timedelta(days=90)
+    elif timeframe == "30d":
+        cutoff_date = datetime.now() - timedelta(days=30)
+    else:
+        cutoff_date = None
+
+    # Get completed streaks from history
+    if timeframe == "active":
+        history_streaks = []
+    else:
+        history_stmt = select(DraftStreakHistory).where(
+            DraftStreakHistory.guild_id == guild_id,
+            DraftStreakHistory.ended_at.isnot(None)
+        )
+
+        if cutoff_date:
+            history_stmt = history_stmt.where(
+                DraftStreakHistory.ended_at >= cutoff_date
+            )
+
+        history_result = await session.execute(history_stmt)
+        history_streaks = history_result.scalars().all()
+
+    # Bulk load PlayerStats for history entries
+    if history_streaks:
+        streak_player_ids = list(set(s.player_id for s in history_streaks))
+        players_bulk_stmt = select(PlayerStats).where(
+            PlayerStats.guild_id == guild_id,
+            PlayerStats.player_id.in_(streak_player_ids)
+        )
+        players_bulk_result = await session.execute(players_bulk_stmt)
+        players_bulk = players_bulk_result.scalars().all()
+        players_lookup = {p.player_id: p for p in players_bulk}
+    else:
+        players_lookup = {}
+
+    # Get active streaks
+    players_stmt = select(PlayerStats).where(
+        PlayerStats.guild_id == guild_id,
+        PlayerStats.current_draft_win_streak > 0
+    )
+    players_result = await session.execute(players_stmt)
+    active_players = players_result.scalars().all()
+
+    # Combine into unified format
+    streak_entries = []
+
+    # Add completed streaks
+    for streak in history_streaks:
+        player = players_lookup.get(streak.player_id)
+        if player and streak.streak_length >= min_streak:
+            # Get ender's name
+            ender_name = None
+            if streak.ended_by_player_id:
+                ender_stmt = select(PlayerStats).where(
+                    PlayerStats.player_id == streak.ended_by_player_id,
+                    PlayerStats.guild_id == guild_id
+                )
+                ender_result = await session.execute(ender_stmt)
+                ender = ender_result.scalar_one_or_none()
+                if ender:
+                    ender_name = ender.display_name
+
+            streak_entries.append({
+                "player_id": streak.player_id,
+                "display_name": player.display_name,
+                "draft_win_streak": streak.streak_length,
+                "team_drafts_won": player.team_drafts_won,
+                "is_active": False,
+                "started_at": streak.started_at,
+                "ended_at": streak.ended_at,
+                "ended_by_name": ender_name
+            })
+
+    # Add active streaks
+    for player in active_players:
+        if player.current_draft_win_streak >= min_streak:
+            streak_entries.append({
+                "player_id": player.player_id,
+                "display_name": player.display_name,
+                "draft_win_streak": player.current_draft_win_streak,
+                "team_drafts_won": player.team_drafts_won,
+                "is_active": True,
+                "started_at": player.current_draft_win_streak_started_at,
+                "ended_at": None,
+                "ended_by_name": None
+            })
+
+    # Deduplicate - keep best per player
+    player_best_streaks = {}
+    for entry in streak_entries:
+        player_id = entry["player_id"]
+        if player_id not in player_best_streaks:
+            player_best_streaks[player_id] = entry
+        else:
+            if entry["draft_win_streak"] > player_best_streaks[player_id]["draft_win_streak"]:
+                player_best_streaks[player_id] = entry
+
+    # Sort by streak length, then total drafts won
+    sorted_players = sorted(
+        player_best_streaks.values(),
+        key=lambda p: (p["draft_win_streak"], p["team_drafts_won"]),
+        reverse=True
+    )
+
     return sorted_players[:limit]
 
 

@@ -97,6 +97,16 @@ CATEGORY_CONFIGS = {
         "description_template": "Players with the most quiz points (min {quizzes} quizzes completed)",
         "color": discord.Color.from_rgb(138, 43, 226),  # Blue-violet
         "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['total_points']} points ({p['total_quizzes']} quizzes, {p['accuracy_percentage']:.1f}% accuracy)"
+    },
+    "draft_win_streak": {
+        "title": "Order of the White Lotus",
+        "description_template": "Longest consecutive draft win streaks (min {streak_min} draft wins)",
+        "color": discord.Color.from_rgb(255, 253, 208),  # Pale yellow (lotus-like)
+        "formatter": lambda p, rank: (
+            f"{get_medal(rank)}{p['display_name']}: {p['draft_win_streak']}-draft streak " +
+            ("᪥ (ACTIVE)" if p.get('is_active') else
+             (_format_ended_streak(p) if p.get('ended_at') else ""))
+        )
     }
 }
 

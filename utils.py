@@ -12,6 +12,7 @@ from league import ChallengeView
 from models.leaderboard_message import LeaderboardMessage
 from models.win_streak_history import WinStreakHistory
 from models.perfect_streak_history import PerfectStreakHistory
+from models.draft_streak_history import DraftStreakHistory
 from models import QuizSession
 from quiz_views_module.quiz_views import QuizPublicView
 from services.draft_analysis import DraftAnalysis
@@ -753,6 +754,12 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 else:
                     logger.warning(f"No active manager found for session {draft_session_id} - logs may remain locked")
 
+                # Update draft win streaks (Order of the White Lotus)
+                try:
+                    await update_draft_win_streaks(draft_session_id, guild, bot)
+                except Exception as e:
+                    logger.error(f"Error updating draft win streaks for session {draft_session_id}: {e}")
+
                 # Check if we have a leaderboard message for this guild
                 stmt = select(LeaderboardMessage).where(LeaderboardMessage.guild_id == draft_session.guild_id)
                 result = await session.execute(stmt)
@@ -862,6 +869,144 @@ async def post_or_update_victory_message(bot, session, channel, embed, draft_ses
     # Schedule the removal of the live draft summary after 15 minutes (900 seconds)
     from livedrafts import remove_live_draft_summary_after_delay
     asyncio.create_task(remove_live_draft_summary_after_delay(bot, draft_session.session_id, 900))
+
+
+async def update_draft_win_streaks(session_id, guild, bot):
+    """Update draft win streaks for all players after a draft completes"""
+    guild_id = str(guild.id)
+    current_time = datetime.now()
+
+    async with AsyncSessionLocal() as db_session:
+        async with db_session.begin():
+            # Get draft session
+            stmt = select(DraftSession).where(DraftSession.session_id == session_id)
+            draft_session = await db_session.scalar(stmt)
+
+            if not draft_session:
+                logger.error(f"Draft session {session_id} not found")
+                return
+
+            # Calculate team wins
+            team_a_wins = 0
+            team_b_wins = 0
+
+            stmt = select(MatchResult).where(
+                MatchResult.session_id == session_id,
+                MatchResult.winner_id.isnot(None)
+            )
+            results = await db_session.execute(stmt)
+            matches = results.scalars().all()
+
+            for match in matches:
+                if match.winner_id in draft_session.team_a:
+                    team_a_wins += 1
+                elif match.winner_id in draft_session.team_b:
+                    team_b_wins += 1
+
+            # Determine result
+            if team_a_wins > team_b_wins:
+                winning_team = draft_session.team_a
+                losing_team = draft_session.team_b
+                is_tie = False
+            elif team_b_wins > team_a_wins:
+                winning_team = draft_session.team_b
+                losing_team = draft_session.team_a
+                is_tie = False
+            else:
+                # It's a tie - both teams maintain their streaks
+                winning_team = []
+                losing_team = []
+                is_tie = True
+
+            # Update winners' streaks
+            for player_id in winning_team:
+                await _update_player_draft_streak(
+                    db_session, player_id, guild_id, current_time,
+                    is_win=True, is_tie=False, ended_by_player_id=None
+                )
+
+            # Update losers' streaks (break them)
+            if not is_tie and losing_team:
+                # Pick a random winner to credit with ending the streak
+                ender_player_id = random.choice(winning_team)
+
+                for player_id in losing_team:
+                    await _update_player_draft_streak(
+                        db_session, player_id, guild_id, current_time,
+                        is_win=False, is_tie=False, ended_by_player_id=ender_player_id
+                    )
+
+            # Update both teams on tie (maintain streaks, increment draft counts)
+            if is_tie:
+                all_players = draft_session.team_a + draft_session.team_b
+                for player_id in all_players:
+                    await _update_player_draft_streak(
+                        db_session, player_id, guild_id, current_time,
+                        is_win=False, is_tie=True, ended_by_player_id=None
+                    )
+
+            await db_session.commit()
+            logger.info(f"Draft win streaks updated for session {session_id}")
+
+
+async def _update_player_draft_streak(db_session, player_id, guild_id, current_time, is_win, is_tie, ended_by_player_id):
+    """Helper to update individual player's draft streak"""
+    stmt = select(PlayerStats).where(
+        PlayerStats.player_id == player_id,
+        PlayerStats.guild_id == guild_id
+    )
+    player_stat = await db_session.scalar(stmt)
+
+    if not player_stat:
+        logger.warning(f"Player {player_id} not found in PlayerStats")
+        return
+
+    if is_win:
+        # Increment draft win count
+        player_stat.team_drafts_won += 1
+
+        # Update streak
+        if player_stat.current_draft_win_streak == 0:
+            player_stat.current_draft_win_streak_started_at = current_time
+        player_stat.current_draft_win_streak += 1
+
+        # Update longest if needed
+        if player_stat.current_draft_win_streak > player_stat.longest_draft_win_streak:
+            player_stat.longest_draft_win_streak = player_stat.current_draft_win_streak
+
+        logger.info(f"{player_stat.display_name} draft win streak: {player_stat.current_draft_win_streak}")
+
+    elif is_tie:
+        # Increment tie count, maintain streak
+        player_stat.team_drafts_tied += 1
+        logger.info(f"{player_stat.display_name} draft tied, streak maintained at {player_stat.current_draft_win_streak}")
+
+    else:  # Loss
+        # Increment loss count
+        player_stat.team_drafts_lost += 1
+
+        # Break streak if active
+        if player_stat.current_draft_win_streak > 0:
+            # Record to history
+            history_entry = DraftStreakHistory(
+                player_id=player_id,
+                guild_id=guild_id,
+                streak_length=player_stat.current_draft_win_streak,
+                started_at=player_stat.current_draft_win_streak_started_at,
+                ended_at=current_time,
+                ended_by_player_id=ended_by_player_id
+            )
+            db_session.add(history_entry)
+
+            # Update longest if needed
+            if player_stat.current_draft_win_streak > player_stat.longest_draft_win_streak:
+                player_stat.longest_draft_win_streak = player_stat.current_draft_win_streak
+
+            logger.info(f"{player_stat.display_name} draft streak broken at {player_stat.current_draft_win_streak}")
+
+            # Reset current streak
+            player_stat.current_draft_win_streak = 0
+            player_stat.current_draft_win_streak_started_at = None
 
 
 async def calculate_three_zero_drafters(session, draft_session_id, guild):
