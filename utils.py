@@ -922,18 +922,15 @@ async def update_draft_win_streaks(session_id, guild, bot):
             for player_id in winning_team:
                 await _update_player_draft_streak(
                     db_session, player_id, guild_id, current_time,
-                    is_win=True, is_tie=False, ended_by_player_id=None
+                    is_win=True, is_tie=False
                 )
 
             # Update losers' streaks (break them)
             if not is_tie and losing_team:
-                # Pick a random winner to credit with ending the streak
-                ender_player_id = random.choice(winning_team)
-
                 for player_id in losing_team:
                     await _update_player_draft_streak(
                         db_session, player_id, guild_id, current_time,
-                        is_win=False, is_tie=False, ended_by_player_id=ender_player_id
+                        is_win=False, is_tie=False
                     )
 
             # Update both teams on tie (maintain streaks, increment draft counts)
@@ -942,14 +939,14 @@ async def update_draft_win_streaks(session_id, guild, bot):
                 for player_id in all_players:
                     await _update_player_draft_streak(
                         db_session, player_id, guild_id, current_time,
-                        is_win=False, is_tie=True, ended_by_player_id=None
+                        is_win=False, is_tie=True
                     )
 
             await db_session.commit()
             logger.info(f"Draft win streaks updated for session {session_id}")
 
 
-async def _update_player_draft_streak(db_session, player_id, guild_id, current_time, is_win, is_tie, ended_by_player_id):
+async def _update_player_draft_streak(db_session, player_id, guild_id, current_time, is_win, is_tie):
     """Helper to update individual player's draft streak"""
     stmt = select(PlayerStats).where(
         PlayerStats.player_id == player_id,
@@ -987,14 +984,14 @@ async def _update_player_draft_streak(db_session, player_id, guild_id, current_t
 
         # Break streak if active
         if player_stat.current_draft_win_streak > 0:
-            # Record to history
+            # Record to history (without ended_by attribution since it's a team effort)
             history_entry = DraftStreakHistory(
                 player_id=player_id,
                 guild_id=guild_id,
                 streak_length=player_stat.current_draft_win_streak,
                 started_at=player_stat.current_draft_win_streak_started_at,
                 ended_at=current_time,
-                ended_by_player_id=ended_by_player_id
+                ended_by_player_id=None
             )
             db_session.add(history_entry)
 
