@@ -17,6 +17,7 @@ class QuizSession(Base):
 
     # Draft reference
     draft_session_id = Column(String(128), nullable=False)  # Foreign key to draft_sessions
+    starting_seat = Column(Integer, nullable=True)  # Starting seat position for pack trace (0-indexed)
 
     # Quiz data (JSON serialized)
     pack_trace_data = Column(JSON, nullable=False)  # Serialized PackTrace
