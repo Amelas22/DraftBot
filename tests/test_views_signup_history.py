@@ -2,6 +2,7 @@
 Tests for SignUpHistory integration with Discord view components.
 """
 import pytest
+import pytest_asyncio
 import asyncio
 import tempfile
 import os
@@ -19,9 +20,17 @@ class MockInteraction:
     """Mock Discord interaction for testing"""
     def __init__(self, user_id: str, display_name: str, guild_id: str):
         self.user = MagicMock()
-        self.user.id = int(user_id)
+        # Handle both numeric and non-numeric user IDs for testing flexibility
+        try:
+            self.user.id = int(user_id)
+        except ValueError:
+            # If not numeric, hash the string to create a fake numeric ID
+            self.user.id = abs(hash(user_id)) % (10 ** 18)  # Discord snowflake-like ID
         self.user.display_name = display_name
-        self.guild_id = int(guild_id)
+        try:
+            self.guild_id = int(guild_id)
+        except ValueError:
+            self.guild_id = abs(hash(guild_id)) % (10 ** 18)
         self.response = AsyncMock()
 
 
@@ -37,7 +46,7 @@ class MockDraftSession:
         self.min_stake = 10
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def test_db():
     """Create a temporary test database"""
     temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')

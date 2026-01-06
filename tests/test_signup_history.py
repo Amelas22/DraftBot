@@ -2,6 +2,7 @@
 Unit tests for SignUpHistory model
 """
 import pytest
+import pytest_asyncio
 import asyncio
 import tempfile
 import os
@@ -14,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy import select
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def test_db():
     """Create a temporary test database"""
     # Create temporary database file

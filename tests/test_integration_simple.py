@@ -2,9 +2,11 @@
 Integration tests to verify SignUpHistory works correctly with the views module.
 """
 import asyncio
+import pytest
 from models.sign_up_history import SignUpHistory
 
 
+@pytest.mark.asyncio
 async def test_signup_event_recording():
     """Test that SignUpHistory can record join and leave events."""
     try:
@@ -33,6 +35,7 @@ async def test_signup_event_recording():
         return False
 
 
+@pytest.mark.asyncio
 async def test_views_module_import():
     """Test that views module can successfully import SignUpHistory."""
     try:
