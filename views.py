@@ -451,9 +451,8 @@ class PersistentView(discord.ui.View):
                 print("Failed to fetch updated draft session after sign-up.")
                 return
                     
-            # Confirm signup with draft link
-            draft_link = draft_session_updated.get_draft_link_for_user(interaction.user.display_name)
-            signup_confirmation_message = f"You are now signed up. Join Here: {draft_link}"
+            # Confirm signup (link provided after teams created)
+            signup_confirmation_message = "You are now signed up! Your Draftmancer link will be provided once teams are created."
             await interaction.response.send_message(signup_confirmation_message, ephemeral=True)
 
             # Send ping if needed (6th player and haven't pinged yet)
@@ -1461,24 +1460,11 @@ async def generate_ready_check_embed(ready_check_status, sign_ups, draft_link, d
         return "\n".join(sign_ups.get(user_id, "Unknown user") for user_id in user_ids) or "None"
 
     # Generate the embed with fields for "Ready", "Not Ready", and "No Response"
-    embed = discord.Embed(title="Ready Check Initiated", description="Please indicate if you are ready.", color=discord.Color.gold())
+    embed = discord.Embed(title="Ready Check Initiated", description="Please indicate if you are ready.\n\nDraftmancer links will be provided once teams are created.", color=discord.Color.gold())
     embed.add_field(name="Ready", value=get_names(ready_check_status['ready']), inline=False)
     embed.add_field(name="Not Ready", value=get_names(ready_check_status['not_ready']), inline=False)
     embed.add_field(name="No Response", value=get_names(ready_check_status['no_response']), inline=False)
-    
-    # Include personalized draft links for each user if draft_session is provided
-    if draft_session:
-        user_links = []
-        for user_id, display_name in sign_ups.items():
-            personalized_link = draft_session.get_draft_link_for_user(display_name)
-            user_links.append(f"**{display_name}**: [Draft Link]({personalized_link})")
-        
-        # Use our helper function that safely splits fields if they're too long
-        add_links_to_embed_safely(embed, user_links, "Your Personalized Draft Links")
-    else:
-        # Fallback if draft_session not provided (backwards compatibility)
-        embed.add_field(name="Draftmancer Link", value=f"**➡️ [JOIN DRAFT HERE]({draft_link})⬅️**", inline=False)
-    
+
     return embed
 
 class ReadyCheckView(discord.ui.View):
@@ -1575,6 +1561,7 @@ class ReadyCheckView(discord.ui.View):
                             class AutoReadyInteraction:
                                 def __init__(self, original_interaction, message):
                                     self.user = original_interaction.user
+                                    self.guild = original_interaction.guild
                                     self.guild_id = original_interaction.guild_id
                                     self.channel = original_interaction.channel
                                     self.client = original_interaction.client
@@ -2225,18 +2212,14 @@ async def update_draft_message(bot, session_id):
         if draft_session.session_type == "staked":
             sign_ups_list = []
             for user_id, display_name in draft_session.sign_ups.items():
-                # Create user-specific draft link
-                user_draft_link = draft_session.get_draft_link_for_user(display_name)
-                # Create hyperlink markdown format
-                linked_name = f"[{display_name}]({user_draft_link})"
                 # Default to "Not set" if no stake has been set yet
                 if user_id in stake_info_by_player:
                     stake_amount = stake_info_by_player[user_id]['amount']
                     is_capped = stake_info_by_player[user_id]['is_capped']
                     capped_emoji = "🧢" if is_capped else "🏎️"  # Cap emoji for capped, lightning for uncapped
-                    sign_ups_list.append((user_id, linked_name, stake_amount, is_capped, capped_emoji))
+                    sign_ups_list.append((user_id, display_name, stake_amount, is_capped, capped_emoji))
                 else:
-                    sign_ups_list.append((user_id, linked_name, "Not set", True, "❓"))
+                    sign_ups_list.append((user_id, display_name, "Not set", True, "❓"))
             
             # Sort by stake amount (highest first)
             # Convert "Not set" to -1 for sorting purposes
@@ -2257,12 +2240,8 @@ async def update_draft_message(bot, session_id):
             sign_ups_str = f"**Players ({sign_up_count}):**\n" + ('\n'.join(formatted_sign_ups) if formatted_sign_ups else 'No players yet.')
         else:
             if draft_session.sign_ups:
-                linked_names = []
-                for user_id, display_name in draft_session.sign_ups.items():
-                    user_draft_link = draft_session.get_draft_link_for_user(display_name)
-                    linked_name = f"[{display_name}]({user_draft_link})"
-                    linked_names.append(linked_name)
-                sign_ups_str = f"**Players ({sign_up_count}):**\n" + '\n'.join(linked_names)
+                player_names = list(draft_session.sign_ups.values())
+                sign_ups_str = f"**Players ({sign_up_count}):**\n" + '\n'.join(player_names)
             else:
                 sign_ups_str = f"**Players (0):**\nNo players yet."
         
@@ -2570,11 +2549,8 @@ class StakeOptionsSelect(discord.ui.Select):
         signup_message = f"You've set your maximum stake to {stake_amount} tix."
         signup_message += f"\nYour bet will be {cap_status}."
             
-        if self.draft_link:
-            display_name = interaction.user.display_name
-            personalized_link = draft_session_updated.get_draft_link_for_user(display_name)
-            signup_message += f"\n\nYou are now signed up. Join Here: {personalized_link}"
-        
+        signup_message += "\n\nYou are now signed up! Your Draftmancer link will be provided once teams are created."
+
         # Send confirmation message
         await interaction.response.send_message(signup_message, ephemeral=True)
         
@@ -2732,10 +2708,8 @@ class StakeModal(discord.ui.Modal):
             if max_stake > 100:
                 signup_message += "\n\nReminder: Your max bet will be used to fill as many opposing team bets as possible."
                 
-            if self.draft_link:
-                draft_link = draft_session.get_draft_link_for_user(interaction.user.display_name)
-                signup_message += f"\n\nYou are now signed up. Join Here: {draft_link}"
-            
+            signup_message += "\n\nYou are now signed up! Your Draftmancer link will be provided once teams are created."
+
             # Send the confirmation
             await interaction.response.send_message(signup_message, ephemeral=True)
             
