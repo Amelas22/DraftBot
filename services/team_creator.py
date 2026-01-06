@@ -19,6 +19,7 @@ from services.draft_setup_manager import DraftSetupManager
 from services.state_manager import state_manager
 from services.stake_service import calculate_and_store_stakes
 from preference_service import get_players_bet_capping_preferences
+from notification_service import send_teams_created_dms
 
 
 async def create_and_display_teams(bot, draft_session_id, interaction, persistent_view):
@@ -136,7 +137,7 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                 if persistent_view.session_type == "staked":
                     await _handle_staked_draft_completion(
                         interaction, db_session, session, embed, channel_embed,
-                        persistent_view, draft_session_id, bot
+                        persistent_view, draft_session_id, bot, guild_id
                     )
                     return True
 
@@ -163,6 +164,16 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
 
         await interaction.channel.send(embed=channel_embed)
 
+        # Send DM notifications with draft links to users who have opted in
+        await send_teams_created_dms(
+            bot_or_client=interaction.client,
+            draft_session=session,
+            guild_id=guild_id,
+            channel_id=str(interaction.channel.id),
+            channel_name=interaction.channel.name,
+            guild_name=interaction.guild.name
+        )
+
         # Handle draft manager updates
         await _update_draft_manager(draft_session_id, bot, interaction.client)
 
@@ -184,6 +195,23 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
         return False
 
 
+async def _add_stake_info_to_embed(embed, session, stake_info_by_player):
+    """Add formatted stake information to an embed if applicable."""
+    if not stake_info_by_player:
+        return
+
+    stake_lines, total_stakes = await get_formatted_stake_pairs(session.session_id, session.sign_ups)
+
+    formatted_lines = []
+    for line in stake_lines:
+        parts = line.split(': ')
+        names = parts[0].split(' vs ')
+        formatted_lines.append(f"**{names[0]}** vs **{names[1]}**: {parts[1]}")
+
+    if formatted_lines:
+        add_links_to_embed_safely(embed, formatted_lines, f"Bets (Total: {total_stakes} tix)")
+
+
 async def _create_teams_embed(session, team_a_names, team_b_names, seating_order, stake_info_by_player, session_type):
     """Create the main embed showing teams and seating order."""
 
@@ -202,7 +230,7 @@ async def _create_teams_embed(session, team_a_names, team_b_names, seating_order
     user_links = []
     for user_id, display_name in session.sign_ups.items():
         personalized_link = session.get_draft_link_for_user(display_name)
-        user_links.append(f"**{display_name}**: [Draft Link]({personalized_link})")
+        user_links.append(f"[{display_name}]({personalized_link})")
 
     add_links_to_embed_safely(embed, user_links, "Your Personalized Draft Links")
 
@@ -217,17 +245,8 @@ async def _create_teams_embed(session, team_a_names, team_b_names, seating_order
     embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
 
     # Add stakes for staked drafts
-    if session_type == "staked" and stake_info_by_player:
-        stake_lines, total_stakes = await get_formatted_stake_pairs(session.session_id, session.sign_ups)
-
-        formatted_lines = []
-        for line in stake_lines:
-            parts = line.split(': ')
-            names = parts[0].split(' vs ')
-            formatted_lines.append(f"**{names[0]}** vs **{names[1]}**: {parts[1]}")
-
-        if formatted_lines:
-            add_links_to_embed_safely(embed, formatted_lines, f"Bets (Total: {total_stakes} tix)")
+    if session_type == "staked":
+        await _add_stake_info_to_embed(embed, session, stake_info_by_player)
 
     return embed
 
@@ -248,7 +267,7 @@ async def _create_channel_announcement_embed(session, seating_order, stake_info_
 
     for user_id, display_name in session.sign_ups.items():
         personalized_link = session.get_draft_link_for_user(display_name)
-        link_entry = f"**{display_name}**: [Draft Link]({personalized_link})"
+        link_entry = f"[{display_name}]({personalized_link})"
 
         if session.session_type == 'swiss':
             team_a_links.append(link_entry)
@@ -273,23 +292,14 @@ async def _create_channel_announcement_embed(session, seating_order, stake_info_
     channel_embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
 
     # Add stakes for staked drafts
-    if session_type == "staked" and stake_info_by_player:
-        stake_lines, total_stakes = await get_formatted_stake_pairs(session.session_id, session.sign_ups)
-
-        formatted_lines = []
-        for line in stake_lines:
-            parts = line.split(': ')
-            names = parts[0].split(' vs ')
-            formatted_lines.append(f"**{names[0]}** vs **{names[1]}**: {parts[1]}")
-
-        if formatted_lines:
-            add_links_to_embed_safely(channel_embed, formatted_lines, f"Bets (Total: {total_stakes} tix)")
+    if session_type == "staked":
+        await _add_stake_info_to_embed(channel_embed, session, stake_info_by_player)
 
     return channel_embed
 
 
 async def _handle_staked_draft_completion(interaction, db_session, session, embed, channel_embed,
-                                         persistent_view, draft_session_id, bot):
+                                         persistent_view, draft_session_id, bot, guild_id):
     """Handle special completion flow for staked drafts."""
     from views import CallbackButton, StakeCalculationButton
 
@@ -325,6 +335,16 @@ async def _handle_staked_draft_completion(interaction, db_session, session, embe
 
     await interaction.channel.send(embed=channel_embed)
     await db_session.commit()
+
+    # Send DM notifications with draft links to users who have opted in
+    await send_teams_created_dms(
+        bot_or_client=interaction.client,
+        draft_session=session,
+        guild_id=guild_id,
+        channel_id=str(interaction.channel.id),
+        channel_name=interaction.channel.name,
+        guild_name=interaction.guild.name
+    )
 
     # Update draft manager
     await _update_draft_manager(draft_session_id, bot, interaction.client)
