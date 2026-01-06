@@ -128,7 +128,9 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                                            seating_order, stake_info_by_player, persistent_view.session_type)
 
                 # Create channel announcement embed
-                channel_embed = _create_channel_announcement_embed(session, seating_order)
+                channel_embed = await _create_channel_announcement_embed(
+                    session, seating_order, stake_info_by_player, persistent_view.session_type
+                )
 
                 # Handle staked drafts specially
                 if persistent_view.session_type == "staked":
@@ -230,7 +232,7 @@ async def _create_teams_embed(session, team_a_names, team_b_names, seating_order
     return embed
 
 
-def _create_channel_announcement_embed(session, seating_order):
+async def _create_channel_announcement_embed(session, seating_order, stake_info_by_player, session_type):
     """Create the channel announcement embed."""
 
     channel_embed = discord.Embed(
@@ -269,6 +271,19 @@ def _create_channel_announcement_embed(session, seating_order):
                                   "blue" if session.session_type in ["random", "staked"] else "")
 
     channel_embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+
+    # Add stakes for staked drafts
+    if session_type == "staked" and stake_info_by_player:
+        stake_lines, total_stakes = await get_formatted_stake_pairs(session.session_id, session.sign_ups)
+
+        formatted_lines = []
+        for line in stake_lines:
+            parts = line.split(': ')
+            names = parts[0].split(' vs ')
+            formatted_lines.append(f"**{names[0]}** vs **{names[1]}**: {parts[1]}")
+
+        if formatted_lines:
+            add_links_to_embed_safely(channel_embed, formatted_lines, f"Bets (Total: {total_stakes} tix)")
 
     return channel_embed
 
