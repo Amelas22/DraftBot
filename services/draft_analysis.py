@@ -134,7 +134,7 @@ class DraftAnalysis:
 
     # === Query Methods ===
 
-    def trace_pack(self, pack_num: int, length: int = 4, debug: bool = False) -> Optional[PackTrace]:
+    def trace_pack(self, pack_num: int, length: int = 4, debug: bool = False, starting_seat: Optional[int] = None) -> Optional[PackTrace]:
         """
         Trace pack through rotation by matching booster contents.
 
@@ -145,11 +145,25 @@ class DraftAnalysis:
             pack_num: Pack number (0, 1, or 2)
             length: Number of consecutive picks to trace (default 4)
             debug: If True, log detailed debugging info
+            starting_seat: If provided, only try this specific seat (0-indexed)
 
         Returns:
             PackTrace with picks in order, or None if sequence not found
         """
-        return self._tracer.trace_pack(pack_num, length, debug)
+        return self._tracer.trace_pack(pack_num, length, debug, starting_seat)
+
+    def get_valid_starting_seats(self, pack_num: int, length: int = 4) -> List[int]:
+        """
+        Get list of valid starting seats that produce a complete pack trace.
+
+        Args:
+            pack_num: Pack number (0, 1, or 2)
+            length: Number of consecutive picks to trace (default 4)
+
+        Returns:
+            List of valid seat numbers (0-indexed)
+        """
+        return self._tracer.get_valid_starting_seats(pack_num, length)
 
     def get_pick(self, pack_num: int, pick_num: int, user_id: str) -> Optional[Pick]:
         """

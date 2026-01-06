@@ -37,7 +37,7 @@ class PackTracer:
         """
         self._indexer = indexer
 
-    def trace_pack(self, pack_num: int, length: int = 4, debug: bool = False) -> Optional[PackTrace]:
+    def trace_pack(self, pack_num: int, length: int = 4, debug: bool = False, starting_seat: Optional[int] = None) -> Optional[PackTrace]:
         """
         Trace pack through picks.
 
@@ -58,6 +58,7 @@ class PackTracer:
             pack_num: Pack number (0, 1, or 2)
             length: Number of consecutive picks to trace (default 4)
             debug: If True, log detailed debugging info
+            starting_seat: If provided, only try this specific seat (0-indexed)
 
         Returns:
             PackTrace with picks in order, or None if not found
@@ -66,8 +67,8 @@ class PackTracer:
         chain = None
         if self._indexer.has_seating:
             if debug:
-                logger.debug(f"Using seat-based tracing for pack {pack_num}")
-            chain = self._trace_by_seats(pack_num, length, debug)
+                logger.debug(f"Using seat-based tracing for pack {pack_num}" + (f" at seat {starting_seat}" if starting_seat is not None else ""))
+            chain = self._trace_by_seats(pack_num, length, debug, starting_seat)
 
         # Fall back to booster matching if seat-based tracing failed
         if not chain:
@@ -87,7 +88,31 @@ class PackTracer:
             logger.debug(f"No {length}-pick chain found for pack {pack_num}")
         return None
 
-    def _trace_by_seats(self, pack_num: int, length: int, debug: bool = False) -> Optional[List[Pick]]:
+    def get_valid_starting_seats(self, pack_num: int, length: int = 4) -> List[int]:
+        """
+        Get list of valid starting seats that produce a complete pack trace.
+
+        Args:
+            pack_num: Pack number (0, 1, or 2)
+            length: Number of consecutive picks to trace (default 4)
+
+        Returns:
+            List of valid seat numbers (0-indexed)
+        """
+        if not self._indexer.has_seating:
+            return []
+
+        valid_seats = []
+        num_players = self._indexer.num_players
+
+        for seat in range(num_players):
+            chain = self._trace_by_seats(pack_num, length, debug=False, starting_seat=seat)
+            if chain and len(chain) == length:
+                valid_seats.append(seat)
+
+        return valid_seats
+
+    def _trace_by_seats(self, pack_num: int, length: int, debug: bool = False, starting_seat: Optional[int] = None) -> Optional[List[Pick]]:
         """
         Trace pack using seat-based rotation (Phase 2).
 
@@ -99,14 +124,21 @@ class PackTracer:
             pack_num: Pack number
             length: Chain length
             debug: Debug logging
+            starting_seat: If provided, only try this specific seat
 
         Returns:
             List of Pick objects or None
         """
         num_players = self._indexer.num_players
 
+        # Determine which seats to try
+        if starting_seat is not None:
+            seats_to_try = [starting_seat]
+        else:
+            seats_to_try = range(num_players)
+
         # Try each seat as starting point
-        for start_seat in range(num_players):
+        for start_seat in seats_to_try:
             chain = []
             current_seat = start_seat
             pick_num = 0

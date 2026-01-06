@@ -2,7 +2,7 @@ import discord
 import random
 import asyncio
 from io import BytesIO
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Set
 from discord.ext import commands
 from datetime import datetime, timedelta
 from loguru import logger
@@ -47,19 +47,30 @@ class QuizCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    async def _select_random_draft(self, guild_id: str) -> Optional[DraftSession]:
+    async def _select_random_draft_and_seat(self, guild_id: str) -> Tuple[Optional[DraftSession], Optional[int]]:
         """
-        Select a random eligible draft from the last year.
+        Select a random eligible draft and seat combination that hasn't been used for a quiz yet.
+
+        Uses lazy evaluation: randomly picks drafts one at a time and checks for unused seats,
+        stopping as soon as a valid combination is found.
 
         Args:
             guild_id: Guild ID to search drafts for
 
         Returns:
-            Random DraftSession or None if no eligible drafts found
+            Tuple of (DraftSession, starting_seat) or (None, None) if no eligible combinations found
         """
         one_year_ago = datetime.now() - timedelta(days=ELIGIBLE_DRAFT_DAYS)
 
         async with db_session() as session:
+            # Get used (draft_session_id, starting_seat) combinations for this guild
+            used_combos_stmt = select(QuizSession.draft_session_id, QuizSession.starting_seat).where(
+                QuizSession.guild_id == str(guild_id)
+            )
+            used_result = await session.execute(used_combos_stmt)
+            used_combos: Set[Tuple[str, Optional[int]]] = {(row[0], row[1]) for row in used_result.fetchall()}
+
+            # Get all eligible drafts (last year, has spaces_object_key)
             stmt = select(DraftSession).where(
                 and_(
                     DraftSession.guild_id == str(guild_id),
@@ -68,22 +79,53 @@ class QuizCommands(commands.Cog):
                 )
             )
             result = await session.execute(stmt)
-            eligible_drafts = result.scalars().all()
+            eligible_drafts = list(result.scalars().all())
 
         if not eligible_drafts:
             logger.warning(f"No eligible drafts found for guild {guild_id}")
-            return None
+            return None, None
 
-        selected_draft = random.choice(eligible_drafts)
-        logger.info(f"Selected draft {selected_draft.session_id} (cube: {selected_draft.cube}) from {len(eligible_drafts)} eligible drafts")
-        return selected_draft
+        # Shuffle drafts for random selection
+        random.shuffle(eligible_drafts)
 
-    async def _prepare_quiz_data(self, draft_session: DraftSession):
+        # Lazily check drafts until we find one with unused seats
+        drafts_checked = 0
+        for draft in eligible_drafts:
+            drafts_checked += 1
+            try:
+                analysis = await DraftAnalysis.from_session(draft)
+                if analysis is None:
+                    continue
+
+                # Get valid seats for this draft
+                valid_seats = analysis.get_valid_starting_seats(QUIZ_PACK_NUMBER, QUIZ_NUM_PICKS)
+                if not valid_seats:
+                    continue
+
+                # Filter to unused seats
+                unused_seats = [seat for seat in valid_seats if (draft.session_id, seat) not in used_combos]
+                if not unused_seats:
+                    continue
+
+                # Found a draft with unused seats - pick one randomly
+                selected_seat = random.choice(unused_seats)
+                logger.info(f"Selected draft {draft.session_id} (cube: {draft.cube}) seat {selected_seat} after checking {drafts_checked} drafts ({len(unused_seats)} unused seats available)")
+                return draft, selected_seat
+
+            except Exception as e:
+                logger.warning(f"Error loading analysis for draft {draft.session_id}: {e}")
+                continue
+
+        logger.warning(f"No unused draft+seat combinations found for guild {guild_id} (checked {drafts_checked} drafts, {len(used_combos)} combinations already used)")
+        return None, None
+
+    async def _prepare_quiz_data(self, draft_session: DraftSession, starting_seat: int):
         """
         Load draft analysis, trace pack, and create visualization.
 
         Args:
             draft_session: Draft session to prepare quiz from
+            starting_seat: Starting seat position for pack trace (0-indexed)
 
         Returns:
             Tuple of (analysis, pack_trace, mpt_url, draft_data) or None if preparation fails
@@ -98,9 +140,9 @@ class QuizCommands(commands.Cog):
             logger.error(f"Failed to load draft analysis: {e}", exc_info=True)
             return None
 
-        # Trace pack
+        # Trace pack with specific starting seat
         try:
-            pack_trace = analysis.trace_pack(pack_num=QUIZ_PACK_NUMBER, length=QUIZ_NUM_PICKS)
+            pack_trace = analysis.trace_pack(pack_num=QUIZ_PACK_NUMBER, length=QUIZ_NUM_PICKS, starting_seat=starting_seat)
         except Exception as e:
             logger.error(f"Failed to trace pack: {e}", exc_info=True)
             return None
@@ -130,7 +172,8 @@ class QuizCommands(commands.Cog):
         pack_trace: PackTrace,
         mpt_url: Optional[str],
         draft_data: Optional[dict],
-        posted_by: str
+        posted_by: str,
+        starting_seat: int
     ) -> Optional[discord.Message]:
         """
         Create quiz session in database and post quiz message.
@@ -145,6 +188,7 @@ class QuizCommands(commands.Cog):
             mpt_url: MagicProTools URL (optional)
             draft_data: Draft data from Spaces (optional)
             posted_by: User ID or "scheduler"
+            starting_seat: Starting seat position for pack trace (0-indexed)
 
         Returns:
             Posted message or None on failure
@@ -179,6 +223,7 @@ class QuizCommands(commands.Cog):
                 guild_id=str(guild_id),
                 channel_id=str(channel_id),
                 draft_session_id=draft_session.session_id,
+                starting_seat=starting_seat,
                 pack_trace_data=pack_trace_data,
                 correct_answers=correct_answers,
                 posted_by=str(posted_by)
@@ -186,7 +231,7 @@ class QuizCommands(commands.Cog):
             session.add(quiz_session)
             await session.commit()
 
-        logger.info(f"Created quiz session {quiz_id} with display_id=#{display_id}")
+        logger.info(f"Created quiz session {quiz_id} with display_id=#{display_id}, seat={starting_seat}")
 
         # Post public message with quiz
         embed = self.create_quiz_embed(draft_session, pack_trace, analysis, mpt_url, display_id)
@@ -296,18 +341,18 @@ class QuizCommands(commands.Cog):
         logger.info(f"Post quiz command received from user {ctx.author.id} in guild {ctx.guild.id}")
         await ctx.response.defer(ephemeral=True)
 
-        # Select random draft
-        draft_session = await self._select_random_draft(ctx.guild.id)
+        # Select random draft and seat combination
+        draft_session, starting_seat = await self._select_random_draft_and_seat(ctx.guild.id)
         if not draft_session:
             await ctx.followup.send(
-                "No eligible drafts found from the last year in this guild.\n"
+                "No eligible draft+seat combinations found from the last year in this guild.\n"
                 "Drafts must have stored data in Spaces.",
                 ephemeral=True
             )
             return
 
-        # Prepare quiz data
-        quiz_data = await self._prepare_quiz_data(draft_session)
+        # Prepare quiz data with specific starting seat
+        quiz_data = await self._prepare_quiz_data(draft_session, starting_seat)
         if not quiz_data:
             await ctx.followup.send(
                 "Failed to load draft data. Please try again.",
@@ -327,7 +372,8 @@ class QuizCommands(commands.Cog):
             pack_trace=pack_trace,
             mpt_url=mpt_url,
             draft_data=draft_data,
-            posted_by=str(ctx.author.id)
+            posted_by=str(ctx.author.id),
+            starting_seat=starting_seat
         )
 
         if not message:
@@ -339,7 +385,7 @@ class QuizCommands(commands.Cog):
 
         # Confirm to mod
         await ctx.followup.send(
-            f"✅ Quiz posted! Draft: {draft_session.cube} from {draft_session.draft_start_time.strftime('%Y-%m-%d')}",
+            f"✅ Quiz posted! Draft: {draft_session.cube} from {draft_session.draft_start_time.strftime('%Y-%m-%d')} (seat {starting_seat})",
             ephemeral=True
         )
 
@@ -362,13 +408,13 @@ class QuizCommands(commands.Cog):
                 logger.error(f"Guild not found for channel {channel_id}")
                 return False
 
-            # Select random draft
-            draft_session = await self._select_random_draft(guild.id)
+            # Select random draft and seat combination
+            draft_session, starting_seat = await self._select_random_draft_and_seat(guild.id)
             if not draft_session:
                 return False
 
-            # Prepare quiz data
-            quiz_data = await self._prepare_quiz_data(draft_session)
+            # Prepare quiz data with specific starting seat
+            quiz_data = await self._prepare_quiz_data(draft_session, starting_seat)
             if not quiz_data:
                 return False
 
@@ -384,7 +430,8 @@ class QuizCommands(commands.Cog):
                 pack_trace=pack_trace,
                 mpt_url=mpt_url,
                 draft_data=draft_data,
-                posted_by="scheduler"
+                posted_by="scheduler",
+                starting_seat=starting_seat
             )
 
             return message is not None
