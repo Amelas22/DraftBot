@@ -251,9 +251,38 @@ async def remove_live_draft_summary_after_delay(bot, draft_session_id, delay_sec
 async def re_register_live_drafts(bot):
     """Re-register all live draft summaries on bot restart"""
     current_time = datetime.now()
-    
+
     async with AsyncSessionLocal() as db_session:
-        # Query for active drafts that have a live_draft_message_id
+        # First, clean up live draft messages for completed drafts
+        # (these may have been left behind if the bot restarted before the cleanup task ran)
+        cleanup_stmt = select(DraftSession).where(
+            DraftSession.session_stage == "completed",
+            DraftSession.live_draft_message_id.isnot(None)
+        )
+        cleanup_result = await db_session.execute(cleanup_stmt)
+        completed_drafts = cleanup_result.scalars().all()
+
+        for draft_session in completed_drafts:
+            logger.info(f"Cleaning up live draft message for completed draft {draft_session.session_id}")
+            guild = bot.get_guild(int(draft_session.guild_id))
+            if guild:
+                live_drafts_channel = discord.utils.get(guild.text_channels, name="live-drafts")
+                if live_drafts_channel:
+                    try:
+                        message = await live_drafts_channel.fetch_message(int(draft_session.live_draft_message_id))
+                        await message.delete()
+                    except discord.NotFound:
+                        pass  # Already deleted
+                    except Exception as e:
+                        logger.error(f"Failed to delete live draft message: {e}")
+
+            # Clear the message ID
+            draft_session.live_draft_message_id = None
+            db_session.add(draft_session)
+
+        await db_session.commit()
+
+        # Now handle active drafts that are still in pairings
         stmt = select(DraftSession).where(
             DraftSession.deletion_time > current_time,
             DraftSession.session_stage == "pairings",
@@ -261,7 +290,7 @@ async def re_register_live_drafts(bot):
         )
         result = await db_session.execute(stmt)
         draft_sessions = result.scalars().all()
-        
+
         for draft_session in draft_sessions:
             # Update the live draft summary
             await update_live_draft_summary(bot, draft_session.session_id)

@@ -19,6 +19,8 @@ from services.draft_analysis import DraftAnalysis
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
 from services.draft_setup_manager import DraftSetupManager
+from services.debt_service import create_debt_entries_from_stakes
+from debt_views import SettleDebtsView
 from loguru import logger
 from config import is_cleanup_exempt
 from leaderboard_config import AUTO_UPDATE_CATEGORIES
@@ -454,7 +456,17 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                                 value="\n".join(outcome_lines),
                                 inline=False
                             )
-                
+
+                            # Create debt ledger entries for stake outcomes
+                            try:
+                                await create_debt_entries_from_stakes(
+                                    guild_id=draft_session.guild_id,
+                                    session_id=draft_session_id,
+                                    winning_team_ids=winning_team
+                                )
+                            except Exception as e:
+                                logger.error(f"Failed to create debt entries for session {draft_session_id}: {e}")
+
             else:
                 # Code for Swiss drafts
                 sign_ups_list = list(draft_session.sign_ups.keys())
@@ -715,6 +727,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 gap = abs(team_a_wins - team_b_wins)
 
                 draft_session.deletion_time = datetime.now() + timedelta(hours=2)
+                draft_session.session_stage = 'completed'  # Mark as completed so it's removed from live drafts
 
                 embed = await generate_draft_summary_embed(bot, draft_session_id)
                 three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
@@ -727,20 +740,24 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                         value=f"[View Draft Log]({logs_link})",
                         inline=False
                     )                
+                # Create settle debts view for staked drafts
+                settle_view = None
+                if draft_session.session_type == "staked":
+                    settle_view = SettleDebtsView(
+                        session_id=draft_session_id,
+                        guild_id=draft_session.guild_id
+                    )
+
                 # Handle the draft-chat channel message
                 draft_chat_channel = guild.get_channel(int(draft_session.draft_chat_channel))
                 if draft_chat_channel:
-                    await post_or_update_victory_message(bot, session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat')
+                    await post_or_update_victory_message(bot, session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat', view=settle_view)
 
                 # Determine the correct results channel
                 results_channel_name = "team-draft-results" if draft_session.session_type == "random" or draft_session.session_type == "staked" else "league-draft-results"
                 results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
                 if results_channel:
-                    await post_or_update_victory_message(bot, session, results_channel, embed, draft_session, 'victory_message_id_results_channel')
-                    if not draft_session.victory_message_id_draft_chat and not draft_session.victory_message_id_results_channel:
-                        from livedrafts import update_live_draft_summary, remove_live_draft_summary_after_delay
-                        await update_live_draft_summary(bot, draft_session_id)
-                        bot.loop.create_task(remove_live_draft_summary_after_delay(bot, draft_session_id, 1200)) 
+                    await post_or_update_victory_message(bot, session, results_channel, embed, draft_session, 'victory_message_id_results_channel', view=settle_view)
                 else:
                     print(f"Results channel '{results_channel_name}' not found.")
 
@@ -760,83 +777,100 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 except Exception as e:
                     logger.error(f"Error updating draft win streaks for session {draft_session_id}: {e}")
 
-                # Check if we have a leaderboard message for this guild
-                stmt = select(LeaderboardMessage).where(LeaderboardMessage.guild_id == draft_session.guild_id)
-                result = await session.execute(stmt)
-                leaderboard_message = result.scalar_one_or_none()
+                # Update leaderboards in background to avoid blocking other operations
+                # (leaderboard updates can take 20+ seconds due to rate limiting)
+                asyncio.create_task(update_leaderboards_for_guild(bot, draft_session.guild_id))
 
-                if leaderboard_message:
-                    logger.info(f"Updating leaderboard for guild {draft_session.guild_id}")
-                    
-                    # Get the original channel
-                    try:
-                        channel = guild.get_channel(int(leaderboard_message.channel_id))
-                        if not channel:
-                            logger.warning(f"Leaderboard channel {leaderboard_message.channel_id} not found")
-                            return
-                        
-                        # Check permissions in the channel
-                        bot_member = guild.get_member(bot.user.id)
-                        permissions = channel.permissions_for(bot_member)
-                        if not (permissions.send_messages and permissions.embed_links and permissions.read_message_history):
-                            logger.warning(f"Missing permissions in leaderboard channel {channel.name}: send_messages={permissions.send_messages}, embed_links={permissions.embed_links}, read_message_history={permissions.read_message_history}")
-                            return
 
-                        # All categories to display (imported from central config)
-                        categories = AUTO_UPDATE_CATEGORIES
-                        
-                        # Get timeframes for each category from database or defaults
-                        timeframes = {}
-                        for category in categories:
-                            if category == "hot_streak":
-                                timeframes[category] = "7d"  # Hot streak is always 7 days
+async def update_leaderboards_for_guild(bot, guild_id: str):
+    """Update all leaderboard messages for a guild.
+
+    This runs as a background task to avoid blocking other operations,
+    as it can take 20+ seconds due to Discord rate limiting.
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            stmt = select(LeaderboardMessage).where(LeaderboardMessage.guild_id == guild_id)
+            result = await session.execute(stmt)
+            leaderboard_message = result.scalar_one_or_none()
+
+            if not leaderboard_message:
+                return
+
+            logger.info(f"Updating leaderboard for guild {guild_id}")
+
+            guild = bot.get_guild(int(guild_id))
+            if not guild:
+                logger.warning(f"Guild {guild_id} not found for leaderboard update")
+                return
+
+            channel = guild.get_channel(int(leaderboard_message.channel_id))
+            if not channel:
+                logger.warning(f"Leaderboard channel {leaderboard_message.channel_id} not found")
+                return
+
+            # Check permissions in the channel
+            bot_member = guild.get_member(bot.user.id)
+            permissions = channel.permissions_for(bot_member)
+            if not (permissions.send_messages and permissions.embed_links and permissions.read_message_history):
+                logger.warning(f"Missing permissions in leaderboard channel {channel.name}")
+                return
+
+            # All categories to display (imported from central config)
+            categories = AUTO_UPDATE_CATEGORIES
+
+            # Get timeframes for each category from database or defaults
+            timeframes = {}
+            for category in categories:
+                if category == "hot_streak":
+                    timeframes[category] = "7d"  # Hot streak is always 7 days
+                else:
+                    # Get stored timeframe or default to "lifetime"
+                    timeframe_field = f"{category}_timeframe"
+                    if hasattr(leaderboard_message, timeframe_field):
+                        timeframes[category] = getattr(leaderboard_message, timeframe_field) or "lifetime"
+                    else:
+                        timeframes[category] = "lifetime"
+
+            # Process each category
+            for category in categories:
+                try:
+                    # Create the embed with the saved timeframe
+                    embed = await create_leaderboard_embed(guild_id, category, timeframe=timeframes[category])
+
+                    # Get the message ID field name
+                    msg_id_field = f"{category}_view_message_id" if category != "hot_streak" else "message_id"
+
+                    # Check if we have a message ID for this category
+                    if hasattr(leaderboard_message, msg_id_field) and getattr(leaderboard_message, msg_id_field):
+                        try:
+                            message_id = getattr(leaderboard_message, msg_id_field)
+                            message = await channel.fetch_message(int(message_id))
+
+                            # For categories with timeframe buttons, update with view
+                            if category != "hot_streak":
+                                view = TimeframeView(bot, guild_id, category, current_timeframe=timeframes[category])
+                                await message.edit(embed=embed, view=view)
                             else:
-                                # Get stored timeframe or default to "lifetime"
-                                timeframe_field = f"{category}_timeframe"
-                                if hasattr(leaderboard_message, timeframe_field):
-                                    timeframes[category] = getattr(leaderboard_message, timeframe_field) or "lifetime"
-                                else:
-                                    timeframes[category] = "lifetime"
-                        
-                        # Process each category
-                        for category in categories:
-                            try:
-                                # Create the embed with the saved timeframe
-                                embed = await create_leaderboard_embed(draft_session.guild_id, category, timeframe=timeframes[category])
-                                
-                                # Get the message ID field name
-                                msg_id_field = f"{category}_view_message_id" if category != "hot_streak" else "message_id"
-                                
-                                # Check if we have a message ID for this category
-                                if hasattr(leaderboard_message, msg_id_field) and getattr(leaderboard_message, msg_id_field):
-                                    try:
-                                        message_id = getattr(leaderboard_message, msg_id_field)
-                                        message = await channel.fetch_message(int(message_id))
-                                        
-                                        # For categories with timeframe buttons, update with view
-                                        if category != "hot_streak":
-                                            view = TimeframeView(bot, draft_session.guild_id, category, current_timeframe=timeframes[category])
-                                            await message.edit(embed=embed, view=view)
-                                        else:
-                                            # Hot streak doesn't have buttons
-                                            await message.edit(embed=embed)
-                                            
-                                        logger.info(f"Updated {category} leaderboard for guild {draft_session.guild_id}")
-                                    except discord.NotFound:
-                                        logger.warning(f"Leaderboard message for {category} not found in guild {draft_session.guild_id}")
-                                    except Exception as e:
-                                        logger.error(f"Error updating {category} leaderboard: {e}")
-                            except Exception as e:
-                                logger.error(f"Error creating {category} leaderboard embed: {e}")
-                        
-                        # Update last_updated timestamp
-                        leaderboard_message.last_updated = datetime.now()
-                        await session.commit()
-                        
-                        logger.info(f"Finished updating all leaderboards for guild {draft_session.guild_id}")
-                    
-                    except Exception as e:
-                        logger.error(f"Error updating leaderboards: {e}")
+                                # Hot streak doesn't have buttons
+                                await message.edit(embed=embed)
+
+                            logger.info(f"Updated {category} leaderboard for guild {guild_id}")
+                        except discord.NotFound:
+                            logger.warning(f"Leaderboard message for {category} not found in guild {guild_id}")
+                        except Exception as e:
+                            logger.error(f"Error updating {category} leaderboard: {e}")
+                except Exception as e:
+                    logger.error(f"Error creating {category} leaderboard embed: {e}")
+
+            # Update last_updated timestamp
+            leaderboard_message.last_updated = datetime.now()
+            await session.commit()
+
+            logger.info(f"Finished updating all leaderboards for guild {guild_id}")
+
+    except Exception as e:
+        logger.error(f"Error updating leaderboards for guild {guild_id}: {e}")
 
 
 async def remove_lock_after_delay(draft_session_id, delay):
@@ -846,7 +880,7 @@ async def remove_lock_after_delay(draft_session_id, delay):
     if draft_session_id in flags:
         del flags[draft_session_id]
 
-async def post_or_update_victory_message(bot, session, channel, embed, draft_session, victory_message_attr):
+async def post_or_update_victory_message(bot, session, channel, embed, draft_session, victory_message_attr, view=None):
     if not channel:
         print("Channel not found.")
         return
@@ -856,13 +890,19 @@ async def post_or_update_victory_message(bot, session, channel, embed, draft_ses
     if victory_message_id:
         try:
             message = await channel.fetch_message(int(victory_message_id))
-            await message.edit(embed=embed)
+            if view:
+                await message.edit(embed=embed, view=view)
+            else:
+                await message.edit(embed=embed)
         except discord.NotFound:
             print(f"Message ID {victory_message_id} not found in {channel.name}. Posting a new message.")
             victory_message_id = None
 
     if not victory_message_id:
-        message = await channel.send(embed=embed)
+        if view:
+            message = await channel.send(embed=embed, view=view)
+        else:
+            message = await channel.send(embed=embed)
         setattr(draft_session, victory_message_attr, str(message.id))
         session.add(draft_session)
     
@@ -1837,6 +1877,57 @@ async def re_register_views(bot):
                 logger.warning(f"Bot lacks permission to unpin message {old_quiz.message_id}")
             except Exception as e:
                 logger.error(f"Error unpinning old quiz message {old_quiz.message_id}: {e}")
+
+        # Re-register SettleDebtsView for completed staked drafts (last 7 days)
+        settle_cutoff = current_time - timedelta(days=7)
+        async with db_session.begin():
+            stmt = select(DraftSession).where(
+                DraftSession.session_type == "staked",
+                DraftSession.victory_message_id_draft_chat.isnot(None),
+                DraftSession.teams_start_time >= settle_cutoff
+            ).order_by(desc(DraftSession.teams_start_time))
+            result = await db_session.execute(stmt)
+            staked_sessions = result.scalars().all()
+
+        logger.info(f"Found {len(staked_sessions)} recent staked drafts to re-register settle views")
+
+        for staked_session in staked_sessions:
+            # Re-register view in draft chat channel
+            if staked_session.draft_chat_channel and staked_session.victory_message_id_draft_chat:
+                channel = bot.get_channel(int(staked_session.draft_chat_channel))
+                if channel:
+                    try:
+                        message = await channel.fetch_message(int(staked_session.victory_message_id_draft_chat))
+                        view = SettleDebtsView(
+                            session_id=staked_session.session_id,
+                            guild_id=staked_session.guild_id
+                        )
+                        await message.edit(view=view)
+                        logger.debug(f"Re-registered settle view for draft chat: {staked_session.session_id}")
+                    except discord.NotFound:
+                        logger.debug(f"Victory message not found for session: {staked_session.session_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to re-register settle view for session {staked_session.session_id}: {e}")
+
+            # Re-register view in results channel (if different message)
+            if staked_session.victory_message_id_results_channel:
+                results_channel_name = "team-draft-results"
+                guild = bot.get_guild(int(staked_session.guild_id))
+                if guild:
+                    results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
+                    if results_channel:
+                        try:
+                            message = await results_channel.fetch_message(int(staked_session.victory_message_id_results_channel))
+                            view = SettleDebtsView(
+                                session_id=staked_session.session_id,
+                                guild_id=staked_session.guild_id
+                            )
+                            await message.edit(view=view)
+                            logger.debug(f"Re-registered settle view for results channel: {staked_session.session_id}")
+                        except discord.NotFound:
+                            logger.debug(f"Results message not found for session: {staked_session.session_id}")
+                        except Exception as e:
+                            logger.error(f"Failed to re-register settle view for results channel {staked_session.session_id}: {e}")
 
 async def calculate_player_standings(limit=None):
     time = datetime.now()
