@@ -221,43 +221,50 @@ class PersistentView(discord.ui.View):
         # First acknowledge the interaction so it doesn't time out
         await interaction.response.defer(ephemeral=True)
 
-        # Generate unique user IDs starting from a high number to avoid conflicts
-        start_id = 900000000000000000
-        
-        # Create fake users with long names to test the character limit
+        # Use the bot's user ID for test users so they resolve to a valid Discord member
+        # This helps test features like debt settlement that need guild.get_member() to work
+        bot_user_id = str(interaction.client.user.id)
+
+        # Test names - prefixed with [TEST] to make it clear they're test users
         test_names = [
-            "SuperLongUserName_Testing_Character_Limits_One",
-            "AnotherVeryLongUsername_For_Testing_Two", 
-            "ThirdLongUsername_With_Extra_Characters_Three",
-            "FourthLongUsername_To_Test_UI_Rendering_Four",
-            "FifthLongUsername_With_Special_Chars_Five",
-            "SixthLongUsername_Testing_Overflow_Six",
-            "SeventhLongUsername_With_Multiple_Words_Seven",
-            "EighthLongUsername_That_Is_Extremely_Long_Eight",
-            "NinthLongUsername_To_Ensure_We_Hit_The_Limit_Nine",
+            "[TEST] BotUser_One",
+            "[TEST] BotUser_Two",
+            "[TEST] BotUser_Three",
+            "[TEST] BotUser_Four",
+            "[TEST] BotUser_Five",
+            "[TEST] BotUser_Six",
+            "[TEST] BotUser_Seven",
+            "[TEST] BotUser_Eight",
+            "[TEST] BotUser_Nine",
         ]
-        
+
         # Get existing sign-ups
         sign_ups = draft_session.sign_ups or {}
         original_count = len(sign_ups)
-        
+
         # Calculate how many users to add (limited by NUM_TEST_USERS_TO_ADD)
         # If we already have users, only add enough to reach NUM_TEST_USERS_TO_ADD total
         users_to_add = max(0, self.NUM_TEST_USERS_TO_ADD - original_count)
-        
+
         # Limit to available test names
         users_to_add = min(users_to_add, len(test_names))
-        
+
         if users_to_add <= 0:
             await interaction.followup.send(f"Already have {original_count} users (limit is {self.NUM_TEST_USERS_TO_ADD}).", ephemeral=True)
             return
-            
+
         logger.info(f"Adding {users_to_add} test users to draft {self.draft_session_id}")
-        
-        # Create a simpler direct approach - add test users up to the limit
+
+        # Create test users - all use the bot's ID so they resolve to valid Discord members
+        # This helps test debt settlement and other features that rely on guild.get_member()
         fake_users = {}
         for i in range(users_to_add):
-            user_id = str(start_id + i)
+            # Use bot's ID for the first test user, then use high fake IDs for rest
+            # This ensures at least one test user resolves to a valid Discord member
+            if i == 0:
+                user_id = bot_user_id
+            else:
+                user_id = str(900000000000000000 + i)
             name = test_names[i]
             fake_users[user_id] = name
             logger.info(f"Generated test user: {name} with ID {user_id}")
@@ -692,7 +699,11 @@ class PersistentView(discord.ui.View):
         if user_id not in session.sign_ups:
             await interaction.response.send_message("You are not registered in the draft session.", ephemeral=True)
             return
-        
+
+        # Defer the response immediately to avoid Discord's 3-second timeout
+        # We'll use followup.send() later to send the actual message
+        await interaction.response.defer()
+
         # Create a dictionary to store the initial ready check status
         # Test users (ID >= 900000000000000000) are automatically marked as ready
         TEST_USER_ID_START = 900000000000000000
@@ -732,8 +743,8 @@ class PersistentView(discord.ui.View):
         # Create the view with the buttons
         view = ReadyCheckView(self.draft_session_id)
 
-        # Send the initial ready check message
-        main_message = await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
+        # Send the initial ready check message (using followup since we deferred)
+        main_message = await interaction.followup.send(embed=embed, view=view)
 
         # Construct a message that mentions all users who need to respond to the ready check
         user_mentions = ' '.join([f"<@{user_id}>" for user_id in session.sign_ups.keys()])

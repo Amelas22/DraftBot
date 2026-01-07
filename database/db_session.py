@@ -1,5 +1,6 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 from contextlib import asynccontextmanager
 import logging
 from sqlalchemy import text
@@ -15,7 +16,16 @@ logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
 DATABASE_URL = "sqlite+aiosqlite:///drafts.db"
 
 # Create engine
-engine = create_async_engine(DATABASE_URL, echo=False)
+# - timeout=30: Wait up to 30 seconds for locks (Python-side fallback)
+# - check_same_thread=False: Required for async
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    connect_args={
+        "timeout": 30,
+        "check_same_thread": False
+    }
+)
 
 # Create session factory
 AsyncSessionLocal = sessionmaker(
@@ -46,8 +56,11 @@ async def db_session():
 async def init_db():
     """Initialize the database, create tables if they don't exist"""
     async with engine.begin() as conn:
+        # WAL mode allows concurrent reads during writes - persists to db file
+        await conn.execute(text("PRAGMA journal_mode=WAL"))
+
         await conn.run_sync(Base.metadata.create_all)
-    
+
     # Run any migrations needed after initialization
     await run_migrations()
 
