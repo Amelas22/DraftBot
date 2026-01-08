@@ -8,6 +8,9 @@ from database.models_base import Base
 from session import db_session, AsyncSessionLocal
 from datetime import datetime
 
+from helpers.permissions import has_bot_manager_role
+
+
 # Define the model to store role cooldown info
 class RolePingCooldown(Base):
     __tablename__ = 'role_ping_cooldowns'
@@ -19,28 +22,17 @@ class RolePingCooldown(Base):
     cooldown_period = Column(Float, default=3600.0, server_default=text('3600.0'))  # Default 1 hour in seconds
     is_managed = Column(Boolean, default=True, server_default=text('1'))  # Whether we should control mentionable permission
 
-# Use the same admin role name as in other cogs
-ADMIN_ROLE_NAME = "Bot Manager"
-
 class PingCooldownManager(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.cooldown_check_task = None
         logger.info("PingCooldownManager cog initialized")
         self.start_cooldown_checker()
-        
+
     def cog_unload(self):
         if self.cooldown_check_task:
             self.cooldown_check_task.cancel()
-            
-    def has_bot_manager_role():
-        async def predicate(ctx):
-            # Check if user is the owner OR has the admin role
-            if await ctx.bot.is_owner(ctx.author):
-                return True
-            return any(role.name == ADMIN_ROLE_NAME for role in ctx.author.roles)
-        return commands.check(predicate)
-    
+
     def start_cooldown_checker(self):
         """Start the background task that checks for expired cooldowns"""
         self.cooldown_check_task = self.bot.loop.create_task(self.check_cooldowns_task())

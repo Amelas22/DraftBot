@@ -4,6 +4,7 @@ Settlement views for the debt tracking system.
 Contains the [Settle Debts] button and related views for settling debts
 from draft results.
 """
+import asyncio
 import traceback
 import discord
 from discord.ui import View, Button, Select, Modal, InputText
@@ -15,7 +16,7 @@ from services.debt_service import (
     get_entries_since_last_settlement,
     create_settlement
 )
-from .helpers import TRANSIENT_ERRORS, get_member_name, format_entry_source
+from .helpers import TRANSIENT_ERRORS, get_member_name, format_entry_source, build_user_balance_embed
 
 
 class SettleDebtsButton(Button):
@@ -53,38 +54,7 @@ class SettleDebtsButton(Button):
                 )
                 return
 
-            # Build the response showing balances
-            embed = discord.Embed(
-                title="Your Outstanding Balances",
-                color=discord.Color.gold()
-            )
-
-            you_owe_lines = []
-            owed_to_you_lines = []
-
-            for counterparty_id, balance in balances.items():
-                name = get_member_name(interaction.guild, counterparty_id)
-
-                if balance < 0:
-                    # User owes them
-                    you_owe_lines.append(f"<@{counterparty_id}>: {abs(balance)} tix")
-                else:
-                    # They owe user
-                    owed_to_you_lines.append(f"<@{counterparty_id}>: {balance} tix")
-
-            if you_owe_lines:
-                embed.add_field(
-                    name="You Owe",
-                    value="\n".join(you_owe_lines),
-                    inline=False
-                )
-
-            if owed_to_you_lines:
-                embed.add_field(
-                    name="Owed to You",
-                    value="\n".join(owed_to_you_lines),
-                    inline=False
-                )
+            embed = build_user_balance_embed(interaction.guild, balances)
 
             # Create dropdown to select counterparty
             view = CounterpartySelectView(
@@ -533,6 +503,13 @@ class SettlementConfirmView(View):
             )
             logger.info(f"[SettlementConfirm] Success message sent")
 
+            # Update debt summary in background (lazy import to avoid circular import)
+            try:
+                from utils import update_debt_summary_for_guild
+                asyncio.create_task(update_debt_summary_for_guild(interaction.client, self.guild_id))
+            except Exception as e:
+                logger.warning(f"[SettlementConfirm] Failed to trigger debt summary update: {e}")
+
         except Exception as e:
             logger.error(f"[SettlementConfirm] Failed to create settlement: {e}")
             logger.error(f"[SettlementConfirm] Traceback: {traceback.format_exc()}")
@@ -564,3 +541,68 @@ class SettlementConfirmView(View):
             embed=None,
             view=None
         )
+
+
+class PublicSettleDebtsView(View):
+    """Persistent view for public debt summary messages with settle button."""
+
+    def __init__(self):
+        super().__init__(timeout=None)  # Persistent view
+
+    @discord.ui.button(
+        label="Settle My Debts",
+        style=discord.ButtonStyle.primary,
+        custom_id="public_settle_debts_button",
+        emoji="\U0001f4b0"
+    )
+    async def settle_button(self, button: Button, interaction: discord.Interaction):
+        """Handle button click - show user's debts and launch settlement flow."""
+        user_id = str(interaction.user.id)
+        guild_id = str(interaction.guild.id)
+        logger.info(f"[PublicSettle] Button clicked by user {user_id} in guild {guild_id}")
+
+        try:
+            # Get all non-zero balances for this user
+            balances = await get_all_balances_for(
+                guild_id=guild_id,
+                player_id=user_id
+            )
+
+            if not balances:
+                await interaction.response.send_message(
+                    "You have no outstanding debts with anyone.",
+                    ephemeral=True
+                )
+                return
+
+            embed = build_user_balance_embed(interaction.guild, balances)
+
+            # Create dropdown to select counterparty
+            view = CounterpartySelectView(
+                user_id=user_id,
+                guild_id=guild_id,
+                balances=balances,
+                guild=interaction.guild
+            )
+
+            await interaction.response.send_message(
+                embed=embed,
+                view=view,
+                ephemeral=True
+            )
+
+        except TRANSIENT_ERRORS as e:
+            logger.warning(f"[PublicSettle] Transient network error: {type(e).__name__}: {e}")
+        except Exception as e:
+            logger.error(f"[PublicSettle] Error in button callback: {e}")
+            logger.error(f"[PublicSettle] Traceback: {traceback.format_exc()}")
+            try:
+                await interaction.response.send_message(
+                    "An error occurred. Please try again.",
+                    ephemeral=True
+                )
+            except discord.errors.InteractionResponded:
+                await interaction.followup.send(
+                    "An error occurred. Please try again.",
+                    ephemeral=True
+                )

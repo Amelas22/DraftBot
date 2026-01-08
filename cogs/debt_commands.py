@@ -17,16 +17,19 @@ from services.debt_service import (
     get_all_balances_for,
     get_balance_with,
     get_entries_since_last_settlement,
-    create_settlement
+    create_settlement,
+    get_guild_debt_rows
 )
 from debt_views.settle_views import (
     CounterpartySelectView,
-    AmountInputView
+    AmountInputView,
+    PublicSettleDebtsView
 )
-from debt_views.helpers import get_member_name, format_entry_source
+from debt_views.helpers import get_member_name, format_entry_source, build_guild_debt_embed
 from database.db_session import db_session
-from models.debt_ledger import DebtLedger
-from sqlalchemy import select, func
+from models.debt_summary_message import DebtSummaryMessage
+from sqlalchemy import select
+from helpers.permissions import has_bot_manager_role
 
 
 class DebtCommands(commands.Cog):
@@ -332,60 +335,73 @@ class DebtCommands(commands.Cog):
         await ctx.followup.send(embed=embed, view=view)
 
     @discord.slash_command(name="debts-admin", description="[Admin] View all debts in the guild")
-    @commands.has_permissions(administrator=True)
+    @has_bot_manager_role()
     async def debts_admin(self, ctx: discord.ApplicationContext):
         """Admin view of all outstanding debts in the guild."""
         await ctx.defer(ephemeral=True)
 
-        guild_id = str(ctx.guild.id)
-
-        # Get all non-zero balances in the guild
-        async with db_session() as session:
-            # Get unique player-counterparty pairs with non-zero balance
-            query = (
-                select(
-                    DebtLedger.player_id,
-                    DebtLedger.counterparty_id,
-                    func.sum(DebtLedger.amount).label('balance')
-                )
-                .where(DebtLedger.guild_id == guild_id)
-                .group_by(DebtLedger.player_id, DebtLedger.counterparty_id)
-                .having(func.sum(DebtLedger.amount) < 0)  # Only show debts (negative balances)
-                .order_by(func.sum(DebtLedger.amount).asc())  # Biggest debts first
-            )
-            result = await session.execute(query)
-            rows = result.all()
+        rows = await get_guild_debt_rows(str(ctx.guild.id))
 
         if not rows:
             await ctx.followup.send("No outstanding debts in this guild.")
             return
 
-        embed = discord.Embed(
-            title="Guild Debt Summary",
-            description="All outstanding debts (showing debtor perspective)",
-            color=discord.Color.orange()
-        )
-
-        debt_lines = []
-        total = 0
-        for row in rows[:25]:  # Limit to 25 entries
-            debtor_name = get_member_name(ctx.guild, row.player_id)
-            creditor_name = get_member_name(ctx.guild, row.counterparty_id)
-
-            amount = abs(row.balance)
-            debt_lines.append(f"{debtor_name} owes {creditor_name}: {amount} tix")
-            total += amount
-
-        embed.add_field(
-            name=f"Outstanding Debts (Total: {total} tix)",
-            value="\n".join(debt_lines) if debt_lines else "None",
-            inline=False
-        )
-
-        if len(rows) > 25:
-            embed.set_footer(text=f"Showing 25 of {len(rows)} debt relationships")
-
+        embed = build_guild_debt_embed(ctx.guild, rows, include_description=False)
         await ctx.followup.send(embed=embed)
+
+    @discord.slash_command(name="debts-post", description="[Admin] Post public debt summary with settle button")
+    @has_bot_manager_role()
+    async def debts_post(self, ctx: discord.ApplicationContext):
+        """Post a public debt summary message that auto-updates."""
+        await ctx.defer(ephemeral=True)
+
+        guild_id = str(ctx.guild.id)
+        channel_id = str(ctx.channel.id)
+
+        rows = await get_guild_debt_rows(guild_id)
+
+        async with db_session() as session:
+            # Check if there's an existing debt summary message for this guild
+            existing_query = select(DebtSummaryMessage).where(
+                DebtSummaryMessage.guild_id == guild_id
+            )
+            existing_result = await session.execute(existing_query)
+            existing_message = existing_result.scalar_one_or_none()
+
+            # Delete old message if it exists
+            if existing_message:
+                try:
+                    old_channel = ctx.guild.get_channel(int(existing_message.channel_id))
+                    if old_channel:
+                        old_msg = await old_channel.fetch_message(int(existing_message.message_id))
+                        await old_msg.delete()
+                        logger.info(f"Deleted old debt summary message {existing_message.message_id}")
+                except discord.NotFound:
+                    logger.info(f"Old debt summary message already deleted")
+                except Exception as e:
+                    logger.warning(f"Could not delete old debt summary message: {e}")
+
+            # Build and post the public message
+            embed = build_guild_debt_embed(ctx.guild, rows)
+            view = PublicSettleDebtsView()
+            public_message = await ctx.channel.send(embed=embed, view=view)
+
+            # Save or update the database record
+            if existing_message:
+                existing_message.channel_id = channel_id
+                existing_message.message_id = str(public_message.id)
+            else:
+                new_record = DebtSummaryMessage(
+                    guild_id=guild_id,
+                    channel_id=channel_id,
+                    message_id=str(public_message.id)
+                )
+                session.add(new_record)
+
+            await session.commit()
+
+        logger.info(f"Posted debt summary message {public_message.id} in channel {channel_id}")
+        await ctx.followup.send("Debt summary posted! It will auto-update when debts change.", ephemeral=True)
 
 
 def setup(bot):

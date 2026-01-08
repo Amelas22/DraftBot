@@ -82,6 +82,9 @@ async def main():
         print(f'Logged in as {bot.user}!')
         from utils import re_register_views
         await re_register_views(bot)
+        # Register persistent debt settlement view
+        from debt_views.settle_views import PublicSettleDebtsView
+        bot.add_view(PublicSettleDebtsView())
         from livedrafts import re_register_live_drafts
         await re_register_live_drafts(bot)
         logger.info("Re-registered team finder")
