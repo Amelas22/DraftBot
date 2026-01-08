@@ -457,3 +457,32 @@ async def create_debt_entries_from_stakes(
 
     logger.info(f"Created {len(debts_created)} debt entries for session {session_id}")
     return debts_created
+
+
+async def get_guild_debt_rows(guild_id: str) -> list:
+    """
+    Get all debt relationships for a guild (from debtor perspective).
+
+    Returns rows with player_id (debtor), counterparty_id (creditor), and balance.
+    Only returns negative balances (actual debts), ordered by largest debt first.
+
+    Args:
+        guild_id: The guild to query
+
+    Returns:
+        List of Row objects with player_id, counterparty_id, balance attributes
+    """
+    async with db_session() as session:
+        query = (
+            select(
+                DebtLedger.player_id,
+                DebtLedger.counterparty_id,
+                func.sum(DebtLedger.amount).label('balance')
+            )
+            .where(DebtLedger.guild_id == guild_id)
+            .group_by(DebtLedger.player_id, DebtLedger.counterparty_id)
+            .having(func.sum(DebtLedger.amount) < 0)
+            .order_by(func.sum(DebtLedger.amount).asc())
+        )
+        result = await session.execute(query)
+        return result.all()

@@ -19,8 +19,11 @@ from services.draft_analysis import DraftAnalysis
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
 from services.draft_setup_manager import DraftSetupManager
-from services.debt_service import create_debt_entries_from_stakes
+from services.debt_service import create_debt_entries_from_stakes, get_guild_debt_rows
 from debt_views import SettleDebtsView
+from debt_views.settle_views import PublicSettleDebtsView
+from debt_views.helpers import build_guild_debt_embed
+from models.debt_summary_message import DebtSummaryMessage
 from loguru import logger
 from config import is_cleanup_exempt
 from leaderboard_config import AUTO_UPDATE_CATEGORIES
@@ -781,6 +784,9 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 # (leaderboard updates can take 20+ seconds due to rate limiting)
                 asyncio.create_task(update_leaderboards_for_guild(bot, draft_session.guild_id))
 
+                # Update debt summary in background (if one exists for this guild)
+                asyncio.create_task(update_debt_summary_for_guild(bot, draft_session.guild_id))
+
 
 async def update_leaderboards_for_guild(bot, guild_id: str):
     """Update all leaderboard messages for a guild.
@@ -871,6 +877,62 @@ async def update_leaderboards_for_guild(bot, guild_id: str):
 
     except Exception as e:
         logger.error(f"Error updating leaderboards for guild {guild_id}: {e}")
+
+
+async def update_debt_summary_for_guild(bot, guild_id: str):
+    """Update the debt summary message for a guild (delete and repost to stay at bottom).
+
+    This runs as a background task to avoid blocking other operations.
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            # Get the debt summary message record
+            stmt = select(DebtSummaryMessage).where(DebtSummaryMessage.guild_id == guild_id)
+            result = await session.execute(stmt)
+            debt_summary = result.scalar_one_or_none()
+
+            if not debt_summary:
+                return  # No debt summary message for this guild
+
+            logger.info(f"Updating debt summary for guild {guild_id}")
+
+            guild = bot.get_guild(int(guild_id))
+            if not guild:
+                logger.warning(f"Guild {guild_id} not found for debt summary update")
+                return
+
+            channel = guild.get_channel(int(debt_summary.channel_id))
+            if not channel:
+                logger.warning(f"Debt summary channel {debt_summary.channel_id} not found")
+                return
+
+            # Delete old message
+            try:
+                old_message = await channel.fetch_message(int(debt_summary.message_id))
+                await old_message.delete()
+                logger.debug(f"Deleted old debt summary message {debt_summary.message_id}")
+            except discord.NotFound:
+                logger.debug(f"Old debt summary message already deleted")
+            except Exception as e:
+                logger.warning(f"Could not delete old debt summary message: {e}")
+
+            # Get all debts and build embed using shared helpers
+            rows = await get_guild_debt_rows(guild_id)
+            embed = build_guild_debt_embed(guild, rows)
+
+            # Post new message at bottom
+            view = PublicSettleDebtsView()
+            new_message = await channel.send(embed=embed, view=view)
+
+            # Update database record
+            debt_summary.message_id = str(new_message.id)
+            debt_summary.last_updated = datetime.now()
+            await session.commit()
+
+            logger.info(f"Updated debt summary for guild {guild_id}, new message ID: {new_message.id}")
+
+    except Exception as e:
+        logger.error(f"Error updating debt summary for guild {guild_id}: {e}")
 
 
 async def remove_lock_after_delay(draft_session_id, delay):

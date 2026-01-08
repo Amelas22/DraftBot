@@ -3,19 +3,12 @@ import os
 import discord
 from loguru import logger
 
-ADMIN_ROLE_NAME = "Bot Manager"
+from helpers.permissions import has_bot_manager_role, ADMIN_ROLE_NAME
+
 
 class AdminCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-
-    def has_bot_manager_role():
-        async def predicate(ctx):
-            # Check if user is the owner OR has the admin role
-            if await ctx.bot.is_owner(ctx.author):
-                return True
-            return any(role.name == ADMIN_ROLE_NAME for role in ctx.author.roles)
-        return commands.check(predicate)
 
     @discord.slash_command(
         name='reload', 
