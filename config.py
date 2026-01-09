@@ -76,9 +76,27 @@ class Config:
             },
             "notifications": {
                 "dm_notifications_default": True      # DM notifications enabled by default
+            },
+            "crown_roles": {
+                "enabled": False,  # Opt-in feature
+                "eligible_categories": [
+                    "draft_record",
+                    "match_win",
+                    "drafts_played",
+                    "time_vault_and_key",
+                    "quiz_points"
+                ],
+                "timeframe": "30d",  # or "14d", "90d", "lifetime", etc.
+                "role_names": {
+                    "1": "Crown",
+                    "2": "Double Crown",
+                    "3": "Triple Crown",
+                    "4": "Grand Champion",
+                    "5": "Ultimate Champion"
+                }
             }
         }
-        
+
         # Special configuration just for your guild
         self.special_guild_config = {
             "channels": {
@@ -132,6 +150,24 @@ class Config:
             },
             "notifications": {
                 "dm_notifications_default": True      # DM notifications enabled by default
+            },
+            "crown_roles": {
+                "enabled": False,  # Opt-in feature
+                "eligible_categories": [
+                    "draft_record",
+                    "match_win",
+                    "drafts_played",
+                    "time_vault_and_key",
+                    "quiz_points"
+                ],
+                "timeframe": "30d",  # or "14d", "90d", "lifetime", etc.
+                "role_names": {
+                    "1": "Crown",
+                    "2": "Double Crown",
+                    "3": "Triple Crown",
+                    "4": "Grand Champion",
+                    "5": "Ultimate Champion"
+                }
             }
         }
 
@@ -337,6 +373,28 @@ def migrate_configs():
                 "card_width": 244,
                 "card_height": 340,
                 "border_pixels": 5
+            }
+            updated = True
+
+        # Add crown_roles configuration if missing
+        if "crown_roles" not in config:
+            config["crown_roles"] = {
+                "enabled": False,
+                "eligible_categories": [
+                    "draft_record",
+                    "match_win",
+                    "drafts_played",
+                    "time_vault_and_key",
+                    "quiz_points"
+                ],
+                "timeframe": "30d",
+                "role_names": {
+                    "1": "Crown",
+                    "2": "Double Crown",
+                    "3": "Triple Crown",
+                    "4": "Grand Champion",
+                    "5": "Ultimate Champion"
+                }
             }
             updated = True
 

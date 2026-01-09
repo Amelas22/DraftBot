@@ -8,7 +8,12 @@ from models.leaderboard_message import LeaderboardMessage
 from services.leaderboard_service import get_timeframe_date
 from services.leaderboard_formatter import create_leaderboard_embed
 from loguru import logger
-from leaderboard_config import ALL_CATEGORIES as LEADERBOARD_CATEGORIES
+from leaderboard_config import (
+    ALL_CATEGORIES as LEADERBOARD_CATEGORIES,
+    STANDARD_TIMEFRAMES,
+    STREAK_TIMEFRAMES,
+    STREAK_CATEGORIES
+)
 
 class TimeframeView(View):
     """Interactive view for selecting leaderboard timeframes"""
@@ -18,24 +23,9 @@ class TimeframeView(View):
         self.guild_id = guild_id
         self.category = category
         self.current_timeframe = current_timeframe
-        
-        # Add timeframe buttons
-        if category in ["longest_win_streak", "perfect_streak", "draft_win_streak"]:
-            # Streak categories get Active button + standard timeframes
-            timeframes = [
-                ("active", "Active"),
-                ("30d", "30 Days"),
-                ("90d", "90 Days"),
-                ("lifetime", "Lifetime")
-            ]
-        else:
-            # Standard timeframes for other categories
-            timeframes = [
-                ("14d", "14 Days"),
-                ("30d", "30 Days"),
-                ("90d", "90 Days"),
-                ("lifetime", "Lifetime")
-            ]
+
+        # Add timeframe buttons - use streak timeframes for streak categories
+        timeframes = STREAK_TIMEFRAMES if category in STREAK_CATEGORIES else STANDARD_TIMEFRAMES
 
         for value, label in timeframes:
             # Make the current timeframe button appear selected

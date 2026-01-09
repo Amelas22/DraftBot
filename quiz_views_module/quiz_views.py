@@ -7,6 +7,7 @@ from database.db_session import db_session
 from models import QuizSession, QuizSubmission, QuizStats, DraftSession
 from services.draft_analysis import DraftAnalysis
 from models.draft_domain import PackTrace
+from helpers.display_names import get_display_name
 
 
 # Quiz scoring constants
@@ -311,9 +312,11 @@ class ShareResultView(discord.ui.View):
         elif self.bonus_type == "all_cards":
             bonus_line = "✅ All Cards Bonus earned!\n"
 
+        display_name = get_display_name(self.user)
+
         message = (
             f"{congrats}\n\n"
-            f"**{self.user.display_name}** scored **{self.total_points} points** on {quiz_ref}!\n"
+            f"**{display_name}** scored **{self.total_points} points** on {quiz_ref}!\n"
             f"{bonus_line}"
             f"\n```\n{share_text}\n```"
         )
@@ -328,7 +331,7 @@ class ShareResultView(discord.ui.View):
         # Then post publicly as a followup
         await interaction.followup.send(message)
 
-        logger.info(f"User {self.user.id} ({self.user.display_name}) shared quiz results publicly: {self.total_points} points")
+        logger.info(f"User {self.user.id} ({get_display_name(self.user)}) shared quiz results publicly: {self.total_points} points")
 
 
 class QuizCardSelect(discord.ui.Select):
@@ -673,7 +676,7 @@ class QuizGuessView(discord.ui.View):
             submission = QuizSubmission(
                 quiz_id=self.quiz_id,
                 player_id=str(self.user.id),
-                display_name=self.user.display_name,
+                display_name=get_display_name(self.user),
                 guesses=guesses,
                 correct_count=correct_count,
                 pick_1_correct=pick_results[0],
@@ -702,7 +705,7 @@ class QuizGuessView(discord.ui.View):
                 stats = QuizStats(
                     player_id=str(self.user.id),
                     guild_id=quiz_session.guild_id,
-                    display_name=self.user.display_name
+                    display_name=get_display_name(self.user)
                 )
                 session.add(stats)
 

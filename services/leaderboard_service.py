@@ -893,3 +893,52 @@ async def get_quiz_points_leaderboard_data(guild_id, timeframe, limit, session):
 
     # Apply limit
     return leaderboard_data[:limit]
+
+
+async def get_crown_leaders(guild_id: str, categories: list, timeframe: str = "lifetime") -> dict:
+    """
+    Get the Discord user ID(s) of the #1 player(s) for each specified category.
+
+    Note: time_vault_and_key returns BOTH player_id and teammate_id since
+    both partners in the #1 duo deserve a crown.
+
+    Args:
+        guild_id: The guild to get leaders for
+        categories: List of category names to check
+        timeframe: The timeframe to use for leaderboard queries
+
+    Returns:
+        dict mapping category -> list of player_ids (empty list if none qualify)
+    """
+    leaders = {}
+    for category in categories:
+        # Reuse existing get_leaderboard_data() with limit=1
+        data = await get_leaderboard_data(guild_id, category=category, limit=1, timeframe=timeframe)
+        if data and len(data) > 0:
+            first_entry = data[0]
+            if category == "time_vault_and_key":
+                # Partnership leaderboard - both players get credit
+                leaders[category] = [first_entry.get('player_id'), first_entry.get('teammate_id')]
+            else:
+                leaders[category] = [first_entry.get('player_id')]
+        else:
+            leaders[category] = []
+    return leaders
+
+
+def calculate_crown_counts(leaders: dict) -> dict:
+    """
+    Given category -> list of player_ids mapping, return player_id -> crown_count.
+
+    Args:
+        leaders: dict mapping category name to list of player IDs holding #1
+
+    Returns:
+        dict mapping player_id -> number of crowns they hold
+    """
+    crown_counts = {}
+    for category, player_ids in leaders.items():
+        for player_id in player_ids:
+            if player_id:
+                crown_counts[player_id] = crown_counts.get(player_id, 0) + 1
+    return crown_counts

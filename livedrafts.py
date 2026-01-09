@@ -4,6 +4,7 @@ from datetime import datetime
 from sqlalchemy import select, not_
 from session import AsyncSessionLocal, DraftSession, MatchResult, get_draft_session
 from utils import calculate_team_wins
+from helpers.display_names import get_display_name, get_display_name_by_id
 from loguru import logger
 
 async def manage_live_drafts_channel(bot, guild):
@@ -89,8 +90,8 @@ async def generate_live_draft_embed(bot, draft_session):
         return None
         
     # Get team names and players
-    team_a_names = [getattr(guild.get_member(int(user_id)), 'display_name', "Unknown User") for user_id in draft_session.team_a]
-    team_b_names = [getattr(guild.get_member(int(user_id)), 'display_name', "Unknown User") for user_id in draft_session.team_b]
+    team_a_names = [get_display_name_by_id(user_id, guild) for user_id in draft_session.team_a]
+    team_b_names = [get_display_name_by_id(user_id, guild) for user_id in draft_session.team_b]
     
     # Calculate team wins
     team_a_wins, team_b_wins = await calculate_team_wins(draft_session.session_id)
@@ -126,8 +127,8 @@ async def generate_live_draft_embed(bot, draft_session):
         for match in match_results:
             player1 = guild.get_member(int(match.player1_id))
             player2 = guild.get_member(int(match.player2_id))
-            player1_name = getattr(player1, 'display_name', 'Unknown User')
-            player2_name = getattr(player2, 'display_name', 'Unknown User')
+            player1_name = get_display_name(player1, guild)
+            player2_name = get_display_name(player2, guild)
             
             # Determine if there's a winner
             if match.winner_id:

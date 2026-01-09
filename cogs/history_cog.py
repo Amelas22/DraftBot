@@ -7,6 +7,7 @@ from discord.ext import commands
 from loguru import logger
 from session import AsyncSessionLocal, DraftSession
 from models.match import MatchResult
+from helpers.display_names import get_display_name
 
 SEATING_ORDER_FIX = 1742144400
 
@@ -102,7 +103,7 @@ class HistoryCog(commands.Cog):
                 current_page = (i // limit) + 1  # Calculate current page number (1-based)
                 
                 embed = discord.Embed(
-                    title=f"Draft History for {ctx.author.display_name}",
+                    title=f"Draft History for {get_display_name(ctx.author, ctx.guild)}",
                     color=0x3498db
                 )
                 
@@ -203,7 +204,7 @@ class HistoryCog(commands.Cog):
                                 else:
                                     right_player_name = right_player_info
                             
-                            user_name = ctx.author.display_name
+                            user_name = get_display_name(ctx.author, ctx.guild)
                             if user_id in sign_ups:
                                 user_info = sign_ups[user_id]
                                 if isinstance(user_info, dict) and "name" in user_info:

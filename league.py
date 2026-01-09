@@ -11,6 +11,7 @@ from session import AsyncSessionLocal, Team, DraftSession, Match, Challenge, Tea
 from sqlalchemy import select, update, func
 import random
 from config import get_draftmancer_base_url, get_draftmancer_session_url, get_league_challenge_hours
+from helpers.display_names import get_display_name
 
 
 class InitialRangeView(View):
@@ -323,7 +324,7 @@ class RegisterPlayerModal(Modal):
 
                     if team:
                         member = interaction.guild.get_member(int(user_id))
-                        display_name = member.display_name if member else "Unknown User"
+                        display_name = get_display_name(member, interaction.guild)
                         # If found, create a new entry in TeamRegistration
                         new_team_registration = TeamRegistration(
                             TeamID=team.TeamID,
@@ -339,7 +340,7 @@ class RegisterPlayerModal(Modal):
                 else:
                     # If the team is already registered, attempt to update the TeamMembers JSON
                     member = interaction.guild.get_member(int(user_id))
-                    display_name = member.display_name if member else "Unknown User"
+                    display_name = get_display_name(member, interaction.guild)
                     updated_team_members = dict(team_registration.TeamMembers)  # Make a copy of the current dictionary
 
                     if user_id not in updated_team_members:

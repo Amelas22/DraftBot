@@ -10,6 +10,7 @@ from player_stats import get_player_statistics, create_stats_embed
 from loguru import logger
 from discord.ext import commands
 from legacy_stats import get_legacy_player_stats, get_legacy_head_to_head_stats
+from helpers.display_names import get_display_name
 
 pacific_time_zone = pytz.timezone('America/Los_Angeles')
 cutoff_datetime = pacific_time_zone.localize(datetime(2024, 5, 6, 0, 0))
@@ -1135,15 +1136,15 @@ async def scheduled_posts(bot):
                             continue
                             
                         if exempt_role and exempt_role in member.roles:
-                            logger.info(f"Skipping exempt member {member.display_name}")
+                            logger.info(f"Skipping exempt member {get_display_name(member, guild)}")
                             continue
-                        
+
                         # Check if member has the Active role
                         if active_role in member.roles:
                             # Remove the Active role
                             await member.remove_roles(active_role)
-                            logger.info(f"Removed Active role from {member.display_name} due to inactivity")
-                            removed_role_players.append(member.display_name)
+                            logger.info(f"Removed Active role from {get_display_name(member, guild)} due to inactivity")
+                            removed_role_players.append(get_display_name(member, guild))
                     except Exception as e:
                         logger.error(f"Error processing inactive player {player.player_id}: {e}")
             

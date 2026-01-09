@@ -115,3 +115,54 @@ ALL_CATEGORIES = list(CATEGORY_CONFIGS.keys())
 
 # Categories that should auto-update after draft completion
 AUTO_UPDATE_CATEGORIES = ALL_CATEGORIES  # All categories by default
+
+# Categories that award crowns when player is #1
+# Excludes: hot_streak (too volatile), streak leaderboards (temporary achievements)
+CROWN_ELIGIBLE_CATEGORIES = [
+    "draft_record",
+    "match_win",
+    "drafts_played",
+    "time_vault_and_key",
+    "quiz_points"
+]
+
+# Timeframe options for leaderboards
+# Format: (value, display_label)
+STANDARD_TIMEFRAMES = [
+    ("14d", "14 Days"),
+    ("30d", "30 Days"),
+    ("90d", "90 Days"),
+    ("lifetime", "Lifetime")
+]
+
+# Streak categories have an "Active" option instead of 14d
+STREAK_TIMEFRAMES = [
+    ("active", "Active"),
+    ("30d", "30 Days"),
+    ("90d", "90 Days"),
+    ("lifetime", "Lifetime")
+]
+
+# Categories that use streak timeframes
+STREAK_CATEGORIES = ["longest_win_streak", "perfect_streak", "draft_win_streak"]
+
+# Valid timeframe values (for validation)
+VALID_TIMEFRAMES = ["14d", "30d", "90d", "lifetime", "active"]
+
+# Crown role icons - used for both Discord roles and display name prefixes
+CROWN_ICONS = {
+    1: "👑",   # Crown
+    2: "🏆",   # Trophy (Double Crown)
+    3: "💎",   # Gem (Triple Crown)
+    4: "🌟",   # Glowing Star (Grand Champion)
+    5: "⚜️",   # Fleur-de-lis (Ultimate Champion)
+}
+
+# Default crown role names
+DEFAULT_CROWN_ROLE_NAMES = {
+    "1": "Crown",
+    "2": "Double Crown",
+    "3": "Triple Crown",
+    "4": "Grand Champion",
+    "5": "Ultimate Champion"
+}
