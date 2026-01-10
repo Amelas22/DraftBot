@@ -65,8 +65,8 @@ class BaseSession:
             except asyncio.CancelledError:
                 pass
 
-        if self.draft_manager and self.draft_manager.sio.connected:
-            await self.draft_manager.sio.disconnect()
+        if self.draft_manager and self.draft_manager.socket_client.connected:
+            await self.draft_manager.socket_client.disconnect()
 
     def setup_draft_session(self, session):
         # Set deletion time based on guild configuration

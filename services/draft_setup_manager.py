@@ -11,7 +11,7 @@ import urllib.parse
 import discord
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from config import get_draftmancer_websocket_url, get_draftmancer_base_url
+from config import get_draftmancer_websocket_url, get_draftmancer_base_url, get_draftmancer_session_url
 from database.db_session import db_session
 from models.draft_session import DraftSession
 from models.match import MatchResult
@@ -21,6 +21,7 @@ from sqlalchemy import select
 from helpers.digital_ocean_helper import DigitalOceanHelper
 from helpers.magicprotools_helper import MagicProtoolsHelper
 from notification_service import send_ready_check_dms
+from services.draft_socket_client import DraftSocketClient
 
 # Constants
 READY_CHECK_INSTRUCTIONS = (
@@ -63,14 +64,53 @@ def exponential_backoff(max_retries=10, base_delay=1):
     return decorator
 
 class DraftSetupManager:
+    async def _on_connect(self):
+        """Handler for 'connect' event."""
+        self.logger.info(f"Successfully connected to the websocket for draft_id: DB{self.draft_id}")
+        self._is_connecting = False
+
+    async def _on_connect_error(self, data):
+        """Handler for 'connect_error' event."""
+        self.logger.warning(f"Connection to the websocket failed for draft_id: DB{self.draft_id}. Data: {data}")
+        self._is_connecting = False
+
+    async def _on_disconnect(self):
+        """Handler for 'disconnect' event."""
+        self.logger.info(f"Disconnected from the websocket for draft_id: DB{self.draft_id}")
+        self._is_connecting = False
+
     def __init__(self, session_id: str, draft_id: str, cube_id: str):
         self.session_id = session_id
         self.draft_id = draft_id
         self.cube_id = cube_id
-        self.sio = socketio.AsyncClient()
+        
+        # Configure contextual logger for this instance
+        self.logger = logger.bind(draft_id=draft_id, session_id=session_id)
+        
+        # Initialize DraftSocketClient
+        self.socket_client = DraftSocketClient(resource_id=f"DB{draft_id}")
+        
+        # Register standard events
+        self.socket_client.sio.on('connect', self._on_connect)
+        self.socket_client.sio.on('connect_error', self._on_connect_error)
+        self.socket_client.sio.on('disconnect', self._on_disconnect)
+        
+        # Register Draftmancer specific events
+        self.socket_client.sio.on('setReady', self._on_set_ready)
+        self.socket_client.sio.on('endDraft', self._on_end_draft)
+        self.socket_client.sio.on('draftPaused', self._on_draft_paused)
+        self.socket_client.sio.on('draftResumed', self._on_draft_resumed)
+        self.socket_client.sio.on('sessionUsers', self._on_session_users)
+        self.socket_client.sio.on('storedSessionSettings', self._on_stored_session_settings)
+        self.socket_client.sio.on('draftLog', self._on_draft_log)
+        
+        # NOTE: self.sio is now deprecated, access via self.socket_client.sio if absolutely needed
+        # Mapping properties for compatibility
+        self.sio = self.socket_client.sio
+
+        # Cube import state
         self.cube_imported = False
-        self.users_count = 0  # Track number of other users
-    
+
         # Seating Order Variables
         self.session_users = []
         self.seating_attempts = 0
@@ -78,11 +118,12 @@ class DraftSetupManager:
         self.last_db_check_time = None
         self.db_check_cooldown = 15
         self.expected_user_count = 0
+        self.users_count = 0  # Current count of non-bot users in the session
         self.desired_seating_order = None
 
-        # Add connection state tracking
-        self._connection_lock = asyncio.Lock()
-        self._is_connecting = False
+        # Connection state tracking
+        # Note: Connection locking is handled by DraftSocketClient._connection_lock
+        self._is_connecting = False  # Tracks if connection attempt is in progress (set by event handlers)
         self._should_disconnect = False
         self._seating_lock = asyncio.Lock()  # Lock for seating attempts
 
@@ -123,167 +164,404 @@ class DraftSetupManager:
         # Add storage for the current draft log
         self.current_draft_log = None
             
-        # Create a contextualized logger for this instance
-        self.logger = logger.bind(
-            draft_id=self.draft_id,
-            session_id=self.session_id,
-            cube_id=self.cube_id
-        )
-        
         # Register this instance in the global registry
         ACTIVE_MANAGERS[session_id] = self
         self.logger.info(f"Registered manager for session {session_id} in active managers registry")
         
-        @self.sio.event
-        async def connect():
-            self.logger.info(f"Connected to websocket for draft_id: DB{self.draft_id}")
-            if not self.cube_imported:
-                await self.import_cube()
-
-        # Add a listener to capture draft logs
-        @self.sio.on('draftLog')
-        async def on_draft_log(draft_log):
-            self.logger.info(f"Received draft log for session: {draft_log.get('sessionID')}")
-            # Store the draft log
-            self.current_draft_log = draft_log
-            
-        @self.sio.event
-        async def connect_error(data):
-            self.logger.error(f"Connection failed for draft_id: DB{self.draft_id}")
-
-        @self.sio.event
-        async def disconnect():
-            self.logger.info(f"Disconnected from draft_id: DB{self.draft_id}")
-
-        # Listen for user changes in ready state status
-        @self.sio.on('setReady')
-        async def on_user_ready(userID, readyState):
-            await self.handle_user_ready_update(userID, readyState)
+        # Initialize state variables for new DraftSocketClient integration
+        self.ready_check_timer_task = None
+        self.ready_check_message = None
+        self.ready_check_view = None
+        self.num_expected_users = 0
+        self.session_users_received = False
+        self.ready_check_in_progress = False
+        self.settings_updated = False
+        self.log_collection_task = None
+        self.log_collection_retry_count = 0 
+        self.MAX_LOG_COLLECTION_RETRIES = 5
+        self.log_release_vote_active = False
         
-        # Listen for Draft Completion
-        @self.sio.on('endDraft')
-        async def on_draft_end(data=None):
-            logger.info(f"Draft ended event received: {data}")
-            self.drafting = False
-            self.draftPaused = False
-            
-            if self.draft_cancelled:
-                logger.info("Draft was manually cancelled - no additional announcement needed")
-                self.draft_cancelled = False  # Reset the flag for future drafts
-            else:
-                logger.info("Draft completed naturally - creating rooms and scheduling log collection")
-                bot = get_bot()
-                guild = bot.get_guild(int(self.guild_id))
-                channel = bot.get_channel(int(self.draft_channel_id))
-                from views import PersistentView
-                if guild:
-                    # Attempt to create rooms and pairings
-                    result = await PersistentView.create_rooms_pairings(bot, guild, self.session_id, session_type=self.session_type)
-                    if channel:
-                        # Only announce if rooms were actually created
-                        if result:
-                            await channel.send("Rooms and Pairings have been created!")
-                        else:
-                            # Check if rooms already existed
-
-                            async with AsyncSessionLocal() as db_session:
-                                stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
-                                session = await db_session.scalar(stmt)
-                                if session and session.draft_chat_channel:
-                                    self.logger.info(f"Rooms already existed for session {self.session_id} - skipping creation")
-                                else:
-                                    await channel.send("Failed to create rooms and pairings. Check logs for details.")
-                else:
-                    self.logger.info("Could not find guild")
-
-        # Listen for Pause or Unpause (Resume)
-        @self.sio.on('draftPaused')
-        async def on_draft_paused(data):
-            self.logger.info(f"Draft paused event received: {data}")
-            self.draftPaused = True
-
-        @self.sio.on('draftResumed')
-        async def on_draft_resumed(data):
-            self.logger.info(f"Draft resumed event received: {data}")
-            self.draftPaused = False
-            
-        # Listen for user changes in the session
-        @self.sio.on('sessionUsers')
-        async def on_session_users(users):
-            self.logger.debug(f"Raw users data received: {users}")
-            
-            # Store the complete user data
-            previous_users = self.session_users.copy() if hasattr(self, 'session_users') else []
-            
-            # Get previous non-bot users for comparison
-            previous_non_bot_users = [user for user in previous_users if user.get('userName') != 'DraftBot']
-            previous_count = self.users_count
-            
-            # Update to new users list
-            self.session_users = users
-            
-            # Count current non-bot users
-            non_bot_users = [user for user in users if user.get('userName') != 'DraftBot']
-            self.users_count = len(non_bot_users)  # Only count non-bot users
-            
-            self.logger.info(
-                f"Users update: Total users={len(users)}, Non-bot users={self.users_count}, "
-                f"User IDs={[user.get('userID') for user in non_bot_users]}"
-            )
-            
-            # Check if user count decreased (someone left)
-            if self.ready_check_active and previous_count > self.users_count:
-                # Someone left during an active ready check - identify who left
-                previous_usernames = {user.get('userName') for user in previous_non_bot_users}
-                current_usernames = {user.get('userName') for user in non_bot_users}
-                left_users = previous_usernames - current_usernames
-                
-                left_user_name = next(iter(left_users)) if left_users else "Unknown"
-                self.logger.info(f"User {left_user_name} left during active ready check - invalidating ready check")
-                await self.invalidate_ready_check(left_user_name)
-            
-            if self.ready_check_active and previous_count < self.users_count:
-                # Someone joined during an active ready check - identify who joined
-                previous_usernames = {user.get('userName') for user in previous_non_bot_users}
-                current_usernames = {user.get('userName') for user in non_bot_users}
-                left_users = current_usernames - previous_usernames
-                
-                left_user_name = next(iter(left_users)) if left_users else "Unknown"
-                self.logger.info(f"User {left_user_name} joined during active ready check - invalidating ready check")
-                await self.invalidate_ready_check(left_user_name)
-            
-            # Check if user list changed and update status message if needed
-            if previous_count != self.users_count or len(previous_users) != len(users):
-                self.logger.info(f"User count changed from {previous_count} to {self.users_count}, updating status message")
-                await self.update_status_message_after_user_change()
-            
-            # IMPORTANT: If we've reached the expected count of users or seating order 
-            # is not set and we have all users, check immediately
-            if ((self.expected_user_count is not None and 
-                previous_count < self.expected_user_count and 
-                self.users_count >= self.expected_user_count) or
-                (not self.seating_order_set and 
-                 self.users_count >= self.expected_user_count and
-                 self.expected_user_count > 0)):
-                
-                self.logger.info(f"Reached expected user count or need to reset seating! Attempting seating order. on_session_users")
-                await self.check_session_stage_and_organize()
-                return
-            
-            # Otherwise, check on our regular schedule
-            current_time = datetime.now()
-            if (self.last_db_check_time is None or 
-                (current_time - self.last_db_check_time).total_seconds() > self.db_check_cooldown):
-                
-                self.last_db_check_time = current_time
-                self.logger.info("check session stage from on_session_users")
-                await self.check_session_stage_and_organize()
-
-        @self.sio.on('storedSessionSettings')
-        async def on_stored_settings(data):
-            self.logger.info(f"Received updated session settings: {data}")
-
+    # Add a listener to capture draft logs
+    async def _on_draft_log(self, draft_log):
+        self.logger.info(f"Received draft log for session: {draft_log.get('sessionID')}")
+        # Store the draft log
+        self.current_draft_log = draft_log
+        
+    # Listen for user changes in ready state status
+    async def _on_set_ready(self, userID, readyState):
+        await self.handle_user_ready_update(userID, readyState)
     
+    # Listen for Draft Completion
+    async def _on_end_draft(self, data=None):
+        logger.info(f"Draft ended event received: {data}")
+        self.drafting = False
+        self.draftPaused = False
+        
+        if self.draft_cancelled:
+            logger.info("Draft was manually cancelled - no additional announcement needed")
+            self.draft_cancelled = False  # Reset the flag for future drafts
+        else:
+            logger.info("Draft completed naturally - creating rooms and scheduling log collection")
+            bot = get_bot()
+            guild = bot.get_guild(int(self.guild_id))
+            channel = bot.get_channel(int(self.draft_channel_id))
+            from views import PersistentView
+            if guild:
+                # Attempt to create rooms and pairings
+                result = await PersistentView.create_rooms_pairings(bot, guild, self.session_id, session_type=self.session_type)
+                if channel:
+                    # Only announce if rooms were actually created
+                    if result:
+                        await channel.send("Rooms and Pairings have been created!")
+                    else:
+                        # Check if rooms already existed
+
+                        async with AsyncSessionLocal() as db_session:
+                            stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
+                            session = await db_session.scalar(stmt)
+                            if session and session.draft_chat_channel:
+                                self.logger.info(f"Rooms already existed for session {self.session_id} - skipping creation")
+                            else:
+                                await channel.send("Failed to create rooms and pairings. Check logs for details.")
+            else:
+                self.logger.info("Could not find guild")
+
+    # Listen for Pause or Unpause (Resume)
+    async def _on_draft_paused(self, data):
+        self.logger.info(f"Draft paused event received: {data}")
+        self.draftPaused = True
+
+    async def _on_draft_resumed(self, data):
+        self.logger.info(f"Draft resumed event received: {data}")
+        self.draftPaused = False
+        
+    # Listen for user changes in the session
+    async def _on_session_users(self, users):
+        self.logger.debug(f"Raw users data received: {users}")
+        
+        # Store the complete user data
+        previous_users = self.session_users.copy() if hasattr(self, 'session_users') else []
+        
+        # Get previous non-bot users for comparison
+        previous_non_bot_users = [user for user in previous_users if user.get('userName') != 'DraftBot']
+        previous_count = self.users_count
+        
+        # Update to new users list
+        self.session_users = users
+        
+        # Count current non-bot users
+        non_bot_users = [user for user in users if user.get('userName') != 'DraftBot']
+        self.users_count = len(non_bot_users)  # Only count non-bot users
+        
+        self.logger.info(
+            f"Users update: Total users={len(users)}, Non-bot users={self.users_count}, "
+            f"User IDs={[user.get('userID') for user in non_bot_users]}"
+        )
+        
+        # Check if user count decreased (someone left)
+        if self.ready_check_active and previous_count > self.users_count:
+            # Someone left during an active ready check - identify who left
+            previous_usernames = {user.get('userName') for user in previous_non_bot_users}
+            current_usernames = {user.get('userName') for user in non_bot_users}
+            left_users = previous_usernames - current_usernames
+            
+            left_user_name = next(iter(left_users)) if left_users else "Unknown"
+            self.logger.info(f"User {left_user_name} left during active ready check - invalidating ready check")
+            await self.invalidate_ready_check(left_user_name)
+        
+        if self.ready_check_active and previous_count < self.users_count:
+            # Someone joined during an active ready check - identify who joined
+            previous_usernames = {user.get('userName') for user in previous_non_bot_users}
+            current_usernames = {user.get('userName') for user in non_bot_users}
+            left_users = current_usernames - previous_usernames
+            
+            left_user_name = next(iter(left_users)) if left_users else "Unknown"
+            self.logger.info(f"User {left_user_name} joined during active ready check - invalidating ready check")
+            await self.invalidate_ready_check(left_user_name)
+        
+        # Check if user list changed and update status message if needed
+        if previous_count != self.users_count or len(previous_users) != len(users):
+            self.logger.info(f"User count changed from {previous_count} to {self.users_count}, updating status message")
+            await self.update_status_message_after_user_change()
+        
+        # IMPORTANT: If we've reached the expected count of users or seating order 
+        # is not set and we have all users, check immediately
+        if ((self.expected_user_count is not None and 
+            previous_count < self.expected_user_count and 
+            self.users_count >= self.expected_user_count) or
+            (not self.seating_order_set and 
+             self.users_count >= self.expected_user_count and
+             self.expected_user_count > 0)):
+            
+            self.logger.info(f"Reached expected user count or need to reset seating! Attempting seating order. on_session_users")
+            await self.check_session_stage_and_organize()
+            return
+        
+        # Otherwise, check on our regular schedule
+        current_time = datetime.now()
+        if (self.last_db_check_time is None or 
+            (current_time - self.last_db_check_time).total_seconds() > self.db_check_cooldown):
+            
+            self.last_db_check_time = current_time
+            self.logger.info("check session stage from on_session_users")
+            await self.check_session_stage_and_organize()
+
+    async def _on_stored_session_settings(self, data):
+        self.logger.info(f"Received updated session settings: {data}")
+
+    # ============== Helper Methods ==============
+
+    async def _get_draft_channel(self):
+        """
+        Get the draft channel with fallback to fetch if not cached.
+        Returns the channel or None if not found.
+        """
+        if not self.draft_channel_id:
+            self.logger.warning("No draft_channel_id set")
+            return None
+
+        bot = get_bot()
+        if not bot:
+            self.logger.error("Bot instance not available")
+            return None
+
+        channel = bot.get_channel(int(self.draft_channel_id))
+        if not channel:
+            try:
+                channel = await bot.fetch_channel(int(self.draft_channel_id))
+            except Exception as e:
+                self.logger.error(f"Error fetching channel {self.draft_channel_id}: {e}")
+
+        if not channel:
+            self.logger.error(f"Could not find channel with ID {self.draft_channel_id}")
+
+        return channel
+
+    async def _get_draft_session_from_db(self):
+        """
+        Fetch the draft session from database using session_id.
+        Returns DraftSession or None if not found.
+        """
+        try:
+            async with db_session() as session:
+                stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
+                result = await session.execute(stmt)
+                return result.scalar_one_or_none()
+        except Exception as e:
+            self.logger.error(f"Error fetching draft session from database: {e}")
+            return None
+
+    def _compute_user_status(self, sign_ups: dict = None):
+        """
+        Compute present, missing, and unexpected users based on session users and sign-ups.
+
+        Args:
+            sign_ups: Dict of user_id -> username. If None, returns empty sets.
+
+        Returns:
+            Dict with 'present', 'missing', 'unexpected' keys containing username sets.
+        """
+        if not sign_ups:
+            return {'present': set(), 'missing': set(), 'unexpected': set()}
+
+        session_usernames = {
+            user.get('userName') for user in self.session_users
+            if user.get('userName') != 'DraftBot'
+        }
+        signup_usernames = set(sign_ups.values())
+
+        return {
+            'present': session_usernames.intersection(signup_usernames),
+            'missing': signup_usernames - session_usernames,
+            'unexpected': session_usernames - signup_usernames
+        }
+
+    async def _update_or_send_message(self, channel, message_id: str, content=None, embed=None, view=None):
+        """
+        Try to update an existing message, fallback to sending a new one.
+
+        Args:
+            channel: Discord channel to send/edit in
+            message_id: ID of message to try editing (can be None)
+            content: Text content for the message
+            embed: Discord embed for the message
+            view: Discord view for the message
+
+        Returns:
+            The message object if successful, None otherwise.
+        """
+        # Try to edit existing message
+        if message_id:
+            try:
+                message = await channel.fetch_message(int(message_id))
+                await message.edit(content=content, embed=embed, view=view)
+                return message
+            except discord.NotFound:
+                self.logger.debug(f"Message {message_id} not found, will send new")
+            except Exception as e:
+                self.logger.warning(f"Could not update message {message_id}: {e}")
+
+        # Fallback to sending new message
+        try:
+            return await channel.send(content=content, embed=embed, view=view)
+        except Exception as e:
+            self.logger.error(f"Failed to send message: {e}")
+            return None
+
+    async def _safe_delete_message(self, channel, message_id: str):
+        """
+        Safely delete a message with proper error handling.
+
+        Args:
+            channel: Discord channel containing the message
+            message_id: ID of message to delete
+
+        Returns:
+            True if deleted successfully, False otherwise.
+        """
+        if not message_id or not channel:
+            return False
+
+        try:
+            message = await channel.fetch_message(int(message_id))
+            await message.delete()
+            return True
+        except discord.NotFound:
+            self.logger.debug(f"Message {message_id} already deleted")
+            return True  # Consider it a success if already gone
+        except discord.Forbidden:
+            self.logger.warning(f"No permission to delete message {message_id}")
+        except Exception as e:
+            self.logger.error(f"Error deleting message {message_id}: {e}")
+        return False
+
+    async def _update_draft_session_field(self, field_name: str, value):
+        """
+        Update a single field in the draft session database record.
+
+        Args:
+            field_name: Name of the field to update
+            value: New value for the field
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        try:
+            async with db_session() as session:
+                stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
+                result = await session.execute(stmt)
+                draft_session = result.scalar_one_or_none()
+                if draft_session:
+                    setattr(draft_session, field_name, value)
+                    await session.commit()
+                    return True
+                else:
+                    self.logger.error(f"Draft session {self.session_id} not found for update")
+                    return False
+        except Exception as e:
+            self.logger.error(f"Error updating draft session field {field_name}: {e}")
+            return False
+
+    # ============== End Helper Methods ==============
+
+    async def regenerate_draft_session(self):
+        """
+        Generate a new draft_id and update the database.
+        Used when the bot cannot access the original Draftmancer session.
+        Returns True if successful, False otherwise.
+        """
+        try:
+            # Generate new draft_id (same format as SessionDetails)
+            new_draft_id = ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
+            new_draft_link = get_draftmancer_session_url(new_draft_id)
+
+            self.logger.info(f"Regenerating draft session: old={self.draft_id}, new={new_draft_id}")
+
+            # Update the database
+            async with db_session() as session:
+                stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
+                result = await session.execute(stmt)
+                draft_session = result.scalar_one_or_none()
+
+                if not draft_session:
+                    self.logger.error(f"Could not find draft session {self.session_id} to update")
+                    return False
+
+                # Update the draft_id and draft_link
+                draft_session.draft_id = new_draft_id
+                draft_session.draft_link = new_draft_link
+                await session.commit()
+
+                self.logger.info(f"Updated draft session in database with new draft_id: {new_draft_id}")
+
+            # Update local state
+            old_draft_id = self.draft_id
+            self.draft_id = new_draft_id
+            self.cube_imported = False  # Reset so we try to import again
+
+            # Update the logger context
+            self.logger = logger.bind(
+                draft_id=self.draft_id,
+                session_id=self.session_id,
+                cube_id=self.cube_id
+            )
+
+            # Disconnect from old session if connected
+            if self.socket_client.connected:
+                await self.socket_client.disconnect()
+                self.logger.info(f"Disconnected from old session DB{old_draft_id}")
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error regenerating draft session: {e}")
+            return False
+
+    async def _notify_bot_no_longer_managing(self):
+        """Send a notification that the bot can no longer manage this draft session."""
+        channel = await self._get_draft_channel()
+        if not channel:
+            return
+
+        embed = discord.Embed(
+            title="Bot No Longer Managing This Draft",
+            description=(
+                "The bot is no longer the owner of this Draftmancer session and cannot "
+                "manage it automatically. This can happen if someone else took control "
+                "of the session or if there was a connection issue."
+            ),
+            color=discord.Color.orange()
+        )
+        embed.add_field(
+            name="What To Do",
+            value=(
+                "**The draft can continue manually:**\n"
+                "• The session owner in Draftmancer can import the cube and start the draft\n"
+                "• Use `/mutiny` if you need to create a new bot-managed session\n"
+                "• Match results can still be reported normally after the draft"
+            ),
+            inline=False
+        )
+
+        if await self._update_or_send_message(channel, None, embed=embed):
+            self.logger.info(f"Sent 'bot no longer managing' notification to channel {self.draft_channel_id}")
+
+    async def connect_to_new_session(self):
+        """Connect to the new Draftmancer session after regeneration."""
+        try:
+            websocket_url = get_draftmancer_websocket_url(self.draft_id)
+            self.logger.info(f"Connecting to new session at {websocket_url}")
+
+            connection_successful = await self.socket_client.connect_with_retry(websocket_url)
+            if not connection_successful:
+                self.logger.error("Failed to connect to new session")
+                return False
+
+            return True
+        except Exception as e:
+            self.logger.error(f"Error connecting to new session: {e}")
+            return False
+
     async def collect_draft_logs(self):
         """Collect draft logs and process them"""
         if self.logs_collection_attempted or self.logs_collection_in_progress:
@@ -606,7 +884,7 @@ class DraftSetupManager:
             discord_name_by_user_id = {}
             discord_id_by_user_id = {}
             for idx, (user_id, _) in enumerate(sorted_users):
-                if idx < len(sign_up_display_names):
+                if idx < len(sign_up_discord_ids):
                     if idx < len(sign_up_discord_ids):
                         discord_id_by_user_id[user_id] = sign_up_discord_ids[idx]
                     
@@ -777,34 +1055,29 @@ class DraftSetupManager:
         """Initiates the ready check process"""
         if self.ready_check_active:
             return False
-            
+
         # Make sure we have channel info
         if not await self.fetch_draft_info():
             self.logger.error("Failed to fetch draft channel info")
             return False
+
         # Check for missing users first
         draft_session = await DraftSession.get_by_session_id(self.session_id)
         if draft_session and draft_session.sign_ups:
-            # Get username sets
-            session_usernames = {
-                user.get('userName') for user in self.session_users 
-                if user.get('userName') != 'DraftBot'
-            }
-            signup_usernames = set(draft_session.sign_ups.values())
-            missing_users = signup_usernames - session_usernames
-            
-            if missing_users:
+            user_status = self._compute_user_status(draft_session.sign_ups)
+
+            if user_status['missing']:
                 # Users are missing, can't start ready check
-                channel = bot.get_channel(int(self.draft_channel_id))
+                channel = await self._get_draft_channel()
                 if channel:
-                    missing_users_str = ", ".join(missing_users)
+                    missing_users_str = ", ".join(user_status['missing'])
                     await channel.send(
                         f"⚠️ **Cannot start ready check**\n"
                         f"Missing users: {missing_users_str}\n"
                         f"These players need to join the Draftmancer session first."
                     )
                 return False
-            
+
         seating_ok, seating_message = await self.verify_seating_order()
 
         if seating_ok:
@@ -812,37 +1085,32 @@ class DraftSetupManager:
         else:
             self.logger.error(f"Seating verification failed: {seating_message}")
             # Post failure message in Discord
-            try:
-                channel = bot.get_channel(int(self.draft_channel_id))
+            channel = await self._get_draft_channel()
+            if channel:
                 await channel.send(
                     f"⚠️ **Seating order verification failed!** {seating_message}\n\n"
                     f"Use `/mutiny` to take control and fix the seating manually, "
                     f"or try `/ready` again when all players have reconnected."
                 )
-            except Exception as e:
-                self.logger.exception(f"Error sending seating failure message: {e}")
-                
+
         self.ready_check_active = True
         self.ready_users.clear()
         self.post_timeout_ready_users.clear()
-        
+
         try:
             # Count expected participants
             non_bot_users = [u for u in self.session_users if u.get('userName') != 'DraftBot']
             total_users = len(non_bot_users)
-            
+
             # If we couldn't get expected count from database, use current users
             if self.expected_user_count is None or self.expected_user_count == 0:
                 self.expected_user_count = total_users
-            
-            # Send initial ready check message to Discord
-            channel = bot.get_channel(int(self.draft_channel_id))
+
+            # Get channel for ready check message
+            channel = await self._get_draft_channel()
             if not channel:
-                channel = await bot.fetch_channel(int(self.draft_channel_id))
-                if not channel:
-                    self.logger.error(f"Could not find channel with ID {self.draft_channel_id}")
-                    self.ready_check_active = False
-                    return False
+                self.ready_check_active = False
+                return False
             
             # Calculate the timestamp 90 seconds from now
             future_time = datetime.now() + timedelta(seconds=90)
@@ -875,7 +1143,7 @@ class DraftSetupManager:
             self.ready_check_timer = asyncio.create_task(self.ready_check_timeout(90, bot))
             
             # Emit ready check to Draftmancer
-            await self.sio.emit('readyCheck')
+            await self.socket_client.emit('readyCheck')
             
             self.logger.info(f"Ready check initiated for session {self.session_id}")
             return True
@@ -1016,115 +1284,68 @@ class DraftSetupManager:
                     
     async def update_ready_check_message(self, bot):
         """Update the ready check message with current count"""
-        if not self.ready_check_message_id or not self.draft_channel_id:
-            self.logger.error("Cannot update message - missing message ID or channel ID")
+        if not self.ready_check_message_id:
+            self.logger.error("Cannot update message - missing message ID")
             return False
-            
-        try:
-            self.logger.info(f"Updating ready check message {self.ready_check_message_id} in channel {self.draft_channel_id}")
-            channel = bot.get_channel(int(self.draft_channel_id))
-            if not channel:
-                try:
-                    self.logger.info("Channel not found in cache, attempting to fetch")
-                    channel = await bot.fetch_channel(int(self.draft_channel_id))
-                except Exception as e:
-                    self.logger.error(f"Failed to fetch channel: {e}")
-                    return False
-                
-            if not channel:
-                self.logger.error(f"Channel with ID {self.draft_channel_id} not found")
-                return False
-                
-            try:
-                message = await channel.fetch_message(int(self.ready_check_message_id))
-                if message:
-                    ready_count = len(self.ready_users)
-                    new_content = (
-                        f"Seating order set. Draftmancer Readycheck in progress: {ready_count}/{self.expected_user_count} ready.\n"
-                        f"{READY_CHECK_INSTRUCTIONS}"
-                    )
-                    self.logger.info(f"Updating message to show {ready_count}/{self.expected_user_count} ready")
-                    await message.edit(content=new_content)
-                    return True
-                else:
-                    self.logger.error("Message object not found after fetch")
-                    return False
-            except Exception as e:
-                self.logger.error(f"Failed to edit message: {e}")
-                return False
-        except Exception as e:
-            self.logger.error(f"Error updating ready check message: {e}")
+
+        channel = await self._get_draft_channel()
+        if not channel:
             return False
+
+        ready_count = len(self.ready_users)
+        new_content = (
+            f"Seating order set. Draftmancer Readycheck in progress: {ready_count}/{self.expected_user_count} ready.\n"
+            f"{READY_CHECK_INSTRUCTIONS}"
+        )
+
+        self.logger.info(f"Updating ready check message to show {ready_count}/{self.expected_user_count} ready")
+        message = await self._update_or_send_message(channel, self.ready_check_message_id, content=new_content)
+        return message is not None
 
     async def ready_check_timeout(self, seconds, bot):
         """Handles timeout for the ready check"""
         try:
             await asyncio.sleep(seconds)
 
-            # Always try to delete the timeout message after the time expires
-            try:
-                if self.timeout_message_id:
-                    channel = bot.get_channel(int(self.draft_channel_id))
-                    if channel:
-                        try:
-                            timeout_msg = await channel.fetch_message(int(self.timeout_message_id))
-                            await timeout_msg.delete()
-                            self.logger.info("Timeout message successfully deleted")
-                        except Exception as e:
-                            self.logger.error(f"Failed to delete timeout message: {e}")
-                    self.timeout_message_id = None
-            except Exception as e:
-                self.logger.error(f"Error handling timeout message deletion: {e}")
-            
+            # Delete the timeout message after the time expires
+            channel = await self._get_draft_channel()
+            if channel and self.timeout_message_id:
+                await self._safe_delete_message(channel, self.timeout_message_id)
+                self.logger.info("Timeout message successfully deleted")
+                self.timeout_message_id = None
+
             # If we reach here, the ready check timed out
             if self.ready_check_active:
                 self.logger.info("Ready check timed out, but continuing to track readiness")
                 self.ready_check_active = False
-                
+
                 # Initialize post-timeout tracking with currently ready users
                 self.post_timeout_ready_users = self.ready_users.copy()
-                
-                # Identify which users weren't ready at timeout
-                missing_users = []
-                for user in self.session_users:
-                    if (user.get('userName') != 'DraftBot' and  # Exclude bot
-                        user.get('userID') not in self.ready_users):
-                        missing_users.append(user.get('userName'))
-                
-                # Format missing users for display
-                missing_text = ""
-                if missing_users:
-                    missing_text = f"\nWaiting for: **{', '.join(missing_users)}**"
-                
-                # Prepare the timeout message
-                timeout_message = f"⚠️ **Ready check failed!** Timed out after {seconds} seconds.{missing_text}\n" \
-                                  f"A new ready check will start automatically when all players are present." \
-                                  f"{READY_CHECK_INSTRUCTIONS}"
-                
-                # Get the channel - needed for either approach
-                try:
-                    channel = bot.get_channel(int(self.draft_channel_id))
-                    if not channel:
-                        self.logger.error(f"Could not find channel with ID {self.draft_channel_id}")
-                    else:
-                        # Try to update existing message first
-                        message_updated = False
-                        if self.ready_check_message_id:
-                            try:
-                                message = await channel.fetch_message(int(self.ready_check_message_id))
-                                await message.edit(content=timeout_message)
-                                message_updated = True
-                                self.logger.info("Ready check message updated successfully for timeout")
-                            except Exception as e:
-                                self.logger.error(f"Failed to update ready check message on timeout: {e}")
 
-                except Exception as e:
-                    self.logger.error(f"Error handling ready check timeout: {e}")
-                
+                # Identify which users weren't ready at timeout
+                missing_users = [
+                    user.get('userName') for user in self.session_users
+                    if user.get('userName') != 'DraftBot' and user.get('userID') not in self.ready_users
+                ]
+
+                # Format missing users for display
+                missing_text = f"\nWaiting for: **{', '.join(missing_users)}**" if missing_users else ""
+
+                # Prepare and send the timeout message
+                timeout_message = (
+                    f"⚠️ **Ready check failed!** Timed out after {seconds} seconds.{missing_text}\n"
+                    f"A new ready check will start automatically when all players are present."
+                    f"{READY_CHECK_INSTRUCTIONS}"
+                )
+
+                if channel and self.ready_check_message_id:
+                    await self._update_or_send_message(channel, self.ready_check_message_id, content=timeout_message)
+                    self.logger.info("Ready check message updated for timeout")
+
                 # Reset message ID but keep tracking readiness
                 self.ready_check_message_id = None
-                self.ready_users.clear()  # Clear the regular ready set
-                
+                self.ready_users.clear()
+
         except asyncio.CancelledError:
             # Expected if the timer is cancelled when all users become ready
             pass
@@ -1134,54 +1355,32 @@ class DraftSetupManager:
         if not self.ready_check_active:
             self.logger.info("complete_ready_check called but no active ready check")
             return
-            
+
         self.logger.info("All users ready! Completing ready check")
         self.ready_check_active = False
-        
+
         # Cancel the timeout timer
         if self.ready_check_timer:
             self.logger.info("Cancelling ready check timeout timer")
             self.ready_check_timer.cancel()
             self.ready_check_timer = None
-        
+
         # Delete the timeout message
+        channel = await self._get_draft_channel()
+        if channel and self.timeout_message_id:
+            await self._safe_delete_message(channel, self.timeout_message_id)
+            self.logger.info("Timeout message deleted on successful ready check")
+            self.timeout_message_id = None
+
         try:
-            if self.timeout_message_id:
-                bot = get_bot()
-                if bot:
-                    channel = bot.get_channel(int(self.draft_channel_id))
-                    if channel:
-                        try:
-                            timeout_msg = await channel.fetch_message(int(self.timeout_message_id))
-                            await timeout_msg.delete()
-                            self.logger.info("Timeout message deleted on successful ready check")
-                        except Exception as e:
-                            self.logger.error(f"Failed to delete timeout message: {e}")
-                    self.timeout_message_id = None
-        except Exception as e:
-            self.logger.error(f"Error deleting timeout message: {e}")
-            
-        try:
-            # Get bot instance
-            bot = get_bot()
-            if bot:
-                channel = bot.get_channel(int(self.draft_channel_id))
-                if not channel:
-                    try:
-                        channel = await bot.fetch_channel(int(self.draft_channel_id))
-                    except Exception as e:
-                        self.logger.error(f"Error fetching channel: {e}")
-                        
-                if channel:
-                    self.logger.info("Sending ready success message")
-                    await channel.send("🎉 All drafters ready! Draft starting in 5 seconds...")
-                else:
-                    self.logger.error(f"Channel not found for ID {self.draft_channel_id}")
-            
+            if channel:
+                self.logger.info("Sending ready success message")
+                await channel.send("🎉 All drafters ready! Draft starting in 5 seconds...")
+
             # Wait before starting
             self.logger.info("Waiting 5 seconds before starting draft")
             await asyncio.sleep(5)
-            
+
             # Start the draft
             self.logger.info("Starting draft")
             await self.start_draft()
@@ -1195,7 +1394,7 @@ class DraftSetupManager:
         The update_status_message_after_user_change method will handle restarting when all users are present.
         """
         self.logger.info(f"Invalidating ready check due to user change from {user_name}")
-        
+
         # Cancel the current ready check timer if it exists
         if self.ready_check_timer:
             try:
@@ -1203,57 +1402,29 @@ class DraftSetupManager:
                 self.ready_check_timer = None
             except Exception as e:
                 self.logger.error(f"Error cancelling ready check timer during invalidation: {e}")
-                
-        # Get the bot instance
-        bot = get_bot()
-        if not bot:
-            self.logger.error("Could not get bot instance for ready check invalidation")
-            return
-            
+
         # Prepare the failure message
-        failure_message = f"⚠️ **Ready check failed!** User {user_name} joined or left during the ready check.\n" \
-                         f"A new ready check will start automatically when all players are present."
-                         
-        # Get the channel - needed for either approach
-        try:
-            channel = bot.get_channel(int(self.draft_channel_id))
-            if not channel:
-                self.logger.error(f"Could not find channel with ID {self.draft_channel_id}")
-                return
-        except Exception as e:
-            self.logger.error(f"Error getting channel: {e}")
-            return
-            
-        # Try to update existing message first
-        message_updated = False
-        if self.ready_check_message_id:
-            try:
-                message = await channel.fetch_message(int(self.ready_check_message_id))
-                await message.edit(content=failure_message)
-                message_updated = True
-                self.logger.info("Ready check message updated successfully")
-            except Exception as e:
-                self.logger.error(f"Failed to update ready check message: {e}")
-                # Continue to fallback
-        
-        # Fallback: If we couldn't update the message or don't have message ID, send a new one
-        if not message_updated:
-            try:
-                await channel.send(failure_message)
-                self.logger.info("Sent new ready check failure message")
-            except Exception as e:
-                self.logger.error(f"Failed to send ready check failure message: {e}")
-            
+        failure_message = (
+            f"⚠️ **Ready check failed!** User {user_name} joined or left during the ready check.\n"
+            f"A new ready check will start automatically when all players are present."
+        )
+
+        # Update or send the failure message
+        channel = await self._get_draft_channel()
+        if channel:
+            await self._update_or_send_message(channel, self.ready_check_message_id, content=failure_message)
+            self.logger.info("Ready check failure message sent/updated")
+
         # Reset the ready check state
         self.ready_check_active = False
         self.ready_users.clear()
         self.post_timeout_ready_users.clear()
         self.ready_check_message_id = None
-        
+
         # Also reset the seating order flag so it will be re-verified
         self.seating_order_set = False
         self.seating_attempts = 0  # Reset attempt counter
-        
+
         # Note: We don't try to restart the ready check here.
         # The update_status_message_after_user_change method will detect when
         # all expected users are present and call check_session_stage_and_organize,
@@ -1271,7 +1442,7 @@ class DraftSetupManager:
                 callback_future.set_result(response)
             
             # Emit the start draft event
-            await self.sio.emit('startDraft', callback=ack_callback)
+            await self.socket_client.emit('startDraft', callback=ack_callback)
             self.logger.info("Draft start requested")
             
             # Wait for the response
@@ -1330,74 +1501,38 @@ class DraftSetupManager:
                 # Get status message ID from database if we don't have it
                 if not hasattr(self, 'status_message_id') or not self.status_message_id:
                     self.status_message_id = draft_session.status_message_id
-                
-                # Get all required info for status message
-                session_usernames = {
-                    user.get('userName') for user in self.session_users 
-                    if user.get('userName') != 'DraftBot'
-                }
-                signup_usernames = set(sign_ups.values())
-                missing_users = signup_usernames - session_usernames
-                unexpected_users = session_usernames - signup_usernames
-                present_users = session_usernames.intersection(signup_usernames)
-                
-                # Update our session status
-                self.session_status = {
-                    'present_users': sorted(list(present_users)),
-                    'missing_users': sorted(list(missing_users)),
-                    'unexpected_users': sorted(list(unexpected_users)),
-                    'updated_at': datetime.now().strftime('%H:%M:%S')
-                }
-                
-                # DEBUG LOGGING for Discord channel info
-                self.logger.info(f"Discord channel info - draft_channel_id: {self.draft_channel_id}")
-                self.logger.info(f"Discord client available: {hasattr(self, 'discord_client') and self.discord_client is not None}")
-                
+
                 # Make sure draft_channel_id is properly set - fetch again if needed
                 if not self.draft_channel_id and draft_session.draft_channel_id:
                     self.draft_channel_id = draft_session.draft_channel_id
                     self.logger.info(f"Updated draft_channel_id from database: {self.draft_channel_id}")
-                
+
+                # Compute user status using helper
+                user_status = self._compute_user_status(sign_ups)
+
+                # Update our session status
+                self.session_status = {
+                    'present_users': sorted(list(user_status['present'])),
+                    'missing_users': sorted(list(user_status['missing'])),
+                    'unexpected_users': sorted(list(user_status['unexpected'])),
+                    'updated_at': datetime.now().strftime('%H:%M:%S')
+                }
+
                 # Send/update status message to Discord channel if available
-                if self.draft_channel_id:
-                    bot = get_bot()
-                    try:
-                        self.logger.info(f"Attempting to get channel with ID: {self.draft_channel_id}")
-                        channel = bot.get_channel(int(self.draft_channel_id))
-                        
-                        if channel:
-                            self.logger.info(f"Found channel: #{channel.name}")
-                            await self.send_session_status_message(channel)
-                        else:
-                            self.logger.warning(f"Channel not found with ID {self.draft_channel_id}, trying to fetch...")
-                            try:
-                                # Try to fetch the channel if it's not in the cache
-                                channel = await bot.fetch_channel(int(self.draft_channel_id))
-                                if channel:
-                                    self.logger.info(f"Successfully fetched channel: #{channel.name}")
-                                    await self.send_session_status_message(channel)
-                                else:
-                                    self.logger.error(f"Could not fetch channel with ID {self.draft_channel_id}")
-                            except Exception as e:
-                                self.logger.error(f"Error fetching channel: {e}")
-                    except Exception as e:
-                        self.logger.exception(f"Error sending status message: {e}")
-                else:
-                    # Log why we couldn't send a message
-                    if not self.draft_channel_id:
-                        self.logger.warning("No draft_channel_id available")
-                    if not hasattr(self, "discord_client") or not self.discord_client:
-                        self.logger.warning("No discord_client available")
+                channel = await self._get_draft_channel()
+                if channel:
+                    self.logger.info(f"Found channel: #{channel.name}")
+                    await self.send_session_status_message(channel)
                 
                 # Check if we have all expected users to attempt setting the order
-                if not missing_users and self.users_count >= self.expected_user_count:
+                if not user_status['missing'] and self.users_count >= self.expected_user_count:
                     if self.removing_unexpected_user:
                         self.logger.info("All expected users present, but we're removing an unexpected user. Delaying seating attempt.")
                     else:
                         self.logger.info("All expected users are present, attempting to set seating order")
                         await self.attempt_seating_order(self.desired_seating_order)
                 else:
-                    self.logger.info(f"Not all users present. Missing: {missing_users}")
+                    self.logger.info(f"Not all users present. Missing: {user_status['missing']}")
                     # Don't attempt seating until all users are present
                     
         except Exception as e:
@@ -1408,39 +1543,29 @@ class DraftSetupManager:
         async with self._seating_lock:
             if self.seating_order_set or self.seating_attempts >= 4:
                 return
-                    
+
             self.seating_attempts += 1
             self.logger.info(f"Attempt {self.seating_attempts}: Setting seating order with {self.users_count} users")
-            
+
             success, missing_users = await self.set_seating_order(desired_seating_order)
-            
+
             if success:
                 self.logger.success(f"Successfully set seating order!")
                 self.seating_order_set = True
-                
+
                 # Update status message with success
                 self.session_status['status'] = 'seating_success'
                 self.session_status['updated_at'] = datetime.now().strftime('%H:%M:%S')
-                
-                if self.draft_channel_id and hasattr(self, "discord_client") and self.discord_client:
-                    bot = self.discord_client
-                    try:
-                        channel = bot.get_channel(int(self.draft_channel_id))
-                        if channel and self.status_message_id:
-                            try:
-                                # Update the existing status message
-                                message = await channel.fetch_message(int(self.status_message_id))
-                                new_content = self.format_status_message(self.session_status)
-                                new_content += "\n\n✅ **Seating order set successfully! Starting ready check...**"
-                                await message.edit(content=new_content)
-                            except Exception as e:
-                                self.logger.error(f"Error updating status message: {e}")
-                    except Exception as e:
-                        self.logger.error(f"Error updating status message: {e}")
-                
+
+                channel = await self._get_draft_channel()
+                if channel and self.status_message_id:
+                    new_content = self.format_status_message(self.session_status)
+                    new_content += "\n\n✅ **Seating order set successfully! Starting ready check...**"
+                    await self._update_or_send_message(channel, self.status_message_id, content=new_content)
+
                 # Automatically initiate the first ready check after seating is set
                 await asyncio.sleep(1)  # Brief pause to ensure everything is settled
-                
+
                 bot = get_bot()
                 if bot:
                     self.logger.info("Seating order set successfully, initiating automatic ready check")
@@ -1449,39 +1574,27 @@ class DraftSetupManager:
                     self.logger.error("Could not get bot instance for automatic ready check")
             else:
                 self.logger.warning(f"Failed to set seating order, missing users: {missing_users}")
-                
+
                 # Update status message with failure
                 self.session_status['status'] = 'seating_failed'
                 self.session_status['missing_users'] = missing_users
                 self.session_status['updated_at'] = datetime.now().strftime('%H:%M:%S')
-                
-                # If we have a Discord channel, update the status message
-                if self.draft_channel_id and hasattr(self, "discord_client") and self.discord_client:
-                    bot = self.discord_client
-                    try:
-                        channel = bot.get_channel(int(self.draft_channel_id))
-                        if channel and self.status_message_id:
-                            try:
-                                # Update the existing status message
-                                message = await channel.fetch_message(int(self.status_message_id))
-                                new_content = self.format_status_message(self.session_status)
-                                missing_users_str = ", ".join(missing_users)
-                                new_content += f"\n\n❌ **Failed to set seating order. Missing users: {missing_users_str}**\n"
-                                new_content += f"These players need to join the Draftmancer session."
-                                await message.edit(content=new_content)
-                            except Exception as e:
-                                self.logger.error(f"Error updating status message: {e}")
-                                
-                            # Also send a separate notification for visibility
-                            missing_users_str = ", ".join(missing_users)
-                            await channel.send(
-                                f"⚠️ **Seating order could not be set**\n"
-                                f"Missing users: {missing_users_str}\n"
-                                f"These players need to join the Draftmancer session."
-                            )
-                    except Exception as e:
-                        self.logger.error(f"Error sending missing users message: {e}")
-                
+
+                channel = await self._get_draft_channel()
+                if channel and self.status_message_id:
+                    new_content = self.format_status_message(self.session_status)
+                    missing_users_str = ", ".join(missing_users)
+                    new_content += f"\n\n❌ **Failed to set seating order. Missing users: {missing_users_str}**\n"
+                    new_content += f"These players need to join the Draftmancer session."
+                    await self._update_or_send_message(channel, self.status_message_id, content=new_content)
+
+                    # Also send a separate notification for visibility
+                    await channel.send(
+                        f"⚠️ **Seating order could not be set**\n"
+                        f"Missing users: {missing_users_str}\n"
+                        f"These players need to join the Draftmancer session."
+                    )
+
                 if self.seating_attempts >= 4:
                     self.logger.error(f"Failed to set seating order after {self.seating_attempts} attempts")
                     await self.notify_seating_failure(missing_users)
@@ -1492,7 +1605,7 @@ class DraftSetupManager:
         Sets the seating order for the draft based on usernames.
         Bot is a spectator and not included in seating order.
         """
-        if not self.sio.connected:
+        if not self.socket_client.connected:
             self.logger.error("Cannot set seating order - socket not connected")
             return False, ["Connection lost"]
             
@@ -1541,7 +1654,7 @@ class DraftSetupManager:
                 
             # Set the seating order using userIDs (bot not included)
             self.logger.info(f"Setting seating order: {user_id_order}")
-            await self.sio.emit('setSeating', user_id_order)
+            await self.socket_client.emit('setSeating', user_id_order)
             
             # All users are present, so we succeeded
             return True, []
@@ -1575,20 +1688,20 @@ class DraftSetupManager:
         2. Transfer ownership 
         3. Disconnect
         """
-        if not self.sio.connected:
+        if not self.socket_client.connected:
             return
         
         self._should_disconnect = True
         try:
             try:
                 self.logger.info("Setting owner as player before transferring ownership")
-                await self.sio.emit('setOwnerIsPlayer', True)
+                await self.socket_client.emit('setOwnerIsPlayer', True)
                 await asyncio.sleep(1)  # Increased delay to ensure the setting is processed
             except Exception as e:
                 self.logger.warning(f"Failed to set owner as player: {e}")
             
             # Disconnect
-            await self.sio.disconnect()
+            await self.socket_client.disconnect()
             self.logger.info("Disconnected successfully")
             
             # Remove from active managers registry
@@ -1738,21 +1851,21 @@ class DraftSetupManager:
 
     @exponential_backoff(max_retries=10, base_delay=1)
     async def update_draft_settings(self):
-        if not self.sio.connected:
+        if not self.socket_client.connected:
             self.logger.error("Cannot update settings - socket not connected")
             return False
             
         try:
             # Send each setting individually
             self.logger.debug("Updating draft settings...")
-            await self.sio.emit('setColorBalance', False)
-            await self.sio.emit('setMaxPlayers', 10)
-            await self.sio.emit('setDraftLogUnlockTimer', 180)
-            await self.sio.emit('setDraftLogRecipients', "delayed")
-            await self.sio.emit('setPersonalLogs', True)
-            await self.sio.emit('teamDraft', True)  # Added teamDraft setting
-            await self.sio.emit('setPickTimer', 60)
-            await self.sio.emit('setOwnerIsPlayer', False)
+            await self.socket_client.emit('setColorBalance', False)
+            await self.socket_client.emit('setMaxPlayers', 10)
+            await self.socket_client.emit('setDraftLogUnlockTimer', 180)
+            await self.socket_client.emit('setDraftLogRecipients', "delayed")
+            await self.socket_client.emit('setPersonalLogs', True)
+            await self.socket_client.emit('teamDraft', True)  # Added teamDraft setting
+            await self.socket_client.emit('setPickTimer', 60)
+            await self.socket_client.emit('setOwnerIsPlayer', False)
             
             return True
             
@@ -1762,120 +1875,160 @@ class DraftSetupManager:
             return False
 
     @exponential_backoff(max_retries=10, base_delay=1)
-    async def import_cube(self):
+    async def import_cube(self, allow_regeneration: bool = True):
+        """
+        Import cube from CubeCobra to Draftmancer.
+
+        If the bot is no longer the session owner:
+        - If no users have joined yet, regenerate the session and retry
+        - If users have already joined, notify them and stop managing
+
+        Args:
+            allow_regeneration: If True and we get an ownership error before users join,
+                              regenerate the session and retry once.
+        """
         try:
             import_data = {
                 "service": "Cube Cobra",
                 "cubeID": self.cube_id,
                 "matchVersions": True
             }
-            
+
             # Create a Future to wait for the callback
+            # Result is a tuple: (success, is_ownership_error)
             future = asyncio.Future()
-            
+
             def ack(response):
                 if 'error' in response:
-                    self.logger.error(f"Import cube error: {response['error']}")
-                    future.set_result(False)
+                    error_info = response['error']
+                    self.logger.error(f"Import cube error: {error_info}")
+
+                    # Check if this is the "Must be session owner" error
+                    # The error format is: {'icon': 'error', 'title': 'Unautorized', 'text': 'Must be session owner.'}
+                    is_ownership_error = False
+                    if isinstance(error_info, dict):
+                        error_text = error_info.get('text', '')
+                        error_title = error_info.get('title', '')
+                        if 'session owner' in error_text.lower() or 'unautorized' in error_title.lower() or 'unauthorized' in error_title.lower():
+                            is_ownership_error = True
+
+                    future.set_result((False, is_ownership_error))
                 else:
                     self.logger.info("Cube import acknowledged")
                     self.cube_imported = True
-                    future.set_result(True)
+                    future.set_result((True, False))
 
-            await self.sio.emit('importCube', import_data, callback=ack)
+            await self.socket_client.emit('importCube', import_data, callback=ack)
             self.logger.info(f"Sent cube import request for {self.cube_id}")
-            
+
             # Wait for the callback to complete
-            success = await future
+            success, is_ownership_error = await future
+
+            # Handle ownership error
+            if not success and is_ownership_error:
+                # Check if users have already joined the Draftmancer session
+                users_have_joined = self.users_count > 0 or len(self.session_users) > 0
+
+                if users_have_joined:
+                    # Users already have the link and may have joined - notify and stop
+                    self.logger.warning("Bot lost ownership after users joined, notifying and stopping management")
+                    await self._notify_bot_no_longer_managing()
+                    if self.socket_client.connected:
+                        await self.socket_client.disconnect()
+                    return False
+                elif allow_regeneration:
+                    # No users yet - regenerate session so we can provide a valid link
+                    self.logger.info("Bot lost ownership before users joined, regenerating session...")
+
+                    if await self.regenerate_draft_session():
+                        self.logger.info("Session regenerated successfully, reconnecting...")
+
+                        if await self.connect_to_new_session():
+                            self.logger.info("Reconnected to new session, retrying cube import...")
+                            # Retry import once (with regeneration disabled to prevent infinite loop)
+                            return await self.import_cube(allow_regeneration=False)
+                        else:
+                            self.logger.error("Failed to connect to new session after regeneration")
+                            return False
+                    else:
+                        self.logger.error("Failed to regenerate session")
+                        return False
+                else:
+                    # Regeneration already attempted and failed
+                    self.logger.error("Ownership error persists after regeneration attempt")
+                    await self._notify_bot_no_longer_managing()
+                    if self.socket_client.connected:
+                        await self.socket_client.disconnect()
+                    return False
+
             return success
-            
+
         except Exception as e:
             self.logger.error(f"Fatal error during cube import: {e}")
-            if self.sio.connected:
-                await self.sio.disconnect()
+            if self.socket_client.connected:
+                await self.socket_client.disconnect()
             return False
 
     async def keep_connection_alive(self):
-        """Updated method to keep the bot connected after seating order is set"""
-        async with self._connection_lock:
-            if self._is_connecting:
-                self.logger.warning("Connection attempt already in progress, skipping...")
-                return
-            self._is_connecting = True
-            self._should_disconnect = False
+        """
+        Main loop to keep connection alive and manage draft state.
+        Now uses DraftSocketClient for robust connection handling.
+        """
+        self.logger.info(f"Starting connection management for draft {self.draft_id}")
+        
+        # Try initial connection
+        websocket_url = get_draftmancer_websocket_url(self.draft_id)
+        
+        # First connection attempt
+        if not await self.socket_client.connect_with_retry(websocket_url):
+            self.logger.error("Initial connection failed after retries. Aborting.")
+            return
 
         try:
-            self.logger.info(f"Starting connection task for draft_id: DB{self.draft_id}")
-            websocket_url = get_draftmancer_websocket_url(self.draft_id)
-                
-            # Log the URL to help with debugging
-            self.logger.debug(f"Attempting connection to URL: {websocket_url}")
-
-            connection_successful = await self.connect_with_retry(websocket_url)
-            if not connection_successful:
-                self.logger.error("Failed to connect after multiple retries, aborting connection task")
-                return
-            
-            # If initial cube import fails, end the task
-            if not self.cube_imported and not await self.import_cube():
-                self.logger.error("Initial cube import failed, ending connection task")
-                return
-
-            # Update draft settings after successful cube import
-            if not await self.update_draft_settings():
-                self.logger.error("Failed to update draft settings, ending connection task")
-                return
-
-            # Monitor the session until conditions are met
-            draft_ended_time = None
-            last_log_attempt_time = None
-            
             while True:
-                if not self.sio.connected:
-                    self.logger.error("Lost connection, ending connection task")
-                    return
-                
+                # Check for disconnect conditions
                 if self._should_disconnect:
-                    self.logger.info("Disconnect requested, ending connection task")
+                    await self.socket_client.disconnect()
                     break
                     
-                try:
-                    await self.sio.emit('getUsers')
+                # If disconnected, try to reconnect
+                if not self.socket_client.connected:
+                    self.logger.info("Connection lost, attempting to reconnect...")
+                    reconnected = await self.socket_client.connect_with_retry(websocket_url)
                     
-                    # Check if we need to set seating
-                    if not self.seating_order_set and self.expected_user_count is not None:
-                        try:
-                            await self.sio.emit('getUsers')
-                        except Exception as e:
-                            self.logger.error(f"Error getting users: {e}")
-                            
-                        # If we already have enough users, check session stage
-                        # This is a fallback in case any event updates were missed
-                        if self.users_count >= self.expected_user_count and self.expected_user_count != 0:
-                            current_time = datetime.now()
-                            if (self.last_db_check_time is None or 
-                                (current_time - self.last_db_check_time).total_seconds() > self.db_check_cooldown):
-                                
-                                self.last_db_check_time = current_time
-                                self.logger.info("check session stage from keep connection alive for user count >= expected user count")
-                                await self.check_session_stage_and_organize()
-                                    
-                        # Try to emit getUsers regularly for accurate counts
-                        try:
-                            await self.sio.emit('getUsers')
-                        except Exception as e:
-                            self.logger.error(f"Error getting users: {e}")
-                    
-                    # If logs were collected successfully, we can disconnect
-                    if self.logs_collection_success:
-                        self.logger.info("Logs collected successfully, disconnecting")
-                        self._should_disconnect = True
-                        
-                    await asyncio.sleep(10)  # Regular check interval
-                        
-                except Exception as e:
-                    self.logger.exception(f"Error while monitoring session: {e}")
-                    await asyncio.sleep(5)
+                    if not reconnected:
+                        # If we can't reconnect, check if we've lost ownership
+                        # This logic was in the original code, adapted here
+                        self.logger.error("Failed to reconnect.")
+                        if not self.session_users_received:
+                             # logic for potentially regenerating session if no one joined
+                             pass 
+                             
+                # Only perform actions if connected
+                if self.socket_client.connected:
+                    # Import cube if needed (uses proper import_cube with ownership handling)
+                    if not self.cube_imported:
+                        if not await self.import_cube():
+                            self.logger.error("Cube import failed in keep_connection_alive loop")
+                            # import_cube handles ownership errors internally
+                            # If it returns False, we may have lost ownership or failed
+                            continue
+
+                    # Update settings if needed
+                    if not self.settings_updated:
+                        if await self.update_draft_settings():
+                            self.settings_updated = True
+                        else:
+                            self.logger.warning("Failed to update draft settings, will retry")
+
+                    try:
+                        await self.socket_client.emit('getUsers')
+                    except Exception as e:
+                        self.logger.error(f"Error emitting getUsers: {e}")
+                
+                # Sleep before next iteration
+                await asyncio.sleep(10)  # Regular check interval
+
                     
         except Exception as e:
             self.logger.exception(f"Fatal error in keep_connection_alive: {e}")
@@ -1885,24 +2038,8 @@ class DraftSetupManager:
             if self._should_disconnect:
                 await self.disconnect_safely()
 
-    @exponential_backoff(max_retries=5, base_delay=2)
-    async def connect_with_retry(self, url):
-        """Handle Socket.IO connection with retries and better error reporting"""
-        try:
-            await self.sio.connect(
-                url,
-                transports='websocket',
-                wait_timeout=10
-            )
-            self.logger.info(f"Successfully connected to {url}")
-            return True
-        except socketio.exceptions.ConnectionError as e:
-            self.logger.error(f"Socket.IO connection error: {str(e)}")
-            return False
-        except Exception as e:
-            self.logger.error(f"Unexpected error during connection: {str(e)}")
-            return False
-                
+    # NOTE: connect_with_retry is now handled by self.socket_client.connect_with_retry()
+
     async def manually_unlock_draft_logs(self):
         """
         Manually unlock draft logs for the currently connected Draftmancer session.
@@ -1924,7 +2061,7 @@ class DraftSetupManager:
                     callback_future.set_result(draft_log is not None)
                 
                 # Request the current draft log
-                await self.sio.emit('getCurrentDraftLog', callback=on_draft_log_response)
+                await self.socket_client.emit('getCurrentDraftLog', callback=on_draft_log_response)
                 
                 # Wait for response with timeout
                 try:
@@ -1944,7 +2081,7 @@ class DraftSetupManager:
                 
                 # Emit the modified log
                 self.logger.info(f"Sharing draft log with delayed=false")
-                await self.sio.emit('shareDraftLog', draft_log)
+                await self.socket_client.emit('shareDraftLog', draft_log)
                 
                 self.logger.info("Logs unlocked using captured draft log")
             else:
@@ -2083,72 +2220,50 @@ class DraftSetupManager:
         """
         Sends or updates a message in the Discord channel with the current session status.
         Lists users in the session, users missing, and unexpected users.
-        
+
         Args:
             channel: The Discord channel to send/update the message in.
         """
         try:
             self.logger.info(f"Sending/updating status message in channel #{channel.name}")
-            
+
             # Get the draft session to compare sign-ups with session users
             draft_session = await DraftSession.get_by_session_id(self.session_id)
             if not draft_session or not draft_session.sign_ups:
                 self.logger.warning("No draft session or sign-ups found for status message")
                 return
-            
-            # Get usernames from the session (excluding DraftBot)
-            session_usernames = {
-                user.get('userName') for user in self.session_users 
-                if user.get('userName') != 'DraftBot'
-            }
-            
-            # Get usernames from sign-ups
-            signup_usernames = set(draft_session.sign_ups.values())
-            
-            # Calculate missing and unexpected users
-            missing_users = signup_usernames - session_usernames
-            unexpected_users = session_usernames - signup_usernames
-            present_users = session_usernames.intersection(signup_usernames)
-            
-            self.logger.info(f"Status data - Present: {present_users}, Missing: {missing_users}, Unexpected: {unexpected_users}")
-            
+
+            # Compute user status using helper
+            user_status = self._compute_user_status(draft_session.sign_ups)
+
+            self.logger.info(f"Status data - Present: {user_status['present']}, Missing: {user_status['missing']}, Unexpected: {user_status['unexpected']}")
+
             # Store status in a dictionary for easier updates
             self.session_status = {
-                'present_users': sorted(list(present_users)),
-                'missing_users': sorted(list(missing_users)),
-                'unexpected_users': sorted(list(unexpected_users)),
+                'present_users': sorted(list(user_status['present'])),
+                'missing_users': sorted(list(user_status['missing'])),
+                'unexpected_users': sorted(list(user_status['unexpected'])),
                 'updated_at': datetime.now().strftime('%H:%M:%S')
             }
-            
+
             # Format the message using the status dictionary
             message_content = self.format_status_message(self.session_status)
-            
+
             # Try to update existing message or create a new one
-            if hasattr(self, 'status_message_id') and self.status_message_id:
-                try:
-                    self.logger.info(f"Attempting to update existing message with ID {self.status_message_id}")
-                    # Try to get the existing message
-                    message = await channel.fetch_message(int(self.status_message_id))
-                    # Update the existing message
-                    await message.edit(content=message_content)
+            message = await self._update_or_send_message(channel, self.status_message_id, content=message_content)
+
+            if message:
+                self.last_status_update = datetime.now()
+                # If we created a new message, store the ID
+                if not self.status_message_id or str(message.id) != self.status_message_id:
+                    self.status_message_id = str(message.id)
+                    self.logger.info(f"Created new status message with ID {self.status_message_id}")
+                    await self.update_draft_session_field('status_message_id', self.status_message_id)
+                else:
                     self.logger.info("Successfully updated existing status message")
-                    self.last_status_update = datetime.now()
-                    return message
-                except Exception as e:
-                    self.logger.warning(f"Could not update existing status message: {e}")
-                    # Message might be deleted or too old, create a new one
-            
-            # Create a new status message
-            self.logger.info("Creating new status message")
-            new_message = await channel.send(message_content)
-            self.status_message_id = str(new_message.id)
-            self.last_status_update = datetime.now()
-            self.logger.info(f"Created new status message with ID {self.status_message_id}")
-            
-            # Store in the database for persistence
-            await self.update_draft_session_field('status_message_id', self.status_message_id)
-            return new_message
-            
+
+            return message
+
         except Exception as e:
             self.logger.exception(f"Error sending/updating status message: {e}")
             return None
@@ -2212,57 +2327,38 @@ class DraftSetupManager:
                 if not draft_session or not draft_session.sign_ups:
                     self.logger.warning("No draft session or sign-ups found for status update")
                     return
-                    
-                # Get username sets 
-                session_users = [u for u in self.session_users if u.get('userName') != 'DraftBot']
-                session_usernames = {user.get('userName') for user in session_users}
-                signup_usernames = set(draft_session.sign_ups.values())
-                missing_users = signup_usernames - session_usernames
-                unexpected_users = session_usernames - signup_usernames
-                present_users = session_usernames.intersection(signup_usernames)
-                
+
+                # Compute user status using helper
+                user_status = self._compute_user_status(draft_session.sign_ups)
+
                 # Update session status with fresh data
                 self.session_status = {
-                    'present_users': sorted(list(present_users)),
-                    'missing_users': sorted(list(missing_users)),
-                    'unexpected_users': sorted(list(unexpected_users)),
+                    'present_users': sorted(list(user_status['present'])),
+                    'missing_users': sorted(list(user_status['missing'])),
+                    'unexpected_users': sorted(list(user_status['unexpected'])),
                     'updated_at': datetime.now().strftime('%H:%M:%S')
                 }
-                
+
                 # Check for unexpected users if we have expected users defined
-                if self.expected_user_count > 0 and unexpected_users:
-                    self.logger.warning(f"Detected unexpected users: {unexpected_users}")
-                    
+                if self.expected_user_count > 0 and user_status['unexpected']:
+                    self.logger.warning(f"Detected unexpected users: {user_status['unexpected']}")
+
                     # Find user IDs for unexpected users and schedule removal
+                    session_users = [u for u in self.session_users if u.get('userName') != 'DraftBot']
                     for user in session_users:
                         username = user.get('userName')
                         user_id = user.get('userID')
-                        if username in unexpected_users:
+                        if username in user_status['unexpected']:
                             self.logger.info(f"Scheduling removal of unexpected user: {username}")
-                            # Schedule removal task
                             asyncio.create_task(self.handle_unexpected_user(username, user_id))
-                
-                bot = get_bot()
-                try:
-                    channel = bot.get_channel(int(self.draft_channel_id))
-                    if channel:
-                        self.logger.info(f"Updating status message after user change in channel #{channel.name}")
-                        await self.send_session_status_message(channel)
-                    else:
-                        # Try to fetch the channel if it's not in cache
-                        try:
-                            channel = await bot.fetch_channel(int(self.draft_channel_id))
-                            if channel:
-                                await self.send_session_status_message(channel)
-                            else:
-                                self.logger.warning(f"Could not fetch channel with ID {self.draft_channel_id}")
-                        except Exception as e:
-                            self.logger.error(f"Error fetching channel: {e}")
-                except Exception as e:
-                    self.logger.error(f"Error updating status message after user change: {e}")
-                
+
+                channel = await self._get_draft_channel()
+                if channel:
+                    self.logger.info(f"Updating status message after user change in channel #{channel.name}")
+                    await self.send_session_status_message(channel)
+
                 # If we now have all expected users, check seating order
-                if not missing_users and self.users_count >= self.expected_user_count:
+                if not user_status['missing'] and self.users_count >= self.expected_user_count:
                     self.logger.info("All expected users are now present, checking seating order. checking session stage from update_status_message_after_user_change")
                     await self.check_session_stage_and_organize()
                     
@@ -2274,7 +2370,7 @@ class DraftSetupManager:
     async def handle_unexpected_user(self, username, user_id):
         """
         Handles unexpected user by posting a warning message, waiting 5 seconds, then removing them.
-        
+
         Args:
             username: The username of the unexpected user
             user_id: The user ID in the Draftmancer session
@@ -2282,66 +2378,48 @@ class DraftSetupManager:
         # Set a flag to indicate we're removing a user
         # This will prevent triggering ready checks during this process
         self.removing_unexpected_user = True
-        
+
         try:
-            # Get the Discord channel
-            bot = get_bot()
-            channel = bot.get_channel(int(self.draft_channel_id))
+            channel = await self._get_draft_channel()
             if not channel:
-                try:
-                    channel = await bot.fetch_channel(int(self.draft_channel_id))
-                except Exception as e:
-                    self.logger.error(f"Error fetching channel: {e}")
-                    self.removing_unexpected_user = False  # Reset flag on error
-                    return
-                    
-            if not channel:
-                self.logger.error(f"Channel with ID {self.draft_channel_id} not found")
-                self.removing_unexpected_user = False  # Reset flag on error
+                self.removing_unexpected_user = False
                 return
-                    
+
             # Post initial warning message
             warning_message = await channel.send(f"⚠️ **Unexpected User Joined: {username}**. This user will be removed in 5 seconds.")
             self.logger.info(f"Posted warning message for unexpected user {username}")
-            
+
             # Wait 5 seconds
             await asyncio.sleep(5)
-            
+
             # Remove the user
             self.logger.info(f"Removing unexpected user {username} with ID {user_id}")
-            await self.sio.emit('removePlayer', user_id)
-            
+            await self.socket_client.emit('removePlayer', user_id)
+
             # Update the message
             await warning_message.edit(content=f"🚫 **Unexpected User ({username}) has been removed**.")
             self.logger.info(f"Successfully removed unexpected user {username}")
 
             # Update status after user change, but don't trigger ready checks yet
             await self.update_status_message_after_user_change()
-            
+
             # Wait a brief moment to ensure user removal is processed
             await asyncio.sleep(1)
-            
+
         except Exception as e:
             self.logger.exception(f"Error handling unexpected user {username}: {e}")
         finally:
             # Reset the flag after user removal is complete
             self.removing_unexpected_user = False
-            
+
             # After removing user and resetting flag, check if we need to initiate a ready check
             if not self.ready_check_active and self.expected_user_count > 0:
-                # Get current users
-                session_users = [u for u in self.session_users if u.get('userName') != 'DraftBot']
-                session_usernames = {user.get('userName') for user in session_users}
-                
-                # Get draft session to check expected users
                 draft_session = await DraftSession.get_by_session_id(self.session_id)
                 if draft_session and draft_session.sign_ups:
-                    signup_usernames = set(draft_session.sign_ups.values())
-                    missing_users = signup_usernames - session_usernames
-                    unexpected_users = session_usernames - signup_usernames
-                    
+                    user_status = self._compute_user_status(draft_session.sign_ups)
+
                     # If all expected users are present and no unexpected users remain,
                     # check session stage which may trigger a ready check if appropriate
-                    if not missing_users and not unexpected_users:
+                    if not user_status['missing'] and not user_status['unexpected']:
                         self.logger.info("All users correct after removal, checking session stage")
                         await self.check_session_stage_and_organize()
