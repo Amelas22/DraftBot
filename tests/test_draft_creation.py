@@ -122,8 +122,8 @@ async def test_random_draft_basic_creation(test_db):
     # Act
     mock_draft_manager = MagicMock()
     mock_draft_manager.keep_connection_alive = AsyncMock()
-    mock_draft_manager.sio = MagicMock()
-    mock_draft_manager.sio.connected = False
+    mock_draft_manager.socket_client = MagicMock()
+    mock_draft_manager.socket_client.connected = False
 
     with patch('sessions.base_session.DraftSetupManager', return_value=mock_draft_manager), \
          patch('sessions.base_session.PersistentView'), \
@@ -178,8 +178,8 @@ async def test_premade_draft_basic_creation(test_db):
     # Mock DraftSetupManager with AsyncMock for keep_connection_alive
     mock_draft_manager = MagicMock()
     mock_draft_manager.keep_connection_alive = AsyncMock()
-    mock_draft_manager.sio = MagicMock()
-    mock_draft_manager.sio.connected = False
+    mock_draft_manager.socket_client = MagicMock()
+    mock_draft_manager.socket_client.connected = False
 
     with patch('sessions.base_session.DraftSetupManager', return_value=mock_draft_manager), \
          patch('sessions.base_session.PersistentView'), \
@@ -213,8 +213,8 @@ async def test_premade_draft_custom_team_names(test_db):
     # Mock DraftSetupManager with AsyncMock for keep_connection_alive
     mock_draft_manager = MagicMock()
     mock_draft_manager.keep_connection_alive = AsyncMock()
-    mock_draft_manager.sio = MagicMock()
-    mock_draft_manager.sio.connected = False
+    mock_draft_manager.socket_client = MagicMock()
+    mock_draft_manager.socket_client.connected = False
 
     with patch('sessions.base_session.DraftSetupManager', return_value=mock_draft_manager), \
          patch('sessions.base_session.PersistentView'), \
@@ -287,8 +287,8 @@ async def test_draft_message_info_stored(test_db):
     # Mock DraftSetupManager with AsyncMock for keep_connection_alive
     mock_draft_manager = MagicMock()
     mock_draft_manager.keep_connection_alive = AsyncMock()
-    mock_draft_manager.sio = MagicMock()
-    mock_draft_manager.sio.connected = False
+    mock_draft_manager.socket_client = MagicMock()
+    mock_draft_manager.socket_client.connected = False
 
     with patch('sessions.base_session.DraftSetupManager', return_value=mock_draft_manager), \
          patch('sessions.base_session.PersistentView'), \
@@ -316,8 +316,8 @@ async def test_draft_deletion_time_set(test_db):
     # Mock DraftSetupManager with AsyncMock for keep_connection_alive
     mock_draft_manager = MagicMock()
     mock_draft_manager.keep_connection_alive = AsyncMock()
-    mock_draft_manager.sio = MagicMock()
-    mock_draft_manager.sio.connected = False
+    mock_draft_manager.socket_client = MagicMock()
+    mock_draft_manager.socket_client.connected = False
 
     with patch('sessions.base_session.DraftSetupManager', return_value=mock_draft_manager), \
          patch('sessions.base_session.PersistentView'), \

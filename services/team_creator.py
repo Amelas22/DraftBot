@@ -370,8 +370,8 @@ async def _update_draft_manager(draft_session_id, bot, client):
             logger.info("Check session from team creator service")
             await manager.check_session_stage_and_organize()
 
-            if manager.sio.connected:
-                await manager.sio.emit('getUsers')
+            if manager.socket_client.connected:
+                await manager.socket_client.emit('getUsers')
         else:
             logger.info(f"DraftSetupManager not found for {draft_session_id}")
 

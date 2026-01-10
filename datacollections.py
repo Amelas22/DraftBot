@@ -13,6 +13,7 @@ from aiobotocore.session import get_session
 from session import AsyncSessionLocal, DraftSession
 from loguru import logger
 from config import get_draftmancer_base_url, get_draftmancer_websocket_url
+from services.draft_socket_client import DraftSocketClient
 
 load_dotenv()
 
@@ -27,57 +28,75 @@ class DraftLogManager:
         self.fetch_attempts = 0
         self.connection_attempts = 0
         self.first_connection = True
-        self.sio = socketio.AsyncClient()
+        self.socket_client = DraftSocketClient(resource_id=f"DB{draft_id}")
         self.discord_client = discord_client
         self.guild_id = guild_id
         
-        @self.sio.event
-        async def connect():
-            logger.info(f"Successfully connected to the websocket for draft_id: DB{self.draft_id}")
+        # Standard event handlers
+        self.socket_client.sio.on('connect', self._on_connect)
+        self.socket_client.sio.on('connect_error', self._on_connect_error)
+        self.socket_client.sio.on('disconnect', self._on_disconnect)
+        
+        # NOTE: self.sio is maintained for compatibility if needed, but prefer self.socket_client.sio
+        self.sio = self.socket_client.sio
 
-        @self.sio.event
-        async def connect_error(data):
-            logger.warning(f"Connection to the websocket failed for draft_id: DB{self.draft_id}")
+    async def _on_connect(self):
+        logger.info(f"Successfully connected to the websocket for draft_id: DB{self.draft_id}")
 
-        @self.sio.event
-        async def disconnect():
-            logger.info(f"Disconnected from the websocket for draft_id: DB{self.draft_id}")
+    async def _on_connect_error(self, data):
+        logger.warning(f"Connection to the websocket failed for draft_id: DB{self.draft_id}")
+
+    async def _on_disconnect(self):
+        logger.info(f"Disconnected from the websocket for draft_id: DB{self.draft_id}")
 
     async def keep_draft_session_alive(self):
         keep_running = True
         if self.first_connection:
             await asyncio.sleep(900)
             self.first_connection = False
+            
         while keep_running:
             try:
                 websocket_url = get_draftmancer_websocket_url(self.draft_id)
-                await self.sio.connect(
-                    websocket_url,
-                    transports='websocket',
-                    wait_timeout=10)
                 
-                while True:
-                    if self.fetch_attempts >= 20 or self.connection_attempts >= 20:
-                        logger.warning(f"Exceeded maximum attempts for {self.draft_id}, stopping attempts and disconnecting.")
-                        keep_running = False
-                        break
+                # Use DraftSocketClient for connection with retries
+                connected = await self.socket_client.connect_with_retry(websocket_url)
+                
+                if not connected:
+                    logger.error(f"Failed to connect to {self.draft_link} after retries")
+                    self.connection_attempts += 1
+                
+                if self.socket_client.connected:
+                    while True:
+                        if self.fetch_attempts >= 20 or self.connection_attempts >= 20:
+                            logger.warning(f"Exceeded maximum attempts for {self.draft_id}, stopping attempts and disconnecting.")
+                            keep_running = False
+                            break
 
-                    data_fetched = await self.fetch_draft_log_data()
-                    if data_fetched:
-                        logger.info(f"Draft log data fetched and saved for {self.draft_id}, disconnecting")
-                        await self.sio.disconnect()
-                        return
-                    else:
-                        logger.info(f"{self.draft_id} log data not available attempt {self.fetch_attempts}, retrying in 5 minutes...")
-                        await asyncio.sleep(300)  # Retry every 5 minutes
+                        data_fetched = await self.fetch_draft_log_data()
+                        if data_fetched:
+                            logger.info(f"Draft log data fetched and saved for {self.draft_id}, disconnecting")
+                            await self.socket_client.disconnect()
+                            return
+                        else:
+                            logger.info(f"{self.draft_id} log data not available attempt {self.fetch_attempts}, retrying in 5 minutes...")
+                            await asyncio.sleep(300)  # Retry every 5 minutes
 
-                    try:
-                        await self.sio.emit('ping')  # Send a ping to keep the connection alive
-                        await asyncio.sleep(120)  # Send a ping every 2 minutes
-                    except socketio.exceptions.ConnectionError:
-                        logger.warning(f"Connection to {self.draft_link} closed, retrying...")
-                        self.connection_attempts += 1
-                        break
+                        try:
+                            # Ping is now robustly handled by emit wrapper
+                            await self.socket_client.emit('ping')  
+                            await asyncio.sleep(120)  # Send a ping every 2 minutes
+                            
+                            # Check if connection was lost during sleep
+                            if not self.socket_client.connected:
+                                logger.warning(f"Connection to {self.draft_link} lost, breaking inner loop to reconnect...")
+                                self.connection_attempts += 1
+                                break
+                                
+                        except Exception as e:
+                            logger.warning(f"Error during ping or sleep for {self.draft_link}: {e}")
+                            self.connection_attempts += 1
+                            break
 
             except Exception as e:
                 logger.error(f"Error connecting to {self.draft_link}: {e}")

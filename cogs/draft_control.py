@@ -816,7 +816,7 @@ class DraftControlCog(commands.Cog):
                     final_message = await ctx.channel.send("✅ **Vote passed!** Replacing disconnected players with bots...")
                     
                     # Send replaceDisconnectedPlayers command to Draftmancer
-                    await manager.sio.emit('replaceDisconnectedPlayers')
+                    await manager.socket_client.emit('replaceDisconnectedPlayers')
                     
                     await final_message.edit(content="🤖 **Disconnected players replaced with bots!** The draft can now be resumed with `/unpause`.")
                 else:
@@ -1095,7 +1095,7 @@ class DraftControlCog(commands.Cog):
                     await asyncio.sleep(5)
                     
                     # Send stopDraft command to Draftmancer
-                    await manager.sio.emit('stopDraft')
+                    await manager.socket_client.emit('stopDraft')
                     
                     await final_message.edit(content=
                                             "🛑 **Draft canceled!** \n" \
@@ -1171,15 +1171,15 @@ class DraftControlCog(commands.Cog):
             await ctx.channel.send(f"https://tenor.com/view/mutiny-jack-sparrow-pirates-pirates-of-the-caribbean-i-wish-to-report-a-mutiny-gif-26531174 \n\n🔄 **Mutiny!** {ctx.author.mention} is taking control of the draft. Bot disconnecting...")
             
             # Set owner as player (required before transfer)
-            await manager.sio.emit('setOwnerIsPlayer', True)
+            await manager.socket_client.emit('setOwnerIsPlayer', True)
             await asyncio.sleep(1)
-            
+
             # Transfer ownership
-            await manager.sio.emit('setSessionOwner', target_user_id)
+            await manager.socket_client.emit('setSessionOwner', target_user_id)
             await asyncio.sleep(1)
-            
+
             # Disconnect
-            await manager.sio.disconnect()
+            await manager.socket_client.disconnect()
             
             # Save the session ID before removing the manager
             session_id = manager.session_id
@@ -1265,7 +1265,7 @@ class DraftControlCog(commands.Cog):
                 return
                 
             # Pause the draft
-            await manager.sio.emit('pauseDraft')
+            await manager.socket_client.emit('pauseDraft')
             manager.draftPaused = True  # Set pause state to True
             
             await ctx.followup.send(
@@ -1389,7 +1389,7 @@ class DraftControlCog(commands.Cog):
                     await asyncio.sleep(5)
                     
                     # Emit the resumeDraft event
-                    await manager.sio.emit('resumeDraft')
+                    await manager.socket_client.emit('resumeDraft')
                     manager.draftPaused = False  # Reset pause state when resuming
                     
                     await resume_message.edit(content="▶️ **Draft resumed!** Good luck and have fun!")
