@@ -281,7 +281,7 @@ class AdminCommands(commands.Cog):
 
                 # Add icon if server supports it
                 if supports_icons and count in role_icons:
-                    role_kwargs["display_icon"] = role_icons[count]
+                    role_kwargs["unicode_emoji"] = role_icons[count]
 
                 await ctx.guild.create_role(**role_kwargs)
                 created_roles.append(role_name)
