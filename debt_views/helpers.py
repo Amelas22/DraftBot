@@ -6,6 +6,7 @@ across debt_commands.py and settle_views.py.
 """
 import discord
 import aiohttp
+from helpers.display_names import get_display_name_by_id
 
 # Network errors that are transient and should be logged but not re-raised
 TRANSIENT_ERRORS = (
@@ -26,11 +27,7 @@ def get_member_name(guild: discord.Guild, user_id: str) -> str:
     Returns:
         The member's display name, or "User {id}" as fallback
     """
-    try:
-        member = guild.get_member(int(user_id))
-        return member.display_name if member else f"User {user_id}"
-    except (ValueError, AttributeError):
-        return f"User {user_id}"
+    return get_display_name_by_id(user_id, guild, f"User {user_id}")
 
 
 def format_entry_source(entry) -> str:

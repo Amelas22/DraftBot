@@ -7,6 +7,7 @@ from session import DraftSession, MatchResult
 from views import MatchResultSelect
 from config import is_money_server
 from preference_service import get_player_dm_notification_preference, update_player_dm_notification_preference
+from helpers.display_names import get_display_name
 
 class DraftCommands(commands.Cog):
     def __init__(self, bot):
@@ -102,8 +103,8 @@ class DraftCommands(commands.Cog):
             await ctx.followup.send("Could not find one or both players for this match.", ephemeral=True)
             return
             
-        player1_name = player1.display_name
-        player2_name = player2.display_name
+        player1_name = get_display_name(player1, ctx.guild)
+        player2_name = get_display_name(player2, ctx.guild)
         
         # Create the select menu
         select_menu = MatchResultSelect(
@@ -132,7 +133,7 @@ class DraftCommands(commands.Cog):
     )
     async def toggle_dm_notifications(self, ctx):
         """Toggle DM notifications for ready checks"""
-        logger.info(f"📱 Received toggle_dm_notifications command from user {ctx.author.id} ({ctx.author.display_name}) in guild {ctx.guild.id}")
+        logger.info(f"📱 Received toggle_dm_notifications command from user {ctx.author.id} ({get_display_name(ctx.author, ctx.guild)}) in guild {ctx.guild.id}")
         await ctx.response.defer(ephemeral=True)
 
         user_id = str(ctx.author.id)
@@ -141,7 +142,7 @@ class DraftCommands(commands.Cog):
         # Get current preference
         logger.debug(f"🔍 Getting current DM notification preference for user {user_id} in guild {guild_id}")
         current_preference = await get_player_dm_notification_preference(user_id, guild_id)
-        logger.info(f"Current preference for {ctx.author.display_name}: {current_preference}")
+        logger.info(f"Current preference for {get_display_name(ctx.author, ctx.guild)}: {current_preference}")
 
         # Toggle the preference
         new_preference = not current_preference
@@ -152,7 +153,7 @@ class DraftCommands(commands.Cog):
         success = await update_player_dm_notification_preference(user_id, guild_id, new_preference)
 
         if success:
-            logger.success(f"✅ Successfully updated DM notification preference for {ctx.author.display_name} to {new_preference}")
+            logger.success(f"✅ Successfully updated DM notification preference for {get_display_name(ctx.author, ctx.guild)} to {new_preference}")
             if new_preference:
                 await ctx.followup.send(
                     f"✅ DM notifications **enabled** for {ctx.guild.name}.\n"
@@ -166,7 +167,7 @@ class DraftCommands(commands.Cog):
                     ephemeral=True
                 )
         else:
-            logger.error(f"❌ Failed to update DM notification preference for {ctx.author.display_name}")
+            logger.error(f"❌ Failed to update DM notification preference for {get_display_name(ctx.author, ctx.guild)}")
             await ctx.followup.send(
                 "Failed to update your DM notification preference. Please try again later.",
                 ephemeral=True

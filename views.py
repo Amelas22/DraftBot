@@ -14,6 +14,7 @@ from models import SignUpHistory
 from sqlalchemy import update, select, and_
 from sqlalchemy.orm import selectinload
 from helpers.utils import get_cube_thumbnail_url
+from helpers.display_names import get_display_name, get_display_name_by_id
 from utils import (
     calculate_pairings, 
     get_formatted_stake_pairs, 
@@ -493,7 +494,7 @@ class PersistentView(discord.ui.View):
                     guild = interaction.guild
                     message_link = f"https://discord.com/channels/{draft_session_updated.guild_id}/{draft_session_updated.draft_channel_id}/{draft_session_updated.message_id}"
                     channel = discord.utils.get(guild.text_channels, name="cube-draft-open-play")
-                    await channel.send(f"**{interaction.user.display_name}** is looking for an opponent for a **Winston Draft**. [Join Here!]({message_link})")
+                    await channel.send(f"**{get_display_name(interaction.user, guild)}** is looking for an opponent for a **Winston Draft**. [Join Here!]({message_link})")
                     
     async def cancel_sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         draft_session = await get_draft_session(self.draft_session_id)
@@ -738,7 +739,7 @@ class PersistentView(discord.ui.View):
                 break
 
         # Generate the initial embed with personalized links
-        embed = await generate_ready_check_embed(ready_check_status=ready_check_status, sign_ups=session.sign_ups, draft_link=session.draft_link, draft_session=session)
+        embed = await generate_ready_check_embed(ready_check_status=ready_check_status, sign_ups=session.sign_ups, draft_link=session.draft_link, draft_session=session, guild=interaction.guild)
         
         # Create the view with the buttons
         view = ReadyCheckView(self.draft_session_id)
@@ -828,7 +829,7 @@ class PersistentView(discord.ui.View):
             for pid in missing_players:
                 member = guild.get_member(int(pid))
                 if member:
-                    missing_names.append(member.display_name)
+                    missing_names.append(get_display_name(member, guild))
             
             # Format error message
             players_str = ", ".join(missing_names)
@@ -1008,9 +1009,9 @@ class PersistentView(discord.ui.View):
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
             return
 
-        user_id = str(interaction.user.id)  
+        user_id = str(interaction.user.id)
         custom_id = button.custom_id
-        user_name = interaction.user.display_name
+        user_name = get_display_name(interaction.user, interaction.guild)
 
         primary_team = secondary_team = primary_key = secondary_key = None
 
@@ -1078,7 +1079,7 @@ class PersistentView(discord.ui.View):
             return
 
         # Show confirmation dialog
-        confirm_view = CancelConfirmationView(self.bot, self.draft_session_id, interaction.user.display_name)
+        confirm_view = CancelConfirmationView(self.bot, self.draft_session_id, get_display_name(interaction.user, interaction.guild))
         await interaction.response.send_message("Are you sure you want to cancel this draft?", view=confirm_view, ephemeral=True)    
     
     async def start_draft_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1132,9 +1133,10 @@ class PersistentView(discord.ui.View):
         message = await channel.fetch_message(int(session.message_id))
         embed = message.embeds[0]  # Assuming there's only one embed attached to the message
 
-        # Assume team_a_names and team_b_names are prepared earlier in the method
-        team_a_names = [session.sign_ups.get(str(user_id), "Unknown User") for user_id in (session.team_a or [])]
-        team_b_names = [session.sign_ups.get(str(user_id), "Unknown User") for user_id in (session.team_b or [])]
+        # Get team names with crown icons
+        guild = interaction.guild
+        team_a_names = [get_display_name_by_id(str(user_id), guild, session.sign_ups.get(str(user_id), "Unknown User")) for user_id in (session.team_a or [])]
+        team_b_names = [get_display_name_by_id(str(user_id), guild, session.sign_ups.get(str(user_id), "Unknown User")) for user_id in (session.team_b or [])]
 
         # Find the index of the Team A and Team B fields in the embed
         team_a_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith(session.team_a_name or "Team A")), None)
@@ -1163,7 +1165,10 @@ class PersistentView(discord.ui.View):
 
         # If the session exists and has sign-ups, and the user is authorized, proceed
         if session.sign_ups:
-            options = [discord.SelectOption(label=user_name, value=user_id) for user_id, user_name in session.sign_ups.items()]
+            # Get display names with crown icons for the dropdown
+            guild = interaction.guild
+            options = [discord.SelectOption(label=get_display_name_by_id(user_id, guild, user_name), value=user_id)
+                      for user_id, user_name in session.sign_ups.items()]
             view = UserRemovalView(session_id=session.session_id, options=options)
             await interaction.response.send_message("Select a user to remove:", view=view, ephemeral=True)
         else:
@@ -1201,7 +1206,10 @@ class PersistentView(discord.ui.View):
             # Only need to update the UI when successful or for other failures
             if result:
                 try:
-                    await self.message.edit(view=self)
+                    # Use self.message if available, otherwise try interaction.message
+                    message = self.message or interaction.message
+                    if message:
+                        await message.edit(view=self)
                 except discord.errors.NotFound:
                     print(f"Cannot edit message - not found. Session ID: {session_id}")
 
@@ -1465,10 +1473,19 @@ class PersistentView(discord.ui.View):
                 await interaction.followup.send("An error occurred.", ephemeral=True)
             return False
 
-async def generate_ready_check_embed(ready_check_status, sign_ups, draft_link, draft_session=None):
-    # Define a function to convert user IDs to their names using the sign_ups dictionary
+async def generate_ready_check_embed(ready_check_status, sign_ups, draft_link, draft_session=None, guild=None):
+    # Define a function to convert user IDs to their names
     def get_names(user_ids):
-        return "\n".join(sign_ups.get(user_id, "Unknown user") for user_id in user_ids) or "None"
+        names = []
+        for user_id in user_ids:
+            if guild:
+                # Use get_display_name_by_id for crown icon support
+                name = get_display_name_by_id(user_id, guild, sign_ups.get(user_id, "Unknown user"))
+            else:
+                # Fallback to stored name if no guild
+                name = sign_ups.get(user_id, "Unknown user")
+            names.append(name)
+        return "\n".join(names) or "None"
 
     # Generate the embed with fields for "Ready", "Not Ready", and "No Response"
     embed = discord.Embed(title="Ready Check Initiated", description="Please indicate if you are ready.\n\nDraftmancer links will be provided once teams are created.", color=discord.Color.gold())
@@ -1515,7 +1532,7 @@ class ReadyCheckView(discord.ui.View):
         # await update_draft_session(self.draft_session_id, session)
         draft_session = await get_draft_session(self.draft_session_id)
         # Generate the updated embed with personalized links
-        embed = await generate_ready_check_embed(session, draft_session.sign_ups, draft_session.draft_link, draft_session)
+        embed = await generate_ready_check_embed(session, draft_session.sign_ups, draft_session.draft_link, draft_session, guild=interaction.guild)
 
         # Check if all players are ready
         all_responded = len(session['no_response']) == 0
@@ -1718,7 +1735,7 @@ async def update_last_draft_timestamp(session_id, guild, bot):
                             # Check if member already has the role
                             if active_role not in member.roles:
                                 await member.add_roles(active_role)
-                                logger.info(f"Added Active role to {member.display_name}")
+                                logger.info(f"Added Active role to {get_display_name(member, guild)}")
                         else:
                             # Get username from draft session sign_ups if possible
                             username = draft_session.sign_ups.get(player_id, "Unknown")
@@ -1915,8 +1932,8 @@ class MatchResultSelect(Select):
             # Get player names for match identification
             player1 = guild.get_member(int(match_result.player1_id))
             player2 = guild.get_member(int(match_result.player2_id))
-            player1_name = player1.display_name if player1 else 'Unknown'
-            player2_name = player2.display_name if player2 else 'Unknown'
+            player1_name = get_display_name(player1, guild)
+            player2_name = get_display_name(player2, guild)
 
             # Update the embed with new match results
             for match_result in match_results_for_this_message:
@@ -2220,9 +2237,14 @@ async def update_draft_message(bot, session_id):
                         }
         
         # Create sign-ups string with stake amounts for staked drafts
+        # Get guild for crown icon lookup
+        guild = channel.guild
+
         if draft_session.session_type == "staked":
             sign_ups_list = []
-            for user_id, display_name in draft_session.sign_ups.items():
+            for user_id, stored_name in draft_session.sign_ups.items():
+                # Get display name with crown icon
+                display_name = get_display_name_by_id(user_id, guild, stored_name)
                 # Default to "Not set" if no stake has been set yet
                 if user_id in stake_info_by_player:
                     stake_amount = stake_info_by_player[user_id]['amount']
@@ -2231,15 +2253,15 @@ async def update_draft_message(bot, session_id):
                     sign_ups_list.append((user_id, display_name, stake_amount, is_capped, capped_emoji))
                 else:
                     sign_ups_list.append((user_id, display_name, "Not set", True, "❓"))
-            
+
             # Sort by stake amount (highest first)
             # Convert "Not set" to -1 for sorting purposes
             def sort_key(item):
                 stake = item[2]
                 return -1 if stake == "Not set" else stake
-            
+
             sign_ups_list.sort(key=sort_key, reverse=True)
-            
+
             # Format with stakes and capping status
             formatted_sign_ups = []
             for user_id, display_name, stake_amount, is_capped, emoji in sign_ups_list:
@@ -2247,11 +2269,13 @@ async def update_draft_message(bot, session_id):
                     formatted_sign_ups.append(f"❌ Not set: {display_name}")
                 else:
                     formatted_sign_ups.append(f"{emoji} {stake_amount} tix: {display_name}")
-            
+
             sign_ups_str = f"**Players ({sign_up_count}):**\n" + ('\n'.join(formatted_sign_ups) if formatted_sign_ups else 'No players yet.')
         else:
             if draft_session.sign_ups:
-                player_names = list(draft_session.sign_ups.values())
+                # Get display names with crown icons
+                player_names = [get_display_name_by_id(user_id, guild, stored_name)
+                               for user_id, stored_name in draft_session.sign_ups.items()]
                 sign_ups_str = f"**Players ({sign_up_count}):**\n" + '\n'.join(player_names)
             else:
                 sign_ups_str = f"**Players (0):**\nNo players yet."
@@ -2796,8 +2820,9 @@ class StakeCalculationButton(discord.ui.Button):
             return
         
         try:
-            # Create player ID to name mapping
-            player_names = {player_id: draft_session.sign_ups.get(player_id, "Unknown") 
+            # Create player ID to name mapping with crown icons
+            guild = interaction.guild
+            player_names = {player_id: get_display_name_by_id(player_id, guild, draft_session.sign_ups.get(player_id, "Unknown"))
                         for player_id in list(draft_session.team_a) + list(draft_session.team_b)}
             
             # Create mapping of player IDs to stakes and cap preferences
