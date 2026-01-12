@@ -79,10 +79,11 @@ class DraftSetupManager:
         self.logger.info(f"Disconnected from the websocket for draft_id: DB{self.draft_id}")
         self._is_connecting = False
 
-    def __init__(self, session_id: str, draft_id: str, cube_id: str):
+    def __init__(self, session_id: str, draft_id: str, cube_id: str, guild_id: str = None):
         self.session_id = session_id
         self.draft_id = draft_id
         self.cube_id = cube_id
+        self.guild_id = guild_id
         
         # Configure contextual logger for this instance
         self.logger = logger.bind(draft_id=draft_id, session_id=session_id)
@@ -145,7 +146,7 @@ class DraftSetupManager:
         self.logs_collection_in_progress = False
         self.logs_collection_success = False
         self.session_type = "team"  # Default to team drafts
-        self.guild_id = None
+
         
         # Initialize helpers
         self.mpt_helper = MagicProtoolsHelper()
@@ -517,8 +518,12 @@ class DraftSetupManager:
             self.logger.error(f"Error regenerating draft session: {e}")
             return False
 
-    async def _notify_bot_no_longer_managing(self):
-        """Send a notification that the bot can no longer manage this draft session."""
+    async def _notify_bot_no_longer_managing(self, include_session_url: bool = True):
+        """Send a notification that the bot can no longer manage this draft session.
+
+        Args:
+            include_session_url: If True, include the Draftmancer session URL so users can continue manually.
+        """
         channel = await self._get_draft_channel()
         if not channel:
             return
@@ -532,6 +537,16 @@ class DraftSetupManager:
             ),
             color=discord.Color.orange()
         )
+
+        # Add session URL so users can continue manually
+        if include_session_url and self.draft_id:
+            session_url = get_draftmancer_session_url(self.draft_id)
+            embed.add_field(
+                name="Draftmancer Session Link",
+                value=f"[Click here to join the session]({session_url})",
+                inline=False
+            )
+
         embed.add_field(
             name="What To Do",
             value=(
@@ -1921,8 +1936,12 @@ class DraftSetupManager:
             await self.socket_client.emit('importCube', import_data, callback=ack)
             self.logger.info(f"Sent cube import request for {self.cube_id}")
 
-            # Wait for the callback to complete
-            success, is_ownership_error = await future
+            # Wait for the callback to complete with a timeout
+            try:
+                success, is_ownership_error = await asyncio.wait_for(future, timeout=30.0)
+            except asyncio.TimeoutError:
+                self.logger.error(f"Cube import callback timed out after 30 seconds for {self.cube_id}")
+                return False
 
             # Handle ownership error
             if not success and is_ownership_error:
@@ -1995,15 +2014,19 @@ class DraftSetupManager:
                 if not self.socket_client.connected:
                     self.logger.info("Connection lost, attempting to reconnect...")
                     reconnected = await self.socket_client.connect_with_retry(websocket_url)
-                    
+
                     if not reconnected:
-                        # If we can't reconnect, check if we've lost ownership
-                        # This logic was in the original code, adapted here
-                        self.logger.error("Failed to reconnect.")
-                        if not self.session_users_received:
-                             # logic for potentially regenerating session if no one joined
-                             pass 
-                             
+                        # Failed to reconnect after max retries - notify users and stop
+                        self.logger.error("Failed to reconnect after max retries. Notifying users and stopping management.")
+                        await self._notify_bot_no_longer_managing(include_session_url=True)
+
+                        # Clean up from active managers registry since we're abandoning this session
+                        if self.session_id in ACTIVE_MANAGERS:
+                            del ACTIVE_MANAGERS[self.session_id]
+                            self.logger.info(f"Removed manager for session {self.session_id} from active managers registry")
+
+                        break  # Exit the loop - we can't manage this draft anymore
+
                 # Only perform actions if connected
                 if self.socket_client.connected:
                     # Import cube if needed (uses proper import_cube with ownership handling)
