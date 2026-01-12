@@ -293,6 +293,33 @@ async def create_settlement(
                     )
                     return (existing_entries[0], existing_entries[1])
 
+                # Balance check: Verify payer owes money and isn't overpaying
+                # We must run this query inside the same transaction to prevent race conditions
+                balance_query = select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
+                    DebtLedger.guild_id == guild_id,
+                    DebtLedger.player_id == payer_id,
+                    DebtLedger.counterparty_id == payee_id
+                )
+                balance_result = await session.execute(balance_query)
+                current_balance = balance_result.scalar()
+
+                # Payer needs to owe money (balance should be negative)
+                if current_balance >= 0:
+                    logger.warning(
+                        f"Attempted settlement where payer {payer_id} owes nothing to {payee_id} "
+                        f"(Balance: {current_balance}). Rejecting."
+                    )
+                    raise ValueError(f"You do not owe anything to this player (Balance: {current_balance})")
+
+                # Check for overpayment
+                debt_amount = abs(current_balance)
+                if amount > debt_amount:
+                     logger.warning(
+                        f"Attempted overpayment: {payer_id} trying to pay {amount} to {payee_id} "
+                        f"but only owes {debt_amount}. Rejecting."
+                    )
+                     raise ValueError(f"Payment amount ({amount}) exceeds current debt ({debt_amount})")
+
                 # Create entries in the same session
                 logger.info(
                     f"Creating settlement: {payer_id} paid {payee_id} {amount} tix "
