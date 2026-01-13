@@ -34,11 +34,68 @@ VICTORY_CHECK_TIMEOUT = 600  # Maximum 10 minutes to wait for victory
 VICTORY_CHECK_INTERVAL = 30  # Check every 30 seconds
 VICTORY_CHECK_INITIAL_DELAY = 10  # Initial delay for immediate victory detection
 
+# Session stage constants (subset - full list in models/draft_session.py)
+# Valid stages: None (initial), "teams", "pairings", "completed"
+SESSION_STAGE_TEAMS = "teams"
+SESSION_STAGE_PAIRINGS = "pairings"
+
+# Connection and retry settings
+MAX_USER_ID_LOOKUP_ATTEMPTS = 5  # Max attempts to find bot's userID in session
+USER_ID_LOOKUP_RETRY_DELAY = 0.5  # Seconds between userID lookup attempts
+OWNERSHIP_CLAIM_TIMEOUT = 3.0  # Seconds to wait for ownership claim confirmation
+SOCKET_OPERATION_DELAY = 0.5  # Seconds between socket operations
+CONNECTION_CHECK_INTERVAL = 10  # Seconds between connection check iterations
+SETTINGS_OPERATION_DELAY = 1  # Seconds after setting operations
+
 # Load environment variables
 load_dotenv()
 
 # Global registry to track active manager instances
 ACTIVE_MANAGERS = {}
+
+class StopRetryException(Exception):
+    """Exception to signal that retries should be aborted."""
+    pass
+
+
+async def create_rooms_and_pairings_with_fallback(
+    bot, guild, channel, session_id, session_type=None, logger=None
+) -> bool:
+    """Create rooms/pairings with user-friendly error handling.
+
+    Args:
+        bot: The Discord bot client
+        guild: The Discord guild
+        channel: The channel to send messages to (optional)
+        session_id: The draft session ID
+        session_type: Optional session type to pass to create_rooms_pairings
+        logger: Optional logger instance
+
+    Returns:
+        True if successful, False otherwise
+    """
+    if channel:
+        await channel.send("⏭️ **Creating rooms and pairings...** Continue the draft manually on Draftmancer.")
+
+    try:
+        from views import PersistentView
+        result = await PersistentView.create_rooms_pairings(
+            bot, guild, session_id, session_type=session_type
+        )
+        if not result:
+            if logger:
+                logger.warning(f"create_rooms_pairings returned False for session {session_id}")
+            if channel:
+                await channel.send("⚠️ Could not create rooms automatically. Use the button manually.")
+            return False
+        return True
+    except Exception as e:
+        if logger:
+            logger.error(f"Failed to create rooms/pairings for session {session_id}: {e}")
+        if channel:
+            await channel.send("⚠️ Could not create rooms automatically. Use the button manually.")
+        return False
+
 
 def exponential_backoff(max_retries=10, base_delay=1):
     def decorator(func):
@@ -50,6 +107,9 @@ def exponential_backoff(max_retries=10, base_delay=1):
                     result = await func(*args, **kwargs)
                     if result:  # If the function succeeds
                         return result
+                except StopRetryException as e:
+                    logger.warning(f"Operation aborted: {e}")
+                    return False  # Abort retries
                 except Exception as e:
                     logger.error(f"Attempt {retries + 1} failed: {e}")
                 
@@ -167,7 +227,8 @@ class DraftSetupManager:
             
         # Register this instance in the global registry
         ACTIVE_MANAGERS[session_id] = self
-        self.logger.info(f"Registered manager for session {session_id} in active managers registry")
+        self.logger.info(f"[LIFECYCLE] Registered manager for session {session_id} in active managers registry")
+        self.logger.info(f"[LIFECYCLE] Manager instance ID: {id(self)}, Socket instance ID: {id(self.socket_client)}")
         
         # Initialize state variables for new DraftSocketClient integration
         self.ready_check_timer_task = None
@@ -516,6 +577,72 @@ class DraftSetupManager:
 
         except Exception as e:
             self.logger.error(f"Error regenerating draft session: {e}")
+            return False
+
+    async def _reclaim_ownership_as_spectator(self) -> bool:
+        """Reclaim session ownership and set bot as spectator after reconnection.
+
+        When the bot reconnects to Draftmancer, it may not automatically be the owner
+        (especially if other users are present). This method actively reclaims ownership
+        using the bot's current userID and sets it as a spectator.
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Find our current userID from session_users
+            # Wait briefly for session_users to populate after reconnect
+            bot_user_id = None
+            for attempt in range(MAX_USER_ID_LOOKUP_ATTEMPTS):
+                for user in self.session_users:
+                    if user.get('userName') == 'DraftBot':
+                        bot_user_id = user.get('userID')
+                        break
+
+                if bot_user_id:
+                    break
+
+                if attempt < MAX_USER_ID_LOOKUP_ATTEMPTS - 1:
+                    self.logger.debug(f"Bot userID not found yet, waiting... (attempt {attempt + 1}/{MAX_USER_ID_LOOKUP_ATTEMPTS})")
+                    await asyncio.sleep(USER_ID_LOOKUP_RETRY_DELAY)
+
+            if not bot_user_id:
+                self.logger.error("Cannot reclaim ownership - bot userID not found in session_users after waiting")
+                return False
+
+            # First, set ourselves as the session owner using our actual userID
+            self.logger.debug(f"Setting session owner to bot userID: {bot_user_id}")
+
+            # Use a callback to verify setSessionOwner succeeded
+            ownership_claimed = asyncio.Future()
+
+            def ownership_callback(response):
+                if 'error' in response:
+                    self.logger.warning(f"setSessionOwner failed: {response['error']}")
+                    ownership_claimed.set_result(False)
+                else:
+                    ownership_claimed.set_result(True)
+
+            await self.socket_client.emit('setSessionOwner', bot_user_id, callback=ownership_callback)
+
+            # Wait for confirmation
+            try:
+                success = await asyncio.wait_for(ownership_claimed, timeout=OWNERSHIP_CLAIM_TIMEOUT)
+                if not success:
+                    self.logger.error("Failed to reclaim ownership - setSessionOwner was rejected")
+                    return False
+            except asyncio.TimeoutError:
+                self.logger.warning("setSessionOwner callback timed out - assuming success")
+
+            await asyncio.sleep(SOCKET_OPERATION_DELAY)
+
+            # Then set as spectator (non-player)
+            await self.socket_client.emit('setOwnerIsPlayer', False)
+            await asyncio.sleep(SOCKET_OPERATION_DELAY)
+            self.logger.info(f"Ownership reclaimed (userID: {bot_user_id}) and set as spectator")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to reclaim ownership as spectator: {e}")
             return False
 
     async def _notify_bot_no_longer_managing(self, include_session_url: bool = True):
@@ -1711,18 +1838,12 @@ class DraftSetupManager:
             try:
                 self.logger.info("Setting owner as player before transferring ownership")
                 await self.socket_client.emit('setOwnerIsPlayer', True)
-                await asyncio.sleep(1)  # Increased delay to ensure the setting is processed
+                await asyncio.sleep(SETTINGS_OPERATION_DELAY)  # Delay to ensure the setting is processed
             except Exception as e:
                 self.logger.warning(f"Failed to set owner as player: {e}")
-            
-            # Disconnect
-            await self.socket_client.disconnect()
-            self.logger.info("Disconnected successfully")
-            
-            # Remove from active managers registry
-            if self.session_id in ACTIVE_MANAGERS:
-                del ACTIVE_MANAGERS[self.session_id]
-                self.logger.info(f"Removed manager for session {self.session_id} from active managers registry")
+
+            # Disconnect and cleanup
+            await self._cleanup_and_disconnect("disconnect safely")
         except Exception as e:
             self.logger.exception(f"Error during disconnect: {e}")
             
@@ -1889,6 +2010,82 @@ class DraftSetupManager:
             self.logger.exception("Full exception details:")
             return False
 
+    async def _should_advance_to_pairings(self) -> bool:
+        """Determine if we should automatically advance to pairings stage.
+
+        Returns True if:
+        - Draft is currently active (self.drafting), OR
+        - Session stage is 'teams' (teams formed but draft not started yet)
+
+        Returns:
+            bool: True if should advance to pairings, False otherwise
+        """
+        if self.drafting:
+            return True
+
+        try:
+            async with db_session() as session:
+                stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
+                result = await session.execute(stmt)
+                draft_session = result.scalar_one_or_none()
+                return draft_session and draft_session.session_stage == SESSION_STAGE_TEAMS
+        except Exception as e:
+            self.logger.error(f"Failed to check session stage: {e}")
+            return False
+
+    async def _handle_ownership_loss_with_pairings(self, channel=None) -> None:
+        """Handle bot losing ownership when past point of no return.
+
+        Notifies users, creates pairings, and disconnects gracefully.
+        Should be called when teams are formed or draft is active and bot loses ownership.
+
+        Args:
+            channel: Optional Discord channel for sending messages
+        """
+        self.logger.warning("Bot lost ownership past point of no return, advancing to pairings")
+        await self._notify_bot_no_longer_managing()
+
+        bot = get_bot()
+        guild = bot.get_guild(int(self.guild_id))
+        if not channel:
+            channel = await self._get_draft_channel()
+
+        if guild:
+            await create_rooms_and_pairings_with_fallback(
+                bot, guild, channel, self.session_id, self.session_type, self.logger
+            )
+
+        await self._cleanup_and_disconnect("ownership loss with pairings")
+
+    async def _cleanup_and_disconnect(self, reason: str = "cleanup") -> None:
+        """Disconnect from Draftmancer and remove from active managers registry.
+
+        Args:
+            reason: Optional description of why cleanup is happening (for logging)
+        """
+        self.logger.info(f"[LIFECYCLE] === CLEANUP START === Reason: {reason}")
+        self.logger.info(f"[LIFECYCLE] Manager instance ID: {id(self)}")
+        self.logger.info(f"[LIFECYCLE] Socket connected before cleanup: {self.socket_client.connected}")
+        self.logger.info(f"[LIFECYCLE] Session in ACTIVE_MANAGERS before cleanup: {self.session_id in ACTIVE_MANAGERS}")
+
+        if self.socket_client.connected:
+            await self.socket_client.disconnect()
+            self.logger.info(f"[LIFECYCLE] Socket disconnected")
+
+        if self.session_id in ACTIVE_MANAGERS:
+            # Check if it's actually this instance
+            if ACTIVE_MANAGERS[self.session_id] is self:
+                del ACTIVE_MANAGERS[self.session_id]
+                self.logger.info(f"[LIFECYCLE] Removed THIS manager instance from ACTIVE_MANAGERS")
+            else:
+                self.logger.warning(f"[LIFECYCLE] Found DIFFERENT manager instance in ACTIVE_MANAGERS (ID: {id(ACTIVE_MANAGERS[self.session_id])})")
+        else:
+            self.logger.info(f"[LIFECYCLE] Session already removed from ACTIVE_MANAGERS")
+
+        self.logger.info(f"[LIFECYCLE] Socket connected after cleanup: {self.socket_client.connected}")
+        self.logger.info(f"[LIFECYCLE] Session in ACTIVE_MANAGERS after cleanup: {self.session_id in ACTIVE_MANAGERS}")
+        self.logger.info(f"[LIFECYCLE] === CLEANUP END ===")
+
     @exponential_backoff(max_retries=10, base_delay=1)
     async def import_cube(self, allow_regeneration: bool = True):
         """
@@ -1945,26 +2142,30 @@ class DraftSetupManager:
 
             # Handle ownership error
             if not success and is_ownership_error:
-                # Check if users have already joined the Draftmancer session
+                # Check if users have joined Draftmancer
                 users_have_joined = self.users_count > 0 or len(self.session_users) > 0
 
-                if users_have_joined:
-                    # Users already have the link and may have joined - notify and stop
-                    self.logger.warning("Bot lost ownership after users joined, notifying and stopping management")
-                    await self._notify_bot_no_longer_managing()
-                    if self.socket_client.connected:
-                        await self.socket_client.disconnect()
-                    return False
+                # Determine if we're past the point of no return
+                # Only advance to pairings if BOTH:
+                # 1. Users have joined Draftmancer (they're committed)
+                # 2. Draft is active OR teams are formed
+                should_advance_to_pairings = users_have_joined and await self._should_advance_to_pairings()
+
+                if should_advance_to_pairings:
+                    # Past point of no return - users committed, create pairings
+                    self.logger.warning("Bot lost ownership with users present and teams formed, creating pairings and disconnecting")
+                    channel = await self._get_draft_channel()
+                    await self._handle_ownership_loss_with_pairings(channel)
+                    raise StopRetryException("Bot lost ownership with users present and teams formed")
+
                 elif allow_regeneration:
-                    # No users yet - regenerate session so we can provide a valid link
-                    self.logger.info("Bot lost ownership before users joined, regenerating session...")
+                    # Either no users yet, or teams not formed - regenerate session
+                    self.logger.info("Bot lost ownership before point of no return, regenerating session...")
 
                     if await self.regenerate_draft_session():
                         self.logger.info("Session regenerated successfully, reconnecting...")
-
                         if await self.connect_to_new_session():
                             self.logger.info("Reconnected to new session, retrying cube import...")
-                            # Retry import once (with regeneration disabled to prevent infinite loop)
                             return await self.import_cube(allow_regeneration=False)
                         else:
                             self.logger.error("Failed to connect to new session after regeneration")
@@ -1976,87 +2177,185 @@ class DraftSetupManager:
                     # Regeneration already attempted and failed
                     self.logger.error("Ownership error persists after regeneration attempt")
                     await self._notify_bot_no_longer_managing()
-                    if self.socket_client.connected:
-                        await self.socket_client.disconnect()
+                    await self._cleanup_and_disconnect("ownership error persists")
                     return False
 
             return success
 
         except Exception as e:
             self.logger.error(f"Fatal error during cube import: {e}")
-            if self.socket_client.connected:
-                await self.socket_client.disconnect()
+            await self._cleanup_and_disconnect("fatal error during cube import")
             return False
+
+    async def _handle_reconnection(self, websocket_url: str) -> bool:
+        """Handle reconnection and ownership reclaim logic.
+
+        Args:
+            websocket_url: The websocket URL to reconnect to
+
+        Returns:
+            bool: True if should continue the loop, False if should break
+        """
+        self.logger.info(f"[RECONNECT] === RECONNECTION START === Manager ID: {id(self)}")
+        self.logger.info(f"[RECONNECT] Connection lost, attempting to reconnect...")
+
+        reconnected = await self.socket_client.connect_with_retry(websocket_url)
+        self.logger.info(f"[RECONNECT] Reconnection result: {reconnected}")
+
+        if not reconnected:
+            # Failed to reconnect after max retries - notify users and stop
+            self.logger.error(f"[RECONNECT] Failed to reconnect after max retries")
+            await self._notify_bot_no_longer_managing(include_session_url=True)
+
+            # Clean up from active managers registry since we're abandoning this session
+            if self.session_id in ACTIVE_MANAGERS:
+                del ACTIVE_MANAGERS[self.session_id]
+                self.logger.info(f"[RECONNECT] Removed from ACTIVE_MANAGERS due to reconnect failure")
+
+            self.logger.info(f"[RECONNECT] === RECONNECTION END (FAILED) === Returning False")
+            return False  # Exit the loop - we can't manage this draft anymore
+
+        # Successfully reconnected - attempt to reclaim ownership
+        self.logger.info(f"[RECONNECT] Reconnected successfully, attempting to reclaim ownership...")
+
+        # Try to reclaim ownership as spectator
+        ownership_reclaimed = await self._reclaim_ownership_as_spectator()
+        self.logger.info(f"[RECONNECT] Ownership reclaim result: {ownership_reclaimed}")
+
+        if not ownership_reclaimed:
+            # Failed to reclaim ownership - someone else is owner
+            self.logger.error(f"[RECONNECT] Failed to reclaim ownership after reconnect")
+
+            # Check if links have been distributed (teams formed or draft active)
+            # This is the ONLY thing that matters, not random users in Draftmancer
+            should_advance_to_pairings = await self._should_advance_to_pairings()
+            self.logger.info(f"[RECONNECT] Should advance to pairings: {should_advance_to_pairings}")
+
+            if should_advance_to_pairings:
+                # Links distributed - can't regenerate, create pairings
+                self.logger.warning(f"[RECONNECT] Links already distributed - creating pairings and disconnecting")
+                channel = await self._get_draft_channel()
+                self.logger.info(f"[RECONNECT] About to call _handle_ownership_loss_with_pairings")
+                await self._handle_ownership_loss_with_pairings(channel)
+                self.logger.info(f"[RECONNECT] Returned from _handle_ownership_loss_with_pairings")
+                self.logger.info(f"[RECONNECT] === RECONNECTION END (PAIRINGS CREATED) === Returning False")
+                return False  # Exit the loop
+
+            else:
+                # Links not distributed yet - safe to regenerate
+                self.logger.info(f"[RECONNECT] Links not distributed yet, regenerating session...")
+                if await self.regenerate_draft_session():
+                    if await self.connect_to_new_session():
+                        # Successfully regenerated and reconnected
+                        self.cube_imported = False
+                        self.settings_updated = False
+                        self.logger.info(f"[RECONNECT] Regenerated session successfully")
+                        self.logger.info(f"[RECONNECT] === RECONNECTION END (REGENERATED) === Returning True")
+                        return True  # Continue the loop with new session
+                    else:
+                        self.logger.error(f"[RECONNECT] Failed to connect to regenerated session")
+                        await self._notify_bot_no_longer_managing()
+                        await self._cleanup_and_disconnect("failed to connect to regenerated session")
+                        self.logger.info(f"[RECONNECT] === RECONNECTION END (REGEN CONNECT FAILED) === Returning False")
+                        return False
+                else:
+                    self.logger.error(f"[RECONNECT] Failed to regenerate session")
+                    await self._notify_bot_no_longer_managing()
+                    await self._cleanup_and_disconnect("failed to regenerate session")
+                    self.logger.info(f"[RECONNECT] === RECONNECTION END (REGEN FAILED) === Returning False")
+                    return False
+
+        # Only reset flags if ownership was successfully reclaimed
+        self.cube_imported = False
+        self.settings_updated = False
+        self.logger.info(f"[RECONNECT] Ownership reclaimed - resetting flags to re-import")
+        self.logger.info(f"[RECONNECT] === RECONNECTION END (SUCCESS) === Returning True")
+        return True  # Continue the loop
+
+    async def _handle_connected_state(self) -> None:
+        """Handle cube import and settings update when connected."""
+        # Import cube if needed (uses proper import_cube with ownership handling)
+        if not self.cube_imported:
+            self.logger.info(f"Attempting to import cube (cube_imported={self.cube_imported})")
+            if not await self.import_cube():
+                self.logger.error("Cube import failed in keep_connection_alive loop")
+                # import_cube handles ownership errors internally
+                # If it returns False, we may have lost ownership or failed
+                raise StopIteration  # Signal to continue outer loop
+        else:
+            self.logger.debug("Cube already imported, skipping")
+
+        # Update settings if needed
+        if not self.settings_updated:
+            if await self.update_draft_settings():
+                self.settings_updated = True
+            else:
+                self.logger.warning("Failed to update draft settings, will retry")
+
+        try:
+            await self.socket_client.emit('getUsers')
+        except Exception as e:
+            self.logger.error(f"Error emitting getUsers: {e}")
 
     async def keep_connection_alive(self):
         """
         Main loop to keep connection alive and manage draft state.
         Now uses DraftSocketClient for robust connection handling.
         """
-        self.logger.info(f"Starting connection management for draft {self.draft_id}")
-        
+        self.logger.info(f"[LOOP] === KEEP_CONNECTION_ALIVE START === Manager ID: {id(self)}")
+        self.logger.info(f"[LOOP] Starting connection management for draft {self.draft_id}")
+
         # Try initial connection
         websocket_url = get_draftmancer_websocket_url(self.draft_id)
-        
+
         # First connection attempt
         if not await self.socket_client.connect_with_retry(websocket_url):
             self.logger.error("Initial connection failed after retries. Aborting.")
             return
 
         try:
+            iteration = 0
             while True:
+                iteration += 1
+                self.logger.debug(f"[LOOP] Iteration {iteration} - Socket connected: {self.socket_client.connected}")
+
                 # Check for disconnect conditions
                 if self._should_disconnect:
+                    self.logger.info(f"[LOOP] _should_disconnect is True, breaking loop")
                     await self.socket_client.disconnect()
                     break
-                    
+
                 # If disconnected, try to reconnect
                 if not self.socket_client.connected:
-                    self.logger.info("Connection lost, attempting to reconnect...")
-                    reconnected = await self.socket_client.connect_with_retry(websocket_url)
-
-                    if not reconnected:
-                        # Failed to reconnect after max retries - notify users and stop
-                        self.logger.error("Failed to reconnect after max retries. Notifying users and stopping management.")
-                        await self._notify_bot_no_longer_managing(include_session_url=True)
-
-                        # Clean up from active managers registry since we're abandoning this session
-                        if self.session_id in ACTIVE_MANAGERS:
-                            del ACTIVE_MANAGERS[self.session_id]
-                            self.logger.info(f"Removed manager for session {self.session_id} from active managers registry")
-
-                        break  # Exit the loop - we can't manage this draft anymore
+                    self.logger.info(f"[LOOP] Socket disconnected, calling _handle_reconnection")
+                    should_continue = await self._handle_reconnection(websocket_url)
+                    self.logger.info(f"[LOOP] _handle_reconnection returned: {should_continue}")
+                    if not should_continue:
+                        self.logger.info(f"[LOOP] Breaking loop (reconnection returned False)")
+                        break
+                    self.logger.info(f"[LOOP] Continuing to next iteration after successful reconnection")
+                    continue
 
                 # Only perform actions if connected
                 if self.socket_client.connected:
-                    # Import cube if needed (uses proper import_cube with ownership handling)
-                    if not self.cube_imported:
-                        if not await self.import_cube():
-                            self.logger.error("Cube import failed in keep_connection_alive loop")
-                            # import_cube handles ownership errors internally
-                            # If it returns False, we may have lost ownership or failed
-                            continue
-
-                    # Update settings if needed
-                    if not self.settings_updated:
-                        if await self.update_draft_settings():
-                            self.settings_updated = True
-                        else:
-                            self.logger.warning("Failed to update draft settings, will retry")
-
+                    self.logger.debug(f"[LOOP] Socket connected, handling connected state")
                     try:
-                        await self.socket_client.emit('getUsers')
-                    except Exception as e:
-                        self.logger.error(f"Error emitting getUsers: {e}")
-                
-                # Sleep before next iteration
-                await asyncio.sleep(10)  # Regular check interval
+                        await self._handle_connected_state()
+                    except StopIteration:
+                        self.logger.debug(f"[LOOP] Cube import failed, continuing loop")
+                        continue
 
-                    
+                # Sleep before next iteration
+                self.logger.debug(f"[LOOP] Sleeping for {CONNECTION_CHECK_INTERVAL}s before next iteration")
+                await asyncio.sleep(CONNECTION_CHECK_INTERVAL)
+
         except Exception as e:
-            self.logger.exception(f"Fatal error in keep_connection_alive: {e}")
+            self.logger.exception(f"[LOOP] Fatal error in keep_connection_alive: {e}")
         finally:
             self._is_connecting = False
+            self.logger.info(f"[LOOP] === KEEP_CONNECTION_ALIVE END === Manager ID: {id(self)}")
+            self.logger.info(f"[LOOP] Final state - Socket connected: {self.socket_client.connected}")
+            self.logger.info(f"[LOOP] Final state - In ACTIVE_MANAGERS: {self.session_id in ACTIVE_MANAGERS}")
             # Only disconnect if requested
             if self._should_disconnect:
                 await self.disconnect_safely()

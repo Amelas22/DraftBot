@@ -888,19 +888,24 @@ async def update_leaderboards_for_guild(bot, guild_id: str):
 
 
 async def update_debt_summary_for_guild(bot, guild_id: str):
-    """Update the debt summary message for a guild (delete and repost to stay at bottom).
+    """Update the debt summary message for a guild (force refresh using sticky message system).
 
     This runs as a background task to avoid blocking other operations.
     """
+    # Local import to avoid circular dependencies if any
+    from database.message_management import fetch_sticky_message, make_message_sticky, handle_sticky_message_update
+    from debt_views.settle_views import PublicSettleDebtsView
+
     try:
         async with AsyncSessionLocal() as session:
-            # Get the debt summary message record
+            # Get the channel ID from legacy debt summary table (or config if we eventually move it)
+            # For now, we rely on the existing table to know WHICH channel is the debt channel.
             stmt = select(DebtSummaryMessage).where(DebtSummaryMessage.guild_id == guild_id)
             result = await session.execute(stmt)
-            debt_summary = result.scalar_one_or_none()
+            debt_summary_record = result.scalar_one_or_none()
 
-            if not debt_summary:
-                return  # No debt summary message for this guild
+            if not debt_summary_record:
+                return  # No debt summary channel configured for this guild
 
             logger.info(f"Updating debt summary for guild {guild_id}")
 
@@ -909,38 +914,53 @@ async def update_debt_summary_for_guild(bot, guild_id: str):
                 logger.warning(f"Guild {guild_id} not found for debt summary update")
                 return
 
-            channel = guild.get_channel(int(debt_summary.channel_id))
+            channel = guild.get_channel(int(debt_summary_record.channel_id))
             if not channel:
-                logger.warning(f"Debt summary channel {debt_summary.channel_id} not found")
+                logger.warning(f"Debt summary channel {debt_summary_record.channel_id} not found")
                 return
 
-            # Delete old message
-            try:
-                old_message = await channel.fetch_message(int(debt_summary.message_id))
-                await old_message.delete()
-                logger.debug(f"Deleted old debt summary message {debt_summary.message_id}")
-            except discord.NotFound:
-                logger.debug(f"Old debt summary message already deleted")
-            except Exception as e:
-                logger.warning(f"Could not delete old debt summary message: {e}")
+            # Check for existing sticky message in the channel
+            sticky_message = await fetch_sticky_message(str(channel.id), session)
+            
+            if sticky_message:
+                # Force update existing sticky message
+                logger.debug(f"Found existing sticky message in channel {channel.id}, forcing update.")
+                await handle_sticky_message_update(sticky_message, bot, session, force=True)
+            else:
+                # Create brand new message and make it sticky
+                logger.debug(f"No sticky message found in channel {channel.id}, creating new one.")
+                
+                # Cleanup legacy message if it exists (Migration step)
+                if debt_summary_record.message_id:
+                    try:
+                        old_message = await channel.fetch_message(int(debt_summary_record.message_id))
+                        await old_message.delete()
+                        logger.info(f"Deleted legacy debt summary message {debt_summary_record.message_id}")
+                    except discord.NotFound:
+                        logger.info("Legacy debt summary message already deleted")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete legacy debt summary message: {e}")
 
-            # Get all debts and build embed using shared helpers
-            rows = await get_guild_debt_rows(guild_id)
-            embed = build_guild_debt_embed(guild, rows)
+                # Get all debts and build embed
+                rows = await get_guild_debt_rows(guild_id)
+                embed = build_guild_debt_embed(guild, rows)
+                view = PublicSettleDebtsView()
 
-            # Post new message at bottom
-            view = PublicSettleDebtsView()
-            new_message = await channel.send(embed=embed, view=view)
+                new_message = await channel.send(embed=embed, view=view)
 
-            # Update database record
-            debt_summary.message_id = str(new_message.id)
-            debt_summary.last_updated = datetime.now()
-            await session.commit()
+                # Make it sticky (this will also pin it and save it to 'messages' table)
+                await make_message_sticky(guild_id, str(channel.id), new_message, view, bot)
+                
+                # Update legacy record just in case (though we rely on sticky table now)
+                debt_summary_record.message_id = str(new_message.id)
+                debt_summary_record.last_updated = datetime.now()
+                await session.commit()
 
-            logger.info(f"Updated debt summary for guild {guild_id}, new message ID: {new_message.id}")
+            logger.info(f"Successfully processed debt summary update for guild {guild_id}")
 
     except Exception as e:
         logger.error(f"Error updating debt summary for guild {guild_id}: {e}")
+
 
 
 async def remove_lock_after_delay(draft_session_id, delay):
