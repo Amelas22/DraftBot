@@ -1120,8 +1120,7 @@ async def _update_player_draft_streak(db_session, player_id, guild_id, current_t
                 guild_id=guild_id,
                 streak_length=player_stat.current_draft_win_streak,
                 started_at=player_stat.current_draft_win_streak_started_at,
-                ended_at=current_time,
-                ended_by_player_id=None
+                ended_at=current_time
             )
             db_session.add(history_entry)
 
