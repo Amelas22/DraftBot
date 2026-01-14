@@ -188,6 +188,20 @@ async def post_or_update_notification(
     return None
 
 
+async def delete_sticky_message_record(sticky_message: Message, session: AsyncSession) -> None:
+    """Safely deletes a sticky message record and its associated notification."""
+    try:        
+        # NOTE: If we wanted to delete the notification, we'd need the bot instance.
+        # For now, we will just delete the DB record to stop the error loop.
+        # The notification finding logic appears in remove_sticky_message but that requires a discord.Message object.
+        
+        await session.delete(sticky_message)
+        # We don't commit here because the caller handles the transaction
+        logger.info(f"Deleted sticky message record for channel {sticky_message.channel_id}")
+    except Exception as e:
+        logger.error(f"Error deleting sticky message record: {str(e)}")
+
+
 async def handle_sticky_message_update(sticky_message: Message, bot: discord.Client, session: AsyncSession) -> None:
     """Handles the process of updating and pinning the sticky message in Discord."""
     # Check if message_count threshold is met before doing anything
@@ -197,14 +211,18 @@ async def handle_sticky_message_update(sticky_message: Message, bot: discord.Cli
 
     draft_session_id = sticky_message.view_metadata.get("draft_session_id")
     if not draft_session_id:
-        logger.error("Missing draft_session_id in view_metadata.")
-        return
+        logger.warning(f"Missing draft_session_id in view_metadata for channel {sticky_message.channel_id}. Removing sticky message.")
+        await delete_sticky_message_record(sticky_message, session)
+        await session.commit()
+        return True
 
     # Fetch the current draft session to get its current state
     draft_session = await get_draft_session(draft_session_id)
     if not draft_session:
-        logger.error(f"DraftSession with ID {draft_session_id} not found.")
-        return
+        logger.warning(f"DraftSession with ID {draft_session_id} not found for channel {sticky_message.channel_id}. Removing sticky message.")
+        await delete_sticky_message_record(sticky_message, session)
+        await session.commit()
+        return True
     
     # Update the view metadata with the current session stage
     view_metadata = sticky_message.view_metadata.copy()
@@ -215,8 +233,10 @@ async def handle_sticky_message_update(sticky_message: Message, bot: discord.Cli
         old_message = await channel.fetch_message(int(sticky_message.message_id))
         embed = old_message.embeds[0] if old_message.embeds else None
     except discord.NotFound:
-        logger.warning(f"Sticky message with ID {sticky_message.message_id} not found.")
-        return
+        logger.warning(f"Sticky message with ID {sticky_message.message_id} not found in Discord. Removing sticky message record.")
+        await delete_sticky_message_record(sticky_message, session)
+        await session.commit()
+        return True
 
     # Create view with updated metadata including the current session stage
     # Support both sync and async from_metadata methods
