@@ -3,11 +3,7 @@ from discord.ext import commands
 import asyncio
 from loguru import logger
 from models.draft_session import DraftSession
-from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
 from discord.ui import View, Button
-from database.db_session import db_session
-from models.draft_session import DraftSession
-from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
 from datetime import datetime
 from sqlalchemy import select
 
@@ -1134,14 +1130,13 @@ class DraftControlCog(commands.Cog):
                 
             manager, draft_session = result
             
-            # Check if draft has already started
+            # Determine if we should automatically advance to pairings
+            # We do this if the draft has already started or if teams are already formed
+            should_advance_to_pairings = manager.drafting or draft_session.session_stage == 'teams'
+            
             if manager.drafting:
-                await ctx.followup.send(
-                    "Cannot take control after draft has started. Use `/pause` instead if needed.", 
-                    ephemeral=True
-                )
-                return
-                
+                self.logger.info(f"Mutiny during active draft for session {manager.session_id}. Will advance to pairings.")
+            
             # Find a suitable user to transfer to (preferably the requester)
             target_user_id = None
             requester_name = ctx.author.display_name
@@ -1181,19 +1176,25 @@ class DraftControlCog(commands.Cog):
             # Signal the keep_connection_alive loop to stop before disconnecting
             manager._should_disconnect = True
 
-            # Disconnect
-            await manager.socket_client.disconnect()
-            
-            # Save the session ID before removing the manager
+            # Save the session ID before cleanup
             session_id = manager.session_id
-            
-            # Remove from active managers
-            if manager.session_id in ACTIVE_MANAGERS:
-                del ACTIVE_MANAGERS[manager.session_id]
+
+            # Disconnect and cleanup
+            await manager._cleanup_and_disconnect("mutiny command")
                 
             await ctx.channel.send(f"✅ Ownership transferred to {requester_name}. Bot disconnected.")
+
+            if should_advance_to_pairings:
+                # Advance to pairings stage
+                from services.draft_setup_manager import create_rooms_and_pairings_with_fallback
+                success = await create_rooms_and_pairings_with_fallback(
+                    ctx.bot, ctx.guild, ctx.channel, session_id, logger=self.logger
+                )
+                if success:
+                    return  # create_rooms_pairings handles the rest (deletes original message, etc)
+                # If failed, fall through to update the view so the button is enabled
             
-            # Update the view to enable the button
+            # Update the view to enable the button (only if NOT advancing to pairings)
             try:
                 # Get the original draft message
                 from session import AsyncSessionLocal

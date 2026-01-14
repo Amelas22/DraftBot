@@ -1,15 +1,26 @@
-from typing import Optional, Union
+from enum import Enum
+from typing import Optional, Dict, Any, Tuple
 import discord
 from sqlalchemy import JSON, Column, Integer, String, Boolean, Float, select, text, REAL
 from sqlalchemy.ext.asyncio import AsyncSession
 from views import PersistentView
 from database.models_base import Base
-from session import AsyncSessionLocal, DraftSession, get_draft_session
+from session import AsyncSessionLocal, get_draft_session
 from quiz_views_module.quiz_views import QuizPublicView
 from loguru import logger
 import time
 import asyncio
 
+
+class StickyUpdateResult(Enum):
+    """Result codes for sticky message update operations."""
+    SUCCESS = "success"              # Message was successfully updated
+    SKIPPED = "skipped"              # Update skipped (e.g., not enough messages)
+    CLEANED_UP = "cleaned_up"        # Invalid state, sticky record was removed
+    FAILED = "failed"                # Update failed but record preserved (transient error)
+
+
+# Constants
 MESSAGES_BEFORE_REGULAR_UPDATE = 8
 INACTIVITY_THRESHOLD = 120  # 120 seconds (2 minutes) of inactivity
 INACTIVITY_CHECK_INTERVAL = 60  # Check for inactive channels every 60 seconds
@@ -56,17 +67,15 @@ async def fetch_all_sticky_messages(session: AsyncSession) -> list[Message]:
     return result.scalars().all()
 
 
-async def update_draft_session_message(draft_session_id: str, message_id: str, session: AsyncSession) -> None:
-    """Updates the draft session with a new sticky message ID."""
-    draft_session = await get_draft_session(draft_session_id)
-    if not draft_session:
-        logger.error(f"DraftSession with ID {draft_session_id} not found in database.")
-        return
-
-    # Merge the draft_session into the provided session (it was fetched in a different session)
-    draft_session = session.merge(draft_session)
-    draft_session.message_id = message_id
-    await session.commit()
+async def _get_guild(bot: discord.Client, guild_id: str) -> Optional[discord.Guild]:
+    """Get guild by ID, with fallback to fetch if not cached."""
+    guild = bot.get_guild(int(guild_id))
+    if not guild:
+        try:
+            guild = await bot.fetch_guild(int(guild_id))
+        except Exception:
+            return None
+    return guild
 
 
 async def find_notification_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
@@ -79,282 +88,368 @@ async def find_notification_channel(guild: discord.Guild) -> Optional[discord.Te
 
 async def find_session_role(guild: discord.Guild, session_type: str) -> Optional[discord.Role]:
     """Find the appropriate role for the given session type in the guild."""
-    logger.debug(f"Finding session role for session_type '{session_type}' in guild '{guild.name}' (ID: {guild.id})")
-    
-    # Get the guild-specific configuration
     from config import get_config
     config = get_config(guild.id)
-    logger.debug(f"Retrieved config for guild {guild.id}: {config.get('roles', {})}")
-    
-    # Get the roles section first
+
     roles_config = config.get("roles", {})
-    logger.debug(f"Full roles config: {roles_config}")
-    
-    # Get both values using the same pattern
     session_roles = roles_config.get("session_roles", {})
     default_drafter = roles_config.get("drafter")
-    
-    logger.debug(f"Session roles config: {session_roles}")
-    logger.debug(f"Default drafter role: {default_drafter}")
-    
-    # Get the role name, falling back to default drafter if not specified
+
     role_name = session_roles.get(session_type, default_drafter)
-    logger.debug(f"Selected role name for {session_type}: {role_name}")
-    
-    # Find the role with matching name
-    guild_roles = [role.name for role in guild.roles]
-    logger.debug(f"Available guild roles: {guild_roles}")
-    
+    if not role_name:
+        return None
+
     for role in guild.roles:
         if role.name.lower() == role_name.lower():
-            logger.info(f"Found matching role '{role.name}' for session type '{session_type}'")
             return role
-    
-    logger.warning(f"No matching role found for name '{role_name}' in guild '{guild.name}'")
+
     return None
 
 
-async def post_or_update_notification(
-    bot: discord.Client, 
-    guild_id: str, 
-    draft_channel_id: str, 
-    sticky_message_id: str, 
-    notification_message_id: Optional[str], 
-    session: AsyncSession
-) -> Optional[str]:
-    """Post or update a notification message in the notification channel."""
-    try:
-        # Fetch the guild and check if notification channel exists
-        guild = bot.get_guild(int(guild_id))
-        if not guild:
-            guild = await bot.fetch_guild(int(guild_id))
+# --- Sticky Strategy Interface & Implementations ---
+
+class StickyStrategy:
+    """Abstract base class for sticky message strategies."""
+    
+    async def should_update(self, sticky_message: Message) -> bool:
+        """Determine if update is needed beyond standard inactivity/volume checks.
+        Default is True since the manager handles the basic checks.
+        """
+        return True
+
+    async def validate_state(self, sticky_message: Message, session: AsyncSession) -> bool:
+        """Check if the underlying state (e.g. draft session) still exists.
+        If False, the sticky message will be removed.
+        """
+        return True
+
+    async def generate_content(
+        self, sticky_message: Message, bot: discord.Client, session: AsyncSession
+    ) -> Tuple[str, Optional[discord.Embed], Optional[discord.ui.View], Dict[str, Any]]:
+        """Generate the content, embed, view, and updated metadata for the new message.
         
-        notification_channel = await find_notification_channel(guild)
-        if not notification_channel:
-            logger.info(f"Notification channel '{DRAFT_NOTIFICATION_CHANNEL}' not found in guild {guild_id}")
-            return None
+        Returns:
+            (content, embed, view, updated_view_metadata)
+        """
+        raise NotImplementedError
+
+    async def on_update_success(
+        self, sticky_message: Message, new_message: discord.Message, bot: discord.Client, session: AsyncSession
+    ) -> None:
+        """Hook for side effects (notifications, specific DB updates) after successful pin.
+
+        Args:
+            sticky_message: The sticky message record being updated
+            new_message: The newly posted Discord message
+            bot: The Discord bot client instance
+            session: The active database session (caller handles commit)
+        """
+        pass
+
+
+class DraftStickyStrategy(StickyStrategy):
+    """Strategy for Draft Session sticky messages."""
+
+    async def validate_state(self, sticky_message: Message, session: AsyncSession) -> bool:
+        draft_session_id = sticky_message.view_metadata.get("draft_session_id")
+        if not draft_session_id:
+            logger.warning(f"Missing draft_session_id in view_metadata for channel {sticky_message.channel_id}")
+            return False
         
-        # Create message content with link to draft
-        draft_channel = await bot.fetch_channel(int(draft_channel_id))
-        # Use Discord's native message link format
-        message_link = f"https://discord.com/channels/{guild_id}/{draft_channel_id}/{sticky_message_id}"
-        
-        content = f"{message_link}: Looking for Drafters"
-        
-        # If this is the first notification, add a mention to the appropriate role
-        if not notification_message_id:
-            # Get the sticky message to access its metadata
-            sticky_message = await fetch_sticky_message(draft_channel_id, session)
-            if sticky_message and sticky_message.view_metadata:
-                logger.debug(f"Found sticky message with metadata: {sticky_message.view_metadata}")
-                session_id = sticky_message.view_metadata.get("draft_session_id")
-                if session_id:
-                    logger.debug(f"Found session ID: {session_id}")
-                    draft_session = await get_draft_session(session_id)
-                    if draft_session:
-                        logger.debug(f"Found draft session with type: {draft_session.session_type}")
-                        session_role = await find_session_role(guild, draft_session.session_type)
-                        if session_role:
-                            content = f"{session_role.mention} {content}"
-                        else:
-                            logger.warning(f"No role found for session type {draft_session.session_type}")
-                    else:
-                        logger.warning(f"No draft session found for ID {session_id}")
-                else:
-                    logger.warning("No draft_session_id found in view_metadata")
-            else:
-                logger.warning(f"No sticky message or metadata found for channel {draft_channel_id}")
-        
-        # Either update existing notification or create a new one
-        if notification_message_id:
-            try:
-                notification_message = await notification_channel.fetch_message(int(notification_message_id))
-                await notification_message.edit(content=content)
-                logger.info(f"Updated notification message in channel '{DRAFT_NOTIFICATION_CHANNEL}'")
-                return notification_message_id
-            except discord.NotFound:
-                logger.info(f"Previous notification message not found. Creating a new one.")
-                notification_message_id = None
-        
-        if not notification_message_id:
+        draft_session = await get_draft_session(draft_session_id)
+        if not draft_session:
+            logger.warning(f"DraftSession {draft_session_id} not found for channel {sticky_message.channel_id}")
+            return False
+            
+        return True
+
+    async def generate_content(
+        self, sticky_message: Message, bot: discord.Client, session: AsyncSession
+    ) -> Tuple[str, Optional[discord.Embed], Optional[discord.ui.View], Dict[str, Any]]:
+        draft_session_id = sticky_message.view_metadata.get("draft_session_id")
+        draft_session = await get_draft_session(draft_session_id)
+
+        # Update metadata with current stage
+        updated_metadata = sticky_message.view_metadata.copy()
+        updated_metadata["session_stage"] = draft_session.session_stage
+
+        # Get existing embed from old message, or regenerate if not found
+        channel = await bot.fetch_channel(int(sticky_message.channel_id))
+        try:
+            old_message = await channel.fetch_message(int(sticky_message.message_id))
+            embed = old_message.embeds[0] if old_message.embeds else None
+        except discord.NotFound:
+            logger.warning(f"Old draft message not found, regenerating embed for session {draft_session_id}")
+            embed = None
+
+        # If embed is missing (old message deleted or had no embed), regenerate it
+        if embed is None:
+            from utils import generate_draft_summary_embed
+            embed = await generate_draft_summary_embed(bot, draft_session_id)
+            if embed is None:
+                logger.error(f"Failed to regenerate embed for draft session {draft_session_id}")
+                raise ValueError(f"Cannot generate content without embed for session {draft_session_id}")
+
+        view_type = updated_metadata.get("view_type", "draft")
+        if view_type == "quiz":
+            view = await QuizPublicView.from_metadata(bot, updated_metadata)
+        else:
+            view = PersistentView.from_metadata(bot, updated_metadata)
+
+        content = sticky_message.content
+        return content, embed, view, updated_metadata
+
+    async def on_update_success(
+        self, sticky_message: Message, new_message: discord.Message, bot: discord.Client, session: AsyncSession
+    ) -> None:
+        """Update DraftSession record and post/update notification in wheres-the-draft channel."""
+        draft_session_id = sticky_message.view_metadata.get("draft_session_id")
+        draft_session = await get_draft_session(draft_session_id)
+        if draft_session:
+            # get_draft_session creates its own session, so we need to merge into current session
+            draft_session = await session.merge(draft_session)
+            draft_session.message_id = str(new_message.id)
+
+        # Post/Update Notification in wheres-the-draft
+        new_notification_id = await self._post_or_update_notification(bot, sticky_message)
+        if new_notification_id:
+            sticky_message.notification_message_id = new_notification_id
+
+    async def _post_or_update_notification(self, bot: discord.Client, sticky_message: Message) -> Optional[str]:
+        """Internal helper to manage the notification in wheres-the-draft channel."""
+        try:
+            guild_id = sticky_message.guild_id
+            guild = await _get_guild(bot, guild_id)
+            if not guild:
+                return None
+
+            notification_channel = await find_notification_channel(guild)
+            if not notification_channel:
+                return None
+            
+            message_link = f"https://discord.com/channels/{guild_id}/{sticky_message.channel_id}/{sticky_message.message_id}"
+            content = f"{message_link}: Looking for Drafters"
+
+            # Add role mention only on first notification (not on updates)
+            # This prevents spamming the role on every sticky message refresh
+            if not sticky_message.notification_message_id:
+                draft_session_id = sticky_message.view_metadata.get("draft_session_id")
+                draft_session = await get_draft_session(draft_session_id)
+                if draft_session:
+                    session_role = await find_session_role(guild, draft_session.session_type)
+                    if session_role:
+                        content = f"{session_role.mention} {content}"
+
+            if sticky_message.notification_message_id:
+                try:
+                    notification_message = await notification_channel.fetch_message(int(sticky_message.notification_message_id))
+                    await notification_message.edit(content=content)
+                    return sticky_message.notification_message_id
+                except discord.NotFound:
+                    sticky_message.notification_message_id = None # Logic to fall through to send new
+            
+            # Send new if didn't exist or wasn't found
             new_notification = await notification_channel.send(content=content)
-            logger.info(f"Posted new notification message in channel '{DRAFT_NOTIFICATION_CHANNEL}'")
             return str(new_notification.id)
             
-    except Exception as e:
-        logger.error(f"Error posting/updating notification: {str(e)}")
-        logger.exception(e)  # This will log the full stack trace
-    
-    return None
+        except Exception as e:
+            logger.error(f"Error posting draft notification: {e}")
+            return None
 
+
+class DebtSummaryStickyStrategy(StickyStrategy):
+    """Strategy for Debt Summary sticky messages."""
+
+    async def validate_state(self, sticky_message: Message, session: AsyncSession) -> bool:
+        # Debt summaries are always valid as long as the channel/guild exists
+        return True
+
+    async def generate_content(
+        self, sticky_message: Message, bot: discord.Client, session: AsyncSession
+    ) -> Tuple[str, Optional[discord.Embed], Optional[discord.ui.View], Dict[str, Any]]:
+        # Function-local imports to avoid circular dependencies
+        from services.debt_service import get_guild_debt_rows
+        from debt_views.helpers import build_guild_debt_embed
+        from debt_views.settle_views import PublicSettleDebtsView
+
+        guild_id = sticky_message.guild_id
+        guild = bot.get_guild(int(guild_id))
+        
+        # Re-fetch debt data to allow the sticky update to refresh content
+        rows = await get_guild_debt_rows(guild_id)
+        embed = build_guild_debt_embed(guild, rows)
+        
+        view = PublicSettleDebtsView()
+        
+        # Metadata doesn't change much for debt summary
+        return sticky_message.content, embed, view, sticky_message.view_metadata
+
+    async def on_update_success(
+        self, sticky_message: Message, new_message: discord.Message, bot: discord.Client, session: AsyncSession
+    ) -> None:
+        # No notifications for debt summaries
+        pass
+
+
+def get_sticky_strategy(view_metadata: Dict[str, Any]) -> StickyStrategy:
+    """Factory method to get the appropriate strategy."""
+    view_type = view_metadata.get("view_type", "draft")
+    
+    if view_type == "debt_summary":
+        return DebtSummaryStickyStrategy()
+    elif view_type == "draft" or view_type == "quiz":
+        return DraftStickyStrategy()
+    else:
+        # Default fallback
+        logger.warning(f"Unknown view_type '{view_type}', falling back to DraftStickyStrategy")
+        return DraftStickyStrategy()
+
+
+# --- Sticky Message Management Functions ---
 
 async def delete_sticky_message_record(sticky_message: Message, session: AsyncSession) -> None:
     """Safely deletes a sticky message record and its associated notification."""
     try:        
-        # NOTE: If we wanted to delete the notification, we'd need the bot instance.
-        # For now, we will just delete the DB record to stop the error loop.
-        # The notification finding logic appears in remove_sticky_message but that requires a discord.Message object.
-        
         await session.delete(sticky_message)
-        # We don't commit here because the caller handles the transaction
         logger.info(f"Deleted sticky message record for channel {sticky_message.channel_id}")
     except Exception as e:
-        logger.error(f"Error deleting sticky message record: {str(e)}")
+        logger.error(f"Error deleting sticky message record: {e}")
 
 
-async def handle_sticky_message_update(sticky_message: Message, bot: discord.Client, session: AsyncSession) -> None:
-    """Handles the process of updating and pinning the sticky message in Discord."""
+async def handle_sticky_message_update(
+    sticky_message: Message, bot: discord.Client, session: AsyncSession, force: bool = False
+) -> StickyUpdateResult:
+    """Handles the process of updating and pinning the sticky message in Discord.
+
+    Args:
+        sticky_message: The sticky message record to update
+        bot: The Discord bot client
+        session: The active database session
+        force: If True, skip message count threshold check
+
+    Returns:
+        StickyUpdateResult indicating the outcome of the operation
+    """
     # Check if message_count threshold is met before doing anything
-    if sticky_message.message_count < MESSAGES_BEFORE_REGULAR_UPDATE:
+    if not force and sticky_message.message_count < MESSAGES_BEFORE_REGULAR_UPDATE:
         logger.info(f"Not enough messages ({sticky_message.message_count}/{MESSAGES_BEFORE_REGULAR_UPDATE}) to update sticky message in channel {sticky_message.channel_id}")
-        return
+        return StickyUpdateResult.SKIPPED
 
-    draft_session_id = sticky_message.view_metadata.get("draft_session_id")
-    if not draft_session_id:
-        logger.warning(f"Missing draft_session_id in view_metadata for channel {sticky_message.channel_id}. Removing sticky message.")
+    # Get Strategy
+    if not sticky_message.view_metadata:
+        logger.warning(f"Missing view_metadata for channel {sticky_message.channel_id}. Removing sticky message.")
         await delete_sticky_message_record(sticky_message, session)
         await session.commit()
-        return True
+        return StickyUpdateResult.CLEANED_UP
 
-    # Fetch the current draft session to get its current state
-    draft_session = await get_draft_session(draft_session_id)
-    if not draft_session:
-        logger.warning(f"DraftSession with ID {draft_session_id} not found for channel {sticky_message.channel_id}. Removing sticky message.")
+    strategy = get_sticky_strategy(sticky_message.view_metadata)
+
+    # Validate state
+    if not await strategy.validate_state(sticky_message, session):
+        logger.warning(f"Sticky message validation failed for channel {sticky_message.channel_id}. Removing.")
         await delete_sticky_message_record(sticky_message, session)
         await session.commit()
-        return True
-    
-    # Update the view metadata with the current session stage
-    view_metadata = sticky_message.view_metadata.copy()
-    view_metadata["session_stage"] = draft_session.session_stage
-    
+        return StickyUpdateResult.CLEANED_UP
+
     channel = await bot.fetch_channel(int(sticky_message.channel_id))
+
+    # Generate new content
     try:
-        old_message = await channel.fetch_message(int(sticky_message.message_id))
-        embed = old_message.embeds[0] if old_message.embeds else None
-    except discord.NotFound:
-        logger.warning(f"Sticky message with ID {sticky_message.message_id} not found in Discord. Removing sticky message record.")
-        await delete_sticky_message_record(sticky_message, session)
-        await session.commit()
-        return True
+        content, embed, view, updated_metadata = await strategy.generate_content(sticky_message, bot, session)
+    except Exception as e:
+        logger.error(f"Failed to generate content for sticky message in {sticky_message.channel_id}: {e}")
+        return StickyUpdateResult.FAILED
 
-    # Create view with updated metadata including the current session stage
-    # Support both sync and async from_metadata methods
-    view_type = view_metadata.get("view_type", "draft")  # Default to draft for backward compatibility
-
-    if view_type == "quiz":
-        # Quiz views require async recreation
-        view = await QuizPublicView.from_metadata(bot, view_metadata)
-    else:
-        # Draft views use sync recreation
-        view = PersistentView.from_metadata(bot, view_metadata)
-
-    new_message = await channel.send(content=sticky_message.content, embed=embed, view=view)
-    await new_message.pin()
-    logger.info(f"Pinned new sticky message with ID {new_message.id} in channel {channel.id}")
-
-    # Save the new message ID to the sticky_message record
     old_message_id = sticky_message.message_id
+
+    # Send new message
+    try:
+        new_message = await channel.send(content=content, embed=embed, view=view)
+        await new_message.pin()
+        logger.info(f"Pinned new sticky message with ID {new_message.id} in channel {channel.id}")
+    except discord.Forbidden:
+        logger.error(f"Missing permissions to pin in {channel.id}")
+        return StickyUpdateResult.FAILED
+    except discord.HTTPException as e:
+        logger.error(f"HTTP error sending sticky message: {e}")
+        return StickyUpdateResult.FAILED
+
+    # Update DB Record
     sticky_message.message_id = str(new_message.id)
-    sticky_message.view_metadata = view_metadata  # Save the updated metadata
-    sticky_message.message_count = 0  # Reset message count after update
-    sticky_message.last_activity = time.time()  # Reset last activity timestamp
-    sticky_message.last_update_time = time.time()  # Record when we did this update
-    
-    # Update the notification message in the wheres-the-draft channel
-    new_notification_id = await post_or_update_notification(
-        bot, 
-        sticky_message.guild_id, 
-        sticky_message.channel_id, 
-        sticky_message.message_id, 
-        sticky_message.notification_message_id,
-        session
-    )
-    if new_notification_id:
-        sticky_message.notification_message_id = new_notification_id
-    
-    # Update the draft session directly without calling update_draft_session_message
-    if draft_session:
-        draft_session.message_id = str(new_message.id)
-        session.add(draft_session)
-    else:
-        logger.error(f"DraftSession with ID {draft_session_id} not found in database.")
-    
-    # Commit all changes at once
+    sticky_message.view_metadata = updated_metadata
+    sticky_message.message_count = 0
+    sticky_message.last_activity = time.time()
+    sticky_message.last_update_time = time.time()
+
+    # Run side effects
+    await strategy.on_update_success(sticky_message, new_message, bot, session)
+
+    # Commit all changes
     await session.commit()
 
-    # Only after all database changes are committed, delete the old message
+    # Delete old message
     try:
+        old_message = await channel.fetch_message(int(old_message_id))
         await old_message.delete()
         logger.info(f"Deleted old sticky message with ID {old_message_id}")
     except discord.NotFound:
         logger.info(f"Old message {old_message_id} was already deleted")
+    except Exception as e:
+        logger.warning(f"Failed to delete old message: {e}")
 
-    return True
+    return StickyUpdateResult.SUCCESS
+
 
 async def check_channels_for_inactivity(bot: discord.Client) -> None:
     """Background task that periodically checks all channels with sticky messages for inactivity."""
     await bot.wait_until_ready()
     logger.info("Starting background task to check for inactive channels")
-    
-    failure_tracker = {}
+
+    failure_tracker: Dict[str, int] = {}
     MAX_CONSECUTIVE_FAILURES = 3
-    
+
     while not bot.is_closed():
         current_time = time.time()
         async with AsyncSessionLocal() as session:
             sticky_messages = await fetch_all_sticky_messages(session)
-            
+
             for sticky_message in sticky_messages:
-                # Create a unique key for this sticky message
-                sticky_key = f"{sticky_message.channel_id}-{sticky_message.view_metadata.get('draft_session_id')}"
-                
-                # Skip if this sticky message has failed too many times
+                sticky_key = f"{sticky_message.channel_id}-{sticky_message.id}"
+
                 if failure_tracker.get(sticky_key, 0) >= MAX_CONSECUTIVE_FAILURES:
-                    logger.warning(f"Skipping update for sticky message in channel {sticky_message.channel_id} - too many consecutive failures")
                     continue
-                
+
                 elapsed_time = current_time - sticky_message.last_activity
                 time_since_last_update = current_time - (sticky_message.last_update_time or 0)
-                
-                # Check if update is needed due to inactivity or high message volume
+
                 should_update = False
-                
-                # Inactivity check
+
+                # Inactivity check: channel quiet for a while with pending messages
                 if elapsed_time >= INACTIVITY_THRESHOLD and sticky_message.message_count >= MESSAGES_BEFORE_REGULAR_UPDATE:
-                    logger.info(f"Channel {sticky_message.channel_id} has been inactive for {elapsed_time:.2f}s with {sticky_message.message_count} messages. Updating sticky message.")
                     should_update = True
-                
-                # Message volume check with anti-spam protection
-                elif (sticky_message.message_count >= MESSAGES_BEFORE_VOLUME_UPDATE and 
+                # Volume check: many messages, respecting anti-spam cooldown
+                elif (sticky_message.message_count >= MESSAGES_BEFORE_VOLUME_UPDATE and
                       time_since_last_update >= ANTI_SPAM_COOLDOWN_SECONDS):
-                    logger.info(f"High message volume detected ({sticky_message.message_count} messages) and anti-spam cooldown passed. Updating sticky message.")
                     should_update = True
-                
+
                 if should_update:
                     try:
-                        success = await handle_sticky_message_update(sticky_message, bot, session)
-                        if success:
-                            # Reset failure counter on success
+                        result = await handle_sticky_message_update(sticky_message, bot, session)
+                        if result == StickyUpdateResult.SUCCESS or result == StickyUpdateResult.CLEANED_UP:
                             failure_tracker[sticky_key] = 0
-                        else:
-                            # Increment failure counter
+                        elif result == StickyUpdateResult.FAILED:
                             failure_tracker[sticky_key] = failure_tracker.get(sticky_key, 0) + 1
-                            logger.warning(f"Failed to update sticky message in channel {sticky_message.channel_id}. Consecutive failures: {failure_tracker[sticky_key]}")
+                        # SKIPPED doesn't affect failure count
                     except Exception as e:
-                        # Log and count any exceptions as failures
-                        logger.error(f"Exception during sticky message update: {str(e)}")
+                        logger.error(f"Error in sticky update loop: {e}")
                         failure_tracker[sticky_key] = failure_tracker.get(sticky_key, 0) + 1
-        
-        # Wait before checking again
+
         await asyncio.sleep(INACTIVITY_CHECK_INTERVAL)
 
 
 async def setup_sticky_handler(bot: discord.Client) -> None:
     """Sets up event handlers for managing sticky messages in Discord."""
     logger.info("Setting up sticky message handler")
-    
-    # Start the background task for checking inactive channels
     bot.loop.create_task(check_channels_for_inactivity(bot))
 
     @bot.event
@@ -368,15 +463,8 @@ async def setup_sticky_handler(bot: discord.Client) -> None:
             if not sticky_message:
                 return
 
-            # Update the last activity timestamp for this channel
             sticky_message.last_activity = current_time
-            
-            # Increment message count
             sticky_message.message_count += 1
-            
-            logger.info(f"Updated channel {message.channel.id} activity. Count: {sticky_message.message_count}/{MESSAGES_BEFORE_REGULAR_UPDATE}")
-            
-            # Just save the changes - actual updates happen in the background check
             await session.commit()
 
     @bot.event
@@ -389,28 +477,38 @@ async def setup_sticky_handler(bot: discord.Client) -> None:
 
 
 async def make_message_sticky(
-    guild_id: str, channel_id: str, message: discord.Message, view: PersistentView
+    guild_id: str, channel_id: str, message: discord.Message, view, bot: discord.Client
 ) -> None:
-    """Pins a message in a channel and saves it as sticky in the database."""
+    """Pins a message in a channel and saves it as sticky in the database.
+
+    Args:
+        guild_id: The Discord guild ID
+        channel_id: The Discord channel ID
+        message: The Discord message to make sticky
+        view: The view associated with the message (must have to_metadata() method)
+        bot: The Discord bot client instance
+    """
     async with AsyncSessionLocal() as session:
         existing_sticky = await fetch_sticky_message(channel_id, session)
-        view_metadata = view.to_metadata()
+
+        if hasattr(view, "to_metadata"):
+            view_metadata = view.to_metadata()
+        else:
+            view_metadata = {}
+
         if not message.pinned:
             await message.pin()
-            logger.info(f"Pinned message ID {message.id} in channel {channel_id} as sticky.")
 
         current_time = time.time()
-        
-        # Prepare the sticky message record
+
         if existing_sticky:
             existing_sticky.message_id = str(message.id)
             existing_sticky.content = message.content
             existing_sticky.view_metadata = view_metadata
-            existing_sticky.message_count = 0  # Reset counter on update
-            existing_sticky.last_activity = current_time  # Initialize activity timestamp
-            existing_sticky.last_update_time = current_time  # Initialize update timestamp
+            existing_sticky.message_count = 0
+            existing_sticky.last_activity = current_time
+            existing_sticky.last_update_time = current_time
             sticky_message = existing_sticky
-            logger.info(f"Updated sticky message in database for channel {channel_id}.")
         else:
             sticky_message = Message(
                 guild_id=guild_id,
@@ -419,26 +517,16 @@ async def make_message_sticky(
                 content=message.content,
                 view_metadata=view_metadata,
                 is_sticky=True,
-                message_count=0,  # Initialize counter
-                last_activity=current_time,  # Initialize activity timestamp
-                last_update_time=current_time  # Initialize update timestamp
+                message_count=0,
+                last_activity=current_time,
+                last_update_time=current_time
             )
             session.add(sticky_message)
-            logger.info(f"Created new sticky message entry for channel {channel_id}.")
-        
-        # Post notification in wheres-the-draft channel if it exists
-        bot = message.guild._state._get_client()
-        notification_message_id = await post_or_update_notification(
-            bot,
-            guild_id,
-            channel_id,
-            str(message.id),
-            None,  # First post, no existing notification message
-            session
-        )
-        if notification_message_id:
-            sticky_message.notification_message_id = notification_message_id
-        
+
+        # Trigger side effects (e.g., notifications for draft messages)
+        strategy = get_sticky_strategy(view_metadata)
+        await strategy.on_update_success(sticky_message, message, bot, session)
+
         await session.commit()
         logger.info(f"Sticky message ID {message.id} committed for channel {channel_id}")
 
@@ -450,7 +538,7 @@ async def remove_sticky_message(message: discord.Message) -> None:
         if not sticky_message or sticky_message.message_id != str(message.id):
             return
         
-        # If there's a notification message, try to delete it
+        # If notification exists, try delete
         if sticky_message.notification_message_id:
             try:
                 guild = message.guild
@@ -458,10 +546,8 @@ async def remove_sticky_message(message: discord.Message) -> None:
                 if notification_channel:
                     notification_msg = await notification_channel.fetch_message(int(sticky_message.notification_message_id))
                     await notification_msg.delete()
-                    logger.info(f"Deleted notification message with ID {sticky_message.notification_message_id}")
             except Exception as e:
-                logger.error(f"Error deleting notification message: {str(e)}")
+                logger.error(f"Error deleting notification: {e}")
 
         await session.delete(sticky_message)
-        logger.info(f"Removed sticky message with ID {message.id} from channel {message.channel.id} in database.")
         await session.commit()

@@ -55,7 +55,7 @@ class BaseSession:
                 await self.update_message_info(new_draft_session, message)
 
                 # Step 6: Make the message sticky
-                await make_message_sticky(interaction.guild.id, message.channel.id, message, view)
+                await make_message_sticky(interaction.guild.id, message.channel.id, message, view, bot)
 
     async def cleanup(self):
         """Call this method when the draft session needs to be cleaned up"""

@@ -606,3 +606,7 @@ class PublicSettleDebtsView(View):
                     "An error occurred. Please try again.",
                     ephemeral=True
                 )
+
+    def to_metadata(self):
+        """Return metadata for persistent storage."""
+        return {"view_type": "debt_summary"}

@@ -1,4 +1,5 @@
 from discord.ext import commands
+import asyncio
 import os
 import discord
 from loguru import logger
@@ -553,32 +554,243 @@ class AdminCommands(commands.Cog):
         # Show the active sessions and let the user know what will happen
         session_list = "\n".join([f"• `{sid}` (draft_id: {mgr.draft_id})" for sid, mgr in guild_managers])
         await ctx.followup.send(
-            f"Found {len(guild_managers)} active draft session(s):\n{session_list}\n\n"
+            f"[TEST] Found {len(guild_managers)} active draft session(s):\n{session_list}\n\n"
             f"Simulating connection failure for the first one...",
             ephemeral=True
         )
 
-        # Get the first manager and simulate failure
+        # Get the first manager and test auto-recovery
         session_id, manager = guild_managers[0]
+
+        # Log initial state
+        logger.info(f"[TEST] === DISCONNECT TEST START ===")
+        logger.info(f"[TEST] Target session: {session_id}")
+        logger.info(f"[TEST] Manager instance ID: {id(manager)}")
+        logger.info(f"[TEST] Socket instance ID: {id(manager.socket_client)}")
+        logger.info(f"[TEST] Initial socket connected: {manager.socket_client.connected}")
+        logger.info(f"[TEST] Initial in ACTIVE_MANAGERS: {session_id in ACTIVE_MANAGERS}")
 
         # Disconnect the socket (simulates connection loss)
         if manager.socket_client.connected:
             await manager.socket_client.disconnect()
             logger.info(f"[TEST] Disconnected socket for session {session_id}")
 
-        # Now trigger the notification (as if reconnection failed)
-        logger.info(f"[TEST] Simulating reconnection failure for session {session_id}")
-        await manager._notify_bot_no_longer_managing(include_session_url=True)
+            await ctx.followup.send(
+                f"[TEST] 🔌 Disconnected! Monitoring auto-recovery...\n"
+                f"The bot should automatically:\n"
+                f"1. Detect disconnect (within 10s loop interval)\n"
+                f"2. Reconnect and reclaim ownership\n"
+                f"3. Re-import cube and continue managing",
+                ephemeral=True
+            )
 
-        # Clean up from active managers
-        if session_id in ACTIVE_MANAGERS:
-            del ACTIVE_MANAGERS[session_id]
-            logger.info(f"[TEST] Removed manager for session {session_id} from registry")
+            # Wait and monitor recovery (bot loop has 10s interval, so wait 12s)
+            logger.info(f"[TEST] Waiting 12 seconds for recovery...")
+            await asyncio.sleep(12)
 
-        await ctx.followup.send(
-            f"✅ Test complete! Check the draft channel for the notification message.",
-            ephemeral=True
-        )
+            # Check state after waiting
+            logger.info(f"[TEST] === POST-WAIT STATE CHECK ===")
+            logger.info(f"[TEST] Manager instance ID (same?): {id(manager)}")
+            logger.info(f"[TEST] Socket connected: {manager.socket_client.connected}")
+            logger.info(f"[TEST] Session in ACTIVE_MANAGERS: {session_id in ACTIVE_MANAGERS}")
+
+            if session_id in ACTIVE_MANAGERS:
+                current_manager = ACTIVE_MANAGERS[session_id]
+                logger.info(f"[TEST] Current manager in ACTIVE_MANAGERS - ID: {id(current_manager)}")
+                logger.info(f"[TEST] Is same instance: {current_manager is manager}")
+                logger.info(f"[TEST] Current manager socket connected: {current_manager.socket_client.connected}")
+
+            # Check if bot recovered
+            if manager.socket_client.connected and session_id in ACTIVE_MANAGERS:
+                # Give it 2 more seconds to finish cube import
+                await asyncio.sleep(2)
+
+                logger.info(f"[TEST] === RECOVERY SUCCESS REPORTED ===")
+                logger.info(f"[TEST] Manager instance ID: {id(manager)}")
+                logger.info(f"[TEST] Socket connected: {manager.socket_client.connected}")
+                logger.info(f"[TEST] Cube imported: {manager.cube_imported}")
+                logger.info(f"[TEST] Settings updated: {manager.settings_updated}")
+
+                await ctx.followup.send(
+                    f"[TEST] ✅ **Auto-recovery successful!**\n"
+                    f"• Reconnected: {manager.socket_client.connected}\n"
+                    f"• Still in active managers: {session_id in ACTIVE_MANAGERS}\n"
+                    f"• Cube imported: {manager.cube_imported}\n"
+                    f"• Settings updated: {manager.settings_updated}\n\n"
+                    f"The bot is continuing to manage the draft normally.",
+                    ephemeral=True
+                )
+            else:
+                logger.info(f"[TEST] === RECOVERY FAILURE REPORTED ===")
+                logger.info(f"[TEST] Manager socket connected: {manager.socket_client.connected}")
+                logger.info(f"[TEST] Session in ACTIVE_MANAGERS: {session_id in ACTIVE_MANAGERS}")
+
+                await ctx.followup.send(
+                    f"[TEST] ⚠️ **Auto-recovery failed**\n"
+                    f"• Reconnected: {manager.socket_client.connected}\n"
+                    f"• Still in active managers: {session_id in ACTIVE_MANAGERS}\n"
+                    f"Check logs for details.",
+                    ephemeral=True
+                )
+
+            logger.info(f"[TEST] === DISCONNECT TEST END ===")
+        else:
+            await ctx.followup.send(
+                "❌ Manager was not connected. Nothing to test.",
+                ephemeral=True
+            )
+
+    @discord.slash_command(name='cleanup_test_drafts', description='Clean up old test drafts and channels')
+    @has_bot_manager_role()
+    async def cleanup_test_drafts(
+        self,
+        ctx,
+        hours_old: discord.Option(int, "Delete drafts older than this many hours", default=1),
+        dry_run: discord.Option(bool, "Preview without actually deleting", default=True)
+    ):
+        """Clean up old test drafts, channels, and database records."""
+        from config import TEST_MODE_ENABLED
+        from datetime import datetime, timedelta
+        from session import AsyncSessionLocal
+        from models.draft_session import DraftSession
+
+        await ctx.defer(ephemeral=True)
+
+        if not TEST_MODE_ENABLED:
+            await ctx.followup.send(
+                "❌ This command is only available when TEST_MODE_ENABLED is True in config.py\n\n"
+                "**Safety:** This prevents accidental cleanup in production.",
+                ephemeral=True
+            )
+            return
+
+        # Calculate cutoff time
+        cutoff_time = datetime.now() - timedelta(hours=hours_old)
+
+        # Query for old draft sessions
+        async with AsyncSessionLocal() as db_session:
+            from sqlalchemy import select
+            stmt = select(DraftSession).filter(
+                DraftSession.guild_id == str(ctx.guild.id),
+                DraftSession.draft_start_time < cutoff_time
+            )
+
+            result = await db_session.execute(stmt)
+            old_sessions = result.scalars().all()
+
+            if not old_sessions:
+                await ctx.followup.send(
+                    f"✅ No drafts found older than {hours_old} hours in this guild.",
+                    ephemeral=True
+                )
+                return
+
+            # Collect statistics
+            total_sessions = len(old_sessions)
+            total_channels = 0
+            channel_names = []
+
+            for session in old_sessions:
+                if session.channel_ids:
+                    total_channels += len(session.channel_ids)
+                    # Collect channel names for preview
+                    for channel_id in session.channel_ids:
+                        channel = ctx.guild.get_channel(int(channel_id))
+                        if channel:
+                            channel_names.append(channel.name)
+
+            # Show preview
+            preview_msg = (
+                f"**{'DRY RUN - ' if dry_run else ''}Cleanup Preview**\n\n"
+                f"**Target:** Drafts older than {hours_old} hours\n"
+                f"**Guild:** {ctx.guild.name}\n"
+                f"**Cutoff time:** {cutoff_time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"**Will delete:**\n"
+                f"• {total_sessions} draft session(s)\n"
+                f"• {total_channels} channel(s)\n\n"
+            )
+
+            if channel_names:
+                sample_channels = channel_names[:10]
+                preview_msg += f"**Channel examples:**\n"
+                for name in sample_channels:
+                    preview_msg += f"• {name}\n"
+                if len(channel_names) > 10:
+                    preview_msg += f"• ...and {len(channel_names) - 10} more\n"
+
+            await ctx.followup.send(preview_msg, ephemeral=True)
+
+            if dry_run:
+                await ctx.followup.send(
+                    "✅ Dry run complete. Use `dry_run: False` to actually delete.",
+                    ephemeral=True
+                )
+                return
+
+            # Actual deletion (not dry run)
+            await ctx.followup.send(
+                f"⚠️ **Starting deletion of {total_sessions} drafts and {total_channels} channels...**",
+                ephemeral=True
+            )
+
+            # Perform cleanup
+            deleted_channels = 0
+            deleted_sessions = 0
+            errors = []
+
+            for session in old_sessions:
+                try:
+                    # Delete Discord channels
+                    if session.channel_ids:
+                        for channel_id in session.channel_ids:
+                            channel = ctx.guild.get_channel(int(channel_id))
+                            if channel:
+                                try:
+                                    await channel.delete(reason=f"Test cleanup - session older than {hours_old}h")
+                                    deleted_channels += 1
+                                    await asyncio.sleep(0.5)  # Rate limiting
+                                except discord.NotFound:
+                                    pass  # Already deleted
+                                except discord.HTTPException as e:
+                                    errors.append(f"Failed to delete channel {channel.name}: {e}")
+
+                    # Delete the draft message if it exists
+                    if session.draft_channel_id and session.message_id:
+                        try:
+                            draft_channel = ctx.guild.get_channel(int(session.draft_channel_id))
+                            if draft_channel:
+                                message = await draft_channel.fetch_message(int(session.message_id))
+                                await message.delete()
+                        except (discord.NotFound, discord.HTTPException):
+                            pass  # Message already gone
+
+                    # Delete from database (CASCADE will handle related records)
+                    await db_session.delete(session)
+                    deleted_sessions += 1
+
+                except Exception as e:
+                    errors.append(f"Error cleaning session {session.session_id}: {e}")
+                    logger.error(f"Error during cleanup of session {session.session_id}: {e}")
+
+            # Commit all deletions
+            await db_session.commit()
+
+            # Send summary
+            summary = (
+                f"✅ **Cleanup Complete**\n\n"
+                f"• Deleted {deleted_sessions} draft session(s)\n"
+                f"• Deleted {deleted_channels} channel(s)\n"
+            )
+
+            if errors:
+                summary += f"\n⚠️ **Errors:** {len(errors)}\n"
+                for error in errors[:5]:  # Show first 5 errors
+                    summary += f"• {error}\n"
+                if len(errors) > 5:
+                    summary += f"• ...and {len(errors) - 5} more (check logs)\n"
+
+            await ctx.followup.send(summary, ephemeral=True)
+            logger.info(f"Cleanup complete: {deleted_sessions} sessions, {deleted_channels} channels deleted")
 
 
 def setup(bot):
