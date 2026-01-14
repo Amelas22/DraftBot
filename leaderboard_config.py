@@ -150,12 +150,13 @@ STREAK_CATEGORIES = ["longest_win_streak", "perfect_streak", "draft_win_streak"]
 VALID_TIMEFRAMES = ["14d", "30d", "90d", "lifetime", "active"]
 
 # Crown role icons - used for both Discord roles and display name prefixes
+# For custom emojis: Use format "<:emoji_name:emoji_id>" from guild 1355718878298116096
 CROWN_ICONS = {
     1: "👑",   # Crown
-    2: "🏆",   # Trophy (Double Crown)
-    3: "💎",   # Gem (Triple Crown)
-    4: "🌟",   # Glowing Star (Grand Champion)
-    5: "⚜️",   # Fleur-de-lis (Ultimate Champion)
+    2: "<:doublecrown:1460684949505048871>",   # Double Crown (custom emoji)
+    3: "<:triplecrown:1460715033712525464>",   # Triple Crown (custom emoji)
+    4: "🌟",   # Grand Champion
+    5: "⚜️",   # Ultimate Champion
 }
 
 # Default crown role names

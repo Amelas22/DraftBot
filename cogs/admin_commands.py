@@ -1,6 +1,7 @@
 from discord.ext import commands
 import asyncio
 import os
+from pathlib import Path
 import discord
 from loguru import logger
 from config import get_config, save_config
@@ -257,61 +258,111 @@ class AdminCommands(commands.Cog):
         supports_icons = ctx.guild.premium_tier >= 2
 
         created_roles = []
-        existing_roles = []
-        failed_roles = []
+        updated_roles = []
+        errors = []
 
-        # Create roles in reverse order so higher crowns appear higher in role list
+        # Create/update roles in reverse order so higher crowns appear higher in role list
         for count in sorted(role_names.keys(), key=lambda x: int(x), reverse=True):
             role_name = role_names[count]
 
+            # Prepare role properties
+            role_kwargs = {
+                "color": discord.Color.gold(),
+                "hoist": True,  # Show separately in member list
+                "mentionable": False,
+            }
+
+            # Try to use custom image for role icon if available
+            image_used = False
+            if supports_icons:
+                image_path = Path("images") / f"{count}crown.png"
+                if image_path.exists():
+                    try:
+                        with open(image_path, 'rb') as image_file:
+                            image_data = image_file.read()
+                            role_kwargs["icon"] = image_data
+                            image_used = True
+                            logger.debug(f"Using custom image for role '{role_name}' from {image_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to read image {image_path}: {e}")
+
+            # Fallback to unicode emoji if no image was used
+            if not image_used and supports_icons and count in role_icons:
+                role_kwargs["unicode_emoji"] = role_icons[count]
+
             # Check if role already exists
             existing_role = discord.utils.get(ctx.guild.roles, name=role_name)
+
             if existing_role:
-                existing_roles.append(role_name)
-                continue
+                # Role exists - update its properties
+                try:
+                    edit_kwargs = {
+                        "color": role_kwargs["color"],
+                        "hoist": role_kwargs["hoist"],
+                        "mentionable": role_kwargs["mentionable"],
+                        "reason": f"Crown role updated by {ctx.author.name}"
+                    }
+                    # Add icon or unicode_emoji depending on what was prepared
+                    if "icon" in role_kwargs:
+                        edit_kwargs["icon"] = role_kwargs["icon"]
+                    elif "unicode_emoji" in role_kwargs:
+                        edit_kwargs["unicode_emoji"] = role_kwargs["unicode_emoji"]
 
-            try:
-                # Build role creation kwargs
-                role_kwargs = {
-                    "name": role_name,
-                    "color": discord.Color.gold(),
-                    "hoist": True,  # Show separately in member list
-                    "mentionable": False,
-                    "reason": f"Crown role created by {ctx.author.name}"
-                }
-
-                # Add icon if server supports it
-                if supports_icons and count in role_icons:
-                    role_kwargs["unicode_emoji"] = role_icons[count]
-
-                await ctx.guild.create_role(**role_kwargs)
-                created_roles.append(role_name)
-                logger.info(f"Created crown role '{role_name}' in {ctx.guild.name}")
-            except discord.Forbidden:
-                failed_roles.append(role_name)
-                logger.warning(f"Failed to create role '{role_name}' - missing permissions")
-            except Exception as e:
-                failed_roles.append(role_name)
-                logger.error(f"Error creating role '{role_name}': {e}")
+                    await existing_role.edit(**edit_kwargs)
+                    updated_roles.append(role_name)
+                    logger.info(f"Updated crown role '{role_name}' in {ctx.guild.name}")
+                except discord.HTTPException as e:
+                    logger.error(f"Failed to update role '{role_name}': {e}")
+                    errors.append(f"{role_name}: {e}")
+            else:
+                # Role doesn't exist - create it
+                try:
+                    role_kwargs["name"] = role_name
+                    role_kwargs["reason"] = f"Crown role created by {ctx.author.name}"
+                    await ctx.guild.create_role(**role_kwargs)
+                    created_roles.append(role_name)
+                    logger.info(f"Created crown role '{role_name}' in {ctx.guild.name}")
+                except discord.HTTPException as e:
+                    logger.error(f"Failed to create role '{role_name}': {e}")
+                    errors.append(f"{role_name}: {e}")
 
         # Build response message
         response_parts = []
-        if created_roles:
-            icon_note = " (with icons)" if supports_icons else ""
-            response_parts.append(f"✅ Created roles{icon_note}: {', '.join(created_roles)}")
-        if existing_roles:
-            response_parts.append(f"ℹ️ Already exist: {', '.join(existing_roles)}")
-        if failed_roles:
-            response_parts.append(f"❌ Failed to create: {', '.join(failed_roles)}")
 
-        if not supports_icons and created_roles:
-            response_parts.append("\n💡 Tip: Boost to level 2 to get role icons!")
+        if created_roles:
+            created_list = ", ".join(created_roles)
+            if supports_icons:
+                response_parts.append(f"✅ **Created roles** (with icons): {created_list}")
+            else:
+                response_parts.append(f"✅ **Created roles**: {created_list}")
+
+        if updated_roles:
+            updated_list = ", ".join(updated_roles)
+            if supports_icons:
+                response_parts.append(f"🔄 **Updated roles** (with new icons): {updated_list}")
+            else:
+                response_parts.append(f"🔄 **Updated roles**: {updated_list}")
+
+        if errors:
+            error_summary = f"⚠️ **Errors:** {len(errors)}"
+            for error in errors[:3]:  # Show first 3
+                error_summary += f"\n• {error}"
+            if len(errors) > 3:
+                error_summary += f"\n• ...and {len(errors) - 3} more (check logs)"
+            response_parts.append(error_summary)
+
+        if not created_roles and not updated_roles and not errors:
+            response_parts.append("ℹ️ No changes needed - all roles already configured correctly")
+
+        # Add boost level note
+        if not supports_icons:
+            response_parts.append("\n💡 **Tip**: Boost to level 2+ to enable role icons!")
 
         # Check if crown roles are enabled
         if not crown_config.get("enabled", False):
             response_parts.append("\n⚠️ Crown roles are not yet enabled. Use `/enable_crown_roles` to enable them.")
 
-        await ctx.followup.send("\n".join(response_parts), ephemeral=True)
+        await ctx.followup.send("\n\n".join(response_parts), ephemeral=True)
 
     @discord.slash_command(
         name='enable_crown_roles',
