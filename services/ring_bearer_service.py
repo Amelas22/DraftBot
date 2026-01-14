@@ -335,13 +335,13 @@ async def post_ring_bearer_announcement(bot, guild_id: str, new_bearer_id: str, 
             if previous_bearer_id:
                 previous_bearer = guild.get_member(int(previous_bearer_id))
                 previous_display = get_display_name(previous_bearer, guild) if previous_bearer else "the previous holder"
-                description = f"**{new_bearer_display}** has claimed the ring bearer role by defeating **{previous_display}** in combat!"
+                description = f"**{new_bearer_display}** has claimed the **Coveted Jewel** by defeating **{previous_display}** in combat!"
             else:
-                description = f"**{new_bearer_display}** has claimed the ring bearer role by defeating the previous holder!"
+                description = f"**{new_bearer_display}** has claimed the **Coveted Jewel** by defeating the previous holder!"
 
         elif acquired_via == "longest_win_streak":
             streak_length = streak_info.get("longest_win_streak", "?") if streak_info else "?"
-            description = f"**{new_bearer_display}** has claimed the ring bearer role with a **{streak_length}-game win streak**!"
+            description = f"**{new_bearer_display}** has claimed the **Coveted Jewel** with a **{streak_length}-game win streak**!"
             if previous_bearer_id:
                 previous_bearer = guild.get_member(int(previous_bearer_id))
                 if previous_bearer:
@@ -350,7 +350,7 @@ async def post_ring_bearer_announcement(bot, guild_id: str, new_bearer_id: str, 
 
         elif acquired_via == "perfect_streak":
             streak_length = streak_info.get("perfect_streak", "?") if streak_info else "?"
-            description = f"**{new_bearer_display}** has claimed the ring bearer role with a **{streak_length}-match perfect streak** (all 2-0 wins)!"
+            description = f"**{new_bearer_display}** has claimed the **Coveted Jewel** with a **{streak_length}-match perfect streak** (all 2-0 wins)!"
             if previous_bearer_id:
                 previous_bearer = guild.get_member(int(previous_bearer_id))
                 if previous_bearer:
@@ -359,7 +359,7 @@ async def post_ring_bearer_announcement(bot, guild_id: str, new_bearer_id: str, 
 
         elif acquired_via == "draft_win_streak":
             streak_length = streak_info.get("draft_win_streak", "?") if streak_info else "?"
-            description = f"**{new_bearer_display}** has claimed the ring bearer role with a **{streak_length}-draft win streak**!"
+            description = f"**{new_bearer_display}** has claimed the **Coveted Jewel** with a **{streak_length}-draft win streak**!"
             if previous_bearer_id:
                 previous_bearer = guild.get_member(int(previous_bearer_id))
                 if previous_bearer:
@@ -367,11 +367,11 @@ async def post_ring_bearer_announcement(bot, guild_id: str, new_bearer_id: str, 
                     description += f"\n*Previous holder: {previous_display}*"
 
         else:
-            description = f"**{new_bearer_display}** has claimed the ring bearer role!"
+            description = f"**{new_bearer_display}** has claimed the **Coveted Jewel**!"
 
         # Create embed
         embed = discord.Embed(
-            title=f"{icon} Ring Bearer Transfer {icon}",
+            title=f"{icon} Coveted Jewel Transfer {icon}",
             description=description,
             color=discord.Color.gold(),
             timestamp=datetime.now()
