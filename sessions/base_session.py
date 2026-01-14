@@ -31,7 +31,8 @@ class BaseSession:
                 self.draft_manager = DraftSetupManager(
                     session_id=new_draft_session.session_id,
                     draft_id=new_draft_session.draft_id,
-                    cube_id=new_draft_session.cube
+                    cube_id=new_draft_session.cube,
+                    guild_id=new_draft_session.guild_id
                 )
                 # Start the connection manager as a background task
                 self.connection_task = asyncio.create_task(self.draft_manager.keep_connection_alive())

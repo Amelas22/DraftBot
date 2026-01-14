@@ -1178,6 +1178,9 @@ class DraftControlCog(commands.Cog):
             await manager.socket_client.emit('setSessionOwner', target_user_id)
             await asyncio.sleep(1)
 
+            # Signal the keep_connection_alive loop to stop before disconnecting
+            manager._should_disconnect = True
+
             # Disconnect
             await manager.socket_client.disconnect()
             

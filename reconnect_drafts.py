@@ -55,7 +55,8 @@ async def reconnect_draft_setup_sessions(discord_client):
                 manager = DraftSetupManager(
                     session_id=session.session_id,
                     draft_id=session.draft_id,
-                    cube_id=session.cube
+                    cube_id=session.cube,
+                    guild_id=session.guild_id
                 )
                 
                 # Add to our list

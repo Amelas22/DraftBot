@@ -513,6 +513,73 @@ class AdminCommands(commands.Cog):
             logger.error(f"Error setting leaderboard channel: {e}")
             await ctx.followup.send(f"❌ Error setting leaderboard channel: {str(e)}", ephemeral=True)
 
+    @discord.slash_command(
+        name='test_disconnect',
+        description='[TEST] Simulate a connection failure for an active draft session'
+    )
+    @has_bot_manager_role()
+    async def test_disconnect(self, ctx):
+        """Simulate a Draftmancer connection failure to test the notification system."""
+        from config import TEST_MODE_ENABLED
+        from services.draft_setup_manager import ACTIVE_MANAGERS
+
+        await ctx.defer(ephemeral=True)
+
+        if not TEST_MODE_ENABLED:
+            await ctx.followup.send(
+                "❌ This command is only available when TEST_MODE_ENABLED is True in config.py",
+                ephemeral=True
+            )
+            return
+
+        # Find active managers for this guild
+        guild_managers = []
+        for session_id, manager in ACTIVE_MANAGERS.items():
+            if manager.guild_id == str(ctx.guild.id):
+                guild_managers.append((session_id, manager))
+
+        if not guild_managers:
+            await ctx.followup.send(
+                "❌ No active Draftmancer connections found for this guild.\n\n"
+                "**Note:** The bot only connects to Draftmancer after:\n"
+                "1. A draft has full signups\n"
+                "2. Ready check passes\n"
+                "3. Teams are created and links are distributed\n\n"
+                "To test, you need a draft that has reached the 'links distributed' stage.",
+                ephemeral=True
+            )
+            return
+
+        # Show the active sessions and let the user know what will happen
+        session_list = "\n".join([f"• `{sid}` (draft_id: {mgr.draft_id})" for sid, mgr in guild_managers])
+        await ctx.followup.send(
+            f"Found {len(guild_managers)} active draft session(s):\n{session_list}\n\n"
+            f"Simulating connection failure for the first one...",
+            ephemeral=True
+        )
+
+        # Get the first manager and simulate failure
+        session_id, manager = guild_managers[0]
+
+        # Disconnect the socket (simulates connection loss)
+        if manager.socket_client.connected:
+            await manager.socket_client.disconnect()
+            logger.info(f"[TEST] Disconnected socket for session {session_id}")
+
+        # Now trigger the notification (as if reconnection failed)
+        logger.info(f"[TEST] Simulating reconnection failure for session {session_id}")
+        await manager._notify_bot_no_longer_managing(include_session_url=True)
+
+        # Clean up from active managers
+        if session_id in ACTIVE_MANAGERS:
+            del ACTIVE_MANAGERS[session_id]
+            logger.info(f"[TEST] Removed manager for session {session_id} from registry")
+
+        await ctx.followup.send(
+            f"✅ Test complete! Check the draft channel for the notification message.",
+            ephemeral=True
+        )
+
 
 def setup(bot):
     bot.add_cog(AdminCommands(bot)) 
