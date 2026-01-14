@@ -28,13 +28,40 @@ from loguru import logger
 from config import is_cleanup_exempt
 from leaderboard_config import AUTO_UPDATE_CATEGORIES
 from services.crown_roles import update_crown_roles_for_guild
+
+# Module-level dict to track match streak extensions for ring bearer checks
+# {session_id: {player_id: {win_streak_increased: bool, perfect_streak_increased: bool}}}
+MATCH_STREAK_EXTENSIONS = {}
 from helpers.display_names import get_display_name, get_display_name_by_id
+from services.ring_bearer_service import update_ring_bearer_for_guild
 
 # Configuration constants
 QUIZ_REREGISTER_DAYS = 7  # Re-register quiz views from last 7 days
 
 flags = {}
 locks = {}
+
+
+def store_match_streak_extensions(session_id: str, player1_id: str, player2_id: str, extensions: dict):
+    """
+    Store match streak extension info for later retrieval during draft completion.
+
+    This is needed because match results are reported individually before the draft ends,
+    but ring bearer checks happen after all matches are completed.
+
+    Args:
+        session_id: Draft session ID
+        player1_id: Player 1's Discord ID
+        player2_id: Player 2's Discord ID
+        extensions: Dict from update_player_stats_and_elo() with streak increase flags
+    """
+    if session_id not in MATCH_STREAK_EXTENSIONS:
+        MATCH_STREAK_EXTENSIONS[session_id] = {}
+
+    MATCH_STREAK_EXTENSIONS[session_id][player1_id] = extensions[player1_id]
+    MATCH_STREAK_EXTENSIONS[session_id][player2_id] = extensions[player2_id]
+    logger.debug(f"[RING BEARER] Stored match streak extensions for session {session_id}: {extensions}")
+
 
 def split_content_for_embed(content, include_header=False, max_length=1000):
     """
@@ -403,13 +430,20 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                 team_a_names = [get_display_name_by_id(user_id, guild) for user_id in draft_session.team_a]
                 team_b_names = [get_display_name_by_id(user_id, guild) for user_id in draft_session.team_b]
                 sign_ups_list = list(draft_session.sign_ups.keys())
+                seating_order = []  # Initialize to avoid unbound error
                 if draft_session.session_type != "premade":
                     seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
 
                 team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
                 total_matches = draft_session.match_counter - 1
                 half_matches = total_matches // 2
-                title, description, discord_color = await determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, half_matches, total_matches)
+                outcome_result = await determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, half_matches, total_matches)
+                if len(outcome_result) == 3:
+                    title, description, discord_color = outcome_result
+                else:
+                    # Handle error case where only 2 values returned
+                    title, description = outcome_result
+                    discord_color = discord.Color.blue()
 
                 embed = discord.Embed(title=title, description=description, color=discord_color)
                 
@@ -776,22 +810,51 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 else:
                     logger.warning(f"No active manager found for session {draft_session_id} - logs may remain locked")
 
-                # Update draft win streaks (Order of the White Lotus)
+                # Update draft win streaks (Order of the White Lotus) and collect extension info
+                draft_streak_extensions = {}
                 try:
-                    await update_draft_win_streaks(draft_session_id, guild, bot)
+                    draft_streak_extensions = await update_draft_win_streaks(draft_session_id, guild, bot)
                 except Exception as e:
                     logger.error(f"Error updating draft win streaks for session {draft_session_id}: {e}")
 
-                # Update leaderboards in background to avoid blocking other operations
+                # Retrieve match streak extensions that were stored during match reporting
+                match_streak_extensions = MATCH_STREAK_EXTENSIONS.get(draft_session_id, {})
+
+                # Combine all streak extension info
+                all_streak_extensions = {}
+                for player_id in set(list(match_streak_extensions.keys()) + list(draft_streak_extensions.keys())):
+                    all_streak_extensions[player_id] = {
+                        "win_streak_increased": match_streak_extensions.get(player_id, {}).get("win_streak_increased", False),
+                        "perfect_streak_increased": match_streak_extensions.get(player_id, {}).get("perfect_streak_increased", False),
+                        "draft_win_streak_increased": draft_streak_extensions.get(player_id, {}).get("draft_win_streak_increased", False)
+                    }
+
+                # Clean up stored match streak data
+                MATCH_STREAK_EXTENSIONS.pop(draft_session_id, None)
+                logger.debug(f"[RING BEARER] Combined streak extensions for session {draft_session_id}: {all_streak_extensions}")
+
+                # Update leaderboards in background, passing streak extension info
                 # (leaderboard updates can take 20+ seconds due to rate limiting)
-                asyncio.create_task(update_leaderboards_for_guild(bot, draft_session.guild_id))
+                asyncio.create_task(update_leaderboards_for_guild(
+                    bot,
+                    draft_session.guild_id,
+                    session_id=draft_session_id,
+                    streak_extensions=all_streak_extensions
+                ))
 
                 # Update debt summary in background (if one exists for this guild)
                 asyncio.create_task(update_debt_summary_for_guild(bot, draft_session.guild_id))
 
 
-async def update_leaderboards_for_guild(bot, guild_id: str):
-    """Update all leaderboard messages for a guild.
+async def update_leaderboards_for_guild(bot, guild_id: str, session_id=None, streak_extensions=None):
+    """
+    Update all leaderboard messages for a guild.
+
+    Args:
+        bot: Discord bot instance
+        guild_id: Guild ID
+        session_id: Draft session ID (for ring bearer check, optional)
+        streak_extensions: Dict of {player_id: {streak_type_increased: bool}} (optional)
 
     This runs as a background task to avoid blocking other operations,
     as it can take 20+ seconds due to Discord rate limiting.
@@ -882,6 +945,12 @@ async def update_leaderboards_for_guild(bot, guild_id: str):
                 await update_crown_roles_for_guild(bot, guild_id)
             except Exception as e:
                 logger.error(f"Error updating crown roles for guild {guild_id}: {e}")
+
+            # Update ring bearer based on new leaderboard standings
+            try:
+                await update_ring_bearer_for_guild(bot, guild_id, session_id, streak_extensions)
+            except Exception as e:
+                logger.error(f"Error updating ring bearer for guild {guild_id}: {e}")
 
     except Exception as e:
         logger.error(f"Error updating leaderboards for guild {guild_id}: {e}")
@@ -1002,9 +1071,15 @@ async def post_or_update_victory_message(bot, session, channel, embed, draft_ses
 
 
 async def update_draft_win_streaks(session_id, guild, bot):
-    """Update draft win streaks for all players after a draft completes"""
+    """
+    Update draft win streaks for all players after a draft completes.
+
+    Returns:
+        dict: {player_id: {"draft_win_streak_increased": bool}}
+    """
     guild_id = str(guild.id)
     current_time = datetime.now()
+    streak_extensions = {}
 
     async with AsyncSessionLocal() as db_session:
         async with db_session.begin():
@@ -1014,7 +1089,7 @@ async def update_draft_win_streaks(session_id, guild, bot):
 
             if not draft_session:
                 logger.error(f"Draft session {session_id} not found")
-                return
+                return streak_extensions
 
             # Calculate team wins
             team_a_wins = 0
@@ -1050,34 +1125,44 @@ async def update_draft_win_streaks(session_id, guild, bot):
 
             # Update winners' streaks
             for player_id in winning_team:
-                await _update_player_draft_streak(
+                increased = await _update_player_draft_streak(
                     db_session, player_id, guild_id, current_time,
                     is_win=True, is_tie=False
                 )
+                streak_extensions[player_id] = {"draft_win_streak_increased": increased}
 
             # Update losers' streaks (break them)
             if not is_tie and losing_team:
                 for player_id in losing_team:
-                    await _update_player_draft_streak(
+                    increased = await _update_player_draft_streak(
                         db_session, player_id, guild_id, current_time,
                         is_win=False, is_tie=False
                     )
+                    streak_extensions[player_id] = {"draft_win_streak_increased": increased}
 
             # Update both teams on tie (maintain streaks, increment draft counts)
             if is_tie:
                 all_players = draft_session.team_a + draft_session.team_b
                 for player_id in all_players:
-                    await _update_player_draft_streak(
+                    increased = await _update_player_draft_streak(
                         db_session, player_id, guild_id, current_time,
                         is_win=False, is_tie=True
                     )
+                    streak_extensions[player_id] = {"draft_win_streak_increased": increased}
 
             await db_session.commit()
             logger.info(f"Draft win streaks updated for session {session_id}")
 
+    return streak_extensions
 
-async def _update_player_draft_streak(db_session, player_id, guild_id, current_time, is_win, is_tie):
-    """Helper to update individual player's draft streak"""
+
+async def _update_player_draft_streak(db_session, player_id, guild_id, current_time, is_win, is_tie) -> bool:
+    """
+    Helper to update individual player's draft streak.
+
+    Returns:
+        bool: True if draft win streak increased, False otherwise
+    """
     stmt = select(PlayerStats).where(
         PlayerStats.player_id == player_id,
         PlayerStats.guild_id == guild_id
@@ -1086,7 +1171,7 @@ async def _update_player_draft_streak(db_session, player_id, guild_id, current_t
 
     if not player_stat:
         logger.warning(f"Player {player_id} not found in PlayerStats")
-        return
+        return False
 
     if is_win:
         # Increment draft win count
@@ -1102,11 +1187,13 @@ async def _update_player_draft_streak(db_session, player_id, guild_id, current_t
             player_stat.longest_draft_win_streak = player_stat.current_draft_win_streak
 
         logger.info(f"{player_stat.display_name} draft win streak: {player_stat.current_draft_win_streak}")
+        return True  # Streak increased
 
     elif is_tie:
         # Increment tie count, maintain streak
         player_stat.team_drafts_tied += 1
         logger.info(f"{player_stat.display_name} draft tied, streak maintained at {player_stat.current_draft_win_streak}")
+        return False  # Streak maintained but not increased
 
     else:  # Loss
         # Increment loss count
@@ -1133,6 +1220,8 @@ async def _update_player_draft_streak(db_session, player_id, guild_id, current_t
             # Reset current streak
             player_stat.current_draft_win_streak = 0
             player_stat.current_draft_win_streak_started_at = None
+
+        return False  # Streak broken
 
 
 async def calculate_three_zero_drafters(session, draft_session_id, guild):
@@ -1276,9 +1365,13 @@ async def send_channel_reminders(bot, session_id):
             stmt = select(DraftSession).where(DraftSession.session_id == session_id)
             result = await db_session.execute(stmt)
             session = result.scalars().first()
+
+    # Handle timezone-aware draft start time
     if session.draft_start_time.tzinfo is None:
         draft_start_time = pytz.utc.localize(session.draft_start_time)
-    
+    else:
+        draft_start_time = session.draft_start_time
+
     # Calculate the reminder time (15 minutes before the draft start time)
     reminder_time = draft_start_time - timedelta(minutes=15)
     current_time = datetime.now(pytz.utc)  # Current time in UTC
@@ -1531,6 +1624,12 @@ async def check_weekly_limits(interaction, match_id, session_type=None, session_
 
 
 async def update_player_stats_and_elo(match_result):
+    # Initialize streak extension tracking
+    streak_extensions = {
+        match_result.player1_id: {"win_streak_increased": False, "perfect_streak_increased": False},
+        match_result.player2_id: {"win_streak_increased": False, "perfect_streak_increased": False}
+    }
+
     async with AsyncSessionLocal() as session:
         async with session.begin():
             # Get the draft session to determine the guild_id
@@ -1539,10 +1638,10 @@ async def update_player_stats_and_elo(match_result):
             )
             draft_session_result = await session.execute(draft_session_stmt)
             draft_session = draft_session_result.scalars().first()
-            
+
             if not draft_session:
                 print(f"Draft session not found for match result {match_result.id}")
-                return
+                return streak_extensions
             
             guild_id = draft_session.guild_id
             # Get both players with guild_id
@@ -1621,6 +1720,10 @@ async def update_player_stats_and_elo(match_result):
                 # Increment winner's streak
                 winner.current_win_streak += 1
 
+                # Track that winner's win streak increased
+                winner_id = match_result.winner_id
+                streak_extensions[winner_id]["win_streak_increased"] = True
+
                 # Update lifetime longest if current exceeds it
                 if winner.current_win_streak > winner.longest_win_streak:
                     winner.longest_win_streak = winner.current_win_streak
@@ -1663,6 +1766,9 @@ async def update_player_stats_and_elo(match_result):
 
                     winner.current_perfect_streak += 1
 
+                    # Track that winner's perfect streak increased
+                    streak_extensions[winner_id]["perfect_streak_increased"] = True
+
                     if winner.current_perfect_streak > winner.longest_perfect_streak:
                         winner.longest_perfect_streak = winner.current_perfect_streak
                 else:
@@ -1685,6 +1791,9 @@ async def update_player_stats_and_elo(match_result):
                     winner.current_perfect_streak_started_at = None
 
                 await session.commit()
+
+    return streak_extensions
+
 
 def calculate_elo_diff(winner_elo, loser_elo, k=20):
     """Calculate Elo rating difference after a game."""
@@ -2065,7 +2174,13 @@ async def calculate_player_standings(limit=None):
             # Prepare the embeds
             embeds = []
             standings_text = ""
-            is_first_embed = True
+
+            # Create first embed
+            embed = discord.Embed(
+                title="AlphaFrog Prelim Standings",
+                description=f"Standings as of <t:{int(time.timestamp())}:F>",
+                color=discord.Color.dark_purple()
+            )
 
             for idx, player in enumerate(sorted_players, start=1):
                 # Format win percentage to display as an integer percentage
@@ -2074,21 +2189,13 @@ async def calculate_player_standings(limit=None):
                     embed.add_field(name="Standings", value=standings_text, inline=False)
                     embeds.append(embed)
                     standings_text = entry
-                    is_first_embed = False
-                else:
-                    standings_text += entry
-
-                if is_first_embed:
-                    embed = discord.Embed(
-                        title="AlphaFrog Prelim Standings",
-                        description=f"Standings as of <t:{int(time.timestamp())}:F>",
-                        color=discord.Color.dark_purple()
-                    )
-                else:
+                    # Create continuation embed
                     embed = discord.Embed(
                         title="Standings, Cont'd",
                         color=discord.Color.dark_purple()
                     )
+                else:
+                    standings_text += entry
 
             if standings_text:
                 embed.add_field(name="Standings", value=standings_text, inline=False)
