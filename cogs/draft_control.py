@@ -5,7 +5,9 @@ from loguru import logger
 from models.draft_session import DraftSession
 from discord.ui import View, Button
 from datetime import datetime
-from sqlalchemy import select
+from sqlalchemy import select, and_, desc
+from database.db_session import db_session
+from services.draft_setup_manager import DraftSetupManager, create_rooms_and_pairings_with_fallback
 
 # Store active unpause ready checks
 ACTIVE_UNPAUSE_CHECKS = {}
@@ -673,6 +675,7 @@ class ScrapVoteView(View):
 class DraftControlCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.logger = logger
         logger.info("Draft control commands registered")
 
     async def _get_manager_for_channel(self, ctx):
@@ -685,8 +688,6 @@ class DraftControlCog(commands.Cog):
         
         # Get all active drafts in this channel (with non-NULL session_stage)
         async with db_session() as session:
-            from sqlalchemy import select, and_, desc
-            
             stmt = select(DraftSession).where(
                 and_(
                     DraftSession.draft_channel_id == channel_id,
@@ -876,8 +877,6 @@ class DraftControlCog(commands.Cog):
             
             # Get the draft session for this chat channel
             async with db_session() as session:
-                from sqlalchemy import select
-                
                 stmt = select(DraftSession).where(
                     DraftSession.draft_chat_channel == channel_id
                 )
@@ -1186,7 +1185,6 @@ class DraftControlCog(commands.Cog):
 
             if should_advance_to_pairings:
                 # Advance to pairings stage
-                from services.draft_setup_manager import create_rooms_and_pairings_with_fallback
                 success = await create_rooms_and_pairings_with_fallback(
                     ctx.bot, ctx.guild, ctx.channel, session_id, logger=self.logger
                 )

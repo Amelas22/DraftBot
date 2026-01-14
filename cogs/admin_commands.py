@@ -843,6 +843,169 @@ class AdminCommands(commands.Cog):
             await ctx.followup.send(summary, ephemeral=True)
             logger.info(f"Cleanup complete: {deleted_sessions} sessions, {deleted_channels} channels deleted")
 
+    @discord.slash_command(
+        name='setup_ring_bearer',
+        description='Create the ring bearer role for the streak leaderboard system'
+    )
+    @has_bot_manager_role()
+    async def setup_ring_bearer(self, ctx):
+        """Create the Discord role needed for the ring bearer system"""
+        await ctx.defer(ephemeral=True)
+
+        config = get_config(ctx.guild.id)
+        rb_config = config.get("ring_bearer", {})
+        role_name = rb_config.get("role_name", "ring bearer")
+
+        # Check if server supports role icons (boost level 2+)
+        supports_icons = ctx.guild.premium_tier >= 2
+
+        # Prepare role properties
+        role_kwargs = {
+            "color": discord.Color.from_rgb(218, 165, 32),  # Gold color
+            "hoist": True,  # Show separately in member list
+            "mentionable": False,
+        }
+
+        # Try to use custom image for role icon if available
+        image_used = False
+        if supports_icons:
+            image_path = Path("images") / "jewel.png"
+            if image_path.exists():
+                try:
+                    with open(image_path, 'rb') as image_file:
+                        image_data = image_file.read()
+                        role_kwargs["icon"] = image_data
+                        image_used = True
+                        logger.debug(f"Using custom image for role '{role_name}' from {image_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to read image {image_path}: {e}")
+
+        # Check if role already exists
+        existing_role = discord.utils.get(ctx.guild.roles, name=role_name)
+
+        if existing_role:
+            # Role exists - update its properties
+            try:
+                edit_kwargs = {
+                    "color": role_kwargs["color"],
+                    "hoist": role_kwargs["hoist"],
+                    "mentionable": role_kwargs["mentionable"],
+                    "reason": f"Ring bearer role updated by {ctx.author.name}"
+                }
+                if "icon" in role_kwargs:
+                    edit_kwargs["icon"] = role_kwargs["icon"]
+
+                await existing_role.edit(**edit_kwargs)
+                logger.info(f"Updated ring bearer role '{role_name}' in {ctx.guild.name}")
+
+                response = f"🔄 **Updated role**: {role_name}"
+                if image_used:
+                    response += " (with custom icon)"
+            except discord.HTTPException as e:
+                logger.error(f"Failed to update role '{role_name}': {e}")
+                response = f"⚠️ **Error updating role**: {e}"
+        else:
+            # Role doesn't exist - create it
+            try:
+                role_kwargs["name"] = role_name
+                role_kwargs["reason"] = f"Ring bearer role created by {ctx.author.name}"
+                await ctx.guild.create_role(**role_kwargs)
+                logger.info(f"Created ring bearer role '{role_name}' in {ctx.guild.name}")
+
+                response = f"✅ **Created role**: {role_name}"
+                if image_used:
+                    response += " (with custom icon)"
+            except discord.HTTPException as e:
+                logger.error(f"Failed to create role '{role_name}': {e}")
+                response = f"⚠️ **Error creating role**: {e}"
+
+        # Add boost level note
+        if not supports_icons:
+            response += "\n\n💡 **Tip**: Boost to level 2+ to enable role icons!"
+
+        # Check if ring bearer is enabled
+        if not rb_config.get("enabled", False):
+            response += "\n\n⚠️ Ring bearer system is not yet enabled. Use `/enable_ring_bearer` to enable it."
+
+        await ctx.followup.send(response, ephemeral=True)
+
+    @discord.slash_command(
+        name='enable_ring_bearer',
+        description='Enable or disable the ring bearer system for this server'
+    )
+    @has_bot_manager_role()
+    async def enable_ring_bearer(self, ctx, enabled: bool):
+        """Enable or disable ring bearer for this guild"""
+        from config import get_config, save_config
+
+        await ctx.defer(ephemeral=True)
+
+        config = get_config(ctx.guild.id)
+
+        # Update config
+        if "ring_bearer" not in config:
+            config["ring_bearer"] = {
+                "enabled": enabled,
+                "role_name": "ring bearer",
+                "icon": "<:coveted_jewel:1460802711694999613>",
+                "streak_categories": [
+                    "longest_win_streak",
+                    "perfect_streak",
+                    "draft_win_streak"
+                ]
+            }
+        else:
+            config["ring_bearer"]["enabled"] = enabled
+
+        save_config(ctx.guild.id, config)
+
+        status = "enabled" if enabled else "disabled"
+        response = f"✅ Ring bearer system has been **{status}** for this server."
+
+        if enabled:
+            response += (
+                "\n\n**Next steps:**"
+                "\n1. Use `/setup_ring_bearer` to create the role if you haven't already"
+                "\n2. The ring bearer will be automatically assigned based on streak leaderboards"
+                "\n3. Players can claim it by defeating the current ring bearer in matches"
+            )
+        else:
+            response += "\n\nThe ring bearer role will no longer be automatically managed."
+
+        await ctx.followup.send(response, ephemeral=True)
+        logger.info(f"Ring bearer {status} for guild {ctx.guild.id} by {ctx.author.name}")
+
+    @discord.slash_command(
+        name='refresh_ring_bearer',
+        description='Manually refresh the ring bearer based on current leaderboard standings'
+    )
+    @has_bot_manager_role()
+    async def refresh_ring_bearer(self, ctx):
+        """Manually trigger a ring bearer refresh"""
+        from config import get_config
+        from services.ring_bearer_service import update_ring_bearer_for_guild
+
+        await ctx.defer(ephemeral=True)
+
+        config = get_config(ctx.guild.id)
+        rb_config = config.get("ring_bearer", {})
+
+        if not rb_config.get("enabled", False):
+            await ctx.followup.send(
+                "⚠️ Ring bearer system is not enabled. Use `/enable_ring_bearer` to enable it first.",
+                ephemeral=True
+            )
+            return
+
+        try:
+            # Manual refresh - no session_id or streak_extensions
+            await update_ring_bearer_for_guild(self.bot, str(ctx.guild.id), session_id=None, streak_extensions=None)
+            await ctx.followup.send("✅ Ring bearer has been refreshed!", ephemeral=True)
+            logger.info(f"Ring bearer manually refreshed for guild {ctx.guild.id} by {ctx.author.name}")
+        except Exception as e:
+            logger.error(f"Error refreshing ring bearer for guild {ctx.guild.id}: {e}")
+            await ctx.followup.send(f"⚠️ Error refreshing ring bearer: {e}", ephemeral=True)
+
 
 def setup(bot):
     bot.add_cog(AdminCommands(bot)) 

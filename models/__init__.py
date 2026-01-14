@@ -11,6 +11,7 @@ from .sign_up_history import SignUpHistory
 from .win_streak_history import WinStreakHistory
 from .perfect_streak_history import PerfectStreakHistory
 from .draft_streak_history import DraftStreakHistory
+from .ring_bearer_state import RingBearerState
 from .quiz_session import QuizSession
 from .quiz_submission import QuizSubmission
 from .quiz_stats import QuizStats
@@ -41,6 +42,7 @@ __all__ = [
     'WinStreakHistory',
     'PerfectStreakHistory',
     'DraftStreakHistory',
+    'RingBearerState',
     'QuizSession',
     'QuizSubmission',
     'QuizStats',

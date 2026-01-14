@@ -7,10 +7,11 @@ for display name logic, including crown icons for leaderboard leaders.
 """
 
 import discord
+from typing import Optional
 from leaderboard_config import CROWN_ICONS
 
 
-def get_crown_icon(member: discord.Member, guild: discord.Guild) -> str:
+def get_crown_icon(member: discord.Member, guild: Optional[discord.Guild]) -> str:
     """
     Get crown icon for a member based on their crown roles.
 
@@ -19,7 +20,7 @@ def get_crown_icon(member: discord.Member, guild: discord.Guild) -> str:
 
     Args:
         member: The Discord member object
-        guild: The guild to get config from
+        guild: The guild to get config from (optional)
 
     Returns:
         The crown icon string, or empty string if no crown role
@@ -47,24 +48,43 @@ def get_crown_icon(member: discord.Member, guild: discord.Guild) -> str:
     return ""
 
 
-def get_display_name(member: discord.Member, guild: discord.Guild = None) -> str:
+def get_display_name(member: discord.Member, guild: Optional[discord.Guild] = None) -> str:
     """
-    Get display name for a Discord member, with crown icon if applicable.
+    Get display name for a Discord member, with ring bearer and/or crown icon if applicable.
 
     Args:
         member: The Discord member object
-        guild: The guild (used for crown icon lookup)
+        guild: The guild (used for icon lookup)
 
     Returns:
-        The member's display name (with crown icon prefix if they have one),
+        The member's display name (with icons if they have any),
         or "Unknown User" if member is None
     """
     if not member:
         return "Unknown User"
 
-    icon = get_crown_icon(member, guild) if guild else ""
-    if icon:
-        return f"{icon} {member.display_name}"
+    icons = []
+
+    # Check for ring bearer icon first
+    if guild:
+        from config import get_config
+        config = get_config(guild.id)
+        rb_config = config.get("ring_bearer", {})
+
+        if rb_config.get("enabled", False):
+            role_name = rb_config.get("role_name", "ring bearer")
+            rb_role = discord.utils.get(member.roles, name=role_name)
+            if rb_role:
+                rb_icon = rb_config.get("icon", "💎")
+                icons.append(rb_icon)
+
+    # Then check for crown icon
+    crown_icon = get_crown_icon(member, guild) if guild else ""
+    if crown_icon:
+        icons.append(crown_icon)
+
+    if icons:
+        return f"{' '.join(icons)} {member.display_name}"
     return member.display_name
 
 
@@ -92,7 +112,7 @@ def get_display_name_by_id(user_id: str, guild: discord.Guild, fallback: str = "
         return fallback
 
 
-def format_display_name(display_name: str, user_id: str = None, guild: discord.Guild = None) -> str:
+def format_display_name(display_name: str, user_id: Optional[str] = None, guild: Optional[discord.Guild] = None) -> str:
     """
     Format an existing display name string.
 

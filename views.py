@@ -1852,9 +1852,30 @@ class MatchResultSelect(Select):
                         match_result.winner_id = winner_id
 
                         await session.commit()  # Commit the changes to the database
-                        
+
                         if draft_session and (draft_session.session_type == "random" or draft_session.session_type == "staked"):
-                            await update_player_stats_and_elo(match_result)
+                            streak_extensions = await update_player_stats_and_elo(match_result)
+
+                            # Store streak extension info for ring bearer check later
+                            from utils import store_match_streak_extensions
+                            store_match_streak_extensions(
+                                self.session_id,
+                                match_result.player1_id,
+                                match_result.player2_id,
+                                streak_extensions
+                            )
+
+                            # Check for ring bearer transfer if there was a winner
+                            if winner_id:
+                                loser_id = match_result.player2_id if winner_id == match_result.player1_id else match_result.player1_id
+                                from services.ring_bearer_service import check_match_defeat_transfer
+                                await check_match_defeat_transfer(
+                                    bot=self.bot,
+                                    guild_id=str(draft_session.guild_id),
+                                    winner_id=winner_id,
+                                    loser_id=loser_id,
+                                    session_id=self.session_id
+                                )
             
             if draft_session:
                 await update_draft_summary_message(self.bot, self.session_id)

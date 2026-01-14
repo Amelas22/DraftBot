@@ -1,7 +1,6 @@
 #misc
 key
 *.pub
-*.png
 *.json
 *.db
 *.xlsx

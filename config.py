@@ -94,6 +94,16 @@ class Config:
                     "4": "Grand Champion",
                     "5": "Ultimate Champion"
                 }
+            },
+            "ring_bearer": {
+                "enabled": True,  # Enabled by default
+                "role_name": "ring bearer",  # Fixed role name
+                "icon": "<:coveted_jewel:1460802711694999613>",
+                "streak_categories": [
+                    "perfect_streak",        # FIRST - hardest (all 2-0 wins)
+                    "longest_win_streak",    # SECOND - match wins
+                    "draft_win_streak"       # THIRD - draft wins
+                ]
             }
         }
 
@@ -168,6 +178,16 @@ class Config:
                     "4": "Grand Champion",
                     "5": "Ultimate Champion"
                 }
+            },
+            "ring_bearer": {
+                "enabled": True,  # Enabled by default
+                "role_name": "ring bearer",  # Fixed role name
+                "icon": "<:coveted_jewel:1460802711694999613>",
+                "streak_categories": [
+                    "perfect_streak",        # FIRST - hardest (all 2-0 wins)
+                    "longest_win_streak",    # SECOND - match wins
+                    "draft_win_streak"       # THIRD - draft wins
+                ]
             }
         }
 
@@ -395,6 +415,20 @@ def migrate_configs():
                     "4": "Grand Champion",
                     "5": "Ultimate Champion"
                 }
+            }
+            updated = True
+
+        # Add ring_bearer configuration if missing
+        if "ring_bearer" not in config:
+            config["ring_bearer"] = {
+                "enabled": True,
+                "role_name": "ring bearer",
+                "icon": "<:coveted_jewel:1460802711694999613>",
+                "streak_categories": [
+                    "perfect_streak",        # FIRST - hardest (all 2-0 wins)
+                    "longest_win_streak",    # SECOND - match wins
+                    "draft_win_streak"       # THIRD - draft wins
+                ]
             }
             updated = True
 
