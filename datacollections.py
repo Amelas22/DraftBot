@@ -310,26 +310,21 @@ class DraftLogManager:
                             logger.info(f"Saved logs channel and message IDs for session {self.session_id}")
 
                             # Update victory messages to include the logs link
-                            # Import the function here to avoid circular imports
-                            from utils import check_and_post_victory_or_draw
-                            logger.info(f"Updating victory messages for session {self.session_id} to include logs link")
+                            # Use the dedicated update_victory_messages_with_logs function instead of
+                            # check_and_post_victory_or_draw to avoid reprocessing streaks/leaderboards
                             try:
-                                await check_and_post_victory_or_draw(self.discord_client, self.session_id)
+                                logger.info(f"Calling update_victory_messages_with_logs for session {self.session_id}")
+                                await update_victory_messages_with_logs(
+                                    self.discord_client,
+                                    self.session_id,
+                                    draft_session.logs_channel_id,
+                                    draft_session.logs_message_id
+                                )
                                 logger.info(f"Successfully updated victory messages with logs link for session {self.session_id}")
                             except Exception as e:
                                 logger.error(f"Error updating victory messages with logs link: {e}")
                         else:
                             logger.warning(f"Draft session {self.session_id} not found, couldn't save logs message info")
-                    try:                        
-                        logger.info(f"Calling update_victory_messages_with_logs for session {self.session_id}")
-                        await update_victory_messages_with_logs(
-                            self.discord_client, 
-                            self.session_id,
-                            draft_session.logs_channel_id,
-                            draft_session.logs_message_id
-                        )
-                    except Exception as e:
-                        logger.error(f"Error updating victory messages with logs link: {e}")
             else:
                 logger.warning(f"No 'draft-logs' channel found in guild {guild.name}, skipping embed message")
         except Exception as e:
