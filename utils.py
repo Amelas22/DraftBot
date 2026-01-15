@@ -755,95 +755,150 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 
                 return
 
+            # Use locking mechanism to prevent race conditions when multiple calls happen simultaneously
+            if draft_session_id not in locks:
+                locks[draft_session_id] = asyncio.Lock()
+            if draft_session_id not in flags:
+                flags[draft_session_id] = {"victory_processed": False}
+
+            lock = locks[draft_session_id]
+            flag = flags[draft_session_id]
+
             team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
             total_matches = draft_session.match_counter - 1
             half_matches = total_matches // 2
 
             # Check victory or draw conditions
             if team_a_wins > half_matches or team_b_wins > half_matches or (team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0):
-                if draft_session.tracked_draft and draft_session.premade_match_id is not None:
-                    await update_match_db_with_wins_winner(draft_session.premade_match_id, team_a_wins, team_b_wins)
-                gap = abs(team_a_wins - team_b_wins)
+                async with lock:
+                    # Check if victory has already been processed (idempotency check)
+                    # This prevents duplicate streak increments and leaderboard updates if this function
+                    # is called multiple times (e.g., once from match results, once from logs processing)
+                    # The lock + flag prevents race conditions from simultaneous calls
+                    already_processed = (draft_session.victory_message_id_draft_chat is not None or
+                                       draft_session.session_stage == 'completed' or
+                                       flag["victory_processed"])
+                    if already_processed:
+                        logger.info(f"Victory already processed for session {draft_session_id}, only updating messages to add logs link if needed")
 
-                draft_session.deletion_time = datetime.now() + timedelta(hours=2)
-                draft_session.session_stage = 'completed'  # Mark as completed so it's removed from live drafts
+                        # Still update messages to add logs link if it wasn't there before
+                        embed = await generate_draft_summary_embed(bot, draft_session_id)
+                        three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
+                        embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
+                        if draft_session.data_received and hasattr(draft_session, 'logs_channel_id') and draft_session.logs_message_id:
+                            logs_link = f"https://discord.com/channels/{draft_session.guild_id}/{draft_session.logs_channel_id}/{draft_session.logs_message_id}"
+                            embed.add_field(
+                                name="Draft Logs",
+                                value=f"[View Draft Log]({logs_link})",
+                                inline=False
+                            )
 
-                embed = await generate_draft_summary_embed(bot, draft_session_id)
-                three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
-                embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
-                # Add logs link to the embed if available
-                if draft_session.data_received and hasattr(draft_session, 'logs_channel_id') and draft_session.logs_message_id:
-                    logs_link = f"https://discord.com/channels/{draft_session.guild_id}/{draft_session.logs_channel_id}/{draft_session.logs_message_id}"
-                    embed.add_field(
-                        name="Draft Logs",
-                        value=f"[View Draft Log]({logs_link})",
-                        inline=False
-                    )                
-                # Create settle debts view for staked drafts
-                settle_view = None
-                if draft_session.session_type == "staked":
-                    settle_view = SettleDebtsView(
+                        settle_view = None
+                        if draft_session.session_type == "staked":
+                            settle_view = SettleDebtsView(
+                                session_id=draft_session_id,
+                                guild_id=draft_session.guild_id
+                            )
+
+                        # Update both message locations with the new embed (including logs link if available)
+                        draft_chat_channel = guild.get_channel(int(draft_session.draft_chat_channel))
+                        if draft_chat_channel:
+                            await post_or_update_victory_message(bot, session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat', view=settle_view)
+
+                        results_channel_name = "team-draft-results" if draft_session.session_type == "random" or draft_session.session_type == "staked" else "league-draft-results"
+                        results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
+                        if results_channel:
+                            await post_or_update_victory_message(bot, session, results_channel, embed, draft_session, 'victory_message_id_results_channel', view=settle_view)
+
+                        return  # Skip all streak/leaderboard processing
+
+                    # First time processing victory - set the flag and do the full flow
+                    flag["victory_processed"] = True
+
+                    if draft_session.tracked_draft and draft_session.premade_match_id is not None:
+                        await update_match_db_with_wins_winner(draft_session.premade_match_id, team_a_wins, team_b_wins)
+                    gap = abs(team_a_wins - team_b_wins)
+
+                    # Mark as completed so it's removed from live drafts
+                    draft_session.deletion_time = datetime.now() + timedelta(hours=2)
+                    draft_session.session_stage = 'completed'
+
+                    embed = await generate_draft_summary_embed(bot, draft_session_id)
+                    three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
+                    embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
+                    # Add logs link to the embed if available
+                    if draft_session.data_received and hasattr(draft_session, 'logs_channel_id') and draft_session.logs_message_id:
+                        logs_link = f"https://discord.com/channels/{draft_session.guild_id}/{draft_session.logs_channel_id}/{draft_session.logs_message_id}"
+                        embed.add_field(
+                            name="Draft Logs",
+                            value=f"[View Draft Log]({logs_link})",
+                            inline=False
+                        )
+                    # Create settle debts view for staked drafts
+                    settle_view = None
+                    if draft_session.session_type == "staked":
+                        settle_view = SettleDebtsView(
+                            session_id=draft_session_id,
+                            guild_id=draft_session.guild_id
+                        )
+
+                    # Handle the draft-chat channel message
+                    draft_chat_channel = guild.get_channel(int(draft_session.draft_chat_channel))
+                    if draft_chat_channel:
+                        await post_or_update_victory_message(bot, session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat', view=settle_view)
+
+                    # Determine the correct results channel
+                    results_channel_name = "team-draft-results" if draft_session.session_type == "random" or draft_session.session_type == "staked" else "league-draft-results"
+                    results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
+                    if results_channel:
+                        await post_or_update_victory_message(bot, session, results_channel, embed, draft_session, 'victory_message_id_results_channel', view=settle_view)
+                    else:
+                        print(f"Results channel '{results_channel_name}' not found.")
+
+                    # Unlock logs for posting
+                    if draft_manager:
+                        logger.info(f"Victory/draw determined - unlocking logs for session {draft_session_id}")
+                        await draft_manager.manually_unlock_draft_logs()
+
+                        # Small delay to allow logs to process
+                        await asyncio.sleep(2)
+                    else:
+                        logger.warning(f"No active manager found for session {draft_session_id} - logs may remain locked")
+
+                    # Update draft win streaks (Order of the White Lotus) and collect extension info
+                    draft_streak_extensions = {}
+                    try:
+                        draft_streak_extensions = await update_draft_win_streaks(draft_session_id, guild, bot)
+                    except Exception as e:
+                        logger.error(f"Error updating draft win streaks for session {draft_session_id}: {e}")
+
+                    # Retrieve match streak extensions that were stored during match reporting
+                    match_streak_extensions = MATCH_STREAK_EXTENSIONS.get(draft_session_id, {})
+
+                    # Combine all streak extension info
+                    all_streak_extensions = {}
+                    for player_id in set(list(match_streak_extensions.keys()) + list(draft_streak_extensions.keys())):
+                        all_streak_extensions[player_id] = {
+                            "win_streak_increased": match_streak_extensions.get(player_id, {}).get("win_streak_increased", False),
+                            "perfect_streak_increased": match_streak_extensions.get(player_id, {}).get("perfect_streak_increased", False),
+                            "draft_win_streak_increased": draft_streak_extensions.get(player_id, {}).get("draft_win_streak_increased", False)
+                        }
+
+                    # Clean up stored match streak data
+                    MATCH_STREAK_EXTENSIONS.pop(draft_session_id, None)
+                    logger.debug(f"[RING BEARER] Combined streak extensions for session {draft_session_id}: {all_streak_extensions}")
+
+                    # Update leaderboards in background, passing streak extension info
+                    # (leaderboard updates can take 20+ seconds due to rate limiting)
+                    asyncio.create_task(update_leaderboards_for_guild(
+                        bot,
+                        draft_session.guild_id,
                         session_id=draft_session_id,
-                        guild_id=draft_session.guild_id
-                    )
+                        streak_extensions=all_streak_extensions
+                    ))
 
-                # Handle the draft-chat channel message
-                draft_chat_channel = guild.get_channel(int(draft_session.draft_chat_channel))
-                if draft_chat_channel:
-                    await post_or_update_victory_message(bot, session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat', view=settle_view)
-
-                # Determine the correct results channel
-                results_channel_name = "team-draft-results" if draft_session.session_type == "random" or draft_session.session_type == "staked" else "league-draft-results"
-                results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
-                if results_channel:
-                    await post_or_update_victory_message(bot, session, results_channel, embed, draft_session, 'victory_message_id_results_channel', view=settle_view)
-                else:
-                    print(f"Results channel '{results_channel_name}' not found.")
-
-                # Unlock logs for posting
-                if draft_manager:
-                    logger.info(f"Victory/draw determined - unlocking logs for session {draft_session_id}")
-                    await draft_manager.manually_unlock_draft_logs()
-                    
-                    # Small delay to allow logs to process
-                    await asyncio.sleep(2)
-                else:
-                    logger.warning(f"No active manager found for session {draft_session_id} - logs may remain locked")
-
-                # Update draft win streaks (Order of the White Lotus) and collect extension info
-                draft_streak_extensions = {}
-                try:
-                    draft_streak_extensions = await update_draft_win_streaks(draft_session_id, guild, bot)
-                except Exception as e:
-                    logger.error(f"Error updating draft win streaks for session {draft_session_id}: {e}")
-
-                # Retrieve match streak extensions that were stored during match reporting
-                match_streak_extensions = MATCH_STREAK_EXTENSIONS.get(draft_session_id, {})
-
-                # Combine all streak extension info
-                all_streak_extensions = {}
-                for player_id in set(list(match_streak_extensions.keys()) + list(draft_streak_extensions.keys())):
-                    all_streak_extensions[player_id] = {
-                        "win_streak_increased": match_streak_extensions.get(player_id, {}).get("win_streak_increased", False),
-                        "perfect_streak_increased": match_streak_extensions.get(player_id, {}).get("perfect_streak_increased", False),
-                        "draft_win_streak_increased": draft_streak_extensions.get(player_id, {}).get("draft_win_streak_increased", False)
-                    }
-
-                # Clean up stored match streak data
-                MATCH_STREAK_EXTENSIONS.pop(draft_session_id, None)
-                logger.debug(f"[RING BEARER] Combined streak extensions for session {draft_session_id}: {all_streak_extensions}")
-
-                # Update leaderboards in background, passing streak extension info
-                # (leaderboard updates can take 20+ seconds due to rate limiting)
-                asyncio.create_task(update_leaderboards_for_guild(
-                    bot,
-                    draft_session.guild_id,
-                    session_id=draft_session_id,
-                    streak_extensions=all_streak_extensions
-                ))
-
-                # Update debt summary in background (if one exists for this guild)
-                asyncio.create_task(update_debt_summary_for_guild(bot, draft_session.guild_id))
+                    # Update debt summary in background (if one exists for this guild)
+                    asyncio.create_task(update_debt_summary_for_guild(bot, draft_session.guild_id))
 
 
 async def update_leaderboards_for_guild(bot, guild_id: str, session_id=None, streak_extensions=None):

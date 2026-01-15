@@ -1230,14 +1230,16 @@ class PersistentView(discord.ui.View):
         
         session = await get_draft_session(self.draft_session_id)
         if not session:
-            print("Draft session not found.")
+            logger.error(f"Draft session not found for session_id={self.draft_session_id} in create_team_channel")
             return
         channel_name = f"{team_name}-Chat-{session.draft_id}"
+
+        logger.info(f"Creating team channel '{channel_name}' for session {self.draft_session_id}, team: {team_name}")
 
         # Get the admin role from config instead of hardcoding role names
         admin_role_name = config["roles"].get("admin")
         admin_role = discord.utils.get(guild.roles, name=admin_role_name) if admin_role_name else None
-        
+
         # Basic permissions overwrites for the channel
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
@@ -1249,21 +1251,23 @@ class PersistentView(discord.ui.View):
             # For the "Draft-chat" channel, add read permissions for admin role
             if admin_role:
                 overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, manage_messages=True)
-            
-            # # For the combined "Draft-chat" channel, also give read access to anyone with the active role
-            # if config["activity_tracking"]["enabled"]:
-            #     active_role_name = config["activity_tracking"]["active_role"]
-            #     active_role = discord.utils.get(guild.roles, name=active_role_name)
-            #     if active_role:
-            #         overwrites[active_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                logger.info(f"Granting '{admin_role_name}' role permissions to channel '{channel_name}'")
+            else:
+                logger.warning(f"Admin role '{admin_role_name}' not found in guild {guild.name}")
 
         # Add team members with read permission (this overrides any role-based permissions)
+        member_names = []
         for member in team_members:
             overwrites[member] = discord.PermissionOverwrite(read_messages=True, manage_messages=True)
+            member_names.append(f"{member.display_name} ({member.id})")
+
+        logger.info(f"Channel '{channel_name}' will have {len(team_members)} team members: {', '.join(member_names)}")
         
         # Create the channel with the specified overwrites
         channel = await guild.create_text_channel(name=channel_name, overwrites=overwrites, category=draft_category)
         self.channel_ids.append(channel.id)
+        logger.info(f"✅ Created text channel '{channel_name}' (ID: {channel.id}) in category '{draft_category.name if draft_category else 'None'}'")
+
         if session.premade_match_id and team_name != "Draft" and session.session_type == "premade":
             # Construct voice channel name
             voice_channel_name = f"{team_name}-Voice-{session.draft_id}"
@@ -1271,6 +1275,7 @@ class PersistentView(discord.ui.View):
             voice_channel = await guild.create_voice_channel(name=voice_channel_name, overwrites=overwrites, category=voice_category)
             # Store the voice channel ID
             self.channel_ids.append(voice_channel.id)
+            logger.info(f"✅ Created voice channel '{voice_channel_name}' (ID: {voice_channel.id}) in category '{voice_category.name if voice_category else 'None'}'")
 
         if team_name == "Draft":
             self.draft_chat_channel = channel.id
@@ -1364,29 +1369,36 @@ class PersistentView(discord.ui.View):
                         logger.info("Created swiss draft channel {}", session.draft_chat_channel)
 
                     elif session.session_type != "test":
+                        logger.info("Creating team channels for session_id={}, session_type={}", session_id, session.session_type)
                         logger.debug("Team A: {}, Team B: {}", session.team_a, session.team_b)
                         team_a_members, team_b_members = [], []
                         for user_id in session.team_a:
                             member = guild.get_member(int(user_id))
                             if member:
                                 team_a_members.append(member)
+                                logger.debug(f"Team A member found: {member.display_name} ({user_id})")
                             else:
                                 logger.warning("Team A member not found for user_id={}", user_id)
                         for user_id in session.team_b:
                             member = guild.get_member(int(user_id))
                             if member:
                                 team_b_members.append(member)
+                                logger.debug(f"Team B member found: {member.display_name} ({user_id})")
                             else:
                                 logger.warning("Team B member not found for user_id={}", user_id)
 
+                        logger.info(f"Team A has {len(team_a_members)} members, Team B has {len(team_b_members)} members")
                         all_members = team_a_members + team_b_members
+                        logger.info("Creating main Draft chat channel with all {} members", len(all_members))
                         channel = await temp_view.create_team_channel(
                             guild, "Draft", all_members, session.team_a, session.team_b
                         )
                         session.draft_chat_channel = str(channel)
                         draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
                         logger.info("Created draft and team channels for session_id={}", session_id)
+                        logger.info("Creating Red-Team channel with {} Team A members", len(team_a_members))
                         await temp_view.create_team_channel(guild, "Red-Team", team_a_members, session.team_a, session.team_b)
+                        logger.info("Creating Blue-Team channel with {} Team B members", len(team_b_members))
                         await temp_view.create_team_channel(guild, "Blue-Team", team_b_members, session.team_a, session.team_b)
 
                     else:
