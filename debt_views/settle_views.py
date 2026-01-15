@@ -16,7 +16,7 @@ from services.debt_service import (
     get_entries_since_last_settlement,
     create_settlement
 )
-from .helpers import TRANSIENT_ERRORS, get_member_name, format_entry_source, build_user_balance_embed
+from .helpers import TRANSIENT_ERRORS, get_member_name, get_member_name_plain, format_entry_source, build_user_balance_embed
 
 
 class SettleDebtsButton(Button):
@@ -120,7 +120,7 @@ class CounterpartySelectView(View):
         # Build select options
         options = []
         for counterparty_id, balance in balances.items():
-            name = get_member_name(guild, counterparty_id)
+            name = get_member_name_plain(guild, counterparty_id)  # Use plain name for dropdown
 
             # Determine direction
             if balance < 0:

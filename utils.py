@@ -586,8 +586,8 @@ async def fetch_match_details(bot, session_id: str, match_number: int):
 
     player1 = guild.get_member(int(match_result.player1_id))
     player2 = guild.get_member(int(match_result.player2_id))
-    player1_name = get_display_name(player1, guild)
-    player2_name = get_display_name(player2, guild)
+    player1_name = player1.display_name if player1 else "Unknown Player"
+    player2_name = player2.display_name if player2 else "Unknown Player"
 
     return player1_name, player2_name
 
