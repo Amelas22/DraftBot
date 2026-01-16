@@ -44,9 +44,10 @@ async def update_ring_bearer_for_guild(bot, guild_id: str, session_id: Optional[
         if not rb_config.get("enabled", False):
             return
 
-        # Ring bearer should only consider ACTIVE streaks, not completed ones
-        # This ensures that if your streak is broken, you lose the ring bearer eligibility
-        timeframe = "active"
+        # Ring bearer checks the 30-day leaderboard to ensure the streak is truly #1
+        # (not just #1 among active streaks, but #1 including recently completed streaks)
+        # Then verifies the #1 streak is still active
+        timeframe = "30d"
 
         guild = bot.get_guild(int(guild_id))
         if not guild:
@@ -71,53 +72,64 @@ async def update_ring_bearer_for_guild(bot, guild_id: str, session_id: Optional[
             for category in streak_categories:
                 logger.info(f"[RING BEARER] Checking category: {category}")
 
-                # Get #1 leader for this category (only active streaks)
-                leader_data = await get_leaderboard_leader(guild_id, category, timeframe, session)
+                # Get ALL players tied for #1 with active streaks
+                tied_leaders = await get_leaderboard_leaders_tied_for_first(guild_id, category, timeframe, session)
 
-                if not leader_data:
-                    logger.info(f"[RING BEARER] No #1 leader in {category}")
+                if not tied_leaders:
+                    logger.info(f"[RING BEARER] No #1 active leaders in {category}")
                     continue
 
-                leader_id = leader_data["player_id"]
-
-                # Extract streak length and key for logging
+                # Extract streak key for checking extensions
                 if category == "longest_win_streak":
-                    streak_length = leader_data.get("longest_win_streak", 0)
                     streak_key = "win_streak_increased"
                 elif category == "perfect_streak":
-                    streak_length = leader_data.get("perfect_streak", 0)
                     streak_key = "perfect_streak_increased"
                 elif category == "draft_win_streak":
-                    streak_length = leader_data.get("draft_win_streak", 0)
                     streak_key = "draft_win_streak_increased"
                 else:
                     continue
 
-                logger.info(f"[RING BEARER] #1 in {category}: {leader_id} (streak={streak_length})")
-
-                # Check if this leader extended their streak
+                # Check if ANY of the tied leaders extended their streak
                 if streak_extensions and session_id:
-                    # Normal draft - check if #1 extended in this draft
-                    player_extensions = streak_extensions.get(leader_id, {})
-                    extended = player_extensions.get(streak_key, False)
+                    # Normal draft - check if any #1 leader extended in this draft
+                    for leader_data in tied_leaders:
+                        leader_id = leader_data["player_id"]
 
-                    logger.info(f"[RING BEARER] Leader extended {category}: {extended}")
+                        # Extract streak length for logging
+                        if category == "longest_win_streak":
+                            streak_length = leader_data.get("longest_win_streak", 0)
+                        elif category == "perfect_streak":
+                            streak_length = leader_data.get("perfect_streak", 0)
+                        elif category == "draft_win_streak":
+                            streak_length = leader_data.get("draft_win_streak", 0)
+                        else:
+                            streak_length = 0
 
-                    if extended:
-                        logger.info(f"[RING BEARER] TRANSFER: {leader_id} gets ring via {category}")
-                        await transfer_ring_bearer(
-                            bot=bot,
-                            guild_id=guild_id,
-                            new_bearer_id=leader_id,
-                            acquired_via=category,
-                            previous_bearer_id=current_bearer_id,
-                            streak_info=leader_data
-                        )
-                        return  # Transfer happened, done
-                    else:
-                        logger.info(f"[RING BEARER] Leader did not extend in this draft")
+                        logger.info(f"[RING BEARER] Checking tied leader {leader_id} (streak={streak_length})")
+
+                        player_extensions = streak_extensions.get(leader_id, {})
+                        extended = player_extensions.get(streak_key, False)
+
+                        logger.info(f"[RING BEARER] Leader {leader_id} extended {category}: {extended}")
+
+                        if extended:
+                            logger.info(f"[RING BEARER] TRANSFER: {leader_id} gets ring via {category}")
+                            await transfer_ring_bearer(
+                                bot=bot,
+                                guild_id=guild_id,
+                                new_bearer_id=leader_id,
+                                acquired_via=category,
+                                previous_bearer_id=current_bearer_id,
+                                streak_info=leader_data
+                            )
+                            return  # Transfer happened, done
+
+                    logger.info(f"[RING BEARER] No tied leader extended in this draft for {category}")
                 else:
-                    # Manual refresh - no streak info, transfer to any #1 leader
+                    # Manual refresh - no streak info, transfer to first #1 leader
+                    leader_data = tied_leaders[0]
+                    leader_id = leader_data["player_id"]
+
                     if leader_id != current_bearer_id:
                         logger.info(f"[RING BEARER] TRANSFER (manual refresh): {leader_id} gets ring via {category}")
                         await transfer_ring_bearer(
@@ -417,3 +429,69 @@ async def get_leaderboard_leader(guild_id: str, category: str, timeframe: str, s
     except Exception as e:
         logger.error(f"Error getting leaderboard leader for {category} in guild {guild_id}: {e}")
         return None
+
+
+async def get_leaderboard_leaders_tied_for_first(guild_id: str, category: str, timeframe: str, session):
+    """
+    Get ALL players tied for #1 in a specific leaderboard category with ACTIVE streaks.
+
+    This function:
+    1. Queries the leaderboard with the given timeframe (e.g., '30d' for 30-day)
+    2. Finds the highest streak value among all players
+    3. Returns ALL players who have that exact streak value AND have active streaks
+
+    This ensures proper handling of ties and validates that the #1 streak is actually active.
+
+    Args:
+        guild_id: Guild ID string
+        category: Category name ('longest_win_streak', 'perfect_streak', 'draft_win_streak')
+        timeframe: Timeframe string ('active', '30d', '90d', 'lifetime')
+        session: Database session
+
+    Returns:
+        List of dicts with leader data (empty list if no leaders found)
+    """
+    try:
+        # Query the leaderboard with sufficient limit to capture potential ties
+        if category == "longest_win_streak":
+            players = await get_win_streak_leaderboard_data(guild_id, timeframe, limit=10, session=session)
+            streak_field = "longest_win_streak"
+        elif category == "perfect_streak":
+            players = await get_perfect_streak_leaderboard_data(guild_id, timeframe, limit=10, session=session)
+            streak_field = "perfect_streak"
+        elif category == "draft_win_streak":
+            players = await get_draft_win_streak_leaderboard_data(guild_id, timeframe, limit=10, session=session)
+            streak_field = "draft_win_streak"
+        else:
+            logger.warning(f"Unknown streak category: {category}")
+            return []
+
+        if not players or len(players) == 0:
+            return []
+
+        # Find the highest streak value (the #1 position)
+        max_streak = players[0].get(streak_field, 0)
+
+        # Find ALL players who:
+        # 1. Have the exact same streak value (tied for #1)
+        # 2. Have ACTIVE streaks (not completed)
+        tied_leaders = []
+        for player in players:
+            player_streak = player.get(streak_field, 0)
+            is_active = player.get("is_active", False)
+
+            # If streak is lower than max, we're past the tied leaders
+            if player_streak < max_streak:
+                break
+
+            # Only include if streak is active
+            if is_active:
+                tied_leaders.append(player)
+
+        logger.info(f"[RING BEARER] Found {len(tied_leaders)} active player(s) tied for #1 in {category} with {max_streak} streak")
+
+        return tied_leaders
+
+    except Exception as e:
+        logger.error(f"Error getting tied leaderboard leaders for {category} in guild {guild_id}: {e}")
+        return []
