@@ -18,7 +18,10 @@ from services.debt_service import (
     get_all_balances_for,
     get_entries_since_last_settlement,
     create_settlement,
-    create_debt_entries_from_stakes
+    create_debt_entries_from_stakes,
+    adjust_debt,
+    get_guild_debt_stats,
+    get_debt_history
 )
 from models.stake import StakeInfo
 
@@ -1242,3 +1245,336 @@ class TestCreateDebtEntriesFromStakes:
             for entry in entries:
                 assert entry.source_type == "draft"
                 assert entry.source_id == "session_123"
+
+
+class TestAdjustDebt:
+    """Tests for adjust_debt function (admin debt management)"""
+
+    @pytest.mark.asyncio
+    async def test_positive_amount_creates_debt(self, test_db):
+        """Test that positive amount creates debt (player1 owes player2)"""
+        new_balance = await adjust_debt(
+            guild_id="guild_123",
+            player1_id="alice",
+            player2_id="bob",
+            amount=30,
+            notes="Admin test debt",
+            created_by="admin_user"
+        )
+
+        # player1 (alice) owes player2 (bob) 30
+        assert new_balance == -30
+
+    @pytest.mark.asyncio
+    async def test_negative_amount_reduces_debt(self, test_db):
+        """Test that negative amount reduces debt (forgiveness)"""
+        # First create debt
+        await adjust_debt(
+            guild_id="guild_123",
+            player1_id="alice",
+            player2_id="bob",
+            amount=50,
+            notes="Initial debt",
+            created_by="admin_user"
+        )
+
+        # Then forgive some
+        new_balance = await adjust_debt(
+            guild_id="guild_123",
+            player1_id="alice",
+            player2_id="bob",
+            amount=-30,
+            notes="Partial forgiveness",
+            created_by="admin_user"
+        )
+
+        # alice now owes bob only 20
+        assert new_balance == -20
+
+    @pytest.mark.asyncio
+    async def test_creates_ledger_entries_with_admin_source(self, test_db):
+        """Test that entries have source_type='admin'"""
+        await adjust_debt(
+            guild_id="guild_123",
+            player1_id="alice",
+            player2_id="bob",
+            amount=30,
+            notes="Admin test",
+            created_by="admin_user"
+        )
+
+        async with AsyncSessionLocal() as session:
+            query = select(DebtLedger).where(
+                DebtLedger.guild_id == "guild_123",
+                DebtLedger.source_type == "admin"
+            )
+            result = await session.execute(query)
+            entries = result.scalars().all()
+
+            assert len(entries) == 2
+            for entry in entries:
+                assert entry.source_type == "admin"
+                assert entry.notes == "Admin test"
+                assert entry.created_by == "admin_user"
+
+    @pytest.mark.asyncio
+    async def test_rejects_zero_amount(self, test_db):
+        """Test that zero amount raises an error"""
+        with pytest.raises(ValueError, match="Amount cannot be zero"):
+            await adjust_debt(
+                guild_id="guild_123",
+                player1_id="alice",
+                player2_id="bob",
+                amount=0,
+                notes="Invalid",
+                created_by="admin_user"
+            )
+
+    @pytest.mark.asyncio
+    async def test_negative_amount_can_flip_debt_direction(self, test_db):
+        """Test that negative amount can flip who owes whom"""
+        # alice owes bob 30
+        await adjust_debt(
+            guild_id="guild_123",
+            player1_id="alice",
+            player2_id="bob",
+            amount=30,
+            notes="Initial",
+            created_by="admin"
+        )
+
+        # Forgive 50 (more than owed), bob now owes alice 20
+        new_balance = await adjust_debt(
+            guild_id="guild_123",
+            player1_id="alice",
+            player2_id="bob",
+            amount=-50,
+            notes="Overpayment",
+            created_by="admin"
+        )
+
+        # alice's balance with bob is now +20 (bob owes her)
+        assert new_balance == 20
+
+
+class TestGetGuildDebtStats:
+    """Tests for get_guild_debt_stats function"""
+
+    @pytest.mark.asyncio
+    async def test_returns_zero_stats_for_no_debts(self, test_db):
+        """Test that stats are zero when no debts exist"""
+        stats = await get_guild_debt_stats("guild_123", "all_time")
+
+        assert stats['total_debt'] == 0
+        assert stats['num_debtors'] == 0
+        assert stats['num_creditors'] == 0
+        assert stats['largest_debt'] is None
+        assert stats['avg_debt_per_debtor'] == 0
+
+    @pytest.mark.asyncio
+    async def test_calculates_total_debt(self, test_db):
+        """Test that total debt is calculated correctly"""
+        # alice owes bob 30
+        await create_ledger_entries(
+            guild_id="guild_123",
+            debtor_id="alice",
+            creditor_id="bob",
+            amount=30,
+            source_type="draft",
+            source_id="session_1"
+        )
+
+        # charlie owes dave 20
+        await create_ledger_entries(
+            guild_id="guild_123",
+            debtor_id="charlie",
+            creditor_id="dave",
+            amount=20,
+            source_type="draft",
+            source_id="session_2"
+        )
+
+        stats = await get_guild_debt_stats("guild_123", "all_time")
+
+        assert stats['total_debt'] == 50  # 30 + 20
+        assert stats['num_debtors'] == 2  # alice, charlie
+        assert stats['num_creditors'] == 2  # bob, dave
+
+    @pytest.mark.asyncio
+    async def test_identifies_largest_debt(self, test_db):
+        """Test that largest debt is identified"""
+        # alice owes bob 30
+        await create_ledger_entries(
+            guild_id="guild_123",
+            debtor_id="alice",
+            creditor_id="bob",
+            amount=30,
+            source_type="draft",
+            source_id="session_1"
+        )
+
+        # charlie owes dave 50 (largest)
+        await create_ledger_entries(
+            guild_id="guild_123",
+            debtor_id="charlie",
+            creditor_id="dave",
+            amount=50,
+            source_type="draft",
+            source_id="session_2"
+        )
+
+        stats = await get_guild_debt_stats("guild_123", "all_time")
+
+        assert stats['largest_debt'] == ("charlie", "dave", 50)
+
+    @pytest.mark.asyncio
+    async def test_counts_entries_by_source_type(self, test_db):
+        """Test that debt_by_source breakdown works"""
+        # Create a draft debt
+        await create_ledger_entries(
+            guild_id="guild_123",
+            debtor_id="alice",
+            creditor_id="bob",
+            amount=30,
+            source_type="draft",
+            source_id="session_1"
+        )
+
+        # Create an admin debt
+        await adjust_debt(
+            guild_id="guild_123",
+            player1_id="charlie",
+            player2_id="dave",
+            amount=20,
+            notes="Admin debt",
+            created_by="admin"
+        )
+
+        stats = await get_guild_debt_stats("guild_123", "all_time")
+
+        # 2 entries per debt (double-entry)
+        assert stats['debt_by_source']['draft'] == 2
+        assert stats['debt_by_source']['admin'] == 2
+
+
+class TestGetDebtHistory:
+    """Tests for get_debt_history function"""
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_for_no_entries(self, test_db):
+        """Test that empty list is returned when no entries exist"""
+        entries = await get_debt_history("guild_123")
+
+        assert entries == []
+
+    @pytest.mark.asyncio
+    async def test_returns_all_entry_types(self, test_db):
+        """Test that all entry types are returned (draft, settlement, admin)"""
+        # Create a draft debt
+        await create_ledger_entries(
+            guild_id="guild_123",
+            debtor_id="alice",
+            creditor_id="bob",
+            amount=30,
+            source_type="draft",
+            source_id="session_1"
+        )
+
+        # Create an admin debt
+        await adjust_debt(
+            guild_id="guild_123",
+            player1_id="charlie",
+            player2_id="dave",
+            amount=20,
+            notes="Admin adjustment",
+            created_by="admin"
+        )
+
+        # Create a settlement
+        await create_settlement(
+            guild_id="guild_123",
+            payer_id="alice",
+            payee_id="bob",
+            amount=10,
+            settled_by="alice"
+        )
+
+        entries = await get_debt_history("guild_123")
+
+        # Should have 6 entries: 2 from draft + 2 from admin + 2 from settlement
+        assert len(entries) == 6
+        source_types = {entry.source_type for entry in entries}
+        assert "draft" in source_types
+        assert "admin" in source_types
+        assert "settlement" in source_types
+
+    @pytest.mark.asyncio
+    async def test_filters_by_player(self, test_db):
+        """Test that player filter works"""
+        # Admin debt: alice <-> bob
+        await adjust_debt(
+            guild_id="guild_123",
+            player1_id="alice",
+            player2_id="bob",
+            amount=30,
+            notes="Alice/Bob debt",
+            created_by="admin"
+        )
+
+        # Admin debt: charlie <-> dave
+        await adjust_debt(
+            guild_id="guild_123",
+            player1_id="charlie",
+            player2_id="dave",
+            amount=20,
+            notes="Charlie/Dave debt",
+            created_by="admin"
+        )
+
+        # Filter for alice
+        entries = await get_debt_history("guild_123", player_id="alice")
+
+        # Should only see entries involving alice (2: her entry + bob's entry)
+        assert len(entries) == 2
+        player_ids = {entry.player_id for entry in entries}
+        assert "alice" in player_ids or "bob" in player_ids
+
+    @pytest.mark.asyncio
+    async def test_respects_limit(self, test_db):
+        """Test that limit parameter works"""
+        # Create multiple admin debts
+        for i in range(5):
+            await adjust_debt(
+                guild_id="guild_123",
+                player1_id="alice",
+                player2_id="bob",
+                amount=10 * (i + 1),
+                notes=f"Debt {i}",
+                created_by="admin"
+            )
+
+        # Each adjust_debt creates 2 entries, so 5 calls = 10 entries
+        # Request limit of 5
+        entries = await get_debt_history("guild_123", limit=5)
+
+        assert len(entries) == 5
+
+    @pytest.mark.asyncio
+    async def test_returns_newest_first(self, test_db):
+        """Test that entries are returned in reverse chronological order"""
+        # Create 3 admin debts
+        for i in range(3):
+            await adjust_debt(
+                guild_id="guild_123",
+                player1_id="alice",
+                player2_id="bob",
+                amount=10 * (i + 1),
+                notes=f"Debt {i}",
+                created_by="admin"
+            )
+
+        entries = await get_debt_history("guild_123", limit=10)
+
+        # Verify they're in descending order by creation time
+        for i in range(len(entries) - 1):
+            assert entries[i].created_at >= entries[i + 1].created_at

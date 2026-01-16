@@ -486,6 +486,270 @@ async def create_debt_entries_from_stakes(
     return debts_created
 
 
+async def adjust_debt(
+    guild_id: str,
+    player1_id: str,
+    player2_id: str,
+    amount: int,
+    notes: str,
+    created_by: str
+) -> int:
+    """
+    Adjust debt between two players (admin operation).
+
+    Positive amount: player1 owes player2 more
+    Negative amount: player1 owes player2 less
+
+    This creates ledger entries with source_type='admin' using a double-entry
+    system. Can be used to create new debt, adjust existing debt, or forgive debt.
+
+    Args:
+        guild_id: The guild this debt belongs to
+        player1_id: First player
+        player2_id: Second player
+        amount: Amount to adjust (positive = player1 owes more, negative = player1 owes less)
+        notes: Reason for this adjustment
+        created_by: Admin who made this adjustment
+
+    Returns:
+        New balance from player1's perspective (negative = player1 owes player2)
+    """
+    if amount == 0:
+        raise ValueError("Amount cannot be zero")
+
+    admin_id = str(uuid.uuid4())
+
+    logger.info(
+        f"Admin {created_by} adjusting debt: {player1_id} <-> {player2_id} by {amount:+d} tix "
+        f"(source_id: {admin_id})"
+    )
+
+    async with db_session() as session:
+        # Create player1's entry
+        # Positive amount means player1 owes more (negative entry in their ledger)
+        # Negative amount means player1 owes less (positive entry in their ledger)
+        player1_entry = DebtLedger(
+            guild_id=guild_id,
+            player_id=player1_id,
+            counterparty_id=player2_id,
+            amount=-amount,  # Invert: +50 means player1 owes 50 more (entry: -50)
+            source_type='admin',
+            source_id=admin_id,
+            notes=notes,
+            created_by=created_by
+        )
+
+        # Create player2's entry (opposite of player1)
+        player2_entry = DebtLedger(
+            guild_id=guild_id,
+            player_id=player2_id,
+            counterparty_id=player1_id,
+            amount=amount,  # Opposite of player1's entry
+            source_type='admin',
+            source_id=admin_id,
+            notes=notes,
+            created_by=created_by
+        )
+
+        session.add(player1_entry)
+        session.add(player2_entry)
+        await session.commit()
+
+        logger.debug(f"Created admin debt entries with IDs: {player1_entry.id}, {player2_entry.id}")
+
+    # Return new balance from player1's perspective
+    new_balance = await get_balance_with(guild_id, player1_id, player2_id)
+    logger.info(f"New balance after adjustment: {player1_id} <-> {player2_id} = {new_balance}")
+    return new_balance
+
+
+async def get_guild_debt_stats(guild_id: str, timeframe: str = "all_time") -> dict:
+    """
+    Get comprehensive debt statistics for a guild.
+
+    Args:
+        guild_id: The guild to query
+        timeframe: One of "all_time", "last_30_days", "last_7_days", "since_last_settlement"
+
+    Returns:
+        Dictionary containing:
+        - total_debt: Sum of all negative balances
+        - num_debtors: Count of unique players with negative balances
+        - num_creditors: Count of unique players with positive balances
+        - largest_debt: Tuple of (debtor_id, creditor_id, amount)
+        - most_active_debtor: Tuple of (player_id, entry_count)
+        - recent_activity: Number of new debt entries in timeframe
+        - avg_debt_per_debtor: Average debt amount per debtor
+        - debt_by_source: Dict of source_type to count
+    """
+    from datetime import datetime, timedelta
+
+    # Calculate cutoff time based on timeframe
+    cutoff_time = None
+    if timeframe == "last_7_days":
+        cutoff_time = datetime.utcnow() - timedelta(days=7)
+    elif timeframe == "last_30_days":
+        cutoff_time = datetime.utcnow() - timedelta(days=30)
+    elif timeframe == "since_last_settlement":
+        # Find most recent settlement in guild
+        async with db_session() as session:
+            query = (
+                select(func.max(DebtLedger.created_at))
+                .where(
+                    DebtLedger.guild_id == guild_id,
+                    DebtLedger.source_type == 'settlement'
+                )
+            )
+            result = await session.execute(query)
+            cutoff_time = result.scalar()
+
+    async with db_session() as session:
+        # Get all current balances (group by player/counterparty pairs)
+        balance_query = (
+            select(
+                DebtLedger.player_id,
+                DebtLedger.counterparty_id,
+                func.sum(DebtLedger.amount).label('balance')
+            )
+            .where(DebtLedger.guild_id == guild_id)
+            .group_by(DebtLedger.player_id, DebtLedger.counterparty_id)
+            .having(func.sum(DebtLedger.amount) != 0)
+        )
+        balance_result = await session.execute(balance_query)
+        balances = balance_result.all()
+
+        # Calculate totals
+        total_debt = 0
+        debtors = set()
+        creditors = set()
+        largest_debt = None
+        largest_debt_amount = 0
+
+        for row in balances:
+            if row.balance < 0:
+                # This player owes money
+                total_debt += abs(row.balance)
+                debtors.add(row.player_id)
+                if abs(row.balance) > largest_debt_amount:
+                    largest_debt_amount = abs(row.balance)
+                    largest_debt = (row.player_id, row.counterparty_id, abs(row.balance))
+            else:
+                # This player is owed money
+                creditors.add(row.player_id)
+
+        # Get activity stats (filtered by timeframe)
+        activity_query = select(
+            DebtLedger.player_id,
+            func.count(DebtLedger.id).label('entry_count')
+        ).where(DebtLedger.guild_id == guild_id)
+
+        if cutoff_time:
+            activity_query = activity_query.where(DebtLedger.created_at >= cutoff_time)
+
+        activity_query = activity_query.group_by(DebtLedger.player_id).order_by(
+            func.count(DebtLedger.id).desc()
+        )
+
+        activity_result = await session.execute(activity_query)
+        activity_rows = activity_result.all()
+
+        most_active_debtor = activity_rows[0] if activity_rows else None
+
+        # Get total entry count for recent activity
+        recent_count_query = select(func.count(DebtLedger.id)).where(
+            DebtLedger.guild_id == guild_id
+        )
+        if cutoff_time:
+            recent_count_query = recent_count_query.where(DebtLedger.created_at >= cutoff_time)
+
+        recent_count_result = await session.execute(recent_count_query)
+        recent_activity = recent_count_result.scalar()
+
+        # Get debt breakdown by source type (within timeframe)
+        source_query = select(
+            DebtLedger.source_type,
+            func.count(DebtLedger.id).label('count')
+        ).where(DebtLedger.guild_id == guild_id)
+
+        if cutoff_time:
+            source_query = source_query.where(DebtLedger.created_at >= cutoff_time)
+
+        source_query = source_query.group_by(DebtLedger.source_type)
+
+        source_result = await session.execute(source_query)
+        source_rows = source_result.all()
+        debt_by_source = {row.source_type: row.count for row in source_rows}
+
+    # Calculate average debt per debtor
+    avg_debt_per_debtor = total_debt / len(debtors) if debtors else 0
+
+    stats = {
+        'total_debt': total_debt,
+        'num_debtors': len(debtors),
+        'num_creditors': len(creditors),
+        'largest_debt': largest_debt,
+        'most_active_debtor': most_active_debtor,
+        'recent_activity': recent_activity,
+        'avg_debt_per_debtor': avg_debt_per_debtor,
+        'debt_by_source': debt_by_source,
+        'timeframe': timeframe
+    }
+
+    logger.debug(f"Guild stats for {guild_id} ({timeframe}): {stats}")
+    return stats
+
+
+async def get_debt_history(
+    guild_id: str,
+    player_id: str = None,
+    limit: int = 25
+) -> list[DebtLedger]:
+    """
+    Get history of all debt entries.
+
+    Returns all ledger entries (draft, settlement, and admin), optionally filtered
+    by a specific player. Entries are returned in reverse chronological order
+    (newest first).
+
+    Args:
+        guild_id: The guild to query
+        player_id: Optional - filter to entries involving this player
+        limit: Maximum number of entries to return (default 25, max 100)
+
+    Returns:
+        List of DebtLedger entries
+    """
+    limit = min(limit, 100)  # Cap at 100
+
+    async with db_session() as session:
+        query = (
+            select(DebtLedger)
+            .where(DebtLedger.guild_id == guild_id)
+        )
+
+        if player_id:
+            # Filter to entries where player is either player_id or counterparty_id
+            from sqlalchemy import or_
+            query = query.where(
+                or_(
+                    DebtLedger.player_id == player_id,
+                    DebtLedger.counterparty_id == player_id
+                )
+            )
+
+        query = query.order_by(DebtLedger.created_at.desc()).limit(limit)
+
+        result = await session.execute(query)
+        entries = result.scalars().all()
+
+        logger.debug(
+            f"Found {len(entries)} debt history entries for guild {guild_id}"
+            + (f" (filtered to player {player_id})" if player_id else "")
+        )
+
+        return list(entries)
+
+
 async def get_guild_debt_rows(guild_id: str) -> list:
     """
     Get all debt relationships for a guild (from debtor perspective).
