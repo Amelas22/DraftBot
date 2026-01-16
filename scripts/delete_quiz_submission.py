@@ -185,40 +185,43 @@ async def delete_submission(quiz_display_id: str, player_name: str, dry_run: boo
             return False
 
         # Actually delete and update
-        async with session.begin():
-            # Delete the submission
-            await session.delete(submission)
-            await session.flush()
+        # Delete the submission
+        await session.delete(submission)
+        await session.flush()
 
-            # Recalculate stats from remaining submissions
-            new_stats = await recalculate_stats(submission.player_id, quiz_session.guild_id, session)
+        # Recalculate stats from remaining submissions
+        new_stats = await recalculate_stats(submission.player_id, quiz_session.guild_id, session)
 
-            if new_stats and stats:
-                # Update existing stats record
-                stats.total_quizzes = new_stats['total_quizzes']
-                stats.total_picks_attempted = new_stats['total_picks_attempted']
-                stats.total_picks_correct = new_stats['total_picks_correct']
-                stats.accuracy_percentage = new_stats['accuracy_percentage']
-                stats.total_points = new_stats['total_points']
-                stats.average_points_per_quiz = new_stats['average_points_per_quiz']
-                stats.highest_quiz_score = new_stats['highest_quiz_score']
-                stats.current_perfect_streak = new_stats['current_perfect_streak']
-                stats.longest_perfect_streak = new_stats['longest_perfect_streak']
-                stats.last_quiz_time = new_stats['last_quiz_time']
+        if new_stats and stats:
+            # Update existing stats record
+            stats.total_quizzes = new_stats['total_quizzes']
+            stats.total_picks_attempted = new_stats['total_picks_attempted']
+            stats.total_picks_correct = new_stats['total_picks_correct']
+            stats.accuracy_percentage = new_stats['accuracy_percentage']
+            stats.total_points = new_stats['total_points']
+            stats.average_points_per_quiz = new_stats['average_points_per_quiz']
+            stats.highest_quiz_score = new_stats['highest_quiz_score']
+            stats.current_perfect_streak = new_stats['current_perfect_streak']
+            stats.longest_perfect_streak = new_stats['longest_perfect_streak']
+            stats.last_quiz_time = new_stats['last_quiz_time']
 
-                logger.success(f"✓ Deleted submission for quiz #{quiz_display_id}")
-                logger.success(f"✓ Updated stats for {submission.display_name}")
-                logger.info(f"\nNew stats:")
-                logger.info(f"  Total quizzes: {stats.total_quizzes}")
-                logger.info(f"  Accuracy: {stats.accuracy_percentage:.2f}%")
-                logger.info(f"  Avg points: {stats.average_points_per_quiz:.2f}")
-            elif not new_stats and stats:
-                # No more submissions - delete stats record
-                await session.delete(stats)
-                logger.success(f"✓ Deleted submission for quiz #{quiz_display_id}")
-                logger.success(f"✓ Deleted stats record (no remaining submissions)")
-            else:
-                logger.success(f"✓ Deleted submission for quiz #{quiz_display_id}")
+            await session.commit()
+
+            logger.success(f"✓ Deleted submission for quiz #{quiz_display_id}")
+            logger.success(f"✓ Updated stats for {submission.display_name}")
+            logger.info(f"\nNew stats:")
+            logger.info(f"  Total quizzes: {stats.total_quizzes}")
+            logger.info(f"  Accuracy: {stats.accuracy_percentage:.2f}%")
+            logger.info(f"  Avg points: {stats.average_points_per_quiz:.2f}")
+        elif not new_stats and stats:
+            # No more submissions - delete stats record
+            await session.delete(stats)
+            await session.commit()
+            logger.success(f"✓ Deleted submission for quiz #{quiz_display_id}")
+            logger.success(f"✓ Deleted stats record (no remaining submissions)")
+        else:
+            await session.commit()
+            logger.success(f"✓ Deleted submission for quiz #{quiz_display_id}")
 
         return True
 
