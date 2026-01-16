@@ -127,22 +127,23 @@ async def create_ring_bearer_state(guild_id, bearer_id, acquired_via, session):
     return state
 
 
-def create_leaderboard_result(player_id, streak_length, win_rate=0.60, category="longest_win_streak"):
+def create_leaderboard_result(player_id, streak_length, win_rate=0.60, category="longest_win_streak", is_active=True):
     """Helper to create mock leaderboard result."""
     result = {
         "player_id": player_id,
         "display_name": f"Player{player_id}",
         "games_won": 100,
         "games_lost": 50,
-        "completed_matches": 150
+        "completed_matches": 150,
+        "is_active": is_active  # Whether streak is active or completed
     }
 
     if category == "longest_win_streak":
         result["longest_win_streak"] = streak_length
     elif category == "perfect_streak":
-        result["longest_perfect_streak"] = streak_length
+        result["perfect_streak"] = streak_length
     elif category == "draft_win_streak":
-        result["longest_draft_win_streak"] = streak_length
+        result["draft_win_streak"] = streak_length
 
     return result
 
@@ -234,14 +235,14 @@ async def test_refresh_first_category_wins(test_db, mock_bot, mock_config):
     async with test_db() as session:
         with patch('services.ring_bearer_service.get_config', return_value=mock_config), \
              patch('services.ring_bearer_service.db_session', return_value=session), \
-             patch('services.ring_bearer_service.get_leaderboard_leader') as mock_get_leader, \
+             patch('services.ring_bearer_service.get_leaderboard_leaders_tied_for_first') as mock_get_leaders, \
              patch('services.ring_bearer_service.transfer_ring_bearer') as mock_transfer:
 
-            # Mock leaderboard leaders
-            mock_get_leader.side_effect = [
-                create_leaderboard_result("player_A", 5, category="perfect_streak"),  # perfect_streak #1
-                create_leaderboard_result("player_B", 10, category="longest_win_streak"),  # match #1
-                create_leaderboard_result("player_C", 8, category="draft_win_streak")  # draft #1
+            # Mock leaderboard leaders (now returns lists)
+            mock_get_leaders.side_effect = [
+                [create_leaderboard_result("player_A", 5, category="perfect_streak")],  # perfect_streak #1
+                [create_leaderboard_result("player_B", 10, category="longest_win_streak")],  # match #1
+                [create_leaderboard_result("player_C", 8, category="draft_win_streak")]  # draft #1
             ]
 
             # Act
@@ -266,13 +267,13 @@ async def test_refresh_second_category_wins_if_first_empty(test_db, mock_bot, mo
     async with test_db() as session:
         with patch('services.ring_bearer_service.get_config', return_value=mock_config), \
              patch('services.ring_bearer_service.db_session', return_value=session), \
-             patch('services.ring_bearer_service.get_leaderboard_leader') as mock_get_leader, \
+             patch('services.ring_bearer_service.get_leaderboard_leaders_tied_for_first') as mock_get_leaders, \
              patch('services.ring_bearer_service.transfer_ring_bearer') as mock_transfer:
 
-            mock_get_leader.side_effect = [
-                None,  # No perfect_streak leader
-                create_leaderboard_result("player_B", 10, category="longest_win_streak"),
-                create_leaderboard_result("player_C", 8, category="draft_win_streak")
+            mock_get_leaders.side_effect = [
+                [],  # No perfect_streak leader
+                [create_leaderboard_result("player_B", 10, category="longest_win_streak")],
+                [create_leaderboard_result("player_C", 8, category="draft_win_streak")]
             ]
 
             await update_ring_bearer_for_guild(mock_bot, guild_id)
@@ -295,13 +296,13 @@ async def test_refresh_third_category_wins_if_first_two_empty(test_db, mock_bot,
     async with test_db() as session:
         with patch('services.ring_bearer_service.get_config', return_value=mock_config), \
              patch('services.ring_bearer_service.db_session', return_value=session), \
-             patch('services.ring_bearer_service.get_leaderboard_leader') as mock_get_leader, \
+             patch('services.ring_bearer_service.get_leaderboard_leaders_tied_for_first') as mock_get_leaders, \
              patch('services.ring_bearer_service.transfer_ring_bearer') as mock_transfer:
 
-            mock_get_leader.side_effect = [
-                None,  # No perfect_streak leader
-                None,  # No longest_win_streak leader
-                create_leaderboard_result("player_C", 8, category="draft_win_streak")
+            mock_get_leaders.side_effect = [
+                [],  # No perfect_streak leader
+                [],  # No longest_win_streak leader
+                [create_leaderboard_result("player_C", 8, category="draft_win_streak")]
             ]
 
             await update_ring_bearer_for_guild(mock_bot, guild_id)
@@ -327,12 +328,12 @@ async def test_refresh_current_holder_keeps_ring_if_still_first(test_db, mock_bo
 
         with patch('services.ring_bearer_service.get_config', return_value=mock_config), \
              patch('services.ring_bearer_service.db_session', return_value=session), \
-             patch('services.ring_bearer_service.get_leaderboard_leader') as mock_get_leader, \
+             patch('services.ring_bearer_service.get_leaderboard_leaders_tied_for_first') as mock_get_leaders, \
              patch('services.ring_bearer_service.transfer_ring_bearer') as mock_transfer:
 
             # Only return for first category - player A is still #1 and has ring
-            mock_get_leader.side_effect = [
-                create_leaderboard_result("player_A", 5, category="perfect_streak"),  # Same player still #1
+            mock_get_leaders.side_effect = [
+                [create_leaderboard_result("player_A", 5, category="perfect_streak")],  # Same player still #1
             ]
 
             await update_ring_bearer_for_guild(mock_bot, guild_id)
@@ -440,14 +441,14 @@ async def test_tie_for_first_transfers_to_most_recent_updater(test_db, mock_bot,
 
         with patch('services.ring_bearer_service.get_config', return_value=mock_config), \
              patch('services.ring_bearer_service.db_session', return_value=session), \
-             patch('services.ring_bearer_service.get_leaderboard_leader') as mock_get_leader, \
+             patch('services.ring_bearer_service.get_leaderboard_leaders_tied_for_first') as mock_get_leaders, \
              patch('services.ring_bearer_service.transfer_ring_bearer') as mock_transfer:
 
             # Player_B most recently extended to 10 wins (becomes #1 via recency)
             # The leaderboard query should use timestamp-based tiebreaker, returning most recent updater
-            mock_get_leader.side_effect = [
-                None,  # No perfect_streak
-                create_leaderboard_result("player_B", 10, category="longest_win_streak")
+            mock_get_leaders.side_effect = [
+                [],  # No perfect_streak
+                [create_leaderboard_result("player_B", 10, category="longest_win_streak")]
             ]
 
             await update_ring_bearer_for_guild(mock_bot, guild_id)
@@ -473,13 +474,13 @@ async def test_different_leaderboard_holder_extends_gets_ring(test_db, mock_bot,
 
         with patch('services.ring_bearer_service.get_config', return_value=mock_config), \
              patch('services.ring_bearer_service.db_session', return_value=session), \
-             patch('services.ring_bearer_service.get_leaderboard_leader') as mock_get_leader, \
+             patch('services.ring_bearer_service.get_leaderboard_leaders_tied_for_first') as mock_get_leaders, \
              patch('services.ring_bearer_service.transfer_ring_bearer') as mock_transfer:
 
             # Leaderboard returns player_B as #1 (most recently updated, even though longest_win_streak is lower priority)
             # The leaderboard query should sort by recency FIRST, then category priority
-            mock_get_leader.side_effect = [
-                create_leaderboard_result("player_B", 11, category="longest_win_streak"),  # Most recent update
+            mock_get_leaders.side_effect = [
+                [create_leaderboard_result("player_B", 11, category="longest_win_streak")],  # Most recent update
             ]
 
             await update_ring_bearer_for_guild(mock_bot, guild_id)
@@ -504,13 +505,13 @@ async def test_category_priority_used_when_same_timestamp(test_db, mock_bot, moc
 
         with patch('services.ring_bearer_service.get_config', return_value=mock_config), \
              patch('services.ring_bearer_service.db_session', return_value=session), \
-             patch('services.ring_bearer_service.get_leaderboard_leader') as mock_get_leader, \
+             patch('services.ring_bearer_service.get_leaderboard_leaders_tied_for_first') as mock_get_leaders, \
              patch('services.ring_bearer_service.transfer_ring_bearer') as mock_transfer:
 
             # After a draft completes, multiple players might have updated streaks at same time
             # Leaderboard query should return perfect_streak #1 (highest priority when timestamps equal)
-            mock_get_leader.side_effect = [
-                create_leaderboard_result("player_A", 5, category="perfect_streak"),  # Highest priority, same timestamp
+            mock_get_leaders.side_effect = [
+                [create_leaderboard_result("player_A", 5, category="perfect_streak")],  # Highest priority, same timestamp
             ]
 
             await update_ring_bearer_for_guild(mock_bot, guild_id)
@@ -536,12 +537,12 @@ async def test_current_holder_extends_run_keeps_ring(test_db, mock_bot, mock_con
 
         with patch('services.ring_bearer_service.get_config', return_value=mock_config), \
              patch('services.ring_bearer_service.db_session', return_value=session), \
-             patch('services.ring_bearer_service.get_leaderboard_leader') as mock_get_leader, \
+             patch('services.ring_bearer_service.get_leaderboard_leaders_tied_for_first') as mock_get_leaders, \
              patch('services.ring_bearer_service.transfer_ring_bearer') as mock_transfer:
 
             # Player A extends streak but still is the leader
-            mock_get_leader.side_effect = [
-                create_leaderboard_result("player_A", 6, category="perfect_streak")
+            mock_get_leaders.side_effect = [
+                [create_leaderboard_result("player_A", 6, category="perfect_streak")]
             ]
 
             await update_ring_bearer_for_guild(mock_bot, guild_id)
@@ -563,12 +564,12 @@ async def test_current_holder_extends_but_overtaken(test_db, mock_bot, mock_conf
 
         with patch('services.ring_bearer_service.get_config', return_value=mock_config), \
              patch('services.ring_bearer_service.db_session', return_value=session), \
-             patch('services.ring_bearer_service.get_leaderboard_leader') as mock_get_leader, \
+             patch('services.ring_bearer_service.get_leaderboard_leaders_tied_for_first') as mock_get_leaders, \
              patch('services.ring_bearer_service.transfer_ring_bearer') as mock_transfer:
 
             # Player B is now #1
-            mock_get_leader.side_effect = [
-                create_leaderboard_result("player_B", 7, category="perfect_streak")
+            mock_get_leaders.side_effect = [
+                [create_leaderboard_result("player_B", 7, category="perfect_streak")]
             ]
 
             await update_ring_bearer_for_guild(mock_bot, guild_id)
@@ -618,12 +619,12 @@ async def test_match_defeat_then_leaderboard_update(test_db, mock_bot, mock_conf
         # Step 2: Leaderboard update - player_A still #1 on leaderboard
         with patch('services.ring_bearer_service.get_config', return_value=mock_config), \
              patch('services.ring_bearer_service.db_session', return_value=session), \
-             patch('services.ring_bearer_service.get_leaderboard_leader') as mock_get_leader, \
+             patch('services.ring_bearer_service.get_leaderboard_leaders_tied_for_first') as mock_get_leaders, \
              patch('services.ring_bearer_service.transfer_ring_bearer') as mock_transfer2:
 
             # Player A is back to #1 on leaderboard
-            mock_get_leader.side_effect = [
-                create_leaderboard_result("player_A", 5, category="perfect_streak")
+            mock_get_leaders.side_effect = [
+                [create_leaderboard_result("player_A", 5, category="perfect_streak")]
             ]
 
             await update_ring_bearer_for_guild(mock_bot, guild_id)
@@ -649,11 +650,11 @@ async def test_leaderboard_update_then_match_defeat(test_db, mock_bot, mock_conf
         # Step 1: Leaderboard update - player_A is #1
         with patch('services.ring_bearer_service.get_config', return_value=mock_config), \
              patch('services.ring_bearer_service.db_session', return_value=session), \
-             patch('services.ring_bearer_service.get_leaderboard_leader') as mock_get_leader, \
+             patch('services.ring_bearer_service.get_leaderboard_leaders_tied_for_first') as mock_get_leaders, \
              patch('services.ring_bearer_service.transfer_ring_bearer') as mock_transfer:
 
-            mock_get_leader.side_effect = [
-                create_leaderboard_result("player_A", 5, category="perfect_streak")
+            mock_get_leaders.side_effect = [
+                [create_leaderboard_result("player_A", 5, category="perfect_streak")]
             ]
 
             await update_ring_bearer_for_guild(mock_bot, guild_id)
@@ -743,11 +744,11 @@ async def test_all_leaderboards_empty_no_transfer(test_db, mock_bot, mock_config
 
         with patch('services.ring_bearer_service.get_config', return_value=mock_config), \
              patch('services.ring_bearer_service.db_session', return_value=session), \
-             patch('services.ring_bearer_service.get_leaderboard_leader') as mock_get_leader, \
+             patch('services.ring_bearer_service.get_leaderboard_leaders_tied_for_first') as mock_get_leaders, \
              patch('services.ring_bearer_service.transfer_ring_bearer') as mock_transfer:
 
             # All leaderboards empty
-            mock_get_leader.side_effect = [None, None, None]
+            mock_get_leaders.side_effect = [[], [], []]
 
             await update_ring_bearer_for_guild(mock_bot, guild_id)
 
