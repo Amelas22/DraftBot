@@ -396,6 +396,9 @@ class QuizPublicView(discord.ui.View):
                 logger.error(f"QuizSession {self.quiz_id} not found")
                 return False
 
+            # Store starting_seat for pack tracing
+            starting_seat = quiz_session.starting_seat
+
             stmt = select(DraftSession).where(DraftSession.session_id == quiz_session.draft_session_id)
             result = await session.execute(stmt)
             draft_session = result.scalar_one_or_none()
@@ -407,7 +410,8 @@ class QuizPublicView(discord.ui.View):
         try:
             self.analysis = await DraftAnalysis.from_session(draft_session)
             if self.analysis:
-                self.pack_trace = self.analysis.trace_pack(pack_num=0, length=4)
+                # Use starting_seat from database to ensure correct pack trace after reconnection
+                self.pack_trace = self.analysis.trace_pack(pack_num=0, length=4, starting_seat=starting_seat)
                 return self.pack_trace is not None
         except Exception as e:
             logger.error(f"Error loading quiz data for {self.quiz_id}: {e}", exc_info=True)
