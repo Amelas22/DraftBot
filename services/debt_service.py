@@ -4,7 +4,7 @@ Service for handling debt ledger operations.
 import asyncio
 import uuid
 from loguru import logger
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.exc import OperationalError
 from database.db_session import db_session
 from models.debt_ledger import DebtLedger
@@ -87,7 +87,8 @@ async def create_ledger_entries(
 async def get_balance_with(
     guild_id: str,
     player_id: str,
-    counterparty_id: str
+    counterparty_id: str,
+    exclude_session_id: str = None
 ) -> int:
     """
     Get the net balance between two players from player's perspective.
@@ -102,16 +103,29 @@ async def get_balance_with(
         guild_id: The guild to check
         player_id: The player whose perspective we want
         counterparty_id: The other player
+        exclude_session_id: Optional session ID to exclude from balance calculation
+                          (useful for getting pre-draft balance)
 
     Returns:
         Net balance as integer (positive = owed to player, negative = player owes)
     """
     async with db_session() as session:
-        query = select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
+        conditions = [
             DebtLedger.guild_id == guild_id,
             DebtLedger.player_id == player_id,
             DebtLedger.counterparty_id == counterparty_id
-        )
+        ]
+
+        # Exclude entries from a specific session if requested
+        if exclude_session_id:
+            conditions.append(
+                or_(
+                    DebtLedger.source_type != 'draft',
+                    DebtLedger.source_id != exclude_session_id
+                )
+            )
+
+        query = select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(*conditions)
         result = await session.execute(query)
         balance = result.scalar()
 

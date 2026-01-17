@@ -1407,7 +1407,11 @@ class PersistentView(discord.ui.View):
                         logger.debug("Using test channel {}", session.draft_channel_id)
 
                     # Generate and send summary
-                    draft_summary_embed = await generate_draft_summary_embed(bot, session.session_id)
+                    main_embed, bet_embed = await generate_draft_summary_embed(bot, session.session_id)
+                    embeds = [main_embed]
+                    if bet_embed:
+                        embeds.append(bet_embed)
+
                     sign_up_tags = ' '.join(f"<@{user_id}>" for user_id in session.sign_ups.keys())
                     auto_text = " (Auto-created)" if interaction is None else ""
                     logger.debug("Sending pairing announcement")
@@ -1418,9 +1422,9 @@ class PersistentView(discord.ui.View):
                     if session.session_type == "staked":
                         stake_view = discord.ui.View(timeout=None)
                         stake_view.add_item(StakeCalculationButton(session.session_id))
-                        draft_summary_message = await draft_chat_channel.send(embed=draft_summary_embed, view=stake_view)
+                        draft_summary_message = await draft_chat_channel.send(embeds=embeds, view=stake_view)
                     else:
-                        draft_summary_message = await draft_chat_channel.send(embed=draft_summary_embed)
+                        draft_summary_message = await draft_chat_channel.send(embeds=embeds)
 
                     if session.session_type != "test":
                         await draft_summary_message.pin()
