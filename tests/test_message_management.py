@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from database.models_base import Base
 from database.db_session import AsyncSessionLocal
-from database.message_management import Message, handle_sticky_message_update
+from database.message_management import Message, handle_sticky_message_update, StickyUpdateResult
 
 @pytest_asyncio.fixture
 async def test_db():
@@ -63,10 +63,10 @@ async def test_handle_sticky_message_update_deletes_corrupted_record(test_db):
         msg = result.scalars().first()
         assert msg is not None, "Setup failed: message not found in DB"
         
-        # The function should return True (success/handled) and delete the record
+        # The function should return CLEANED_UP and delete the record
         result = await handle_sticky_message_update(msg, mock_bot, session)
-        
-        assert result is True, "Function should return True when handling corruption"
+
+        assert result == StickyUpdateResult.CLEANED_UP, "Function should return CLEANED_UP when handling corruption"
         
         # Verify deletion in the same session (flush happens in delete helper but not commit)
         # The helper performs session.delete(msg). The changes are pending.
