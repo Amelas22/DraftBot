@@ -185,7 +185,8 @@ class DraftStickyStrategy(StickyStrategy):
         # If embed is missing (old message deleted or had no embed), regenerate it
         if embed is None:
             from utils import generate_draft_summary_embed
-            embed = await generate_draft_summary_embed(bot, draft_session_id)
+            main_embed, bet_embed = await generate_draft_summary_embed(bot, draft_session_id)
+            embed = main_embed  # Use main embed for sticky message
             if embed is None:
                 logger.error(f"Failed to regenerate embed for draft session {draft_session_id}")
                 raise ValueError(f"Cannot generate content without embed for session {draft_session_id}")

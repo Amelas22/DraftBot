@@ -19,7 +19,7 @@ from services.draft_analysis import DraftAnalysis
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
 from services.draft_setup_manager import DraftSetupManager
-from services.debt_service import create_debt_entries_from_stakes, get_guild_debt_rows
+from services.debt_service import create_debt_entries_from_stakes, get_guild_debt_rows, get_balance_with
 from debt_views import SettleDebtsView
 from debt_views.settle_views import PublicSettleDebtsView
 from debt_views.helpers import build_guild_debt_embed
@@ -418,12 +418,18 @@ async def calculate_team_wins(draft_session_id):
 
 
 async def generate_draft_summary_embed(bot, draft_session_id):
+    """
+    Generate draft summary embed(s) for a completed or in-progress draft.
+
+    Returns:
+        tuple: (main_embed, bet_embed) where bet_embed may be None if no bets
+    """
     async with AsyncSessionLocal() as session:
         async with session.begin():
             draft_session = await get_draft_session(draft_session_id)
             if not draft_session:
                 print("Draft session not found. Generate Draft Summary")
-                return None
+                return None, None
 
             guild = bot.get_guild(int(draft_session.guild_id))
             if draft_session.session_type != "swiss":
@@ -446,7 +452,8 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                     discord_color = discord.Color.blue()
 
                 embed = discord.Embed(title=title, description=description, color=discord_color)
-                
+                bet_embed = None  # Initialize bet embed (will be populated for staked drafts)
+
                 # Add team fields and seating order
                 embed.add_field(name="🔴 Team Red" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_a_name}", 
                                 value="\n".join(team_a_names), inline=True)
@@ -476,25 +483,29 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                             inline=False
                         )
                     
-                    # Add bet outcomes if there's a winner
+                    # Create bet outcomes embed if there's a winner
                     if team_a_wins > half_matches or team_b_wins > half_matches:
                         # Determine the winning team
                         winning_team = draft_session.team_a if team_a_wins > team_b_wins else draft_session.team_b
-                        
+
                         # Get bet outcome lines
                         outcome_lines, outcome_total = await get_formatted_bet_outcomes(
-                            draft_session_id, 
-                            draft_session.sign_ups, 
+                            draft_session_id,
+                            draft_session.sign_ups,
                             winning_team
                         )
-                        
-                        # Add the bet outcomes field to the embed
+
+                        # Create separate bet outcomes embed
                         if outcome_lines:
-                            embed.add_field(
-                                name="**Bet Outcomes**",
-                                value="\n".join(outcome_lines),
-                                inline=False
+                            separator = "💵━━━━━━━━━━━━━━━"
+                            bet_description = f"\n{separator}\n".join(outcome_lines)
+
+                            bet_embed = discord.Embed(
+                                title="💰 Bet Outcomes",
+                                description=bet_description,
+                                color=discord_color  # Match main embed color
                             )
+                            bet_embed.set_footer(text=f"Total bets settled: {outcome_total} tix")
 
                             # Create debt ledger entries for stake outcomes
                             try:
@@ -515,8 +526,9 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                 embed = discord.Embed(title=title, description=description, color=discord_color)
                 seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
                 embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+                bet_embed = None  # Swiss drafts don't have bet outcomes
 
-            return embed
+            return embed, bet_embed
         
 
 async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, half_matches, total_matches):
@@ -600,13 +612,17 @@ async def update_draft_summary_message(bot, draft_session_id):
             return
         if draft_session.session_type == "swiss":
             return
-        updated_embed = await generate_draft_summary_embed(bot, draft_session_id)
+        main_embed, bet_embed = await generate_draft_summary_embed(bot, draft_session_id)
         guild = bot.get_guild(int(draft_session.guild_id))
         channel = guild.get_channel(int(draft_session.draft_chat_channel))
-        
+
         try:
             summary_message = await channel.fetch_message(int(draft_session.draft_summary_message_id))
-            await summary_message.edit(embed=updated_embed)
+            # Update with both embeds
+            embeds = [main_embed]
+            if bet_embed:
+                embeds.append(bet_embed)
+            await summary_message.edit(embeds=embeds)
         except Exception as e:
             print(f"Failed to update draft summary message: {e}")
 
@@ -782,12 +798,12 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                         logger.info(f"Victory already processed for session {draft_session_id}, only updating messages to add logs link if needed")
 
                         # Still update messages to add logs link if it wasn't there before
-                        embed = await generate_draft_summary_embed(bot, draft_session_id)
+                        main_embed, bet_embed = await generate_draft_summary_embed(bot, draft_session_id)
                         three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
-                        embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
+                        main_embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
                         if draft_session.data_received and hasattr(draft_session, 'logs_channel_id') and draft_session.logs_message_id:
                             logs_link = f"https://discord.com/channels/{draft_session.guild_id}/{draft_session.logs_channel_id}/{draft_session.logs_message_id}"
-                            embed.add_field(
+                            main_embed.add_field(
                                 name="Draft Logs",
                                 value=f"[View Draft Log]({logs_link})",
                                 inline=False
@@ -800,15 +816,20 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                                 guild_id=draft_session.guild_id
                             )
 
-                        # Update both message locations with the new embed (including logs link if available)
+                        # Prepare embeds list
+                        embeds = [main_embed]
+                        if bet_embed:
+                            embeds.append(bet_embed)
+
+                        # Update both message locations with the new embeds (including logs link if available)
                         draft_chat_channel = guild.get_channel(int(draft_session.draft_chat_channel))
                         if draft_chat_channel:
-                            await post_or_update_victory_message(bot, session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat', view=settle_view)
+                            await post_or_update_victory_message(bot, session, draft_chat_channel, embeds, draft_session, 'victory_message_id_draft_chat', view=settle_view)
 
                         results_channel_name = "team-draft-results" if draft_session.session_type == "random" or draft_session.session_type == "staked" else "league-draft-results"
                         results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
                         if results_channel:
-                            await post_or_update_victory_message(bot, session, results_channel, embed, draft_session, 'victory_message_id_results_channel', view=settle_view)
+                            await post_or_update_victory_message(bot, session, results_channel, embeds, draft_session, 'victory_message_id_results_channel', view=settle_view)
 
                         return  # Skip all streak/leaderboard processing
 
@@ -823,13 +844,13 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                     draft_session.deletion_time = datetime.now() + timedelta(hours=2)
                     draft_session.session_stage = 'completed'
 
-                    embed = await generate_draft_summary_embed(bot, draft_session_id)
+                    main_embed, bet_embed = await generate_draft_summary_embed(bot, draft_session_id)
                     three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
-                    embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
+                    main_embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
                     # Add logs link to the embed if available
                     if draft_session.data_received and hasattr(draft_session, 'logs_channel_id') and draft_session.logs_message_id:
                         logs_link = f"https://discord.com/channels/{draft_session.guild_id}/{draft_session.logs_channel_id}/{draft_session.logs_message_id}"
-                        embed.add_field(
+                        main_embed.add_field(
                             name="Draft Logs",
                             value=f"[View Draft Log]({logs_link})",
                             inline=False
@@ -842,16 +863,21 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                             guild_id=draft_session.guild_id
                         )
 
+                    # Prepare embeds list
+                    embeds = [main_embed]
+                    if bet_embed:
+                        embeds.append(bet_embed)
+
                     # Handle the draft-chat channel message
                     draft_chat_channel = guild.get_channel(int(draft_session.draft_chat_channel))
                     if draft_chat_channel:
-                        await post_or_update_victory_message(bot, session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat', view=settle_view)
+                        await post_or_update_victory_message(bot, session, draft_chat_channel, embeds, draft_session, 'victory_message_id_draft_chat', view=settle_view)
 
                     # Determine the correct results channel
                     results_channel_name = "team-draft-results" if draft_session.session_type == "random" or draft_session.session_type == "staked" else "league-draft-results"
                     results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
                     if results_channel:
-                        await post_or_update_victory_message(bot, session, results_channel, embed, draft_session, 'victory_message_id_results_channel', view=settle_view)
+                        await post_or_update_victory_message(bot, session, results_channel, embeds, draft_session, 'victory_message_id_results_channel', view=settle_view)
                     else:
                         print(f"Results channel '{results_channel_name}' not found.")
 
@@ -1094,7 +1120,13 @@ async def remove_lock_after_delay(draft_session_id, delay):
     if draft_session_id in flags:
         del flags[draft_session_id]
 
-async def post_or_update_victory_message(bot, session, channel, embed, draft_session, victory_message_attr, view=None):
+async def post_or_update_victory_message(bot, session, channel, embeds, draft_session, victory_message_attr, view=None):
+    """
+    Post or update victory message with embed(s).
+
+    Args:
+        embeds: Single embed or list of embeds
+    """
     if not channel:
         print("Channel not found.")
         return
@@ -1105,18 +1137,18 @@ async def post_or_update_victory_message(bot, session, channel, embed, draft_ses
         try:
             message = await channel.fetch_message(int(victory_message_id))
             if view:
-                await message.edit(embed=embed, view=view)
+                await message.edit(embeds=embeds, view=view)
             else:
-                await message.edit(embed=embed)
+                await message.edit(embeds=embeds)
         except discord.NotFound:
             print(f"Message ID {victory_message_id} not found in {channel.name}. Posting a new message.")
             victory_message_id = None
 
     if not victory_message_id:
         if view:
-            message = await channel.send(embed=embed, view=view)
+            message = await channel.send(embeds=embeds, view=view)
         else:
-            message = await channel.send(embed=embed)
+            message = await channel.send(embeds=embeds)
         setattr(draft_session, victory_message_attr, str(message.id))
         session.add(draft_session)
     
@@ -2469,23 +2501,100 @@ async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
                 else:
                     winner_id = stake.opponent_id
                     loser_id = stake.player_id
-                
+
                 # Get player names
                 winner_name = sign_ups.get(winner_id, "Unknown")
                 loser_name = sign_ups.get(loser_id, "Unknown")
-                
-                # Add to unique outcomes list
-                unique_pairs.append((loser_name, winner_name, amount))
-                
+
+                # Get pre-draft balance from loser's perspective
+                # Exclude entries from THIS session to get the true pre-existing balance
+                pre_draft_balance = await get_balance_with(
+                    guild_id=draft_session.guild_id,
+                    player_id=loser_id,
+                    counterparty_id=winner_id,
+                    exclude_session_id=session_id
+                )
+
+                # Calculate new balance after this draft
+                # From loser's perspective: negative = loser owes winner
+                new_balance = pre_draft_balance - amount
+
+                # Convert to absolute values for display
+                previous_debt = abs(pre_draft_balance)
+                new_debt = abs(new_balance)
+
+                # Add to unique outcomes list with balances
+                unique_pairs.append((loser_name, winner_name, amount, loser_id, winner_id, pre_draft_balance, new_balance))
+
                 # Add to total stake
                 total_stake += amount
-            
+
             # Sort by amount (highest first)
             unique_pairs.sort(key=lambda x: x[2], reverse=True)
-            
-            # Format for display - Loser owes Winner
-            formatted_lines = [f"{loser} owes {winner}: {amount} tix" for loser, winner, amount in unique_pairs]
-            
+
+            # Format for display with pre-existing debt, this draft, and net total
+            formatted_lines = []
+            for loser_name, winner_name, amount, loser_id, winner_id, pre_draft_balance, new_balance in unique_pairs:
+                previous_debt = abs(pre_draft_balance)
+                new_debt = abs(new_balance)
+
+                # Determine net debtor/creditor based on new_balance sign
+                if new_balance < 0:
+                    # NET: Loser owes Winner (most common)
+                    net_debtor = loser_name
+                    net_creditor = winner_name
+
+                    if pre_draft_balance > 0:
+                        # Debt inverted (winner owed loser → loser now owes winner)
+                        # Math: amount - previous_debt = new_debt
+                        lines = [
+                            f"{net_debtor} owes {net_creditor}:",
+                            f"  This draft: {net_debtor} lost {amount} tix",
+                            f"  Pre-existing: {net_debtor} was owed {previous_debt} tix",
+                            f"  Net total: {net_debtor} owes {new_debt} tix (from {amount} - {previous_debt})"
+                        ]
+                    elif pre_draft_balance == 0:
+                        # First bet
+                        lines = [
+                            f"{net_debtor} owes {net_creditor}:",
+                            f"  This draft: {amount} tix",
+                            f"  Pre-existing: 0 tix",
+                            f"  Net total: {new_debt} tix"
+                        ]
+                    else:
+                        # Debt increases in same direction
+                        lines = [
+                            f"{net_debtor} owes {net_creditor}:",
+                            f"  This draft: {amount} tix",
+                            f"  Pre-existing: {previous_debt} tix",
+                            f"  Net total: {new_debt} tix"
+                        ]
+
+                elif new_balance > 0:
+                    # NET: Winner still owes Loser (pre-existing debt absorbed the loss)
+                    # Math: previous_debt - amount = new_debt
+                    net_debtor = winner_name
+                    net_creditor = loser_name
+
+                    lines = [
+                        f"{net_debtor} owes {net_creditor}:",
+                        f"  This draft: {loser_name} lost {amount} tix",
+                        f"  Pre-existing: {net_debtor} owed {previous_debt} tix",
+                        f"  Net total: {net_debtor} owes {new_debt} tix (from {previous_debt} - {amount})"
+                    ]
+
+                else:  # new_balance == 0
+                    # Debts exactly canceled
+                    lines = [
+                        f"Debt between {loser_name} and {winner_name}:",
+                        f"  This draft: {amount} tix",
+                        f"  Pre-existing: {previous_debt} tix",
+                        f"  Net total: 0 tix (debts canceled!)"
+                    ]
+
+                # Join the 4 lines into a single multi-line string
+                formatted_lines.append("\n".join(lines))
+
             return formatted_lines, total_stake
 
 
