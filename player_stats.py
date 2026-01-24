@@ -6,19 +6,13 @@ from session import AsyncSessionLocal, DraftSession, MatchResult, PlayerStats
 from models.win_streak_history import WinStreakHistory
 from models.perfect_streak_history import PerfectStreakHistory
 from loguru import logger
+from stats_core import get_timeframe_start_date, calculate_win_percentage, calculate_team_draft_win_percentage
 
 async def get_player_statistics(user_id, time_frame=None, user_display_name=None, guild_id=None):
     """Get player statistics for a specific user and time frame, filtered by guild_id if provided."""
     try:
-        now = datetime.now()
-        
-        # Calculate the start date based on time frame
-        if time_frame == 'week':
-            start_date = now - timedelta(days=7)
-        elif time_frame == 'month':
-            start_date = now - timedelta(days=30)
-        else:  # Lifetime stats
-            start_date = datetime(2000, 1, 1)  # Far in the past
+        # Calculate the start date based on time frame using shared utility
+        start_date = get_timeframe_start_date(time_frame)
         
         # Default values for stats
         drafts_played = 0
@@ -289,9 +283,10 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                 matches_played_params = {"user_id": user_id, "start_date": start_date, "guild_id": guild_id}                
                 matches_played_result = await session.execute(matches_played_query, matches_played_params)
                 matches_played = matches_played_result.scalar() or 0
-                
-                # Calculate match win percentage
-                match_win_percentage = (matches_won / matches_played * 100) if matches_played > 0 else 0
+
+                # Calculate match win percentage using shared utility
+                matches_lost = matches_played - matches_won
+                match_win_percentage = calculate_win_percentage(matches_won, matches_lost)
                 
                 # Get all draft sessions with guild_id filter
                 drafts_query_text = """
@@ -859,18 +854,15 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
                             else:
                                 stats["losses"] += 1
                 
-                # Calculate win percentages for match stats
+                # Calculate win percentages for match stats using shared utility
                 for stats in [weekly_stats, monthly_stats, lifetime_stats]:
-                    stats["user1_win_percentage"] = (stats["user1_wins"] / stats["matches_played"] * 100) if stats["matches_played"] > 0 else 0
-                    stats["user2_win_percentage"] = (stats["user2_wins"] / stats["matches_played"] * 100) if stats["matches_played"] > 0 else 0
+                    total_matches = stats["matches_played"]
+                    stats["user1_win_percentage"] = calculate_win_percentage(stats["user1_wins"], total_matches - stats["user1_wins"])
+                    stats["user2_win_percentage"] = calculate_win_percentage(stats["user2_wins"], total_matches - stats["user2_wins"])
                 
-                # Calculate win percentages for team stats (excluding draws from calculation)
+                # Calculate win percentages for team stats using shared utility
                 for stats in [opposing_weekly, opposing_monthly, opposing_lifetime, teammate_weekly, teammate_monthly, teammate_lifetime]:
-                    wins_plus_losses = stats["wins"] + stats["losses"]
-                    if wins_plus_losses > 0:
-                        stats["win_percentage"] = (stats["wins"] / wins_plus_losses) * 100
-                    else:
-                        stats["win_percentage"] = 0
+                    stats["win_percentage"] = calculate_win_percentage(stats["wins"], stats["losses"], stats["draws"])
                 
                 # Debug log to verify data
                 logger.info(f"User1_id: {user1_id}, User2_id: {user2_id}")

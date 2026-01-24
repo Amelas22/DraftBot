@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 from sqlalchemy import select
 from player_stats import get_head_to_head_stats, get_player_statistics
+from stats_core import get_timeframe_start_date, calculate_win_percentage, calculate_team_draft_win_percentage
 
 # Constants
 LEGACY_GUILD_ID = "715228693529886760"  
@@ -246,20 +247,17 @@ def get_legacy_player_stats(user_id, time_frame=None):
             stats['trophies_won'] += 1
     
     # Calculate team win percentage
-    if stats['team_drafts_played'] > 0:
-        team_games = stats['team_drafts_won'] + (stats['team_drafts_played'] - stats['team_drafts_won'] - stats['team_drafts_tied'])
-        if team_games > 0:
-            stats['team_draft_win_percentage'] = (stats['team_drafts_won'] / team_games) * 100
-        else:
-            stats['team_draft_win_percentage'] = 0
-    else:
-        stats['team_draft_win_percentage'] = 0
-    
-    # Calculate match win percentage
-    if stats['matches_played'] > 0:
-        stats['match_win_percentage'] = (stats['matches_won'] / stats['matches_played']) * 100
-    else:
-        stats['match_win_percentage'] = 0
+    # Calculate team draft win percentage using shared utility
+    team_losses = stats['team_drafts_played'] - stats['team_drafts_won'] - stats['team_drafts_tied']
+    stats['team_draft_win_percentage'] = calculate_team_draft_win_percentage(
+        stats['team_drafts_won'],
+        team_losses,
+        stats['team_drafts_tied']
+    )
+
+    # Calculate match win percentage using shared utility
+    matches_lost = stats['matches_played'] - stats['matches_won']
+    stats['match_win_percentage'] = calculate_win_percentage(stats['matches_won'], matches_lost)
         
     return stats
 
@@ -358,21 +356,14 @@ def get_legacy_head_to_head_stats(user1_id, user2_id, time_frame=None):
                 elif match['winner_id'] == user2_id:
                     match_stats['user2_wins'] += 1
     
-    # Calculate win percentages for match stats
-    if match_stats['matches_played'] > 0:
-        match_stats['user1_win_percentage'] = (match_stats['user1_wins'] / match_stats['matches_played']) * 100
-        match_stats['user2_win_percentage'] = (match_stats['user2_wins'] / match_stats['matches_played']) * 100
-    else:
-        match_stats['user1_win_percentage'] = 0
-        match_stats['user2_win_percentage'] = 0
-    
-    # Calculate win percentages for team stats (excluding draws)
+    # Calculate win percentages for match stats using shared utility
+    total_matches = match_stats['matches_played']
+    match_stats['user1_win_percentage'] = calculate_win_percentage(match_stats['user1_wins'], total_matches - match_stats['user1_wins'])
+    match_stats['user2_win_percentage'] = calculate_win_percentage(match_stats['user2_wins'], total_matches - match_stats['user2_wins'])
+
+    # Calculate win percentages for team stats using shared utility
     for stats in [opposing_stats, teammate_stats]:
-        wins_plus_losses = stats['wins'] + stats['losses']
-        if wins_plus_losses > 0:
-            stats['win_percentage'] = (stats['wins'] / wins_plus_losses) * 100
-        else:
-            stats['win_percentage'] = 0
+        stats['win_percentage'] = calculate_win_percentage(stats['wins'], stats['losses'], stats['draws'])
     
     return {
         "match_stats": match_stats,
@@ -420,17 +411,16 @@ async def get_player_statistics_with_legacy(user_id, time_frame=None, user_displ
             "longest_perfect_streak": current_stats.get("longest_perfect_streak", 0)
         }
         
-        # Recalculate percentages
-        if merged_stats["matches_played"] > 0:
-            merged_stats["match_win_percentage"] = (merged_stats["matches_won"] / merged_stats["matches_played"]) * 100
-        else:
-            merged_stats["match_win_percentage"] = 0
-            
-        team_games = merged_stats["team_drafts_won"] + (merged_stats["team_drafts_played"] - merged_stats["team_drafts_won"] - merged_stats["team_drafts_tied"])
-        if team_games > 0:
-            merged_stats["team_draft_win_percentage"] = (merged_stats["team_drafts_won"] / team_games) * 100
-        else:
-            merged_stats["team_draft_win_percentage"] = 0
+        # Recalculate percentages using shared utilities
+        matches_lost = merged_stats["matches_played"] - merged_stats["matches_won"]
+        merged_stats["match_win_percentage"] = calculate_win_percentage(merged_stats["matches_won"], matches_lost)
+
+        team_losses = merged_stats["team_drafts_played"] - merged_stats["team_drafts_won"] - merged_stats["team_drafts_tied"]
+        merged_stats["team_draft_win_percentage"] = calculate_team_draft_win_percentage(
+            merged_stats["team_drafts_won"],
+            team_losses,
+            merged_stats["team_drafts_tied"]
+        )
         
         return merged_stats
     else:
@@ -472,13 +462,10 @@ async def get_head_to_head_stats_with_legacy(user1_id, user2_id, user1_display_n
             "user2_wins": current_lifetime.get("user2_wins", 0) + legacy_lifetime_matches.get("user2_wins", 0)
         }
         
-        # Recalculate percentages
-        if merged_lifetime["matches_played"] > 0:
-            merged_lifetime["user1_win_percentage"] = (merged_lifetime["user1_wins"] / merged_lifetime["matches_played"]) * 100
-            merged_lifetime["user2_win_percentage"] = (merged_lifetime["user2_wins"] / merged_lifetime["matches_played"]) * 100
-        else:
-            merged_lifetime["user1_win_percentage"] = 0
-            merged_lifetime["user2_win_percentage"] = 0
+        # Recalculate percentages using shared utility
+        total_matches = merged_lifetime["matches_played"]
+        merged_lifetime["user1_win_percentage"] = calculate_win_percentage(merged_lifetime["user1_wins"], total_matches - merged_lifetime["user1_wins"])
+        merged_lifetime["user2_win_percentage"] = calculate_win_percentage(merged_lifetime["user2_wins"], total_matches - merged_lifetime["user2_wins"])
         
         # Merge monthly match stats
         current_monthly = current_stats.get("monthly", {})
@@ -490,13 +477,10 @@ async def get_head_to_head_stats_with_legacy(user1_id, user2_id, user1_display_n
             "user2_wins": current_monthly.get("user2_wins", 0) + legacy_monthly_matches.get("user2_wins", 0)
         }
         
-        # Recalculate percentages
-        if merged_monthly["matches_played"] > 0:
-            merged_monthly["user1_win_percentage"] = (merged_monthly["user1_wins"] / merged_monthly["matches_played"]) * 100
-            merged_monthly["user2_win_percentage"] = (merged_monthly["user2_wins"] / merged_monthly["matches_played"]) * 100
-        else:
-            merged_monthly["user1_win_percentage"] = 0
-            merged_monthly["user2_win_percentage"] = 0
+        # Recalculate percentages using shared utility
+        total_matches = merged_monthly["matches_played"]
+        merged_monthly["user1_win_percentage"] = calculate_win_percentage(merged_monthly["user1_wins"], total_matches - merged_monthly["user1_wins"])
+        merged_monthly["user2_win_percentage"] = calculate_win_percentage(merged_monthly["user2_wins"], total_matches - merged_monthly["user2_wins"])
         
         # Merge weekly match stats
         current_weekly = current_stats.get("weekly", {})
@@ -508,13 +492,10 @@ async def get_head_to_head_stats_with_legacy(user1_id, user2_id, user1_display_n
             "user2_wins": current_weekly.get("user2_wins", 0) + legacy_weekly_matches.get("user2_wins", 0)
         }
         
-        # Recalculate percentages
-        if merged_weekly["matches_played"] > 0:
-            merged_weekly["user1_win_percentage"] = (merged_weekly["user1_wins"] / merged_weekly["matches_played"]) * 100
-            merged_weekly["user2_win_percentage"] = (merged_weekly["user2_wins"] / merged_weekly["matches_played"]) * 100
-        else:
-            merged_weekly["user1_win_percentage"] = 0
-            merged_weekly["user2_win_percentage"] = 0
+        # Recalculate percentages using shared utility
+        total_matches = merged_weekly["matches_played"]
+        merged_weekly["user1_win_percentage"] = calculate_win_percentage(merged_weekly["user1_wins"], total_matches - merged_weekly["user1_wins"])
+        merged_weekly["user2_win_percentage"] = calculate_win_percentage(merged_weekly["user2_wins"], total_matches - merged_weekly["user2_wins"])
         
         # Merge opposing team stats
         current_opposing_lifetime = current_stats.get("opposing_lifetime", {})
@@ -526,12 +507,12 @@ async def get_head_to_head_stats_with_legacy(user1_id, user2_id, user1_display_n
             "draws": current_opposing_lifetime.get("draws", 0) + legacy_opposing_lifetime.get("draws", 0)
         }
         
-        # Recalculate win percentage
-        wins_plus_losses = merged_opposing_lifetime["wins"] + merged_opposing_lifetime["losses"]
-        if wins_plus_losses > 0:
-            merged_opposing_lifetime["win_percentage"] = (merged_opposing_lifetime["wins"] / wins_plus_losses) * 100
-        else:
-            merged_opposing_lifetime["win_percentage"] = 0
+        # Recalculate win percentage using shared utility
+        merged_opposing_lifetime["win_percentage"] = calculate_win_percentage(
+            merged_opposing_lifetime["wins"],
+            merged_opposing_lifetime["losses"],
+            merged_opposing_lifetime["draws"]
+        )
         
         # Similar merge for monthly and weekly opposing stats
         current_opposing_monthly = current_stats.get("opposing_monthly", {})
@@ -543,11 +524,11 @@ async def get_head_to_head_stats_with_legacy(user1_id, user2_id, user1_display_n
             "draws": current_opposing_monthly.get("draws", 0) + legacy_opposing_monthly.get("draws", 0)
         }
         
-        wins_plus_losses = merged_opposing_monthly["wins"] + merged_opposing_monthly["losses"]
-        if wins_plus_losses > 0:
-            merged_opposing_monthly["win_percentage"] = (merged_opposing_monthly["wins"] / wins_plus_losses) * 100
-        else:
-            merged_opposing_monthly["win_percentage"] = 0
+        merged_opposing_monthly["win_percentage"] = calculate_win_percentage(
+            merged_opposing_monthly["wins"],
+            merged_opposing_monthly["losses"],
+            merged_opposing_monthly["draws"]
+        )
         
         current_opposing_weekly = current_stats.get("opposing_weekly", {})
         legacy_opposing_weekly = legacy_weekly.get("opposing_stats", {})
@@ -558,11 +539,11 @@ async def get_head_to_head_stats_with_legacy(user1_id, user2_id, user1_display_n
             "draws": current_opposing_weekly.get("draws", 0) + legacy_opposing_weekly.get("draws", 0)
         }
         
-        wins_plus_losses = merged_opposing_weekly["wins"] + merged_opposing_weekly["losses"]
-        if wins_plus_losses > 0:
-            merged_opposing_weekly["win_percentage"] = (merged_opposing_weekly["wins"] / wins_plus_losses) * 100
-        else:
-            merged_opposing_weekly["win_percentage"] = 0
+        merged_opposing_weekly["win_percentage"] = calculate_win_percentage(
+            merged_opposing_weekly["wins"],
+            merged_opposing_weekly["losses"],
+            merged_opposing_weekly["draws"]
+        )
         
         # Merge teammate stats
         current_teammate_lifetime = current_stats.get("teammate_lifetime", {})
@@ -574,11 +555,11 @@ async def get_head_to_head_stats_with_legacy(user1_id, user2_id, user1_display_n
             "draws": current_teammate_lifetime.get("draws", 0) + legacy_teammate_lifetime.get("draws", 0)
         }
         
-        wins_plus_losses = merged_teammate_lifetime["wins"] + merged_teammate_lifetime["losses"]
-        if wins_plus_losses > 0:
-            merged_teammate_lifetime["win_percentage"] = (merged_teammate_lifetime["wins"] / wins_plus_losses) * 100
-        else:
-            merged_teammate_lifetime["win_percentage"] = 0
+        merged_teammate_lifetime["win_percentage"] = calculate_win_percentage(
+            merged_teammate_lifetime["wins"],
+            merged_teammate_lifetime["losses"],
+            merged_teammate_lifetime["draws"]
+        )
         
         # Similar merge for monthly and weekly teammate stats
         current_teammate_monthly = current_stats.get("teammate_monthly", {})
@@ -590,11 +571,11 @@ async def get_head_to_head_stats_with_legacy(user1_id, user2_id, user1_display_n
             "draws": current_teammate_monthly.get("draws", 0) + legacy_teammate_monthly.get("draws", 0)
         }
         
-        wins_plus_losses = merged_teammate_monthly["wins"] + merged_teammate_monthly["losses"]
-        if wins_plus_losses > 0:
-            merged_teammate_monthly["win_percentage"] = (merged_teammate_monthly["wins"] / wins_plus_losses) * 100
-        else:
-            merged_teammate_monthly["win_percentage"] = 0
+        merged_teammate_monthly["win_percentage"] = calculate_win_percentage(
+            merged_teammate_monthly["wins"],
+            merged_teammate_monthly["losses"],
+            merged_teammate_monthly["draws"]
+        )
         
         current_teammate_weekly = current_stats.get("teammate_weekly", {})
         legacy_teammate_weekly = legacy_weekly.get("teammate_stats", {})
@@ -605,11 +586,11 @@ async def get_head_to_head_stats_with_legacy(user1_id, user2_id, user1_display_n
             "draws": current_teammate_weekly.get("draws", 0) + legacy_teammate_weekly.get("draws", 0)
         }
         
-        wins_plus_losses = merged_teammate_weekly["wins"] + merged_teammate_weekly["losses"]
-        if wins_plus_losses > 0:
-            merged_teammate_weekly["win_percentage"] = (merged_teammate_weekly["wins"] / wins_plus_losses) * 100
-        else:
-            merged_teammate_weekly["win_percentage"] = 0
+        merged_teammate_weekly["win_percentage"] = calculate_win_percentage(
+            merged_teammate_weekly["wins"],
+            merged_teammate_weekly["losses"],
+            merged_teammate_weekly["draws"]
+        )
         
         # Construct final merged stats
         merged_stats = {
