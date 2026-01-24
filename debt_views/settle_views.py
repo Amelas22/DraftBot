@@ -162,11 +162,12 @@ class CounterpartySelectView(View):
             )
             logger.debug(f"[CounterpartySelect] Found {len(entries)} entries")
 
-            name = get_member_name(self.guild, counterparty_id)
+            name_decorated = get_member_name(self.guild, counterparty_id)
+            name_plain = get_member_name_plain(self.guild, counterparty_id)
 
             # Build breakdown embed
             embed = discord.Embed(
-                title=f"Settle with {name}",
+                title=f"Settle with {name_plain}",
                 color=discord.Color.blue()
             )
 
@@ -212,7 +213,8 @@ class CounterpartySelectView(View):
                 guild_id=self.guild_id,
                 counterparty_id=counterparty_id,
                 net_balance=balance,
-                counterparty_name=name
+                counterparty_name_plain=name_plain,
+                counterparty_name_decorated=name_decorated
             )
 
             logger.debug(f"[CounterpartySelect] Editing message with breakdown embed")
@@ -238,13 +240,15 @@ class AmountInputView(View):
     """View with button to enter settlement amount."""
 
     def __init__(self, user_id: str, guild_id: str, counterparty_id: str,
-                 net_balance: int, counterparty_name: str):
+                 net_balance: int, counterparty_name_plain: str,
+                 counterparty_name_decorated: str):
         super().__init__(timeout=300)
         self.user_id = user_id
         self.guild_id = guild_id
         self.counterparty_id = counterparty_id
         self.net_balance = net_balance
-        self.counterparty_name = counterparty_name
+        self.counterparty_name_plain = counterparty_name_plain
+        self.counterparty_name_decorated = counterparty_name_decorated
         logger.debug(f"[AmountInputView] Created for user {user_id}, counterparty {counterparty_id}, balance {net_balance}")
 
     @discord.ui.button(label="Enter Amount", style=discord.ButtonStyle.primary)
@@ -257,7 +261,8 @@ class AmountInputView(View):
                 guild_id=self.guild_id,
                 counterparty_id=self.counterparty_id,
                 net_balance=self.net_balance,
-                counterparty_name=self.counterparty_name
+                counterparty_name_plain=self.counterparty_name_plain,
+                counterparty_name_decorated=self.counterparty_name_decorated
             )
             logger.debug(f"[AmountInputView] Sending modal")
             await interaction.response.send_modal(modal)
@@ -291,13 +296,23 @@ class AmountConfirmationModal(Modal):
     """Modal for entering the settlement amount."""
 
     def __init__(self, user_id: str, guild_id: str, counterparty_id: str,
-                 net_balance: int, counterparty_name: str):
-        super().__init__(title=f"Settle with {counterparty_name[:40]}")
+                 net_balance: int, counterparty_name_plain: str,
+                 counterparty_name_decorated: str):
+        # Use plain name (no icons) for modal title with safe truncation
+        # Discord modal title limit: 45 chars, "Settle with " prefix: 12 chars
+        # Available for name: 33 chars, reserve 3 for ellipsis if needed
+        if len(counterparty_name_plain) <= 33:
+            safe_name = counterparty_name_plain
+        else:
+            safe_name = counterparty_name_plain[:30] + "..."
+
+        super().__init__(title=f"Settle with {safe_name}")
         self.user_id = user_id
         self.guild_id = guild_id
         self.counterparty_id = counterparty_id
         self.net_balance = net_balance
-        self.counterparty_name = counterparty_name
+        self.counterparty_name_plain = counterparty_name_plain
+        self.counterparty_name_decorated = counterparty_name_decorated
 
         logger.debug(f"[AmountModal] Created for user {user_id}, counterparty {counterparty_id}, balance {net_balance}")
 
@@ -371,7 +386,7 @@ class AmountConfirmationModal(Modal):
         embed.add_field(
             name="Settlement Details",
             value=(
-                f"**With:** {self.counterparty_name}\n"
+                f"**With:** {self.counterparty_name_decorated}\n"
                 f"**Amount:** {amount} tix ({direction})\n"
                 f"**Net balance was:** {abs_balance} tix"
             ),
