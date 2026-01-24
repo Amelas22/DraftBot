@@ -7,6 +7,7 @@ from sqlalchemy import select, not_, or_
 from datetime import datetime, timedelta
 from collections import Counter
 from player_stats import get_player_statistics, create_stats_embed
+from stats_display import get_stats_embed_for_player
 from loguru import logger
 from discord.ext import commands
 from legacy_stats import get_legacy_player_stats, get_legacy_head_to_head_stats
@@ -98,25 +99,17 @@ async def league_commands(bot):
         """Display your personal draft statistics."""
         # Convert choice to boolean for internal logic
         hidden_message = visibility == "Just me"
-        
+
         # Only defer publicly if stats are meant to be public
         await ctx.defer(ephemeral=hidden_message)
-        
-        user = ctx.author
-        user_id = str(user.id)
-        user_display_name = user.display_name
-        guild_id = str(ctx.guild.id)  # Get current guild ID
-        
+
+        user_id = str(ctx.author.id)
+        guild_id = str(ctx.guild.id)
+        display_name = ctx.author.display_name
+
         try:
-            from legacy_stats import get_player_statistics_with_legacy
-            
-            # Get player statistics with legacy data incorporated
-            stats_weekly = await get_player_statistics_with_legacy(user_id, 'week', user_display_name, guild_id)
-            stats_monthly = await get_player_statistics_with_legacy(user_id, 'month', user_display_name, guild_id)
-            stats_lifetime = await get_player_statistics_with_legacy(user_id, None, user_display_name, guild_id)
-            
-            # Create and send the embed
-            embed = await create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime)
+            # Use DRY helper function
+            embed = await get_stats_embed_for_player(bot, user_id, guild_id, display_name)
             await ctx.followup.send(embed=embed, ephemeral=hidden_message)
         except Exception as e:
             logger.error(f"Error in stats command: {e}")

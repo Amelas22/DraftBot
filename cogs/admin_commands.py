@@ -6,6 +6,7 @@ import discord
 from loguru import logger
 from config import get_config, save_config
 from leaderboard_config import CROWN_ICONS, DEFAULT_CROWN_ROLE_NAMES
+from stats_display import get_stats_embed_for_player
 
 from helpers.permissions import has_bot_manager_role, ADMIN_ROLE_NAME
 
@@ -1005,6 +1006,49 @@ class AdminCommands(commands.Cog):
         except Exception as e:
             logger.error(f"Error refreshing ring bearer for guild {ctx.guild.id}: {e}")
             await ctx.followup.send(f"⚠️ Error refreshing ring bearer: {e}", ephemeral=True)
+
+
+    @discord.slash_command(
+        name="admin-stats",
+        description="[Admin] View draft statistics for any player"
+    )
+    @discord.option(
+        "player",
+        discord.Member,
+        description="The player to view stats for",
+        required=True
+    )
+    @discord.option(
+        "visibility",
+        str,
+        description="Who can see the stats?",
+        choices=["Just me", "Everyone"],
+        default="Just me"
+    )
+    @has_bot_manager_role()
+    async def admin_stats(self, ctx, player: discord.Member, visibility: str = "Just me"):
+        """[Admin] View draft statistics for any player."""
+        hidden_message = visibility == "Just me"
+        await ctx.defer(ephemeral=hidden_message)
+
+        player_id = str(player.id)
+        guild_id = str(ctx.guild.id)
+        display_name = player.display_name
+
+        try:
+            embed = await get_stats_embed_for_player(self.bot, player_id, guild_id, display_name)
+
+            # Add admin indicator to embed footer
+            current_footer = embed.footer.text if embed.footer else "Stats are updated after each draft"
+            embed.set_footer(text=f"{current_footer} | Requested by {ctx.author.display_name} (Admin)")
+
+            await ctx.followup.send(embed=embed, ephemeral=hidden_message)
+        except Exception as e:
+            logger.error(f"Error in admin-stats command: {e}")
+            await ctx.followup.send(
+                f"An error occurred while fetching stats for {player.display_name}. Please try again later.",
+                ephemeral=True
+            )
 
 
 def setup(bot):
