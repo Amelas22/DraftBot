@@ -692,26 +692,109 @@ class AdminCommands(commands.Cog):
                 ephemeral=True
             )
 
-    @discord.slash_command(name='cleanup_test_drafts', description='Clean up old test drafts and channels')
+    async def _get_expected_match_count(self, draft_session):
+        """
+        Calculate how many matches should exist for a draft session.
+        Returns the match_counter - 1 (since counter tracks next match number).
+        """
+        if not draft_session.match_counter:
+            return 0
+        return draft_session.match_counter - 1
+
+    async def _create_missing_matches_as_draws(self, db_session, draft_session):
+        """
+        Ensure all expected matches exist as draw records.
+        For non-Swiss: 3 rounds with team_a_size matches each
+        For Swiss: up to 12 matches based on match_counter
+        Returns count of matches created.
+        """
+        from models.match import MatchResult
+        from sqlalchemy import select
+
+        # Get existing matches
+        stmt = select(MatchResult).where(
+            MatchResult.session_id == draft_session.session_id
+        )
+        result = await db_session.execute(stmt)
+        existing_matches = result.scalars().all()
+        existing_match_numbers = {m.match_number for m in existing_matches}
+
+        # Calculate expected match count
+        expected_count = await self._get_expected_match_count(draft_session)
+
+        # Create missing matches as draws
+        created_count = 0
+        for match_num in range(1, expected_count + 1):
+            if match_num not in existing_match_numbers:
+                # Match is missing, create it as a draw
+                # Note: We don't have player info, so set both player IDs to None
+                match_result = MatchResult(
+                    session_id=draft_session.session_id,
+                    match_number=match_num,
+                    player1_id=None,
+                    player2_id=None,
+                    player1_wins=0,
+                    player2_wins=0,
+                    winner_id=None,
+                    guild_id=draft_session.guild_id
+                )
+                db_session.add(match_result)
+                created_count += 1
+                logger.info(f"Created missing match {match_num} as draw for session {draft_session.session_id}")
+
+        return created_count
+
+    async def _get_unplayed_match_count(self, db_session, session_id: str):
+        """
+        Count unplayed matches (winner_id=None, both wins=0).
+        These will be preserved as draws.
+        """
+        from sqlalchemy import select, and_, func
+        from models.match import MatchResult
+
+        stmt = select(func.count()).where(
+            and_(
+                MatchResult.session_id == session_id,
+                MatchResult.winner_id.is_(None),
+                MatchResult.player1_wins == 0,
+                MatchResult.player2_wins == 0
+            )
+        )
+        result = await db_session.execute(stmt)
+        return result.scalar()
+
+    @discord.slash_command(name='cleanup_stale_drafts', description='Complete old stale drafts as draws and clean up channels')
     @has_bot_manager_role()
-    async def cleanup_test_drafts(
+    async def cleanup_stale_drafts(
         self,
         ctx,
-        hours_old: discord.Option(int, "Delete drafts older than this many hours", default=1),
-        dry_run: discord.Option(bool, "Preview without actually deleting", default=True)
+        hours_old: discord.Option(int, "Complete drafts older than this many hours (minimum 12)", default=24),
+        dry_run: discord.Option(bool, "Preview without actually completing/deleting", default=True)
     ):
-        """Clean up old test drafts, channels, and database records."""
-        from config import TEST_MODE_ENABLED
+        """Complete old stale drafts as draws, clean up channels, and remove database records."""
+        from config import is_cleanup_exempt
         from datetime import datetime, timedelta
         from session import AsyncSessionLocal
         from models.draft_session import DraftSession
 
         await ctx.defer(ephemeral=True)
 
-        if not TEST_MODE_ENABLED:
+        # Safety: Minimum age requirement
+        MIN_HOURS_OLD = 12
+        if hours_old < MIN_HOURS_OLD:
             await ctx.followup.send(
-                "❌ This command is only available when TEST_MODE_ENABLED is True in config.py\n\n"
-                "**Safety:** This prevents accidental cleanup in production.",
+                f"❌ Safety check failed: Must clean drafts older than {MIN_HOURS_OLD} hours.\n"
+                f"You specified: {hours_old} hours\n\n"
+                f"This prevents accidental cleanup of active or recent drafts.",
+                ephemeral=True
+            )
+            return
+
+        # Optional: Check guild cleanup exemption
+        if is_cleanup_exempt(ctx.guild.id):
+            await ctx.followup.send(
+                "❌ This guild is exempt from cleanup operations.\n"
+                "Check config.py timeout settings for this guild.",
                 ephemeral=True
             )
             return
@@ -738,9 +821,17 @@ class AdminCommands(commands.Cog):
                 return
 
             # Collect statistics
+            from models.match import MatchResult
+            from sqlalchemy import func
+
             total_sessions = len(old_sessions)
             total_channels = 0
             channel_names = []
+
+            # Collect match and completion statistics
+            total_matches_to_create = 0
+            total_unplayed_matches = 0
+            sessions_to_complete = []
 
             for session in old_sessions:
                 if session.channel_ids:
@@ -751,16 +842,65 @@ class AdminCommands(commands.Cog):
                         if channel:
                             channel_names.append(channel.name)
 
+                # Calculate how many matches need to be created
+                expected = await self._get_expected_match_count(session)
+                if expected > 0:
+                    # Count existing matches
+                    stmt = select(func.count()).where(MatchResult.session_id == session.session_id)
+                    result = await db_session.execute(stmt)
+                    existing = result.scalar() or 0
+                    missing = max(0, expected - existing)
+                    total_matches_to_create += missing
+
+                    # Count unplayed matches that will remain as draws
+                    unplayed = await self._get_unplayed_match_count(db_session, session.session_id)
+                    total_unplayed_matches += unplayed
+
+                    if missing > 0 or unplayed > 0 or session.session_stage != 'completed':
+                        sessions_to_complete.append({
+                            'session_id': session.session_id,
+                            'missing_matches': missing,
+                            'unplayed_matches': unplayed,
+                            'is_completed': session.session_stage == 'completed'
+                        })
+
             # Show preview
             preview_msg = (
                 f"**{'DRY RUN - ' if dry_run else ''}Cleanup Preview**\n\n"
                 f"**Target:** Drafts older than {hours_old} hours\n"
                 f"**Guild:** {ctx.guild.name}\n"
                 f"**Cutoff time:** {cutoff_time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                f"**Will delete:**\n"
+                f"**Will process:**\n"
                 f"• {total_sessions} draft session(s)\n"
-                f"• {total_channels} channel(s)\n\n"
+                f"• {total_channels} channel(s) will be deleted\n"
             )
+
+            incomplete_count = sum(1 for s in sessions_to_complete if not s['is_completed'])
+            if incomplete_count > 0:
+                preview_msg += f"• {incomplete_count} draft(s) will be marked as completed\n"
+
+            if total_matches_to_create > 0:
+                preview_msg += f"\n**Missing matches (will be created as draws):**\n"
+                preview_msg += f"• {total_matches_to_create} match record(s) will be created\n"
+
+            if total_unplayed_matches > 0:
+                preview_msg += f"\n**Unplayed matches (already draws):**\n"
+                preview_msg += f"• {total_unplayed_matches} existing unplayed match(es)\n"
+                preview_msg += f"• These will remain in database as 0-0 draws\n"
+
+            if sessions_to_complete:
+                preview_msg += f"\n**Sample sessions to complete:**\n"
+                for detail in sessions_to_complete[:5]:
+                    status = "completed" if detail['is_completed'] else "incomplete"
+                    preview_msg += (
+                        f"• Session {detail['session_id'][:8]}... ({status}): "
+                        f"{detail['missing_matches']} to create, "
+                        f"{detail['unplayed_matches']} unplayed\n"
+                    )
+                if len(sessions_to_complete) > 5:
+                    preview_msg += f"• ...and {len(sessions_to_complete) - 5} more\n"
+
+            preview_msg += "\n"
 
             if channel_names:
                 sample_channels = channel_names[:10]
@@ -774,31 +914,53 @@ class AdminCommands(commands.Cog):
 
             if dry_run:
                 await ctx.followup.send(
-                    "✅ Dry run complete. Use `dry_run: False` to actually delete.",
+                    "✅ Dry run complete. Use `dry_run: False` to actually complete/delete.",
                     ephemeral=True
                 )
                 return
 
-            # Actual deletion (not dry run)
+            # Actual completion and deletion (not dry run)
             await ctx.followup.send(
-                f"⚠️ **Starting deletion of {total_sessions} drafts and {total_channels} channels...**",
+                f"⚠️ **Starting completion of {total_sessions} drafts and deletion of {total_channels} channels...**",
                 ephemeral=True
             )
 
-            # Perform cleanup
+            # Perform completion and cleanup
             deleted_channels = 0
             deleted_sessions = 0
+            completed_drafts = 0
+            created_matches = 0
+            preserved_matches = 0
             errors = []
 
             for session in old_sessions:
                 try:
-                    # Delete Discord channels
+                    # Step 1: Create missing matches as draws
+                    missing_count = await self._create_missing_matches_as_draws(db_session, session)
+                    created_matches += missing_count
+                    if missing_count > 0:
+                        logger.info(f"Created {missing_count} missing matches as draws for session {session.session_id}")
+
+                    # Step 2: Count unplayed matches for logging
+                    unplayed_count = await self._get_unplayed_match_count(db_session, session.session_id)
+                    preserved_matches += unplayed_count
+                    if unplayed_count > 0:
+                        logger.info(f"Preserving {unplayed_count} unplayed matches as draws for session {session.session_id}")
+
+                    # Step 3: Mark draft as completed (if not already)
+                    if session.session_stage != 'completed':
+                        session.session_stage = 'completed'
+                        session.deletion_time = datetime.now()  # Set to now for immediate cleanup
+                        completed_drafts += 1
+                        logger.info(f"Marked session {session.session_id} as completed")
+
+                    # Step 4: Delete Discord channels
                     if session.channel_ids:
                         for channel_id in session.channel_ids:
                             channel = ctx.guild.get_channel(int(channel_id))
                             if channel:
                                 try:
-                                    await channel.delete(reason=f"Test cleanup - session older than {hours_old}h")
+                                    await channel.delete(reason=f"Stale draft cleanup - session older than {hours_old}h")
                                     deleted_channels += 1
                                     await asyncio.sleep(0.5)  # Rate limiting
                                 except discord.NotFound:
@@ -806,7 +968,7 @@ class AdminCommands(commands.Cog):
                                 except discord.HTTPException as e:
                                     errors.append(f"Failed to delete channel {channel.name}: {e}")
 
-                    # Delete the draft message if it exists
+                    # Step 5: Delete the draft message if it exists
                     if session.draft_channel_id and session.message_id:
                         try:
                             draft_channel = ctx.guild.get_channel(int(session.draft_channel_id))
@@ -816,7 +978,16 @@ class AdminCommands(commands.Cog):
                         except (discord.NotFound, discord.HTTPException):
                             pass  # Message already gone
 
-                    # Delete from database (CASCADE will handle related records)
+                    # Step 6: Detach MatchResult records before deleting session
+                    # Set session_id to NULL to preserve match records
+                    from sqlalchemy import update
+                    stmt = update(MatchResult).where(
+                        MatchResult.session_id == session.session_id
+                    ).values(session_id=None)
+                    await db_session.execute(stmt)
+                    await db_session.flush()
+
+                    # Step 7: Delete from database
                     await db_session.delete(session)
                     deleted_sessions += 1
 
@@ -824,15 +995,22 @@ class AdminCommands(commands.Cog):
                     errors.append(f"Error cleaning session {session.session_id}: {e}")
                     logger.error(f"Error during cleanup of session {session.session_id}: {e}")
 
-            # Commit all deletions
+            # Commit all changes
             await db_session.commit()
 
             # Send summary
             summary = (
                 f"✅ **Cleanup Complete**\n\n"
+                f"• Completed {completed_drafts} draft(s) (marked as completed)\n"
                 f"• Deleted {deleted_sessions} draft session(s)\n"
                 f"• Deleted {deleted_channels} channel(s)\n"
             )
+
+            if created_matches > 0:
+                summary += f"• Created {created_matches} missing match(es) as draws\n"
+
+            if preserved_matches > 0:
+                summary += f"• Preserved {preserved_matches} unplayed match(es) as draws\n"
 
             if errors:
                 summary += f"\n⚠️ **Errors:** {len(errors)}\n"
@@ -842,7 +1020,11 @@ class AdminCommands(commands.Cog):
                     summary += f"• ...and {len(errors) - 5} more (check logs)\n"
 
             await ctx.followup.send(summary, ephemeral=True)
-            logger.info(f"Cleanup complete: {deleted_sessions} sessions, {deleted_channels} channels deleted")
+            logger.info(
+                f"Cleanup complete: {completed_drafts} drafts completed, "
+                f"{deleted_sessions} sessions deleted, {deleted_channels} channels deleted, "
+                f"{created_matches} matches created, {preserved_matches} matches preserved as draws"
+            )
 
     @discord.slash_command(
         name='setup_ring_bearer',
