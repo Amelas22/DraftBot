@@ -14,6 +14,7 @@ from models import (
     SwissChallenge,
     TeamFinder,
     StakeInfo,
+    StakePairing,
     DraftSession
 )
 # Keep all existing functions

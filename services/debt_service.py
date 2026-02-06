@@ -9,6 +9,7 @@ from sqlalchemy.exc import OperationalError
 from database.db_session import db_session
 from models.debt_ledger import DebtLedger
 from models.stake import StakeInfo
+from models.stake_pairing import StakePairing
 
 
 async def create_ledger_entries(
@@ -427,23 +428,18 @@ async def create_debt_entries_from_stakes(
 
         logger.info(f"Creating debt entries from stakes for session {session_id}")
 
-        # Get all stake info records for this session
-        stake_stmt = select(StakeInfo).where(StakeInfo.session_id == session_id)
-        results = await session.execute(stake_stmt)
-        all_stake_infos = results.scalars().all()
+        # Get all stake pairings for this session
+        pairing_stmt = select(StakePairing).where(StakePairing.session_id == session_id)
+        results = await session.execute(pairing_stmt)
+        all_pairings = results.scalars().all()
 
-        # Track processed pairs to avoid duplicates
+        # Track processed pairs to avoid duplicates (algorithm might create duplicates)
         processed = set()
 
-        for stake in all_stake_infos:
-            # Skip if no opponent or amount
-            if not stake.opponent_id or not stake.assigned_stake:
-                continue
-
+        for pairing in all_pairings:
             # Create unique identifier for this pair (sorted players + amount)
-            players = tuple(sorted([stake.player_id, stake.opponent_id]))
-            amount = stake.assigned_stake
-            pair_key = (players, amount)
+            players = tuple(sorted([pairing.player_a_id, pairing.player_b_id]))
+            pair_key = (players, pairing.amount)
 
             # Skip if already processed
             if pair_key in processed:
@@ -451,8 +447,8 @@ async def create_debt_entries_from_stakes(
             processed.add(pair_key)
 
             # Check if players are on opposite teams
-            player_a_on_winning = stake.player_id in winning_team_set
-            player_b_on_winning = stake.opponent_id in winning_team_set
+            player_a_on_winning = pairing.player_a_id in winning_team_set
+            player_b_on_winning = pairing.player_b_id in winning_team_set
 
             if player_a_on_winning == player_b_on_winning:
                 # Both winners or both losers - no debt
@@ -460,11 +456,13 @@ async def create_debt_entries_from_stakes(
 
             # Determine winner (creditor) and loser (debtor)
             if player_a_on_winning:
-                winner_id = stake.player_id
-                loser_id = stake.opponent_id
+                winner_id = pairing.player_a_id
+                loser_id = pairing.player_b_id
             else:
-                winner_id = stake.opponent_id
-                loser_id = stake.player_id
+                winner_id = pairing.player_b_id
+                loser_id = pairing.player_a_id
+
+            amount = pairing.amount
 
             # Create debt ledger entries directly in this session (no separate function call)
             # Entry from debtor's perspective (they owe, so negative)

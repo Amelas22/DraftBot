@@ -2,8 +2,8 @@
 Service for handling stake calculations and storage.
 """
 from loguru import logger
-from sqlalchemy import select, and_
-from session import AsyncSessionLocal, StakeInfo
+from sqlalchemy import select, and_, delete
+from session import AsyncSessionLocal, StakeInfo, StakePairing
 from draft_organization.stake_calculator import calculate_stakes_with_strategy
 from config import get_config
 
@@ -43,52 +43,33 @@ async def calculate_and_store_stakes(guild_id, draft_session, cap_info=None):
                 cap_info=cap_info
             )
             
-            # First, clear any existing assigned stakes to avoid duplications
-            for record in stake_info_records:
-                record.assigned_stake = None
-                record.opponent_id = None
-                db_session.add(record)
-            
-            # Now update with the new calculated stakes
-            processed_pairs = set()  # Track which pairs we've handled
-            
+            # Delete existing pairings for this session (idempotency)
+            await db_session.execute(
+                delete(StakePairing).where(StakePairing.session_id == draft_session.session_id)
+            )
+
+            # Insert new pairings into stake_pairings table
+            processed_pairs = set()  # Track which pairs we've handled to avoid duplicates
+
             for pair in stake_pairs:
-                # Create a unique identifier for this pair 
+                # Create a unique identifier for this pair
                 # Sort the player IDs but keep the amount separate
                 pair_id = (tuple(sorted([pair.player_a_id, pair.player_b_id])), pair.amount)
-                
+
                 # Skip if we've already processed this exact pairing
                 if pair_id in processed_pairs:
                     continue
                 processed_pairs.add(pair_id)
-                
-                # Update player A's stake info
-                player_a_stmt = select(StakeInfo).where(and_(
-                    StakeInfo.session_id == draft_session.session_id,
-                    StakeInfo.player_id == pair.player_a_id
-                ))
-                player_a_result = await db_session.execute(player_a_stmt)
-                player_a_info = player_a_result.scalars().first()
-                
-                if player_a_info:
-                    # Update existing record
-                    player_a_info.opponent_id = pair.player_b_id
-                    player_a_info.assigned_stake = pair.amount
-                    db_session.add(player_a_info)
-                
-                # Update player B's stake info
-                player_b_stmt = select(StakeInfo).where(and_(
-                    StakeInfo.session_id == draft_session.session_id,
-                    StakeInfo.player_id == pair.player_b_id
-                ))
-                player_b_result = await db_session.execute(player_b_stmt)
-                player_b_info = player_b_result.scalars().first()
-                
-                if player_b_info:
-                    # Update existing record
-                    player_b_info.opponent_id = pair.player_a_id
-                    player_b_info.assigned_stake = pair.amount
-                    db_session.add(player_b_info)
+
+                # Insert the pairing
+                pairing = StakePairing(
+                    session_id=draft_session.session_id,
+                    player_a_id=pair.player_a_id,
+                    player_b_id=pair.player_b_id,
+                    amount=pair.amount
+                )
+                db_session.add(pairing)
+                logger.debug(f"Added pairing: {pair.player_a_id} ↔ {pair.player_b_id}: {pair.amount} tix")
             
             # Commit the changes
             await db_session.commit()
