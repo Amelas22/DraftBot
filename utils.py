@@ -4,7 +4,7 @@ import asyncio
 import pytz
 from sqlalchemy import update, select, func, or_, desc, and_
 from datetime import datetime, timedelta
-from session import AsyncSessionLocal, get_draft_session, StakeInfo, Challenge, PlayerLimit, DraftSession, MatchResult, PlayerStats, Match, Team, WeeklyLimit
+from session import AsyncSessionLocal, get_draft_session, StakeInfo, Challenge, PlayerLimit, DraftSession, MatchResult, PlayerStats, Match, Team, WeeklyLimit, StakePairing
 from sqlalchemy.orm import selectinload, joinedload
 from trueskill import Rating, rate_1vs1
 from discord.ui import View
@@ -2372,62 +2372,46 @@ async def get_formatted_stake_pairs(session_id, sign_ups):
             # Create sets of team members for quick lookup
             team_red_members = set(draft_session.team_a)
             team_blue_members = set(draft_session.team_b)
-            
-            # Get all stake info records
-            stake_stmt = select(StakeInfo).where(StakeInfo.session_id == session_id)
-            results = await db_session.execute(stake_stmt)
-            all_stake_infos = results.scalars().all()
-            
+
+            # Get all stake pairings for this session
+            pairing_stmt = select(StakePairing).where(StakePairing.session_id == session_id)
+            results = await db_session.execute(pairing_stmt)
+            all_pairings = results.scalars().all()
+
             # Create a list to store unique stake pairs
             unique_pairs = []
-            processed = set()
             total_stake = 0
-            
-            # Process each stake info record
-            for stake in all_stake_infos:
-                # Skip if no opponent or amount
-                if not stake.opponent_id or not stake.assigned_stake:
-                    continue
-                
-                # Create a unique identifier for this pair 
-                # Sort the player IDs but keep the amount separate
-                players = tuple(sorted([stake.player_id, stake.opponent_id]))
-                amount = stake.assigned_stake
-                pair_key = (players, amount)
-                
-                # Skip if we've already processed this exact pairing
-                if pair_key in processed:
-                    continue
-                processed.add(pair_key)
-                
+
+            # Process each pairing
+            for pairing in all_pairings:
                 # Determine team membership
-                player_a_in_red = stake.player_id in team_red_members
-                player_b_in_red = stake.opponent_id in team_red_members
-                
+                player_a_in_red = pairing.player_a_id in team_red_members
+                player_b_in_red = pairing.player_b_id in team_red_members
+
                 # Always show red player first, blue player second
                 if player_a_in_red and not player_b_in_red:
                     # player_a is red, player_b is blue - correct order
-                    red_player_id = stake.player_id
-                    blue_player_id = stake.opponent_id
+                    red_player_id = pairing.player_a_id
+                    blue_player_id = pairing.player_b_id
                 elif not player_a_in_red and player_b_in_red:
                     # player_a is blue, player_b is red - swap order
-                    red_player_id = stake.opponent_id
-                    blue_player_id = stake.player_id
+                    red_player_id = pairing.player_b_id
+                    blue_player_id = pairing.player_a_id
                 else:
-                    # If team membership can't be determined
-                    # In this case, just use original order
-                    red_player_id = stake.player_id
-                    blue_player_id = stake.opponent_id
-                
+                    # If team membership can't be determined (same team or can't determine)
+                    # Just use original order
+                    red_player_id = pairing.player_a_id
+                    blue_player_id = pairing.player_b_id
+
                 # Get player names
                 red_player_name = sign_ups.get(red_player_id, "Unknown")
                 blue_player_name = sign_ups.get(blue_player_id, "Unknown")
-                
+
                 # Add to unique pairs list with correct order
-                unique_pairs.append((red_player_name, blue_player_name, amount))
-                
+                unique_pairs.append((red_player_name, blue_player_name, pairing.amount))
+
                 # Add to total stake
-                total_stake += amount
+                total_stake += pairing.amount
             
             # Sort by amount (highest first)
             unique_pairs.sort(key=lambda x: x[2], reverse=True)
@@ -2458,49 +2442,35 @@ async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
             
             if not draft_session:
                 return [], 0
-                
-            # Get all stake info records
-            stake_stmt = select(StakeInfo).where(StakeInfo.session_id == session_id)
-            results = await db_session.execute(stake_stmt)
-            all_stake_infos = results.scalars().all()
-            
+
+            # Get all stake pairings for this session
+            pairing_stmt = select(StakePairing).where(StakePairing.session_id == session_id)
+            results = await db_session.execute(pairing_stmt)
+            all_pairings = results.scalars().all()
+
             # Create a list to store unique stake pairs
             unique_pairs = []
-            processed = set()
             total_stake = 0
-            
-            # Process each stake info record
-            for stake in all_stake_infos:
-                # Skip if no opponent or amount
-                if not stake.opponent_id or not stake.assigned_stake:
-                    continue
-                
-                # Create a unique identifier for this pair 
-                # Sort the player IDs but keep the amount separate
-                players = tuple(sorted([stake.player_id, stake.opponent_id]))
-                amount = stake.assigned_stake
-                pair_key = (players, amount)
-                
-                # Skip if we've already processed this exact pairing
-                if pair_key in processed:
-                    continue
-                processed.add(pair_key)
-                
+
+            # Process each pairing
+            for pairing in all_pairings:
                 # Skip if both players are on the same team
-                player_a_on_winning_team = stake.player_id in winning_team_ids
-                player_b_on_winning_team = stake.opponent_id in winning_team_ids
-                
+                player_a_on_winning_team = pairing.player_a_id in winning_team_ids
+                player_b_on_winning_team = pairing.player_b_id in winning_team_ids
+
                 if player_a_on_winning_team == player_b_on_winning_team:
                     # Both are winners or both are losers, so no bet outcome
                     continue
-                
+
                 # Determine winner and loser
                 if player_a_on_winning_team:
-                    winner_id = stake.player_id
-                    loser_id = stake.opponent_id
+                    winner_id = pairing.player_a_id
+                    loser_id = pairing.player_b_id
                 else:
-                    winner_id = stake.opponent_id
-                    loser_id = stake.player_id
+                    winner_id = pairing.player_b_id
+                    loser_id = pairing.player_a_id
+
+                amount = pairing.amount
 
                 # Get player names
                 winner_name = sign_ups.get(winner_id, "Unknown")

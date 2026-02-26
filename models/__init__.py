@@ -5,6 +5,7 @@ from .team import Team, TeamRegistration, WeeklyLimit
 from .challenge import Challenge, SwissChallenge
 from .utility import TeamFinder
 from .stake import StakeInfo
+from .stake_pairing import StakePairing
 from .leaderboard_message import LeaderboardMessage
 from .draft_logs import LogChannel, BackupLog, UserSubmission, PostSchedule
 from .sign_up_history import SignUpHistory
@@ -33,6 +34,7 @@ __all__ = [
     'SwissChallenge',
     'TeamFinder',
     'StakeInfo',
+    'StakePairing',
     'LeaderboardMessage',
     'LogChannel',
     'BackupLog',
