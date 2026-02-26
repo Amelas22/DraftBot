@@ -226,17 +226,17 @@ class PersistentView(discord.ui.View):
         # This helps test features like debt settlement that need guild.get_member() to work
         bot_user_id = str(interaction.client.user.id)
 
-        # Test names - prefixed with [TEST] to make it clear they're test users
+        # Test names - prefixed with [TEST] and includes markdown characters to test escaping
         test_names = [
-            "[TEST] BotUser_One",
-            "[TEST] BotUser_Two",
-            "[TEST] BotUser_Three",
-            "[TEST] BotUser_Four",
-            "[TEST] BotUser_Five",
-            "[TEST] BotUser_Six",
-            "[TEST] BotUser_Seven",
-            "[TEST] BotUser_Eight",
-            "[TEST] BotUser_Nine",
+            "[TEST] Bot_User_One",      # Underscores (italic formatting)
+            "[TEST] **Bold**User",       # Asterisks (bold formatting)
+            "[TEST] ~Strike~User",       # Tildes (strikethrough formatting)
+            "[TEST] _Italic_Name",       # Underscores at edges (italic formatting)
+            "[TEST] *Single*Star",       # Single asterisks (italic formatting)
+            "[TEST] Mix_*All*~Types~",   # Mixed markdown characters
+            "[TEST] Normal User",        # Normal name for control
+            "[TEST] User__Double__",     # Double underscores (bold italic)
+            "[TEST] ***Triple***Bold",   # Triple asterisks (bold italic)
         ]
 
         # Get existing sign-ups

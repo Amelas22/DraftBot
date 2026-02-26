@@ -83,9 +83,12 @@ def get_display_name(member: discord.Member, guild: Optional[discord.Guild] = No
     if crown_icon:
         icons.append(crown_icon)
 
+    # Escape markdown characters in display name to prevent formatting issues
+    escaped_name = discord.utils.escape_markdown(member.display_name)
+
     if icons:
-        return f"{' '.join(icons)} {member.display_name}"
-    return member.display_name
+        return f"{' '.join(icons)} {escaped_name}"
+    return escaped_name
 
 
 def get_display_name_by_id(user_id: str, guild: discord.Guild, fallback: str = "Unknown User") -> str:
@@ -98,26 +101,27 @@ def get_display_name_by_id(user_id: str, guild: discord.Guild, fallback: str = "
         fallback: Value to return if member not found
 
     Returns:
-        The member's display name, or fallback if not found
+        The member's display name (escaped), or escaped fallback if not found
     """
     if not guild or not user_id:
-        return fallback
+        return discord.utils.escape_markdown(fallback)
 
     try:
         member = guild.get_member(int(user_id))
         if not member:
-            return fallback
+            # Escape the fallback name since it won't go through get_display_name()
+            return discord.utils.escape_markdown(fallback)
         return get_display_name(member, guild)
     except (ValueError, TypeError):
-        return fallback
+        return discord.utils.escape_markdown(fallback)
 
 
 def format_display_name(display_name: str, user_id: Optional[str] = None, guild: Optional[discord.Guild] = None) -> str:
     """
     Format an existing display name string.
 
-    Currently returns as-is, but provides a hook for future enhancements
-    (like adding crown icons based on user roles).
+    Escapes markdown characters to prevent formatting issues in Discord embeds.
+    Provides a hook for future enhancements (like adding crown icons based on user roles).
 
     Args:
         display_name: The display name to format
@@ -125,6 +129,6 @@ def format_display_name(display_name: str, user_id: Optional[str] = None, guild:
         guild: Optional guild for looking up member roles
 
     Returns:
-        The formatted display name
+        The formatted display name with escaped markdown characters
     """
-    return display_name
+    return discord.utils.escape_markdown(display_name)
