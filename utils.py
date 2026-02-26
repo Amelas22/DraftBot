@@ -42,6 +42,9 @@ flags = {}
 locks = {}
 
 
+from helpers.pin_helpers import safe_pin, safe_unpin  # noqa: F401  (re-exported for callers)
+
+
 def store_match_streak_extensions(session_id: str, player1_id: str, player2_id: str, extensions: dict):
     """
     Store match streak extension info for later retrieval during draft completion.
@@ -2154,8 +2157,7 @@ async def re_register_views(bot):
             try:
                 message = await channel.fetch_message(int(old_quiz.message_id))
                 if message.pinned:
-                    await message.unpin()
-                    logger.info(f"Unpinned old quiz message {old_quiz.message_id} from {old_quiz.posted_at}")
+                    await safe_unpin(message)
             except discord.NotFound:
                 logger.debug(f"Old quiz message {old_quiz.message_id} not found (already deleted)")
             except discord.Forbidden:

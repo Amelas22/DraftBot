@@ -12,6 +12,7 @@ from sqlalchemy import select, update, func
 import random
 from config import get_draftmancer_base_url, get_draftmancer_session_url, get_league_challenge_hours
 from helpers.display_names import get_display_name
+from helpers.pin_helpers import safe_pin
 
 
 class InitialRangeView(View):
@@ -219,7 +220,7 @@ class LeagueDraftView(discord.ui.View):
                             await session.commit()
 
             # Pin the message to the channel
-            await message.pin()
+            await safe_pin(message)
 
 
 
@@ -549,7 +550,7 @@ class ChallengeTimeModal(Modal):
                             await session.commit()
 
             # Pin the message to the channel
-            await message.pin()
+            await safe_pin(message)
             from utils import send_channel_reminders
             asyncio.create_task(send_channel_reminders(bot, updated_session.session_id))
 
@@ -1089,7 +1090,7 @@ class ChallengeView(View):
                         )
                         message = await lobby_channel.send(embed=embed, view=view)
                         self.lobby_message = message
-                        await message.pin()
+                        await safe_pin(message)
                         await db_session.execute(
                             update(DraftSession).
                             where(DraftSession.session_id == new_draft_session.session_id).
@@ -1242,7 +1243,7 @@ class ChallengeView(View):
 
                                 # Pin the message to the channel
                                 self.lobby_message = message
-                                await message.pin()
+                                await safe_pin(message)
                             else:
                                 await interaction.response.send_message("Unable to open lobby. You are not a member of an involved team.", ephemeral=True)
                                 

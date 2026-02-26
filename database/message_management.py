@@ -1,6 +1,7 @@
 from enum import Enum
 from typing import Optional, Dict, Any, Tuple
 import discord
+from helpers.pin_helpers import safe_pin
 from sqlalchemy import JSON, Column, Integer, String, Boolean, Float, select, text, REAL
 from sqlalchemy.ext.asyncio import AsyncSession
 from views import PersistentView
@@ -366,14 +367,14 @@ async def handle_sticky_message_update(
     # Send new message
     try:
         new_message = await channel.send(content=content, embed=embed, view=view)
-        await new_message.pin()
-        logger.info(f"Pinned new sticky message with ID {new_message.id} in channel {channel.id}")
     except discord.Forbidden:
-        logger.error(f"Missing permissions to pin in {channel.id}")
+        logger.error(f"Missing permissions to send message in {channel.id}")
         return StickyUpdateResult.FAILED
     except discord.HTTPException as e:
         logger.error(f"HTTP error sending sticky message: {e}")
         return StickyUpdateResult.FAILED
+
+    await safe_pin(new_message)
 
     # Update DB Record
     sticky_message.message_id = str(new_message.id)
@@ -498,7 +499,7 @@ async def make_message_sticky(
             view_metadata = {}
 
         if not message.pinned:
-            await message.pin()
+            await safe_pin(message)
 
         current_time = time.time()
 
