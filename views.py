@@ -16,19 +16,20 @@ from sqlalchemy.orm import selectinload
 from helpers.utils import get_cube_thumbnail_url
 from helpers.display_names import get_display_name, get_display_name_by_id
 from utils import (
-    calculate_pairings, 
-    get_formatted_stake_pairs, 
-    generate_draft_summary_embed, 
-    post_pairings, 
-    generate_seating_order, 
-    fetch_match_details, 
-    split_into_teams, 
-    update_draft_summary_message, 
-    check_and_post_victory_or_draw, 
-    update_player_stats_and_elo, 
-    check_weekly_limits, 
+    calculate_pairings,
+    get_formatted_stake_pairs,
+    generate_draft_summary_embed,
+    post_pairings,
+    generate_seating_order,
+    fetch_match_details,
+    split_into_teams,
+    update_draft_summary_message,
+    check_and_post_victory_or_draw,
+    update_player_stats_and_elo,
+    check_weekly_limits,
     update_player_stats_for_draft,
-    add_links_to_embed_safely
+    add_links_to_embed_safely,
+    safe_pin,
 )
 from cube_views.CubeSelectionView import CubeUpdateSelectionView
 from loguru import logger
@@ -1243,7 +1244,7 @@ class PersistentView(discord.ui.View):
         # Basic permissions overwrites for the channel
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            guild.me: discord.PermissionOverwrite(read_messages=True)
+            guild.me: discord.PermissionOverwrite(read_messages=True, manage_messages=True)
         }
 
         # Only add admin roles to the Draft chat, not to team-specific channels
@@ -1427,8 +1428,7 @@ class PersistentView(discord.ui.View):
                         draft_summary_message = await draft_chat_channel.send(embeds=embeds)
 
                     if session.session_type != "test":
-                        await draft_summary_message.pin()
-                        logger.debug("Pinned draft summary message {}", draft_summary_message.id)
+                        await safe_pin(draft_summary_message)
                     session.draft_summary_message_id = str(draft_summary_message.id)
 
                     # Delete original message

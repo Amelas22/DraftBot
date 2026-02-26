@@ -1,6 +1,7 @@
 import discord
 import random
 import asyncio
+from utils import safe_pin
 from io import BytesIO
 from typing import Optional, Tuple, List, Set
 from discord.ext import commands
@@ -320,13 +321,7 @@ class QuizCommands(commands.Cog):
         logger.info(f"Posted quiz message {message.id} in channel {channel_id}")
 
         # Pin the quiz message
-        try:
-            await message.pin()
-            logger.info(f"Pinned quiz message {message.id}")
-        except discord.Forbidden:
-            logger.warning(f"Bot lacks permission to pin messages in channel {channel_id}")
-        except Exception as e:
-            logger.error(f"Failed to pin quiz message: {e}")
+        await safe_pin(message)
 
         return message
 
