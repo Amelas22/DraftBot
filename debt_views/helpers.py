@@ -114,6 +114,70 @@ def build_guild_debt_embed(guild: discord.Guild, rows: list, include_description
     return embed
 
 
+def build_guild_debt_embed_pages(guild: discord.Guild, rows: list, per_page: int = 10, include_description: bool = True) -> list:
+    """
+    Build a list of paginated guild debt summary embeds.
+
+    Args:
+        guild: The Discord guild
+        rows: List of rows with player_id, counterparty_id, balance attributes
+        per_page: Number of debt lines per page
+        include_description: Whether to include the settle button description
+
+    Returns:
+        List of Discord embeds, one per page
+    """
+    description = "Outstanding debts in this server. Click the button below to settle your debts." if include_description else "All outstanding debts (showing debtor perspective)"
+
+    if not rows:
+        embed = discord.Embed(
+            title="Guild Debt Summary",
+            description=description,
+            color=discord.Color.orange()
+        )
+        embed.add_field(
+            name="Outstanding Debts",
+            value="No outstanding debts!",
+            inline=False
+        )
+        return [embed]
+
+    # Calculate total across all rows
+    total = sum(abs(row.balance) for row in rows)
+    total_pages = (len(rows) + per_page - 1) // per_page
+    pages = []
+
+    for page_num in range(total_pages):
+        start = page_num * per_page
+        page_rows = rows[start:start + per_page]
+
+        embed = discord.Embed(
+            title="Guild Debt Summary",
+            description=description,
+            color=discord.Color.orange()
+        )
+
+        debt_lines = []
+        for row in page_rows:
+            debtor_name = get_member_name(guild, row.player_id)
+            creditor_name = get_member_name(guild, row.counterparty_id)
+            amount = abs(row.balance)
+            debt_lines.append(f"{debtor_name} owes {creditor_name}: {amount} tix")
+
+        embed.add_field(
+            name=f"Outstanding Debts (Total: {total} tix)",
+            value="\n".join(debt_lines),
+            inline=False
+        )
+
+        if total_pages > 1:
+            embed.set_footer(text=f"Page {page_num + 1} of {total_pages} ({len(rows)} total debts)")
+
+        pages.append(embed)
+
+    return pages
+
+
 def build_user_balance_embed(guild: discord.Guild, balances: dict) -> discord.Embed:
     """
     Build an embed showing a user's outstanding balances.
