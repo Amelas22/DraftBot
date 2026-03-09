@@ -1,14 +1,18 @@
 #!/bin/bash
 
 # Script to fetch production logs from remote server
-# Usage: ./fetch_prod_logs.sh
+# Usage: ./scripts/fetch_prod_logs.sh
 
 set -e  # Exit on any error
+
+# Resolve project root (parent of scripts/)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Configuration
 REMOTE_HOST="my-droplet"
 REMOTE_LOGS_PATH="/root/DraftBot/logs"
-LOCAL_LOGS_DIR="./prod_logs"
+LOCAL_LOGS_DIR="$PROJECT_ROOT/prod_logs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 FETCH_DIR="$LOCAL_LOGS_DIR/$TIMESTAMP"
 NUM_FILES=5  # Number of most recent log files to fetch

@@ -1,15 +1,19 @@
 #!/bin/bash
 
 # Script to fetch production database from remote server
-# Usage: ./fetch_prod_db.sh
+# Usage: ./scripts/fetch_prod_db.sh
 
 set -e  # Exit on any error
+
+# Resolve project root (parent of scripts/)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Configuration
 REMOTE_HOST="my-droplet"
 REMOTE_PATH="/root/DraftBot/drafts.db"
-LOCAL_PATH="./drafts.db"
-BACKUP_PATH="./drafts.db.backup.$(date +%Y%m%d_%H%M%S)"
+LOCAL_PATH="$PROJECT_ROOT/drafts.db"
+BACKUP_PATH="$PROJECT_ROOT/drafts.db.backup.$(date +%Y%m%d_%H%M%S)"
 
 echo "🔄 Fetching production database from remote server..."
 
