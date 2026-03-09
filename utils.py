@@ -22,7 +22,7 @@ from services.draft_setup_manager import DraftSetupManager
 from services.debt_service import create_debt_entries_from_stakes, get_guild_debt_rows, get_balance_with
 from debt_views import SettleDebtsView
 from debt_views.settle_views import PublicSettleDebtsView
-from debt_views.helpers import build_guild_debt_embed
+from debt_views.helpers import build_guild_debt_embed_pages
 from models.debt_summary_message import DebtSummaryMessage
 from loguru import logger
 from config import is_cleanup_exempt
@@ -1094,12 +1094,12 @@ async def update_debt_summary_for_guild(bot, guild_id: str):
                     except Exception as e:
                         logger.warning(f"Failed to delete legacy debt summary message: {e}")
 
-                # Get all debts and build embed
+                # Get all debts and build embed pages
                 rows = await get_guild_debt_rows(guild_id)
-                embed = build_guild_debt_embed(guild, rows)
-                view = PublicSettleDebtsView()
+                pages = build_guild_debt_embed_pages(guild, rows)
+                view = PublicSettleDebtsView(pages=pages)
 
-                new_message = await channel.send(embed=embed, view=view)
+                new_message = await channel.send(embed=pages[0], view=view)
 
                 # Make it sticky (this will also pin it and save it to 'messages' table)
                 await make_message_sticky(guild_id, str(channel.id), new_message, view, bot)

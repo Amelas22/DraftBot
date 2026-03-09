@@ -25,7 +25,7 @@ from debt_views.settle_views import (
     AmountInputView,
     PublicSettleDebtsView
 )
-from debt_views.helpers import get_member_name, format_entry_source, build_guild_debt_embed
+from debt_views.helpers import get_member_name, format_entry_source, build_guild_debt_embed, build_guild_debt_embed_pages
 from database.db_session import db_session
 from models.debt_summary_message import DebtSummaryMessage
 from sqlalchemy import select
@@ -346,8 +346,8 @@ class DebtCommands(commands.Cog):
             await ctx.followup.send("No outstanding debts in this guild.")
             return
 
-        embed = build_guild_debt_embed(ctx.guild, rows, include_description=False)
-        await ctx.followup.send(embed=embed)
+        pages = build_guild_debt_embed_pages(ctx.guild, rows, include_description=False)
+        await ctx.followup.send(embed=pages[0])
 
     @discord.slash_command(name="debts-post", description="[Admin] Post public debt summary with settle button")
     @has_bot_manager_role()
@@ -382,9 +382,9 @@ class DebtCommands(commands.Cog):
                     logger.warning(f"Could not delete old debt summary message: {e}")
 
             # Build and post the public message
-            embed = build_guild_debt_embed(ctx.guild, rows)
-            view = PublicSettleDebtsView()
-            public_message = await ctx.channel.send(embed=embed, view=view)
+            pages = build_guild_debt_embed_pages(ctx.guild, rows)
+            view = PublicSettleDebtsView(pages=pages)
+            public_message = await ctx.channel.send(embed=pages[0], view=view)
 
             # Save or update the database record
             if existing_message:

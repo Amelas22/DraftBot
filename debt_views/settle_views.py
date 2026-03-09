@@ -559,16 +559,84 @@ class SettlementConfirmView(View):
 
 
 class PublicSettleDebtsView(View):
-    """Persistent view for public debt summary messages with settle button."""
+    """Persistent view for public debt summary messages with settle button and pagination."""
 
-    def __init__(self):
+    def __init__(self, pages=None):
         super().__init__(timeout=None)  # Persistent view
+        # Pages are only used for the initial send; after that, buttons are stateless
+        self._initial_pages = pages or []
+        self._update_pagination_buttons_for_pages(self._initial_pages, 0)
+
+    def _update_pagination_buttons_for_pages(self, pages, current_page):
+        """Enable/disable pagination buttons based on page state."""
+        has_pages = len(pages) > 1
+        self.prev_button.disabled = not has_pages or current_page <= 0
+        self.next_button.disabled = not has_pages or current_page >= len(pages) - 1
+
+    @staticmethod
+    def _get_current_page_from_embed(interaction: discord.Interaction):
+        """Parse current page number from the embed footer (0-indexed)."""
+        message = interaction.message
+        if message and message.embeds:
+            footer = message.embeds[0].footer
+            if footer and footer.text and "Page " in footer.text:
+                try:
+                    # Footer format: "Page X of Y (Z total debts)"
+                    page_str = footer.text.split("Page ")[1].split(" of ")[0]
+                    return int(page_str) - 1  # Convert to 0-indexed
+                except (IndexError, ValueError):
+                    pass
+        return 0
+
+    async def _get_pages_and_navigate(self, interaction: discord.Interaction, direction: int):
+        """Fetch fresh pages and navigate. direction: -1 for prev, +1 for next."""
+        guild = interaction.guild
+        if not guild:
+            await interaction.response.defer()
+            return
+
+        from services.debt_service import get_guild_debt_rows
+        from debt_views.helpers import build_guild_debt_embed_pages
+
+        rows = await get_guild_debt_rows(str(guild.id))
+        pages = build_guild_debt_embed_pages(guild, rows)
+
+        current_page = self._get_current_page_from_embed(interaction)
+        new_page = current_page + direction
+        new_page = max(0, min(new_page, len(pages) - 1))
+
+        # Build a fresh view with correct button states for this page
+        view = PublicSettleDebtsView(pages=pages)
+        view._update_pagination_buttons_for_pages(pages, new_page)
+
+        await interaction.response.edit_message(embed=pages[new_page], view=view)
+
+    @discord.ui.button(
+        label="\u25c0\ufe0f",
+        style=discord.ButtonStyle.blurple,
+        custom_id="debt_summary_prev_page",
+        row=0
+    )
+    async def prev_button(self, button: Button, interaction: discord.Interaction):
+        """Go to previous page."""
+        await self._get_pages_and_navigate(interaction, -1)
+
+    @discord.ui.button(
+        label="\u25b6\ufe0f",
+        style=discord.ButtonStyle.blurple,
+        custom_id="debt_summary_next_page",
+        row=0
+    )
+    async def next_button(self, button: Button, interaction: discord.Interaction):
+        """Go to next page."""
+        await self._get_pages_and_navigate(interaction, +1)
 
     @discord.ui.button(
         label="Settle My Debts",
         style=discord.ButtonStyle.primary,
         custom_id="public_settle_debts_button",
-        emoji="\U0001f4b0"
+        emoji="\U0001f4b0",
+        row=1
     )
     async def settle_button(self, button: Button, interaction: discord.Interaction):
         """Handle button click - show user's debts and launch settlement flow."""
