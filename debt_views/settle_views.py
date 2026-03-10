@@ -14,9 +14,29 @@ from services.debt_service import (
     get_all_balances_for,
     get_balance_with,
     get_entries_since_last_settlement,
-    create_settlement
+    create_settlement,
+    get_transferable_debtors,
+    create_debt_transfer
 )
 from .helpers import TRANSIENT_ERRORS, get_member_name, get_member_name_plain, format_entry_source, build_user_balance_embed
+
+
+async def _build_settle_entry_view(
+    user_id: str, guild_id: str, balances: dict, guild: discord.Guild
+) -> View:
+    """Build the appropriate entry view: SettleOrTransferView if transfers are available, else CounterpartySelectView."""
+    for cid, bal in balances.items():
+        if bal < 0:
+            transferable = await get_transferable_debtors(
+                guild_id=guild_id, transferrer_id=user_id, creditor_id=cid
+            )
+            if transferable:
+                return SettleOrTransferView(
+                    user_id=user_id, guild_id=guild_id, balances=balances, guild=guild
+                )
+    return CounterpartySelectView(
+        user_id=user_id, guild_id=guild_id, balances=balances, guild=guild
+    )
 
 
 class SettleDebtsButton(Button):
@@ -55,9 +75,7 @@ class SettleDebtsButton(Button):
                 return
 
             embed = build_user_balance_embed(interaction.guild, balances)
-
-            # Create dropdown to select counterparty
-            view = CounterpartySelectView(
+            view = await _build_settle_entry_view(
                 user_id=user_id,
                 guild_id=self.guild_id,
                 balances=balances,
@@ -287,6 +305,514 @@ class AmountInputView(View):
         logger.info(f"[AmountInputView] Cancel clicked by user {interaction.user.id}")
         await interaction.response.edit_message(
             content="Settlement cancelled.",
+            embed=None,
+            view=None
+        )
+
+class SettleOrTransferView(View):
+    """View that asks the user whether they want to settle or transfer debt."""
+
+    def __init__(self, user_id: str, guild_id: str, balances: dict, guild: discord.Guild):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.balances = balances
+        self.guild = guild
+
+    @discord.ui.button(label="Settle a Debt", style=discord.ButtonStyle.primary, emoji="\U0001f4b0")
+    async def settle_button(self, button: Button, interaction: discord.Interaction):
+        """Go to the normal settle flow."""
+        try:
+            embed = build_user_balance_embed(self.guild, self.balances)
+            view = CounterpartySelectView(
+                user_id=self.user_id,
+                guild_id=self.guild_id,
+                balances=self.balances,
+                guild=self.guild
+            )
+            await interaction.response.edit_message(embed=embed, view=view)
+        except TRANSIENT_ERRORS as e:
+            logger.warning(f"[SettleOrTransfer] Transient error in settle button: {type(e).__name__}: {e}")
+        except Exception as e:
+            logger.error(f"[SettleOrTransfer] Error in settle button: {e}")
+            logger.error(f"[SettleOrTransfer] Traceback: {traceback.format_exc()}")
+            try:
+                await interaction.response.send_message(
+                    "An error occurred. Please try again.",
+                    ephemeral=True
+                )
+            except discord.errors.InteractionResponded:
+                await interaction.followup.send(
+                    "An error occurred. Please try again.",
+                    ephemeral=True
+                )
+
+    @discord.ui.button(label="Transfer Debt", style=discord.ButtonStyle.secondary, emoji="\U0001f504")
+    async def transfer_button(self, button: Button, interaction: discord.Interaction):
+        """Go to the transfer flow - pick who you owe first."""
+        try:
+            # Re-fetch live balances (may have changed since view was created)
+            balances = await get_all_balances_for(
+                guild_id=self.guild_id,
+                player_id=self.user_id
+            )
+
+            # Find all creditors (people the user owes) that have transferable debtors
+            creditors_with_transfers = []
+            for counterparty_id, balance in balances.items():
+                if balance >= 0:
+                    continue  # User doesn't owe this person
+                transferable = await get_transferable_debtors(
+                    guild_id=self.guild_id,
+                    transferrer_id=self.user_id,
+                    creditor_id=counterparty_id
+                )
+                if transferable:
+                    creditors_with_transfers.append(
+                        (counterparty_id, abs(balance), transferable)
+                    )
+
+            if not creditors_with_transfers:
+                await interaction.response.edit_message(
+                    content="No transferable debts found. No one owes you money that could be redirected.",
+                    embed=None,
+                    view=None
+                )
+                return
+
+            view = TransferCreditorSelectView(
+                user_id=self.user_id,
+                guild_id=self.guild_id,
+                creditors_with_transfers=creditors_with_transfers,
+                guild=self.guild
+            )
+
+            embed = discord.Embed(
+                title="Transfer Debt",
+                description=(
+                    "Select which debt you want to transfer.\n\n"
+                    "This lets you redirect someone else's debt to you "
+                    "toward someone you owe."
+                ),
+                color=discord.Color.blurple()
+            )
+
+            await interaction.response.edit_message(embed=embed, view=view)
+
+        except TRANSIENT_ERRORS as e:
+            logger.warning(f"[SettleOrTransfer] Transient error in transfer button: {type(e).__name__}: {e}")
+        except Exception as e:
+            logger.error(f"[SettleOrTransfer] Error in transfer button: {e}")
+            logger.error(f"[SettleOrTransfer] Traceback: {traceback.format_exc()}")
+            try:
+                await interaction.response.send_message(
+                    "An error occurred. Please try again.",
+                    ephemeral=True
+                )
+            except discord.errors.InteractionResponded:
+                await interaction.followup.send(
+                    "An error occurred. Please try again.",
+                    ephemeral=True
+                )
+
+
+class TransferCreditorSelectView(View):
+    """View with dropdown to select which creditor (person you owe) to transfer debt toward."""
+
+    def __init__(self, user_id: str, guild_id: str,
+                 creditors_with_transfers: list, guild: discord.Guild):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.guild = guild
+
+        # Store transferable debtors per creditor for lookup after selection
+        self._creditor_lookup = {}
+
+        options = []
+        for creditor_id, amount_owed, transferable_debtors in creditors_with_transfers:
+            name = get_member_name_plain(guild, creditor_id)
+            self._creditor_lookup[creditor_id] = transferable_debtors
+
+            options.append(discord.SelectOption(
+                label=name[:100],
+                value=creditor_id,
+                description=f"You owe them {amount_owed} tix"[:100]
+            ))
+
+        options = options[:25]
+
+        select = Select(
+            placeholder="Select whose debt to reduce...",
+            options=options,
+            custom_id="transfer_creditor_select"
+        )
+        select.callback = self.select_callback
+        self.add_item(select)
+
+    async def select_callback(self, interaction: discord.Interaction):
+        """Handle creditor selection - show debtor dropdown."""
+        try:
+            creditor_id = interaction.data['values'][0]
+            transferable_debtors = self._creditor_lookup[creditor_id]
+            creditor_name_plain = get_member_name_plain(self.guild, creditor_id)
+            creditor_name_decorated = get_member_name(self.guild, creditor_id)
+
+            logger.info(
+                f"[TransferCreditorSelect] User {self.user_id} selected creditor {creditor_id}, "
+                f"{len(transferable_debtors)} transferable debtors"
+            )
+
+            view = DebtorSelectView(
+                user_id=self.user_id,
+                guild_id=self.guild_id,
+                creditor_id=creditor_id,
+                creditor_name_plain=creditor_name_plain,
+                creditor_name_decorated=creditor_name_decorated,
+                transferable_debtors=transferable_debtors,
+                guild=self.guild
+            )
+
+            embed = discord.Embed(
+                title="Transfer Debt",
+                description=(
+                    f"Select someone who owes you to transfer their debt to "
+                    f"{creditor_name_decorated}."
+                ),
+                color=discord.Color.blurple()
+            )
+
+            await interaction.response.edit_message(embed=embed, view=view)
+
+        except TRANSIENT_ERRORS as e:
+            logger.warning(f"[TransferCreditorSelect] Transient error: {type(e).__name__}: {e}")
+        except Exception as e:
+            logger.error(f"[TransferCreditorSelect] Error: {e}")
+            logger.error(f"[TransferCreditorSelect] Traceback: {traceback.format_exc()}")
+            try:
+                await interaction.response.send_message(
+                    "An error occurred. Please try again.",
+                    ephemeral=True
+                )
+            except discord.errors.InteractionResponded:
+                await interaction.followup.send(
+                    "An error occurred. Please try again.",
+                    ephemeral=True
+                )
+
+
+class DebtorSelectView(View):
+    """View with dropdown to select which debtor to transfer debt from."""
+
+    def __init__(self, user_id: str, guild_id: str, creditor_id: str,
+                 creditor_name_plain: str, creditor_name_decorated: str,
+                 transferable_debtors: list, guild: discord.Guild):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.creditor_id = creditor_id
+        self.creditor_name_plain = creditor_name_plain
+        self.creditor_name_decorated = creditor_name_decorated
+        self.transferable_debtors = transferable_debtors
+        self.guild = guild
+
+        # Build a lookup for easy access after selection
+        self._debtor_lookup = {}
+
+        options = []
+        for debtor_id, amount_owed, max_transfer in transferable_debtors:
+            name = get_member_name_plain(guild, debtor_id)
+            self._debtor_lookup[debtor_id] = (amount_owed, max_transfer)
+
+            options.append(discord.SelectOption(
+                label=name[:100],
+                value=debtor_id,
+                description=f"Owes you {amount_owed} tix (max transfer: {max_transfer} tix)"[:100]
+            ))
+
+        options = options[:25]
+
+        select = Select(
+            placeholder="Select who to transfer debt from...",
+            options=options,
+            custom_id="debtor_select"
+        )
+        select.callback = self.select_callback
+        self.add_item(select)
+
+    async def select_callback(self, interaction: discord.Interaction):
+        """Handle debtor selection - open transfer amount modal."""
+        try:
+            debtor_id = interaction.data['values'][0]
+            amount_owed, max_transfer = self._debtor_lookup[debtor_id]
+            debtor_name_plain = get_member_name_plain(self.guild, debtor_id)
+            debtor_name_decorated = get_member_name(self.guild, debtor_id)
+
+            logger.info(
+                f"[DebtorSelect] User {self.user_id} selected debtor {debtor_id}, "
+                f"owes {amount_owed}, max transfer {max_transfer}"
+            )
+
+            modal = TransferAmountModal(
+                user_id=self.user_id,
+                guild_id=self.guild_id,
+                debtor_id=debtor_id,
+                creditor_id=self.creditor_id,
+                debtor_name_plain=debtor_name_plain,
+                debtor_name_decorated=debtor_name_decorated,
+                creditor_name_plain=self.creditor_name_plain,
+                creditor_name_decorated=self.creditor_name_decorated,
+                max_amount=max_transfer,
+                guild=self.guild
+            )
+
+            await interaction.response.send_modal(modal)
+
+        except TRANSIENT_ERRORS as e:
+            logger.warning(f"[DebtorSelect] Transient error: {type(e).__name__}: {e}")
+        except Exception as e:
+            logger.error(f"[DebtorSelect] Error: {e}")
+            logger.error(f"[DebtorSelect] Traceback: {traceback.format_exc()}")
+            try:
+                await interaction.response.send_message(
+                    "An error occurred. Please try again.",
+                    ephemeral=True
+                )
+            except discord.errors.InteractionResponded:
+                await interaction.followup.send(
+                    "An error occurred. Please try again.",
+                    ephemeral=True
+                )
+
+
+class TransferAmountModal(Modal):
+    """Modal for entering the transfer amount."""
+
+    def __init__(self, user_id: str, guild_id: str, debtor_id: str,
+                 creditor_id: str, debtor_name_plain: str,
+                 debtor_name_decorated: str, creditor_name_plain: str,
+                 creditor_name_decorated: str, max_amount: int,
+                 guild: discord.Guild):
+        # Safe title truncation
+        title_text = f"Transfer: {debtor_name_plain} → {creditor_name_plain}"
+        if len(title_text) > 45:
+            title_text = title_text[:42] + "..."
+
+        super().__init__(title=title_text)
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.debtor_id = debtor_id
+        self.creditor_id = creditor_id
+        self.debtor_name_plain = debtor_name_plain
+        self.debtor_name_decorated = debtor_name_decorated
+        self.creditor_name_plain = creditor_name_plain
+        self.creditor_name_decorated = creditor_name_decorated
+        self.max_amount = max_amount
+        self.guild = guild
+
+        self.amount_input = InputText(
+            label=f"Amount to transfer (max: {max_amount} tix)",
+            placeholder=f"Enter amount (max: {max_amount} tix)",
+            value=str(max_amount),
+            required=True,
+            max_length=10
+        )
+        self.add_item(self.amount_input)
+
+    async def callback(self, interaction: discord.Interaction):
+        """Handle modal submission."""
+        logger.info(f"[TransferModal] Submitted by user {interaction.user.id}")
+
+        try:
+            amount = int(self.amount_input.value)
+            if amount <= 0:
+                await interaction.response.send_message(
+                    "Amount must be positive.",
+                    ephemeral=True
+                )
+                return
+            if amount > self.max_amount:
+                await interaction.response.send_message(
+                    f"Amount cannot exceed {self.max_amount} tix.",
+                    ephemeral=True
+                )
+                return
+        except ValueError:
+            await interaction.response.send_message(
+                "Please enter a valid number.",
+                ephemeral=True
+            )
+            return
+
+        # Get current balances for the confirmation display
+        debtor_owes_transferrer = abs(await get_balance_with(
+            self.guild_id, self.debtor_id, self.user_id
+        ))
+        transferrer_owes_creditor = abs(await get_balance_with(
+            self.guild_id, self.user_id, self.creditor_id
+        ))
+
+        # Guard against stale data — balances may have changed since the modal opened
+        if amount > debtor_owes_transferrer or amount > transferrer_owes_creditor:
+            await interaction.response.send_message(
+                "The debt balances have changed since you started this flow. Please try again.",
+                ephemeral=True
+            )
+            return
+
+        # Build confirmation embed
+        embed = discord.Embed(
+            title="Confirm Debt Transfer",
+            description="This will rearrange the following debts:",
+            color=discord.Color.blurple()
+        )
+
+        embed.add_field(
+            name="What will happen",
+            value=(
+                f"• {self.debtor_name_decorated} owes you **{debtor_owes_transferrer}** tix → "
+                f"reduced by **{amount}** to **{debtor_owes_transferrer - amount}** tix\n"
+                f"• You owe {self.creditor_name_decorated} **{transferrer_owes_creditor}** tix → "
+                f"reduced by **{amount}** to **{transferrer_owes_creditor - amount}** tix\n"
+                f"• {self.debtor_name_decorated} will owe {self.creditor_name_decorated} **{amount}** tix"
+            ),
+            inline=False
+        )
+
+        embed.set_footer(text="Net debts in the system remain the same — only who owes whom changes.")
+
+        view = TransferConfirmView(
+            user_id=self.user_id,
+            guild_id=self.guild_id,
+            debtor_id=self.debtor_id,
+            creditor_id=self.creditor_id,
+            amount=amount,
+            guild=self.guild
+        )
+
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        logger.error(f"[TransferModal] Error: {error}")
+        logger.error(f"[TransferModal] Traceback: {traceback.format_exc()}")
+        try:
+            await interaction.response.send_message(
+                f"An error occurred: {str(error)}",
+                ephemeral=True
+            )
+        except discord.errors.InteractionResponded:
+            await interaction.followup.send(
+                f"An error occurred: {str(error)}",
+                ephemeral=True
+            )
+
+
+class TransferConfirmView(View):
+    """Final confirmation view before executing debt transfer."""
+
+    def __init__(self, user_id: str, guild_id: str, debtor_id: str,
+                 creditor_id: str, amount: int, guild: discord.Guild):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.debtor_id = debtor_id
+        self.creditor_id = creditor_id
+        self.amount = amount
+        self.guild = guild
+        self._processing = False
+
+        import uuid
+        self.transfer_id = str(uuid.uuid4())
+
+        logger.debug(
+            f"[TransferConfirm] Created: transferrer={user_id}, debtor={debtor_id}, "
+            f"creditor={creditor_id}, amount={amount}, transfer_id={self.transfer_id}"
+        )
+
+    @discord.ui.button(label="Confirm Transfer", style=discord.ButtonStyle.success)
+    async def confirm(self, button: Button, interaction: discord.Interaction):
+        """Execute the debt transfer."""
+        if self._processing:
+            logger.warning(f"[TransferConfirm] Ignoring duplicate click from user {interaction.user.id}")
+            await interaction.response.send_message(
+                "Transfer is already being processed...",
+                ephemeral=True
+            )
+            return
+
+        self._processing = True
+        logger.info(f"[TransferConfirm] Confirm clicked by user {interaction.user.id}")
+
+        await interaction.response.defer()
+
+        for item in self.children:
+            item.disabled = True
+
+        try:
+            await interaction.edit_original_response(
+                content="Processing transfer...",
+                view=self
+            )
+        except Exception as e:
+            logger.warning(f"[TransferConfirm] Could not update to processing state: {e}")
+
+        try:
+            await create_debt_transfer(
+                guild_id=self.guild_id,
+                transferrer_id=self.user_id,
+                debtor_id=self.debtor_id,
+                creditor_id=self.creditor_id,
+                amount=self.amount,
+                transfer_id=self.transfer_id
+            )
+
+            debtor_name = get_member_name(self.guild, self.debtor_id)
+            creditor_name = get_member_name(self.guild, self.creditor_id)
+
+            await interaction.edit_original_response(
+                content=(
+                    f"Debt transfer of {self.amount} tix recorded successfully!\n"
+                    f"{debtor_name} now owes {creditor_name} instead of you."
+                ),
+                embed=None,
+                view=None
+            )
+            logger.info(f"[TransferConfirm] Transfer completed successfully")
+
+            # Update debt summary in background
+            try:
+                from utils import update_debt_summary_for_guild
+                asyncio.create_task(update_debt_summary_for_guild(interaction.client, self.guild_id))
+            except Exception as e:
+                logger.warning(f"[TransferConfirm] Failed to trigger debt summary update: {e}")
+
+        except Exception as e:
+            logger.error(f"[TransferConfirm] Failed to create transfer: {e}")
+            logger.error(f"[TransferConfirm] Traceback: {traceback.format_exc()}")
+            self._processing = False
+            for item in self.children:
+                item.disabled = False
+            try:
+                await interaction.edit_original_response(
+                    content=f"Failed to record transfer: {str(e)}",
+                    view=self
+                )
+            except Exception:
+                pass
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, button: Button, interaction: discord.Interaction):
+        """Cancel transfer."""
+        if self._processing:
+            await interaction.response.send_message(
+                "Transfer is already being processed, cannot cancel.",
+                ephemeral=True
+            )
+            return
+
+        logger.info(f"[TransferConfirm] Cancel clicked by user {interaction.user.id}")
+        await interaction.response.edit_message(
+            content="Transfer cancelled.",
             embed=None,
             view=None
         )
@@ -659,9 +1185,7 @@ class PublicSettleDebtsView(View):
                 return
 
             embed = build_user_balance_embed(interaction.guild, balances)
-
-            # Create dropdown to select counterparty
-            view = CounterpartySelectView(
+            view = await _build_settle_entry_view(
                 user_id=user_id,
                 guild_id=guild_id,
                 balances=balances,

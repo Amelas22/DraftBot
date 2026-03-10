@@ -199,7 +199,7 @@ async def get_entries_since_last_settlement(
         List of DebtLedger entries, oldest first
     """
     async with db_session() as session:
-        # First, find the most recent settlement between these two players
+        # First, find the most recent settlement or transfer between these two players
         # (from player's perspective)
         settlement_query = (
             select(DebtLedger.created_at)
@@ -207,7 +207,7 @@ async def get_entries_since_last_settlement(
                 DebtLedger.guild_id == guild_id,
                 DebtLedger.player_id == player_id,
                 DebtLedger.counterparty_id == counterparty_id,
-                DebtLedger.source_type == 'settlement'
+                DebtLedger.source_type.in_(['settlement', 'transfer'])
             )
             .order_by(DebtLedger.created_at.desc())
             .limit(1)
@@ -573,6 +573,233 @@ async def adjust_debt(
     new_balance = await get_balance_with(guild_id, player1_id, player2_id)
     logger.info(f"New balance after adjustment: {player1_id} <-> {player2_id} = {new_balance}")
     return new_balance
+
+
+async def get_transferable_debtors(
+    guild_id: str,
+    transferrer_id: str,
+    creditor_id: str
+) -> list[tuple[str, int, int]]:
+    """
+    Get debtors whose debt to the transferrer can be transferred to the creditor.
+
+    In the scenario: A owes B, B owes C — B is the transferrer, C is the creditor.
+    This returns all A's (people who owe B), excluding C, with the max transferable amount.
+
+    Args:
+        guild_id: The guild to check
+        transferrer_id: B - the person who owes C and is owed by others
+        creditor_id: C - the person B owes
+
+    Returns:
+        List of (debtor_id, amount_they_owe_B, max_transferable) tuples
+        where max_transferable = min(owe_B, B_owes_C)
+    """
+    # Get how much B owes C (from B's perspective, this is negative)
+    b_owes_c = await get_balance_with(guild_id, transferrer_id, creditor_id)
+    if b_owes_c >= 0:
+        # B doesn't owe C anything
+        return []
+
+    b_debt_to_c = abs(b_owes_c)
+
+    # Get all balances for B
+    all_balances = await get_all_balances_for(guild_id, transferrer_id)
+
+    result = []
+    for counterparty_id, balance in all_balances.items():
+        # Only include people who owe B (positive balance from B's perspective)
+        if balance <= 0:
+            continue
+        # Exclude C (debtor cannot equal creditor)
+        if counterparty_id == creditor_id:
+            continue
+
+        max_transferable = min(balance, b_debt_to_c)
+        result.append((counterparty_id, balance, max_transferable))
+
+    logger.debug(
+        f"Transferable debtors for {transferrer_id} -> {creditor_id} in {guild_id}: {result}"
+    )
+    return result
+
+
+async def create_debt_transfer(
+    guild_id: str,
+    transferrer_id: str,
+    debtor_id: str,
+    creditor_id: str,
+    amount: int,
+    transfer_id: str = None
+) -> tuple:
+    """
+    Transfer debt: A owes B, B owes C → A owes C.
+
+    Creates 6 ledger entries atomically (3 double-entry pairs):
+    - Zero out A→B by amount: A +amount with B, B -amount with A
+    - Zero out B→C by amount: B +amount with C, C -amount with B
+    - Create A→C debt: A -amount with C, C +amount with A
+
+    Args:
+        guild_id: The guild this transfer belongs to
+        transferrer_id: B - the middleman transferring debt
+        debtor_id: A - the original debtor
+        creditor_id: C - the ultimate creditor
+        amount: Amount to transfer (positive integer)
+        transfer_id: Optional deterministic ID for idempotency
+
+    Returns:
+        Tuple of all 6 created DebtLedger entries
+
+    Raises:
+        ValueError: If validation fails
+    """
+    if amount <= 0:
+        raise ValueError("Amount must be positive")
+    if debtor_id == creditor_id:
+        raise ValueError("Debtor and creditor cannot be the same person")
+
+    if transfer_id is None:
+        transfer_id = str(uuid.uuid4())
+
+    notes = f"Debt transfer: {amount} tix from {debtor_id}→{transferrer_id} to {debtor_id}→{creditor_id}"
+
+    max_retries = 3
+    retry_delay = 1.0
+
+    for attempt in range(max_retries):
+        try:
+            async with db_session() as session:
+                # Idempotency check
+                existing_query = (
+                    select(DebtLedger)
+                    .where(
+                        DebtLedger.source_type == 'transfer',
+                        DebtLedger.source_id == transfer_id
+                    )
+                    .order_by(DebtLedger.id)
+                )
+                result = await session.execute(existing_query)
+                existing_entries = result.scalars().all()
+
+                if len(existing_entries) >= 6:
+                    logger.info(
+                        f"Transfer {transfer_id} already exists, returning existing entries "
+                        f"(idempotency check)"
+                    )
+                    return tuple(existing_entries[:6])
+
+                # Validate: A owes B >= amount
+                a_owes_b_query = select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
+                    DebtLedger.guild_id == guild_id,
+                    DebtLedger.player_id == debtor_id,
+                    DebtLedger.counterparty_id == transferrer_id
+                )
+                a_owes_b_result = await session.execute(a_owes_b_query)
+                a_balance_with_b = a_owes_b_result.scalar()
+
+                if a_balance_with_b >= 0:
+                    raise ValueError(
+                        f"Debtor does not owe transferrer anything (balance: {a_balance_with_b})"
+                    )
+                if amount > abs(a_balance_with_b):
+                    raise ValueError(
+                        f"Transfer amount ({amount}) exceeds what debtor owes transferrer ({abs(a_balance_with_b)})"
+                    )
+
+                # Validate: B owes C >= amount
+                b_owes_c_query = select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
+                    DebtLedger.guild_id == guild_id,
+                    DebtLedger.player_id == transferrer_id,
+                    DebtLedger.counterparty_id == creditor_id
+                )
+                b_owes_c_result = await session.execute(b_owes_c_query)
+                b_balance_with_c = b_owes_c_result.scalar()
+
+                if b_balance_with_c >= 0:
+                    raise ValueError(
+                        f"Transferrer does not owe creditor anything (balance: {b_balance_with_c})"
+                    )
+                if amount > abs(b_balance_with_c):
+                    raise ValueError(
+                        f"Transfer amount ({amount}) exceeds what transferrer owes creditor ({abs(b_balance_with_c)})"
+                    )
+
+                logger.info(
+                    f"Creating debt transfer: {debtor_id}→{transferrer_id} to {debtor_id}→{creditor_id}, "
+                    f"amount={amount}, transfer_id={transfer_id}"
+                )
+
+                entries = []
+
+                # Pair 1: Zero out A→B by amount
+                # A gets +amount with B (reduces A's debt to B)
+                entries.append(DebtLedger(
+                    guild_id=guild_id, player_id=debtor_id,
+                    counterparty_id=transferrer_id, amount=amount,
+                    source_type='transfer', source_id=transfer_id,
+                    notes=notes, created_by=transferrer_id
+                ))
+                # B gets -amount with A (reduces B's credit from A)
+                entries.append(DebtLedger(
+                    guild_id=guild_id, player_id=transferrer_id,
+                    counterparty_id=debtor_id, amount=-amount,
+                    source_type='transfer', source_id=transfer_id,
+                    notes=notes, created_by=transferrer_id
+                ))
+
+                # Pair 2: Zero out B→C by amount
+                # B gets +amount with C (reduces B's debt to C)
+                entries.append(DebtLedger(
+                    guild_id=guild_id, player_id=transferrer_id,
+                    counterparty_id=creditor_id, amount=amount,
+                    source_type='transfer', source_id=transfer_id,
+                    notes=notes, created_by=transferrer_id
+                ))
+                # C gets -amount with B (reduces C's credit from B)
+                entries.append(DebtLedger(
+                    guild_id=guild_id, player_id=creditor_id,
+                    counterparty_id=transferrer_id, amount=-amount,
+                    source_type='transfer', source_id=transfer_id,
+                    notes=notes, created_by=transferrer_id
+                ))
+
+                # Pair 3: Create A→C debt
+                # A gets -amount with C (A now owes C)
+                entries.append(DebtLedger(
+                    guild_id=guild_id, player_id=debtor_id,
+                    counterparty_id=creditor_id, amount=-amount,
+                    source_type='transfer', source_id=transfer_id,
+                    notes=notes, created_by=transferrer_id
+                ))
+                # C gets +amount with A (C is now owed by A)
+                entries.append(DebtLedger(
+                    guild_id=guild_id, player_id=creditor_id,
+                    counterparty_id=debtor_id, amount=amount,
+                    source_type='transfer', source_id=transfer_id,
+                    notes=notes, created_by=transferrer_id
+                ))
+
+                for entry in entries:
+                    session.add(entry)
+
+                await session.flush()
+                for entry in entries:
+                    await session.refresh(entry)
+
+                logger.info(f"Created debt transfer with {len(entries)} entries, transfer_id={transfer_id}")
+                return tuple(entries)
+
+        except OperationalError as e:
+            if "database is locked" in str(e) and attempt < max_retries - 1:
+                logger.warning(
+                    f"Database locked on transfer attempt {attempt + 1}/{max_retries}, "
+                    f"retrying in {retry_delay}s..."
+                )
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2
+            else:
+                raise
 
 
 async def get_guild_debt_stats(guild_id: str, timeframe: str = "all_time") -> dict:

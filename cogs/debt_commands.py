@@ -25,7 +25,7 @@ from debt_views.settle_views import (
     AmountInputView,
     PublicSettleDebtsView
 )
-from debt_views.helpers import get_member_name, format_entry_source, build_guild_debt_embed, build_guild_debt_embed_pages
+from debt_views.helpers import get_member_name, get_member_name_plain, format_entry_source, build_guild_debt_embed, build_guild_debt_embed_pages
 from database.db_session import db_session
 from models.debt_summary_message import DebtSummaryMessage
 from sqlalchemy import select
@@ -324,12 +324,16 @@ class DebtCommands(commands.Cog):
 
         embed.set_footer(text="Click 'Enter Amount' to confirm the payment amount")
 
+        name_decorated = get_member_name(ctx.guild, counterparty_id)
+        name_plain = get_member_name_plain(ctx.guild, counterparty_id)
+
         view = AmountInputView(
             user_id=user_id,
             guild_id=guild_id,
             counterparty_id=counterparty_id,
             net_balance=balance,
-            counterparty_name=player.display_name
+            counterparty_name_plain=name_plain,
+            counterparty_name_decorated=name_decorated
         )
 
         await ctx.followup.send(embed=embed, view=view)
