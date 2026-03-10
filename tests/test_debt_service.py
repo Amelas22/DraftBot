@@ -24,6 +24,7 @@ from services.debt_service import (
     get_debt_history
 )
 from models.stake import StakeInfo
+from models.stake_pairing import StakePairing
 
 
 @pytest_asyncio.fixture
@@ -1099,6 +1100,15 @@ class TestCreateDebtEntriesFromStakes:
 
             for stake in stakes:
                 session.add(stake)
+
+            # Create corresponding StakePairing records (output data queried by functions under test)
+            pairings = [
+                StakePairing(session_id="session_123", player_a_id="alice", player_b_id="charlie", amount=30),
+                StakePairing(session_id="session_123", player_a_id="bob", player_b_id="dave", amount=20),
+            ]
+            for pairing in pairings:
+                session.add(pairing)
+
             await session.commit()
 
         return test_db
