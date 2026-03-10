@@ -297,16 +297,19 @@ class DebtAdminCommands(commands.Cog):
                 color=discord.Color.purple()
             )
 
-            # Group entries by source_id (pairs)
+            # Group entries by (source_id, debtor, creditor) to show each
+            # debt pair separately — a single draft can produce multiple pairs.
+            # We key on the sorted player pair so both sides collapse into one line.
             grouped_entries = {}
             for entry in entries:
-                if entry.source_id not in grouped_entries:
-                    grouped_entries[entry.source_id] = []
-                grouped_entries[entry.source_id].append(entry)
+                pair_key = (entry.source_id, *sorted([entry.player_id, entry.counterparty_id]))
+                if pair_key not in grouped_entries:
+                    grouped_entries[pair_key] = []
+                grouped_entries[pair_key].append(entry)
 
             # Build history lines
             history_lines = []
-            for source_id, group in grouped_entries.items():
+            for pair_key, group in grouped_entries.items():
                 # Take the first entry as representative (they share same timestamp, notes, etc.)
                 rep_entry = group[0]
                 date_str = rep_entry.created_at.strftime("%b %d, %Y %I:%M %p") if rep_entry.created_at else "?"
