@@ -5,7 +5,9 @@ Commands:
 - /debt-admin adjust - Manually adjust debt between two players (create, modify, forgive)
 - /debt-admin stats - View comprehensive guild debt statistics
 - /debt-admin history - View audit trail of admin debt modifications
+- /debt-admin notify - DM players about their outstanding debts
 """
+import asyncio
 import discord
 from discord.ext import commands
 from discord.commands import SlashCommandGroup, option
@@ -15,11 +17,61 @@ from services.debt_service import (
     adjust_debt,
     get_balance_with,
     get_guild_debt_stats,
-    get_debt_history
+    get_debt_history,
+    get_all_balances_for,
+    get_guild_debt_rows
 )
 from debt_views.helpers import get_member_name
+from debt_views.settle_views import DMSettleDebtsView
 from helpers.permissions import has_bot_manager_role
 from utils import update_debt_summary_for_guild
+
+
+class DebtNotifyConfirmView(discord.ui.View):
+    """Confirmation view for sending debt notification DMs."""
+
+    def __init__(self, notifications: list[tuple[str, str]], bot, guild_id: str):
+        super().__init__(timeout=60)
+        self.notifications = notifications  # [(player_id, message), ...]
+        self.bot = bot
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="Send Notifications", style=discord.ButtonStyle.green)
+    async def confirm(self, button: discord.ui.Button, interaction: discord.Interaction):
+        self.disable_all_items()
+        await interaction.response.edit_message(content="Sending notifications...", view=self)
+
+        sent = 0
+        failed = 0
+        for player_id, msg in self.notifications:
+            try:
+                user = self.bot.get_user(int(player_id)) or await self.bot.fetch_user(int(player_id))
+                view = DMSettleDebtsView(guild_id=self.guild_id, bot=self.bot)
+                await user.send(msg, view=view)
+                sent += 1
+            except discord.Forbidden:
+                failed += 1
+            except discord.HTTPException as e:
+                logger.warning(f"Failed to DM {player_id}: {e}")
+                failed += 1
+            await asyncio.sleep(0.5)
+
+        result = f"Sent debt notifications to {sent} player{'s' if sent != 1 else ''}."
+        if failed:
+            result += f" {failed} failed (DMs disabled)."
+        await interaction.edit_original_response(content=result, embed=None, view=None)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
+    async def cancel(self, button: discord.ui.Button, interaction: discord.Interaction):
+        self.disable_all_items()
+        await interaction.response.edit_message(content="Cancelled.", embed=None, view=None)
+
+    async def on_timeout(self):
+        self.disable_all_items()
+        try:
+            await self.message.edit(content="Timed out.", embed=None, view=None)
+        except Exception:
+            pass
 
 
 class DebtAdminCommands(commands.Cog):
@@ -312,6 +364,149 @@ class DebtAdminCommands(commands.Cog):
 
         except Exception as e:
             logger.error(f"Error fetching debt history: {e}")
+            await ctx.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+
+    def _format_player_debt_message(self, guild: discord.Guild, player_id: str, balances: dict) -> str:
+        """Format a DM message for a player about their debts."""
+        you_owe = []
+        owed_to_you = []
+
+        for counterparty_id, balance in balances.items():
+            name = get_member_name(guild, counterparty_id)
+            if balance < 0:
+                you_owe.append(f"**{abs(balance)} tix** to {name}")
+            else:
+                owed_to_you.append(f"**{balance} tix** from {name}")
+
+        lines = [f"**Debt Reminder** from {guild.name}\n"]
+        if you_owe:
+            lines.append(f"You owe: {', '.join(you_owe)}")
+        if owed_to_you:
+            lines.append(f"Owed to you: {', '.join(owed_to_you)}")
+        lines.append("\nUse /debts summary in the server to see details.")
+        return "\n".join(lines)
+
+    def _format_preview_lines(self, guild: discord.Guild, player_id: str, balances: dict) -> str:
+        """Format preview lines for a single player's debts (for the admin embed)."""
+        you_owe = []
+        owed_to_you = []
+
+        for counterparty_id, balance in balances.items():
+            name = get_member_name(guild, counterparty_id)
+            if balance < 0:
+                you_owe.append(f"{abs(balance)} tix to {name}")
+            else:
+                owed_to_you.append(f"{balance} tix from {name}")
+
+        lines = []
+        if you_owe:
+            lines.append(f"  You owe: {', '.join(you_owe)}")
+        if owed_to_you:
+            lines.append(f"  Owed to you: {', '.join(owed_to_you)}")
+        return "\n".join(lines)
+
+    @debt_admin.command(name="notify", description="[Admin] DM players about their outstanding debts")
+    @option("player", discord.User, description="Notify a specific player (optional)", required=False)
+    @has_bot_manager_role()
+    async def debt_admin_notify(
+        self,
+        ctx: discord.ApplicationContext,
+        player: discord.User = None
+    ):
+        """Send DM notifications to players about their outstanding debts."""
+        await ctx.defer(ephemeral=True)
+
+        try:
+            guild_id = str(ctx.guild.id)
+
+            if player:
+                # Single player mode
+                balances = await get_all_balances_for(guild_id, str(player.id))
+                if not balances:
+                    await ctx.followup.send(f"No outstanding debts found for {player.mention}.", ephemeral=True)
+                    return
+                player_balances = {str(player.id): balances}
+            else:
+                # All players mode - collect unique player IDs from debt rows
+                debt_rows = await get_guild_debt_rows(guild_id)
+                if not debt_rows:
+                    await ctx.followup.send("No outstanding debts found in this server.", ephemeral=True)
+                    return
+
+                # Get unique player IDs involved in debts
+                player_ids = set()
+                for row in debt_rows:
+                    player_ids.add(row.player_id)
+                    player_ids.add(row.counterparty_id)
+
+                # Fetch balances for each player
+                player_balances = {}
+                for pid in player_ids:
+                    balances = await get_all_balances_for(guild_id, pid)
+                    if balances:
+                        player_balances[pid] = balances
+
+            if not player_balances:
+                await ctx.followup.send("No outstanding debts found.", ephemeral=True)
+                return
+
+            # Build notifications list and preview embed
+            notifications = []
+            preview_entries = []  # (name, preview_text)
+            for pid, balances in player_balances.items():
+                dm_msg = self._format_player_debt_message(ctx.guild, pid, balances)
+                notifications.append((pid, dm_msg))
+                name = get_member_name(ctx.guild, pid)
+                preview_entries.append((name, self._format_preview_lines(ctx.guild, pid, balances)))
+
+            count = len(notifications)
+            embed = discord.Embed(
+                title="Debt Notification Preview",
+                description=f"{count} player{'s' if count != 1 else ''} will be notified",
+                color=discord.Color.blue()
+            )
+
+            # Pack preview entries into embed fields, respecting the 1024 char field limit
+            # and 25 field limit
+            current_chunk = []
+            current_len = 0
+            field_count = 0
+            for name, preview in preview_entries:
+                entry = f"**{name}**\n{preview}"
+                entry_len = len(entry) + 2  # +2 for "\n\n" separator
+                if current_chunk and current_len + entry_len > 1024:
+                    # Flush current chunk to a field
+                    if field_count < 25:
+                        embed.add_field(
+                            name="Players" if field_count == 0 else "\u200b",
+                            value="\n\n".join(current_chunk),
+                            inline=False
+                        )
+                        field_count += 1
+                    current_chunk = []
+                    current_len = 0
+                current_chunk.append(entry)
+                current_len += entry_len
+
+            if current_chunk and field_count < 25:
+                embed.add_field(
+                    name="Players" if field_count == 0 else "\u200b",
+                    value="\n\n".join(current_chunk),
+                    inline=False
+                )
+                field_count += 1
+
+            if field_count >= 25:
+                embed.set_footer(text="Preview truncated — all players will still be notified")
+
+            view = DebtNotifyConfirmView(notifications, self.bot, str(ctx.guild.id))
+            msg = await ctx.followup.send(embed=embed, view=view, ephemeral=True)
+            view.message = msg
+
+            logger.info(f"Admin {ctx.author.name} previewing debt notifications for {len(notifications)} players")
+
+        except Exception as e:
+            logger.error(f"Error in debt notify: {e}")
             await ctx.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
 
     def _format_balance(self, balance: int, player1: discord.User, player2: discord.User) -> str:

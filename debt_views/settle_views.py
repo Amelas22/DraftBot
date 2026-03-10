@@ -1217,3 +1217,77 @@ class PublicSettleDebtsView(View):
     def to_metadata(self):
         """Return metadata for persistent storage."""
         return {"view_type": "debt_summary"}
+
+
+class DMSettleDebtsView(View):
+    """View with a Settle Debts button that works in DMs.
+
+    Unlike the guild-based settle views, this resolves the guild from the bot
+    instance since interaction.guild is None in DMs.
+    """
+
+    def __init__(self, guild_id: str, bot):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.guild_id = guild_id
+        self.bot = bot
+
+    @discord.ui.button(
+        label="Settle My Debts",
+        style=discord.ButtonStyle.success,
+        emoji="\U0001f4b0"
+    )
+    async def settle_button(self, button: Button, interaction: discord.Interaction):
+        """Handle button click in DM - resolve guild from bot and launch settlement flow."""
+        user_id = str(interaction.user.id)
+        logger.info(f"[DMSettle] Button clicked by user {user_id} for guild {self.guild_id}")
+
+        try:
+            guild = self.bot.get_guild(int(self.guild_id))
+            if not guild:
+                await interaction.response.send_message(
+                    "Could not find the server. The bot may no longer be in it.",
+                    ephemeral=True
+                )
+                return
+
+            balances = await get_all_balances_for(
+                guild_id=self.guild_id,
+                player_id=user_id
+            )
+
+            if not balances:
+                await interaction.response.send_message(
+                    "You have no outstanding debts with anyone.",
+                    ephemeral=True
+                )
+                return
+
+            embed = build_user_balance_embed(guild, balances)
+            view = await _build_settle_entry_view(
+                user_id=user_id,
+                guild_id=self.guild_id,
+                balances=balances,
+                guild=guild
+            )
+
+            await interaction.response.send_message(
+                embed=embed,
+                view=view,
+                ephemeral=True
+            )
+
+        except TRANSIENT_ERRORS as e:
+            logger.warning(f"[DMSettle] Transient network error: {type(e).__name__}: {e}")
+        except Exception as e:
+            logger.error(f"[DMSettle] Error in button callback: {e}")
+            logger.error(f"[DMSettle] Traceback: {traceback.format_exc()}")
+            try:
+                await interaction.response.send_message(
+                    "An error occurred. Please try again.",
+                    ephemeral=True
+                )
+            except discord.errors.InteractionResponded:
+                await interaction.followup.send(
+                    "An error occurred. Please try again.",
+                    ephemeral=True
+                )
