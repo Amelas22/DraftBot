@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from utils import get_formatted_bet_outcomes
 from models.draft_session import DraftSession
 from models.stake import StakeInfo
+from models.stake_pairing import StakePairing
 from models.debt_ledger import DebtLedger
 from services.debt_service import create_ledger_entries
 
@@ -68,7 +69,8 @@ class TestBetOutcomesDisplay:
                     opponent_id="alice",
                     assigned_stake=30
                 )
-                db_session.add_all([stake_alice, stake_bob])
+                pairing = StakePairing(session_id="test_session_1", player_a_id="alice", player_b_id="bob", amount=30)
+                db_session.add_all([stake_alice, stake_bob, pairing])
                 await db_session.commit()
 
         # Call the function (Bob's team wins, so Alice loses)
@@ -125,7 +127,8 @@ class TestBetOutcomesDisplay:
                     opponent_id="alice",
                     assigned_stake=20
                 )
-                db_session.add_all([stake_alice, stake_bob])
+                pairing = StakePairing(session_id="test_session_2", player_a_id="alice", player_b_id="bob", amount=20)
+                db_session.add_all([stake_alice, stake_bob, pairing])
                 await db_session.commit()
 
         # Call the function (Bob wins again, Alice loses again)
@@ -182,7 +185,8 @@ class TestBetOutcomesDisplay:
                     opponent_id="alice",
                     assigned_stake=10
                 )
-                db_session.add_all([stake_alice, stake_bob])
+                pairing = StakePairing(session_id="test_session_3", player_a_id="alice", player_b_id="bob", amount=10)
+                db_session.add_all([stake_alice, stake_bob, pairing])
                 await db_session.commit()
 
         # Call the function (Alice wins, Bob loses)
@@ -240,7 +244,8 @@ class TestBetOutcomesDisplay:
                     opponent_id="alice",
                     assigned_stake=20
                 )
-                db_session.add_all([stake_alice, stake_bob])
+                pairing = StakePairing(session_id="test_session_4", player_a_id="alice", player_b_id="bob", amount=20)
+                db_session.add_all([stake_alice, stake_bob, pairing])
                 await db_session.commit()
 
         # Call the function (Alice wins, Bob loses)
@@ -298,7 +303,8 @@ class TestBetOutcomesDisplay:
                     opponent_id="alice",
                     assigned_stake=30
                 )
-                db_session.add_all([stake_alice, stake_bob])
+                pairing = StakePairing(session_id="test_session_5", player_a_id="alice", player_b_id="bob", amount=30)
+                db_session.add_all([stake_alice, stake_bob, pairing])
                 await db_session.commit()
 
         # Call the function (Alice wins, Bob loses 30)
@@ -363,7 +369,9 @@ class TestBetOutcomesDisplay:
                     assigned_stake=20
                 )
 
-                db_session.add_all([stake_alice, stake_bob, stake_charlie, stake_dave])
+                pairing_ab = StakePairing(session_id="test_session_6", player_a_id="alice", player_b_id="bob", amount=30)
+                pairing_cd = StakePairing(session_id="test_session_6", player_a_id="charlie", player_b_id="dave", amount=20)
+                db_session.add_all([stake_alice, stake_bob, stake_charlie, stake_dave, pairing_ab, pairing_cd])
                 await db_session.commit()
 
         # Call the function (Bob and Dave win)
@@ -416,7 +424,8 @@ class TestBetOutcomesDisplay:
                     opponent_id="alice",
                     assigned_stake=30
                 )
-                db_session.add_all([stake_alice, stake_bob])
+                pairing = StakePairing(session_id="test_session_idempotent", player_a_id="alice", player_b_id="bob", amount=30)
+                db_session.add_all([stake_alice, stake_bob, pairing])
                 await db_session.commit()
 
         sign_ups = {"alice": "Alice", "bob": "Bob"}
