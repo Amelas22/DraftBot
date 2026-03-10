@@ -62,6 +62,8 @@ def format_entry_source(entry) -> str:
         return f"Draft #{entry.source_id}"
     elif entry.source_type == 'settlement':
         return "Settlement"
+    elif entry.source_type == 'transfer':
+        return "Transfer"
     else:
         return entry.source_type.title()
 
