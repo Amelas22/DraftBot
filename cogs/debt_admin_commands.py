@@ -8,6 +8,7 @@ Commands:
 - /debt-admin notify - DM players about their outstanding debts
 """
 import asyncio
+from datetime import datetime
 import discord
 from discord.ext import commands
 from discord.commands import SlashCommandGroup, option
@@ -266,12 +267,14 @@ class DebtAdminCommands(commands.Cog):
     @debt_admin.command(name="history", description="[Admin] View debt history (all sources)")
     @option("player", discord.User, description="Filter by specific player (optional)", required=False)
     @option("limit", int, description="Number of entries to show (max 100)", default=25, min_value=1, max_value=100)
+    @option("older_than_days", int, description="Only show entries older than this many days (optional)", required=False, min_value=1)
     @has_bot_manager_role()
     async def debt_admin_history(
         self,
         ctx: discord.ApplicationContext,
         player: discord.User = None,
-        limit: int = 25
+        limit: int = 25,
+        older_than_days: int = None
     ):
         """View complete debt history (drafts, settlements, and admin modifications)."""
         await ctx.defer(ephemeral=True)
@@ -280,10 +283,12 @@ class DebtAdminCommands(commands.Cog):
             guild_id = str(ctx.guild.id)
             player_id = str(player.id) if player else None
 
-            entries = await get_debt_history(guild_id, player_id, limit)
+            entries = await get_debt_history(guild_id, player_id, limit, older_than_days)
 
             if not entries:
                 filter_msg = f" for {player.display_name}" if player else ""
+                if older_than_days:
+                    filter_msg += f" older than {older_than_days} days"
                 await ctx.followup.send(f"No debt history found{filter_msg}.", ephemeral=True)
                 return
 
@@ -291,6 +296,8 @@ class DebtAdminCommands(commands.Cog):
             title = "Debt History"
             if player:
                 title += f" - {player.display_name}"
+            if older_than_days:
+                title += f" (older than {older_than_days} days)"
 
             embed = discord.Embed(
                 title=title,
@@ -312,7 +319,12 @@ class DebtAdminCommands(commands.Cog):
             for pair_key, group in grouped_entries.items():
                 # Take the first entry as representative (they share same timestamp, notes, etc.)
                 rep_entry = group[0]
-                date_str = rep_entry.created_at.strftime("%b %d, %Y %I:%M %p") if rep_entry.created_at else "?"
+                if rep_entry.created_at:
+                    date_str = rep_entry.created_at.strftime("%b %d, %Y %I:%M %p")
+                    age_days = (datetime.utcnow() - rep_entry.created_at).days
+                    date_str += f" ({age_days}d ago)"
+                else:
+                    date_str = "?"
 
                 # Determine who owes whom
                 # Find the entry with negative amount (debtor's perspective)

@@ -3,6 +3,7 @@ Service for handling debt ledger operations.
 """
 import asyncio
 import uuid
+from datetime import datetime, timedelta
 from loguru import logger
 from sqlalchemy import select, func, or_
 from sqlalchemy.exc import OperationalError
@@ -821,8 +822,6 @@ async def get_guild_debt_stats(guild_id: str, timeframe: str = "all_time") -> di
         - avg_debt_per_debtor: Average debt amount per debtor
         - debt_by_source: Dict of source_type to count
     """
-    from datetime import datetime, timedelta
-
     # Calculate cutoff time based on timeframe
     cutoff_time = None
     if timeframe == "last_7_days":
@@ -941,7 +940,8 @@ async def get_guild_debt_stats(guild_id: str, timeframe: str = "all_time") -> di
 async def get_debt_history(
     guild_id: str,
     player_id: str = None,
-    limit: int = 25
+    limit: int = 25,
+    older_than_days: int = None
 ) -> list[DebtLedger]:
     """
     Get history of all debt entries.
@@ -954,6 +954,7 @@ async def get_debt_history(
         guild_id: The guild to query
         player_id: Optional - filter to entries involving this player
         limit: Maximum number of entries to return (default 25, max 100)
+        older_than_days: Optional - only return entries older than this many days
 
     Returns:
         List of DebtLedger entries
@@ -976,6 +977,10 @@ async def get_debt_history(
                 )
             )
 
+        if older_than_days is not None:
+            cutoff = datetime.utcnow() - timedelta(days=older_than_days)
+            query = query.where(DebtLedger.created_at < cutoff)
+
         query = query.order_by(DebtLedger.created_at.desc()).limit(limit)
 
         result = await session.execute(query)
@@ -984,6 +989,7 @@ async def get_debt_history(
         logger.debug(
             f"Found {len(entries)} debt history entries for guild {guild_id}"
             + (f" (filtered to player {player_id})" if player_id else "")
+            + (f" (older than {older_than_days} days)" if older_than_days else "")
         )
 
         return list(entries)
