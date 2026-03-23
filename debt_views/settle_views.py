@@ -18,6 +18,7 @@ from services.debt_service import (
     get_transferable_debtors,
     create_debt_transfer
 )
+from notification_service import send_debt_transfer_dms
 from .helpers import TRANSIENT_ERRORS, get_member_name, get_member_name_plain, format_entry_source, build_user_balance_embed
 
 
@@ -785,6 +786,20 @@ class TransferConfirmView(View):
                 asyncio.create_task(update_debt_summary_for_guild(interaction.client, self.guild_id))
             except Exception as e:
                 logger.warning(f"[TransferConfirm] Failed to trigger debt summary update: {e}")
+
+            # Notify debtor and creditor via DM
+            try:
+                asyncio.create_task(send_debt_transfer_dms(
+                    bot=interaction.client,
+                    guild=self.guild,
+                    guild_id=self.guild_id,
+                    transferrer_id=self.user_id,
+                    debtor_id=self.debtor_id,
+                    creditor_id=self.creditor_id,
+                    amount=self.amount
+                ))
+            except Exception as e:
+                logger.warning(f"[TransferConfirm] Failed to trigger DM notifications: {e}")
 
         except Exception as e:
             logger.error(f"[TransferConfirm] Failed to create transfer: {e}")

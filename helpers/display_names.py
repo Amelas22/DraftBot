@@ -91,6 +91,38 @@ def get_display_name(member: discord.Member, guild: Optional[discord.Guild] = No
     return escaped_name
 
 
+def get_member_name(guild: discord.Guild, user_id: str) -> str:
+    """
+    Resolve a user ID to their display name in a guild (with icons).
+
+    Args:
+        guild: The Discord guild to look up the member in
+        user_id: The user's ID as a string
+
+    Returns:
+        The member's display name with ring bearer/crown icons, or "User {id}" as fallback
+    """
+    return get_display_name_by_id(user_id, guild, f"User {user_id}")
+
+
+def get_member_name_plain(guild: discord.Guild, user_id: str) -> str:
+    """
+    Resolve a user ID to their plain display name (without icons).
+    Use this for dropdowns/selects where icons are not desired.
+
+    Args:
+        guild: The Discord guild to look up the member in
+        user_id: The user's ID as a string
+
+    Returns:
+        The member's plain display name, or "User {id}" as fallback
+    """
+    member = guild.get_member(int(user_id))
+    if member:
+        return member.display_name
+    return f"User {user_id}"
+
+
 def get_display_name_by_id(user_id: str, guild: discord.Guild, fallback: str = "Unknown User") -> str:
     """
     Get display name by user ID, looking up the member in the guild.
