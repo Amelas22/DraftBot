@@ -25,6 +25,7 @@ from services.debt_service import (
 from debt_views.helpers import get_member_name
 from debt_views.settle_views import DMSettleDebtsView
 from helpers.permissions import has_bot_manager_role
+from notification_service import send_dm
 from utils import update_debt_summary_for_guild
 
 
@@ -45,15 +46,10 @@ class DebtNotifyConfirmView(discord.ui.View):
         sent = 0
         failed = 0
         for player_id, msg in self.notifications:
-            try:
-                user = self.bot.get_user(int(player_id)) or await self.bot.fetch_user(int(player_id))
-                view = DMSettleDebtsView(guild_id=self.guild_id, bot=self.bot)
-                await user.send(msg, view=view)
+            view = DMSettleDebtsView(guild_id=self.guild_id, bot=self.bot)
+            if await send_dm(self.bot, player_id, msg, view=view, label=f"debt notify player"):
                 sent += 1
-            except discord.Forbidden:
-                failed += 1
-            except discord.HTTPException as e:
-                logger.warning(f"Failed to DM {player_id}: {e}")
+            else:
                 failed += 1
             await asyncio.sleep(0.5)
 

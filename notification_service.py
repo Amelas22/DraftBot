@@ -5,11 +5,41 @@ Notification service for sending DMs and other notifications to users.
 import asyncio
 import discord
 from loguru import logger
+from helpers.display_names import get_member_name_plain
 from preference_service import get_players_dm_notification_preferences
+from services.debt_service import get_balance_with
 
 # Rate limiting constants to avoid Discord API throttling
 DM_BATCH_SIZE = 8  # Number of DMs to send per batch (matches typical draft size)
 DM_BATCH_DELAY = 1.0  # Seconds to wait between batches
+
+
+async def send_dm(bot_or_client, user_id: str, message: str, view=None, label: str = None) -> bool:
+    """
+    Send a DM to a single user with standard error handling.
+
+    Args:
+        label: Human-readable description of who this user is (e.g. "debtor JohnDoe")
+              for clearer log messages.
+
+    Returns True if the DM was sent successfully, False otherwise.
+    """
+    who = f"{label} ({user_id})" if label else f"user {user_id}"
+    logger.debug(f"Attempting DM to {who}: {message}")
+    try:
+        user = bot_or_client.get_user(int(user_id)) or await bot_or_client.fetch_user(int(user_id))
+        await user.send(message, view=view)
+        logger.info(f"Successfully sent DM to {who}")
+        return True
+    except discord.Forbidden:
+        logger.info(f"Could not DM {who} - DMs disabled or bot blocked. Message: {message}")
+        return False
+    except discord.HTTPException as e:
+        if e.code == 50007:  # Cannot send messages to this user
+            logger.info(f"Could not DM {who} - DMs disabled (50007). Message: {message}")
+            return False
+        logger.warning(f"HTTP error sending DM to {who}: {e}. Message: {message}")
+        return False
 
 
 async def _send_notification_dms(
@@ -80,28 +110,9 @@ async def _send_notification_dms(
             logger.debug(f"Processing batch {batch_number}/{total_batches} ({len(batch)} users)")
 
             for user_id, display_name in batch:
-                try:
-                    # Get the user object
-                    user = await bot_or_client.fetch_user(int(user_id))
-                    if not user:
-                        logger.error(f"Could not fetch user object for {user_id}")
-                        continue
-
-                    # Build personalized message
-                    dm_message = message_builder(display_name, channel_link)
-
-                    # Send DM
-                    await user.send(dm_message)
+                dm_message = message_builder(display_name, channel_link)
+                if await send_dm(bot_or_client, user_id, dm_message, label=f"{notification_type} {display_name}"):
                     dm_sent_count += 1
-                    logger.info(f"Successfully sent {notification_type} DM to {display_name} (ID: {user_id})")
-
-                except discord.Forbidden:
-                    logger.warning(f"Could not send DM to {display_name} (ID: {user_id}) - DMs are disabled or bot is blocked")
-                except discord.HTTPException as e:
-                    logger.warning(f"HTTP error sending DM to {display_name} (ID: {user_id}): {e}")
-                except Exception as e:
-                    logger.error(f"Unexpected error sending DM to {display_name} (ID: {user_id}): {e}")
-                    logger.exception("Full exception traceback:")
 
             # Add delay between batches (but not after the last batch)
             if batch_index + DM_BATCH_SIZE < total_users:
@@ -115,6 +126,56 @@ async def _send_notification_dms(
         logger.error(f"❌ Error in {notification_type} DM notification: {e}")
         logger.exception("Full exception traceback:")
         return 0, 0
+
+
+async def send_debt_transfer_dms(
+    bot, guild: "discord.Guild", guild_id: str, transferrer_id: str,
+    debtor_id: str, creditor_id: str, amount: int
+):
+    """Send DM notifications to debtor and creditor about a debt transfer."""
+    transferrer_name = get_member_name_plain(guild, transferrer_id)
+    debtor_name = get_member_name_plain(guild, debtor_id)
+    creditor_name = get_member_name_plain(guild, creditor_id)
+
+    # Get post-transfer balances from debtor's perspective
+    # positive = creditor owes debtor, negative = debtor owes creditor
+    debtor_to_transferrer = await get_balance_with(guild_id, debtor_id, transferrer_id)
+    debtor_to_creditor_post = await get_balance_with(guild_id, debtor_id, creditor_id)
+
+    # Derive pre-transfer balance: transfer decreased debtor's balance with creditor by `amount`
+    debtor_to_creditor_pre = debtor_to_creditor_post + amount
+
+    remaining_to_transferrer = abs(debtor_to_transferrer) if debtor_to_transferrer < 0 else 0
+
+    def _format_balance(balance, other_name):
+        """Format a balance between two users. Positive = other owes you, negative = you owe other."""
+        if balance < 0:
+            return f"you owed {other_name} {abs(balance)} tix"
+        elif balance > 0:
+            return f"{other_name} owed you {balance} tix"
+        else:
+            return f"you and {other_name} were settled"
+
+    pre_debtor = _format_balance(debtor_to_creditor_pre, creditor_name)
+    post_debtor = _format_balance(debtor_to_creditor_post, creditor_name).replace("owed", "owe").replace("were", "are")
+    # Flip sign for creditor's perspective
+    pre_creditor = _format_balance(-debtor_to_creditor_pre, debtor_name)
+    post_creditor = _format_balance(-debtor_to_creditor_post, debtor_name).replace("owed", "owe").replace("were", "are")
+
+    # DM debtor
+    debtor_msg = f"{transferrer_name} transferred {amount} tix of your debt to {creditor_name}."
+    if remaining_to_transferrer > 0:
+        debtor_msg += f" You still owe {transferrer_name} {remaining_to_transferrer} tix."
+    else:
+        debtor_msg += f" You no longer owe {transferrer_name}."
+    debtor_msg += f" Previously {pre_debtor}. Now {post_debtor}."
+
+    # DM creditor
+    creditor_msg = f"{transferrer_name} transferred {amount} tix of {debtor_name}'s debt to you."
+    creditor_msg += f" Previously {pre_creditor}. Now {post_creditor}."
+
+    await send_dm(bot, debtor_id, debtor_msg, label=f"debtor {debtor_name}")
+    await send_dm(bot, creditor_id, creditor_msg, label=f"creditor {creditor_name}")
 
 
 async def send_ready_check_dms(bot_or_client, draft_session, guild_id, channel_id, channel_name, guild_name):
