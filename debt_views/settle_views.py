@@ -18,7 +18,7 @@ from services.debt_service import (
     get_transferable_debtors,
     create_debt_transfer
 )
-from notification_service import send_debt_transfer_dms
+from notification_service import send_debt_transfer_dms, send_settlement_notification_dm
 from .helpers import TRANSIENT_ERRORS, get_member_name, get_member_name_plain, format_entry_source, build_user_balance_embed
 
 
@@ -1058,6 +1058,20 @@ class SettlementConfirmView(View):
                 view=None
             )
             logger.info(f"[SettlementConfirm] Success message sent")
+
+            # Notify the other party
+            try:
+                asyncio.create_task(send_settlement_notification_dm(
+                    bot=interaction.client,
+                    guild=interaction.guild,
+                    guild_id=self.guild_id,
+                    settler_id=self.user_id,
+                    payer_id=self.payer_id,
+                    payee_id=self.payee_id,
+                    amount=self.amount
+                ))
+            except Exception as e:
+                logger.warning(f"[SettlementConfirm] Failed to send settlement notification DM: {e}")
 
             # Update debt summary in background (lazy import to avoid circular import)
             try:
