@@ -9,6 +9,7 @@ from leaderboard_config import CROWN_ICONS, DEFAULT_CROWN_ROLE_NAMES
 from stats_display import get_stats_embed_for_player
 
 from helpers.permissions import has_bot_manager_role, ADMIN_ROLE_NAME
+from cube_views.CubeListModal import CubeListModal
 
 
 class AdminCommands(commands.Cog):
@@ -565,6 +566,22 @@ class AdminCommands(commands.Cog):
         except Exception as e:
             logger.error(f"Error setting leaderboard channel: {e}")
             await ctx.followup.send(f"❌ Error setting leaderboard channel: {str(e)}", ephemeral=True)
+
+    @discord.slash_command(
+        name='set_cube_list',
+        description='Set the list of cubes offered (in addition to custom) on this server'
+    )
+    @has_bot_manager_role()
+    async def set_cube_list(
+        self,
+        ctx,
+        session_type: discord.Option(str, "Which draft type to configure", choices=["default", "winston"], required=True),
+    ):
+        current = get_config(ctx.guild.id).get("cubes", {}).get(session_type, [])
+        prefill = "\n".join(f"{c['label']} : {c['value']}" for c in current)
+
+        modal = CubeListModal(session_type=session_type, prefill=prefill)
+        await ctx.send_modal(modal)
 
     @discord.slash_command(
         name='test_disconnect',
