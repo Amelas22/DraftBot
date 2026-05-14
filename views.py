@@ -563,7 +563,7 @@ class PersistentView(discord.ui.View):
                 return
             
             # Create the appropriate cube selection view based on session type
-            cube_selection = CubeUpdateSelectionView(draft_session.session_type)
+            cube_selection = CubeUpdateSelectionView(draft_session.session_type, interaction.guild_id)
             
             async def custom_cube_callback(select_interaction):
                 try:

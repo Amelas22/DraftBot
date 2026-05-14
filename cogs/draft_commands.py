@@ -29,11 +29,11 @@ class DraftCommands(commands.Cog):
         # Check if this is a money server
         if is_money_server(ctx.guild.id):
             logger.info(f"Using staked draft view for money server {ctx.guild.id}")
-            view = StakedCubeDraftSelectionView()
+            view = StakedCubeDraftSelectionView(guild_id=ctx.guild.id)
             await ctx.response.send_message("Select a cube for the staked draft:", view=view, ephemeral=True)
         else:
             logger.info(f"Using standard draft view for free server {ctx.guild.id}")
-            view = CubeDraftSelectionView(session_type="random")
+            view = CubeDraftSelectionView(session_type="random", guild_id=ctx.guild.id)
             await ctx.response.send_message("Select a cube:", view=view, ephemeral=True)
 
     # @discord.slash_command(name='start_draft', description='Start a team draft with random teams', guild_ids=None)
@@ -45,13 +45,13 @@ class DraftCommands(commands.Cog):
     @discord.slash_command(name='winston_draft', description='Start a winston draft', guild_ids=None)
     async def winston_draft(self, ctx):
         logger.info("Received winston_draft command")
-        view = CubeDraftSelectionView(session_type="winston")
+        view = CubeDraftSelectionView(session_type="winston", guild_id=ctx.guild.id)
         await ctx.response.send_message("Select a cube:", view=view, ephemeral=True)
 
     @discord.slash_command(name='premade_draft', description='Start a team draft with premade teams', guild_ids=None)
     async def premade_draft(self, ctx):
         logger.info("Received premade_draft command")
-        view = CubeDraftSelectionView(session_type="premade")
+        view = CubeDraftSelectionView(session_type="premade", guild_id=ctx.guild.id)
         await ctx.response.send_message("Select a cube:", view=view, ephemeral=True)
         
     # @discord.slash_command(name='dynamic_stake', description='Start a team draft with random teams and customizable stakes')
