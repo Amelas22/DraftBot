@@ -1,32 +1,13 @@
 import discord
+from config import get_cube_options
 
 class CubeUpdateSelectionView(discord.ui.View):
     """Selection view for updating cubes, to avoid circular imports with modals.py"""
-    def __init__(self, session_type: str):
+    def __init__(self, session_type: str, guild_id: int):
         super().__init__()
         self.session_type = session_type
-        
-        # Define cube options by type
-        cube_options = {
-            "winston": [
-                discord.SelectOption(label="LSVWinston", value="LSVWinston"),
-                discord.SelectOption(label="ChillWinston", value="ChillWinston"),
-                discord.SelectOption(label="WinstonDeluxe", value="WinstonDeluxe"),
-                discord.SelectOption(label="data", value="data")
-            ],
-            "default": [
-                discord.SelectOption(label="LSVCube", value="LSVCube"),
-                discord.SelectOption(label="AlphaFrog", value="AlphaFrog"),
-                discord.SelectOption(label="MODO Vintage Cube", value="modovintage"),
-                discord.SelectOption(label="LSVRetro", value="LSVRetro"),
-                discord.SelectOption(label="PowerLSV", value="PowerLSV"),
-                discord.SelectOption(label="Powerslax", value="Powerslax"),
-                discord.SelectOption(label="PowerSam", value="PowerSam"),
-            ]
-        }
-        
-        # Get the appropriate options for this session type
-        options = cube_options.get(session_type, cube_options["default"])
+
+        options = [discord.SelectOption(**opt) for opt in get_cube_options(guild_id, session_type)]
         
         # Create the select dropdown with those options
         self.cube_select = discord.ui.Select(

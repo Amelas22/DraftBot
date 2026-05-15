@@ -39,6 +39,23 @@ class Config:
             "external": {
                 "cube_url": "https://cubecobra.com/cube/list/"
             },
+            "cubes": {
+                "default": [
+                    {"label": "LSVCube", "value": "LSVCube"},
+                    {"label": "AlphaFrog", "value": "AlphaFrog"},
+                    {"label": "MODO Vintage Cube", "value": "modovintage"},
+                    {"label": "LSVRetro", "value": "LSVRetro"},
+                    {"label": "PowerLSV", "value": "PowerLSV"},
+                    {"label": "Powerslax", "value": "Powerslax"},
+                    {"label": "PowerSam", "value": "PowerSam"},
+                ],
+                "winston": [
+                    {"label": "LSVWinston", "value": "LSVWinston"},
+                    {"label": "ChillWinston", "value": "ChillWinston"},
+                    {"label": "WinstonDeluxe", "value": "WinstonDeluxe"},
+                    {"label": "data", "value": "data"},
+                ],
+            },
             "features": {
                 "winston_draft": False,
                 "voice_channels": False,
@@ -130,6 +147,23 @@ class Config:
             "timezone": "US/Eastern",
             "external": {
                 "cube_url": "https://cubecobra.com/cube/list/"
+            },
+            "cubes": {
+                "default": [
+                    {"label": "LSVCube", "value": "LSVCube"},
+                    {"label": "AlphaFrog", "value": "AlphaFrog"},
+                    {"label": "MODO Vintage Cube", "value": "modovintage"},
+                    {"label": "LSVRetro", "value": "LSVRetro"},
+                    {"label": "PowerLSV", "value": "PowerLSV"},
+                    {"label": "Powerslax", "value": "Powerslax"},
+                    {"label": "PowerSam", "value": "PowerSam"},
+                ],
+                "winston": [
+                    {"label": "LSVWinston", "value": "LSVWinston"},
+                    {"label": "ChillWinston", "value": "ChillWinston"},
+                    {"label": "WinstonDeluxe", "value": "WinstonDeluxe"},
+                    {"label": "data", "value": "data"},
+                ],
             },
             "features": {
                 "winston_draft": True,
@@ -329,6 +363,12 @@ def get_session_deletion_hours(guild_id):
     timeout_config = get_timeout_config(guild_id)
     return timeout_config.get("session_deletion_hours", 4)
 
+def get_cube_options(guild_id, session_type):
+    """Return the list of cube dicts for the given session type."""
+    config = get_config(guild_id)
+    cubes = config.get("cubes", bot_config.default_config["cubes"])
+    return cubes.get(session_type, cubes["default"])
+
 def get_dm_notifications_default(guild_id):
     """Get the default DM notifications setting for a guild"""
     config = get_config(guild_id)
@@ -429,6 +469,27 @@ def migrate_configs():
                     "longest_win_streak",    # SECOND - match wins
                     "draft_win_streak"       # THIRD - draft wins
                 ]
+            }
+            updated = True
+
+        # Add cubes configuration if missing
+        if "cubes" not in config:
+            config["cubes"] = {
+                "default": [
+                    {"label": "LSVCube", "value": "LSVCube"},
+                    {"label": "AlphaFrog", "value": "AlphaFrog"},
+                    {"label": "MODO Vintage Cube", "value": "modovintage"},
+                    {"label": "LSVRetro", "value": "LSVRetro"},
+                    {"label": "PowerLSV", "value": "PowerLSV"},
+                    {"label": "Powerslax", "value": "Powerslax"},
+                    {"label": "PowerSam", "value": "PowerSam"},
+                ],
+                "winston": [
+                    {"label": "LSVWinston", "value": "LSVWinston"},
+                    {"label": "ChillWinston", "value": "ChillWinston"},
+                    {"label": "WinstonDeluxe", "value": "WinstonDeluxe"},
+                    {"label": "data", "value": "data"},
+                ],
             }
             updated = True
 

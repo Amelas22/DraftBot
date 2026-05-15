@@ -3,6 +3,7 @@ import random
 from datetime import datetime
 from loguru import logger
 from typing import Optional
+from config import get_cube_options
 from models.session_details import SessionDetails
 
 from sessions import RandomSession, PremadeSession, SwissSession, BaseSession
@@ -62,33 +63,14 @@ class CubeDraftModal(discord.ui.Modal):
         return details
 
 class CubeDraftSelectionView(discord.ui.View):
-    def __init__(self, session_type: str):
+    def __init__(self, session_type: str, guild_id: int):
         super().__init__()
         self.session_type = session_type
-        if session_type == "winston":
-            self.cube_select = discord.ui.Select(
-                placeholder="Select a Cube",
-                options=[
-                    discord.SelectOption(label="LSVWinston", value="LSVWinston"),
-                    discord.SelectOption(label="ChillWinston", value="ChillWinston"),
-                    discord.SelectOption(label="WinstonDeluxe", value="WinstonDeluxe"),
-                    discord.SelectOption(label="data", value="data"),
-                    discord.SelectOption(label="Custom Cube...", value="custom")
-                ]
-            )
-        else:
-            self.cube_select = discord.ui.Select(
-                placeholder="Select a Cube",
-                options=[
-                discord.SelectOption(label="LSVCube", value="LSVCube"),
-                discord.SelectOption(label="AlphaFrog", value="AlphaFrog"),
-                discord.SelectOption(label="MODO Vintage Cube", value="modovintage"),
-                discord.SelectOption(label="LSVRetro", value="LSVRetro"),
-                discord.SelectOption(label="PowerLSV", value="PowerLSV"),
-                discord.SelectOption(label="Powerslax", value="Powerslax"),
-                discord.SelectOption(label="PowerSam", value="PowerSam"),
-                discord.SelectOption(label="Custom Cube...", value="custom")
-            ]
+        options = [discord.SelectOption(**opt) for opt in get_cube_options(guild_id, session_type)]
+        options.append(discord.SelectOption(label="Custom Cube...", value="custom"))
+        self.cube_select = discord.ui.Select(
+            placeholder="Select a Cube",
+            options=options
         )
         self.cube_select.callback = self.cube_select_callback
         self.add_item(self.cube_select)
@@ -136,21 +118,13 @@ async def handle_draft_session(interaction: discord.Interaction, session_type: s
 
 
 class StakedCubeDraftSelectionView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, guild_id: int):
         super().__init__()
-        
+        options = [discord.SelectOption(**opt) for opt in get_cube_options(guild_id, "default")]
+        options.append(discord.SelectOption(label="Custom Cube...", value="custom"))
         self.cube_select = discord.ui.Select(
             placeholder="Select a Cube",
-            options=[
-                discord.SelectOption(label="LSVCube", value="LSVCube"),
-                discord.SelectOption(label="AlphaFrog", value="AlphaFrog"),
-                discord.SelectOption(label="MODO Vintage Cube", value="modovintage"),
-                discord.SelectOption(label="LSVRetro", value="LSVRetro"),
-                discord.SelectOption(label="PowerLSV", value="PowerLSV"),
-                discord.SelectOption(label="Powerslax", value="Powerslax"),
-                discord.SelectOption(label="PowerSam", value="PowerSam"),
-                discord.SelectOption(label="Custom Cube...", value="custom")
-            ]
+            options=options
         )
         self.cube_select.callback = self.cube_select_callback
         self.add_item(self.cube_select)
