@@ -103,6 +103,12 @@ async def main():
             await guild.system_channel.send(
                 "Thanks for adding the Draft Bot! To set up needed channels and roles, an admin should use `/setup`."
             )
+
+    @bot.event
+    async def on_application_command_error(ctx, error):
+        from helpers.permissions import handle_application_command_error
+        await handle_application_command_error(ctx, error)
+
     async def delayed_log_collection(bot):
         # Wait 65 seconds
         await asyncio.sleep(65)
