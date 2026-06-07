@@ -1866,6 +1866,7 @@ class MatchResultSelect(Select):
                         if winner_indicator != '0':  
                             winner_id = match_result.player1_id if winner_indicator == '1' else match_result.player2_id
                         match_result.winner_id = winner_id
+                        match_result.result_submitted_at = datetime.now()
 
                         await session.commit()  # Commit the changes to the database
 
