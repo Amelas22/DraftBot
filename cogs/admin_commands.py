@@ -508,13 +508,42 @@ class AdminCommands(commands.Cog):
         description='Set the channel where leaderboards will be posted'
     )
     @has_bot_manager_role()
-    async def set_leaderboard_channel(self, ctx, channel: discord.TextChannel):
-        """Set the channel for leaderboard posts"""
+    async def set_leaderboard_channel(
+        self, ctx,
+        channel: discord.Option(discord.TextChannel, "Existing channel to use", required=False) = None,
+        new_channel_name: discord.Option(str, "Create a new channel with this name", required=False) = None,
+    ):
+        """Set the channel for leaderboard posts.
+
+        Pass exactly one of `channel` (pick an existing channel) or
+        `new_channel_name` (create a new channel with the given name).
+        """
         from database.db_session import db_session
         from models import LeaderboardMessage
         from sqlalchemy import select
 
         await ctx.defer(ephemeral=True)
+
+        if (channel is None) == (new_channel_name is None):
+            await ctx.followup.send(
+                "❌ Provide either an existing `channel` **or** a `new_channel_name`, not both.",
+                ephemeral=True,
+            )
+            return
+
+        if new_channel_name is not None:
+            try:
+                channel = await ctx.guild.create_text_channel(name=new_channel_name)
+            except discord.Forbidden:
+                await ctx.followup.send(
+                    "❌ I don't have permission to create channels in this server. "
+                    "Grant me **Manage Channels** or create the channel manually and re-run with `channel:`.",
+                    ephemeral=True,
+                )
+                return
+            except discord.HTTPException as e:
+                await ctx.followup.send(f"❌ Failed to create channel: {e}", ephemeral=True)
+                return
 
         guild_id = str(ctx.guild.id)
 
