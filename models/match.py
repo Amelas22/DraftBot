@@ -43,6 +43,7 @@ class MatchResult(Base):
     winner_id = Column(String(64), nullable=True)
     pairing_message_id = Column(String(64))
     guild_id = Column(String(64))
+    result_submitted_at = Column(DateTime, nullable=True)
     
     # Relationship with DraftSession
     draft_session = relationship("DraftSession", back_populates="match_results")
