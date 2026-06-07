@@ -27,6 +27,7 @@ from debt_views.settle_views import (
 )
 from debt_views.helpers import get_member_name, get_member_name_plain, format_entry_source, build_guild_debt_embed, build_guild_debt_embed_pages
 from database.db_session import db_session
+from models.debt_ledger import DebtLedger
 from models.debt_summary_message import DebtSummaryMessage
 from sqlalchemy import select
 from helpers.permissions import has_bot_manager_role

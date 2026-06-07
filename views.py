@@ -23,6 +23,7 @@ from utils import (
     generate_seating_order,
     fetch_match_details,
     split_into_teams,
+    split_content_for_embed,
     update_draft_summary_message,
     check_and_post_victory_or_draw,
     update_player_stats_and_elo,
