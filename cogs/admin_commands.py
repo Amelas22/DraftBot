@@ -575,7 +575,7 @@ class AdminCommands(commands.Cog):
     async def set_cube_list(
         self,
         ctx,
-        session_type: discord.Option(str, "Which draft type to configure", choices=["default", "winston"], required=True),
+        session_type: discord.Option(str, "Which draft type to configure", choices=["default"], required=True),
     ):
         current = get_config(ctx.guild.id).get("cubes", {}).get(session_type, [])
         prefill = "\n".join(f"{c['label']} : {c['value']}" for c in current)

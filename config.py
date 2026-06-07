@@ -365,9 +365,11 @@ def get_session_deletion_hours(guild_id):
 
 def get_cube_options(guild_id, session_type):
     """Return the list of cube dicts for the given session type."""
+    if session_type == "winston":
+        return bot_config.default_config["cubes"]["winston"]
     config = get_config(guild_id)
     cubes = config.get("cubes", bot_config.default_config["cubes"])
-    return cubes.get(session_type, cubes["default"])
+    return cubes.get(session_type, cubes.get("default", bot_config.default_config["cubes"]["default"]))
 
 def get_dm_notifications_default(guild_id):
     """Get the default DM notifications setting for a guild"""

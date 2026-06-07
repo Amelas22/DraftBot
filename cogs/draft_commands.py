@@ -42,11 +42,13 @@ class DraftCommands(commands.Cog):
     #     view = CubeDraftSelectionView(session_type="random")
     #     await ctx.response.send_message("Select a cube:", view=view, ephemeral=True)
 
-    @discord.slash_command(name='winston_draft', description='Start a winston draft', guild_ids=None)
-    async def winston_draft(self, ctx):
-        logger.info("Received winston_draft command")
-        view = CubeDraftSelectionView(session_type="winston", guild_id=ctx.guild.id)
-        await ctx.response.send_message("Select a cube:", view=view, ephemeral=True)
+    # Disabled — Winston cube/draft flow has known bugs (see PR #298 follow-up).
+    # Keep the code in place; we'll re-enable once the cube selection issues are fixed.
+    # @discord.slash_command(name='winston_draft', description='Start a winston draft', guild_ids=None)
+    # async def winston_draft(self, ctx):
+    #     logger.info("Received winston_draft command")
+    #     view = CubeDraftSelectionView(session_type="winston", guild_id=ctx.guild.id)
+    #     await ctx.response.send_message("Select a cube:", view=view, ephemeral=True)
 
     @discord.slash_command(name='premade_draft', description='Start a team draft with premade teams', guild_ids=None)
     async def premade_draft(self, ctx):
