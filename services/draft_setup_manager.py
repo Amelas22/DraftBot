@@ -22,6 +22,7 @@ from helpers.digital_ocean_helper import DigitalOceanHelper
 from helpers.magicprotools_helper import MagicProtoolsHelper
 from notification_service import send_ready_check_dms
 from services.draft_socket_client import DraftSocketClient
+from cube_views.pack_options import DEFAULT_PACKS_PER_PLAYER, DEFAULT_CARDS_PER_PACK
 
 # Constants
 READY_CHECK_INSTRUCTIONS = (
@@ -46,6 +47,10 @@ OWNERSHIP_CLAIM_TIMEOUT = 3.0  # Seconds to wait for ownership claim confirmatio
 SOCKET_OPERATION_DELAY = 0.5  # Seconds between socket operations
 CONNECTION_CHECK_INTERVAL = 10  # Seconds between connection check iterations
 SETTINGS_OPERATION_DELAY = 1  # Seconds after setting operations
+
+# DEFAULT_PACKS_PER_PLAYER / DEFAULT_CARDS_PER_PACK are imported from
+# cube_views.pack_options (single source of truth) and re-exported here for
+# callers that import them alongside DraftSetupManager.
 
 # Load environment variables
 load_dotenv()
@@ -139,11 +144,15 @@ class DraftSetupManager:
         self.logger.info(f"Disconnected from the websocket for draft_id: DB{self.draft_id}")
         self._is_connecting = False
 
-    def __init__(self, session_id: str, draft_id: str, cube_id: str, guild_id: str = None):
+    def __init__(self, session_id: str, draft_id: str, cube_id: str, guild_id: str = None,
+                 packs_per_player: int = DEFAULT_PACKS_PER_PLAYER,
+                 cards_per_pack: int = DEFAULT_CARDS_PER_PACK):
         self.session_id = session_id
         self.draft_id = draft_id
         self.cube_id = cube_id
         self.guild_id = guild_id
+        self.packs_per_player = packs_per_player
+        self.cards_per_pack = cards_per_pack
         
         # Configure contextual logger for this instance
         self.logger = logger.bind(draft_id=draft_id, session_id=session_id)
@@ -2002,12 +2011,36 @@ class DraftSetupManager:
             await self.socket_client.emit('teamDraft', True)  # Added teamDraft setting
             await self.socket_client.emit('setPickTimer', 60)
             await self.socket_client.emit('setOwnerIsPlayer', False)
-            
+            await self.socket_client.emit('boostersPerPlayer', self.packs_per_player)
+            await self.socket_client.emit('cardsPerBooster', self.cards_per_pack)
+
             return True
             
         except Exception as e:
             self.logger.error(f"Error during settings update: {e}")
             self.logger.exception("Full exception details:")
+            return False
+
+    async def update_pack_settings(self, packs_per_player: int, cards_per_pack: int) -> bool:
+        """Update pack structure on an existing session and push it to Draftmancer.
+
+        Stores the new values on the manager and, if connected, re-emits the
+        Draftmancer pack settings. Returns False (without raising) when the
+        socket is not connected so callers can fall back to a DB-only update.
+        """
+        self.packs_per_player = packs_per_player
+        self.cards_per_pack = cards_per_pack
+
+        if not self.socket_client.connected:
+            self.logger.warning("Cannot push pack settings - socket not connected")
+            return False
+
+        try:
+            await self.socket_client.emit('boostersPerPlayer', packs_per_player)
+            await self.socket_client.emit('cardsPerBooster', cards_per_pack)
+            return True
+        except Exception as e:
+            self.logger.error(f"Error updating pack settings: {e}")
             return False
 
     async def _should_advance_to_pairings(self) -> bool:

@@ -33,6 +33,10 @@ from utils import (
     safe_pin,
 )
 from cube_views.CubeSelectionView import CubeUpdateSelectionView
+from cube_views.pack_options import (
+    DEFAULT_PACKS_PER_PLAYER, DEFAULT_CARDS_PER_PACK,
+    pack_format_display, PACK_FORMAT_FIELD_NAME,
+)
 from loguru import logger
 
 from services.state_manager import state_manager
@@ -563,96 +567,99 @@ class PersistentView(discord.ui.View):
                 await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
                 return
             
-            # Create the appropriate cube selection view based on session type
-            cube_selection = CubeUpdateSelectionView(draft_session.session_type, interaction.guild_id)
-            
-            async def custom_cube_callback(select_interaction):
+            async def apply_cube_update(select_interaction, view):
                 try:
-                    # Get the selected cube choice
-                    cube_choice = select_interaction.data["values"][0]
-                    
-                    # If the cube choice is the same as the current cube, no need to update
-                    if draft_session.cube == cube_choice:
+                    cube_choice = view.cube_choice
+                    packs = view.packs_per_player
+                    cards = view.cards_per_pack
+
+                    current_packs = draft_session.packs_per_player or DEFAULT_PACKS_PER_PLAYER
+                    current_cards = draft_session.cards_per_pack or DEFAULT_CARDS_PER_PACK
+                    cube_changed = cube_choice != draft_session.cube
+                    packs_changed = (packs != current_packs) or (cards != current_cards)
+
+                    if not cube_changed and not packs_changed:
                         await select_interaction.response.send_message(
-                            f"The draft is already using the {cube_choice} cube.",
+                            f"The draft is already using the {cube_choice} cube with these pack settings.",
                             ephemeral=True
                         )
                         return
-                    
-                    # Confirm the cube update
+
                     await select_interaction.response.send_message(
-                        f"Updating draft to use cube: {cube_choice}...", 
+                        f"Updating draft to cube **{cube_choice}** "
+                        f"({packs} packs × {cards} cards)...",
                         ephemeral=True
                     )
-                    
-                    # Try to get the existing manager
+
                     manager = DraftSetupManager.get_active_manager(draft_session.session_id)
-                    
-                    if not manager:
-                        # Even without a manager, we can still update the database
-                        logger.warning(f"No active draft manager found for session {draft_session.session_id}. "
-                                      f"Updating database only.")
-                        
-                        # Update database and message without manager
-                        async with AsyncSessionLocal() as db_session:
-                            async with db_session.begin():
-                                await db_session.execute(
-                                    update(DraftSession)
-                                    .where(DraftSession.session_id == draft_session.session_id)
-                                    .values(cube=cube_choice)
+
+                    # Push to Draftmancer when we have a live manager.
+                    if manager:
+                        if cube_changed:
+                            if not await manager.update_cube(cube_choice):
+                                await select_interaction.followup.send(
+                                    "Failed to update the cube in Draftmancer. Please try again later.",
+                                    ephemeral=True
                                 )
-                                await db_session.commit()
-                                
-                        # Update the draft message with the new cube
-                        await update_draft_message(select_interaction.client, draft_session.session_id)
-                        
+                                return
+                        if packs_changed:
+                            await manager.update_pack_settings(packs, cards)
+
+                    # Persist only the columns that actually changed.
+                    new_values = {}
+                    if cube_changed:
+                        new_values["cube"] = cube_choice
+                    if packs_changed:
+                        new_values["packs_per_player"] = packs
+                        new_values["cards_per_pack"] = cards
+                    async with AsyncSessionLocal() as db_session:
+                        async with db_session.begin():
+                            await db_session.execute(
+                                update(DraftSession)
+                                .where(DraftSession.session_id == draft_session.session_id)
+                                .values(**new_values)
+                            )
+                            await db_session.commit()
+
+                    await update_draft_message(select_interaction.client, draft_session.session_id)
+
+                    if manager:
                         await select_interaction.followup.send(
-                            f"The draft has been updated to use cube: {cube_choice} (Note: Draft has already started, "
-                            f"so the cube won't be updated in Draftmancer).",
-                            ephemeral=True
-                        )
-                        return
-                    
-                    # If we have a manager, update the cube through it
-                    success = await manager.update_cube(cube_choice)
-                    
-                    if success:
-                        # Update the database with the new cube name
-                        async with AsyncSessionLocal() as db_session:
-                            async with db_session.begin():
-                                await db_session.execute(
-                                    update(DraftSession)
-                                    .where(DraftSession.session_id == draft_session.session_id)
-                                    .values(cube=cube_choice)
-                                )
-                                await db_session.commit()
-                        
-                        # Update the draft message with the new cube info
-                        await update_draft_message(select_interaction.client, draft_session.session_id)
-                        
-                        await select_interaction.followup.send(
-                            f"The draft has been updated to use cube: {cube_choice}",
+                            f"The draft has been updated to cube **{cube_choice}** "
+                            f"({packs} packs × {cards} cards).",
                             ephemeral=True
                         )
                     else:
+                        logger.warning(f"No active draft manager for session {draft_session.session_id}. "
+                                       f"Updated database only.")
                         await select_interaction.followup.send(
-                            f"Failed to update the cube in Draftmancer. Please try again later.",
+                            f"The draft has been updated to cube **{cube_choice}** "
+                            f"({packs} packs × {cards} cards) — note: the draft has already started, "
+                            "so this won't be reflected in Draftmancer.",
                             ephemeral=True
                         )
-                
+
                 except Exception as e:
                     logger.exception(f"Error in cube update callback: {e}")
                     await select_interaction.followup.send(
                         f"An error occurred while updating the cube: {str(e)}",
                         ephemeral=True
                     )
-            
-            # Replace the original callback with our custom one
-            cube_selection.cube_select.callback = custom_cube_callback
-            
+
+            # Same selection experience as starting a draft: cube dropdown
+            # (incl. Custom), Advanced Options, and a submit button.
+            cube_selection = CubeUpdateSelectionView(
+                draft_session.session_type,
+                interaction.guild_id,
+                current_cube=draft_session.cube,
+                on_submit=apply_cube_update,
+            )
+            cube_selection.packs_per_player = draft_session.packs_per_player or DEFAULT_PACKS_PER_PLAYER
+            cube_selection.cards_per_pack = draft_session.cards_per_pack or DEFAULT_CARDS_PER_PACK
+
             await interaction.response.send_message(
-                f"Select a new cube for this draft (currently using {draft_session.cube}):", 
-                view=cube_selection, 
+                f"Select a new cube for this draft (currently using {draft_session.cube}):",
+                view=cube_selection,
                 ephemeral=True
             )
             
@@ -2363,7 +2370,23 @@ async def update_draft_message(bot, session_id):
         cube_field_name = "Cube:"
         cube_field_value = f"[{draft_session.cube}](https://cubecobra.com/cube/list/{draft_session.cube})"
         update_field(cube_field_name, cube_field_value, inline=True)
-                
+
+        # Show/refresh/remove the pack-format field based on current settings.
+        pack_format = pack_format_display(
+            draft_session.packs_per_player or DEFAULT_PACKS_PER_PLAYER,
+            draft_session.cards_per_pack or DEFAULT_CARDS_PER_PACK,
+        )
+        pack_field_index = next(
+            (i for i, f in enumerate(embed.fields) if f.name == PACK_FORMAT_FIELD_NAME), None
+        )
+        if pack_format:
+            if pack_field_index is not None:
+                embed.set_field_at(pack_field_index, name=PACK_FORMAT_FIELD_NAME, value=pack_format, inline=True)
+            else:
+                embed.add_field(name=PACK_FORMAT_FIELD_NAME, value=pack_format, inline=True)
+        elif pack_field_index is not None:
+            embed.remove_field(pack_field_index)
+
         # Get the thumbnail URL for the cube
         thumbnail_url = get_cube_thumbnail_url(draft_session.cube)
         embed.set_thumbnail(url=thumbnail_url)

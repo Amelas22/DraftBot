@@ -3,7 +3,9 @@ from datetime import datetime, timedelta
 from sqlalchemy.future import select
 from session import AsyncSessionLocal, DraftSession
 from datacollections import DraftLogManager
-from services.draft_setup_manager import DraftSetupManager
+from services.draft_setup_manager import (
+    DraftSetupManager, DEFAULT_PACKS_PER_PLAYER, DEFAULT_CARDS_PER_PACK,
+)
 from loguru import logger
 from config import get_draftmancer_draft_url
 
@@ -56,7 +58,9 @@ async def reconnect_draft_setup_sessions(discord_client):
                     session_id=session.session_id,
                     draft_id=session.draft_id,
                     cube_id=session.cube,
-                    guild_id=session.guild_id
+                    guild_id=session.guild_id,
+                    packs_per_player=getattr(session, 'packs_per_player', None) or DEFAULT_PACKS_PER_PLAYER,
+                    cards_per_pack=getattr(session, 'cards_per_pack', None) or DEFAULT_CARDS_PER_PACK
                 )
                 
                 # Add to our list

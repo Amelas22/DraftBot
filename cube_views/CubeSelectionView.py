@@ -1,19 +1,30 @@
 import discord
-from config import get_cube_options
+from cube_views.pack_options import BaseCubeSelectionView, CustomCubeNameModal
 
-class CubeUpdateSelectionView(discord.ui.View):
-    """Selection view for updating cubes, to avoid circular imports with modals.py"""
-    def __init__(self, session_type: str, guild_id: int):
-        super().__init__()
-        self.session_type = session_type
 
-        options = [discord.SelectOption(**opt) for opt in get_cube_options(guild_id, session_type)]
-        
-        # Create the select dropdown with those options
-        self.cube_select = discord.ui.Select(
-            placeholder="Select a Cube",
-            options=options
-        )
-        
-        # We'll set the callback later in the update_cube_callback method
-        self.add_item(self.cube_select)
+class CubeUpdateSelectionView(BaseCubeSelectionView):
+    """Cube selection for an existing draft (Update Cube).
+
+    Identical selection experience to starting a draft (cube dropdown incl.
+    Custom, Advanced Options, and a submit button). The actual update is
+    delegated to ``on_submit(interaction, view)`` so this view stays free of
+    heavy imports.
+    """
+
+    submit_label = "Update Cube"
+
+    def __init__(self, session_type: str, guild_id: int, current_cube=None, on_submit=None):
+        super().__init__(session_type, guild_id, current_cube)
+        self.on_submit = on_submit
+
+    async def submit_callback(self, interaction: discord.Interaction):
+        if not self.cube_choice:
+            await interaction.response.send_message(
+                "❌ Please select a cube before updating.", ephemeral=True
+            )
+            return
+
+        if self.cube_choice == "custom":
+            await interaction.response.send_modal(CustomCubeNameModal(self, self.on_submit))
+        else:
+            await self.on_submit(interaction, self)

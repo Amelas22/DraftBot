@@ -48,6 +48,8 @@ class DraftSession(Base):
     cube = Column(String(128))
     live_draft_message_id = Column(String(64))
     min_stake = Column(Integer, default=10, server_default=text('10'))
+    packs_per_player = Column(Integer, default=3, server_default=text('3'))
+    cards_per_pack = Column(Integer, default=15, server_default=text('15'))
     logs_channel_id = Column(String(64))
     logs_message_id = Column(String(64))
     magicprotools_links = Column(JSON)

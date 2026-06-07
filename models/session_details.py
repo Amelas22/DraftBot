@@ -15,4 +15,6 @@ class SessionDetails:
         self.team_a_name = None
         self.team_b_name = None
         self.min_stake = 10
+        self.packs_per_player = 3
+        self.cards_per_pack = 15
         logger.debug(f"SessionDetails initialized: {self}")

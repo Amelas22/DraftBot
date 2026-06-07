@@ -32,7 +32,9 @@ class BaseSession:
                     session_id=new_draft_session.session_id,
                     draft_id=new_draft_session.draft_id,
                     cube_id=new_draft_session.cube,
-                    guild_id=new_draft_session.guild_id
+                    guild_id=new_draft_session.guild_id,
+                    packs_per_player=new_draft_session.packs_per_player,
+                    cards_per_pack=new_draft_session.cards_per_pack
                 )
                 # Start the connection manager as a background task
                 self.connection_task = asyncio.create_task(self.draft_manager.keep_connection_alive())
@@ -87,7 +89,9 @@ class BaseSession:
             team_b_name=self.session_details.team_b_name,
             tracked_draft=True,
             cube=self.session_details.cube_choice,
-            min_stake=getattr(self.session_details, 'min_stake', 10)
+            min_stake=getattr(self.session_details, 'min_stake', 10),
+            packs_per_player=self.session_details.packs_per_player,
+            cards_per_pack=self.session_details.cards_per_pack
         )
         session.add(new_draft_session)
         return new_draft_session
@@ -101,6 +105,15 @@ class BaseSession:
         # Add a dedicated Cube field (easier to update in views.py)
         cube_field_value = f"[{self.session_details.cube_choice}](https://cubecobra.com/cube/list/{self.session_details.cube_choice})"
         embed.add_field(name="Cube:", value=cube_field_value, inline=True)
+
+        # Surface pack structure only when it differs from the default.
+        from cube_views.pack_options import pack_format_display, PACK_FORMAT_FIELD_NAME
+        pack_format = pack_format_display(
+            self.session_details.packs_per_player,
+            self.session_details.cards_per_pack,
+        )
+        if pack_format:
+            embed.add_field(name=PACK_FORMAT_FIELD_NAME, value=pack_format, inline=True)
 
         # Add signup fields (can be overridden by subclasses)
         self._add_signup_fields(embed)
