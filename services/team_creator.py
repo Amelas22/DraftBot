@@ -67,6 +67,8 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                     session.deletion_time = datetime.now() + timedelta(hours=4)
                 session.session_stage = 'teams'
 
+                stake_info_by_player = {}
+
                 # Create teams for random/test/staked/winston drafts
                 if session.session_type in ['random', 'test', 'staked', 'winston']:
                     await split_into_teams(bot, session.session_id)
@@ -78,7 +80,6 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                         state_manager.remove_ready_check_session(session_id)
 
                     # Calculate stakes for staked drafts
-                    stake_info_by_player = {}
                     if persistent_view.session_type == "staked" and updated_session and updated_session.team_a and updated_session.team_b:
                         all_players = updated_session.team_a + updated_session.team_b
 
