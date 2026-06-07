@@ -178,6 +178,36 @@ async def send_debt_transfer_dms(
     await send_dm(bot, creditor_id, creditor_msg, label=f"creditor {creditor_name}")
 
 
+async def send_settlement_notification_dm(
+    bot, guild: "discord.Guild", guild_id: str, settler_id: str,
+    payer_id: str, payee_id: str, amount: int
+):
+    """Send a DM to the other party when a settlement is recorded."""
+    settler_name = get_member_name_plain(guild, settler_id)
+    payer_name = get_member_name_plain(guild, payer_id)
+    payee_name = get_member_name_plain(guild, payee_id)
+
+    # Determine who to notify (the party that didn't initiate)
+    other_id = payee_id if settler_id == payer_id else payer_id
+
+    # Get post-settlement balance from other party's perspective
+    other_to_settler = await get_balance_with(guild_id, other_id, settler_id)
+
+    if other_to_settler < 0:
+        balance_msg = f"You still owe {settler_name} {abs(other_to_settler)} tix."
+    elif other_to_settler > 0:
+        balance_msg = f"{settler_name} still owes you {other_to_settler} tix."
+    else:
+        balance_msg = f"You and {settler_name} are fully settled."
+
+    if settler_id == payer_id:
+        msg = f"💰 {payer_name} has recorded that they paid {payee_name} {amount} tix. {balance_msg}"
+    else:
+        msg = f"💰 {payee_name} has recorded that {payer_name} paid them {amount} tix. {balance_msg}"
+
+    await send_dm(bot, other_id, msg, label=f"settlement notify {other_id}")
+
+
 async def send_ready_check_dms(bot_or_client, draft_session, guild_id, channel_id, channel_name, guild_name):
     """
     Send DM notifications to users who have DM notifications enabled for a ready check.
