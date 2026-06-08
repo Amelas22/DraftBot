@@ -55,8 +55,27 @@ def _disable_all(view):
         child.disabled = True
 
 
-class AbandonVoteView(View):
-    """Majority vote among draft participants to abandon a draft and void matches."""
+class BaseVoteView(View):
+    """A majority yes/no vote among draft participants.
+
+    Subclasses only set the appearance/wording class attributes below; all the
+    voting, tallying, early-exit, timeout and embed logic lives here. The
+    command that creates the view sends it, starts ``start_timer``, awaits
+    ``complete``, then acts on ``get_vote_result``.
+    """
+
+    # --- per-vote appearance / wording (override in subclasses) ---
+    embed_title = "Vote"
+    embed_description = "Vote."
+    embed_color = discord.Color.blurple()
+    yes_label = "Yes"
+    no_label = "No"
+    yes_style = discord.ButtonStyle.primary
+    no_style = discord.ButtonStyle.secondary
+    yes_status = "✅ Voted Yes"
+    no_status = "❌ Voted No"
+    action_verb = "pass"   # used in "votes needed to {action_verb}"
+    log_name = "vote"      # used in timeout log lines
 
     def __init__(self, draft_session_id, participants, timeout=90.0):
         super().__init__(timeout=timeout)
@@ -66,15 +85,18 @@ class AbandonVoteView(View):
         self.timer_task = None
         self.complete = asyncio.Event()
         self._start_time = datetime.now()
+        # Apply the subclass's appearance to the decorator-created buttons.
+        self.yes_button.label, self.yes_button.style = self.yes_label, self.yes_style
+        self.no_button.label, self.no_button.style = self.no_label, self.no_style
 
     async def start_timer(self):
         try:
             await asyncio.sleep(self.timeout)
             if not self.complete.is_set():
-                logger.info(f"Abandon vote for session {self.draft_session_id} timed out")
+                logger.info(f"{self.log_name} for session {self.draft_session_id} timed out")
                 await self.on_timeout()
         except asyncio.CancelledError:
-            logger.debug(f"Timer for abandon vote {self.draft_session_id} was cancelled")
+            logger.debug(f"Timer for {self.log_name} {self.draft_session_id} was cancelled")
 
     def get_vote_result(self):
         """Return (passed, yes_votes, total): passes when more than half vote yes."""
@@ -95,7 +117,7 @@ class AbandonVoteView(View):
             self.timer_task.cancel()
         _disable_all(self)
 
-    @discord.ui.button(label="Yes, Abandon Draft", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Yes", style=discord.ButtonStyle.primary)
     async def yes_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         user_id = str(interaction.user.id)
         if user_id not in self.votes:
@@ -105,12 +127,11 @@ class AbandonVoteView(View):
         embed = await self.generate_status_embed(interaction.guild)
         await interaction.response.edit_message(embed=embed, view=self)
 
-        passed, _, _ = self.get_vote_result()
-        if passed:
+        if self.get_vote_result()[0]:
             self._finish()
             await self.message.edit(view=self)
 
-    @discord.ui.button(label="No, Keep Draft", style=discord.ButtonStyle.green)
+    @discord.ui.button(label="No", style=discord.ButtonStyle.secondary)
     async def no_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         user_id = str(interaction.user.id)
         if user_id not in self.votes:
@@ -125,30 +146,29 @@ class AbandonVoteView(View):
             self._finish()
             await self.message.edit(view=self)
 
+    def _participant_status(self, vote):
+        if vote is True:
+            return self.yes_status
+        if vote is False:
+            return self.no_status
+        return "⏳ Not Voted"
+
     async def generate_status_embed(self, guild):
         embed = discord.Embed(
-            title="Draft Abandonment Vote",
-            description="Vote to abandon the current draft. All match results will be voided.",
-            color=discord.Color.red(),
+            title=self.embed_title, description=self.embed_description, color=self.embed_color
         )
         status_lines = []
         for user_id, vote in self.votes.items():
             member = guild.get_member(int(user_id))
             name = member.display_name if member else f"User {user_id}"
-            if vote is True:
-                status = "✅ Voted to Abandon"
-            elif vote is False:
-                status = "❌ Voted to Keep"
-            else:
-                status = "⏳ Not Voted"
-            status_lines.append(f"{name}: {status}")
+            status_lines.append(f"{name}: {self._participant_status(vote)}")
         embed.add_field(name="Participants", value="\n".join(status_lines) or "No participants found", inline=False)
 
         passed, yes_votes, total_participants = self.get_vote_result()
         needed_votes = (total_participants // 2) + 1
         embed.add_field(
             name="Vote Status",
-            value=f"**{yes_votes}/{needed_votes}** votes needed to abandon\n" +
+            value=f"**{yes_votes}/{needed_votes}** votes needed to {self.action_verb}\n" +
                   ("**Vote will pass!**" if passed else "**Vote will not pass yet**"),
             inline=False,
         )
@@ -163,17 +183,32 @@ class AbandonVoteView(View):
             passed, yes_votes, total_participants = self.get_vote_result()
             needed_votes = (total_participants // 2) + 1
             embed = discord.Embed(
-                title="Draft Abandonment Vote - Ended",
+                title=f"{self.embed_title} - Ended",
                 description="The vote has ended.",
-                color=discord.Color.red(),
+                color=self.embed_color,
             )
             embed.add_field(
                 name="Final Results",
-                value=f"**{yes_votes}/{needed_votes}** votes needed to abandon\n" +
+                value=f"**{yes_votes}/{needed_votes}** votes needed to {self.action_verb}\n" +
                       ("**Vote passed!**" if passed else "**Vote did not pass**"),
                 inline=False,
             )
             await self.message.edit(embed=embed, view=self)
+
+
+class AbandonVoteView(BaseVoteView):
+    """Majority vote to abandon a draft and void all its matches."""
+    embed_title = "Draft Abandonment Vote"
+    embed_description = "Vote to abandon the current draft. All match results will be voided."
+    embed_color = discord.Color.red()
+    yes_label = "Yes, Abandon Draft"
+    yes_style = discord.ButtonStyle.danger
+    no_label = "No, Keep Draft"
+    no_style = discord.ButtonStyle.green
+    yes_status = "✅ Voted to Abandon"
+    no_status = "❌ Voted to Keep"
+    action_verb = "abandon"
+    log_name = "Abandon vote"
 
 
 class AbandonConfirmView(View):
@@ -201,361 +236,35 @@ class AbandonConfirmView(View):
         await interaction.response.edit_message(content="Abandon cancelled.", view=self)
 
 
-class LogReleaseVoteView(View):
-    def __init__(self, draft_session_id, participants, timeout=90.0):
-        super().__init__(timeout=timeout)
-        self.draft_session_id = draft_session_id
-        # Initialize with all participants set to None (haven't voted)
-        self.votes = {user_id: None for user_id in participants}  # None = not voted, True = yes, False = no
-        self.message = None
-        self.timer_task = None
-        self.complete = asyncio.Event()
-        self._start_time = datetime.now()
-        
-    async def start_timer(self):
-        """Start the timeout timer for the vote"""
-        try:
-            await asyncio.sleep(self.timeout)
-            if not self.complete.is_set():
-                # Time's up, mark the vote as complete
-                logger.info(f"Log release vote for session {self.draft_session_id} timed out")
-                await self.on_timeout()
-        except asyncio.CancelledError:
-            logger.debug(f"Timer for log release vote {self.draft_session_id} was cancelled")
-    
-    def get_vote_result(self):
-        """Check if the vote passed (more than half voted yes)"""
-        yes_votes = sum(1 for vote in self.votes.values() if vote is True)
-        total_participants = len(self.votes)
-        
-        # Vote passes if more than half vote yes
-        needed_votes = (total_participants // 2) + 1
-        return yes_votes >= needed_votes, yes_votes, total_participants
-    
-    @discord.ui.button(label="Yes, Release Logs", style=discord.ButtonStyle.primary)
-    async def yes_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        """Vote yes to release logs"""
-        user_id = str(interaction.user.id)
-        if user_id not in self.votes:
-            await interaction.response.send_message("You are not part of this draft.", ephemeral=True)
-            return
-            
-        # Record vote
-        self.votes[user_id] = True
-        
-        # Update the message
-        embed = await self.generate_status_embed(interaction.guild)
-        await interaction.response.edit_message(embed=embed, view=self)
-        
-        # Check if vote has passed
-        passed, _, _ = self.get_vote_result()
-        if passed:
-            self.complete.set()
-            if self.timer_task:
-                self.timer_task.cancel()
-            
-            # Disable buttons
-            for child in self.children:
-                child.disabled = True
-                
-            await self.message.edit(view=self)
-            # The on_complete callback will handle releasing the logs
-        
-    @discord.ui.button(label="No, Keep Logs Private", style=discord.ButtonStyle.secondary)
-    async def no_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        """Vote no to keep logs private"""
-        user_id = str(interaction.user.id)
-        if user_id not in self.votes:
-            await interaction.response.send_message("You are not part of this draft.", ephemeral=True)
-            return
-            
-        # Record vote
-        self.votes[user_id] = False
-        
-        # Update the message
-        embed = await self.generate_status_embed(interaction.guild)
-        await interaction.response.edit_message(embed=embed, view=self)
-
-        # Check if vote cannot pass anymore
-        no_votes = sum(1 for vote in self.votes.values() if vote is False)
-        total_participants = len(self.votes)
-        needed_votes = (total_participants // 2) + 1
-        remaining_votes = sum(1 for vote in self.votes.values() if vote is None)
-        max_possible_yes = sum(1 for vote in self.votes.values() if vote is True) + remaining_votes
-
-        # If max possible yes votes can't reach threshold, end vote early
-        if max_possible_yes < needed_votes:
-            self.complete.set()
-            if self.timer_task:
-                self.timer_task.cancel()
-            
-            # Disable buttons
-            for child in self.children:
-                child.disabled = True
-                
-            await self.message.edit(view=self)
-    
-    async def generate_status_embed(self, guild):
-        """Generate an embed showing the current vote status"""
-        embed = discord.Embed(
-            title="Draft Logs Release Vote",
-            description="Vote to release the draft logs early.",
-            color=discord.Color.blue()
-        )
-        
-        # Add a field showing votes for each participant
-        status_lines = []
-        for user_id, vote in self.votes.items():
-            # Try to get member name
-            member = guild.get_member(int(user_id))
-            name = member.display_name if member else f"User {user_id}"
-            
-            # Add status emoji based on vote
-            if vote is True:
-                status = "✅ Voted to Release"
-            elif vote is False:
-                status = "❌ Voted to Keep Private"
-            else:
-                status = "⏳ Not Voted"
-                
-            status_lines.append(f"{name}: {status}")
-        
-        embed.add_field(
-            name="Participants",
-            value="\n".join(status_lines) or "No participants found",
-            inline=False
-        )
-        
-        # Add vote results field
-        passed, yes_votes, total_participants = self.get_vote_result()
-        needed_votes = (total_participants // 2) + 1
-        
-        embed.add_field(
-            name="Vote Status",
-            value=f"**{yes_votes}/{needed_votes}** votes needed to release logs\n" +
-                  (f"**Vote will pass!**" if passed else f"**Vote will not pass yet**"),
-            inline=False
-        )
-        
-        # Calculate expiry timestamp correctly
-        expiry_time = self._start_time.timestamp() + self.timeout
-        expiry_timestamp = int(expiry_time)
-        
-        embed.add_field(
-            name="Vote Ends",
-            value=f"<t:{expiry_timestamp}:R>",
-            inline=False
-        )
-        
-        return embed
-        
-    async def on_timeout(self):
-        """Called when the view times out"""
-        # Make sure we set the complete event
-        self.complete.set()
-        
-        # Disable all buttons
-        for child in self.children:
-            child.disabled = True
-            
-        # Update the message if it exists
-        if self.message:
-            embed = discord.Embed(
-                title="Draft Logs Release Vote - Ended",
-                description="The vote has ended.",
-                color=discord.Color.blue()
-            )
-            
-            passed, yes_votes, total_participants = self.get_vote_result()
-            needed_votes = (total_participants // 2) + 1
-            
-            embed.add_field(
-                name="Final Results",
-                value=f"**{yes_votes}/{needed_votes}** votes needed to release logs\n" +
-                      (f"**Vote passed!**" if passed else f"**Vote did not pass**"),
-                inline=False
-            )
-            
-            await self.message.edit(embed=embed, view=self)
+class LogReleaseVoteView(BaseVoteView):
+    """Majority vote to release the draft logs early."""
+    embed_title = "Draft Logs Release Vote"
+    embed_description = "Vote to release the draft logs early."
+    embed_color = discord.Color.blue()
+    yes_label = "Yes, Release Logs"
+    yes_style = discord.ButtonStyle.primary
+    no_label = "No, Keep Logs Private"
+    no_style = discord.ButtonStyle.secondary
+    yes_status = "✅ Voted to Release"
+    no_status = "❌ Voted to Keep Private"
+    action_verb = "release logs"
+    log_name = "Log release vote"
 
 ACTIVE_REPLACE_VOTES = {}
 
-class ReplaceWithBotsVoteView(View):
-    def __init__(self, draft_session_id, participants, timeout=90.0):
-        super().__init__(timeout=timeout)
-        self.draft_session_id = draft_session_id
-        # Initialize with all participants set to None (haven't voted)
-        self.votes = {user_id: None for user_id in participants}  # None = not voted, True = yes, False = no
-        self.message = None
-        self.timer_task = None
-        self.complete = asyncio.Event()
-        self._start_time = datetime.now()
-        
-    async def start_timer(self):
-        """Start the timeout timer for the vote"""
-        try:
-            await asyncio.sleep(self.timeout)
-            if not self.complete.is_set():
-                # Time's up, mark the vote as complete
-                logger.info(f"Replace with bots vote for session {self.draft_session_id} timed out")
-                await self.on_timeout()
-        except asyncio.CancelledError:
-            logger.debug(f"Timer for replace with bots vote {self.draft_session_id} was cancelled")
-    
-    def get_vote_result(self):
-        """Check if the vote passed (more than half voted yes)"""
-        yes_votes = sum(1 for vote in self.votes.values() if vote is True)
-        total_participants = len(self.votes)
-        
-        # Vote passes if more than half vote yes
-        needed_votes = (total_participants // 2) + 1
-        return yes_votes >= needed_votes, yes_votes, total_participants
-    
-    @discord.ui.button(label="Yes, Replace with Bots", style=discord.ButtonStyle.primary)
-    async def yes_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        """Vote yes to replace disconnected users with bots"""
-        user_id = str(interaction.user.id)
-        if user_id not in self.votes:
-            await interaction.response.send_message("You are not part of this draft.", ephemeral=True)
-            return
-            
-        # Record vote
-        self.votes[user_id] = True
-        
-        # Update the message
-        embed = await self.generate_status_embed(interaction.guild)
-        await interaction.response.edit_message(embed=embed, view=self)
-        
-        # Check if vote has passed
-        passed, _, _ = self.get_vote_result()
-        if passed:
-            self.complete.set()
-            if self.timer_task:
-                self.timer_task.cancel()
-            
-            # Disable buttons
-            for child in self.children:
-                child.disabled = True
-                
-            await self.message.edit(view=self)
-            # The on_complete callback will handle replacing disconnected users
-        
-    @discord.ui.button(label="No, Wait for Players", style=discord.ButtonStyle.secondary)
-    async def no_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        """Vote no to continue waiting for disconnected users"""
-        user_id = str(interaction.user.id)
-        if user_id not in self.votes:
-            await interaction.response.send_message("You are not part of this draft.", ephemeral=True)
-            return
-            
-        # Record vote
-        self.votes[user_id] = False
-        
-        # Update the message
-        embed = await self.generate_status_embed(interaction.guild)
-        await interaction.response.edit_message(embed=embed, view=self)
-
-        # Check if vote cannot pass anymore
-        no_votes = sum(1 for vote in self.votes.values() if vote is False)
-        total_participants = len(self.votes)
-        needed_votes = (total_participants // 2) + 1
-        remaining_votes = sum(1 for vote in self.votes.values() if vote is None)
-        max_possible_yes = sum(1 for vote in self.votes.values() if vote is True) + remaining_votes
-
-        # If max possible yes votes can't reach threshold, end vote early
-        if max_possible_yes < needed_votes:
-            self.complete.set()
-            if self.timer_task:
-                self.timer_task.cancel()
-            
-            # Disable buttons
-            for child in self.children:
-                child.disabled = True
-                
-            await self.message.edit(view=self)
-    
-    async def generate_status_embed(self, guild):
-        """Generate an embed showing the current vote status"""
-        embed = discord.Embed(
-            title="Replace Disconnected Players Vote",
-            description="Vote to replace disconnected players with bots.",
-            color=discord.Color.blue()
-        )
-        
-        # Add a field showing votes for each participant
-        status_lines = []
-        for user_id, vote in self.votes.items():
-            # Try to get member name
-            member = guild.get_member(int(user_id))
-            name = member.display_name if member else f"User {user_id}"
-            
-            # Add status emoji based on vote
-            if vote is True:
-                status = "✅ Replace with Bots"
-            elif vote is False:
-                status = "❌ Wait for Players"
-            else:
-                status = "⏳ Not Voted"
-                
-            status_lines.append(f"{name}: {status}")
-        
-        embed.add_field(
-            name="Participants",
-            value="\n".join(status_lines) or "No participants found",
-            inline=False
-        )
-        
-        # Add vote results field with fixed needed votes calculation
-        passed, yes_votes, total_participants = self.get_vote_result()
-        needed_votes = (total_participants // 2) + 1
-        
-        embed.add_field(
-            name="Vote Status",
-            value=f"**{yes_votes}/{needed_votes}** votes needed to replace\n" +
-                  (f"**Vote will pass!**" if passed else f"**Vote will not pass yet**"),
-            inline=False
-        )
-        
-        # Calculate expiry timestamp correctly
-        expiry_time = self._start_time.timestamp() + self.timeout
-        expiry_timestamp = int(expiry_time)
-        
-        embed.add_field(
-            name="Vote Ends",
-            value=f"<t:{expiry_timestamp}:R>",
-            inline=False
-        )
-        
-        return embed
-        
-    async def on_timeout(self):
-        """Called when the view times out"""
-        # Make sure we set the complete event
-        self.complete.set()
-        
-        # Disable all buttons
-        for child in self.children:
-            child.disabled = True
-            
-        # Update the message if it exists
-        if self.message:
-            embed = discord.Embed(
-                title="Replace Disconnected Players Vote - Ended",
-                description="The vote has ended.",
-                color=discord.Color.blue()
-            )
-            
-            passed, yes_votes, total_participants = self.get_vote_result()
-            needed_votes = (total_participants // 2) + 1
-            
-            embed.add_field(
-                name="Final Results",
-                value=f"**{yes_votes}/{needed_votes}** votes needed to replace\n" +
-                      (f"**Vote passed!**" if passed else f"**Vote did not pass**"),
-                inline=False
-            )
-            
-            await self.message.edit(embed=embed, view=self)
+class ReplaceWithBotsVoteView(BaseVoteView):
+    """Majority vote to replace disconnected players with bots."""
+    embed_title = "Replace Disconnected Players Vote"
+    embed_description = "Vote to replace disconnected players with bots."
+    embed_color = discord.Color.blue()
+    yes_label = "Yes, Replace with Bots"
+    yes_style = discord.ButtonStyle.primary
+    no_label = "No, Wait for Players"
+    no_style = discord.ButtonStyle.secondary
+    yes_status = "✅ Replace with Bots"
+    no_status = "❌ Wait for Players"
+    action_verb = "replace"
+    log_name = "Replace with bots vote"
 
 class DraftMancerReadyCheckView(View):
     def __init__(self, draft_session_id, participants, timeout=90.0):
@@ -681,182 +390,20 @@ class DraftMancerReadyCheckView(View):
         if self.draft_session_id in ACTIVE_UNPAUSE_CHECKS:
             del ACTIVE_UNPAUSE_CHECKS[self.draft_session_id]
 
-class ScrapVoteView(View):
-    def __init__(self, draft_session_id, participants, timeout=90.0):
-        super().__init__(timeout=timeout)
-        self.draft_session_id = draft_session_id
-        # Initialize with all participants set to None (haven't voted)
-        self.votes = {user_id: None for user_id in participants}  # None = not voted, True = yes, False = no
-        self.message = None
-        self.timer_task = None
-        self.complete = asyncio.Event()
-        self._start_time = datetime.now()  # Use time.time() instead of asyncio.get_event_loop().time()
-        
-    async def start_timer(self):
-        """Start the timeout timer for the vote"""
-        try:
-            await asyncio.sleep(self.timeout)
-            if not self.complete.is_set():
-                # Time's up, mark the vote as complete
-                logger.info(f"Scrap vote for session {self.draft_session_id} timed out")
-                await self.on_timeout()
-        except asyncio.CancelledError:
-            logger.debug(f"Timer for scrap vote {self.draft_session_id} was cancelled")
-    
-    def get_vote_result(self):
-        """Check if the vote passed (more than half voted yes)"""
-        yes_votes = sum(1 for vote in self.votes.values() if vote is True)
-        total_participants = len(self.votes)
-        
-        # Vote passes if more than half vote yes
-        needed_votes = (total_participants // 2) + 1
-        return yes_votes >= needed_votes, yes_votes, total_participants
-    
-    @discord.ui.button(label="Yes, Cancel Draft", style=discord.ButtonStyle.danger)
-    async def yes_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        """Vote yes to cancel the draft"""
-        user_id = str(interaction.user.id)
-        if user_id not in self.votes:
-            await interaction.response.send_message("You are not part of this draft.", ephemeral=True)
-            return
-            
-        # Record vote
-        self.votes[user_id] = True
-        
-        # Update the message
-        embed = await self.generate_status_embed(interaction.guild)
-        await interaction.response.edit_message(embed=embed, view=self)
-        
-        # Check if vote has passed
-        passed, _, _ = self.get_vote_result()
-        if passed:
-            self.complete.set()
-            if self.timer_task:
-                self.timer_task.cancel()
-            
-            # Disable buttons
-            for child in self.children:
-                child.disabled = True
-                
-            await self.message.edit(view=self)
-            # The on_complete callback will handle canceling the draft
-        
-    @discord.ui.button(label="No, Continue Draft", style=discord.ButtonStyle.green)
-    async def no_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        """Vote no to continue the draft"""
-        user_id = str(interaction.user.id)
-        if user_id not in self.votes:
-            await interaction.response.send_message("You are not part of this draft.", ephemeral=True)
-            return
-            
-        # Record vote
-        self.votes[user_id] = False
-        
-        # Update the message
-        embed = await self.generate_status_embed(interaction.guild)
-        await interaction.response.edit_message(embed=embed, view=self)
+class ScrapVoteView(BaseVoteView):
+    """Majority vote to cancel the current draft."""
+    embed_title = "Draft Cancellation Vote"
+    embed_description = "Vote to cancel the current draft."
+    embed_color = discord.Color.red()
+    yes_label = "Yes, Cancel Draft"
+    yes_style = discord.ButtonStyle.danger
+    no_label = "No, Continue Draft"
+    no_style = discord.ButtonStyle.green
+    yes_status = "✅ Voted to Cancel"
+    no_status = "❌ Voted to Continue"
+    action_verb = "cancel"
+    log_name = "Scrap vote"
 
-        # Check if vote cannot pass anymore
-        no_votes = sum(1 for vote in self.votes.values() if vote is False)
-        total_participants = len(self.votes)
-        needed_votes = (total_participants // 2) + 1
-        remaining_votes = sum(1 for vote in self.votes.values() if vote is None)
-        max_possible_yes = sum(1 for vote in self.votes.values() if vote is True) + remaining_votes
-
-        # If max possible yes votes can't reach threshold, end vote early
-        if max_possible_yes < needed_votes:
-            self.complete.set()
-            if self.timer_task:
-                self.timer_task.cancel()
-            
-            # Disable buttons
-            for child in self.children:
-                child.disabled = True
-                
-            await self.message.edit(view=self)
-    
-    async def generate_status_embed(self, guild):
-        """Generate an embed showing the current vote status"""
-        embed = discord.Embed(
-            title="Draft Cancellation Vote",
-            description="Vote to cancel the current draft.",
-            color=discord.Color.red()
-        )
-        
-        # Add a field showing votes for each participant
-        status_lines = []
-        for user_id, vote in self.votes.items():
-            # Try to get member name
-            member = guild.get_member(int(user_id))
-            name = member.display_name if member else f"User {user_id}"
-            
-            # Add status emoji based on vote
-            if vote is True:
-                status = "✅ Voted to Cancel"
-            elif vote is False:
-                status = "❌ Voted to Continue"
-            else:
-                status = "⏳ Not Voted"
-                
-            status_lines.append(f"{name}: {status}")
-        
-        embed.add_field(
-            name="Participants",
-            value="\n".join(status_lines) or "No participants found",
-            inline=False
-        )
-        
-        # Add vote results field with fixed needed votes calculation
-        passed, yes_votes, total_participants = self.get_vote_result()
-        needed_votes = (total_participants // 2) + 1  # Fix: more than half means (n/2)+1
-        
-        embed.add_field(
-            name="Vote Status",
-            value=f"**{yes_votes}/{needed_votes}** votes needed to cancel\n" +
-                  (f"**Vote will pass!**" if passed else f"**Vote will not pass yet**"),
-            inline=False
-        )
-        
-        # Calculate expiry timestamp correctly
-        expiry_time = self._start_time.timestamp() + self.timeout
-        expiry_timestamp = int(expiry_time)
-        
-        embed.add_field(
-            name="Vote Ends",
-            value=f"<t:{expiry_timestamp}:R>",
-            inline=False
-        )
-        
-        return embed
-        
-    async def on_timeout(self):
-        """Called when the view times out"""
-        # Make sure we set the complete event
-        self.complete.set()
-        
-        # Disable all buttons
-        for child in self.children:
-            child.disabled = True
-            
-        # Update the message if it exists
-        if self.message:
-            embed = discord.Embed(
-                title="Draft Cancellation Vote - Ended",
-                description="The vote has ended.",
-                color=discord.Color.red()
-            )
-            
-            passed, yes_votes, total_participants = self.get_vote_result()
-            needed_votes = (total_participants // 2) + 1
-            
-            embed.add_field(
-                name="Final Results",
-                value=f"**{yes_votes}/{needed_votes}** votes needed to cancel\n" +
-                      (f"**Vote passed!**" if passed else f"**Vote did not pass**"),
-                inline=False
-            )
-            
-            await self.message.edit(embed=embed, view=self)
 
 class DraftControlCog(commands.Cog):
     def __init__(self, bot):
@@ -1663,7 +1210,7 @@ class DraftControlCog(commands.Cog):
                     
                     # Everyone is ready, resume the draft with pings
                     resume_message = await ctx.channel.send(
-                        f"\{ping_text}n\n🎮 **Everyone is ready!** Draft resuming in 5 seconds..."
+                        f"{ping_text}\n\n🎮 **Everyone is ready!** Draft resuming in 5 seconds..."
                     )
                     await asyncio.sleep(5)
                     
