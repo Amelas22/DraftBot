@@ -163,6 +163,95 @@ async def test_random_draft_has_signup_field(test_db):
 
 
 # ============================================================================
+# PACK SETTINGS TESTS
+# ============================================================================
+
+@pytest.mark.asyncio
+async def test_pack_settings_persisted_and_passed_to_manager(test_db):
+    """Custom pack settings should be stored on the draft and handed to Draftmancer."""
+    interaction = create_mock_interaction()
+    session_details = create_session_details(interaction)
+    session_details.packs_per_player = 4
+    session_details.cards_per_pack = 10
+    random_session = RandomSession(session_details, session_factory=test_db)
+
+    mock_draft_manager = MagicMock()
+    mock_draft_manager.keep_connection_alive = AsyncMock()
+    mock_draft_manager.socket_client = MagicMock()
+    mock_draft_manager.socket_client.connected = False
+
+    with patch('sessions.base_session.DraftSetupManager', return_value=mock_draft_manager) as mock_mgr, \
+         patch('sessions.base_session.PersistentView'), \
+         patch('sessions.base_session.make_message_sticky', new_callable=AsyncMock), \
+         patch('sessions.base_session.get_session_deletion_hours', return_value=5), \
+         patch('sessions.base_session.get_cube_thumbnail_url', return_value='https://example.com/thumb.jpg'):
+        await random_session.create_draft_session(interaction, interaction.client)
+
+    draft = await get_draft_by_session_id(session_details.session_id, test_db)
+    assert draft.packs_per_player == 4
+    assert draft.cards_per_pack == 10
+
+    _, kwargs = mock_mgr.call_args
+    assert kwargs["packs_per_player"] == 4
+    assert kwargs["cards_per_pack"] == 10
+
+
+@pytest.mark.asyncio
+async def test_pack_settings_default_to_three_by_fifteen(test_db):
+    """Without overrides, drafts persist the standard 3 x 15 pack structure."""
+    interaction = create_mock_interaction()
+    session_details = create_session_details(interaction)
+    random_session = RandomSession(session_details, session_factory=test_db)
+
+    mock_draft_manager = MagicMock()
+    mock_draft_manager.keep_connection_alive = AsyncMock()
+    mock_draft_manager.socket_client = MagicMock()
+    mock_draft_manager.socket_client.connected = False
+
+    with patch('sessions.base_session.DraftSetupManager', return_value=mock_draft_manager), \
+         patch('sessions.base_session.PersistentView'), \
+         patch('sessions.base_session.make_message_sticky', new_callable=AsyncMock), \
+         patch('sessions.base_session.get_session_deletion_hours', return_value=5), \
+         patch('sessions.base_session.get_cube_thumbnail_url', return_value='https://example.com/thumb.jpg'):
+        await random_session.create_draft_session(interaction, interaction.client)
+
+    draft = await get_draft_by_session_id(session_details.session_id, test_db)
+    assert draft.packs_per_player == 3
+    assert draft.cards_per_pack == 15
+
+
+@pytest.mark.asyncio
+async def test_embed_shows_pack_format_when_non_default(test_db):
+    """The draft embed surfaces pack settings only when they differ from default."""
+    interaction = create_mock_interaction()
+    session_details = create_session_details(interaction)
+    session_details.packs_per_player = 4
+    session_details.cards_per_pack = 10
+    random_session = RandomSession(session_details)
+
+    with patch('sessions.base_session.get_cube_thumbnail_url', return_value='https://example.com/thumb.jpg'):
+        embed = random_session.create_embed()
+
+    field = next((f for f in embed.fields if f.name == "Pack Format:"), None)
+    assert field is not None
+    assert "4" in field.value and "10" in field.value
+
+
+@pytest.mark.asyncio
+async def test_embed_hides_pack_format_when_default(test_db):
+    """Standard 3 x 15 drafts do not clutter the embed with a pack-format field."""
+    interaction = create_mock_interaction()
+    session_details = create_session_details(interaction)  # defaults 3 / 15
+    random_session = RandomSession(session_details)
+
+    with patch('sessions.base_session.get_cube_thumbnail_url', return_value='https://example.com/thumb.jpg'):
+        embed = random_session.create_embed()
+
+    field = next((f for f in embed.fields if f.name == "Pack Format:"), None)
+    assert field is None
+
+
+# ============================================================================
 # PREMADE DRAFT TESTS
 # ============================================================================
 
