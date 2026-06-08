@@ -639,6 +639,10 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                 print("Draft session not found.")
                 return
 
+            if draft_session.session_stage == "abandoned":
+                # Draft was abandoned; never finalize results for it.
+                return
+
             guild = bot.get_guild(int(draft_session.guild_id))
             if not guild:
                 print("Guild not found.")

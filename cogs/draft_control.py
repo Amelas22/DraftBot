@@ -3,9 +3,10 @@ from discord.ext import commands
 import asyncio
 from loguru import logger
 from models.draft_session import DraftSession
+from models.match import MatchResult
 from discord.ui import View, Button
-from datetime import datetime
-from sqlalchemy import select, and_, desc
+from datetime import datetime, timedelta
+from sqlalchemy import select, and_, desc, update
 from database.db_session import db_session
 from services.draft_setup_manager import DraftSetupManager, create_rooms_and_pairings_with_fallback
 
@@ -13,6 +14,191 @@ from services.draft_setup_manager import DraftSetupManager, create_rooms_and_pai
 ACTIVE_UNPAUSE_CHECKS = {}
 ACTIVE_SCRAP_VOTES = {}
 ACTIVE_LOG_RELEASE_VOTES = {}
+ACTIVE_ABANDON_VOTES = {}
+
+# Hours until an abandoned draft's channels are cleaned up by the deletion task.
+ABANDON_CLEANUP_HOURS = 2
+
+
+async def abandon_draft_session(session_id, session_factory=None):
+    """Void all match results for a draft and mark it abandoned.
+
+    Sets every MatchResult back to unplayed (no winner, zero game wins,
+    no submission time) and flags the draft ``session_stage='abandoned'`` with a
+    ``deletion_time`` so the existing cleanup task removes its channels. Only
+    intended for not-yet-completed drafts (the caller enforces that).
+    """
+    if session_factory is None:
+        from session import AsyncSessionLocal
+        session_factory = AsyncSessionLocal
+
+    async with session_factory() as db:
+        async with db.begin():
+            await db.execute(
+                update(MatchResult)
+                .where(MatchResult.session_id == session_id)
+                .values(winner_id=None, player1_wins=0, player2_wins=0, result_submitted_at=None)
+            )
+            await db.execute(
+                update(DraftSession)
+                .where(DraftSession.session_id == session_id)
+                .values(
+                    session_stage="abandoned",
+                    deletion_time=datetime.now() + timedelta(hours=ABANDON_CLEANUP_HOURS),
+                )
+            )
+
+
+def _disable_all(view):
+    """Disable every component on a view (so a settled prompt can't be re-clicked)."""
+    for child in view.children:
+        child.disabled = True
+
+
+class AbandonVoteView(View):
+    """Majority vote among draft participants to abandon a draft and void matches."""
+
+    def __init__(self, draft_session_id, participants, timeout=90.0):
+        super().__init__(timeout=timeout)
+        self.draft_session_id = draft_session_id
+        self.votes = {user_id: None for user_id in participants}  # None=not voted, True=yes, False=no
+        self.message = None
+        self.timer_task = None
+        self.complete = asyncio.Event()
+        self._start_time = datetime.now()
+
+    async def start_timer(self):
+        try:
+            await asyncio.sleep(self.timeout)
+            if not self.complete.is_set():
+                logger.info(f"Abandon vote for session {self.draft_session_id} timed out")
+                await self.on_timeout()
+        except asyncio.CancelledError:
+            logger.debug(f"Timer for abandon vote {self.draft_session_id} was cancelled")
+
+    def get_vote_result(self):
+        """Return (passed, yes_votes, total): passes when more than half vote yes."""
+        yes_votes = sum(1 for vote in self.votes.values() if vote is True)
+        total_participants = len(self.votes)
+        needed_votes = (total_participants // 2) + 1
+        return yes_votes >= needed_votes, yes_votes, total_participants
+
+    def can_still_pass(self):
+        """True while the remaining unvoted participants could still form a majority."""
+        _, yes_votes, total = self.get_vote_result()
+        remaining = sum(1 for v in self.votes.values() if v is None)
+        return yes_votes + remaining >= (total // 2) + 1
+
+    def _finish(self):
+        self.complete.set()
+        if self.timer_task:
+            self.timer_task.cancel()
+        _disable_all(self)
+
+    @discord.ui.button(label="Yes, Abandon Draft", style=discord.ButtonStyle.danger)
+    async def yes_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+        user_id = str(interaction.user.id)
+        if user_id not in self.votes:
+            await interaction.response.send_message("You are not part of this draft.", ephemeral=True)
+            return
+        self.votes[user_id] = True
+        embed = await self.generate_status_embed(interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+        passed, _, _ = self.get_vote_result()
+        if passed:
+            self._finish()
+            await self.message.edit(view=self)
+
+    @discord.ui.button(label="No, Keep Draft", style=discord.ButtonStyle.green)
+    async def no_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+        user_id = str(interaction.user.id)
+        if user_id not in self.votes:
+            await interaction.response.send_message("You are not part of this draft.", ephemeral=True)
+            return
+        self.votes[user_id] = False
+        embed = await self.generate_status_embed(interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+        # End early if the vote can no longer reach a majority.
+        if not self.can_still_pass():
+            self._finish()
+            await self.message.edit(view=self)
+
+    async def generate_status_embed(self, guild):
+        embed = discord.Embed(
+            title="Draft Abandonment Vote",
+            description="Vote to abandon the current draft. All match results will be voided.",
+            color=discord.Color.red(),
+        )
+        status_lines = []
+        for user_id, vote in self.votes.items():
+            member = guild.get_member(int(user_id))
+            name = member.display_name if member else f"User {user_id}"
+            if vote is True:
+                status = "✅ Voted to Abandon"
+            elif vote is False:
+                status = "❌ Voted to Keep"
+            else:
+                status = "⏳ Not Voted"
+            status_lines.append(f"{name}: {status}")
+        embed.add_field(name="Participants", value="\n".join(status_lines) or "No participants found", inline=False)
+
+        passed, yes_votes, total_participants = self.get_vote_result()
+        needed_votes = (total_participants // 2) + 1
+        embed.add_field(
+            name="Vote Status",
+            value=f"**{yes_votes}/{needed_votes}** votes needed to abandon\n" +
+                  ("**Vote will pass!**" if passed else "**Vote will not pass yet**"),
+            inline=False,
+        )
+        expiry_timestamp = int(self._start_time.timestamp() + self.timeout)
+        embed.add_field(name="Vote Ends", value=f"<t:{expiry_timestamp}:R>", inline=False)
+        return embed
+
+    async def on_timeout(self):
+        self.complete.set()
+        _disable_all(self)
+        if self.message:
+            passed, yes_votes, total_participants = self.get_vote_result()
+            needed_votes = (total_participants // 2) + 1
+            embed = discord.Embed(
+                title="Draft Abandonment Vote - Ended",
+                description="The vote has ended.",
+                color=discord.Color.red(),
+            )
+            embed.add_field(
+                name="Final Results",
+                value=f"**{yes_votes}/{needed_votes}** votes needed to abandon\n" +
+                      ("**Vote passed!**" if passed else "**Vote did not pass**"),
+                inline=False,
+            )
+            await self.message.edit(embed=embed, view=self)
+
+
+class AbandonConfirmView(View):
+    """Ephemeral admin confirmation before an immediate abandon."""
+
+    def __init__(self, session_id, channel, timeout=60.0):
+        super().__init__(timeout=timeout)
+        self.session_id = session_id
+        self.channel = channel
+
+    @discord.ui.button(label="Yes, Abandon", style=discord.ButtonStyle.danger)
+    async def confirm(self, button: discord.ui.Button, interaction: discord.Interaction):
+        _disable_all(self)
+        await abandon_draft_session(self.session_id)
+        await interaction.response.edit_message(
+            content="🛑 Draft abandoned. All match results have been voided.", view=self
+        )
+        await self.channel.send(
+            "🛑 **This draft has been abandoned by an admin.** All match results have been voided."
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, button: discord.ui.Button, interaction: discord.Interaction):
+        _disable_all(self)
+        await interaction.response.edit_message(content="Abandon cancelled.", view=self)
 
 
 class LogReleaseVoteView(View):
@@ -1117,6 +1303,97 @@ class DraftControlCog(commands.Cog):
             logger.exception(f"Error in scrap command: {e}")
             await ctx.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
             
+    @discord.slash_command(
+        name='abandon',
+        description='Abandon this draft and void all matches (admins immediately; players by majority vote)'
+    )
+    async def abandon_command(self, ctx):
+        """Abandon a draft from its match channel. Admin = immediate (with
+        confirmation); a participant starts a majority vote."""
+        await ctx.defer(ephemeral=True)
+
+        try:
+            channel_id = str(ctx.channel_id)
+            draft_session = await DraftSession.get_by_channel_id(channel_id)
+            if not draft_session:
+                await ctx.followup.send(
+                    "Run `/abandon` in the draft's match channel (where pairings are posted).",
+                    ephemeral=True,
+                )
+                return
+
+            if draft_session.session_stage == "completed":
+                await ctx.followup.send(
+                    "This draft is already completed and can't be abandoned.", ephemeral=True
+                )
+                return
+            if draft_session.session_stage == "abandoned":
+                await ctx.followup.send("This draft has already been abandoned.", ephemeral=True)
+                return
+
+            # Admin path: immediate (after a confirmation click).
+            from helpers.permissions import is_bot_manager
+            if await is_bot_manager(ctx):
+                await ctx.followup.send(
+                    "Abandon this draft? This voids **all** match results and can't be undone.",
+                    view=AbandonConfirmView(draft_session.session_id, ctx.channel),
+                    ephemeral=True,
+                )
+                return
+
+            # Participant path: majority vote.
+            sign_ups = draft_session.sign_ups or {}
+            if str(ctx.author.id) not in sign_ups:
+                await ctx.followup.send(
+                    "Only draft participants or admins can abandon this draft.", ephemeral=True
+                )
+                return
+
+            if draft_session.session_id in ACTIVE_ABANDON_VOTES:
+                await ctx.followup.send(
+                    "There's already an active vote to abandon this draft.", ephemeral=True
+                )
+                return
+
+            participants = list(sign_ups.keys())
+            view = AbandonVoteView(draft_session.session_id, participants)
+
+            user_pings = []
+            for player_id in sign_ups:
+                member = ctx.guild.get_member(int(player_id))
+                if member:
+                    user_pings.append(member.mention)
+            ping_text = " ".join(user_pings) if user_pings else "No players to ping."
+
+            embed = await view.generate_status_embed(ctx.guild)
+            message = await ctx.channel.send(
+                f"⚠️ **Draft Abandonment Vote** initiated by {ctx.author.mention}\n\n{ping_text}\n\n"
+                "A majority of participants must agree to abandon this draft (voids all matches).",
+                embed=embed,
+                view=view,
+            )
+            view.message = message
+            ACTIVE_ABANDON_VOTES[draft_session.session_id] = view
+            view.timer_task = asyncio.create_task(view.start_timer())
+            await ctx.followup.send("Abandonment vote initiated.", ephemeral=True)
+
+            try:
+                await view.complete.wait()
+                passed, _, _ = view.get_vote_result()
+                if passed:
+                    await abandon_draft_session(draft_session.session_id)
+                    await ctx.channel.send(
+                        "🛑 **Vote passed — draft abandoned.** All match results have been voided."
+                    )
+                else:
+                    await ctx.channel.send("✅ **Vote to abandon the draft did not pass.**")
+            finally:
+                ACTIVE_ABANDON_VOTES.pop(draft_session.session_id, None)
+
+        except Exception as e:
+            logger.exception(f"Error in abandon command: {e}")
+            await ctx.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
+
     @discord.slash_command(name='mutiny', description='Take control of the Draftmancer session from the bot')
     async def mutiny_command(self, ctx):
         """Transfer draft control to a user and disconnect the bot"""
