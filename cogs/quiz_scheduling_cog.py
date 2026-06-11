@@ -7,6 +7,7 @@ from sqlalchemy import select, and_, or_, desc, func
 import pytz
 from typing import Optional, List
 from database.db_session import db_session
+from helpers.permissions import has_bot_manager_role
 from models.quiz_scheduling import QuizChannel, QuizSchedule
 
 class QuizSchedulingCog(commands.Cog):
@@ -18,7 +19,7 @@ class QuizSchedulingCog(commands.Cog):
         name="setup_quiz_channel",
         description="Set up a channel for posting scheduled quizzes"
     )
-    @commands.has_permissions(manage_roles=True)
+    @has_bot_manager_role()
     async def setup_quiz_channel(
         self,
         ctx,
@@ -78,7 +79,7 @@ class QuizSchedulingCog(commands.Cog):
         name="add_quiz_schedule",
         description="Add a posting schedule for quizzes"
     )
-    @commands.has_permissions(manage_roles=True)
+    @has_bot_manager_role()
     async def add_quiz_schedule(
         self,
         ctx,
@@ -157,7 +158,7 @@ class QuizSchedulingCog(commands.Cog):
         name="list_quiz_schedules",
         description="List all posting schedules for quizzes"
     )
-    @commands.has_permissions(manage_roles=True)
+    @has_bot_manager_role()
     async def list_quiz_schedules(
         self,
         ctx,
@@ -207,7 +208,7 @@ class QuizSchedulingCog(commands.Cog):
         name="remove_quiz_schedule",
         description="Remove a quiz posting schedule"
     )
-    @commands.has_permissions(manage_roles=True)
+    @has_bot_manager_role()
     async def remove_quiz_schedule(
         self,
         ctx,
@@ -255,7 +256,7 @@ class QuizSchedulingCog(commands.Cog):
         name="edit_quiz_timezone",
         description="Edit the timezone for a quiz channel"
     )
-    @commands.has_permissions(manage_roles=True)
+    @has_bot_manager_role()
     async def edit_quiz_timezone(
         self,
         ctx,
@@ -310,7 +311,7 @@ class QuizSchedulingCog(commands.Cog):
         name="enable_quiz_posting",
         description="Enable automatic quiz posting for a channel"
     )
-    @commands.has_permissions(manage_roles=True)
+    @has_bot_manager_role()
     async def enable_quiz_posting(
         self,
         ctx,
@@ -356,7 +357,7 @@ class QuizSchedulingCog(commands.Cog):
         name="disable_quiz_posting",
         description="Disable automatic quiz posting for a channel"
     )
-    @commands.has_permissions(manage_roles=True)
+    @has_bot_manager_role()
     async def disable_quiz_posting(
         self,
         ctx,
