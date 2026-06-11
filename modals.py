@@ -115,21 +115,7 @@ def create_session_instance(session_type: str, session_details: SessionDetails) 
     return session_class(session_details)
 
 async def handle_draft_session(interaction: discord.Interaction, session_type: str, session_details: SessionDetails) -> None:
-    """Handle either scheduled or immediate draft sessions."""
-    if session_type == "schedule":
-        from league import InitialPostView
-        initial_view = InitialPostView(
-            command_type=session_type,
-            team_id=1,
-            cube_choice=session_details.cube_choice
-        )
-        await interaction.response.send_message(
-            "Post a scheduled draft. Select a Timezone.",
-            view=initial_view,
-            ephemeral=True
-        )
-        return
-
+    """Handle immediate draft sessions."""
     session_instance = create_session_instance(session_type, session_details)
     await session_instance.create_draft_session(interaction, interaction.client)
 
