@@ -8,6 +8,7 @@ can point them at a temp database (mirrors the leaderboard_service convention).
 """
 from sqlalchemy import desc, func, select
 
+from database.db_session import db_session
 from draft_organization.swiss import pair_round
 from models.team import Team
 from models.tournament import (
@@ -234,6 +235,19 @@ async def set_result(session, match_id, team_a_wins, team_b_wins):
     match.team_b_wins = team_b_wins
     await session.flush()
     return match
+
+
+async def record_linked_result(tournament_match_id, team_a_wins, team_b_wins):
+    """Record a result coming from a linked premade draft's completion.
+
+    Opens its own session because the caller (the draft victory chokepoint in
+    utils.py) holds an unrelated transaction. Side A of the draft is side A of
+    the match — the launcher pre-names the draft teams from the pairing.
+    Correction-safe via set_result, so a draft finishing after an admin ruling
+    (or a re-finalization) replaces rather than double-counts.
+    """
+    async with db_session() as session:
+        return await set_result(session, tournament_match_id, team_a_wins, team_b_wins)
 
 
 async def _current_round(session, tournament):

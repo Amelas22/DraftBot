@@ -64,6 +64,9 @@ class TournamentRound(Base):
     tournament_id = Column(Integer, ForeignKey('tournaments.id'), nullable=False)
     round_number = Column(Integer, nullable=False)
     created_at = Column(DateTime, default=datetime.now)
+    # Where this round's pairings message lives, for view re-registration on restart
+    pairings_channel_id = Column(String(64), nullable=True)
+    pairings_message_id = Column(String(64), nullable=True)
 
     __table_args__ = (
         UniqueConstraint('tournament_id', 'round_number', name='uq_tournament_round'),

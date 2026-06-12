@@ -7,7 +7,8 @@ from loguru import logger
 from config import get_config
 from database.db_session import db_session
 from helpers.permissions import has_bot_manager_role
-from models.tournament import TournamentParticipant
+from models.tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
+from sqlalchemy import select
 from services.tournament_service import (
     advance_round,
     create_tournament,
@@ -24,6 +25,90 @@ from services.tournament_service import (
 
 def tournament_enabled(guild_id):
     return get_config(guild_id).get("features", {}).get("tournament", False)
+
+
+async def launch_tournament_match(interaction, match_id):
+    """'Play this match' button: open a cube picker that launches the premade
+    draft pre-named with the pairing's teams and linked for auto-recording."""
+    async with db_session() as session:
+        match = await session.get(TournamentMatch, match_id)
+        if match is None or match.is_bye:
+            await interaction.response.send_message("This match no longer exists.", ephemeral=True)
+            return
+        part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
+        part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
+
+    from modals import CubeDraftSelectionView
+    view = CubeDraftSelectionView(
+        session_type="premade",
+        guild_id=interaction.guild_id,
+        session_details_overrides={
+            "tournament_match_id": match.id,
+            "team_a_name": part_a.team_name,
+            "team_b_name": part_b.team_name,
+        },
+    )
+    await interaction.response.send_message(
+        f"Pick a cube to launch **{part_a.team_name}** vs **{part_b.team_name}** "
+        f"(result will record automatically when the draft finishes):",
+        view=view,
+        ephemeral=True,
+    )
+
+
+class MatchActionView(discord.ui.View):
+    """Persistent per-round view with one 'Play this match' button per pairing."""
+
+    def __init__(self, match_entries):
+        super().__init__(timeout=None)
+        for match_id, label in match_entries:
+            button = discord.ui.Button(
+                label=f"▶ {label}",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"tournament_play:{match_id}",
+            )
+            button.callback = self._make_callback(match_id)
+            self.add_item(button)
+
+    @staticmethod
+    def _make_callback(match_id):
+        async def callback(interaction):
+            await launch_tournament_match(interaction, match_id)
+        return callback
+
+
+async def _match_entries(session, matches):
+    """Build (match_id, 'A vs B') entries for the playable (non-bye) matches."""
+    entries = []
+    for match in matches:
+        if match.is_bye:
+            continue
+        part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
+        part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
+        entries.append((match.id, f"{part_a.team_name} vs {part_b.team_name}"))
+    return entries
+
+
+async def re_register_tournament_views(bot):
+    """Re-attach Play buttons on the current round's pairings message after a restart."""
+    async with db_session() as session:
+        stmt = (
+            select(TournamentRound, Tournament)
+            .join(Tournament, TournamentRound.tournament_id == Tournament.id)
+            .where(
+                Tournament.status == "active",
+                TournamentRound.round_number == Tournament.current_round,
+                TournamentRound.pairings_message_id.isnot(None),
+            )
+        )
+        rows = (await session.execute(stmt)).all()
+        for round_, _tournament in rows:
+            stmt = select(TournamentMatch).where(TournamentMatch.round_id == round_.id)
+            matches = (await session.execute(stmt)).scalars().all()
+            entries = await _match_entries(session, matches)
+            if entries:
+                bot.add_view(MatchActionView(entries), message_id=int(round_.pairings_message_id))
+                logger.info(f"Re-registered tournament play buttons for round {round_.id}")
 
 
 class TournamentCog(commands.Cog):
@@ -160,9 +245,11 @@ class TournamentCog(commands.Cog):
                 matches = await start_tournament(session, tournament.id, random.Random())
                 pairing_lines = await self._format_pairings(session, matches)
             logger.info(f"Tournament {tournament.id} started in guild {ctx.guild.id} by {ctx.author.id}")
-            await ctx.followup.send(
+            await self._post_pairings(
+                ctx,
                 f"🏆 **{tournament.name}** has started!\n\n"
                 f"**Round 1 pairings:**\n{pairing_lines}",
+                matches,
             )
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
@@ -234,11 +321,26 @@ class TournamentCog(commands.Cog):
                 from services.tournament_service import _round_matches
                 matches = await _round_matches(session, new_round.id)
                 pairing_lines = await self._format_pairings(session, matches)
-            await ctx.followup.send(
-                f"**Round {new_round.round_number} pairings:**\n{pairing_lines}"
+            await self._post_pairings(
+                ctx,
+                f"**Round {new_round.round_number} pairings:**\n{pairing_lines}",
+                matches,
             )
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
+
+    async def _post_pairings(self, ctx, content, matches):
+        """Post pairings with Play buttons and remember the message for restarts."""
+        async with db_session() as session:
+            entries = await _match_entries(session, matches)
+        if entries:
+            message = await ctx.followup.send(content, view=MatchActionView(entries))
+        else:
+            message = await ctx.followup.send(content)
+        async with db_session() as session:
+            round_ = await session.get(TournamentRound, matches[0].round_id)
+            round_.pairings_channel_id = str(message.channel.id)
+            round_.pairings_message_id = str(message.id)
 
     async def _format_pairings(self, session, matches):
         lines = []

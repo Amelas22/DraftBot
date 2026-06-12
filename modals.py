@@ -26,19 +26,23 @@ class CubeDraftModal(discord.ui.Modal):
     @classmethod
     def create_if_needed(cls, session_type: str, cube_choice: str,
                          packs_per_player: int = DEFAULT_PACKS_PER_PLAYER,
-                         cards_per_pack: int = DEFAULT_CARDS_PER_PACK) -> Optional['CubeDraftModal']:
+                         cards_per_pack: int = DEFAULT_CARDS_PER_PACK,
+                         session_details_overrides=None) -> Optional['CubeDraftModal']:
         """Create a modal only if it would have input fields."""
-        modal = cls(session_type, cube_choice, packs_per_player, cards_per_pack)
+        modal = cls(session_type, cube_choice, packs_per_player, cards_per_pack,
+                    session_details_overrides=session_details_overrides)
         return modal if modal.children else None
 
     def __init__(self, session_type: str, cube_choice: str,
                  packs_per_player: int = DEFAULT_PACKS_PER_PLAYER,
-                 cards_per_pack: int = DEFAULT_CARDS_PER_PACK, *args, **kwargs) -> None:
+                 cards_per_pack: int = DEFAULT_CARDS_PER_PACK,
+                 session_details_overrides=None, *args, **kwargs) -> None:
         super().__init__(title="Draft Setup", *args, **kwargs)
         self.session_type: str = session_type
         self.cube_choice = cube_choice
         self.packs_per_player = packs_per_player
         self.cards_per_pack = cards_per_pack
+        self.session_details_overrides = session_details_overrides or {}
 
         if cube_choice == "custom":
             self.add_item(discord.ui.InputText(
@@ -46,8 +50,12 @@ class CubeDraftModal(discord.ui.Modal):
                 placeholder="Enter your cube name",
                 custom_id="cube_name_input"
             ))
-            
-        if self.session_type == "premade":
+
+        # Team names are asked for unless the launcher already provided them
+        # (e.g. a tournament pairing pre-naming both teams).
+        has_team_names = ("team_a_name" in self.session_details_overrides
+                          and "team_b_name" in self.session_details_overrides)
+        if self.session_type == "premade" and not has_team_names:
             self.add_item(discord.ui.InputText(
                 label="Team A Name", 
                 placeholder="Enter Team A Name", 
@@ -76,14 +84,23 @@ class CubeDraftModal(discord.ui.Modal):
         details.packs_per_player = self.packs_per_player
         details.cards_per_pack = self.cards_per_pack
 
-        if self.session_type == "premade":
-            input_offset = 0 if hasattr(self, 'cube_choice') else 1
-            details.team_a_name = self.children[input_offset].value or "Team A"
-            details.team_b_name = self.children[input_offset + 1].value or "Team B"
+        team_inputs = [c for c in self.children if c.custom_id in ("team_a_input", "team_b_input")]
+        if self.session_type == "premade" and team_inputs:
+            details.team_a_name = team_inputs[0].value or "Team A"
+            details.team_b_name = team_inputs[1].value or "Team B"
+
+        for attr, value in self.session_details_overrides.items():
+            setattr(details, attr, value)
 
         return details
 
 class CubeDraftSelectionView(BaseCubeSelectionView):
+    def __init__(self, session_type, guild_id, current_cube=None, session_details_overrides=None):
+        super().__init__(session_type, guild_id, current_cube=current_cube)
+        # Extra SessionDetails attributes set by the launcher (e.g. a tournament
+        # pairing pre-naming the teams and linking the match for auto-recording).
+        self.session_details_overrides = session_details_overrides or {}
+
     async def submit_callback(self, interaction: discord.Interaction):
         if not self.cube_choice:
             await interaction.response.send_message(
@@ -92,7 +109,8 @@ class CubeDraftSelectionView(BaseCubeSelectionView):
             return
 
         if modal := CubeDraftModal.create_if_needed(
-            self.session_type, self.cube_choice, self.packs_per_player, self.cards_per_pack
+            self.session_type, self.cube_choice, self.packs_per_player, self.cards_per_pack,
+            session_details_overrides=self.session_details_overrides
         ):
             await interaction.response.send_modal(modal)
         else:
@@ -100,6 +118,8 @@ class CubeDraftSelectionView(BaseCubeSelectionView):
             session_details.cube_choice = self.cube_choice
             session_details.packs_per_player = self.packs_per_player
             session_details.cards_per_pack = self.cards_per_pack
+            for attr, value in self.session_details_overrides.items():
+                setattr(session_details, attr, value)
             await handle_draft_session(interaction, self.session_type, session_details)
 
 # Shared utility functions

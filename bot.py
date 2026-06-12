@@ -87,6 +87,8 @@ async def main():
         bot.add_view(PublicSettleDebtsView())
         from livedrafts import re_register_live_drafts
         await re_register_live_drafts(bot)
+        from cogs.tournament_commands import re_register_tournament_views
+        await re_register_tournament_views(bot)
         logger.info("Re-registered team finder")
         bot.loop.create_task(delayed_log_collection(bot))
 

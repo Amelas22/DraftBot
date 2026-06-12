@@ -15,6 +15,7 @@ class SessionDetails:
         self.team_a_name = None
         self.team_b_name = None
         self.min_stake = 10
+        self.tournament_match_id = None  # set when launched from a tournament pairing
         self.packs_per_player = 3
         self.cards_per_pack = 15
         logger.debug(f"SessionDetails initialized: {self}")

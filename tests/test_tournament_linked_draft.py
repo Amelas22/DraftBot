@@ -1,0 +1,182 @@
+"""Tests for Slice 3: linked premade-draft auto-recording of tournament results."""
+import os
+import random
+import tempfile
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
+
+from database.models_base import Base
+from models.session_details import SessionDetails
+from models.tournament import TournamentParticipant
+from services.tournament_service import (
+    create_tournament,
+    record_linked_result,
+    register_team,
+    start_tournament,
+)
+
+CUBES = [{"label": "AlphaFrog", "value": "AlphaFrog"}]
+
+
+@pytest_asyncio.fixture
+async def test_db():
+    temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+    temp_db.close()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{temp_db.name}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    yield factory
+    await engine.dispose()
+    os.unlink(temp_db.name)
+
+
+def make_interaction():
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.guild_id = 123
+    return interaction
+
+
+# ---- session details / draft session threading -----------------------------------
+
+def test_session_details_defaults_to_no_tournament_match():
+    details = SessionDetails(make_interaction())
+    assert details.tournament_match_id is None
+
+
+def test_setup_draft_session_threads_tournament_match_id(test_db):
+    from sessions.premade_session import PremadeSession
+
+    details = SessionDetails(make_interaction())
+    details.cube_choice = "AlphaFrog"
+    details.team_a_name = "Alpha"
+    details.team_b_name = "Bravo"
+    details.tournament_match_id = 77
+
+    draft = PremadeSession(details).setup_draft_session(MagicMock())
+    assert draft.tournament_match_id == 77
+    assert draft.session_type == "premade"
+
+
+def test_setup_draft_session_without_tournament_stays_none(test_db):
+    from sessions.premade_session import PremadeSession
+
+    details = SessionDetails(make_interaction())
+    details.cube_choice = "AlphaFrog"
+    draft = PremadeSession(details).setup_draft_session(MagicMock())
+    assert draft.tournament_match_id is None
+
+
+# ---- cube selection view carries overrides ----------------------------------------
+
+@pytest.mark.asyncio
+async def test_cube_view_applies_session_details_overrides():
+    with patch("cube_views.pack_options.get_cube_options", return_value=CUBES):
+        from modals import CubeDraftSelectionView
+        view = CubeDraftSelectionView(
+            session_type="premade",
+            guild_id=1,
+            session_details_overrides={
+                "tournament_match_id": 77,
+                "team_a_name": "Alpha",
+                "team_b_name": "Bravo",
+            },
+        )
+    view.cube_choice = "AlphaFrog"
+    interaction = MagicMock()
+    interaction.response.send_message = AsyncMock()
+    interaction.response.send_modal = AsyncMock()
+    with patch("modals.handle_draft_session", new_callable=AsyncMock) as handler, \
+         patch("modals.SessionDetails") as SD:
+        details = MagicMock()
+        SD.return_value = details
+        await view.submit_callback(interaction)
+    handler.assert_awaited_once()
+    assert details.tournament_match_id == 77
+    assert details.team_a_name == "Alpha"
+    assert details.team_b_name == "Bravo"
+
+
+# ---- record_linked_result -----------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_record_linked_result_records_match_and_stats(test_db):
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "Spring", 3)
+        await session.commit()
+        await register_team(session, tournament.id, "Alpha", "1")
+        await register_team(session, tournament.id, "Bravo", "2")
+        await session.commit()
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        match_id = matches[0].id
+        part_a_id = matches[0].team_a_participant_id
+
+    @asynccontextmanager
+    async def fake_db_session():
+        async with test_db() as inner:
+            yield inner
+            await inner.commit()
+
+    with patch("services.tournament_service.db_session", fake_db_session):
+        match = await record_linked_result(match_id, 2, 1)
+
+    assert (match.team_a_wins, match.team_b_wins) == (2, 1)
+    async with test_db() as session:
+        winner = await session.get(TournamentParticipant, part_a_id)
+        assert winner.match_wins == 1 and winner.points == 3
+
+
+@pytest.mark.asyncio
+async def test_record_linked_result_is_correction_safe(test_db):
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "Spring", 3)
+        await session.commit()
+        await register_team(session, tournament.id, "Alpha", "1")
+        await register_team(session, tournament.id, "Bravo", "2")
+        await session.commit()
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        match_id = matches[0].id
+        part_a_id = matches[0].team_a_participant_id
+
+    @asynccontextmanager
+    async def fake_db_session():
+        async with test_db() as inner:
+            yield inner
+            await inner.commit()
+
+    with patch("services.tournament_service.db_session", fake_db_session):
+        await record_linked_result(match_id, 2, 0)  # e.g. admin forfeit ruling
+        await record_linked_result(match_id, 1, 2)  # teams played anyway
+
+    async with test_db() as session:
+        part_a = await session.get(TournamentParticipant, part_a_id)
+        assert (part_a.match_wins, part_a.match_losses, part_a.points) == (0, 1, 0)
+        assert (part_a.game_wins, part_a.game_losses) == (1, 2)
+
+
+# ---- play-match view ------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_match_action_view_builds_persistent_play_buttons():
+    from cogs.tournament_commands import MatchActionView
+
+    view = MatchActionView([(5, "Alpha vs Bravo"), (6, "Charlie vs Delta")])
+    assert view.timeout is None  # survives restarts
+    custom_ids = {child.custom_id for child in view.children}
+    assert custom_ids == {"tournament_play:5", "tournament_play:6"}
+
+
+def test_round_model_stores_pairings_message_location(test_db):
+    from models.tournament import TournamentRound
+
+    round_ = TournamentRound(tournament_id=1, round_number=1)
+    assert round_.pairings_message_id is None
+    assert round_.pairings_channel_id is None
