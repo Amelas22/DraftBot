@@ -61,6 +61,7 @@ class Config:
                 "voice_channels": False,
                 "bot_detection": False,
                 "money_server": False,
+                "tournament": False,
                 "quiz_pack_images": {
                     "enabled": True,
                     "timeout_seconds": 10,
@@ -170,6 +171,7 @@ class Config:
                 "voice_channels": True,
                 "bot_detection": True,
                 "money_server": False,
+                "tournament": False,
                 "quiz_pack_images": {
                     "enabled": True,
                     "timeout_seconds": 10,
