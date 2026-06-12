@@ -13,17 +13,21 @@ def test_cog_imports_and_setup_registers():
     assert isinstance(bot.add_cog.call_args.args[0], TournamentCog)
 
 
-def test_tournament_group_has_slice_one_commands():
+def test_tournament_group_has_slice_one_and_two_commands():
     from cogs.tournament_commands import TournamentCog
 
     subcommands = {cmd.name for cmd in TournamentCog.tournament.subcommands}
-    assert {"create", "register", "status"} <= subcommands
+    assert {"create", "register", "status",
+            "start", "set_result", "next_round",
+            "add_team", "remove_team"} <= subcommands
 
 
-def test_create_is_gated_by_bot_manager_check():
+def test_admin_commands_are_gated_by_bot_manager_check():
     from cogs.tournament_commands import TournamentCog
 
-    assert is_bot_manager in TournamentCog.create.checks
+    for command in ("create", "start", "set_result", "next_round",
+                    "add_team", "remove_team"):
+        assert is_bot_manager in getattr(TournamentCog, command).checks, command
 
 
 def test_register_and_status_are_open_to_everyone():

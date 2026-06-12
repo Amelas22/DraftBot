@@ -1,5 +1,6 @@
-"""Tests for services/tournament_service.py (Slice 1)."""
+"""Tests for services/tournament_service.py (Slices 1-2)."""
 import os
+import random
 import tempfile
 
 import pytest
@@ -10,12 +11,23 @@ from sqlalchemy.orm import sessionmaker
 
 from database.models_base import Base
 from models.team import Team
-from models.tournament import Tournament, TournamentParticipant
+from models.tournament import (
+    Tournament,
+    TournamentMatch,
+    TournamentParticipant,
+    TournamentRound,
+)
 from services.tournament_service import (
+    advance_round,
     create_tournament,
+    find_current_match,
     get_active_tournament,
+    get_standings_data,
     list_participants,
     register_team,
+    remove_team,
+    set_result,
+    start_tournament,
 )
 
 
@@ -168,6 +180,264 @@ async def test_register_team_rejects_unknown_tournament(test_db):
     async with test_db() as session:
         with pytest.raises(ValueError):
             await register_team(session, 999, "Alpha", "42")
+
+
+# ---- remove_team (admin roster control) -------------------------------------------
+
+@pytest.mark.asyncio
+async def test_remove_team_during_registration(test_db):
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "Spring", 3)
+        await session.commit()
+        await register_team(session, tournament.id, "Alpha", "42")
+        await session.commit()
+
+        await remove_team(session, tournament.id, "alpha")  # case-insensitive
+        await session.commit()
+        assert await list_participants(session, tournament.id) == []
+
+        with pytest.raises(ValueError):  # unknown team
+            await remove_team(session, tournament.id, "Ghost")
+
+
+@pytest.mark.asyncio
+async def test_remove_team_rejected_once_started(test_db):
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "Spring", 3)
+        await session.commit()
+        await register_team(session, tournament.id, "Alpha", "1")
+        await register_team(session, tournament.id, "Bravo", "2")
+        await session.commit()
+        await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+
+        with pytest.raises(ValueError):
+            await remove_team(session, tournament.id, "Alpha")
+
+
+# ---- slice 2: start / results / rounds / standings -------------------------------
+
+async def _tournament_with_teams(session, count, rounds=3):
+    tournament = await create_tournament(session, "g1", "Spring", rounds)
+    await session.commit()
+    for i in range(count):
+        await register_team(session, tournament.id, f"Team{i}", str(i))
+    await session.commit()
+    return tournament
+
+
+@pytest.mark.asyncio
+async def test_start_tournament_activates_and_pairs_round_one(test_db):
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 4)
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+
+        assert tournament.status == "active"
+        assert tournament.current_round == 1
+        assert len(matches) == 2
+        rounds = (await session.execute(select(TournamentRound))).scalars().all()
+        assert len(rounds) == 1 and rounds[0].round_number == 1
+        paired = {m.team_a_participant_id for m in matches} | {m.team_b_participant_id for m in matches}
+        assert len(paired) == 4
+
+
+@pytest.mark.asyncio
+async def test_start_tournament_odd_count_scores_the_bye(test_db):
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 5)
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+
+        byes = [m for m in matches if m.is_bye]
+        assert len(byes) == 1
+        bye_match = byes[0]
+        assert bye_match.team_b_participant_id is None
+
+        recipient = await session.get(TournamentParticipant, bye_match.team_a_participant_id)
+        assert recipient.match_wins == 1
+        assert recipient.points == 3
+        assert recipient.byes == 1
+
+
+@pytest.mark.asyncio
+async def test_start_tournament_requires_registration_status_and_two_teams(test_db):
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 1)
+        with pytest.raises(ValueError):
+            await start_tournament(session, tournament.id, random.Random(7))
+
+        await register_team(session, tournament.id, "Other", "9")
+        await session.commit()
+        await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        with pytest.raises(ValueError):  # already active
+            await start_tournament(session, tournament.id, random.Random(7))
+
+
+@pytest.mark.asyncio
+async def test_set_result_updates_both_participants(test_db):
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 2)
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+
+        match = await set_result(session, matches[0].id, 2, 1)
+        await session.commit()
+
+        winner = await session.get(TournamentParticipant, match.team_a_participant_id)
+        loser = await session.get(TournamentParticipant, match.team_b_participant_id)
+        assert (winner.match_wins, winner.match_losses, winner.points) == (1, 0, 3)
+        assert (winner.game_wins, winner.game_losses) == (2, 1)
+        assert (loser.match_wins, loser.match_losses, loser.points) == (0, 1, 0)
+        assert (loser.game_wins, loser.game_losses) == (1, 2)
+
+
+@pytest.mark.asyncio
+async def test_set_result_draw_gives_one_point_each(test_db):
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 2)
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+
+        match = await set_result(session, matches[0].id, 1, 1)
+        await session.commit()
+
+        a = await session.get(TournamentParticipant, match.team_a_participant_id)
+        b = await session.get(TournamentParticipant, match.team_b_participant_id)
+        assert a.match_draws == 1 and b.match_draws == 1
+        assert a.points == 1 and b.points == 1
+
+
+@pytest.mark.asyncio
+async def test_set_result_correction_replaces_not_doubles(test_db):
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 2)
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+
+        await set_result(session, matches[0].id, 2, 0)
+        await session.commit()
+        match = await set_result(session, matches[0].id, 0, 2)  # admin correction
+        await session.commit()
+
+        a = await session.get(TournamentParticipant, match.team_a_participant_id)
+        b = await session.get(TournamentParticipant, match.team_b_participant_id)
+        assert (a.match_wins, a.match_losses, a.points) == (0, 1, 0)
+        assert (b.match_wins, b.match_losses, b.points) == (1, 0, 3)
+        assert (a.game_wins, a.game_losses) == (0, 2)
+        assert (b.game_wins, b.game_losses) == (2, 0)
+
+
+@pytest.mark.asyncio
+async def test_set_result_rejects_bye_matches(test_db):
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 3)
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+
+        bye_match = next(m for m in matches if m.is_bye)
+        with pytest.raises(ValueError):
+            await set_result(session, bye_match.id, 2, 0)
+
+
+@pytest.mark.asyncio
+async def test_find_current_match_resolves_by_team_name(test_db):
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 4)
+        await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+
+        match = await find_current_match(session, tournament.id, "Team2")
+        participants = {match.team_a_participant_id, match.team_b_participant_id}
+        team2 = (await session.execute(
+            select(TournamentParticipant).where(TournamentParticipant.team_name == "Team2")
+        )).scalars().one()
+        assert team2.id in participants
+
+        assert await find_current_match(session, tournament.id, "NoSuchTeam") is None
+
+
+@pytest.mark.asyncio
+async def test_advance_round_gated_until_all_results_in(test_db):
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 4)
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+
+        with pytest.raises(ValueError):
+            await advance_round(session, tournament.id, random.Random(7))
+
+        await set_result(session, matches[0].id, 2, 0)
+        await set_result(session, matches[1].id, 2, 1)
+        await session.commit()
+
+        new_round = await advance_round(session, tournament.id, random.Random(7))
+        await session.commit()
+        assert new_round.round_number == 2
+        assert tournament.current_round == 2
+
+
+@pytest.mark.asyncio
+async def test_advance_round_pairs_winners_and_avoids_rematch(test_db):
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 4)
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        await set_result(session, matches[0].id, 2, 0)
+        await set_result(session, matches[1].id, 2, 0)
+        await session.commit()
+        await advance_round(session, tournament.id, random.Random(7))
+        await session.commit()
+
+        round_two = (await session.execute(
+            select(TournamentRound).where(TournamentRound.round_number == 2)
+        )).scalars().one()
+        new_matches = (await session.execute(
+            select(TournamentMatch).where(TournamentMatch.round_id == round_two.id)
+        )).scalars().all()
+
+        round_one_pairs = {
+            frozenset((m.team_a_participant_id, m.team_b_participant_id)) for m in matches
+        }
+        winners = {matches[0].team_a_participant_id, matches[1].team_a_participant_id}
+        for m in new_matches:
+            pair = frozenset((m.team_a_participant_id, m.team_b_participant_id))
+            assert pair not in round_one_pairs
+            # winners (3 pts) face each other, losers face each other
+            assert (m.team_a_participant_id in winners) == (m.team_b_participant_id in winners)
+
+
+@pytest.mark.asyncio
+async def test_advance_after_final_round_completes_tournament(test_db):
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 2, rounds=1)
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        await set_result(session, matches[0].id, 2, 0)
+        await session.commit()
+
+        result = await advance_round(session, tournament.id, random.Random(7))
+        await session.commit()
+        assert result is None
+        assert tournament.status == "completed"
+        assert await get_active_tournament(session, "g1") is None
+
+
+@pytest.mark.asyncio
+async def test_standings_sorted_by_points_then_game_diff(test_db):
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 4)
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        await set_result(session, matches[0].id, 2, 0)  # winner: +2 game diff
+        await set_result(session, matches[1].id, 2, 1)  # winner: +1 game diff
+        await session.commit()
+
+        standings = await get_standings_data(session, tournament.id)
+        assert [p.points for p in standings] == [3, 3, 0, 0]
+        assert standings[0].id == matches[0].team_a_participant_id  # better game diff first
+        assert standings[1].id == matches[1].team_a_participant_id
 
 
 # ---- list_participants ----------------------------------------------------------

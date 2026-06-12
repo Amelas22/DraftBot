@@ -1,6 +1,15 @@
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, UniqueConstraint, text
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+    text,
+)
 
 from database.models_base import Base
 
@@ -31,9 +40,51 @@ class TournamentParticipant(Base):
     team_name = Column(String(128), nullable=False)
     captain_user_id = Column(String(64), nullable=False)
 
+    # This tournament's standings (never written onto the global Team record)
+    match_wins = Column(Integer, nullable=False, default=0, server_default=text('0'))
+    match_losses = Column(Integer, nullable=False, default=0, server_default=text('0'))
+    match_draws = Column(Integer, nullable=False, default=0, server_default=text('0'))
+    points = Column(Integer, nullable=False, default=0, server_default=text('0'))
+    game_wins = Column(Integer, nullable=False, default=0, server_default=text('0'))
+    game_losses = Column(Integer, nullable=False, default=0, server_default=text('0'))
+    byes = Column(Integer, nullable=False, default=0, server_default=text('0'))
+
     __table_args__ = (
         UniqueConstraint('tournament_id', 'team_id', name='uq_tournament_team'),
     )
 
     def __repr__(self):
         return f"<TournamentParticipant(tournament_id={self.tournament_id}, team={self.team_name!r})>"
+
+
+class TournamentRound(Base):
+    __tablename__ = 'tournament_rounds'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tournament_id = Column(Integer, ForeignKey('tournaments.id'), nullable=False)
+    round_number = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint('tournament_id', 'round_number', name='uq_tournament_round'),
+    )
+
+    def __repr__(self):
+        return f"<TournamentRound(tournament_id={self.tournament_id}, round={self.round_number})>"
+
+
+class TournamentMatch(Base):
+    __tablename__ = 'tournament_matches'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    round_id = Column(Integer, ForeignKey('tournament_rounds.id'), nullable=False)
+    team_a_participant_id = Column(Integer, ForeignKey('tournament_participants.id'), nullable=False)
+    # Null for a bye "match" (team A gets the bye)
+    team_b_participant_id = Column(Integer, ForeignKey('tournament_participants.id'), nullable=True)
+    team_a_wins = Column(Integer, nullable=True)
+    team_b_wins = Column(Integer, nullable=True)
+    is_bye = Column(Boolean, nullable=False, default=False, server_default=text('0'))
+
+    def __repr__(self):
+        return (f"<TournamentMatch(round_id={self.round_id}, "
+                f"a={self.team_a_participant_id}, b={self.team_b_participant_id})>")
