@@ -250,6 +250,15 @@ async def record_linked_result(tournament_match_id, team_a_wins, team_b_wins):
         return await set_result(session, tournament_match_id, team_a_wins, team_b_wins)
 
 
+async def get_tournament_id_for_match(session, match_id):
+    """Resolve a match's tournament id (match -> round -> tournament), or None."""
+    match = await session.get(TournamentMatch, match_id)
+    if match is None:
+        return None
+    round_ = await session.get(TournamentRound, match.round_id)
+    return round_.tournament_id if round_ else None
+
+
 async def _current_round(session, tournament):
     stmt = select(TournamentRound).where(
         TournamentRound.tournament_id == tournament.id,

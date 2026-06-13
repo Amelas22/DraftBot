@@ -852,10 +852,12 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                         await update_match_db_with_wins_winner(draft_session.premade_match_id, team_a_wins, team_b_wins)
                     if draft_session.tournament_match_id is not None:
                         from services.tournament_service import record_linked_result
+                        from services.tournament_formatter import update_standings_message_for_match
                         try:
                             await record_linked_result(draft_session.tournament_match_id, team_a_wins, team_b_wins)
                             logger.info(f"Tournament match {draft_session.tournament_match_id} auto-recorded "
                                         f"{team_a_wins}-{team_b_wins} from draft {draft_session_id}")
+                            await update_standings_message_for_match(bot, draft_session.tournament_match_id)
                         except ValueError as e:
                             logger.error(f"Failed to auto-record tournament match "
                                          f"{draft_session.tournament_match_id}: {e}")

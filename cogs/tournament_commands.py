@@ -9,6 +9,7 @@ from database.db_session import db_session
 from helpers.permissions import has_bot_manager_role
 from models.tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
 from sqlalchemy import select
+from services.tournament_formatter import create_standings_embed, update_standings_message
 from services.tournament_service import (
     advance_round,
     create_tournament,
@@ -259,15 +260,18 @@ class TournamentCog(commands.Cog):
                 if tournament is None:
                     await ctx.followup.send("There is no tournament to start.", ephemeral=True)
                     return
+                tournament_id = tournament.id
+                tournament_name = tournament.name
                 matches = await start_tournament(session, tournament.id, random.Random())
                 pairing_lines = await self._format_pairings(session, matches)
-            logger.info(f"Tournament {tournament.id} started in guild {ctx.guild.id} by {ctx.author.id}")
+            logger.info(f"Tournament {tournament_id} started in guild {ctx.guild.id} by {ctx.author.id}")
             await self._post_pairings(
                 ctx,
-                f"🏆 **{tournament.name}** has started!\n\n"
+                f"🏆 **{tournament_name}** has started!\n\n"
                 f"**Round 1 pairings:**\n{pairing_lines}",
                 matches,
             )
+            await self._post_standings(ctx, tournament_id)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
 
@@ -303,6 +307,7 @@ class TournamentCog(commands.Cog):
                     a_wins, b_wins = opponent_wins, team_wins
                 match = await set_result(session, match.id, a_wins, b_wins)
                 part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
+                tournament_id = tournament.id
             logger.info(
                 f"Result set for match {match.id} ({part_a.team_name} {match.team_a_wins}-"
                 f"{match.team_b_wins} {part_b.team_name}) by {ctx.author.id}"
@@ -311,6 +316,7 @@ class TournamentCog(commands.Cog):
                 f"✅ Result recorded: **{part_a.team_name}** {match.team_a_wins}–"
                 f"{match.team_b_wins} **{part_b.team_name}**"
             )
+            await update_standings_message(self.bot, tournament_id)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
 
@@ -326,14 +332,17 @@ class TournamentCog(commands.Cog):
                 if tournament is None:
                     await ctx.followup.send("There is no active tournament.", ephemeral=True)
                     return
+                tournament_id = tournament.id
+                tournament_name = tournament.name
                 new_round = await advance_round(session, tournament.id, random.Random())
                 if new_round is None:
                     standings = await get_standings_data(session, tournament.id)
                     winner = standings[0]
                     await ctx.followup.send(
-                        f"🏁 **{tournament.name}** is complete! "
+                        f"🏁 **{tournament_name}** is complete! "
                         f"Champion: **{winner.team_name}** 🏆"
                     )
+                    await update_standings_message(self.bot, tournament_id)
                     return
                 from services.tournament_service import _round_matches
                 matches = await _round_matches(session, new_round.id)
@@ -343,6 +352,7 @@ class TournamentCog(commands.Cog):
                 f"**Round {new_round.round_number} pairings:**\n{pairing_lines}",
                 matches,
             )
+            await update_standings_message(self.bot, tournament_id)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
 
@@ -358,6 +368,18 @@ class TournamentCog(commands.Cog):
             round_ = await session.get(TournamentRound, matches[0].round_id)
             round_.pairings_channel_id = str(message.channel.id)
             round_.pairings_message_id = str(message.id)
+
+    async def _post_standings(self, ctx, tournament_id):
+        """Post the standings message and remember it for in-place updates."""
+        async with db_session() as session:
+            tournament = await session.get(Tournament, tournament_id)
+            participants = await get_standings_data(session, tournament_id)
+            embed = create_standings_embed(tournament, participants)
+        message = await ctx.followup.send(embed=embed)
+        async with db_session() as session:
+            tournament = await session.get(Tournament, tournament_id)
+            tournament.standings_channel_id = str(message.channel.id)
+            tournament.standings_message_id = str(message.id)
 
     async def _format_pairings(self, session, matches):
         lines = []
@@ -382,37 +404,31 @@ class TournamentCog(commands.Cog):
                 return
             if tournament.status == "registration":
                 participants = await list_participants(session, tournament.id)
+                embed = self._registration_embed(tournament, participants)
             else:
                 participants = await get_standings_data(session, tournament.id)
+                embed = create_standings_embed(tournament, participants)
+        await ctx.followup.send(embed=embed)
 
+    def _registration_embed(self, tournament, participants):
         embed = discord.Embed(
             title=f"🏆 {tournament.name}",
-            description=(
-                f"**Status:** {tournament.status.title()}\n"
-                f"**Rounds:** {tournament.current_round}/{tournament.total_rounds}"
-            ),
+            description=f"**Status:** {tournament.status.title()}",
             color=discord.Color.gold(),
         )
-        if not participants:
-            embed.add_field(
-                name="Teams (0)",
-                value="No teams yet — register with `/tournament register`.",
-                inline=False,
-            )
-        elif tournament.status == "registration":
+        if participants:
             teams = "\n".join(
                 f"{i}. **{p.team_name}** — captain <@{p.captain_user_id}>"
                 for i, p in enumerate(participants, start=1)
             )
             embed.add_field(name=f"Teams ({len(participants)})", value=teams, inline=False)
         else:
-            rows = "\n".join(
-                f"{i}. **{p.team_name}** — {p.points} pts "
-                f"({p.match_wins}-{p.match_losses}-{p.match_draws})"
-                for i, p in enumerate(participants, start=1)
+            embed.add_field(
+                name="Teams (0)",
+                value="No teams yet — register with `/tournament register`.",
+                inline=False,
             )
-            embed.add_field(name="Standings", value=rows, inline=False)
-        await ctx.followup.send(embed=embed)
+        return embed
 
 
 def setup(bot):

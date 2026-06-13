@@ -25,6 +25,9 @@ class Tournament(Base):
     status = Column(String(16), nullable=False, default='registration',
                     server_default=text("'registration'"))
     created_at = Column(DateTime, default=datetime.now)
+    # Where the auto-updating standings message lives (edited in place on every result)
+    standings_channel_id = Column(String(64), nullable=True)
+    standings_message_id = Column(String(64), nullable=True)
 
     def __repr__(self):
         return f"<Tournament(id={self.id}, name={self.name!r}, status={self.status})>"
