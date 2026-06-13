@@ -220,19 +220,25 @@ async def split_into_teams(bot, draft_session_id):
 async def generate_seating_order(bot, draft_session, command_type=None):
     guild = bot.get_guild(int(draft_session.guild_id))
 
-    team_a_members = [guild.get_member(int(user_id)) for user_id in draft_session.team_a]
-    team_b_members = [guild.get_member(int(user_id)) for user_id in draft_session.team_b]
+    # Pair each user id with its member object; test users resolve to None and
+    # fall back to their sign_ups display name instead of being dropped.
+    team_a_pairs = [(user_id, guild.get_member(int(user_id))) for user_id in draft_session.team_a]
+    team_b_pairs = [(user_id, guild.get_member(int(user_id))) for user_id in draft_session.team_b]
 
-    random.shuffle(team_a_members)
-    random.shuffle(team_b_members)
+    random.shuffle(team_a_pairs)
+    random.shuffle(team_b_pairs)
+
+    def display(user_id, member):
+        if member:
+            return get_display_name(member, guild)
+        return (draft_session.sign_ups or {}).get(user_id, "Unknown User")
 
     seating_order = []
-    for i in range(max(len(team_a_members), len(team_b_members))):
-        if i < len(team_a_members) and team_a_members[i]:
-            seating_order.append(get_display_name(team_a_members[i], guild))
-        if i < len(team_b_members) and team_b_members[i]:
-            seating_order.append(get_display_name(team_b_members[i], guild))
-
+    for i in range(max(len(team_a_pairs), len(team_b_pairs))):
+        if i < len(team_a_pairs):
+            seating_order.append(display(*team_a_pairs[i]))
+        if i < len(team_b_pairs):
+            seating_order.append(display(*team_b_pairs[i]))
 
     return seating_order
 
