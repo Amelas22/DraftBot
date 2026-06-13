@@ -9,6 +9,53 @@ Teams are plain dicts: {"id": <participant id>, "points": int, "byes": int}.
 """
 
 
+MWP_FLOOR = 1 / 3
+
+
+def match_win_percentage(match_points, rounds_played, floor=MWP_FLOOR):
+    """A participant's match-win percentage, floored (MTR convention).
+
+    match_points are 3 per win / 1 per draw; the denominator is 3 per round
+    played. Zero rounds returns the floor.
+    """
+    if rounds_played <= 0:
+        return floor
+    return max(floor, match_points / (3 * rounds_played))
+
+
+def rank_standings(participants, matches):
+    """Sort participants by points, then OMW%, then game diff, then name.
+
+    OMW% is the average match-win percentage of each participant's *real*
+    opponents (byes excluded). Participants with no real opponents get the
+    floor. Pure: ``participants`` and ``matches`` are read-only.
+    """
+    by_id = {p.id: p for p in participants}
+    opponents = {p.id: [] for p in participants}
+    for m in matches:
+        if m.is_bye or m.team_a_participant_id is None or m.team_b_participant_id is None:
+            continue
+        a, b = m.team_a_participant_id, m.team_b_participant_id
+        if a in opponents and b in opponents:
+            opponents[a].append(b)
+            opponents[b].append(a)
+
+    def mwp(p):
+        rounds = p.match_wins + p.match_losses + p.match_draws
+        return match_win_percentage(p.points, rounds)
+
+    def omw(p):
+        opp_ids = opponents[p.id]
+        if not opp_ids:
+            return MWP_FLOOR
+        return sum(mwp(by_id[oid]) for oid in opp_ids) / len(opp_ids)
+
+    return sorted(
+        participants,
+        key=lambda p: (-p.points, -omw(p), -(p.game_wins - p.game_losses), p.team_name),
+    )
+
+
 def assign_bye(teams, rng):
     """Pick the bye recipient: fewest byes first, then lowest points, then random."""
     fewest_byes = min(t["byes"] for t in teams)

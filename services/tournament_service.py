@@ -6,10 +6,10 @@ standings.
 All functions take an AsyncSession so callers control the transaction and tests
 can point them at a temp database (mirrors the leaderboard_service convention).
 """
-from sqlalchemy import desc, func, select
+from sqlalchemy import func, select
 
 from database.db_session import db_session
-from draft_organization.swiss import pair_round
+from draft_organization.swiss import pair_round, rank_standings
 from models.team import Team
 from models.tournament import (
     Tournament,
@@ -338,14 +338,19 @@ async def advance_round(session, tournament_id, rng):
 
 
 async def get_standings_data(session, tournament_id):
-    """Participants ranked by points, then game-win differential, then name."""
-    stmt = (
-        select(TournamentParticipant)
-        .where(TournamentParticipant.tournament_id == tournament_id)
-        .order_by(
-            desc(TournamentParticipant.points),
-            desc(TournamentParticipant.game_wins - TournamentParticipant.game_losses),
-            TournamentParticipant.team_name,
+    """Participants ranked by points, then OMW%, then game diff, then name.
+
+    OMW% (opponents' match-win %, byes excluded) needs the full match graph, so
+    we load participants and matches and rank in memory (tournaments are small).
+    """
+    participants = (await session.execute(
+        select(TournamentParticipant).where(
+            TournamentParticipant.tournament_id == tournament_id
         )
-    )
-    return (await session.execute(stmt)).scalars().all()
+    )).scalars().all()
+    matches = (await session.execute(
+        select(TournamentMatch)
+        .join(TournamentRound, TournamentMatch.round_id == TournamentRound.id)
+        .where(TournamentRound.tournament_id == tournament_id)
+    )).scalars().all()
+    return rank_standings(participants, matches)

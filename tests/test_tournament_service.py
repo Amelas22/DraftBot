@@ -425,6 +425,47 @@ async def test_advance_after_final_round_completes_tournament(test_db):
 
 
 @pytest.mark.asyncio
+async def test_standings_uses_omw_to_break_points_tie(test_db):
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "Spring", 3)
+        await session.commit()
+        # Two 3-point teams with equal game diff. 'zeta' beat a winner, 'alpha'
+        # beat a loser. Names are chosen so the name tiebreaker would put alpha
+        # FIRST — only OMW% can flip zeta above alpha.
+        ids = {}
+        for name, pts, w, l, gw, gl in [
+            ("zeta", 3, 1, 0, 2, 0), ("alpha", 3, 1, 0, 2, 0),
+            ("good", 3, 1, 0, 2, 0), ("bad", 0, 0, 1, 0, 2),
+        ]:
+            p = TournamentParticipant(
+                tournament_id=tournament.id, team_id=len(ids) + 1, team_name=name,
+                captain_user_id="1", points=pts, match_wins=w, match_losses=l,
+                game_wins=gw, game_losses=gl,
+            )
+            session.add(p)
+            await session.flush()
+            ids[name] = p.id
+        round_one = TournamentRound(tournament_id=tournament.id, round_number=1)
+        session.add(round_one)
+        await session.flush()
+        session.add(TournamentMatch(round_id=round_one.id,
+                                    team_a_participant_id=ids["zeta"],
+                                    team_b_participant_id=ids["good"],
+                                    team_a_wins=2, team_b_wins=0))
+        session.add(TournamentMatch(round_id=round_one.id,
+                                    team_a_participant_id=ids["alpha"],
+                                    team_b_participant_id=ids["bad"],
+                                    team_a_wins=2, team_b_wins=0))
+        await session.commit()
+
+        standings = await get_standings_data(session, tournament.id)
+        order = [p.team_name for p in standings]
+        assert order.index("zeta") < order.index("alpha"), (
+            f"OMW% should rank 'zeta' above 'alpha'; got {order}"
+        )
+
+
+@pytest.mark.asyncio
 async def test_standings_sorted_by_points_then_game_diff(test_db):
     async with test_db() as session:
         tournament = await _tournament_with_teams(session, 4)
