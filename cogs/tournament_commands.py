@@ -4,7 +4,7 @@ import discord
 from discord.ext import commands
 from loguru import logger
 
-from config import get_config
+from config import get_config, update_setting
 from database.db_session import db_session
 from helpers.permissions import has_bot_manager_role
 from models.tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
@@ -24,7 +24,9 @@ from services.tournament_service import (
 
 
 def tournament_enabled(guild_id):
-    return get_config(guild_id).get("features", {}).get("tournament", False)
+    # On by default; a guild opts out by explicitly setting the flag to false
+    # (via /tournament disable or its config file).
+    return get_config(guild_id).get("features", {}).get("tournament", True)
 
 
 async def launch_tournament_match(interaction, match_id):
@@ -123,6 +125,21 @@ class TournamentCog(commands.Cog):
             return True
         await ctx.respond("Tournaments are not enabled on this server.", ephemeral=True)
         return False
+
+    @tournament.command(name="enable", description="Admin: enable tournament commands on this server")
+    @has_bot_manager_role()
+    async def enable(self, ctx):
+        # Deliberately not feature-gated: this command manages the gate itself.
+        update_setting(ctx.guild.id, "features.tournament", True)
+        logger.info(f"Tournament feature enabled in guild {ctx.guild.id} by {ctx.author.id}")
+        await ctx.respond("✅ Tournament commands are now **enabled** on this server.", ephemeral=True)
+
+    @tournament.command(name="disable", description="Admin: disable tournament commands on this server")
+    @has_bot_manager_role()
+    async def disable(self, ctx):
+        update_setting(ctx.guild.id, "features.tournament", False)
+        logger.info(f"Tournament feature disabled in guild {ctx.guild.id} by {ctx.author.id}")
+        await ctx.respond("🔴 Tournament commands are now **disabled** on this server.", ephemeral=True)
 
     @tournament.command(name="create", description="Create a tournament and open registration")
     @has_bot_manager_role()
