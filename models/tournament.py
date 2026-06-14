@@ -24,6 +24,9 @@ class Tournament(Base):
     current_round = Column(Integer, nullable=False, default=0, server_default=text('0'))
     status = Column(String(16), nullable=False, default='registration',
                     server_default=text("'registration'"))
+    # 'swiss' (re-pair each round) | 'round_robin' | 'manual' (schedule fixed upfront)
+    format = Column(String(16), nullable=False, default='swiss',
+                    server_default=text("'swiss'"))
     created_at = Column(DateTime, default=datetime.now)
     # Where the auto-updating standings message lives (edited in place on every result)
     standings_channel_id = Column(String(64), nullable=True)

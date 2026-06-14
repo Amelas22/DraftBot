@@ -9,6 +9,36 @@ Teams are plain dicts: {"id": <participant id>, "points": int, "byes": int}.
 """
 
 
+def round_robin_schedule(team_ids, rng=None):
+    """Full single round-robin schedule via the circle method.
+
+    Returns a list of rounds; each round is a list of (a, b) pairs. Every team
+    plays every other exactly once. For an odd team count one team sits out each
+    round (no bye *match* is emitted). An optional rng shuffles the seeding so
+    the schedule isn't always in team order.
+    """
+    teams = list(team_ids)
+    if rng is not None:
+        rng.shuffle(teams)
+    sit_out = object()  # sentinel occupying the odd slot; never emitted
+    if len(teams) % 2 == 1:
+        teams.append(sit_out)
+
+    n = len(teams)
+    arr = teams[:]
+    rounds = []
+    for _ in range(n - 1):
+        pairs = []
+        for i in range(n // 2):
+            a, b = arr[i], arr[n - 1 - i]
+            if a is not sit_out and b is not sit_out:
+                pairs.append((a, b))
+        rounds.append(pairs)
+        # Fix arr[0], rotate the rest one position.
+        arr = [arr[0]] + [arr[-1]] + arr[1:-1]
+    return rounds
+
+
 MWP_FLOOR = 1 / 3
 
 

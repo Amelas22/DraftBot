@@ -8,11 +8,12 @@ from config import get_config, update_setting
 from database.db_session import db_session
 from helpers.permissions import has_bot_manager_role
 from models.tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from services.tournament_formatter import create_standings_embed, update_standings_message
 from services.tournament_service import (
     advance_round,
     create_tournament,
+    finish_tournament,
     find_current_match,
     get_active_tournament,
     get_standings_data,
@@ -93,14 +94,21 @@ async def _match_entries(session, matches):
 
 
 async def re_register_tournament_views(bot):
-    """Re-attach Play buttons on the current round's pairings message after a restart."""
+    """Re-attach Play buttons on active pairings messages after a restart.
+
+    Swiss only has its current round live; all-open formats (round_robin/manual)
+    have every round live at once.
+    """
     async with db_session() as session:
         stmt = (
             select(TournamentRound, Tournament)
             .join(Tournament, TournamentRound.tournament_id == Tournament.id)
             .where(
                 Tournament.status == "active",
-                TournamentRound.round_number == Tournament.current_round,
+                or_(
+                    Tournament.format != "swiss",
+                    TournamentRound.round_number == Tournament.current_round,
+                ),
                 TournamentRound.pairings_message_id.isnot(None),
             )
         )
@@ -148,17 +156,31 @@ class TournamentCog(commands.Cog):
         self,
         ctx,
         name: discord.Option(str, "Tournament name"),
-        rounds: discord.Option(int, "Number of Swiss rounds", min_value=1, max_value=20),
+        format: discord.Option(
+            str, "Pairing format", choices=["swiss", "round_robin"], default="swiss"
+        ),
+        rounds: discord.Option(
+            int, "Number of Swiss rounds (Swiss only)", min_value=1, max_value=20,
+            required=False, default=None,
+        ),
     ):
         if not await self._check_enabled(ctx):
             return
         await ctx.defer(ephemeral=True)
+        if format == "swiss" and rounds is None:
+            await ctx.followup.send("❌ Swiss tournaments need a `rounds` count.", ephemeral=True)
+            return
+        # Round-robin/manual derive their round count from the schedule at start.
+        total_rounds = rounds if format == "swiss" else 0
         try:
             async with db_session() as session:
-                tournament = await create_tournament(session, ctx.guild.id, name, rounds)
-            logger.info(f"Tournament '{name}' created in guild {ctx.guild.id} by {ctx.author.id}")
+                tournament = await create_tournament(
+                    session, ctx.guild.id, name, total_rounds, format=format
+                )
+            logger.info(f"Tournament '{name}' ({format}) created in guild {ctx.guild.id} by {ctx.author.id}")
+            detail = f"{tournament.total_rounds} rounds" if format == "swiss" else format.replace("_", "-")
             await ctx.followup.send(
-                f"✅ Tournament **{tournament.name}** created with {tournament.total_rounds} rounds. "
+                f"✅ Tournament **{tournament.name}** created ({detail}). "
                 f"Registration is open — captains can join with `/tournament register`.",
                 ephemeral=True,
             )
@@ -248,7 +270,7 @@ class TournamentCog(commands.Cog):
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
 
-    @tournament.command(name="start", description="Admin: close registration and pair round 1")
+    @tournament.command(name="start", description="Admin: close registration and open the schedule")
     @has_bot_manager_role()
     async def start(self, ctx):
         if not await self._check_enabled(ctx):
@@ -262,15 +284,10 @@ class TournamentCog(commands.Cog):
                     return
                 tournament_id = tournament.id
                 tournament_name = tournament.name
-                matches = await start_tournament(session, tournament.id, random.Random())
-                pairing_lines = await self._format_pairings(session, matches)
+                await start_tournament(session, tournament.id, random.Random())
             logger.info(f"Tournament {tournament_id} started in guild {ctx.guild.id} by {ctx.author.id}")
-            await self._post_pairings(
-                ctx,
-                f"🏆 **{tournament_name}** has started!\n\n"
-                f"**Round 1 pairings:**\n{pairing_lines}",
-                matches,
-            )
+            await ctx.followup.send(f"🏆 **{tournament_name}** has started!")
+            await self._post_schedule(ctx, tournament_id)
             await self._post_standings(ctx, tournament_id)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
@@ -320,7 +337,29 @@ class TournamentCog(commands.Cog):
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
 
-    @tournament.command(name="next_round", description="Admin: pair the next round (all results must be in)")
+    @tournament.command(name="finish", description="Admin: end the tournament and crown the champion")
+    @has_bot_manager_role()
+    async def finish(self, ctx):
+        if not await self._check_enabled(ctx):
+            return
+        await ctx.defer()
+        try:
+            async with db_session() as session:
+                tournament = await get_active_tournament(session, ctx.guild.id)
+                if tournament is None:
+                    await ctx.followup.send("There is no active tournament.", ephemeral=True)
+                    return
+                tournament_id = tournament.id
+                tournament_name = tournament.name
+                champion = await finish_tournament(session, tournament.id)
+            champ_text = f"Champion: **{champion.team_name}** 🏆" if champion else "No teams competed."
+            logger.info(f"Tournament {tournament_id} finished in guild {ctx.guild.id} by {ctx.author.id}")
+            await ctx.followup.send(f"🏁 **{tournament_name}** is complete! {champ_text}")
+            await update_standings_message(self.bot, tournament_id)
+        except ValueError as e:
+            await ctx.followup.send(f"❌ {e}", ephemeral=True)
+
+    @tournament.command(name="next_round", description="Admin: pair the next Swiss round (all results must be in)")
     @has_bot_manager_role()
     async def next_round(self, ctx):
         if not await self._check_enabled(ctx):
@@ -355,6 +394,36 @@ class TournamentCog(commands.Cog):
             await update_standings_message(self.bot, tournament_id)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
+
+    async def _post_schedule(self, ctx, tournament_id):
+        """Post a pairings message (with Play buttons) for every round of the schedule.
+
+        Works for Swiss (one round) and the all-open formats (every round at once,
+        each its own message to stay under Discord's per-message button cap).
+        """
+        async with db_session() as session:
+            rounds = (await session.execute(
+                select(TournamentRound)
+                .where(TournamentRound.tournament_id == tournament_id)
+                .order_by(TournamentRound.round_number)
+            )).scalars().all()
+            round_meta = [(r.id, r.round_number) for r in rounds]
+        for round_id, round_number in round_meta:
+            async with db_session() as session:
+                matches = (await session.execute(
+                    select(TournamentMatch).where(TournamentMatch.round_id == round_id)
+                )).scalars().all()
+                pairing_lines = await self._format_pairings(session, matches)
+                entries = await _match_entries(session, matches)
+            content = f"**Round {round_number} pairings:**\n{pairing_lines}"
+            if entries:
+                message = await ctx.followup.send(content, view=MatchActionView(entries))
+            else:
+                message = await ctx.followup.send(content)
+            async with db_session() as session:
+                round_ = await session.get(TournamentRound, round_id)
+                round_.pairings_channel_id = str(message.channel.id)
+                round_.pairings_message_id = str(message.id)
 
     async def _post_pairings(self, ctx, content, matches):
         """Post pairings with Play buttons and remember the message for restarts."""

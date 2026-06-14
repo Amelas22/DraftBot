@@ -9,7 +9,7 @@ can point them at a temp database (mirrors the leaderboard_service convention).
 from sqlalchemy import func, select
 
 from database.db_session import db_session
-from draft_organization.swiss import pair_round, rank_standings
+from draft_organization.swiss import pair_round, rank_standings, round_robin_schedule
 from models.team import Team
 from models.tournament import (
     Tournament,
@@ -33,19 +33,28 @@ async def get_active_tournament(session, guild_id):
     return result.scalars().first()
 
 
-async def create_tournament(session, guild_id, name, total_rounds):
+ALL_OPEN_FORMATS = ("round_robin", "manual")
+
+
+async def create_tournament(session, guild_id, name, total_rounds, format="swiss"):
     """Create a tournament in registration status.
 
-    Raises ValueError if the guild already has a registration/active tournament
-    (one active tournament per guild keeps all other commands argument-free).
+    ``format`` is 'swiss', 'round_robin', or 'manual'. For the all-open formats
+    total_rounds is set at start (derived from the schedule), so callers may
+    pass 0. Raises ValueError if the guild already has a registration/active
+    tournament (one active per guild keeps other commands argument-free).
     """
+    if format not in ("swiss",) + ALL_OPEN_FORMATS:
+        raise ValueError(f"Unknown tournament format: {format}")
     existing = await get_active_tournament(session, guild_id)
     if existing is not None:
         raise ValueError(
             f"'{existing.name}' is already {existing.status} in this server. "
             "Finish it before creating a new tournament."
         )
-    tournament = Tournament(guild_id=str(guild_id), name=name, total_rounds=total_rounds)
+    tournament = Tournament(
+        guild_id=str(guild_id), name=name, total_rounds=total_rounds, format=format
+    )
     session.add(tournament)
     await session.flush()
     return tournament
@@ -194,7 +203,12 @@ async def _create_round_with_pairings(session, tournament, participants, history
 
 
 async def start_tournament(session, tournament_id, rng):
-    """Activate a tournament and pair round 1. Returns the round's matches."""
+    """Activate a tournament and create its first round(s).
+
+    Returns a flat list of the matches created. Swiss pairs round 1 only (later
+    rounds via advance_round); round_robin builds the entire schedule up front,
+    all rounds open at once.
+    """
     tournament = await session.get(Tournament, tournament_id)
     if tournament is None:
         raise ValueError("Tournament not found.")
@@ -205,10 +219,49 @@ async def start_tournament(session, tournament_id, rng):
         raise ValueError("At least 2 teams must be registered to start.")
 
     tournament.status = "active"
+    if tournament.format == "round_robin":
+        return await _build_round_robin(session, tournament, participants, rng)
+
     _, matches = await _create_round_with_pairings(
         session, tournament, participants, set(), rng
     )
     return matches
+
+
+async def _build_round_robin(session, tournament, participants, rng):
+    """Create every round of a single round-robin at once (no byes). All open."""
+    schedule = round_robin_schedule([p.id for p in participants], rng)
+    all_matches = []
+    for round_number, pairs in enumerate(schedule, start=1):
+        new_round = TournamentRound(tournament_id=tournament.id, round_number=round_number)
+        session.add(new_round)
+        await session.flush()
+        for id_a, id_b in pairs:
+            match = TournamentMatch(
+                round_id=new_round.id,
+                team_a_participant_id=id_a,
+                team_b_participant_id=id_b,
+            )
+            session.add(match)
+            all_matches.append(match)
+    tournament.total_rounds = len(schedule)
+    tournament.current_round = len(schedule)  # all rounds revealed at once
+    await session.flush()
+    return all_matches
+
+
+async def finish_tournament(session, tournament_id):
+    """End an active tournament now, ranking current standings. Returns the
+    champion participant (top of standings), or None if there are none."""
+    tournament = await session.get(Tournament, tournament_id)
+    if tournament is None:
+        raise ValueError("Tournament not found.")
+    if tournament.status != "active":
+        raise ValueError(f"'{tournament.name}' is not active.")
+    tournament.status = "completed"
+    await session.flush()
+    standings = await get_standings_data(session, tournament_id)
+    return standings[0] if standings else None
 
 
 async def set_result(session, match_id, team_a_wins, team_b_wins):
@@ -302,6 +355,11 @@ async def advance_round(session, tournament_id, rng):
         raise ValueError("Tournament not found.")
     if tournament.status != "active":
         raise ValueError(f"'{tournament.name}' is not active.")
+    if tournament.format != "swiss":
+        raise ValueError(
+            "next_round is for Swiss tournaments — this one's schedule is fixed; "
+            "use /tournament finish to end it."
+        )
 
     round_ = await _current_round(session, tournament)
     matches = await _round_matches(session, round_.id)

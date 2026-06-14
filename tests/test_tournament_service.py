@@ -20,6 +20,7 @@ from models.tournament import (
 from services.tournament_service import (
     advance_round,
     create_tournament,
+    finish_tournament,
     find_current_match,
     get_active_tournament,
     get_standings_data,
@@ -479,6 +480,77 @@ async def test_standings_sorted_by_points_then_game_diff(test_db):
         assert [p.points for p in standings] == [3, 3, 0, 0]
         assert standings[0].id == matches[0].team_a_participant_id  # better game diff first
         assert standings[1].id == matches[1].team_a_participant_id
+
+
+# ---- slice 6: round-robin format + finish ----------------------------------------
+
+async def _round_robin_with_teams(session, count):
+    tournament = await create_tournament(session, "g1", "RR", 0, format="round_robin")
+    await session.commit()
+    for i in range(count):
+        await register_team(session, tournament.id, f"Team{i}", str(i))
+    await session.commit()
+    return tournament
+
+
+@pytest.mark.asyncio
+async def test_start_round_robin_creates_full_schedule(test_db):
+    async with test_db() as session:
+        tournament = await _round_robin_with_teams(session, 4)
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+
+        assert tournament.status == "active"
+        assert tournament.total_rounds == 3  # n-1 rounds for 4 teams
+        rounds = (await session.execute(select(TournamentRound))).scalars().all()
+        assert len(rounds) == 3
+        # 6 matches total (C(4,2)), none are byes
+        assert len(matches) == 6
+        assert all(not m.is_bye for m in matches)
+        # every team pair appears exactly once
+        pairs = {frozenset((m.team_a_participant_id, m.team_b_participant_id)) for m in matches}
+        assert len(pairs) == 6
+
+
+@pytest.mark.asyncio
+async def test_next_round_rejected_for_round_robin(test_db):
+    async with test_db() as session:
+        tournament = await _round_robin_with_teams(session, 4)
+        await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        with pytest.raises(ValueError):
+            await advance_round(session, tournament.id, random.Random(7))
+
+
+@pytest.mark.asyncio
+async def test_finish_tournament_completes_and_returns_champion(test_db):
+    async with test_db() as session:
+        tournament = await _round_robin_with_teams(session, 4)
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        # Give one team a clean sweep so the champion is unambiguous.
+        winner_id = matches[0].team_a_participant_id
+        for m in matches:
+            if m.team_a_participant_id == winner_id:
+                await set_result(session, m.id, 2, 0)
+            elif m.team_b_participant_id == winner_id:
+                await set_result(session, m.id, 0, 2)
+        await session.commit()
+
+        champion = await finish_tournament(session, tournament.id)
+        await session.commit()
+
+        assert tournament.status == "completed"
+        assert champion.id == winner_id
+        assert await get_active_tournament(session, "g1") is None
+
+
+@pytest.mark.asyncio
+async def test_finish_rejects_non_active(test_db):
+    async with test_db() as session:
+        tournament = await _round_robin_with_teams(session, 4)  # still registration
+        with pytest.raises(ValueError):
+            await finish_tournament(session, tournament.id)
 
 
 # ---- list_participants ----------------------------------------------------------
