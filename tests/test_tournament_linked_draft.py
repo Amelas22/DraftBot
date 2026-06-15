@@ -180,3 +180,65 @@ def test_round_model_stores_pairings_message_location(test_db):
     round_ = TournamentRound(tournament_id=1, round_number=1)
     assert round_.pairings_message_id is None
     assert round_.pairings_channel_id is None
+
+
+# ---- already-reported matches are not playable ------------------------------------
+
+async def _started_round_robin(session, count=4):
+    t = await create_tournament(session, "g1", "RR", 0, format="round_robin")
+    await session.commit()
+    for i in range(count):
+        await register_team(session, t.id, f"T{i}", str(i))
+    await session.commit()
+    matches = await start_tournament(session, t.id, random.Random(7))
+    await session.commit()
+    return t, matches
+
+
+@pytest.mark.asyncio
+async def test_match_entries_excludes_reported_matches(test_db):
+    from sqlalchemy import select
+    from cogs.tournament_commands import _match_entries
+    from models.tournament import TournamentMatch
+    from services.tournament_service import set_result
+
+    async with test_db() as session:
+        _t, matches = await _started_round_robin(session)
+        reported_id = matches[0].id
+        await set_result(session, reported_id, 2, 0)
+        await session.commit()
+
+        all_matches = (await session.execute(select(TournamentMatch))).scalars().all()
+        entries = await _match_entries(session, all_matches)
+        ids = {mid for mid, _ in entries}
+        assert reported_id not in ids
+        assert len(ids) == len(all_matches) - 1  # only the reported match dropped
+
+
+@pytest.mark.asyncio
+async def test_launch_refuses_already_reported_match(test_db):
+    from cogs.tournament_commands import launch_tournament_match
+    from services.tournament_service import set_result
+
+    async with test_db() as session:
+        _t, matches = await _started_round_robin(session, count=2)
+        match_id = matches[0].id
+        await set_result(session, match_id, 2, 0)
+        await session.commit()
+
+    @asynccontextmanager
+    async def fake_db_session():
+        async with test_db() as inner:
+            yield inner
+            await inner.commit()
+
+    interaction = MagicMock()
+    interaction.response.send_message = AsyncMock()
+    with patch("cogs.tournament_commands.db_session", fake_db_session):
+        await launch_tournament_match(interaction, match_id)
+
+    interaction.response.send_message.assert_awaited_once()
+    msg = interaction.response.send_message.call_args.args[0]
+    assert "already" in msg.lower() and "result" in msg.lower()
+    # must NOT have launched a draft (no view passed)
+    assert "view" not in interaction.response.send_message.call_args.kwargs

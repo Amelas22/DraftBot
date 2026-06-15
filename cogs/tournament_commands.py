@@ -40,6 +40,13 @@ async def launch_tournament_match(interaction, match_id):
         if match is None or match.is_bye:
             await interaction.response.send_message("This match no longer exists.", ephemeral=True)
             return
+        if match.team_a_wins is not None:
+            await interaction.response.send_message(
+                "This match already has a recorded result and can't be replayed. "
+                "Ask an admin if it needs correcting.",
+                ephemeral=True,
+            )
+            return
         part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
         part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
 
@@ -86,8 +93,8 @@ async def _match_entries(session, matches):
     """Build (match_id, 'A vs B') entries for the playable (non-bye) matches."""
     entries = []
     for match in matches:
-        if match.is_bye:
-            continue
+        if match.is_bye or match.team_a_wins is not None:
+            continue  # byes and already-reported matches aren't playable
         part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
         part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
         entries.append((match.id, f"{part_a.team_name} vs {part_b.team_name}"))
