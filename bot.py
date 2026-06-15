@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from database.message_management import setup_sticky_handler
 from database.db_session import init_db, ensure_guild_id_in_tables
 from utils import cleanup_sessions_task, check_inactive_players_task
-from commands import league_commands, scheduled_posts
+from commands import core_commands, scheduled_posts
 from reconnect_drafts import reconnect_recent_draft_sessions, reconnect_draft_setup_sessions
 from bot_registry import register_bot
 from preference_service import PlayerPreferences
@@ -87,6 +87,8 @@ async def main():
         bot.add_view(PublicSettleDebtsView())
         from livedrafts import re_register_live_drafts
         await re_register_live_drafts(bot)
+        from cogs.tournament_commands import re_register_tournament_views
+        await re_register_tournament_views(bot)
         logger.info("Re-registered team finder")
         bot.loop.create_task(delayed_log_collection(bot))
 
@@ -146,7 +148,7 @@ async def main():
         except Exception as e:
             logger.error(f"Error during draft {task_type} reconnection sequence: {e}")
 
-    await league_commands(bot)
+    await core_commands(bot)
     await scheduled_posts(bot)
     await load_extensions(bot)
     await init_db()

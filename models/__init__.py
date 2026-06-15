@@ -19,6 +19,7 @@ from .quiz_stats import QuizStats
 from .quiz_scheduling import QuizChannel, QuizSchedule
 from .debt_ledger import DebtLedger
 from .debt_summary_message import DebtSummaryMessage
+from .tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
 
 # Export all models
 __all__ = [
@@ -51,5 +52,9 @@ __all__ = [
     'QuizChannel',
     'QuizSchedule',
     'DebtLedger',
-    'DebtSummaryMessage'
+    'DebtSummaryMessage',
+    'Tournament',
+    'TournamentParticipant',
+    'TournamentRound',
+    'TournamentMatch'
 ]

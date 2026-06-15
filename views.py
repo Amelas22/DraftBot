@@ -131,6 +131,11 @@ class PersistentView(discord.ui.View):
         self._add_button(self.team_b_name, "red", "Team_B", self.team_assignment_callback)
         self._add_button("Generate Seating Order", "primary", "generate_seating", self.randomize_teams_callback)
 
+        # Add test button only if global test mode is enabled
+        if TEST_MODE_ENABLED:
+            logger.debug(f"🧪 TEST_MODE_ENABLED=True - Adding 'Add Test Users' button for premade session {self.draft_session_id}")
+            self._add_button("🧪 Fill Teams (Test)", "grey", "add_test_users_premade", self.add_test_users_premade_callback)
+
 
     def _add_generic_buttons(self):
         if self.session_type == "swiss":
@@ -328,6 +333,51 @@ class PersistentView(discord.ui.View):
         else:
             await interaction.followup.send(f"No additional test users were added. The draft already has {len(sign_ups)} users (limit is {self.NUM_TEST_USERS_TO_ADD}).", ephemeral=True)
 
+
+    async def add_test_users_premade_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """TEST_MODE only: fill both premade teams to 3 players with test users."""
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Only server administrators can use this test feature.", ephemeral=True)
+            return
+
+        draft_session = await get_draft_session(self.draft_session_id)
+        if not draft_session:
+            await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
+            return
+        if draft_session.session_stage == "teams":
+            await interaction.response.send_message("Cannot add test users after the seating order has been generated.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        from helpers.test_users import plan_premade_test_users
+        sign_ups = draft_session.sign_ups or {}
+        new_users, team_a, team_b = plan_premade_test_users(
+            draft_session.team_a, draft_session.team_b,
+            draft_session.team_a_name, draft_session.team_b_name,
+            existing_ids=set(sign_ups),
+        )
+        if not new_users:
+            await interaction.followup.send("Both teams are already full.", ephemeral=True)
+            return
+
+        sign_ups.update(new_users)
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                await db_session.execute(
+                    update(DraftSession).
+                    where(DraftSession.session_id == self.draft_session_id).
+                    values(sign_ups=sign_ups, team_a=team_a, team_b=team_b)
+                )
+
+        logger.info(f"Added {len(new_users)} test users to premade draft {self.draft_session_id} "
+                    f"({draft_session.team_a_name}: {len(team_a)}, {draft_session.team_b_name}: {len(team_b)})")
+        await self.update_team_view(interaction)
+        await interaction.followup.send(
+            f"Added {len(new_users)} test users. "
+            f"**{draft_session.team_a_name}**: {len(team_a)}/3, **{draft_session.team_b_name}**: {len(team_b)}/3.",
+            ephemeral=True,
+        )
 
     async def sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = str(interaction.user.id)

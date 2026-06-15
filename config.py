@@ -61,6 +61,7 @@ class Config:
                 "voice_channels": False,
                 "bot_detection": False,
                 "money_server": False,
+                "tournament": True,
                 "quiz_pack_images": {
                     "enabled": True,
                     "timeout_seconds": 10,
@@ -170,6 +171,7 @@ class Config:
                 "voice_channels": True,
                 "bot_detection": True,
                 "money_server": False,
+                "tournament": True,
                 "quiz_pack_images": {
                     "enabled": True,
                     "timeout_seconds": 10,
@@ -425,6 +427,11 @@ def migrate_configs():
             config["notifications"] = {
                 "dm_notifications_default": True  # DM notifications enabled by default
             }
+            updated = True
+
+        # Tournament feature: on by default unless a guild explicitly disables it
+        if "features" in config and "tournament" not in config["features"]:
+            config["features"]["tournament"] = True
             updated = True
 
         # Add quiz_pack_images feature if missing

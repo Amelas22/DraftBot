@@ -85,6 +85,7 @@ class BaseSession:
             deletion_time=deletion_time,
             session_type=self.get_session_type(),
             premade_match_id=self.get_premade_match_id(),
+            tournament_match_id=getattr(self.session_details, 'tournament_match_id', None),
             team_a_name=self.session_details.team_a_name,
             team_b_name=self.session_details.team_b_name,
             tracked_draft=True,

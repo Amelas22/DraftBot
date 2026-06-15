@@ -40,6 +40,7 @@ class DraftSession(Base):
     team_b_name = Column(String(128))
     are_rooms_processing = Column(Boolean, default=False)
     premade_match_id = Column(String(128))
+    tournament_match_id = Column(Integer, nullable=True)  # links result auto-recording to a TournamentMatch
     tracked_draft = Column(Boolean, default=False)
     swiss_matches = Column(JSON)
     draft_data = Column(JSON)

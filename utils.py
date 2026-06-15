@@ -8,7 +8,6 @@ from session import AsyncSessionLocal, get_draft_session, StakeInfo, Challenge, 
 from sqlalchemy.orm import selectinload, joinedload
 from trueskill import Rating, rate_1vs1
 from discord.ui import View
-from league import ChallengeView
 from models.leaderboard_message import LeaderboardMessage
 from models.win_streak_history import WinStreakHistory
 from models.perfect_streak_history import PerfectStreakHistory
@@ -221,19 +220,25 @@ async def split_into_teams(bot, draft_session_id):
 async def generate_seating_order(bot, draft_session, command_type=None):
     guild = bot.get_guild(int(draft_session.guild_id))
 
-    team_a_members = [guild.get_member(int(user_id)) for user_id in draft_session.team_a]
-    team_b_members = [guild.get_member(int(user_id)) for user_id in draft_session.team_b]
+    # Pair each user id with its member object; test users resolve to None and
+    # fall back to their sign_ups display name instead of being dropped.
+    team_a_pairs = [(user_id, guild.get_member(int(user_id))) for user_id in draft_session.team_a]
+    team_b_pairs = [(user_id, guild.get_member(int(user_id))) for user_id in draft_session.team_b]
 
-    random.shuffle(team_a_members)
-    random.shuffle(team_b_members)
+    random.shuffle(team_a_pairs)
+    random.shuffle(team_b_pairs)
+
+    def display(user_id, member):
+        if member:
+            return get_display_name(member, guild)
+        return (draft_session.sign_ups or {}).get(user_id, "Unknown User")
 
     seating_order = []
-    for i in range(max(len(team_a_members), len(team_b_members))):
-        if i < len(team_a_members) and team_a_members[i]:
-            seating_order.append(get_display_name(team_a_members[i], guild))
-        if i < len(team_b_members) and team_b_members[i]:
-            seating_order.append(get_display_name(team_b_members[i], guild))
-
+    for i in range(max(len(team_a_pairs), len(team_b_pairs))):
+        if i < len(team_a_pairs):
+            seating_order.append(display(*team_a_pairs[i]))
+        if i < len(team_b_pairs):
+            seating_order.append(display(*team_b_pairs[i]))
 
     return seating_order
 
@@ -845,6 +850,17 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
 
                     if draft_session.tracked_draft and draft_session.premade_match_id is not None:
                         await update_match_db_with_wins_winner(draft_session.premade_match_id, team_a_wins, team_b_wins)
+                    if draft_session.tournament_match_id is not None:
+                        from services.tournament_service import record_linked_result
+                        from services.tournament_formatter import update_standings_message_for_match
+                        try:
+                            await record_linked_result(draft_session.tournament_match_id, team_a_wins, team_b_wins)
+                            logger.info(f"Tournament match {draft_session.tournament_match_id} auto-recorded "
+                                        f"{team_a_wins}-{team_b_wins} from draft {draft_session_id}")
+                            await update_standings_message_for_match(bot, draft_session.tournament_match_id)
+                        except ValueError as e:
+                            logger.error(f"Failed to auto-record tournament match "
+                                         f"{draft_session.tournament_match_id}: {e}")
                     gap = abs(team_a_wins - team_b_wins)
 
                     # Mark as completed so it's removed from live drafts
@@ -1957,33 +1973,6 @@ async def balance_teams(player_ids, guild):
                     is_team_a_turn = True
 
     return team_a, team_b
-
-async def re_register_challenges(bot):
-    now = datetime.now()
-    async with AsyncSessionLocal() as db_session:
-        async with db_session.begin():
-            from session import SwissChallenge
-            stmt = select(SwissChallenge).where(SwissChallenge.start_time > now)
-            result = await db_session.execute(stmt)
-            challenge_to_update = result.scalars().all()
-
-            for challenge in challenge_to_update:
-                if challenge.channel_id:
-                    channel_id = int(challenge.channel_id)
-                    channel = bot.get_channel(channel_id)
-                    if channel:
-                        try:
-                            message = await channel.fetch_message(int(challenge.message_id))
-                            view = ChallengeView(challenge_id=challenge.id, 
-                                                 command_type="swiss"
-                            )
-                            await message.edit(view=view)
-                        except discord.NotFound:
-                            # Handle cases where the message or channel might have been deleted
-                            print(f"Message or channel not found for session: {challenge.id}")
-                        except Exception as e:
-                            # Log or handle any other exceptions
-                            print(f"Failed to re-register view for challenge: {challenge.id}, error: {e}")
 
 async def re_register_views(bot):
     current_time = datetime.now()
