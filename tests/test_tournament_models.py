@@ -125,6 +125,10 @@ async def test_match_defaults_unreported_and_not_bye(test_db):
         match = (await session.execute(select(TournamentMatch))).scalars().one()
         assert match.team_a_wins is None and match.team_b_wins is None
         assert match.is_bye is False
+        # per-match Play-button message location + match thread (slice: match threads)
+        assert match.pairings_message_id is None
+        assert match.pairings_channel_id is None
+        assert match.thread_id is None
 
 
 @pytest.mark.asyncio

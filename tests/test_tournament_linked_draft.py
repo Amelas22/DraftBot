@@ -162,18 +162,6 @@ async def test_record_linked_result_is_correction_safe(test_db):
         assert (part_a.game_wins, part_a.game_losses) == (1, 2)
 
 
-# ---- play-match view ------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_match_action_view_builds_persistent_play_buttons():
-    from cogs.tournament_commands import MatchActionView
-
-    view = MatchActionView([(5, "Alpha vs Bravo"), (6, "Charlie vs Delta")])
-    assert view.timeout is None  # survives restarts
-    custom_ids = {child.custom_id for child in view.children}
-    assert custom_ids == {"tournament_play:5", "tournament_play:6"}
-
-
 def test_round_model_stores_pairings_message_location(test_db):
     from models.tournament import TournamentRound
 
@@ -196,23 +184,111 @@ async def _started_round_robin(session, count=4):
 
 
 @pytest.mark.asyncio
-async def test_match_entries_excludes_reported_matches(test_db):
-    from sqlalchemy import select
-    from cogs.tournament_commands import _match_entries
+async def test_re_register_skips_reported_matches(test_db):
+    from cogs.tournament_commands import re_register_tournament_views
     from models.tournament import TournamentMatch
     from services.tournament_service import set_result
 
     async with test_db() as session:
-        _t, matches = await _started_round_robin(session)
-        reported_id = matches[0].id
-        await set_result(session, reported_id, 2, 0)
+        _t, matches = await _started_round_robin(session, count=4)  # 6 matches, no byes
+        for i, m in enumerate(matches):
+            mm = await session.get(TournamentMatch, m.id)
+            mm.pairings_message_id = str(1000 + i)
+        await session.commit()
+        await set_result(session, matches[0].id, 2, 0)  # report one
+        await session.commit()
+        total = len(matches)
+
+    @asynccontextmanager
+    async def fake_db_session():
+        async with test_db() as inner:
+            yield inner
+            await inner.commit()
+
+    bot = MagicMock()
+    bot.add_view = MagicMock()
+    with patch("cogs.tournament_commands.db_session", fake_db_session):
+        await re_register_tournament_views(bot)
+
+    assert bot.add_view.call_count == total - 1  # reported match not re-registered
+
+
+@pytest.mark.asyncio
+async def test_play_match_view_has_one_button():
+    from cogs.tournament_commands import PlayMatchView
+
+    view = PlayMatchView(5, "Alpha vs Bravo")
+    assert view.timeout is None
+    assert len(view.children) == 1
+    assert view.children[0].custom_id == "tournament_play:5"
+
+
+@pytest.mark.asyncio
+async def test_launch_creates_thread_and_stores_id(test_db):
+    from cogs.tournament_commands import launch_tournament_match
+
+    async with test_db() as session:
+        _t, matches = await _started_round_robin(session, count=2)
+        match_id = matches[0].id
+
+    @asynccontextmanager
+    async def fake_db_session():
+        async with test_db() as inner:
+            yield inner
+            await inner.commit()
+
+    thread = MagicMock()
+    thread.id = 999
+    thread.mention = "<#999>"
+    thread.send = AsyncMock()
+    interaction = MagicMock()
+    interaction.message.create_thread = AsyncMock(return_value=thread)
+    interaction.response.send_message = AsyncMock()
+
+    with patch("cogs.tournament_commands.db_session", fake_db_session):
+        await launch_tournament_match(interaction, match_id)
+
+    interaction.message.create_thread.assert_awaited_once()
+    thread.send.assert_awaited_once()  # cube picker posted in the thread
+    # thread id persisted on the match
+    async with test_db() as session:
+        from models.tournament import TournamentMatch
+        m = await session.get(TournamentMatch, match_id)
+        assert m.thread_id == "999"
+
+
+@pytest.mark.asyncio
+async def test_launch_reuses_existing_thread(test_db):
+    from cogs.tournament_commands import launch_tournament_match
+    from models.tournament import TournamentMatch
+
+    async with test_db() as session:
+        _t, matches = await _started_round_robin(session, count=2)
+        match_id = matches[0].id
+        m = await session.get(TournamentMatch, match_id)
+        m.thread_id = "12345"  # Ben already made this thread
         await session.commit()
 
-        all_matches = (await session.execute(select(TournamentMatch))).scalars().all()
-        entries = await _match_entries(session, all_matches)
-        ids = {mid for mid, _ in entries}
-        assert reported_id not in ids
-        assert len(ids) == len(all_matches) - 1  # only the reported match dropped
+    @asynccontextmanager
+    async def fake_db_session():
+        async with test_db() as inner:
+            yield inner
+            await inner.commit()
+
+    thread = MagicMock()
+    thread.mention = "<#12345>"
+    thread.send = AsyncMock()
+    interaction = MagicMock()
+    interaction.guild.get_channel.return_value = thread
+    interaction.message.create_thread = AsyncMock()
+    interaction.response.send_message = AsyncMock()
+
+    with patch("cogs.tournament_commands.db_session", fake_db_session):
+        await launch_tournament_match(interaction, match_id)
+
+    interaction.message.create_thread.assert_not_called()  # reused, not recreated
+    interaction.guild.get_channel.assert_called_once_with(12345)
+    thread.send.assert_awaited_once()
 
 
 @pytest.mark.asyncio

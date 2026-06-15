@@ -93,6 +93,11 @@ class TournamentMatch(Base):
     team_a_wins = Column(Integer, nullable=True)
     team_b_wins = Column(Integer, nullable=True)
     is_bye = Column(Boolean, nullable=False, default=False, server_default=text('0'))
+    # Each match has its own pairing message (with the Play button) for restart
+    # re-registration, and a per-match thread the lobby runs in.
+    pairings_channel_id = Column(String(64), nullable=True)
+    pairings_message_id = Column(String(64), nullable=True)
+    thread_id = Column(String(64), nullable=True)
 
     def __repr__(self):
         return (f"<TournamentMatch(round_id={self.round_id}, "
