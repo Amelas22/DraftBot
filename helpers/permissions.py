@@ -32,14 +32,18 @@ def get_manager_role_names(guild_id):
 
 
 async def is_bot_manager(ctx):
-    """True if the invoker is the bot owner or has an accepted manager role."""
+    """True if the invoker is the bot owner, has an accepted manager role, or
+    has the Manage Roles permission in the guild."""
     if await ctx.bot.is_owner(ctx.author):
         return True
     guild = getattr(ctx, "guild", None)
     if guild is None:
         return False
     allowed = get_manager_role_names(guild.id)
-    return any(role.name in allowed for role in ctx.author.roles)
+    if any(role.name in allowed for role in ctx.author.roles):
+        return True
+    perms = getattr(ctx.author, "guild_permissions", None)
+    return bool(perms and perms.manage_roles)
 
 
 def has_bot_manager_role():
@@ -67,6 +71,9 @@ async def handle_application_command_error(ctx, error):
     "This application does not respond").
     """
     original = getattr(error, "original", error)
+    if isinstance(error, commands.NotOwner) or isinstance(original, commands.NotOwner):
+        await _send_error(ctx, "❌ Only the bot owner can use this command.")
+        return
     if isinstance(error, commands.CheckFailure) or isinstance(original, commands.CheckFailure):
         guild = getattr(ctx, "guild", None)
         if guild is not None:
@@ -76,7 +83,7 @@ async def handle_application_command_error(ctx, error):
         await _send_error(
             ctx,
             f"❌ You don't have permission to use this command. "
-            f"You need one of these roles: {roles}.",
+            f"You need one of these roles: {roles}, or the Manage Roles permission.",
         )
         return
 
