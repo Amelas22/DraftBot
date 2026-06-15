@@ -12,6 +12,7 @@ from sqlalchemy import or_, select
 from services.tournament_formatter import create_standings_embed, update_standings_message
 from services.tournament_service import (
     advance_round,
+    add_match,
     create_tournament,
     finish_tournament,
     find_current_match,
@@ -157,7 +158,7 @@ class TournamentCog(commands.Cog):
         ctx,
         name: discord.Option(str, "Tournament name"),
         format: discord.Option(
-            str, "Pairing format", choices=["swiss", "round_robin"], default="swiss"
+            str, "Pairing format", choices=["swiss", "round_robin", "manual"], default="swiss"
         ),
         rounds: discord.Option(
             int, "Number of Swiss rounds (Swiss only)", min_value=1, max_value=20,
@@ -267,6 +268,34 @@ class TournamentCog(commands.Cog):
                     return
                 participant = await remove_team(session, tournament.id, team)
             await ctx.followup.send(f"✅ **{participant.team_name}** removed.", ephemeral=True)
+        except ValueError as e:
+            await ctx.followup.send(f"❌ {e}", ephemeral=True)
+
+    @tournament.command(name="add_match", description="Admin: author a match for a manual-format tournament")
+    @has_bot_manager_role()
+    async def add_match(
+        self,
+        ctx,
+        team_a: discord.Option(str, "First team"),
+        team_b: discord.Option(str, "Second team"),
+    ):
+        if not await self._check_enabled(ctx):
+            return
+        await ctx.defer(ephemeral=True)
+        try:
+            async with db_session() as session:
+                tournament = await get_active_tournament(session, ctx.guild.id)
+                if tournament is None:
+                    await ctx.followup.send("There is no tournament accepting matches right now.", ephemeral=True)
+                    return
+                match = await add_match(session, tournament.id, team_a, team_b)
+                part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
+                part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
+            await ctx.followup.send(
+                f"✅ Added match: **{part_a.team_name}** vs **{part_b.team_name}**. "
+                f"Add more, then `/tournament start`.",
+                ephemeral=True,
+            )
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
 

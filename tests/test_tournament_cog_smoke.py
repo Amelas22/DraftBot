@@ -19,14 +19,14 @@ def test_tournament_group_has_slice_one_and_two_commands():
     subcommands = {cmd.name for cmd in TournamentCog.tournament.subcommands}
     assert {"create", "register", "status",
             "start", "set_result", "next_round", "finish",
-            "add_team", "remove_team"} <= subcommands
+            "add_team", "remove_team", "add_match"} <= subcommands
 
 
 def test_admin_commands_are_gated_by_bot_manager_check():
     from cogs.tournament_commands import TournamentCog
 
     for command in ("create", "start", "set_result", "next_round", "finish",
-                    "add_team", "remove_team"):
+                    "add_team", "remove_team", "add_match"):
         assert is_bot_manager in getattr(TournamentCog, command).checks, command
 
 

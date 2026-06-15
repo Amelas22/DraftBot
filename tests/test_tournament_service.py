@@ -18,6 +18,7 @@ from models.tournament import (
     TournamentRound,
 )
 from services.tournament_service import (
+    add_match,
     advance_round,
     create_tournament,
     finish_tournament,
@@ -551,6 +552,126 @@ async def test_finish_rejects_non_active(test_db):
         tournament = await _round_robin_with_teams(session, 4)  # still registration
         with pytest.raises(ValueError):
             await finish_tournament(session, tournament.id)
+
+
+# ---- slice 7: manual schedule ----------------------------------------------------
+
+async def _manual_with_teams(session, count):
+    tournament = await create_tournament(session, "g1", "Manual", 0, format="manual")
+    await session.commit()
+    for i in range(count):
+        await register_team(session, tournament.id, f"Team{i}", str(i))
+    await session.commit()
+    return tournament
+
+
+@pytest.mark.asyncio
+async def test_add_match_creates_authored_match(test_db):
+    async with test_db() as session:
+        tournament = await _manual_with_teams(session, 4)
+        match = await add_match(session, tournament.id, "Team0", "Team1")
+        await session.commit()
+
+        p0 = (await session.execute(select(TournamentParticipant).where(
+            TournamentParticipant.team_name == "Team0"))).scalars().one()
+        p1 = (await session.execute(select(TournamentParticipant).where(
+            TournamentParticipant.team_name == "Team1"))).scalars().one()
+        assert {match.team_a_participant_id, match.team_b_participant_id} == {p0.id, p1.id}
+        assert match.is_bye is False
+
+
+@pytest.mark.asyncio
+async def test_add_match_resolves_team_names_case_insensitively(test_db):
+    async with test_db() as session:
+        tournament = await _manual_with_teams(session, 4)
+        match = await add_match(session, tournament.id, "  team0 ", "TEAM1")
+        await session.commit()
+        assert match.id is not None
+
+
+@pytest.mark.asyncio
+async def test_add_match_rejects_unknown_team(test_db):
+    async with test_db() as session:
+        tournament = await _manual_with_teams(session, 2)
+        with pytest.raises(ValueError):
+            await add_match(session, tournament.id, "Team0", "Ghost")
+
+
+@pytest.mark.asyncio
+async def test_add_match_rejects_self_pairing(test_db):
+    async with test_db() as session:
+        tournament = await _manual_with_teams(session, 2)
+        with pytest.raises(ValueError):
+            await add_match(session, tournament.id, "Team0", "Team0")
+
+
+@pytest.mark.asyncio
+async def test_add_match_rejected_for_non_manual_format(test_db):
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "RR", 0, format="round_robin")
+        await session.commit()
+        await register_team(session, tournament.id, "A", "1")
+        await register_team(session, tournament.id, "B", "2")
+        await session.commit()
+        with pytest.raises(ValueError):
+            await add_match(session, tournament.id, "A", "B")
+
+
+@pytest.mark.asyncio
+async def test_add_match_rejected_after_start(test_db):
+    async with test_db() as session:
+        tournament = await _manual_with_teams(session, 2)
+        await add_match(session, tournament.id, "Team0", "Team1")
+        await session.commit()
+        await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        with pytest.raises(ValueError):
+            await add_match(session, tournament.id, "Team0", "Team1")
+
+
+@pytest.mark.asyncio
+async def test_add_match_packs_into_capped_rounds(test_db):
+    async with test_db() as session:
+        tournament = await _manual_with_teams(session, 6)
+        # 12 matches with a per-round cap of 10 -> 2 rounds
+        names = [f"Team{i}" for i in range(6)]
+        added = 0
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                await add_match(session, tournament.id, names[i], names[j])
+                added += 1
+        await session.commit()
+        assert added == 15  # C(6,2)
+        rounds = (await session.execute(select(TournamentRound))).scalars().all()
+        # 15 matches, cap 10 -> 2 rounds; no round exceeds the cap
+        assert len(rounds) == 2
+        for r in rounds:
+            cnt = len((await session.execute(select(TournamentMatch).where(
+                TournamentMatch.round_id == r.id))).scalars().all())
+            assert cnt <= 10
+
+
+@pytest.mark.asyncio
+async def test_start_manual_opens_authored_schedule(test_db):
+    async with test_db() as session:
+        tournament = await _manual_with_teams(session, 4)
+        await add_match(session, tournament.id, "Team0", "Team1")
+        await add_match(session, tournament.id, "Team2", "Team3")
+        await session.commit()
+
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        assert tournament.status == "active"
+        assert tournament.total_rounds == 1  # both fit in one capped round
+        assert len(matches) == 2
+
+
+@pytest.mark.asyncio
+async def test_start_manual_requires_authored_matches(test_db):
+    async with test_db() as session:
+        tournament = await _manual_with_teams(session, 4)  # no matches added
+        with pytest.raises(ValueError):
+            await start_tournament(session, tournament.id, random.Random(7))
 
 
 # ---- list_participants ----------------------------------------------------------

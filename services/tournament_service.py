@@ -34,6 +34,16 @@ async def get_active_tournament(session, guild_id):
 
 
 ALL_OPEN_FORMATS = ("round_robin", "manual")
+MANUAL_ROUND_SIZE = 10  # matches per pairings message, well under Discord's 25-button cap
+
+
+async def _participant_by_name(session, tournament_id, team_name):
+    """Find a tournament participant by team name (case-insensitive), or None."""
+    stmt = select(TournamentParticipant).where(
+        TournamentParticipant.tournament_id == tournament_id,
+        func.lower(TournamentParticipant.team_name) == team_name.strip().lower(),
+    )
+    return (await session.execute(stmt)).scalars().first()
 
 
 async def create_tournament(session, guild_id, name, total_rounds, format="swiss"):
@@ -221,10 +231,82 @@ async def start_tournament(session, tournament_id, rng):
     tournament.status = "active"
     if tournament.format == "round_robin":
         return await _build_round_robin(session, tournament, participants, rng)
+    if tournament.format == "manual":
+        return await _open_manual_schedule(session, tournament)
 
     _, matches = await _create_round_with_pairings(
         session, tournament, participants, set(), rng
     )
+    return matches
+
+
+async def add_match(session, tournament_id, team_a_name, team_b_name):
+    """Author one match for a manual tournament (before it starts).
+
+    Resolves team names to registered participants and packs the match into a
+    round capped at MANUAL_ROUND_SIZE (so each pairings message stays under the
+    Discord button limit). Returns the created match.
+    """
+    tournament = await session.get(Tournament, tournament_id)
+    if tournament is None:
+        raise ValueError("Tournament not found.")
+    if tournament.format != "manual":
+        raise ValueError("Matches are only authored by hand for manual tournaments.")
+    if tournament.status != "registration":
+        raise ValueError("Add matches before starting the tournament.")
+
+    a = await _participant_by_name(session, tournament_id, team_a_name)
+    b = await _participant_by_name(session, tournament_id, team_b_name)
+    if a is None or b is None:
+        missing = team_a_name if a is None else team_b_name
+        raise ValueError(f"'{missing}' is not registered for this tournament.")
+    if a.id == b.id:
+        raise ValueError("A team can't be scheduled against itself.")
+
+    rounds = (await session.execute(
+        select(TournamentRound)
+        .where(TournamentRound.tournament_id == tournament_id)
+        .order_by(TournamentRound.round_number)
+    )).scalars().all()
+    target = rounds[-1] if rounds else None
+    if target is not None:
+        count = (await session.execute(
+            select(func.count()).select_from(TournamentMatch).where(
+                TournamentMatch.round_id == target.id
+            )
+        )).scalar_one()
+        if count >= MANUAL_ROUND_SIZE:
+            target = None
+    if target is None:
+        target = TournamentRound(tournament_id=tournament_id, round_number=len(rounds) + 1)
+        session.add(target)
+        await session.flush()
+
+    match = TournamentMatch(
+        round_id=target.id,
+        team_a_participant_id=a.id,
+        team_b_participant_id=b.id,
+    )
+    session.add(match)
+    await session.flush()
+    return match
+
+
+async def _open_manual_schedule(session, tournament):
+    """Activate a manual tournament by opening its pre-authored matches."""
+    rounds = (await session.execute(
+        select(TournamentRound).where(TournamentRound.tournament_id == tournament.id)
+    )).scalars().all()
+    if not rounds:
+        raise ValueError("Add matches with /tournament add_match before starting.")
+    matches = (await session.execute(
+        select(TournamentMatch)
+        .join(TournamentRound, TournamentMatch.round_id == TournamentRound.id)
+        .where(TournamentRound.tournament_id == tournament.id)
+    )).scalars().all()
+    tournament.total_rounds = len(rounds)
+    tournament.current_round = len(rounds)
+    await session.flush()
     return matches
 
 
