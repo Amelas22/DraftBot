@@ -10,7 +10,7 @@ Usage:
     pipenv run python scripts/cleanup_test_channels.py
 
 Safety Features:
-- Only works in test mode (TEST_MODE_ENABLED = True in config.py)
+- Only works in test mode (TEST_MODE=true in environment or .env)
 - Prompts for confirmation before deleting channels
 - Shows preview of channels to be deleted
 - Logs all deletions for audit trail
@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 # Add parent directory to path to import project modules
 sys.path.append(str(Path(__file__).parent.parent))
 
-from config import TEST_MODE_ENABLED, get_config
+from config import is_test_mode, get_config
 
 # Load environment variables
 load_dotenv()
@@ -151,13 +151,13 @@ class ChannelCleanup:
         """Main cleanup function"""
         
         # Safety check - only run in test mode
-        if not TEST_MODE_ENABLED:
-            logger.error("ERROR: This script only runs when TEST_MODE_ENABLED = True in config.py")
+        if not is_test_mode():
+            logger.error("ERROR: This script only runs when TEST_MODE=true is set in the environment")
             logger.error("This prevents accidental deletion of production channels.")
             return False
-            
+
         logger.info("Starting test channel cleanup...")
-        logger.info("TEST_MODE_ENABLED = True - Proceeding with cleanup")
+        logger.info("TEST_MODE=true - Proceeding with cleanup")
         
         # Get guilds to clean up
         guilds_to_process = []
@@ -232,10 +232,10 @@ async def main():
         logger.add(sys.stderr, level="DEBUG")
     
     # Safety check
-    if not TEST_MODE_ENABLED:
+    if not is_test_mode():
         logger.error("\n" + "="*60)
         logger.error("SAFETY CHECK FAILED")
-        logger.error("TEST_MODE_ENABLED must be True in config.py")
+        logger.error("TEST_MODE=true must be set in the environment")
         logger.error("This prevents accidental deletion of production channels")
         logger.error("="*60)
         return 1

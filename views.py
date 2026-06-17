@@ -5,7 +5,7 @@ import pytz
 from datetime import datetime, timedelta
 from discord import SelectOption
 from discord.ui import Button, View, Select, select
-from config import TEST_MODE_ENABLED, should_reset_on_signup, get_queue_inactivity_minutes
+from config import is_test_mode, should_reset_on_signup, get_queue_inactivity_minutes
 from notification_service import send_ready_check_dms
 from draft_organization.stake_calculator import calculate_stakes_with_strategy
 from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
@@ -132,8 +132,8 @@ class PersistentView(discord.ui.View):
         self._add_button("Generate Seating Order", "primary", "generate_seating", self.randomize_teams_callback)
 
         # Add test button only if global test mode is enabled
-        if TEST_MODE_ENABLED:
-            logger.debug(f"🧪 TEST_MODE_ENABLED=True - Adding 'Add Test Users' button for premade session {self.draft_session_id}")
+        if is_test_mode():
+            logger.debug(f"🧪 TEST_MODE=True - Adding 'Add Test Users' button for premade session {self.draft_session_id}")
             self._add_button("🧪 Fill Teams (Test)", "grey", "add_test_users_premade", self.add_test_users_premade_callback)
 
 
@@ -150,11 +150,11 @@ class PersistentView(discord.ui.View):
             self._add_button("How Bets Work 💰", "green", "explain_stakes", self.explain_stakes_callback)
 
         # Add test button only if global test mode is enabled
-        if TEST_MODE_ENABLED:
-            logger.debug(f"🧪 TEST_MODE_ENABLED=True - Adding 'Add Test Users' button for session {self.draft_session_id}")
+        if is_test_mode():
+            logger.debug(f"🧪 TEST_MODE=True - Adding 'Add Test Users' button for session {self.draft_session_id}")
             self._add_button("🧪 Add Test Users", "grey", "add_test_users", self.add_test_users_callback)
         else:
-            logger.debug(f"TEST_MODE_ENABLED=False - Skipping 'Add Test Users' button for session {self.draft_session_id}")
+            logger.debug(f"TEST_MODE=False - Skipping 'Add Test Users' button for session {self.draft_session_id}")
 
 
     def _apply_stage_button_disabling(self):
