@@ -1414,10 +1414,11 @@ async def cleanup_sessions_task(bot):
                                     await msg.delete()
                                     logger.info(f"Cancelled inactive queue for session {session.session_id} (Draft-{session.draft_id})")
                             except discord.NotFound:
-                                # If the message is not found, silently continue
                                 pass
                             except discord.HTTPException as e:
                                 logger.error(f"Failed to delete message ID {session.message_id} in draft channel. Reason: {e}")
+                            from ready_check import ReadyCheckSession
+                            await ReadyCheckSession.cleanup(session.session_id, draft_channel)
                     
                     # Delete the session from the database
                     await db_session.delete(session)

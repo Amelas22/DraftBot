@@ -7,6 +7,7 @@ from discord import SelectOption
 from discord.ui import Button, View, Select, select
 from config import is_test_mode, should_reset_on_signup, get_queue_inactivity_minutes
 from notification_service import send_ready_check_dms
+from ready_check import ReadyCheckView, ReadyCheckSession
 from draft_organization.stake_calculator import calculate_stakes_with_strategy
 from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
 from session import StakeInfo, AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
@@ -539,7 +540,10 @@ class PersistentView(discord.ui.View):
 
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
-            
+
+            # If a ready check is active, add the new player to no_response and refresh the embed
+            await ReadyCheckSession.sync_added_player(self.draft_session_id, user_id, draft_session_updated, interaction)
+
             if self.session_type == "winston":
                 if len(sign_ups) == 2:
                     sign_up_tags = ' '.join([f"<@{user_id}>" for user_id in draft_session_updated.sign_ups.keys()])
@@ -608,7 +612,9 @@ class PersistentView(discord.ui.View):
             
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
-    
+
+            await ReadyCheckSession.sync_removed_player(self.draft_session_id, user_id, draft_session_updated, interaction)
+
     async def update_cube_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Callback for the Update Cube button - Shows a selection view for choosing a new cube"""
         try:
@@ -731,7 +737,7 @@ class PersistentView(discord.ui.View):
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
             return        
         
-        sign_up_count = len(session.sign_ups)
+        sign_up_count = len(session.sign_ups) if session.sign_ups else 0
         if sign_up_count < 6:
             await interaction.response.send_message(
                 f"Ready check only available with 6 or more players. Currently {sign_up_count} players in queue."
@@ -764,47 +770,40 @@ class PersistentView(discord.ui.View):
         # We'll use followup.send() later to send the actual message
         await interaction.response.defer()
 
-        # Create a dictionary to store the initial ready check status
-        # Test users (ID >= 900000000000000000) are automatically marked as ready
+        # Build the initial ready check state.
+        # All players start as no_response; initiator and test users are marked ready immediately.
         TEST_USER_ID_START = 900000000000000000
 
-        ready_check_status = {
-            "ready": [user_id],  # Add the initiator to ready immediately
-            "not_ready": [],
-            "no_response": []
-        }
-
-        # Separate real users from test users
+        rc = ReadyCheckSession(player_ids=session.sign_ups.keys())
+        rc.set_status(user_id, 'ready')
         for uid in session.sign_ups.keys():
-            if uid == user_id:
-                continue  # Initiator already in ready list
-
-            # Check if this is a test user (ID >= 900000000000000000)
-            if int(uid) >= TEST_USER_ID_START:
-                ready_check_status["ready"].append(uid)
+            if uid != user_id and int(uid) >= TEST_USER_ID_START:
+                rc.set_status(uid, 'ready')
                 logger.debug(f"Auto-marked test user {uid} as ready")
-            else:
-                ready_check_status["no_response"].append(uid)
 
-        # Save this status in a global sessions dictionary
-        state_manager.set_ready_check_session(self.draft_session_id, ready_check_status)
-        logger.info(f"✅ Ready check initiated - registered session ID {self.draft_session_id} in sessions dictionary")
-        logger.debug(f"Sessions dictionary now contains {list(state_manager.sessions.keys())}")
+        state_manager.set_ready_check(self.draft_session_id, rc)
+        logger.info(f"✅ Ready check initiated - registered session ID {self.draft_session_id}")
 
-        # Disable the "Ready Check" button
+
+        # Disable the "Ready Check" button and persist it to the draft message
         for item in self.children:
-            if isinstance(item, discord.ui.Button) and item.custom_id.endswith("ready_check"):
+            if isinstance(item, discord.ui.Button) and item.custom_id == f"ready_check_{self.draft_session_id}":
                 item.disabled = True
                 break
+        try:
+            await interaction.message.edit(view=self)
+        except Exception as e:
+            logger.error(f"Failed to disable ready check button in draft message: {e}")
 
         # Generate the initial embed with personalized links
-        embed = await generate_ready_check_embed(ready_check_status=ready_check_status, sign_ups=session.sign_ups, draft_link=session.draft_link, draft_session=session, guild=interaction.guild)
+        embed = await rc.build_embed(session.sign_ups, guild=interaction.guild)
         
         # Create the view with the buttons
         view = ReadyCheckView(self.draft_session_id)
 
         # Send the initial ready check message (using followup since we deferred)
         main_message = await interaction.followup.send(embed=embed, view=view)
+        rc.message_id = main_message.id
 
         # Construct a message that mentions all users who need to respond to the ready check
         user_mentions = ' '.join([f"<@{user_id}>" for user_id in session.sign_ups.keys()])
@@ -823,24 +822,15 @@ class PersistentView(discord.ui.View):
             guild_name=interaction.guild.name
         )
 
-        # asyncio.create_task(self.cleanup_ready_check(self.draft_session_id))
+        # In test mode all test users are pre-marked ready — skip waiting for button clicks
+        if rc.all_ready():
+            await ReadyCheckSession.handle_all_ready(self.draft_session_id, session, interaction)
 
     async def remove_cooldown(self, draft_session_id):
         await asyncio.sleep(60)  # Wait for 60 seconds
         # Reset cooldown on successful full ready
         state_manager.remove_cooldown(draft_session_id)
 
-    # async def cleanup_ready_check(self, draft_session_id):
-    #     await asyncio.sleep(1800)  # Wait for 30 minutes
-    #     try:
-    #         if draft_session_id in sessions:
-    #             logger.warning(f"⚠️ Removing session {draft_session_id} from sessions dictionary due to timeout")
-    #             del sessions[draft_session_id]  # Clean up the session data
-    #             logger.debug(f"Sessions dictionary after cleanup: {list(sessions.keys())}")
-    #         else:
-    #             logger.info(f"Session {draft_session_id} already removed from sessions dictionary")
-    #     except Exception as e:
-    #         logger.error(f"Failed during ready check cleanup: {e}")
 
     async def _validate_team_creation_request(self, interaction: discord.Interaction, session_id: str, user_id: str):
         """Validate initial conditions for team creation"""
@@ -867,8 +857,8 @@ class PersistentView(discord.ui.View):
     async def _validate_staked_draft_requirements(self, interaction: discord.Interaction, session_id: str):
         """Validate staked draft specific requirements"""
         # Check if a ready check has been performed
-        ready_check_performed = state_manager.session_exists(session_id)
-        logger.info(f"Ready check verification: session_id={session_id}, in sessions dict={ready_check_performed}")
+        ready_check_performed = state_manager.has_ready_check(session_id)
+        logger.info(f"Ready check verification: session_id={session_id}, has active ready check={ready_check_performed}")
         
         if not ready_check_performed:
             logger.warning(f"❌ Ready check verification failed for session {session_id}")
@@ -927,7 +917,7 @@ class PersistentView(discord.ui.View):
             # Defer the response early since team creation might take time
             await interaction.response.defer()
 
-            logger.info(f"Create teams - checking sessions dict: {list(state_manager.sessions.keys())}")
+            logger.info(f"Create teams - active ready checks: {list(state_manager.ready_checks.keys())}")
 
             # Validate staked draft requirements if needed
             if self.session_type == "staked":
@@ -1547,167 +1537,6 @@ class PersistentView(discord.ui.View):
                 await interaction.followup.send("An error occurred.", ephemeral=True)
             return False
 
-async def generate_ready_check_embed(ready_check_status, sign_ups, draft_link, draft_session=None, guild=None):
-    # Define a function to convert user IDs to their names
-    def get_names(user_ids):
-        names = []
-        for user_id in user_ids:
-            if guild:
-                # Use get_display_name_by_id for crown icon support
-                name = get_display_name_by_id(user_id, guild, sign_ups.get(user_id, "Unknown user"))
-            else:
-                # Fallback to stored name if no guild
-                name = sign_ups.get(user_id, "Unknown user")
-            names.append(name)
-        return "\n".join(names) or "None"
-
-    # Generate the embed with fields for "Ready", "Not Ready", and "No Response"
-    embed = discord.Embed(title="Ready Check Initiated", description="Please indicate if you are ready.\n\nDraftmancer links will be provided once teams are created.", color=discord.Color.gold())
-    embed.add_field(name="Ready", value=get_names(ready_check_status['ready']), inline=False)
-    embed.add_field(name="Not Ready", value=get_names(ready_check_status['not_ready']), inline=False)
-    embed.add_field(name="No Response", value=get_names(ready_check_status['no_response']), inline=False)
-
-    return embed
-
-class ReadyCheckView(discord.ui.View):
-    def __init__(self, draft_session_id):
-        super().__init__(timeout=None)
-        self.draft_session_id = draft_session_id
-        # Append the session ID to each custom_id to make it unique
-        self.ready_button.custom_id = f"ready_check_ready_{self.draft_session_id}"
-        self.not_ready_button.custom_id = f"ready_check_not_ready_{self.draft_session_id}"
-
-    @discord.ui.button(label="Ready", style=discord.ButtonStyle.green, custom_id="placeholder_ready")
-    async def ready_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        await self.handle_ready_not_ready_interaction(interaction, "ready")
-
-    @discord.ui.button(label="Not Ready", style=discord.ButtonStyle.red, custom_id="placeholder_not_ready")
-    async def not_ready_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        await self.handle_ready_not_ready_interaction(interaction, "not_ready")
-
-    async def handle_ready_not_ready_interaction(self, interaction: discord.Interaction, status):
-        session = state_manager.get_ready_check_session(self.draft_session_id)
-        if not session:
-            await interaction.response.send_message("Session data is missing.", ephemeral=True)
-            return
-
-        user_id = str(interaction.user.id)
-        if user_id not in session['no_response'] and user_id not in session['ready'] and user_id not in session['not_ready']:
-            await interaction.response.send_message("You are not authorized to interact with this button.", ephemeral=True)
-            return
-
-        # Update the ready check status
-        for state in ['ready', 'not_ready', 'no_response']:
-            if user_id in session[state]:
-                session[state].remove(user_id)
-        session[status].append(user_id)
-
-        # Update the session status in the database if necessary
-        # await update_draft_session(self.draft_session_id, session)
-        draft_session = await get_draft_session(self.draft_session_id)
-        # Generate the updated embed with personalized links
-        embed = await generate_ready_check_embed(session, draft_session.sign_ups, draft_session.draft_link, draft_session, guild=interaction.guild)
-
-        # Check if all players are ready
-        all_responded = len(session['no_response']) == 0
-        all_ready = len(session['not_ready']) == 0
-        ready_check_complete = all_responded and all_ready and len(session['ready']) > 0
-
-        if ready_check_complete:
-            # Update embed title to show success
-            embed.title = "✅ Ready Check Complete - All Players Ready!"
-
-        # Update the message
-        await interaction.response.edit_message(embed=embed, view=self)
-
-        # If ready check is complete, automatically create teams
-        if ready_check_complete:
-            # Check for race condition
-            if state_manager.is_creating_teams(self.draft_session_id):
-                logger.warning(f"Teams already being created for {self.draft_session_id}")
-                return
-
-            state_manager.set_creating_teams(self.draft_session_id, True)
-
-            try:
-                await interaction.followup.send(
-                    "✅ **All players ready!** Creating teams now...",
-                    ephemeral=False
-                )
-
-                # Get bot from interaction.client
-                bot = interaction.client
-
-                # Fetch the draft session to get the message and create the view
-                if draft_session and draft_session.message_id and draft_session.draft_channel_id:
-                    # Get the channel and message
-                    channel = bot.get_channel(int(draft_session.draft_channel_id))
-                    if channel:
-                        try:
-                            message = await channel.fetch_message(int(draft_session.message_id))
-
-                            # Recreate the PersistentView for team creation
-                            persistent_view = PersistentView(
-                                bot=bot,
-                                draft_session_id=self.draft_session_id,
-                                session_type=draft_session.session_type,
-                                team_a_name=draft_session.team_a_name,
-                                team_b_name=draft_session.team_b_name
-                            )
-
-                            # Use the team creator service
-                            from services.team_creator import create_and_display_teams
-
-                            # Create a mock interaction for the service
-                            # Since we need to pass the message for updates
-                            class AutoReadyInteraction:
-                                def __init__(self, original_interaction, message):
-                                    self.user = original_interaction.user
-                                    self.guild = original_interaction.guild
-                                    self.guild_id = original_interaction.guild_id
-                                    self.channel = original_interaction.channel
-                                    self.client = original_interaction.client
-                                    self.message = message
-                                    self._followup = original_interaction.followup
-
-                                @property
-                                def followup(self):
-                                    return self._followup
-
-                            mock_interaction = AutoReadyInteraction(interaction, message)
-                            success = await create_and_display_teams(
-                                bot, self.draft_session_id, mock_interaction, persistent_view
-                            )
-
-                            if success:
-                                await interaction.followup.send(
-                                    "✅ Teams created! Check the draft message above for teams and seating order.",
-                                    ephemeral=False
-                                )
-                            else:
-                                await interaction.followup.send(
-                                    "❌ Error creating teams. You can try using the Create Teams button manually.",
-                                    ephemeral=False
-                                )
-                        except Exception as e:
-                            logger.error(f"Error updating draft message after auto-create: {e}")
-                            await interaction.followup.send(
-                                f"❌ Error creating teams: {str(e)}\nYou can try using the Create Teams button manually.",
-                                ephemeral=False
-                            )
-
-            except Exception as e:
-                logger.error(f"Error auto-creating teams after ready check: {e}")
-                await interaction.followup.send(
-                    f"❌ Error creating teams: {str(e)}\nYou can try using the Create Teams button manually.",
-                    ephemeral=False
-                )
-            finally:
-                state_manager.set_creating_teams(self.draft_session_id, False)
-        
-
-
-
 class UserRemovalSelect(Select):
     def __init__(self, options: list[SelectOption], session_id: str, *args, **kwargs):
         super().__init__(*args, **kwargs, placeholder="Choose a user to remove...", min_values=1, max_values=1, options=options)
@@ -1745,6 +1574,7 @@ class UserRemovalSelect(Select):
                 await PersistentView.update_team_view(interaction)
 
             await interaction.followup.send(f"Removed {removed_user_name} from the draft.")
+            await ReadyCheckSession.sync_removed_player(self.session_id, user_id_to_remove, session, interaction)
         else:
             await interaction.response.send_message("User not found in sign-ups.", ephemeral=True)
 
@@ -2495,14 +2325,16 @@ class CancelConfirmationView(discord.ui.View):
         else:
             logger.info(f"No active draft manager found for session {self.draft_session_id}")
         
-        # Then delete the message
+        await ReadyCheckSession.cleanup(self.draft_session_id, channel)
+
+        # Then delete the draft sign-up message
         if channel:
             try:
                 message = await channel.fetch_message(int(session.message_id))
                 await message.delete()
             except Exception as e:
                 logger.error(f"Failed to delete draft message: {e}")
-        
+
         # Remove from database
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
