@@ -1,13 +1,21 @@
+import asyncio
+
 import discord
 from loguru import logger
 from typing import Dict, Iterable, List, Literal, Optional
 
 from helpers.display_names import get_display_name_by_id
+from models import SignUpHistory
 from services.state_manager import state_manager
 from services.team_creator import create_and_display_teams
 from session import get_draft_session
 
 PlayerStatus = Literal['ready', 'not_ready', 'no_response']
+
+# After this long with no response and no re-fire, a stalled lobby ready check is
+# auto-cleaned and a notice is posted. Must exceed the re-fire debounce in views.py
+# so a host can re-trigger (which cleans up silently) before this fires.
+READY_CHECK_TIMEOUT_SECONDS = 300
 
 
 class ReadyCheckSession:
@@ -46,6 +54,14 @@ class ReadyCheckSession:
             len(self._players) > 0
             and all(s == 'ready' for s in self._players.values())
         )
+
+    def counts(self) -> Dict[str, int]:
+        """Return the number of players in each ready-check bucket (for logging)."""
+        return {
+            "ready": len(self.ready),
+            "not_ready": len(self.not_ready),
+            "no_response": len(self.no_response),
+        }
 
     @property
     def ready(self) -> List[str]:
@@ -115,6 +131,58 @@ class ReadyCheckSession:
             logger.error(f"Error refreshing ready check embed: {e}")
             return False
 
+    async def run_timeout(self, session_id: str, channel, guild) -> None:
+        """After READY_CHECK_TIMEOUT_SECONDS, if THIS check is still the active one
+        and stalled (some players never responded), audit the non-responders, delete
+        the stale message, drop the state, and post a notice.
+
+        No-op if the check completed, everyone responded, or it was superseded by a
+        re-fire (the re-fire cleans up the old message silently, so no notice here).
+        """
+        await asyncio.sleep(READY_CHECK_TIMEOUT_SECONDS)
+
+        # Superseded by a re-fire or already torn down -> the other path handled it.
+        if state_manager.get_ready_check(session_id) is not self:
+            return
+        # Completed (handle_all_ready in flight) -> leave it alone.
+        if self.all_ready():
+            return
+
+        non_responders = self.no_response
+        if not non_responders:
+            # Everyone responded (some Not Ready); not a silent stall, nothing to flag.
+            return
+
+        guild_id = str(guild.id) if guild else "unknown"
+        draft_session = await get_draft_session(session_id)
+        sign_ups = (draft_session.sign_ups or {}) if draft_session else {}
+
+        logger.warning(
+            f"⏰ Ready check {session_id} timed out after {READY_CHECK_TIMEOUT_SECONDS}s; "
+            f"{len(non_responders)} non-responder(s): {non_responders}"
+        )
+
+        for user_id in non_responders:
+            await SignUpHistory.record_ready_event(
+                session_id=session_id,
+                user_id=user_id,
+                display_name=sign_ups.get(user_id, "Unknown user"),
+                action="ready_timeout",
+                guild_id=guild_id,
+            )
+
+        await self.delete_message(channel)
+        state_manager.remove_ready_check(session_id)
+
+        names = ", ".join(sign_ups.get(uid, "Unknown user") for uid in non_responders)
+        try:
+            await channel.send(
+                f"⏰ **Ready check timed out.** {len(non_responders)} player(s) did not respond "
+                f"({names}). Press **Ready Check** to start a new one when everyone's around."
+            )
+        except discord.HTTPException as e:
+            logger.error(f"Failed to send ready-check timeout notice for {session_id}: {e}")
+
     # --- class-level entry points (fetch session from state, delegate to instance) ---
 
     @classmethod
@@ -126,31 +194,14 @@ class ReadyCheckSession:
         state_manager.remove_ready_check(session_id)
 
     @classmethod
-    async def cancel(cls, session_id: str, bot, channel, cancelled_by: str) -> None:
-        """Abort the ready check, clean up, announce, and re-enable the Ready Check button."""
-        # Deferred to avoid circular import: ready_check -> views
-        from views import PersistentView
+    async def cancel(cls, session_id: str, channel, cancelled_by: str) -> None:
+        """Abort the ready check: delete the message, drop the state, and announce it.
 
-        draft_session = await get_draft_session(session_id)
+        The draft message's Ready Check button is never disabled (the debounce in
+        views.py prevents spam instead), so there is nothing to re-enable here.
+        """
         await cls.cleanup(session_id, channel)
         await channel.send(f"**{cancelled_by}** cancelled the ready check.")
-
-        if not (draft_session and draft_session.message_id):
-            return
-        try:
-            draft_message = await channel.fetch_message(int(draft_session.message_id))
-            restored_view = PersistentView(
-                bot=bot,
-                draft_session_id=session_id,
-                session_type=draft_session.session_type,
-                team_a_name=draft_session.team_a_name,
-                team_b_name=draft_session.team_b_name
-            )
-            await draft_message.edit(view=restored_view)
-        except discord.NotFound:
-            pass
-        except Exception as e:
-            logger.error(f"Error restoring draft message after ready check cancel: {e}")
 
     @classmethod
     async def sync_added_player(cls, session_id: str, user_id: str, draft_session, interaction: discord.Interaction) -> None:
@@ -267,17 +318,44 @@ class ReadyCheckView(discord.ui.View):
     async def _handle_status(self, interaction: discord.Interaction, status: PlayerStatus) -> None:
         rc = state_manager.get_ready_check(self.draft_session_id)
         if not rc:
+            logger.warning(
+                f"Ready click against missing session {self.draft_session_id} "
+                f"by user {interaction.user.id}; live checks: "
+                f"{list(state_manager.ready_checks.keys())}"
+            )
             await interaction.response.send_message("Session data is missing.", ephemeral=True)
             return
 
         user_id = str(interaction.user.id)
         if not rc.has_player(user_id):
+            logger.warning(
+                f"Unauthorized ready click on {self.draft_session_id} by user {user_id} (not a participant)"
+            )
             await interaction.response.send_message("You are not authorized to interact with this button.", ephemeral=True)
             return
 
         rc.set_status(user_id, status)
 
         draft_session = await get_draft_session(self.draft_session_id)
+
+        # Record the response in the audit trail. Auditing is best-effort: a DB/audit
+        # failure must not break the user's ready click, so swallow and log it.
+        try:
+            await SignUpHistory.record_ready_event(
+                session_id=self.draft_session_id,
+                user_id=user_id,
+                display_name=(draft_session.sign_ups or {}).get(user_id, "Unknown user"),
+                action=status,
+                guild_id=str(interaction.guild.id),
+            )
+        except Exception as e:
+            logger.error(f"Failed to record ready event for {self.draft_session_id} user {user_id}: {e}")
+
+        logger.info(
+            f"Ready click on {self.draft_session_id}: user {user_id} -> {status}; "
+            f"counts={rc.counts()}; complete={rc.all_ready()}"
+        )
+
         embed = await rc.build_embed(draft_session.sign_ups, guild=interaction.guild)
         await interaction.response.edit_message(embed=embed, view=self)
 
@@ -298,7 +376,6 @@ class ReadyCheckCancelConfirmView(discord.ui.View):
         await interaction.response.edit_message(view=self)
         await ReadyCheckSession.cancel(
             self.draft_session_id,
-            interaction.client,
             interaction.channel,
             cancelled_by=self.cancelled_by,
         )

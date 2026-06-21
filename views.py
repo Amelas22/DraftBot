@@ -44,6 +44,11 @@ from services.state_manager import state_manager
 from services.stake_service import calculate_and_store_stakes
 from preference_service import get_players_bet_capping_preferences
 
+# Minimum gap between successive lobby ready checks on the same draft. The Ready
+# Check button stays enabled; this debounce (not a disabled button) is what
+# prevents spamming multiple checks in quick succession.
+READY_CHECK_DEBOUNCE_SECONDS = 120
+
 
 
 
@@ -752,11 +757,11 @@ class PersistentView(discord.ui.View):
                 ephemeral=True
             )
             return
-        
-        # Set a new cooldown for this draft session (60 seconds)
-        state_manager.set_cooldown(self.draft_session_id, current_time + timedelta(seconds=60))
-        
-        # Schedule the cooldown to be removed after 60 seconds
+
+        # Debounce: block another ready check on this draft for the cooldown window.
+        state_manager.set_cooldown(self.draft_session_id, current_time + timedelta(seconds=READY_CHECK_DEBOUNCE_SECONDS))
+
+        # Schedule the cooldown entry to be cleared once the window elapses.
         asyncio.create_task(self.remove_cooldown(self.draft_session_id))
         
 
@@ -770,6 +775,13 @@ class PersistentView(discord.ui.View):
         # We'll use followup.send() later to send the actual message
         await interaction.response.defer()
 
+        # If a previous ready check is still active (host re-fires a stalled check
+        # after the debounce), clean it up silently first — no timeout notice, just
+        # remove the orphaned message so the new check is the only live one.
+        if state_manager.has_ready_check(self.draft_session_id):
+            logger.info(f"Re-firing ready check for {self.draft_session_id}; cleaning up the previous one")
+            await ReadyCheckSession.cleanup(self.draft_session_id, interaction.channel)
+
         # Build the initial ready check state.
         # All players start as no_response; initiator and test users are marked ready immediately.
         TEST_USER_ID_START = 900000000000000000
@@ -782,18 +794,14 @@ class PersistentView(discord.ui.View):
                 logger.debug(f"Auto-marked test user {uid} as ready")
 
         state_manager.set_ready_check(self.draft_session_id, rc)
-        logger.info(f"✅ Ready check initiated - registered session ID {self.draft_session_id}")
+        logger.info(
+            f"✅ Ready check initiated for {self.draft_session_id} by user {user_id}; "
+            f"initial counts={rc.counts()}"
+        )
 
-
-        # Disable the "Ready Check" button and persist it to the draft message
-        for item in self.children:
-            if isinstance(item, discord.ui.Button) and item.custom_id == f"ready_check_{self.draft_session_id}":
-                item.disabled = True
-                break
-        try:
-            await interaction.message.edit(view=self)
-        except Exception as e:
-            logger.error(f"Failed to disable ready check button in draft message: {e}")
+        # The Ready Check button is intentionally left enabled — the per-session
+        # debounce above (READY_CHECK_DEBOUNCE_SECONDS) prevents spamming, while
+        # keeping the button live so a stalled check can be re-fired once it lapses.
 
         # Generate the initial embed with personalized links
         embed = await rc.build_embed(session.sign_ups, guild=interaction.guild)
@@ -804,6 +812,19 @@ class PersistentView(discord.ui.View):
         # Send the initial ready check message (using followup since we deferred)
         main_message = await interaction.followup.send(embed=embed, view=view)
         rc.message_id = main_message.id
+
+        # Persist the message id so stale Ready/Not-Ready buttons can be stripped on
+        # restart (in-memory state is not restored across restarts).
+        async with AsyncSessionLocal() as db_sess:
+            async with db_sess.begin():
+                await db_sess.execute(
+                    update(DraftSession)
+                    .where(DraftSession.session_id == self.draft_session_id)
+                    .values(lobby_ready_check_message_id=str(main_message.id))
+                )
+
+        # Schedule the stall timeout (notify-only; re-fire cleans up silently before this).
+        asyncio.create_task(rc.run_timeout(self.draft_session_id, interaction.channel, interaction.guild))
 
         # Construct a message that mentions all users who need to respond to the ready check
         user_mentions = ' '.join([f"<@{user_id}>" for user_id in session.sign_ups.keys()])
@@ -827,8 +848,8 @@ class PersistentView(discord.ui.View):
             await ReadyCheckSession.handle_all_ready(self.draft_session_id, session, interaction)
 
     async def remove_cooldown(self, draft_session_id):
-        await asyncio.sleep(60)  # Wait for 60 seconds
-        # Reset cooldown on successful full ready
+        await asyncio.sleep(READY_CHECK_DEBOUNCE_SECONDS)
+        # Clear the debounce entry once the window has elapsed.
         state_manager.remove_cooldown(draft_session_id)
 
 

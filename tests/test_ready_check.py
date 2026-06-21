@@ -10,7 +10,24 @@ import discord
 from ready_check import (
     ReadyCheckCancelConfirmView,
     ReadyCheckSession,
+    ReadyCheckView,
 )
+
+
+# ---------------------------------------------------------------------------
+# counts
+# ---------------------------------------------------------------------------
+
+class TestCounts:
+    def test_counts_per_bucket(self):
+        rc = ReadyCheckSession(player_ids=["1", "2", "3", "4", "5"])
+        rc.set_status("1", "ready")
+        rc.set_status("2", "ready")
+        rc.set_status("3", "not_ready")
+        assert rc.counts() == {"ready": 2, "not_ready": 1, "no_response": 2}
+
+    def test_counts_empty(self):
+        assert ReadyCheckSession(player_ids=[]).counts() == {"ready": 0, "not_ready": 0, "no_response": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -168,72 +185,27 @@ class TestCleanup:
 
 @pytest.mark.asyncio
 class TestCancel:
-    def _make_channel(self, draft_msg=None):
+    def _make_channel(self):
         channel = MagicMock()
         channel.send = AsyncMock()
-        msg = draft_msg or MagicMock()
-        msg.edit = AsyncMock()
-        channel.fetch_message = AsyncMock(return_value=msg)
         return channel
-
-    def _make_session(self, message_id="777", channel_id="888"):
-        s = MagicMock()
-        s.message_id = message_id
-        s.draft_channel_id = channel_id
-        s.session_type = "random"
-        s.team_a_name = "Team A"
-        s.team_b_name = "Team B"
-        return s
 
     async def test_posts_cancellation_message(self):
         channel = self._make_channel()
-        bot = MagicMock()
-        with patch("ready_check.get_draft_session", AsyncMock(return_value=self._make_session())), \
-             patch.object(ReadyCheckSession, "cleanup", AsyncMock()), \
-             patch("ready_check.state_manager"), \
-             patch("views.PersistentView", MagicMock()):
-            await ReadyCheckSession.cancel("sid", bot, channel, cancelled_by="Alice")
+        with patch.object(ReadyCheckSession, "cleanup", AsyncMock()), \
+             patch("ready_check.state_manager"):
+            await ReadyCheckSession.cancel("sid", channel, cancelled_by="Alice")
 
         channel.send.assert_awaited_once()
         assert "Alice" in channel.send.call_args.args[0]
 
-    async def test_restores_draft_message_view(self):
+    async def test_delegates_to_cleanup(self):
         channel = self._make_channel()
-        bot = MagicMock()
-        session = self._make_session()
-        mock_persistent_view = MagicMock()
-
-        with patch("ready_check.get_draft_session", AsyncMock(return_value=session)), \
-             patch.object(ReadyCheckSession, "cleanup", AsyncMock()), \
-             patch("ready_check.state_manager"), \
-             patch("views.PersistentView", return_value=mock_persistent_view):
-            await ReadyCheckSession.cancel("sid", bot, channel, cancelled_by="Bob")
-
-        channel.fetch_message.assert_awaited_once_with(int(session.message_id))
-        channel.fetch_message.return_value.edit.assert_awaited_once()
-
-    async def test_no_session_skips_draft_message_edit(self):
-        channel = self._make_channel()
-        bot = MagicMock()
-        with patch("ready_check.get_draft_session", AsyncMock(return_value=None)), \
-             patch.object(ReadyCheckSession, "cleanup", AsyncMock()), \
+        with patch.object(ReadyCheckSession, "cleanup", AsyncMock()) as mock_cleanup, \
              patch("ready_check.state_manager"):
-            await ReadyCheckSession.cancel("sid", bot, channel, cancelled_by="Eve")
+            await ReadyCheckSession.cancel("sid", channel, cancelled_by="Bob")
 
-        channel.fetch_message.assert_not_awaited()
-
-    async def test_draft_message_not_found_is_swallowed(self):
-        channel = self._make_channel()
-        channel.fetch_message = AsyncMock(
-            side_effect=discord.NotFound(MagicMock(), "gone")
-        )
-        bot = MagicMock()
-        with patch("ready_check.get_draft_session", AsyncMock(return_value=self._make_session())), \
-             patch.object(ReadyCheckSession, "cleanup", AsyncMock()), \
-             patch("ready_check.state_manager"), \
-             patch("views.PersistentView", MagicMock()):
-            # Should not raise
-            await ReadyCheckSession.cancel("sid", bot, channel, cancelled_by="Eve")
+        mock_cleanup.assert_awaited_once_with("sid", channel)
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +350,178 @@ class TestSyncAddedPlayer:
             await ReadyCheckSession.sync_added_player("sid", "2", _make_draft_session(), interaction)
 
         assert rc.message_id is None
+
+
+# ---------------------------------------------------------------------------
+# ReadyCheckSession.run_timeout
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+class TestRunTimeout:
+    def _make_channel(self):
+        channel = MagicMock()
+        channel.send = AsyncMock()
+        msg = MagicMock()
+        msg.delete = AsyncMock()
+        channel.fetch_message = AsyncMock(return_value=msg)
+        return channel
+
+    def _guild(self, gid="42"):
+        guild = MagicMock()
+        guild.id = gid
+        return guild
+
+    async def test_superseded_is_noop(self):
+        """A re-fire replaced this check -> timeout does nothing (the re-fire cleaned up)."""
+        rc = _make_rc(ready=["1"], no_response=["2"])
+        channel = self._make_channel()
+        with patch("ready_check.asyncio.sleep", AsyncMock()), \
+             patch("ready_check.state_manager") as sm, \
+             patch("ready_check.SignUpHistory") as sh:
+            sm.get_ready_check.return_value = object()  # not `rc`
+            await rc.run_timeout("sid", channel, self._guild())
+
+        sh.record_ready_event.assert_not_called()
+        channel.send.assert_not_awaited()
+        sm.remove_ready_check.assert_not_called()
+
+    async def test_all_ready_is_noop(self):
+        rc = _make_rc(ready=["1", "2"])
+        channel = self._make_channel()
+        with patch("ready_check.asyncio.sleep", AsyncMock()), \
+             patch("ready_check.state_manager") as sm, \
+             patch("ready_check.SignUpHistory") as sh:
+            sm.get_ready_check.return_value = rc
+            await rc.run_timeout("sid", channel, self._guild())
+
+        sh.record_ready_event.assert_not_called()
+        channel.send.assert_not_awaited()
+
+    async def test_no_non_responders_is_noop(self):
+        """Everyone responded (some Not Ready) -> not a silent stall, no notice."""
+        rc = _make_rc(ready=["1"], not_ready=["2"])
+        channel = self._make_channel()
+        with patch("ready_check.asyncio.sleep", AsyncMock()), \
+             patch("ready_check.state_manager") as sm, \
+             patch("ready_check.SignUpHistory") as sh:
+            sm.get_ready_check.return_value = rc
+            await rc.run_timeout("sid", channel, self._guild())
+
+        sh.record_ready_event.assert_not_called()
+        channel.send.assert_not_awaited()
+
+    async def test_genuine_stall_audits_cleans_and_notifies(self):
+        rc = _make_rc(ready=["1"], no_response=["2", "3"], message_id=55)
+        channel = self._make_channel()
+        ds = MagicMock()
+        ds.sign_ups = {"1": "Alice", "2": "Bob", "3": "Carol"}
+        with patch("ready_check.asyncio.sleep", AsyncMock()), \
+             patch("ready_check.state_manager") as sm, \
+             patch("ready_check.get_draft_session", AsyncMock(return_value=ds)), \
+             patch("ready_check.SignUpHistory") as sh:
+            sm.get_ready_check.return_value = rc
+            sh.record_ready_event = AsyncMock()
+            await rc.run_timeout("sid", channel, self._guild())
+
+        # One audit row per non-responder, all tagged ready_timeout.
+        assert sh.record_ready_event.await_count == 2
+        for call in sh.record_ready_event.await_args_list:
+            assert call.kwargs["action"] == "ready_timeout"
+        # Stale message deleted, state dropped, notice posted naming the non-responders.
+        channel.fetch_message.assert_awaited_once_with(55)
+        channel.fetch_message.return_value.delete.assert_awaited_once()
+        sm.remove_ready_check.assert_called_once_with("sid")
+        channel.send.assert_awaited_once()
+        notice = channel.send.call_args.args[0]
+        assert "Bob" in notice and "Carol" in notice
+
+
+# ---------------------------------------------------------------------------
+# ReadyCheckView._handle_status (the click handler)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+class TestHandleStatus:
+    def _interaction(self, user_id="1", guild_id="42"):
+        i = MagicMock()
+        i.user.id = user_id
+        i.guild.id = guild_id
+        i.response.send_message = AsyncMock()
+        i.response.edit_message = AsyncMock()
+        return i
+
+    async def test_records_audit_and_updates_embed(self):
+        rc = _make_rc(no_response=["1", "2"])  # readying "1" leaves "2" pending
+        view = ReadyCheckView("sid")
+        i = self._interaction(user_id="1")
+        with patch("ready_check.state_manager") as sm, \
+             patch("ready_check.get_draft_session", AsyncMock(return_value=_make_draft_session())), \
+             patch("ready_check.SignUpHistory") as sh, \
+             patch.object(ReadyCheckSession, "build_embed", AsyncMock(return_value=MagicMock())):
+            sm.get_ready_check.return_value = rc
+            sh.record_ready_event = AsyncMock()
+            await view._handle_status(i, "ready")
+
+        assert "1" in rc.ready
+        sh.record_ready_event.assert_awaited_once()
+        assert sh.record_ready_event.await_args.kwargs["action"] == "ready"
+        i.response.edit_message.assert_awaited_once()
+
+    async def test_missing_session_warns_and_skips(self):
+        view = ReadyCheckView("sid")
+        i = self._interaction()
+        with patch("ready_check.state_manager") as sm, \
+             patch("ready_check.SignUpHistory") as sh:
+            sm.get_ready_check.return_value = None
+            await view._handle_status(i, "ready")
+
+        i.response.send_message.assert_awaited_once()
+        assert i.response.send_message.call_args.kwargs.get("ephemeral") is True
+        sh.record_ready_event.assert_not_called()
+        i.response.edit_message.assert_not_awaited()
+
+    async def test_unauthorized_user_no_state_change(self):
+        rc = _make_rc(no_response=["1"])  # only player "1" is in the check
+        view = ReadyCheckView("sid")
+        i = self._interaction(user_id="999")  # not a participant
+        with patch("ready_check.state_manager") as sm, \
+             patch("ready_check.SignUpHistory") as sh:
+            sm.get_ready_check.return_value = rc
+            await view._handle_status(i, "ready")
+
+        i.response.send_message.assert_awaited_once()
+        sh.record_ready_event.assert_not_called()
+        assert rc.no_response == ["1"]  # unchanged
+
+    async def test_last_ready_triggers_handle_all_ready(self):
+        rc = _make_rc(no_response=["1"])  # single player; readying completes the check
+        view = ReadyCheckView("sid")
+        with patch("ready_check.state_manager") as sm, \
+             patch("ready_check.get_draft_session", AsyncMock(return_value=_make_draft_session())), \
+             patch("ready_check.SignUpHistory") as sh, \
+             patch.object(ReadyCheckSession, "build_embed", AsyncMock(return_value=MagicMock())), \
+             patch.object(ReadyCheckSession, "handle_all_ready", AsyncMock()) as hac:
+            sm.get_ready_check.return_value = rc
+            sh.record_ready_event = AsyncMock()
+            await view._handle_status(self._interaction(user_id="1"), "ready")
+
+        hac.assert_awaited_once()
+
+    async def test_audit_failure_does_not_break_click(self):
+        """A failing audit write must not abort the user's ready click."""
+        rc = _make_rc(no_response=["1", "2"])
+        view = ReadyCheckView("sid")
+        i = self._interaction(user_id="1")
+        with patch("ready_check.state_manager") as sm, \
+             patch("ready_check.get_draft_session", AsyncMock(return_value=_make_draft_session())), \
+             patch("ready_check.SignUpHistory") as sh, \
+             patch.object(ReadyCheckSession, "build_embed", AsyncMock(return_value=MagicMock())):
+            sm.get_ready_check.return_value = rc
+            sh.record_ready_event = AsyncMock(side_effect=RuntimeError("db down"))
+            await view._handle_status(i, "ready")  # must not raise
+
+        assert "1" in rc.ready                       # state still applied
+        i.response.edit_message.assert_awaited_once()  # click still completed
 
 
 # ---------------------------------------------------------------------------
