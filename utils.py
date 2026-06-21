@@ -2232,24 +2232,28 @@ async def strip_stale_lobby_ready_checks(bot):
             stale_rc_sessions = result.scalars().all()
 
         for stale_session in stale_rc_sessions:
-            if stale_session.draft_channel_id:
-                channel = bot.get_channel(int(stale_session.draft_channel_id))
-                if channel:
-                    try:
-                        message = await channel.fetch_message(int(stale_session.lobby_ready_check_message_id))
-                        await message.edit(view=None)  # Strip Ready/Not-Ready buttons; keep the embed.
-                        logger.info(f"Stripped stale lobby ready-check buttons for session: {stale_session.session_id}")
-                    except discord.NotFound:
-                        logger.debug(f"Stale lobby ready-check message not found for session: {stale_session.session_id}")
-                    except Exception as e:
-                        logger.error(f"Failed to strip lobby ready-check buttons for {stale_session.session_id}: {e}")
+            if not stale_session.draft_channel_id:
+                continue
+            channel = bot.get_channel(int(stale_session.draft_channel_id))
+            if not channel:
+                continue
+            try:
+                message = await channel.fetch_message(int(stale_session.lobby_ready_check_message_id))
+                await message.edit(view=None)  # Strip Ready/Not-Ready buttons; keep the embed.
+                logger.info(f"Stripped stale lobby ready-check buttons for session: {stale_session.session_id}")
+            except discord.NotFound:
+                logger.debug(f"Stale lobby ready-check message not found for session: {stale_session.session_id}")
+            except Exception as e:
+                logger.error(f"Failed to strip lobby ready-check buttons for {stale_session.session_id}: {e}")
 
-            async with db_session.begin():
-                await db_session.execute(
-                    update(DraftSession)
-                    .where(DraftSession.session_id == stale_session.session_id)
-                    .values(lobby_ready_check_message_id=None)
-                )
+        # Clear every persisted id in one statement — the cleanup is self-healing,
+        # so clearing all rows at once (rather than one UPDATE per session) is correct.
+        async with db_session.begin():
+            await db_session.execute(
+                update(DraftSession)
+                .where(DraftSession.lobby_ready_check_message_id.isnot(None))
+                .values(lobby_ready_check_message_id=None)
+            )
 
 
 async def calculate_player_standings(limit=None):

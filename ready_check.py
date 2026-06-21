@@ -12,10 +12,18 @@ from session import get_draft_session
 
 PlayerStatus = Literal['ready', 'not_ready', 'no_response']
 
+# Minimum gap between successive lobby ready checks on the same draft. The Ready
+# Check button stays enabled; this debounce (not a disabled button) is what
+# prevents spamming multiple checks in quick succession.
+READY_CHECK_DEBOUNCE_SECONDS = 120
+
 # After this long with no response and no re-fire, a stalled lobby ready check is
-# auto-cleaned and a notice is posted. Must exceed the re-fire debounce in views.py
-# so a host can re-trigger (which cleans up silently) before this fires.
+# auto-cleaned and a notice is posted.
 READY_CHECK_TIMEOUT_SECONDS = 300
+
+# The timeout must outlast the debounce so a host can re-fire a stalled check
+# (which cleans up silently) before the timeout fires and posts a notice.
+assert READY_CHECK_TIMEOUT_SECONDS > READY_CHECK_DEBOUNCE_SECONDS
 
 
 class ReadyCheckSession:

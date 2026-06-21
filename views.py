@@ -43,13 +43,9 @@ from loguru import logger
 from services.state_manager import state_manager
 from services.stake_service import calculate_and_store_stakes
 from preference_service import get_players_bet_capping_preferences
-
-# Minimum gap between successive lobby ready checks on the same draft. The Ready
-# Check button stays enabled; this debounce (not a disabled button) is what
-# prevents spamming multiple checks in quick succession.
-READY_CHECK_DEBOUNCE_SECONDS = 120
-
-
+# Debounce/timeout constants live in ready_check.py so the ordering invariant
+# between them is asserted in one place; re-exported here for the cooldown logic.
+from ready_check import READY_CHECK_DEBOUNCE_SECONDS
 
 
 class PersistentView(discord.ui.View):
@@ -763,8 +759,6 @@ class PersistentView(discord.ui.View):
 
         # Schedule the cooldown entry to be cleared once the window elapses.
         asyncio.create_task(self.remove_cooldown(self.draft_session_id))
-        
-
 
         user_id = str(interaction.user.id)
         if user_id not in session.sign_ups:
