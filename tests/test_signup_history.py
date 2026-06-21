@@ -202,6 +202,52 @@ async def test_repr_method(test_db):
         assert action in repr_str
 
 
+@pytest.mark.asyncio
+async def test_record_ready_event(test_db):
+    """Recording a ready-check response writes the expected row."""
+    session_id = "rc_session_1"
+    user_id = "user_ready_1"
+    display_name = "ReadyUser"
+    guild_id = "guild_rc"
+
+    await SignUpHistory.record_ready_event(
+        session_id=session_id,
+        user_id=user_id,
+        display_name=display_name,
+        action="ready",
+        guild_id=guild_id,
+    )
+
+    async with AsyncSessionLocal() as session:
+        query = select(SignUpHistory).where(SignUpHistory.session_id == session_id)
+        result = await session.execute(query)
+        record = result.scalar_one()
+
+        assert record.user_id == user_id
+        assert record.user_display_name == display_name
+        assert record.action == "ready"
+        assert record.guild_id == guild_id
+        assert record.timestamp is not None
+
+
+@pytest.mark.asyncio
+async def test_record_ready_event_timeout_action(test_db):
+    """The ready_timeout action value (longer than the old 16-char limit) is stored intact."""
+    await SignUpHistory.record_ready_event(
+        session_id="rc_session_2",
+        user_id="user_to_1",
+        display_name="TimedOutUser",
+        action="ready_timeout",
+        guild_id="guild_rc",
+    )
+
+    async with AsyncSessionLocal() as session:
+        query = select(SignUpHistory).where(SignUpHistory.session_id == "rc_session_2")
+        result = await session.execute(query)
+        record = result.scalar_one()
+        assert record.action == "ready_timeout"
+
+
 async def run_model_tests():
     """Run all SignUpHistory model tests."""
     from sqlalchemy.ext.asyncio import create_async_engine

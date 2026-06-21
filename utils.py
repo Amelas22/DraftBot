@@ -2210,6 +2210,48 @@ async def re_register_views(bot):
                         except Exception as e:
                             logger.error(f"Failed to re-register settle view for results channel {staked_session.session_id}: {e}")
 
+    # Strip stale lobby ready-check buttons left over from a restart mid-check.
+    await strip_stale_lobby_ready_checks(bot)
+
+
+async def strip_stale_lobby_ready_checks(bot):
+    """Remove Ready/Not-Ready buttons from lobby ready-check messages left in-flight
+    by a restart, and clear the persisted message id.
+
+    In-memory ready-check state is not restored across restarts, so those buttons
+    would only error if clicked. We strip them (keeping the embed) and null the
+    column. Missing messages are tolerated — the column is cleared either way, so
+    the cleanup is self-healing.
+    """
+    async with AsyncSessionLocal() as db_session:
+        async with db_session.begin():
+            stmt = select(DraftSession).where(
+                DraftSession.lobby_ready_check_message_id.isnot(None)
+            )
+            result = await db_session.execute(stmt)
+            stale_rc_sessions = result.scalars().all()
+
+        for stale_session in stale_rc_sessions:
+            if stale_session.draft_channel_id:
+                channel = bot.get_channel(int(stale_session.draft_channel_id))
+                if channel:
+                    try:
+                        message = await channel.fetch_message(int(stale_session.lobby_ready_check_message_id))
+                        await message.edit(view=None)  # Strip Ready/Not-Ready buttons; keep the embed.
+                        logger.info(f"Stripped stale lobby ready-check buttons for session: {stale_session.session_id}")
+                    except discord.NotFound:
+                        logger.debug(f"Stale lobby ready-check message not found for session: {stale_session.session_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to strip lobby ready-check buttons for {stale_session.session_id}: {e}")
+
+            async with db_session.begin():
+                await db_session.execute(
+                    update(DraftSession)
+                    .where(DraftSession.session_id == stale_session.session_id)
+                    .values(lobby_ready_check_message_id=None)
+                )
+
+
 async def calculate_player_standings(limit=None):
     time = datetime.now()
     async with AsyncSessionLocal() as db_session:

@@ -15,6 +15,7 @@ class DraftSession(Base):
     draft_channel_id = Column(String(64))
     true_skill_draft = Column(Boolean, default=False)
     ready_check_message_id = Column(String(64))
+    lobby_ready_check_message_id = Column(String(64))  # lobby ReadyCheckView message; stripped on restart
     draft_link = Column(String(256))
     ready_check_status = Column(JSON) # deprecated
     draft_start_time = Column(DateTime, default=datetime.now)

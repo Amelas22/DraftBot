@@ -13,7 +13,7 @@ class SignUpHistory(Base):
     session_id = Column(String(64), ForeignKey('draft_sessions.session_id', ondelete='CASCADE'), nullable=False)
     user_id = Column(String(64), nullable=False)
     user_display_name = Column(String(128))
-    action = Column(String(16), nullable=False)  # 'join' or 'leave'
+    action = Column(String(32), nullable=False)  # join | leave | ready | not_ready | ready_timeout
     timestamp = Column(DateTime, default=datetime.now, server_default=text('CURRENT_TIMESTAMP'), nullable=False)
     guild_id = Column(String(64), nullable=False)
     
@@ -50,4 +50,30 @@ class SignUpHistory(Base):
         
         async with db_session() as session:
             session.add(signup_record)
+            await session.commit()
+
+    @classmethod
+    async def record_ready_event(cls, session_id: str, user_id: str, display_name: str, action: str, guild_id: str):
+        """
+        Record a ready-check response event for a draft session.
+
+        Args:
+            session_id (str): The draft session ID
+            user_id (str): The Discord user ID
+            display_name (str): The user's display name
+            action (str): One of 'ready', 'not_ready', 'ready_timeout'
+            guild_id (str): The Discord guild ID
+        """
+        record = cls(
+            id=str(uuid.uuid4()),
+            session_id=session_id,
+            user_id=user_id,
+            user_display_name=display_name,
+            action=action,
+            timestamp=datetime.now(),
+            guild_id=guild_id,
+        )
+
+        async with db_session() as session:
+            session.add(record)
             await session.commit()
