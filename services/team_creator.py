@@ -69,15 +69,15 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
 
                 stake_info_by_player = {}
 
+                # Clean up any active ready check, regardless of session type
+                from ready_check import ReadyCheckSession
+                rc_channel = bot.get_channel(int(session.draft_channel_id)) if session.draft_channel_id else None
+                await ReadyCheckSession.cleanup(session_id, rc_channel)
+
                 # Create teams for random/test/staked/winston drafts
                 if session.session_type in ['random', 'test', 'staked', 'winston']:
                     await split_into_teams(bot, session.session_id)
                     updated_session = await DraftSessionModel.get_by_session_id(draft_session_id)
-
-                    # Clean up ready check data if it exists
-                    if state_manager.get_ready_check_session(session_id):
-                        logger.info(f"✅ Teams created - removing ready check data for session {session_id}")
-                        state_manager.remove_ready_check_session(session_id)
 
                     # Calculate stakes for staked drafts
                     if persistent_view.session_type == "staked" and updated_session and updated_session.team_a and updated_session.team_b:

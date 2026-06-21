@@ -1,12 +1,12 @@
 """
-Test-only commands. This cog only loads when TEST_MODE_ENABLED is True in config.py.
+Test-only commands. This cog only loads when TEST_MODE=true is set in the environment.
 """
 import asyncio
 import discord
 from discord.ext import commands
 from loguru import logger
 
-from config import TEST_MODE_ENABLED
+from config import is_test_mode
 from helpers.permissions import has_bot_manager_role
 
 
@@ -73,7 +73,7 @@ class TestCommands(commands.Cog):
 
 
 def setup(bot):
-    if not TEST_MODE_ENABLED:
-        logger.info("Test commands cog skipped (TEST_MODE_ENABLED is False)")
+    if not is_test_mode():
+        logger.info("Test commands cog skipped (TEST_MODE is not enabled)")
         return
     bot.add_cog(TestCommands(bot))

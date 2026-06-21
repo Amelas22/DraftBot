@@ -71,8 +71,8 @@ sudo journalctl -u draftbot.service -f       # View logs
 - Test locally with a copy of production data
 - Use `./fetch_prod_db.sh` to get production database
 - Always test migrations before deployment
-- **CRITICAL**: Check `config.py` - `TEST_MODE_ENABLED` should be `True` for testing
-- **NEVER commit with `TEST_MODE_ENABLED = True`** - always reset to `False` before committing
+- **CRITICAL**: Set `TEST_MODE=true` in `.env` (or environment) to enable test features locally
+- **NEVER set `TEST_MODE=true` in production** - production `.env` should not have this set
 
 #### Running Tests
 Tests are located in the `tests/` directory. **IMPORTANT:** Always use `python -m pytest` instead of `pytest`:
@@ -99,9 +99,9 @@ pipenv run python -m pytest tests/test_seating_order.py::TestSeatingOrder::test_
 - Guild-specific configurations in `config.py`
 - Special guild (`SPECIAL_GUILD_ID`) has enhanced features
 - Configuration files stored in `/configs/` directory as JSON
-- **Test Mode**: `TEST_MODE_ENABLED` flag in `config.py` controls test features
-  - Set to `True` for local testing/development
-  - **MUST be `False` for production commits**
+- **Test Mode**: `is_test_mode()` function in `config.py` reads the `TEST_MODE` env var
+  - Set `TEST_MODE=true` in `.env` for local testing/development
+  - Production `.env` should not include `TEST_MODE`
 
 ### Error Handling
 - Comprehensive logging with loguru
@@ -152,7 +152,7 @@ pipenv run python -m pytest tests/test_seating_order.py::TestSeatingOrder::test_
 3. **Commands**: Implement Discord slash commands
 4. **Views**: Add interactive UI components
 5. **Test**: Test with production data copy using `pipenv run`
-6. **Pre-commit Check**: Ensure `TEST_MODE_ENABLED = False` in `config.py`
+6. **Pre-commit Check**: Ensure `TEST_MODE=true` is not in the production `.env`
 7. **Deploy**: Use service restart for automatic migration
 
 ### Code Quality
@@ -163,7 +163,7 @@ pipenv run python -m pytest tests/test_seating_order.py::TestSeatingOrder::test_
 - Include logging for debugging
 - Write descriptive commit messages
 - **Pre-commit checklist**:
-  - [ ] `TEST_MODE_ENABLED = False` in `config.py`
+  - [ ] `TEST_MODE=true` is not set in production environment
   - [ ] All commands tested with `pipenv run`
   - [ ] Database migrations tested locally
 

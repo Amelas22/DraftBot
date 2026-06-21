@@ -11,9 +11,9 @@ SPECIAL_GUILD_ID = "336345350535118849"
 # Change this to switch between environments (prod, beta, dev)
 DRAFTMANCER_BASE_URL = "https://draftmancer.com"
 
-# Global flag to enable test features
-# Set to True during development to enable test buttons, False for production
-TEST_MODE_ENABLED = False
+def is_test_mode() -> bool:
+    """Returns True if TEST_MODE env var is set to a truthy value."""
+    return os.environ.get("TEST_MODE", "false").lower() in ("true", "1", "yes")
 
 class Config:
     def __init__(self):

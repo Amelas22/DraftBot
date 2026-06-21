@@ -619,14 +619,14 @@ class AdminCommands(commands.Cog):
     @has_bot_manager_role()
     async def test_disconnect(self, ctx):
         """Simulate a Draftmancer connection failure to test the notification system."""
-        from config import TEST_MODE_ENABLED
+        from config import is_test_mode
         from services.draft_setup_manager import ACTIVE_MANAGERS
 
         await ctx.defer(ephemeral=True)
 
-        if not TEST_MODE_ENABLED:
+        if not is_test_mode():
             await ctx.followup.send(
-                "❌ This command is only available when TEST_MODE_ENABLED is True in config.py",
+                "❌ This command is only available when TEST_MODE=true is set in the environment",
                 ephemeral=True
             )
             return
