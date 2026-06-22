@@ -111,3 +111,42 @@ async def test_capture_spaces_failure_keeps_db_copy_without_stamp():
     embed.assert_not_called()
     assert ds.draft_data is not None        # raw log still saved (data safety)
     assert ds.logs_captured_at is None      # NOT stamped -> retryable
+
+
+@pytest.mark.asyncio
+async def test_on_end_draft_captures_log():
+    """A naturally-completed draft triggers capture_draft_log with the pushed log."""
+    m = _manager()
+    m.draft_cancelled = False
+    m.drafting = True
+    m.draftPaused = False
+    m.draft_channel_id = "999"
+    m.current_draft_log = _draft_data()
+    bot = MagicMock()
+    bot.get_guild.return_value = None      # skip the rooms-creation branch
+    bot.get_channel.return_value = None
+    with patch("services.draft_setup_manager.get_bot", return_value=bot), \
+         patch.object(DraftSetupManager, "capture_draft_log", AsyncMock()) as cap:
+        await m._on_end_draft()
+    cap.assert_awaited_once_with(m.current_draft_log)
+
+
+@pytest.mark.asyncio
+async def test_on_end_draft_warns_when_no_log_arrives():
+    """If the draftLog push never lands, the wait loop times out, logs a warning,
+    and does NOT call capture (no data to capture)."""
+    from services.draft_setup_manager import DRAFT_LOG_WAIT_ATTEMPTS
+    m = _manager()
+    m.draft_cancelled = False
+    m.draft_channel_id = "999"
+    m.current_draft_log = None
+    bot = MagicMock()
+    bot.get_guild.return_value = None
+    bot.get_channel.return_value = None
+    with patch("services.draft_setup_manager.get_bot", return_value=bot), \
+         patch("services.draft_setup_manager.asyncio.sleep", AsyncMock()) as sleep, \
+         patch.object(DraftSetupManager, "capture_draft_log", AsyncMock()) as cap:
+        await m._on_end_draft()
+    cap.assert_not_awaited()
+    assert sleep.await_count == DRAFT_LOG_WAIT_ATTEMPTS
+    m.logger.warning.assert_called()

@@ -43,6 +43,8 @@ SESSION_STAGE_PAIRINGS = "pairings"
 # Connection and retry settings
 MAX_USER_ID_LOOKUP_ATTEMPTS = 5  # Max attempts to find bot's userID in session
 USER_ID_LOOKUP_RETRY_DELAY = 0.5  # Seconds between userID lookup attempts
+DRAFT_LOG_WAIT_ATTEMPTS = 20    # Poll for the draftLog push after endDraft (10s total)
+DRAFT_LOG_WAIT_INTERVAL = 0.5   # Seconds between draftLog availability checks
 OWNERSHIP_CLAIM_TIMEOUT = 3.0  # Seconds to wait for ownership claim confirmation
 SOCKET_OPERATION_DELAY = 0.5  # Seconds between socket operations
 CONNECTION_CHECK_INTERVAL = 10  # Seconds between connection check iterations
@@ -296,6 +298,16 @@ class DraftSetupManager:
                                 await channel.send("Failed to create rooms and pairings. Check logs for details.")
             else:
                 self.logger.info("Could not find guild")
+            # Capture the draft log immediately so it is never lost (Slice 1).
+            # The draftLog push may land just after endDraft; wait briefly for it.
+            for _ in range(DRAFT_LOG_WAIT_ATTEMPTS):
+                if self.current_draft_log:
+                    break
+                await asyncio.sleep(DRAFT_LOG_WAIT_INTERVAL)
+            if self.current_draft_log:
+                await self.capture_draft_log(self.current_draft_log)
+            else:
+                self.logger.warning(f"No draft log available to capture for {self.session_id}")
 
     # Listen for Pause or Unpause (Resume)
     async def _on_draft_paused(self, data):
