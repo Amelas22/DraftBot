@@ -869,6 +869,63 @@ class DraftSetupManager:
             self.logger.exception(f"Error capturing draft log: {e}")
             return False
 
+    async def publish_draft_log(self, release=False):
+        """Post the captured draft log to Discord and mark it published.
+
+        Reads the already-captured `draft_data` from the DB (capture runs at
+        draft-end), posts the MagicProTools embed, and sets `data_received`.
+        Works without a live socket — it operates on the saved data. Idempotent:
+        a session already published (`data_received`) is skipped.
+
+        When `release=True` (manual early release) and the socket is still
+        connected, the Draftmancer log is unlocked first via `shareDraftLog`; the
+        timer-driven path does not release (Draftmancer auto-unlocks on its own).
+        """
+        try:
+            async with db_session() as session:
+                draft_session = (await session.execute(
+                    select(DraftSession).filter(DraftSession.session_id == self.session_id)
+                )).scalar_one_or_none()
+                if not draft_session:
+                    self.logger.warning(f"No draft session for {self.session_id}; cannot publish")
+                    return False
+                if draft_session.data_received:
+                    self.logger.info(f"Draft log already published for {self.session_id}; skipping")
+                    return True
+                draft_data = draft_session.draft_data
+
+            if not draft_data:
+                self.logger.warning(f"No captured draft_data for {self.session_id}; nothing to publish")
+                return False
+
+            # Manual early release: unlock the Draftmancer log now (best-effort).
+            if release and self.socket_client.connected and self.current_draft_log:
+                try:
+                    log_copy = self.current_draft_log.copy()
+                    log_copy['delayed'] = False
+                    await self.socket_client.emit('shareDraftLog', log_copy)
+                    self.logger.info(f"Released Draftmancer log for {self.session_id} (manual early)")
+                except Exception as e:
+                    self.logger.error(f"Failed to release Draftmancer log for {self.session_id}: {e}")
+
+            # Post the MagicProTools embed/links to Discord.
+            if self.guild_id:
+                await self.send_magicprotools_embed(draft_data)
+
+            async with db_session() as session:
+                draft_session = (await session.execute(
+                    select(DraftSession).filter(DraftSession.session_id == self.session_id)
+                )).scalar_one_or_none()
+                if draft_session:
+                    draft_session.data_received = True
+                    await session.commit()
+
+            self.logger.info(f"Published draft log for {self.session_id} (release={release})")
+            return True
+        except Exception as e:
+            self.logger.exception(f"Error publishing draft log: {e}")
+            return False
+
     async def save_draft_log_data(self, draft_data):
         """Save draft log data to database and process it"""
         try:

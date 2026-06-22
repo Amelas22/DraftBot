@@ -150,3 +150,76 @@ async def test_on_end_draft_warns_when_no_log_arrives():
     cap.assert_not_awaited()
     assert sleep.await_count == DRAFT_LOG_WAIT_ATTEMPTS
     m.logger.warning.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_publish_posts_and_marks_received():
+    m = _manager()
+    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False)
+    db_factory, _ = _mock_db_session(ds)
+    with patch("services.draft_setup_manager.db_session", db_factory), \
+         patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock()) as embed:
+        ok = await m.publish_draft_log()
+    assert ok is True
+    embed.assert_awaited_once()
+    assert ds.data_received is True
+
+
+@pytest.mark.asyncio
+async def test_publish_idempotent_when_already_received():
+    m = _manager()
+    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=True)
+    db_factory, _ = _mock_db_session(ds)
+    with patch("services.draft_setup_manager.db_session", db_factory), \
+         patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock()) as embed:
+        ok = await m.publish_draft_log()
+    assert ok is True
+    embed.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_publish_no_data_returns_false():
+    m = _manager()
+    ds = SimpleNamespace(session_id="sid", draft_data=None, data_received=False)
+    db_factory, _ = _mock_db_session(ds)
+    with patch("services.draft_setup_manager.db_session", db_factory), \
+         patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock()) as embed:
+        ok = await m.publish_draft_log()
+    assert ok is False
+    embed.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_publish_release_emits_sharedraftlog_when_connected():
+    m = _manager()
+    m.current_draft_log = _draft_data()
+    m.socket_client = MagicMock()
+    m.socket_client.connected = True
+    m.socket_client.emit = AsyncMock()
+    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False)
+    db_factory, _ = _mock_db_session(ds)
+    with patch("services.draft_setup_manager.db_session", db_factory), \
+         patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock()):
+        ok = await m.publish_draft_log(release=True)
+    assert ok is True
+    m.socket_client.emit.assert_awaited_once()
+    assert m.socket_client.emit.await_args.args[0] == "shareDraftLog"
+    assert m.socket_client.emit.await_args.args[1].get("delayed") is False
+
+
+@pytest.mark.asyncio
+async def test_publish_release_skips_when_disconnected():
+    m = _manager()
+    m.current_draft_log = _draft_data()
+    m.socket_client = MagicMock()
+    m.socket_client.connected = False
+    m.socket_client.emit = AsyncMock()
+    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False)
+    db_factory, _ = _mock_db_session(ds)
+    with patch("services.draft_setup_manager.db_session", db_factory), \
+         patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock()) as embed:
+        ok = await m.publish_draft_log(release=True)
+    assert ok is True
+    m.socket_client.emit.assert_not_called()
+    embed.assert_awaited_once()
+    assert ds.data_received is True
