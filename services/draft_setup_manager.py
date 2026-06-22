@@ -45,6 +45,7 @@ MAX_USER_ID_LOOKUP_ATTEMPTS = 5  # Max attempts to find bot's userID in session
 USER_ID_LOOKUP_RETRY_DELAY = 0.5  # Seconds between userID lookup attempts
 DRAFT_LOG_WAIT_ATTEMPTS = 20    # Poll for the draftLog push after endDraft (10s total)
 DRAFT_LOG_WAIT_INTERVAL = 0.5   # Seconds between draftLog availability checks
+PUBLISH_DELAY_SECONDS = 180 * 60   # Post logs when Draftmancer auto-unlocks them (matches setDraftLogUnlockTimer(180))
 OWNERSHIP_CLAIM_TIMEOUT = 3.0  # Seconds to wait for ownership claim confirmation
 SOCKET_OPERATION_DELAY = 0.5  # Seconds between socket operations
 CONNECTION_CHECK_INTERVAL = 10  # Seconds between connection check iterations
@@ -308,6 +309,9 @@ class DraftSetupManager:
                 await self.capture_draft_log(self.current_draft_log)
             else:
                 self.logger.warning(f"No draft log available to capture for {self.session_id}")
+            # Schedule the publish (post links) for when Draftmancer makes the log
+            # public (~180 min). Posting is decoupled from match completion.
+            asyncio.create_task(self.schedule_publish(PUBLISH_DELAY_SECONDS))
 
     # Listen for Pause or Unpause (Resume)
     async def _on_draft_paused(self, data):
@@ -925,6 +929,16 @@ class DraftSetupManager:
         except Exception as e:
             self.logger.exception(f"Error publishing draft log: {e}")
             return False
+
+    async def schedule_publish(self, delay_seconds):
+        """Wait `delay_seconds`, then publish the captured log (the single
+        ~180-min timer aligned to Draftmancer's auto-unlock)."""
+        try:
+            self.logger.info(f"Scheduled publish in {delay_seconds}s for {self.session_id}")
+            await asyncio.sleep(delay_seconds)
+            await self.publish_draft_log()
+        except Exception as e:
+            self.logger.exception(f"Error in scheduled publish for {self.session_id}: {e}")
 
     async def save_draft_log_data(self, draft_data):
         """Save draft log data to database and process it"""

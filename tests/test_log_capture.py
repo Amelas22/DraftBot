@@ -1,4 +1,5 @@
 """Unit tests for DraftSetupManager.capture_draft_log (Slice 1)."""
+import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -223,3 +224,37 @@ async def test_publish_release_skips_when_disconnected():
     m.socket_client.emit.assert_not_called()
     embed.assert_awaited_once()
     assert ds.data_received is True
+
+
+@pytest.mark.asyncio
+async def test_schedule_publish_calls_publish_after_delay():
+    m = _manager()
+    with patch("services.draft_setup_manager.asyncio.sleep", AsyncMock()) as sleep, \
+         patch.object(DraftSetupManager, "publish_draft_log", AsyncMock()) as pub:
+        await m.schedule_publish(123)
+    sleep.assert_awaited_once_with(123)
+    pub.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_on_end_draft_schedules_publish():
+    from services.draft_setup_manager import PUBLISH_DELAY_SECONDS
+    m = _manager()
+    m.draft_cancelled = False
+    m.draft_channel_id = "999"
+    m.current_draft_log = _draft_data()
+    bot = MagicMock()
+    bot.get_guild.return_value = None
+    bot.get_channel.return_value = None
+
+    def _stub_create_task(coro):
+        if asyncio.iscoroutine(coro):
+            coro.close()
+        return MagicMock()
+
+    with patch("services.draft_setup_manager.get_bot", return_value=bot), \
+         patch.object(DraftSetupManager, "capture_draft_log", AsyncMock()), \
+         patch.object(DraftSetupManager, "schedule_publish", MagicMock(return_value=None)) as sched, \
+         patch("services.draft_setup_manager.asyncio.create_task", _stub_create_task):
+        await m._on_end_draft()
+    sched.assert_called_once_with(PUBLISH_DELAY_SECONDS)
