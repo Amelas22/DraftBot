@@ -46,6 +46,7 @@ class DraftSession(Base):
     swiss_matches = Column(JSON)
     draft_data = Column(JSON)
     data_received = Column(Boolean, default=False)
+    logs_captured_at = Column(DateTime)  # set when the log is captured to DB/Spaces (pre-publish)
     spaces_object_key = Column(String(256), nullable=True)  # DigitalOcean Spaces object path
     cube = Column(String(128))
     live_draft_message_id = Column(String(64))
