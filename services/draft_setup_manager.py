@@ -11,7 +11,7 @@ import urllib.parse
 import discord
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from config import get_draftmancer_websocket_url, get_draftmancer_base_url, get_draftmancer_session_url
+from config import get_draftmancer_websocket_url, get_draftmancer_base_url, get_draftmancer_session_url, is_test_mode
 from database.db_session import db_session
 from models.draft_session import DraftSession
 from models.match import MatchResult
@@ -45,7 +45,17 @@ MAX_USER_ID_LOOKUP_ATTEMPTS = 5  # Max attempts to find bot's userID in session
 USER_ID_LOOKUP_RETRY_DELAY = 0.5  # Seconds between userID lookup attempts
 DRAFT_LOG_WAIT_ATTEMPTS = 20    # Poll for the draftLog push after endDraft (10s total)
 DRAFT_LOG_WAIT_INTERVAL = 0.5   # Seconds between draftLog availability checks
-PUBLISH_DELAY_SECONDS = 180 * 60   # Post logs when Draftmancer auto-unlocks them (matches setDraftLogUnlockTimer(180))
+# Draft-setup timings. In test mode (TEST_MODE=true) these are shortened so an
+# end-to-end draft completes and publishes in seconds; production uses the real
+# durations. PUBLISH_DELAY_SECONDS aligns with the Draftmancer unlock timer in prod.
+if is_test_mode():
+    PUBLISH_DELAY_SECONDS = 30            # publish ~30s after draft-end (prod: 3h)
+    DRAFT_PICK_TIMER_SECONDS = 3          # fast auto-pick so test drafts finish quickly (prod: 60s)
+    DRAFT_LOG_UNLOCK_TIMER_MINUTES = 1    # Draftmancer public unlock (prod: 180 min)
+else:
+    PUBLISH_DELAY_SECONDS = 180 * 60      # post logs when Draftmancer auto-unlocks (matches setDraftLogUnlockTimer)
+    DRAFT_PICK_TIMER_SECONDS = 60
+    DRAFT_LOG_UNLOCK_TIMER_MINUTES = 180
 OWNERSHIP_CLAIM_TIMEOUT = 3.0  # Seconds to wait for ownership claim confirmation
 SOCKET_OPERATION_DELAY = 0.5  # Seconds between socket operations
 CONNECTION_CHECK_INTERVAL = 10  # Seconds between connection check iterations
@@ -2004,11 +2014,11 @@ class DraftSetupManager:
             self.logger.debug("Updating draft settings...")
             await self.socket_client.emit('setColorBalance', False)
             await self.socket_client.emit('setMaxPlayers', 10)
-            await self.socket_client.emit('setDraftLogUnlockTimer', 180)
+            await self.socket_client.emit('setDraftLogUnlockTimer', DRAFT_LOG_UNLOCK_TIMER_MINUTES)
             await self.socket_client.emit('setDraftLogRecipients', "delayed")
             await self.socket_client.emit('setPersonalLogs', True)
             await self.socket_client.emit('teamDraft', True)  # Added teamDraft setting
-            await self.socket_client.emit('setPickTimer', 60)
+            await self.socket_client.emit('setPickTimer', DRAFT_PICK_TIMER_SECONDS)
             await self.socket_client.emit('setOwnerIsPlayer', False)
             await self.socket_client.emit('boostersPerPlayer', self.packs_per_player)
             await self.socket_client.emit('cardsPerBooster', self.cards_per_pack)
