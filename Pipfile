@@ -12,7 +12,7 @@ pandas = "==2.2.3"
 python-dotenv = "==1.0.1"
 python-socketio = "==5.11.4"
 pytz = "==2024.2"
-sqlalchemy = "==2.0.21"
+sqlalchemy = {extras = ["asyncio"], version = "==2.0.21"}
 trueskill = "==0.4.5"
 loguru = "*"
 win32-setctime = {version = "*", markers = "sys_platform == 'win32'"}
