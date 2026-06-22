@@ -258,3 +258,12 @@ async def test_on_end_draft_schedules_publish():
          patch("services.draft_setup_manager.asyncio.create_task", _stub_create_task):
         await m._on_end_draft()
     sched.assert_called_once_with(PUBLISH_DELAY_SECONDS)
+
+
+@pytest.mark.asyncio
+async def test_manually_unlock_delegates_to_publish_with_release():
+    m = _manager()
+    with patch.object(DraftSetupManager, "publish_draft_log", AsyncMock(return_value=True)) as pub:
+        result = await m.manually_unlock_draft_logs()
+    assert result is True
+    pub.assert_awaited_once_with(release=True)
