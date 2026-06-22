@@ -97,6 +97,18 @@ Using `python -m pytest` runs pytest as a module, which automatically adds the c
 
 Using just `pytest` will result in import errors because the project root won't be in the Python path.
 
+Type Checking
+-------------
+
+DraftBot uses [Pyrefly](https://github.com/facebook/pyrefly) (Meta's Python type checker) at the **default** strictness preset. The type checker must pass clean before merging any changes.
+
+```bash
+# Run type checker (must report 0 errors)
+pipenv run pyrefly check .
+```
+
+Configuration is in `pyrefly.toml`. One-off migration scripts (`legacy_stats.py`, `backfill_draft_win_streaks.py`, `analysis.py`, `scripts/`) have errors suppressed inline since they are not part of the production bot.
+
 Contribution
 ------------
 

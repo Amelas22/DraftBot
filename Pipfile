@@ -25,6 +25,10 @@ aiohttp = "*"
 [dev-packages]
 pytest = "*"
 pytest-asyncio = "*"
+pyrefly = "*"
 
 [requires]
 python_version = "3.11"
+
+[pipenv]
+venv_in_project = true

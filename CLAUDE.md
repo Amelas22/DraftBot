@@ -61,6 +61,9 @@ pipenv run alembic revision --autogenerate   # Generate new migration
 # Running the bot locally
 pipenv run python bot.py
 
+# Type checking
+pipenv run pyrefly check .                   # Run type checker (must pass clean)
+
 # Service management (production)
 sudo systemctl restart draftbot.service      # Restart with auto-migration
 sudo journalctl -u draftbot.service -f       # View logs
@@ -166,6 +169,7 @@ pipenv run python -m pytest tests/test_seating_order.py::TestSeatingOrder::test_
   - [ ] `TEST_MODE=true` is not set in production environment
   - [ ] All commands tested with `pipenv run`
   - [ ] Database migrations tested locally
+  - [ ] Type checker passes: `pipenv run pyrefly check .` reports 0 errors
 
 ### Security Considerations
 - Never commit secrets or tokens
