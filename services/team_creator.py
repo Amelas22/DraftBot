@@ -97,6 +97,8 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                     session = updated_session
 
                 # Generate seating order based on session type
+                team_a_display_names: list[str] = []
+                team_b_display_names: list[str] = []
                 if session.session_type != "swiss":
                     sign_ups_list = list(session.sign_ups.keys())
                     if session.session_type == "premade":
@@ -313,7 +315,7 @@ async def _handle_staked_draft_completion(interaction, db_session, session, embe
                 label=item.label,
                 style=item.style,
                 custom_id=item.custom_id,
-                custom_callback=item.custom_callback
+                custom_callback=item.custom_callback  # pyrefly: ignore
             )
 
             if item.custom_id == f"create_rooms_pairings_{draft_session_id}":

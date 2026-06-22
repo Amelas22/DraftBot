@@ -264,6 +264,7 @@ def write_to_excel(players, cap_info, results, logs):
     
     # Remove default sheet
     default_sheet = wb.active
+    # pyrefly: ignore [bad-argument-type]
     wb.remove(default_sheet)
     
     # Add input sheet
@@ -402,6 +403,7 @@ def write_to_excel(players, cap_info, results, logs):
     for sheet in wb.worksheets:
         for column in sheet.columns:
             max_length = 0
+            # pyrefly: ignore [missing-attribute]
             column_letter = column[0].column_letter
             for cell in column:
                 try:

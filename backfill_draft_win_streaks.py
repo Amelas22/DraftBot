@@ -180,14 +180,19 @@ async def backfill_historical_streaks(dry_run=False):
 
                 if result == "team_a":  # Win
                     if player_streaks[key]["current"] == 0:
+                        # pyrefly: ignore [unsupported-operation]
                         player_streaks[key]["started_at"] = draft_time
+                        # pyrefly: ignore [unsupported-operation]
                         player_streaks[key]["current_started_at"] = draft_time
+                    # pyrefly: ignore [unsupported-operation]
                     player_streaks[key]["current"] += 1
+                    # pyrefly: ignore [unsupported-operation]
                     if player_streaks[key]["current"] > player_streaks[key]["longest"]:
                         player_streaks[key]["longest"] = player_streaks[key]["current"]
                 elif result == "tie":  # Tie - maintain streak
                     pass
                 else:  # Loss - break streak
+                    # pyrefly: ignore [unsupported-operation]
                     if player_streaks[key]["current"] > 0:
                         # Record historical streak
                         historical_streaks.append({
@@ -209,14 +214,19 @@ async def backfill_historical_streaks(dry_run=False):
 
                 if result == "team_b":  # Win
                     if player_streaks[key]["current"] == 0:
+                        # pyrefly: ignore [unsupported-operation]
                         player_streaks[key]["started_at"] = draft_time
+                        # pyrefly: ignore [unsupported-operation]
                         player_streaks[key]["current_started_at"] = draft_time
+                    # pyrefly: ignore [unsupported-operation]
                     player_streaks[key]["current"] += 1
+                    # pyrefly: ignore [unsupported-operation]
                     if player_streaks[key]["current"] > player_streaks[key]["longest"]:
                         player_streaks[key]["longest"] = player_streaks[key]["current"]
                 elif result == "tie":  # Tie - maintain streak
                     pass
                 else:  # Loss - break streak
+                    # pyrefly: ignore [unsupported-operation]
                     if player_streaks[key]["current"] > 0:
                         # Record historical streak
                         historical_streaks.append({
@@ -261,6 +271,7 @@ async def backfill_historical_streaks(dry_run=False):
                         logger.warning(f"PlayerStats not found for player {player_id} in guild {guild_id}")
 
                 # Insert historical streaks (only those >= 3)
+                # pyrefly: ignore [unsupported-operation]
                 significant_streaks = [s for s in historical_streaks if s["streak_length"] >= 3]
                 logger.info(f"Inserting {len(significant_streaks)} significant historical streaks (>= 3)")
 
@@ -276,6 +287,7 @@ async def backfill_historical_streaks(dry_run=False):
         for (player_id, guild_id), streak_data in list(player_streaks.items())[:10]:
             logger.info(f"  Player {player_id} in guild {guild_id}: current={streak_data['current']}, longest={streak_data['longest']}")
         logger.info(f"  ... and {len(player_streaks) - 10} more")
+        # pyrefly: ignore [unsupported-operation]
         logger.info(f"Would insert {len([s for s in historical_streaks if s['streak_length'] >= 3])} historical streaks")
 
 

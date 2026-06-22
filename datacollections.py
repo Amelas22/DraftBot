@@ -14,6 +14,7 @@ from session import AsyncSessionLocal, DraftSession
 from loguru import logger
 from config import get_draftmancer_base_url, get_draftmancer_websocket_url
 from services.draft_socket_client import DraftSocketClient
+from helpers.utils import not_none
 
 load_dotenv()
 
@@ -278,7 +279,7 @@ class DraftLogManager:
         """Find draft-logs channel and send the embed if found."""
         try:
             # Find the guild
-            guild = self.discord_client.get_guild(self.guild_id)
+            guild = not_none(self.discord_client).get_guild(self.guild_id)
             if not guild:
                 logger.warning(f"Could not find guild with ID {self.guild_id}")
                 return
@@ -477,9 +478,9 @@ class DraftLogManager:
 
     async def generate_magicprotools_embed(self, draft_data):
         """Generate a Discord embed with MagicProTools links for all drafters and store them in the database."""
+        import discord  # Import locally to avoid issues if Discord isn't available
+        from models.match import MatchResult  # Import MatchResult class
         try:
-            import discord  # Import locally to avoid issues if Discord isn't available
-            from models.match import MatchResult  # Import MatchResult class
             
             DO_SPACES_REGION = os.getenv("DO_SPACES_REGION")
             DO_SPACES_BUCKET = os.getenv("DO_SPACES_BUCKET")

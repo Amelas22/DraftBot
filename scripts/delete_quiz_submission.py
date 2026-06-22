@@ -125,7 +125,7 @@ async def delete_submission(quiz_display_id: str, player_name: str, dry_run: boo
         # Find the submission
         submission, quiz_session = await find_submission(quiz_display_id, player_name, session)
 
-        if not submission:
+        if not submission or not quiz_session:
             logger.error(f"No submission found for quiz #{quiz_display_id} by player '{player_name}'")
             return False
 

@@ -8,6 +8,10 @@ from models.perfect_streak_history import PerfectStreakHistory
 from loguru import logger
 from stats_core import get_timeframe_start_date, calculate_win_percentage, calculate_team_draft_win_percentage
 
+# Win/loss/percentage counters accumulated per timeframe. Values start as int
+# counts and gain float win-percentage entries as stats are computed.
+StatsDict = dict[str, int | float]
+
 async def get_player_statistics(user_id, time_frame=None, user_display_name=None, guild_id=None):
     """Get player statistics for a specific user and time frame, filtered by guild_id if provided."""
     try:
@@ -639,19 +643,19 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
         month_ago = now - timedelta(days=30)
         
         # Default values
-        weekly_stats = {"matches_played": 0, "user1_wins": 0, "user2_wins": 0}
-        monthly_stats = {"matches_played": 0, "user1_wins": 0, "user2_wins": 0}
-        lifetime_stats = {"matches_played": 0, "user1_wins": 0, "user2_wins": 0}
-        
+        weekly_stats: StatsDict = {"matches_played": 0, "user1_wins": 0, "user2_wins": 0}
+        monthly_stats: StatsDict = {"matches_played": 0, "user1_wins": 0, "user2_wins": 0}
+        lifetime_stats: StatsDict = {"matches_played": 0, "user1_wins": 0, "user2_wins": 0}
+
         # Stats for when users are on opposing teams
-        opposing_weekly = {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0}
-        opposing_monthly = {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0}
-        opposing_lifetime = {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0}
-        
+        opposing_weekly: StatsDict = {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0}
+        opposing_monthly: StatsDict = {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0}
+        opposing_lifetime: StatsDict = {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0}
+
         # Stats for when users are on the same team
-        teammate_weekly = {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0}
-        teammate_monthly = {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0}
-        teammate_lifetime = {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0}
+        teammate_weekly: StatsDict = {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0}
+        teammate_monthly: StatsDict = {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0}
+        teammate_lifetime: StatsDict = {"wins": 0, "losses": 0, "draws": 0, "win_percentage": 0}
         
         # Get display names if not provided
         if not user1_display_name or not user2_display_name:
@@ -1013,7 +1017,10 @@ async def create_head_to_head_embed(user1, user2, h2h_stats):
     
     return embed
 
-async def find_discord_id_by_display_name_fuzzy(display_name, guild_id=None):
+async def find_discord_id_by_display_name_fuzzy(
+    display_name: str,
+    guild_id: str | None = None,
+) -> tuple[str | list[tuple[str, str]] | None, str | None, bool]:
     """
     Find Discord user IDs by partial display name matching.
     

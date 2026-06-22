@@ -1,10 +1,11 @@
 import random
 
 class Tournament:
-    def __init__(self, sign_ups=None, from_state=None):
+    def __init__(self, sign_ups: dict | None = None, from_state=None):
         if from_state:
             self.__dict__.update(from_state)
         else:
+            sign_ups = sign_ups or {}
             self.players = {}
             self.round_number = 0
             self.matches = []

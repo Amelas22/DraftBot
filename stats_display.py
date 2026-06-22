@@ -13,7 +13,7 @@ async def get_stats_embed_for_player(
     bot,
     player_id: str,
     guild_id: str,
-    display_name: str = None
+    display_name: str | None = None
 ) -> discord.Embed:
     """
     Get stats embed for any player by their ID.

@@ -207,12 +207,12 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
                             "completed_matches": 0,  # Only count matches with a result
                             "matches_won": 0,
                             "matches_lost": 0,
-                            "match_win_percentage": 0,
+                            "match_win_percentage": 0.0,
                             "team_drafts_played": 0,
                             "team_drafts_won": 0,
                             "team_drafts_tied": 0,
                             "team_drafts_lost": 0,
-                            "team_draft_win_percentage": 0,
+                            "team_draft_win_percentage": 0.0,
                             "teammate_win_rates": {}
                         }
                     else:
@@ -539,7 +539,7 @@ async def get_win_streak_leaderboard_data(guild_id, timeframe, limit, session):
             player_best_streaks[player_id] = entry
         else:
             # Keep the longer streak
-            if entry["longest_win_streak"] > player_best_streaks[player_id]["longest_win_streak"]:
+            if (entry["longest_win_streak"] or 0) > (player_best_streaks[player_id]["longest_win_streak"] or 0):
                 player_best_streaks[player_id] = entry
 
     # === Part 5: Sort by streak length, then win % ===
@@ -671,7 +671,7 @@ async def get_perfect_streak_leaderboard_data(guild_id, timeframe, limit, sessio
             player_best_streaks[player_id] = entry
         else:
             # Keep the longer streak
-            if entry["perfect_streak"] > player_best_streaks[player_id]["perfect_streak"]:
+            if (entry["perfect_streak"] or 0) > (player_best_streaks[player_id]["perfect_streak"] or 0):
                 player_best_streaks[player_id] = entry
 
     # === Part 5: Sort by streak length, then win % ===

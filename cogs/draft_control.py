@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands
 import asyncio
+from typing import cast
 from loguru import logger
 from models.draft_session import DraftSession
 from models.match import MatchResult
@@ -8,6 +9,7 @@ from discord.ui import View, Button
 from datetime import datetime, timedelta
 from sqlalchemy import select, and_, desc, update
 from database.db_session import db_session
+from helpers.utils import not_none
 from services.draft_setup_manager import DraftSetupManager, create_rooms_and_pairings_with_fallback
 
 # Store active unpause ready checks
@@ -52,7 +54,7 @@ async def abandon_draft_session(session_id, session_factory=None):
 def _disable_all(view):
     """Disable every component on a view (so a settled prompt can't be re-clicked)."""
     for child in view.children:
-        child.disabled = True
+        cast(discord.ui.Button, child).disabled = True
 
 
 class BaseVoteView(View):
@@ -77,11 +79,12 @@ class BaseVoteView(View):
     action_verb = "pass"   # used in "votes needed to {action_verb}"
     log_name = "vote"      # used in timeout log lines
 
-    def __init__(self, draft_session_id, participants, timeout=90.0):
+    def __init__(self, draft_session_id, participants, timeout: float = 90.0):
         super().__init__(timeout=timeout)
         self.draft_session_id = draft_session_id
-        self.votes = {user_id: None for user_id in participants}  # None=not voted, True=yes, False=no
-        self.message = None
+        self._timeout_seconds: float = timeout
+        self.votes: dict[str, bool | None] = {user_id: None for user_id in participants}  # None=not voted, True=yes, False=no
+        self.message: discord.Message | None = None
         self.timer_task = None
         self.complete = asyncio.Event()
         self._start_time = datetime.now()
@@ -91,7 +94,7 @@ class BaseVoteView(View):
 
     async def start_timer(self):
         try:
-            await asyncio.sleep(self.timeout)
+            await asyncio.sleep(self._timeout_seconds)
             if not self.complete.is_set():
                 logger.info(f"{self.log_name} for session {self.draft_session_id} timed out")
                 await self.on_timeout()
@@ -119,7 +122,7 @@ class BaseVoteView(View):
 
     @discord.ui.button(label="Yes", style=discord.ButtonStyle.primary)
     async def yes_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        user_id = str(interaction.user.id)
+        user_id = str(not_none(interaction.user).id)
         if user_id not in self.votes:
             await interaction.response.send_message("You are not part of this draft.", ephemeral=True)
             return
@@ -129,11 +132,12 @@ class BaseVoteView(View):
 
         if self.get_vote_result()[0]:
             self._finish()
-            await self.message.edit(view=self)
+            if self.message:
+                await self.message.edit(view=self)
 
     @discord.ui.button(label="No", style=discord.ButtonStyle.secondary)
     async def no_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        user_id = str(interaction.user.id)
+        user_id = str(not_none(interaction.user).id)
         if user_id not in self.votes:
             await interaction.response.send_message("You are not part of this draft.", ephemeral=True)
             return
@@ -144,7 +148,8 @@ class BaseVoteView(View):
         # End early if the vote can no longer reach a majority.
         if not self.can_still_pass():
             self._finish()
-            await self.message.edit(view=self)
+            if self.message:
+                await self.message.edit(view=self)
 
     def _participant_status(self, vote):
         if vote is True:
@@ -172,7 +177,7 @@ class BaseVoteView(View):
                   ("**Vote will pass!**" if passed else "**Vote will not pass yet**"),
             inline=False,
         )
-        expiry_timestamp = int(self._start_time.timestamp() + self.timeout)
+        expiry_timestamp = int(self._start_time.timestamp() + self._timeout_seconds)
         embed.add_field(name="Vote Ends", value=f"<t:{expiry_timestamp}:R>", inline=False)
         return embed
 
@@ -267,11 +272,12 @@ class ReplaceWithBotsVoteView(BaseVoteView):
     log_name = "Replace with bots vote"
 
 class DraftMancerReadyCheckView(View):
-    def __init__(self, draft_session_id, participants, timeout=90.0):
+    def __init__(self, draft_session_id, participants, timeout: float = 90.0):
         super().__init__(timeout=timeout)
         self.draft_session_id = draft_session_id
-        self.participants = {user_id: False for user_id in participants}  # False = not ready
-        self.message = None
+        self._timeout_seconds: float = timeout
+        self.participants: dict[str, bool] = {user_id: False for user_id in participants}  # False = not ready
+        self.message: discord.Message | None = None
         self.timer_task = None
         self.complete = asyncio.Event()
         self._start_time = datetime.now()
@@ -279,7 +285,7 @@ class DraftMancerReadyCheckView(View):
     async def start_timer(self):
         """Start the timeout timer for the ready check"""
         try:
-            await asyncio.sleep(self.timeout)
+            await asyncio.sleep(self._timeout_seconds)
             if not self.complete.is_set():
                 # Time's up, mark the check as complete
                 logger.info(f"Unpause ready check for session {self.draft_session_id} timed out")
@@ -294,7 +300,7 @@ class DraftMancerReadyCheckView(View):
     @discord.ui.button(label="Ready", style=discord.ButtonStyle.green)
     async def ready_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         """Mark user as ready"""
-        user_id = str(interaction.user.id)
+        user_id = str(not_none(interaction.user).id)
         if user_id not in self.participants:
             await interaction.response.send_message("You are not part of this draft.", ephemeral=True)
             return
@@ -314,15 +320,16 @@ class DraftMancerReadyCheckView(View):
             
             # Disable buttons
             for child in self.children:
-                child.disabled = True
+                cast(discord.ui.Button, child).disabled = True
                 
-            await self.message.edit(view=self)
+            if self.message:
+                await self.message.edit(view=self)
             # The on_complete callback will handle the actual resuming
         
     @discord.ui.button(label="Not Ready", style=discord.ButtonStyle.red)
     async def not_ready_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         """Mark user as not ready"""
-        user_id = str(interaction.user.id)
+        user_id = str(not_none(interaction.user).id)
         if user_id not in self.participants:
             await interaction.response.send_message("You are not part of this draft.", ephemeral=True)
             return
@@ -359,7 +366,7 @@ class DraftMancerReadyCheckView(View):
             inline=False
         )
         
-        expiry_time = self._start_time.timestamp() + self.timeout
+        expiry_time = self._start_time.timestamp() + self._timeout_seconds
         expiry_timestamp = int(expiry_time)
 
         embed.add_field(
@@ -375,7 +382,7 @@ class DraftMancerReadyCheckView(View):
         
         # Disable all buttons
         for child in self.children:
-            child.disabled = True
+            cast(discord.ui.Button, child).disabled = True
             
         # Update the message if it exists
         if self.message:

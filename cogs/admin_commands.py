@@ -2,6 +2,7 @@ from discord.ext import commands
 import asyncio
 import os
 from pathlib import Path
+from typing import Any, cast
 import discord
 from loguru import logger
 from config import get_config, save_config
@@ -9,6 +10,7 @@ from leaderboard_config import CROWN_ICONS, DEFAULT_CROWN_ROLE_NAMES
 from stats_display import get_stats_embed_for_player
 
 from helpers.permissions import has_bot_manager_role, ADMIN_ROLE_NAME
+from helpers.utils import not_none
 from cube_views.CubeListModal import CubeListModal
 
 
@@ -199,9 +201,9 @@ class AdminCommands(commands.Cog):
     async def post_announcement(self, ctx, channel: discord.TextChannel):
         """Post an announcement from the announcement.md file"""
         await ctx.defer(ephemeral=True)
+        announcement_path = "announcement.md"
         try:
             # Read the announcement file
-            announcement_path = "announcement.md"
             with open(announcement_path, 'r', encoding='utf-8') as f:
                 announcement = f.read()
 
@@ -268,7 +270,7 @@ class AdminCommands(commands.Cog):
             role_name = role_names[count]
 
             # Prepare role properties
-            role_kwargs = {
+            role_kwargs: dict[str, Any] = {
                 "color": discord.Color.gold(),
                 "hoist": True,  # Show separately in member list
                 "mentionable": False,
@@ -454,7 +456,7 @@ class AdminCommands(commands.Cog):
     async def set_crown_timeframe(
         self,
         ctx,
-        timeframe: discord.Option(
+        timeframe: discord.Option(  # pyrefly: ignore
             str,
             description="The timeframe for crown calculations",
             choices=["14d", "30d", "90d", "lifetime"]
@@ -510,8 +512,8 @@ class AdminCommands(commands.Cog):
     @has_bot_manager_role()
     async def set_leaderboard_channel(
         self, ctx,
-        channel: discord.Option(discord.TextChannel, "Existing channel to use", required=False) = None,
-        new_channel_name: discord.Option(str, "Create a new channel with this name", required=False) = None,
+        channel: discord.Option(discord.TextChannel, "Existing channel to use", required=False) = None,  # pyrefly: ignore
+        new_channel_name: discord.Option(str, "Create a new channel with this name", required=False) = None,  # pyrefly: ignore
     ):
         """Set the channel for leaderboard posts.
 
@@ -604,7 +606,7 @@ class AdminCommands(commands.Cog):
     async def set_cube_list(
         self,
         ctx,
-        session_type: discord.Option(str, "Which draft type to configure", choices=["default"], required=True),
+        session_type: discord.Option(str, "Which draft type to configure", choices=["default"], required=True),  # pyrefly: ignore
     ):
         current = get_config(ctx.guild.id).get("cubes", {}).get(session_type, [])
         prefill = "\n".join(f"{c['label']} : {c['value']}" for c in current)
@@ -814,8 +816,8 @@ class AdminCommands(commands.Cog):
     async def cleanup_stale_drafts(
         self,
         ctx,
-        hours_old: discord.Option(int, "Complete drafts older than this many hours (minimum 12)", default=24),
-        dry_run: discord.Option(bool, "Preview without actually completing/deleting", default=True)
+        hours_old: discord.Option(int, "Complete drafts older than this many hours (minimum 12)", default=24),  # pyrefly: ignore
+        dry_run: discord.Option(bool, "Preview without actually completing/deleting", default=True)  # pyrefly: ignore
     ):
         """Complete old stale drafts as draws, clean up channels, and remove database records."""
         from config import is_cleanup_exempt
@@ -939,7 +941,7 @@ class AdminCommands(commands.Cog):
                 for detail in sessions_to_complete[:5]:
                     status = "completed" if detail['is_completed'] else "incomplete"
                     preview_msg += (
-                        f"• Session {detail['session_id'][:8]}... ({status}): "
+                        f"• Session {str(detail['session_id'])[:8]}... ({status}): "
                         f"{detail['missing_matches']} to create, "
                         f"{detail['unplayed_matches']} unplayed\n"
                     )
@@ -1089,7 +1091,7 @@ class AdminCommands(commands.Cog):
         supports_icons = ctx.guild.premium_tier >= 2
 
         # Prepare role properties
-        role_kwargs = {
+        role_kwargs: dict[str, Any] = {
             "color": discord.Color.from_rgb(218, 165, 32),  # Gold color
             "hoist": True,  # Show separately in member list
             "mentionable": False,

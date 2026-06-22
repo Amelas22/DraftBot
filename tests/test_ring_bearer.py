@@ -19,8 +19,7 @@ from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy import select
 
 from database.models_base import Base
@@ -44,10 +43,9 @@ async def test_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    test_session_factory = sessionmaker(
+    test_session_factory = async_sessionmaker(
         engine,
         expire_on_commit=False,
-        class_=AsyncSession
     )
     yield test_session_factory
 

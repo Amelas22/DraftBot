@@ -5,10 +5,11 @@ import tempfile
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import discord
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from typing import cast
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from database.models_base import Base
 from models.session_details import SessionDetails
@@ -30,7 +31,7 @@ async def test_db():
     engine = create_async_engine(f"sqlite+aiosqlite:///{temp_db.name}")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    factory = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
     os.unlink(temp_db.name)
@@ -220,7 +221,7 @@ async def test_play_match_view_has_one_button():
     view = PlayMatchView(5, "Alpha vs Bravo")
     assert view.timeout is None
     assert len(view.children) == 1
-    assert view.children[0].custom_id == "tournament_play:5"
+    assert cast(discord.ui.Button, view.children[0]).custom_id == "tournament_play:5"
 
 
 @pytest.mark.asyncio

@@ -271,9 +271,11 @@ async def main():
             )
             
             # Store result and close
+            # pyrefly: ignore [missing-attribute]
             client._cleanup_success = success
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
+            # pyrefly: ignore [missing-attribute]
             client._cleanup_success = False
         finally:
             await client.close()

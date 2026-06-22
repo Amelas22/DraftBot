@@ -249,6 +249,7 @@ def get_legacy_player_stats(user_id, time_frame=None):
     # Calculate team win percentage
     # Calculate team draft win percentage using shared utility
     team_losses = stats['team_drafts_played'] - stats['team_drafts_won'] - stats['team_drafts_tied']
+    # pyrefly: ignore [bad-assignment]
     stats['team_draft_win_percentage'] = calculate_team_draft_win_percentage(
         stats['team_drafts_won'],
         team_losses,
@@ -257,6 +258,7 @@ def get_legacy_player_stats(user_id, time_frame=None):
 
     # Calculate match win percentage using shared utility
     matches_lost = stats['matches_played'] - stats['matches_won']
+    # pyrefly: ignore [bad-assignment]
     stats['match_win_percentage'] = calculate_win_percentage(stats['matches_won'], matches_lost)
         
     return stats
@@ -358,11 +360,14 @@ def get_legacy_head_to_head_stats(user1_id, user2_id, time_frame=None):
     
     # Calculate win percentages for match stats using shared utility
     total_matches = match_stats['matches_played']
+    # pyrefly: ignore [bad-assignment]
     match_stats['user1_win_percentage'] = calculate_win_percentage(match_stats['user1_wins'], total_matches - match_stats['user1_wins'])
+    # pyrefly: ignore [bad-assignment]
     match_stats['user2_win_percentage'] = calculate_win_percentage(match_stats['user2_wins'], total_matches - match_stats['user2_wins'])
 
     # Calculate win percentages for team stats using shared utility
     for stats in [opposing_stats, teammate_stats]:
+        # pyrefly: ignore [unsupported-operation]
         stats['win_percentage'] = calculate_win_percentage(stats['wins'], stats['losses'], stats['draws'])
     
     return {
@@ -395,12 +400,19 @@ async def get_player_statistics_with_legacy(user_id, time_frame=None, user_displ
         
         # Merge the stats
         merged_stats = {
+            # pyrefly: ignore [unsupported-operation]
             "drafts_played": current_stats.get("drafts_played", 0) + legacy_stats.get("drafts_played", 0),
+            # pyrefly: ignore [unsupported-operation]
             "matches_played": current_stats.get("matches_played", 0) + legacy_stats.get("matches_played", 0),
+            # pyrefly: ignore [unsupported-operation]
             "matches_won": current_stats.get("matches_won", 0) + legacy_stats.get("matches_won", 0),
+            # pyrefly: ignore [unsupported-operation]
             "trophies_won": current_stats.get("trophies_won", 0) + legacy_stats.get("trophies_won", 0),
+            # pyrefly: ignore [unsupported-operation]
             "team_drafts_played": current_stats.get("team_drafts_played", 0) + legacy_stats.get("team_drafts_played", 0),
+            # pyrefly: ignore [unsupported-operation]
             "team_drafts_won": current_stats.get("team_drafts_won", 0) + legacy_stats.get("team_drafts_won", 0),
+            # pyrefly: ignore [unsupported-operation]
             "team_drafts_tied": current_stats.get("team_drafts_tied", 0) + legacy_stats.get("team_drafts_tied", 0),
             "display_name": current_stats.get("display_name", user_display_name),
             "cube_stats": current_stats.get("cube_stats", {}),
@@ -457,8 +469,11 @@ async def get_head_to_head_stats_with_legacy(user1_id, user2_id, user1_display_n
         legacy_lifetime_matches = legacy_lifetime.get("match_stats", {})
         
         merged_lifetime = {
+            # pyrefly: ignore [missing-attribute]
             "matches_played": current_lifetime.get("matches_played", 0) + legacy_lifetime_matches.get("matches_played", 0),
+            # pyrefly: ignore [missing-attribute]
             "user1_wins": current_lifetime.get("user1_wins", 0) + legacy_lifetime_matches.get("user1_wins", 0),
+            # pyrefly: ignore [missing-attribute]
             "user2_wins": current_lifetime.get("user2_wins", 0) + legacy_lifetime_matches.get("user2_wins", 0)
         }
         
@@ -472,8 +487,11 @@ async def get_head_to_head_stats_with_legacy(user1_id, user2_id, user1_display_n
         legacy_monthly_matches = legacy_monthly.get("match_stats", {})
         
         merged_monthly = {
+            # pyrefly: ignore [missing-attribute]
             "matches_played": current_monthly.get("matches_played", 0) + legacy_monthly_matches.get("matches_played", 0),
+            # pyrefly: ignore [missing-attribute]
             "user1_wins": current_monthly.get("user1_wins", 0) + legacy_monthly_matches.get("user1_wins", 0),
+            # pyrefly: ignore [missing-attribute]
             "user2_wins": current_monthly.get("user2_wins", 0) + legacy_monthly_matches.get("user2_wins", 0)
         }
         
@@ -487,8 +505,11 @@ async def get_head_to_head_stats_with_legacy(user1_id, user2_id, user1_display_n
         legacy_weekly_matches = legacy_weekly.get("match_stats", {})
         
         merged_weekly = {
+            # pyrefly: ignore [missing-attribute]
             "matches_played": current_weekly.get("matches_played", 0) + legacy_weekly_matches.get("matches_played", 0),
+            # pyrefly: ignore [missing-attribute]
             "user1_wins": current_weekly.get("user1_wins", 0) + legacy_weekly_matches.get("user1_wins", 0),
+            # pyrefly: ignore [missing-attribute]
             "user2_wins": current_weekly.get("user2_wins", 0) + legacy_weekly_matches.get("user2_wins", 0)
         }
         
@@ -502,8 +523,11 @@ async def get_head_to_head_stats_with_legacy(user1_id, user2_id, user1_display_n
         legacy_opposing_lifetime = legacy_lifetime.get("opposing_stats", {})
         
         merged_opposing_lifetime = {
+            # pyrefly: ignore [missing-attribute]
             "wins": current_opposing_lifetime.get("wins", 0) + legacy_opposing_lifetime.get("wins", 0),
+            # pyrefly: ignore [missing-attribute]
             "losses": current_opposing_lifetime.get("losses", 0) + legacy_opposing_lifetime.get("losses", 0),
+            # pyrefly: ignore [missing-attribute]
             "draws": current_opposing_lifetime.get("draws", 0) + legacy_opposing_lifetime.get("draws", 0)
         }
         
@@ -519,8 +543,11 @@ async def get_head_to_head_stats_with_legacy(user1_id, user2_id, user1_display_n
         legacy_opposing_monthly = legacy_monthly.get("opposing_stats", {})
         
         merged_opposing_monthly = {
+            # pyrefly: ignore [missing-attribute]
             "wins": current_opposing_monthly.get("wins", 0) + legacy_opposing_monthly.get("wins", 0),
+            # pyrefly: ignore [missing-attribute]
             "losses": current_opposing_monthly.get("losses", 0) + legacy_opposing_monthly.get("losses", 0),
+            # pyrefly: ignore [missing-attribute]
             "draws": current_opposing_monthly.get("draws", 0) + legacy_opposing_monthly.get("draws", 0)
         }
         
@@ -534,8 +561,11 @@ async def get_head_to_head_stats_with_legacy(user1_id, user2_id, user1_display_n
         legacy_opposing_weekly = legacy_weekly.get("opposing_stats", {})
         
         merged_opposing_weekly = {
+            # pyrefly: ignore [missing-attribute]
             "wins": current_opposing_weekly.get("wins", 0) + legacy_opposing_weekly.get("wins", 0),
+            # pyrefly: ignore [missing-attribute]
             "losses": current_opposing_weekly.get("losses", 0) + legacy_opposing_weekly.get("losses", 0),
+            # pyrefly: ignore [missing-attribute]
             "draws": current_opposing_weekly.get("draws", 0) + legacy_opposing_weekly.get("draws", 0)
         }
         
@@ -550,8 +580,11 @@ async def get_head_to_head_stats_with_legacy(user1_id, user2_id, user1_display_n
         legacy_teammate_lifetime = legacy_lifetime.get("teammate_stats", {})
         
         merged_teammate_lifetime = {
+            # pyrefly: ignore [missing-attribute]
             "wins": current_teammate_lifetime.get("wins", 0) + legacy_teammate_lifetime.get("wins", 0),
+            # pyrefly: ignore [missing-attribute]
             "losses": current_teammate_lifetime.get("losses", 0) + legacy_teammate_lifetime.get("losses", 0),
+            # pyrefly: ignore [missing-attribute]
             "draws": current_teammate_lifetime.get("draws", 0) + legacy_teammate_lifetime.get("draws", 0)
         }
         
@@ -566,8 +599,11 @@ async def get_head_to_head_stats_with_legacy(user1_id, user2_id, user1_display_n
         legacy_teammate_monthly = legacy_monthly.get("teammate_stats", {})
         
         merged_teammate_monthly = {
+            # pyrefly: ignore [missing-attribute]
             "wins": current_teammate_monthly.get("wins", 0) + legacy_teammate_monthly.get("wins", 0),
+            # pyrefly: ignore [missing-attribute]
             "losses": current_teammate_monthly.get("losses", 0) + legacy_teammate_monthly.get("losses", 0),
+            # pyrefly: ignore [missing-attribute]
             "draws": current_teammate_monthly.get("draws", 0) + legacy_teammate_monthly.get("draws", 0)
         }
         
@@ -581,8 +617,11 @@ async def get_head_to_head_stats_with_legacy(user1_id, user2_id, user1_display_n
         legacy_teammate_weekly = legacy_weekly.get("teammate_stats", {})
         
         merged_teammate_weekly = {
+            # pyrefly: ignore [missing-attribute]
             "wins": current_teammate_weekly.get("wins", 0) + legacy_teammate_weekly.get("wins", 0),
+            # pyrefly: ignore [missing-attribute]
             "losses": current_teammate_weekly.get("losses", 0) + legacy_teammate_weekly.get("losses", 0),
+            # pyrefly: ignore [missing-attribute]
             "draws": current_teammate_weekly.get("draws", 0) + legacy_teammate_weekly.get("draws", 0)
         }
         

@@ -17,7 +17,7 @@ class DraftSocketClient:
     def connected(self):
         return self.sio.connected
 
-    async def connect_with_retry(self, url: str, max_retries: int = 5, base_delay: int = 2):
+    async def connect_with_retry(self, url: str, max_retries: int = 5, base_delay: float = 2):
         """
         Attempts to connect to the given URL with exponential backoff.
         """

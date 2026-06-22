@@ -93,7 +93,7 @@ async def update_ring_bearer_for_guild(bot, guild_id: str, session_id: Optional[
                 if streak_extensions and session_id:
                     # Normal draft - check if any #1 leader extended in this draft
                     for leader_data in tied_leaders:
-                        leader_id = leader_data["player_id"]
+                        leader_id = str(leader_data["player_id"])
 
                         # Extract streak length for logging
                         if category == "longest_win_streak":
@@ -128,7 +128,7 @@ async def update_ring_bearer_for_guild(bot, guild_id: str, session_id: Optional[
                 else:
                     # Manual refresh - no streak info, transfer to first #1 leader
                     leader_data = tied_leaders[0]
-                    leader_id = leader_data["player_id"]
+                    leader_id = str(leader_data["player_id"])
 
                     if leader_id != current_bearer_id:
                         logger.info(f"[RING BEARER] TRANSFER (manual refresh): {leader_id} gets ring via {category}")
@@ -470,14 +470,14 @@ async def get_leaderboard_leaders_tied_for_first(guild_id: str, category: str, t
             return []
 
         # Find the highest streak value (the #1 position)
-        max_streak = players[0].get(streak_field, 0)
+        max_streak = players[0].get(streak_field, 0) or 0
 
         # Find ALL players who:
         # 1. Have the exact same streak value (tied for #1)
         # 2. Have ACTIVE streaks (not completed)
         tied_leaders = []
         for player in players:
-            player_streak = player.get(streak_field, 0)
+            player_streak = player.get(streak_field, 0) or 0
             is_active = player.get("is_active", False)
 
             # If streak is lower than max, we're past the tied leaders

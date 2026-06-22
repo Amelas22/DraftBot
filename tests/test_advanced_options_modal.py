@@ -11,6 +11,7 @@ def test_pack_format_display_none_for_default():
 
 def test_pack_format_display_string_for_non_default():
     text = pack_format_display(4, 10)
+    assert text is not None
     assert "4" in text and "10" in text
 
 

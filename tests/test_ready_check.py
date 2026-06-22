@@ -464,7 +464,9 @@ class TestHandleStatus:
 
         assert "1" in rc.ready
         sh.record_ready_event.assert_awaited_once()
-        assert sh.record_ready_event.await_args.kwargs["action"] == "ready"
+        await_args = sh.record_ready_event.await_args
+        assert await_args is not None
+        assert await_args.kwargs["action"] == "ready"
         i.response.edit_message.assert_awaited_once()
 
     async def test_missing_session_warns_and_skips(self):
@@ -537,12 +539,12 @@ class TestReadyCheckCancelConfirmView:
 
     async def test_confirm_button_is_danger(self):
         view = ReadyCheckCancelConfirmView("sid", "Alice")
-        confirm = next(c for c in view.children if "Yes" in c.label)
+        confirm = next(c for c in view.children if isinstance(c, discord.ui.Button) and c.label and "Yes" in c.label)
         assert confirm.style == discord.ButtonStyle.danger
 
     async def test_deny_button_is_secondary(self):
         view = ReadyCheckCancelConfirmView("sid", "Alice")
-        deny = next(c for c in view.children if "No" in c.label)
+        deny = next(c for c in view.children if isinstance(c, discord.ui.Button) and c.label and "No" in c.label)
         assert deny.style == discord.ButtonStyle.secondary
 
     async def test_stores_cancelled_by(self):

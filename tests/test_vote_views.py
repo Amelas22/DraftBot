@@ -114,7 +114,8 @@ async def test_timeout_embed(cls, spec):
 @pytest.mark.parametrize("cls", CLASSES)
 async def test_majority_threshold_even(cls):
     view = cls("s1", ["1", "2", "3", "4"])
-    view.votes = {"1": True, "2": True, "3": None, "4": None}
+    # constructor seeds all participants to None (dict[str, bool | None]); flip two to True
+    view.votes.update({"1": True, "2": True})
     passed, yes, total = view.get_vote_result()
     assert (yes, total) == (2, 4)
     assert not passed  # need 3 of 4

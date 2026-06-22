@@ -15,6 +15,16 @@ The category will automatically propagate to:
 """
 
 import discord
+from typing import Callable, TypedDict
+
+
+class CategoryConfig(TypedDict):
+    """Shape of each leaderboard category's display configuration."""
+    title: str
+    description_template: str
+    color: discord.Color
+    formatter: Callable[[dict, int], str]
+
 
 # Helper function for formatting (used by all categories)
 def get_medal(rank):
@@ -41,7 +51,7 @@ def _format_ended_streak(p):
 
 
 # Category configuration - SINGLE SOURCE OF TRUTH
-CATEGORY_CONFIGS = {
+CATEGORY_CONFIGS: dict[str, CategoryConfig] = {
     "draft_record": {
         "title": "Draft Record Leaderboard",
         "description_template": "Players with the highest team draft win percentage (min {drafts} drafts, 50%+ win rate)",

@@ -176,11 +176,13 @@ class StakeAnalyzer:
         
         if not has_victory_message:
             logger.warning(f"Draft {draft.session_id} does not have a victory message, skipping")
+            # pyrefly: ignore [bad-return]
             return None
             
         stakes = await self.fetch_stakes_for_draft(draft.session_id)
         if not stakes:
             logger.warning(f"Draft {draft.session_id} has no stakes, skipping")
+            # pyrefly: ignore [bad-return]
             return None
         
         # Get team assignments
@@ -189,6 +191,7 @@ class StakeAnalyzer:
         
         if not team_a or not team_b:
             logger.warning(f"Draft {draft.session_id} has incomplete team data, skipping")
+            # pyrefly: ignore [bad-return]
             return None
         
         # Determine min and max teams
@@ -214,10 +217,13 @@ class StakeAnalyzer:
         # Record the outcome
         if winner:
             if winner == min_team:
+                # pyrefly: ignore [bad-assignment]
                 result['outcome'] = 'min_win'
             elif winner == max_team:
+                # pyrefly: ignore [bad-assignment]
                 result['outcome'] = 'max_win'
         else:
+            # pyrefly: ignore [bad-assignment]
             result['outcome'] = 'draw'
         
         logger.info(f"Draft {draft.session_id} - Min Team: {min_team} ({min_team_stakes}), "
@@ -251,8 +257,11 @@ class StakeAnalyzer:
         
         # Calculate percentages
         if self.results['valid_drafts'] > 0:
+            # pyrefly: ignore [bad-assignment]
             self.results['min_team_win_pct'] = (self.results['min_team_wins'] / self.results['valid_drafts']) * 100
+            # pyrefly: ignore [bad-assignment]
             self.results['max_team_win_pct'] = (self.results['max_team_wins'] / self.results['valid_drafts']) * 100
+            # pyrefly: ignore [bad-assignment]
             self.results['draw_pct'] = (self.results['draws'] / self.results['valid_drafts']) * 100
         
         return self.results
@@ -379,6 +388,7 @@ class StakeAnalyzer:
                 draws = row['draw'] if 'draw' in row else 0
                 draw_pct = row['draw_pct'] if 'draw_pct' in row else 0
                 
+                # pyrefly: ignore [bad-argument-type]
                 print(f"Bucket {bucket+1}     | {ratio_range:13} | {int(total_drafts):12d} | {int(min_wins):4d} ({min_pct:5.1f}%) | {int(max_wins):4d} ({max_pct:5.1f}%) | {int(draws):2d} ({draw_pct:5.1f}%)")
         
         # Print overall row

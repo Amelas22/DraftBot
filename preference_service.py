@@ -236,7 +236,7 @@ async def update_player_dm_notification_preference(player_id, guild_id, enabled)
 
     return await execute_db_operation(_update, default_value=False, commit=True, error_message="Error updating DM notification preference")
 
-async def get_players_dm_notification_preferences(player_ids, guild_id):
+async def get_players_dm_notification_preferences(player_ids: list[str], guild_id: str) -> dict[str, bool]:
     """
     Get DM notification preferences for multiple players at once.
 
@@ -277,4 +277,7 @@ async def get_players_dm_notification_preferences(player_ids, guild_id):
         logger.info(f"Retrieved DM preferences for {len(player_ids)} players: {sum(preferences.values())} enabled")
         return preferences
 
-    return await execute_db_operation(_batch_query, default_value=default_preferences, error_message="Error getting DM notification preferences")
+    preferences = await execute_db_operation(_batch_query, default_value=default_preferences, error_message="Error getting DM notification preferences")
+    # execute_db_operation falls back to default_value on error, so this is always
+    # a dict at runtime; guard anyway to keep the return type non-optional.
+    return preferences if preferences is not None else default_preferences

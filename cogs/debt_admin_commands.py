@@ -10,6 +10,7 @@ Commands:
 import asyncio
 from datetime import datetime
 import discord
+from helpers.utils import not_none
 from discord.ext import commands
 from discord.commands import SlashCommandGroup, option
 from loguru import logger
@@ -66,7 +67,7 @@ class DebtNotifyConfirmView(discord.ui.View):
     async def on_timeout(self):
         self.disable_all_items()
         try:
-            await self.message.edit(content="Timed out.", embed=None, view=None)
+            await not_none(self.message).edit(content="Timed out.", embed=None, view=None)
         except Exception:
             pass
 
@@ -268,9 +269,9 @@ class DebtAdminCommands(commands.Cog):
     async def debt_admin_history(
         self,
         ctx: discord.ApplicationContext,
-        player: discord.User = None,
+        player: discord.User | None = None,
         limit: int = 25,
-        older_than_days: int = None
+        older_than_days: int | None = None
     ):
         """View complete debt history (drafts, settlements, and admin modifications)."""
         await ctx.defer(ephemeral=True)
@@ -422,7 +423,7 @@ class DebtAdminCommands(commands.Cog):
     async def debt_admin_notify(
         self,
         ctx: discord.ApplicationContext,
-        player: discord.User = None
+        player: discord.User | None = None
     ):
         """Send DM notifications to players about their outstanding debts."""
         await ctx.defer(ephemeral=True)

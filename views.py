@@ -4,7 +4,7 @@ import random
 import pytz
 from datetime import datetime, timedelta
 from discord import SelectOption
-from discord.ui import Button, View, Select, select
+from discord.ui import Button, View, Select
 from config import is_test_mode, should_reset_on_signup, get_queue_inactivity_minutes
 from notification_service import send_ready_check_dms
 from ready_check import ReadyCheckView, ReadyCheckSession
@@ -14,7 +14,8 @@ from session import StakeInfo, AsyncSessionLocal, get_draft_session, DraftSessio
 from models import SignUpHistory
 from sqlalchemy import update, select, and_
 from sqlalchemy.orm import selectinload
-from helpers.utils import get_cube_thumbnail_url
+from helpers.utils import get_cube_thumbnail_url, not_none
+from typing import cast
 from helpers.display_names import get_display_name, get_display_name_by_id
 from utils import (
     calculate_pairings,
@@ -199,7 +200,7 @@ class PersistentView(discord.ui.View):
         draft_session = await get_draft_session(self.draft_session_id)
         # update the button's label and style directly based on the new tracked_draft state
         # Find the specific button to update
-        track_draft_button = next((btn for btn in self.children if btn.custom_id == f"track_draft_{self.draft_session_id}"), None)
+        track_draft_button = next((cast(discord.ui.Button, btn) for btn in self.children if cast(discord.ui.Button, btn).custom_id == f"track_draft_{self.draft_session_id}"), None)
         if track_draft_button:
             track_draft_button.label = "League Draft: ON" if draft_session.tracked_draft else "League Draft: OFF"
             track_draft_button.style = discord.ButtonStyle.green if draft_session.tracked_draft else discord.ButtonStyle.red
@@ -214,10 +215,10 @@ class PersistentView(discord.ui.View):
     async def add_test_users_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Add test users to the draft for testing purposes, up to NUM_TEST_USERS_TO_ADD."""
         # Only allow admins to use this feature
-        if not interaction.user.guild_permissions.administrator:
+        if not cast(discord.Member, not_none(interaction.user)).guild_permissions.administrator:
             await interaction.response.send_message("Only server administrators can use this test feature.", ephemeral=True)
             return
-                    
+
         logger.info(f"Adding test users to draft {self.draft_session_id}")
         
         # Fetch the current draft session to ensure it's up to date
@@ -237,7 +238,7 @@ class PersistentView(discord.ui.View):
 
         # Use the bot's user ID for test users so they resolve to a valid Discord member
         # This helps test features like debt settlement that need guild.get_member() to work
-        bot_user_id = str(interaction.client.user.id)
+        bot_user_id = str(not_none(interaction.client.user).id)
 
         # Test names - prefixed with [TEST] and includes markdown characters to test escaping
         test_names = [
@@ -338,7 +339,7 @@ class PersistentView(discord.ui.View):
 
     async def add_test_users_premade_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         """TEST_MODE only: fill both premade teams to 3 players with test users."""
-        if not interaction.user.guild_permissions.administrator:
+        if not cast(discord.Member, not_none(interaction.user)).guild_permissions.administrator:
             await interaction.response.send_message("Only server administrators can use this test feature.", ephemeral=True)
             return
 
@@ -382,7 +383,7 @@ class PersistentView(discord.ui.View):
         )
 
     async def sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_id = str(interaction.user.id)
+        user_id = str(not_none(interaction.user).id)
         
         # Get the guild config for the interaction's guild
         from config import get_config
@@ -391,7 +392,7 @@ class PersistentView(discord.ui.View):
         timeout_role_name = roles_config.get("timeout")
         
         # Check if the user has the timeout role
-        if timeout_role_name and discord.utils.get(interaction.user.roles, name=timeout_role_name):
+        if timeout_role_name and discord.utils.get(cast(discord.Member, not_none(interaction.user)).roles, name=timeout_role_name):
             await interaction.response.send_message(
                 "You are ineligible to join a queue due to an infraction (Leaving Draft Early/Unpaid Debts). Message a Mod for more details.",
                 ephemeral=True
@@ -399,7 +400,7 @@ class PersistentView(discord.ui.View):
             return
         
         # Check if user has Draftmancer role
-        has_draftmancer_role = discord.utils.get(interaction.user.roles, name="Draftmancer") is not None
+        has_draftmancer_role = discord.utils.get(cast(discord.Member, not_none(interaction.user)).roles, name="Draftmancer") is not None
         
         if self.session_type == "winston":
             now = datetime.now()
@@ -449,7 +450,7 @@ class PersistentView(discord.ui.View):
                 stake_options_view = StakeOptionsView(
                     draft_session_id=self.draft_session_id,
                     draft_link=draft_session.draft_link,
-                    user_display_name=interaction.user.display_name,
+                    user_display_name=not_none(interaction.user).display_name,
                     min_stake=draft_session.min_stake,
                     has_draftmancer_role=has_draftmancer_role  
                 )
@@ -461,8 +462,8 @@ class PersistentView(discord.ui.View):
                 return
             
             # For non-staked drafts, add them to sign_ups now        
-            sign_ups[user_id] = interaction.user.display_name
-            display_name = str(interaction.user.display_name)
+            sign_ups[user_id] = not_none(interaction.user).display_name
+            display_name = str(not_none(interaction.user).display_name)
             
             # Record the signup event in history
             await SignUpHistory.record_signup_event(
@@ -529,7 +530,7 @@ class PersistentView(discord.ui.View):
                 drafter_role_name = guild_config["roles"]["drafter"]
                 
                 # Find the role in the guild
-                guild = interaction.guild
+                guild = not_none(interaction.guild)
                 drafter_role = discord.utils.get(guild.roles, name=drafter_role_name)
                 
                 if drafter_role:
@@ -537,7 +538,7 @@ class PersistentView(discord.ui.View):
                     channel = await interaction.client.fetch_channel(draft_session_updated.draft_channel_id)
                     if channel:
                         player_count = len(sign_ups)
-                        await channel.send(f"{player_count} Players in queue! {drafter_role.mention}")
+                        await cast(discord.TextChannel, channel).send(f"{player_count} Players in queue! {drafter_role.mention}")
 
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
@@ -548,14 +549,14 @@ class PersistentView(discord.ui.View):
             if self.session_type == "winston":
                 if len(sign_ups) == 2:
                     sign_up_tags = ' '.join([f"<@{user_id}>" for user_id in draft_session_updated.sign_ups.keys()])
-                    guild = self.bot.get_guild(int(interaction.guild_id))
+                    guild = not_none(self.bot.get_guild(not_none(interaction.guild_id)))
                     channel = discord.utils.get(guild.text_channels, name="winston-draft")
-                    await channel.send(f"Winston Draft Ready. Good luck in your match! {sign_up_tags}")
+                    await cast(discord.TextChannel, not_none(channel)).send(f"Winston Draft Ready. Good luck in your match! {sign_up_tags}")
                 else:
-                    guild = interaction.guild
+                    guild = not_none(interaction.guild)
                     message_link = f"https://discord.com/channels/{draft_session_updated.guild_id}/{draft_session_updated.draft_channel_id}/{draft_session_updated.message_id}"
                     channel = discord.utils.get(guild.text_channels, name="cube-draft-open-play")
-                    await channel.send(f"**{get_display_name(interaction.user, guild)}** is looking for an opponent for a **Winston Draft**. [Join Here!]({message_link})")
+                    await cast(discord.TextChannel, not_none(channel)).send(f"**{get_display_name(cast(discord.Member, not_none(interaction.user)), guild)}** is looking for an opponent for a **Winston Draft**. [Join Here!]({message_link})")
                     
     async def cancel_sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         draft_session = await get_draft_session(self.draft_session_id)
@@ -565,9 +566,9 @@ class PersistentView(discord.ui.View):
         
         sign_ups = draft_session.sign_ups or {}
         draftmancer_role_users = draft_session.draftmancer_role_users or []
-        user_id = str(interaction.user.id)
-        display_name = str(interaction.user.display_name)
-        
+        user_id = str(not_none(interaction.user).id)
+        display_name = not_none(interaction.user).display_name
+
         if user_id not in sign_ups:
             # User is not signed up; inform them
             await interaction.response.send_message("You are not signed up!", ephemeral=True)
@@ -707,7 +708,7 @@ class PersistentView(discord.ui.View):
             # (incl. Custom), Advanced Options, and a submit button.
             cube_selection = CubeUpdateSelectionView(
                 draft_session.session_type,
-                interaction.guild_id,
+                not_none(interaction.guild_id),
                 current_cube=draft_session.cube,
                 on_submit=apply_cube_update,
             )
@@ -760,7 +761,7 @@ class PersistentView(discord.ui.View):
         # Schedule the cooldown entry to be cleared once the window elapses.
         asyncio.create_task(self.remove_cooldown(self.draft_session_id))
 
-        user_id = str(interaction.user.id)
+        user_id = str(not_none(interaction.user).id)
         if user_id not in session.sign_ups:
             await interaction.response.send_message("You are not registered in the draft session.", ephemeral=True)
             return
@@ -831,10 +832,10 @@ class PersistentView(discord.ui.View):
         await send_ready_check_dms(
             bot_or_client=interaction.client,
             draft_session=session,
-            guild_id=str(interaction.guild.id),
-            channel_id=str(interaction.channel.id),
-            channel_name=interaction.channel.name,
-            guild_name=interaction.guild.name
+            guild_id=str(not_none(interaction.guild).id),
+            channel_id=str(not_none(interaction.channel).id),
+            channel_name=cast(discord.TextChannel, not_none(interaction.channel)).name,
+            guild_name=not_none(interaction.guild).name
         )
 
         # In test mode all test users are pre-marked ready — skip waiting for button clicks
@@ -888,7 +889,7 @@ class PersistentView(discord.ui.View):
         missing_players = await get_missing_stake_players(session_id)
         if missing_players:
             # Get display names for the missing players
-            guild = interaction.client.get_guild(int(interaction.guild_id))
+            guild = not_none(interaction.client.get_guild(not_none(interaction.guild_id)))
             missing_names = []
             for pid in missing_players:
                 member = guild.get_member(int(pid))
@@ -908,7 +909,7 @@ class PersistentView(discord.ui.View):
     async def randomize_teams_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         bot = interaction.client
         session_id = self.draft_session_id
-        user_id = str(interaction.user.id)
+        user_id = str(not_none(interaction.user).id)
 
         # Check for race condition - is someone already creating teams?
         if state_manager.is_creating_teams(session_id):
@@ -1073,9 +1074,9 @@ class PersistentView(discord.ui.View):
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
             return
 
-        user_id = str(interaction.user.id)
-        custom_id = button.custom_id
-        user_name = get_display_name(interaction.user, interaction.guild)
+        user_id = str(not_none(interaction.user).id)
+        custom_id = not_none(button.custom_id)
+        user_name = get_display_name(cast(discord.Member, not_none(interaction.user)), not_none(interaction.guild))
 
         primary_team = secondary_team = primary_key = secondary_key = None
 
@@ -1088,7 +1089,7 @@ class PersistentView(discord.ui.View):
             primary_key, secondary_key = "team_b", "team_a"
 
         # Safety check if the button custom_id doesn't correctly specify a team
-        if primary_team is None or secondary_team is None:
+        if primary_team is None or secondary_team is None or primary_key is None or secondary_key is None:
             await interaction.response.send_message("An error occurred. Unable to determine the team.", ephemeral=True)
             return
 
@@ -1130,7 +1131,7 @@ class PersistentView(discord.ui.View):
         timeout_role_name = roles_config.get("timeout")
         
         # Check if the user has the timeout role
-        if timeout_role_name and discord.utils.get(interaction.user.roles, name=timeout_role_name):
+        if timeout_role_name and discord.utils.get(cast(discord.Member, not_none(interaction.user)).roles, name=timeout_role_name):
             await interaction.response.send_message(
                 "You are ineligible due to an infraction (Leaving Draft Early/Unpaid Debts). Message a Mod for more details.",
                 ephemeral=True
@@ -1143,7 +1144,7 @@ class PersistentView(discord.ui.View):
             return
 
         # Show confirmation dialog
-        confirm_view = CancelConfirmationView(self.bot, self.draft_session_id, get_display_name(interaction.user, interaction.guild))
+        confirm_view = CancelConfirmationView(self.bot, self.draft_session_id, get_display_name(cast(discord.Member, not_none(interaction.user)), not_none(interaction.guild)))
         await interaction.response.send_message("Are you sure you want to cancel this draft?", view=confirm_view, ephemeral=True)    
     
     async def start_draft_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1198,7 +1199,7 @@ class PersistentView(discord.ui.View):
         embed = message.embeds[0]  # Assuming there's only one embed attached to the message
 
         # Get team names with crown icons
-        guild = interaction.guild
+        guild = not_none(interaction.guild)
         team_a_names = [get_display_name_by_id(str(user_id), guild, session.sign_ups.get(str(user_id), "Unknown User")) for user_id in (session.team_a or [])]
         team_b_names = [get_display_name_by_id(str(user_id), guild, session.sign_ups.get(str(user_id), "Unknown User")) for user_id in (session.team_b or [])]
 
@@ -1223,14 +1224,14 @@ class PersistentView(discord.ui.View):
             return
 
         # Check if the user initiating the remove action is in the sign_ups
-        if str(interaction.user.id) not in session.sign_ups:
+        if str(not_none(interaction.user).id) not in session.sign_ups:
             await interaction.response.send_message("You are not authorized to remove users.", ephemeral=True)
             return
 
         # If the session exists and has sign-ups, and the user is authorized, proceed
         if session.sign_ups:
             # Get display names with crown icons for the dropdown
-            guild = interaction.guild
+            guild = not_none(interaction.guild)
             options = [discord.SelectOption(label=get_display_name_by_id(user_id, guild, user_name), value=user_id)
                       for user_id, user_name in session.sign_ups.items()]
             view = UserRemovalView(session_id=session.session_id, options=options)
@@ -1562,7 +1563,7 @@ class UserRemovalSelect(Select):
         bot = interaction.client
         session = await get_draft_session(self.session_id)
 
-        user_id_to_remove = self.values[0]  
+        user_id_to_remove = str(self.values[0])
         if user_id_to_remove in session.sign_ups:
             removed_user_name = session.sign_ups.pop(user_id_to_remove)
             
@@ -1586,7 +1587,7 @@ class UserRemovalSelect(Select):
             if session.session_type != "premade":
                 await update_draft_message(bot, session_id=session.session_id)
             else:
-                await PersistentView.update_team_view(interaction)
+                await PersistentView.update_team_view(interaction)  # pyrefly: ignore
 
             await interaction.followup.send(f"Removed {removed_user_name} from the draft.")
             await ReadyCheckSession.sync_removed_player(self.session_id, user_id_to_remove, session, interaction)
@@ -1739,7 +1740,7 @@ class MatchResultSelect(Select):
         # Splitting the selected value to get the result details
         await interaction.response.defer()
         try:
-            player1_wins, player2_wins, winner_indicator = self.values[0].split('-')
+            player1_wins, player2_wins, winner_indicator = str(self.values[0]).split('-')
             player1_wins = int(player1_wins)
             player2_wins = int(player2_wins)
             winner_id = None  # Default to None in case of a draw
@@ -1992,7 +1993,7 @@ class PersonalizedCapStatusView(discord.ui.View):
         user_id = self.user_id
         
         # Only the owner of the view should be able to toggle
-        if str(interaction.user.id) != user_id:
+        if str(not_none(interaction.user).id) != user_id:
             await interaction.response.send_message("This button is not for you.", ephemeral=True)
             return
             
@@ -2304,10 +2305,10 @@ class CancelConfirmationView(discord.ui.View):
     @discord.ui.button(label="Yes, Cancel Draft", style=discord.ButtonStyle.danger)
     async def confirm_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
-        
+
         # Disable buttons
         for child in self.children:
-            child.disabled = True
+            cast(discord.ui.Button, child).disabled = True
         await interaction.response.edit_message(view=self)
         
         # Get session to proceed with cancellation
@@ -2368,7 +2369,7 @@ class CancelConfirmationView(discord.ui.View):
     async def cancel_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         # Disable buttons
         for child in self.children:
-            child.disabled = True
+            cast(discord.ui.Button, child).disabled = True
         await interaction.response.edit_message(content="Draft cancellation aborted.", view=self)
 
 
@@ -2394,7 +2395,7 @@ class StakeOptionsSelect(discord.ui.Select):
         super().__init__(placeholder=f"Select your maximum bet... ", min_values=1, max_values=1, options=options)
         
     async def callback(self, interaction: discord.Interaction):
-        user_id = str(interaction.user.id)
+        user_id = str(not_none(interaction.user).id)
         guild_id = str(interaction.guild_id)
         
         # Load the user's saved preference
@@ -2412,20 +2413,20 @@ class StakeOptionsSelect(discord.ui.Select):
             stake_modal.has_draftmancer_role = self.has_draftmancer_role
             
             # IMPORTANT: Set the default value based on saved preference before showing the modal
-            stake_modal.default_cap_setting = is_capped
+            stake_modal.default_cap_setting = bool(is_capped)
             # Update the cap checkbox value based on the preference
             stake_modal.cap_checkbox.value = "yes" if is_capped else "no"
             
             await interaction.response.send_modal(stake_modal)
         else:
             # Process the selected preset stake amount with the saved preference
-            stake_amount = int(selected_value)
+            stake_amount = int(str(selected_value))
             
             # Add user to sign_ups and handle stake submission using saved preference
             await self.handle_stake_submission(interaction, stake_amount, is_capped=is_capped)
             
     async def handle_stake_submission(self, interaction, stake_amount, is_capped=True):
-        user_id = str(interaction.user.id)
+        user_id = str(not_none(interaction.user).id)
         guild_id = str(interaction.guild_id)
         display_name = str(interaction.user.display_name)
         
@@ -2528,7 +2529,7 @@ class StakeOptionsSelect(discord.ui.Select):
                 drafter_role_name = guild_config["roles"]["drafter"]
                 
                 # Find the role in the guild
-                guild = interaction.guild
+                guild = not_none(interaction.guild)
                 drafter_role = discord.utils.get(guild.roles, name=drafter_role_name)
                 
                 if drafter_role:
@@ -2536,7 +2537,7 @@ class StakeOptionsSelect(discord.ui.Select):
                     channel = await interaction.client.fetch_channel(draft_session_updated.draft_channel_id)
                     if channel:
                         player_count = len(sign_ups)
-                        await channel.send(f"{player_count} Players in queue! {drafter_role.mention}")
+                        await cast(discord.TextChannel, channel).send(f"{player_count} Players in queue! {drafter_role.mention}")
         
         # Confirm stake and provide draft link
         cap_status = "capped at the highest opponent bet" if is_capped else "NOT capped (full action)"
@@ -2595,12 +2596,12 @@ class StakeModal(discord.ui.Modal):
         self.user_display_name = None
 
     async def callback(self, interaction: discord.Interaction):
-        user_id = str(interaction.user.id)
+        user_id = str(not_none(interaction.user).id)
         guild_id = str(interaction.guild_id)
         
         try:
             # Parse the stake amount
-            max_stake = int(self.stake_input.value)
+            max_stake = int(not_none(self.stake_input.value))
         except ValueError:
             await interaction.response.send_message("Please enter a valid number.", ephemeral=True)
             return
@@ -2608,7 +2609,7 @@ class StakeModal(discord.ui.Modal):
         # Determine if bet should be capped
         is_capped = True  # Default for regular stakes
         if self.over_100:
-            cap_value = self.cap_checkbox.value.lower()
+            cap_value = not_none(self.cap_checkbox.value).lower()
             is_capped = cap_value in ('yes', 'y', 'true')
         
         # Validation for over 100 stakes
@@ -2648,7 +2649,7 @@ class StakeModal(discord.ui.Modal):
                     
                     # Only add to sign_ups if stake is valid
                     sign_ups = draft_session.sign_ups or {}
-                    display_name = self.user_display_name or interaction.user.display_name
+                    display_name = self.user_display_name or not_none(interaction.user).display_name
                     sign_ups[user_id] = display_name
                     
                     # Update draftmancer_role_users if user has the role
@@ -2732,11 +2733,11 @@ class PaginatedStakeExplanation(discord.ui.View):
         
     def update_button_states(self):
         # Disable previous button if we're on the first page
-        self.children[0].disabled = (self.current_page == 0)
+        cast(discord.ui.Button, self.children[0]).disabled = (self.current_page == 0)
         # Disable next button if we're on the last page
-        self.children[2].disabled = (self.current_page == len(self.embeds) - 1)
+        cast(discord.ui.Button, self.children[2]).disabled = (self.current_page == len(self.embeds) - 1)
         # Update page counter
-        self.children[1].label = f"Page {self.current_page + 1}/{len(self.embeds)}"
+        cast(discord.ui.Button, self.children[1]).label = f"Page {self.current_page + 1}/{len(self.embeds)}"
     
     @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
     async def previous_button(self, button, interaction):
@@ -2780,7 +2781,7 @@ class StakeCalculationButton(discord.ui.Button):
         
         try:
             # Create player ID to name mapping with crown icons
-            guild = interaction.guild
+            guild = not_none(interaction.guild)
             player_names = {player_id: get_display_name_by_id(player_id, guild, draft_session.sign_ups.get(player_id, "Unknown"))
                         for player_id in list(draft_session.team_a) + list(draft_session.team_b)}
             
@@ -3100,6 +3101,7 @@ class StakeCalculationButton(discord.ui.Button):
                     allocation_text.append(f"{player_name}: {allocated}/{stake} tix ({percentage:.1f}%)")
             
             # Max team low tier allocations
+            low_tier_total = 0
             if max_team_low_tier:
                 allocation_text.append(f"\n*{max_team_name} (Max Team ≤50 tix):*")
                 low_tier_total = 0
@@ -3341,7 +3343,7 @@ class PersonalizedCapStatusView(discord.ui.View):
         user_id = self.user_id
         
         # Only the owner of the view should be able to toggle
-        if str(interaction.user.id) != user_id:
+        if str(not_none(interaction.user).id) != user_id:
             await interaction.response.send_message("This button is not for you.", ephemeral=True)
             return
             
@@ -3465,7 +3467,7 @@ class BetCapToggleButton(CallbackButton):
         self.draft_session_id = draft_session_id
     
     async def bet_cap_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_id = str(interaction.user.id)
+        user_id = str(not_none(interaction.user).id)
         guild_id = str(interaction.guild_id)
         
         # Check if user is registered in this draft
@@ -3524,7 +3526,7 @@ class BetCapToggleButton(CallbackButton):
                 stake_select = CombinedStakeSelect(
                     draft_session_id=self.draft_session_id,
                     draft_link=draft_session.draft_link,
-                    user_display_name=interaction.user.display_name,
+                    user_display_name=not_none(interaction.user).display_name,
                     min_stake=min_stake,
                     current_stake=current_stake,
                     options=options
@@ -3547,15 +3549,15 @@ class BetCapToggleButton(CallbackButton):
                     custom_id=f"cap_yes_{self.draft_session_id}"
                 )
                 
-                async def yes_callback(yes_interaction):
-                    if yes_interaction.user.id != interaction.user.id:
+                async def yes_callback(yes_interaction: discord.Interaction):
+                    if not_none(yes_interaction.user).id != not_none(interaction.user).id:
                         await yes_interaction.response.send_message("This button is not for you.", ephemeral=True)
                         return
-                    
+
                     # Update cap status
                     await self.update_cap_status(yes_interaction, user_id, guild_id, is_capped=True)
                 
-                yes_button.callback = yes_callback
+                yes_button.callback = yes_callback  # pyrefly: ignore
                 combined_view.add_item(yes_button)
                 
                 # Create OFF button with its callback
@@ -3565,15 +3567,15 @@ class BetCapToggleButton(CallbackButton):
                     custom_id=f"cap_no_{self.draft_session_id}"
                 )
                 
-                async def no_callback(no_interaction):
-                    if no_interaction.user.id != interaction.user.id:
+                async def no_callback(no_interaction: discord.Interaction):
+                    if not_none(no_interaction.user).id != not_none(interaction.user).id:
                         await no_interaction.response.send_message("This button is not for you.", ephemeral=True)
                         return
-                    
+
                     # Update cap status
                     await self.update_cap_status(no_interaction, user_id, guild_id, is_capped=False)
-                
-                no_button.callback = no_callback
+
+                no_button.callback = no_callback  # pyrefly: ignore
                 combined_view.add_item(no_button)
                 
                 # Send the ephemeral message with the combined view
@@ -3638,7 +3640,7 @@ class CombinedStakeSelect(discord.ui.Select):
         super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
         
     async def callback(self, interaction: discord.Interaction):
-        user_id = str(interaction.user.id)
+        user_id = str(not_none(interaction.user).id)
         guild_id = str(interaction.guild_id)
         
         # Load the user's saved preference
@@ -3655,20 +3657,20 @@ class CombinedStakeSelect(discord.ui.Select):
             stake_modal.user_display_name = self.user_display_name
             
             # IMPORTANT: Set the default value based on saved preference before showing the modal
-            stake_modal.default_cap_setting = is_capped
+            stake_modal.default_cap_setting = bool(is_capped)
             # Update the cap checkbox value based on the preference
             stake_modal.cap_checkbox.value = "yes" if is_capped else "no"
             
             await interaction.response.send_modal(stake_modal)
         else:
             # Process the selected preset stake amount with the saved preference
-            stake_amount = int(selected_value)
+            stake_amount = int(str(selected_value))
             
             # Add user to sign_ups and handle stake submission using saved preference
             await self.handle_stake_submission(interaction, stake_amount, is_capped=is_capped)
             
     async def handle_stake_submission(self, interaction, stake_amount, is_capped=True):
-        user_id = str(interaction.user.id)
+        user_id = str(not_none(interaction.user).id)
         guild_id = str(interaction.guild_id)
         
         # Only proceed if this is different from current stake

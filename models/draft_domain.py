@@ -9,7 +9,7 @@ Immutable dataclasses representing core entities in an MTG draft:
 """
 
 from dataclasses import dataclass
-from typing import List, Optional, Dict
+from typing import List, Dict
 
 
 @dataclass(frozen=True)
@@ -63,10 +63,10 @@ class Pick:
     """
     user_id: str
     user_name: str
-    pack_num: int
-    pick_num: int
+    pack_num: int | None
+    pick_num: int | None
     booster_ids: List[str]  # Card UUIDs in booster
-    picked_id: str          # UUID of picked card
+    picked_id: str | None  # UUID of picked card (None if pick data is invalid)
 
     @property
     def booster_size(self) -> int:
@@ -128,7 +128,7 @@ class Player:
     """
     user_id: str
     user_name: str
-    seat_num: Optional[int] = None
+    seat_num: int | None = None
 
     @property
     def has_seat(self) -> bool:
@@ -179,11 +179,11 @@ class PackTrace:
         return [p.user_name for p in self.picks]
 
     @property
-    def pick_numbers(self) -> List[int]:
+    def pick_numbers(self) -> List[int | None]:
         """Pick numbers in chronological order."""
         return [p.pick_num for p in self.picks]
 
     @property
-    def picked_ids(self) -> List[str]:
+    def picked_ids(self) -> List[str | None]:
         """Card UUIDs that were picked in order."""
         return [p.picked_id for p in self.picks]

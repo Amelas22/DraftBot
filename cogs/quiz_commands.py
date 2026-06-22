@@ -1,6 +1,5 @@
 import discord
 import random
-import asyncio
 from utils import safe_pin
 from io import BytesIO
 from typing import Optional, Tuple, List, Set
@@ -48,7 +47,7 @@ class QuizCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    async def _select_random_draft_and_seat(self, guild_id: str) -> Tuple[Optional[DraftSession], Optional[int]]:
+    async def _select_random_draft_and_seat(self, guild_id: str) -> Optional[Tuple[DraftSession, int]]:
         """
         Select a random eligible draft and seat combination that hasn't been used for a quiz yet.
 
@@ -59,7 +58,7 @@ class QuizCommands(commands.Cog):
             guild_id: Guild ID to search drafts for
 
         Returns:
-            Tuple of (DraftSession, starting_seat) or (None, None) if no eligible combinations found
+            Tuple of (DraftSession, starting_seat), or None if no eligible combinations found
         """
         one_year_ago = datetime.now() - timedelta(days=ELIGIBLE_DRAFT_DAYS)
 
@@ -84,7 +83,7 @@ class QuizCommands(commands.Cog):
 
         if not eligible_drafts:
             logger.warning(f"No eligible drafts found for guild {guild_id}")
-            return None, None
+            return None
 
         # Shuffle drafts for random selection
         random.shuffle(eligible_drafts)
@@ -118,7 +117,7 @@ class QuizCommands(commands.Cog):
                 continue
 
         logger.warning(f"No unused draft+seat combinations found for guild {guild_id} (checked {drafts_checked} drafts, {len(used_combos)} combinations already used)")
-        return None, None
+        return None
 
     async def _prepare_quiz_data(self, draft_session: DraftSession, starting_seat: int):
         """
@@ -309,6 +308,9 @@ class QuizCommands(commands.Cog):
 
             logger.info(f"[QUIZ_IMAGE] channel.send() completed, message_id={message.id}")
 
+        else:
+            message = await channel.send(embed=embed, view=view)
+
         # Update QuizSession with message_id
         async with db_session() as session:
             await session.execute(
@@ -337,14 +339,15 @@ class QuizCommands(commands.Cog):
         await ctx.response.defer(ephemeral=True)
 
         # Select random draft and seat combination
-        draft_session, starting_seat = await self._select_random_draft_and_seat(ctx.guild.id)
-        if not draft_session:
+        selection = await self._select_random_draft_and_seat(ctx.guild.id)
+        if selection is None:
             await ctx.followup.send(
                 "No eligible draft+seat combinations found from the last year in this guild.\n"
                 "Drafts must have stored data in Spaces.",
                 ephemeral=True
             )
             return
+        draft_session, starting_seat = selection
 
         # Prepare quiz data with specific starting seat
         quiz_data = await self._prepare_quiz_data(draft_session, starting_seat)
@@ -404,9 +407,10 @@ class QuizCommands(commands.Cog):
                 return False
 
             # Select random draft and seat combination
-            draft_session, starting_seat = await self._select_random_draft_and_seat(guild.id)
-            if not draft_session:
+            selection = await self._select_random_draft_and_seat(guild.id)
+            if selection is None:
                 return False
+            draft_session, starting_seat = selection
 
             # Prepare quiz data with specific starting seat
             quiz_data = await self._prepare_quiz_data(draft_session, starting_seat)

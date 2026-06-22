@@ -85,8 +85,9 @@ async def list_all_json_files() -> Dict[str, str]:
         # Spaces returns: "magic-draft-logs/team/file.json"
         # We want to store: "team/file.json" (boto3 expects this format)
         normalized_key = key_path
-        if key_path.startswith(f"{helper.bucket}/"):
-            normalized_key = key_path[len(helper.bucket) + 1:]
+        bucket = helper.bucket
+        if bucket and key_path.startswith(f"{bucket}/"):
+            normalized_key = key_path[len(bucket) + 1:]
 
         # Only process JSON files
         if not normalized_key.endswith('.json'):

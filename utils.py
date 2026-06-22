@@ -811,6 +811,9 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
 
                         # Still update messages to add logs link if it wasn't there before
                         main_embed, bet_embed = await generate_draft_summary_embed(bot, draft_session_id)
+                        if main_embed is None:
+                            logger.error(f"Could not generate draft summary embed for session {draft_session_id}; skipping victory message update")
+                            return
                         three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
                         main_embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
                         if draft_session.data_received and hasattr(draft_session, 'logs_channel_id') and draft_session.logs_message_id:
@@ -868,6 +871,9 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                     draft_session.session_stage = 'completed'
 
                     main_embed, bet_embed = await generate_draft_summary_embed(bot, draft_session_id)
+                    if main_embed is None:
+                        logger.error(f"Could not generate draft summary embed for session {draft_session_id}; skipping victory message posting")
+                        return
                     three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
                     main_embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
                     # Add logs link to the embed if available

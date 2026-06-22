@@ -148,7 +148,7 @@ class DraftSession(Base):
             await session.commit()
     
     @classmethod
-    async def get_active_sessions(cls, guild_id: str = None):
+    async def get_active_sessions(cls, guild_id: str | None = None):
         """Get all active draft sessions, optionally filtered by guild ID"""
         async with db_session() as session:
             query = select(cls).where(cls.session_stage != "COMPLETED")
@@ -167,7 +167,7 @@ class DraftSession(Base):
             result = await session.execute(query)
             return result.scalar_one_or_none()
 
-    def get_draft_link_for_user(self, user_name: str) -> str:
+    def get_draft_link_for_user(self, user_name: str) -> str | None:
         """
         Get a personalized draft link for a specific user.
         

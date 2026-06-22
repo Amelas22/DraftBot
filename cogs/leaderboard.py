@@ -238,8 +238,8 @@ class LeaderboardCog(commands.Cog):
         # Try to update existing message
         message_updated = False
         if hasattr(leaderboard_record, msg_id_field) and getattr(leaderboard_record, msg_id_field):
+            message_id = str(getattr(leaderboard_record, msg_id_field))
             try:
-                message_id = getattr(leaderboard_record, msg_id_field)
                 existing_msg = await channel.fetch_message(int(message_id))
                 if category != "hot_streak":
                     await existing_msg.edit(embed=embed, view=view)
@@ -308,8 +308,8 @@ async def refresh_all_leaderboards(bot):
             
             # Process each leaderboard
             for leaderboard in all_leaderboards:
+                guild_id = str(leaderboard.guild_id)
                 try:
-                    guild_id = leaderboard.guild_id
                     guild = bot.get_guild(int(guild_id))
                     
                     if not guild:
@@ -354,8 +354,8 @@ async def refresh_all_leaderboards(bot):
                             # Try to update existing message
                             message_updated = False
                             if hasattr(leaderboard, msg_id_field) and getattr(leaderboard, msg_id_field):
+                                message_id = str(getattr(leaderboard, msg_id_field))
                                 try:
-                                    message_id = getattr(leaderboard, msg_id_field)
                                     existing_msg = await channel.fetch_message(int(message_id))
                                     
                                     if category != "hot_streak":

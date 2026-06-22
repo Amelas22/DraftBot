@@ -202,27 +202,27 @@ class MagicProtoolsHelper:
                 user_filename = f"DraftLog_{user_id}.txt"
                 
                 # Upload to DO Spaces
-                result = await self.do_helper.upload_text(
+                upload_result = await self.do_helper.upload_text(
                     mpt_format,
                     base_path,
                     user_filename
                 )
 
-                if result.success:
+                if upload_result.success:
                     # Get the public URL
                     txt_key = f"{base_path}/{user_filename}"
                     txt_url = self.do_helper.get_public_url(txt_key)
-                    
+
                     # Try direct API submission first
                     mpt_url = None
                     if self.api_key:
                         mpt_url = await self.submit_to_api(user_id, draft_data)
-                    
+
                     # Fallback to import URL if direct submission failed
                     if not mpt_url:
                         import_url = f"https://magicprotools.com/draft/import?url={urllib.parse.quote(txt_url)}"
                         mpt_url = import_url
-                    
+
                     # Store the URLs
                     result[user_id] = {
                         "name": user_name,

@@ -24,7 +24,7 @@ class QuizSchedulingCog(commands.Cog):
         self,
         ctx,
         channel: discord.TextChannel,
-        time_zone: Optional[str] = "UTC"
+        time_zone: str = "UTC"
     ):
         """
         Set up a channel for posting scheduled quizzes

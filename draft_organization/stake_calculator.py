@@ -142,9 +142,10 @@ class StakeCalculator:
         
         return results
     
-    def tiered_stakes_calculator(team_a: List[str], team_b: List[str], 
+    @staticmethod
+    def tiered_stakes_calculator(team_a: List[str], team_b: List[str],
                                 stakes: Dict[str, int], min_stake: int = 10,
-                                multiple: int = 10, cap_info: Dict[str, bool] = None) -> List[StakePair]:
+                                multiple: int = 10, cap_info: Dict[str, bool] | None = None) -> List[StakePair]:
         """
         Calculate stake pairings using a tiered approach that prioritizes 10/20/50 bets
         and applies proportional allocation to higher bets.
@@ -497,7 +498,9 @@ class StakeCalculator:
                 
                 # Store final high tier allocations
                 for player_id, allocation, adjusted_stake, original_stake in high_tier_allocations:
-                    allocations[player_id] = allocation
+                    # allocation is a whole multiple of `multiple` (see rounding above);
+                    # round() keeps allocations as int tix, consistent with StakePair.amount.
+                    allocations[player_id] = round(allocation)
                     percentage = (allocation / original_stake) * 100
                     stake_logger.info(f"Max team high tier player {player_id} allocation: {allocation}/{original_stake} ({percentage:.1f}%)")
             
@@ -1017,7 +1020,7 @@ class StakeCalculator:
 def calculate_stakes_with_strategy(team_a: List[str], team_b: List[str], 
                                  stakes: Dict[str, int], min_stake: int = 10,
                                  multiple: int = 10, use_optimized: bool = False,
-                                 cap_info: Dict[str, bool] = None) -> List[StakePair]:
+                                 cap_info: Dict[str, bool] | None = None) -> List[StakePair]:
     """
     Calculate stake pairings using either the original or optimized algorithm.
     
