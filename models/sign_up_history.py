@@ -24,46 +24,8 @@ class SignUpHistory(Base):
         )
     
     @classmethod
-    async def record_signup_event(cls, session_id: str, user_id: str, display_name: str, action: str, guild_id: str):
-        """
-        Record a signup event (join or leave) for a draft session.
-        
-        Args:
-            session_id (str): The draft session ID
-            user_id (str): The Discord user ID
-            display_name (str): The user's display name
-            action (str): Either 'join' or 'leave'
-            guild_id (str): The Discord guild ID
-        """
-        # Generate unique UUID for this record
-        record_id = str(uuid.uuid4())
-        
-        signup_record = cls(
-            id=record_id,
-            session_id=session_id,
-            user_id=user_id,
-            user_display_name=display_name,
-            action=action,
-            timestamp=datetime.now(),
-            guild_id=guild_id
-        )
-        
-        async with db_session() as session:
-            session.add(signup_record)
-            await session.commit()
-
-    @classmethod
-    async def record_ready_event(cls, session_id: str, user_id: str, display_name: str, action: str, guild_id: str):
-        """
-        Record a ready-check response event for a draft session.
-
-        Args:
-            session_id (str): The draft session ID
-            user_id (str): The Discord user ID
-            display_name (str): The user's display name
-            action (str): One of 'ready', 'not_ready', 'ready_timeout'
-            guild_id (str): The Discord guild ID
-        """
+    async def _record_event(cls, session_id: str, user_id: str, display_name: str, action: str, guild_id: str):
+        """Persist a single history row. Shared by the signup and ready-check recorders."""
         record = cls(
             id=str(uuid.uuid4()),
             session_id=session_id,
@@ -77,3 +39,13 @@ class SignUpHistory(Base):
         async with db_session() as session:
             session.add(record)
             await session.commit()
+
+    @classmethod
+    async def record_signup_event(cls, session_id: str, user_id: str, display_name: str, action: str, guild_id: str):
+        """Record a signup event (action: 'join' or 'leave') for a draft session."""
+        await cls._record_event(session_id, user_id, display_name, action, guild_id)
+
+    @classmethod
+    async def record_ready_event(cls, session_id: str, user_id: str, display_name: str, action: str, guild_id: str):
+        """Record a ready-check response event (action: 'ready', 'not_ready', 'ready_timeout')."""
+        await cls._record_event(session_id, user_id, display_name, action, guild_id)
