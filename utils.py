@@ -635,6 +635,38 @@ async def update_draft_summary_message(bot, draft_session_id):
             print(f"Failed to update draft summary message: {e}")
 
 
+def find_postable_results_channel(guild, name):
+    """Resolve a results channel by name, tolerating duplicate-named channels.
+
+    A guild can end up with more than one channel sharing a name (e.g. a stale
+    'league-draft-results' the bot lost access to, alongside the live one). A
+    plain name lookup returns whichever comes first, which may be one the bot
+    can't post in (→ 403). Among all same-named channels, prefer one the bot can
+    actually post in (view + send). Falls back to the first match when none are
+    postable, so behavior is unchanged for the normal single-channel case.
+    """
+    matches = [c for c in guild.text_channels if c.name == name]
+    if not matches:
+        return None
+    postable = [
+        c for c in matches
+        if c.permissions_for(guild.me).view_channel
+        and c.permissions_for(guild.me).send_messages
+    ]
+    if postable:
+        if len(matches) > 1:
+            logger.info(
+                f"Multiple channels named '{name}' ({len(matches)}); posting to "
+                f"the one the bot can access (id={postable[0].id})."
+            )
+        return postable[0]
+    logger.warning(
+        f"No postable channel named '{name}' (found {len(matches)}); "
+        f"falling back to id={matches[0].id}, which the bot may not be able to post in."
+    )
+    return matches[0]
+
+
 async def check_and_post_victory_or_draw(bot, draft_session_id):
     draft_manager = DraftSetupManager.get_active_manager(draft_session_id)
     async with AsyncSessionLocal() as session:
@@ -839,7 +871,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                             await post_or_update_victory_message(bot, session, draft_chat_channel, embeds, draft_session, 'victory_message_id_draft_chat', view=settle_view)
 
                         results_channel_name = "team-draft-results" if draft_session.session_type == "random" or draft_session.session_type == "staked" else "league-draft-results"
-                        results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
+                        results_channel = find_postable_results_channel(guild, results_channel_name)
                         if results_channel:
                             await post_or_update_victory_message(bot, session, results_channel, embeds, draft_session, 'victory_message_id_results_channel', view=settle_view)
 
@@ -898,7 +930,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
 
                     # Determine the correct results channel
                     results_channel_name = "team-draft-results" if draft_session.session_type == "random" or draft_session.session_type == "staked" else "league-draft-results"
-                    results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
+                    results_channel = find_postable_results_channel(guild, results_channel_name)
                     if results_channel:
                         await post_or_update_victory_message(bot, session, results_channel, embeds, draft_session, 'victory_message_id_results_channel', view=settle_view)
                     else:
