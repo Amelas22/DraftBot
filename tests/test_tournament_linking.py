@@ -13,7 +13,7 @@ from models.draft_session import DraftSession
 from models.tournament import (
     Tournament, TournamentMatch, TournamentParticipant, TournamentRound,
 )
-from services.tournament_linking import resolve_candidate_matches, link_draft_to_match
+from services.tournament_linking import resolve_candidate_matches, link_draft_to_match, match_summary
 
 
 @pytest_asyncio.fixture
@@ -258,3 +258,22 @@ async def test_link_rejects_match_taken_by_other_draft(test_db):
         await s.flush()
         out = await link_draft_to_match(s, "d1", m.id, "u1")
     assert out.status == "match_taken"
+
+
+@pytest.mark.asyncio
+async def test_match_summary_returns_names_and_round(test_db):
+    async with test_db() as s:
+        t, r, parts = await _make_tournament(s)
+        m = TournamentMatch(round_id=r.id, team_a_participant_id=parts[0].id,
+                            team_b_participant_id=parts[1].id)
+        s.add(m); await s.flush()
+        out = await match_summary(s, m.id)
+    assert out == ("Latecomers", "Strixhaven Dropouts", 1)
+
+
+@pytest.mark.asyncio
+async def test_match_summary_returns_none_for_missing_match(test_db):
+    async with test_db() as s:
+        await _make_tournament(s)
+        out = await match_summary(s, 999999)
+    assert out is None

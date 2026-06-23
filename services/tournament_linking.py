@@ -146,6 +146,8 @@ async def link_draft_to_match(session, session_id, match_id, actor_id):
         TournamentParticipant.id == match.team_a_participant_id))).scalars().first()
     pb = (await session.execute(select(TournamentParticipant).where(
         TournamentParticipant.id == match.team_b_participant_id))).scalars().first()
+    if pa is None or pb is None:
+        return LinkOutcome(status="no_match")
     a_name, b_name = pa.team_name, pb.team_name
 
     normal = min(_name_score(draft.team_a_name, pa.team_name),
