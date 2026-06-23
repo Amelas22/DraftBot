@@ -4,6 +4,7 @@ Top-level module (like livedrafts.py) so the premade session hook and bot.py
 can both import it without a cog import cycle.
 """
 import discord
+from datetime import datetime, timedelta
 from loguru import logger
 from sqlalchemy import select
 
@@ -179,3 +180,43 @@ async def post_premade_nudge(channel, guild_id, session_id, team_a_name, team_b_
         await channel.send(content=content, view=view)
     except discord.HTTPException as e:
         logger.warning(f"Could not post tournament-link nudge for {session_id}: {e}")
+
+
+async def collect_nudge_views(now=None):
+    """(session_id, view) for each recent unlinked premade draft still matching.
+
+    TZ note: `draft_start_time` is stored as America/New_York-naive in prod
+    (see project memory), and `datetime.now()` here is the server's local time.
+    For a 24h cruft bound the few-hours skew is immaterial; the unit test injects
+    `now` explicitly. If exactness ever matters, compute `cutoff` in the column's
+    zone.
+    """
+    now = now or datetime.now()
+    cutoff = now - timedelta(hours=24)
+    out = []
+    async with db_session() as session:
+        drafts = (await session.execute(
+            select(DraftSession).where(
+                DraftSession.session_type == "premade",
+                DraftSession.tournament_match_id.is_(None),
+                DraftSession.draft_start_time >= cutoff,
+            )
+        )).scalars().all()
+        for d in drafts:
+            tournament = await get_active_tournament(session, d.guild_id)
+            if tournament is None:
+                continue
+            candidates = await resolve_candidate_matches(
+                session, tournament, d.team_a_name, d.team_b_name)
+            built = build_nudge_view(d.session_id, candidates)
+            if built is not None:
+                out.append((d.session_id, built[1]))
+    return out
+
+
+async def re_register_premade_nudges(bot):
+    """Re-attach nudge views (by custom_id) after a restart."""
+    views = await collect_nudge_views()
+    for _session_id, view in views:
+        bot.add_view(view)
+    logger.info(f"Re-registered {len(views)} premade tournament-link nudges")

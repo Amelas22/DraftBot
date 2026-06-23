@@ -89,6 +89,8 @@ async def main():
         await re_register_live_drafts(bot)
         from cogs.tournament_commands import re_register_tournament_views
         await re_register_tournament_views(bot)
+        from tournament_nudge import re_register_premade_nudges
+        await re_register_premade_nudges(bot)
         logger.info("Re-registered team finder")
         bot.loop.create_task(delayed_log_collection(bot))
 

@@ -234,3 +234,36 @@ async def test_post_premade_nudge_silent_when_draft_already_linked(patched_db):
     ch = _FakeChannel()
     await post_premade_nudge(ch, "g1", "d1", "Latecomers", "Strixhaven Dropouts")
     assert ch.sent == []
+
+
+from datetime import datetime, timedelta
+
+
+@pytest.mark.asyncio
+async def test_collect_nudge_views_recent_unlinked_only(patched_db):
+    from tournament_nudge import collect_nudge_views
+    now = datetime(2026, 6, 22, 12, 0, 0)
+    async with patched_db() as s:
+        t = Tournament(guild_id="g1", name="T", total_rounds=1, current_round=1,
+                       status="active", format="manual")
+        s.add(t); await s.flush()
+        r = TournamentRound(tournament_id=t.id, round_number=1); s.add(r); await s.flush()
+        pa = TournamentParticipant(tournament_id=t.id, team_id=1, team_name="Latecomers",
+                                   captain_user_id="1")
+        pb = TournamentParticipant(tournament_id=t.id, team_id=2, team_name="Strixhaven Dropouts",
+                                   captain_user_id="2")
+        s.add_all([pa, pb]); await s.flush()
+        s.add(TournamentMatch(round_id=r.id, team_a_participant_id=pa.id, team_b_participant_id=pb.id))
+        # recent, unlinked, matching → included
+        s.add(DraftSession(session_id="recent", guild_id="g1", session_type="premade",
+                           team_a_name="Latecomers", team_b_name="Strixhaven Dropouts",
+                           draft_start_time=now - timedelta(hours=2)))
+        # too old → excluded
+        s.add(DraftSession(session_id="old", guild_id="g1", session_type="premade",
+                           team_a_name="Latecomers", team_b_name="Strixhaven Dropouts",
+                           draft_start_time=now - timedelta(hours=48)))
+        await s.commit()
+
+    views = await collect_nudge_views(now)
+    ids = [sid for sid, _ in views]
+    assert ids == ["recent"]
