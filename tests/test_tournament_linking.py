@@ -13,7 +13,7 @@ from models.draft_session import DraftSession
 from models.tournament import (
     Tournament, TournamentMatch, TournamentParticipant, TournamentRound,
 )
-from services.tournament_linking import resolve_candidate_matches
+from services.tournament_linking import resolve_candidate_matches, link_draft_to_match
 
 
 @pytest_asyncio.fixture
@@ -175,3 +175,86 @@ async def test_substring_boost_admits_low_raw_ratio_name(test_db):
         s.add(m); await s.flush()
         out = await resolve_candidate_matches(s, t, "rakdos", "Strixhaven Dropouts")
     assert len(out) == 1  # admitted only because "rakdos" is contained (boost -> 0.9)
+
+
+async def _draft(s, session_id, a="Latecomers", b="Strixhaven Dropouts"):
+    d = DraftSession(session_id=session_id, guild_id="g1", session_type="premade",
+                     team_a_name=a, team_b_name=b)
+    s.add(d); await s.flush()
+    return d
+
+
+@pytest.mark.asyncio
+async def test_link_sets_match_id_normal(test_db):
+    async with test_db() as s:
+        t, r, parts = await _make_tournament(s)
+        m = TournamentMatch(round_id=r.id, team_a_participant_id=parts[0].id,
+                            team_b_participant_id=parts[1].id)
+        s.add(m); await s.flush()
+        await _draft(s, "d1")
+        out = await link_draft_to_match(s, "d1", m.id, "u1")
+        await s.commit()
+        d = (await s.execute(select(DraftSession).where(DraftSession.session_id == "d1"))).scalar_one()
+    assert out.status == "linked"
+    assert d.tournament_match_id == m.id
+    assert (m.team_a_participant_id, m.team_b_participant_id) == (parts[0].id, parts[1].id)
+
+
+@pytest.mark.asyncio
+async def test_link_swaps_participants_when_reversed(test_db):
+    async with test_db() as s:
+        t, r, parts = await _make_tournament(s)
+        m = TournamentMatch(round_id=r.id, team_a_participant_id=parts[0].id,
+                            team_b_participant_id=parts[1].id)
+        s.add(m); await s.flush()
+        # Draft team A is "Strixhaven..." which is match participant B → reversed.
+        await _draft(s, "d1", a="Strixhaven Dropouts", b="Latecomers")
+        out = await link_draft_to_match(s, "d1", m.id, "u1")
+        await s.commit()
+        match_id, a_id, b_id = m.id, parts[0].id, parts[1].id
+    assert out.status == "linked"
+    # Re-read the match from a fresh session so we assert persisted state.
+    async with test_db() as s2:
+        m2 = (await s2.execute(select(TournamentMatch).where(TournamentMatch.id == match_id))).scalar_one()
+        assert (m2.team_a_participant_id, m2.team_b_participant_id) == (b_id, a_id)
+
+
+@pytest.mark.asyncio
+async def test_link_rejects_already_linked_draft(test_db):
+    async with test_db() as s:
+        t, r, parts = await _make_tournament(s)
+        m = TournamentMatch(round_id=r.id, team_a_participant_id=parts[0].id,
+                            team_b_participant_id=parts[1].id)
+        s.add(m); await s.flush()
+        d = await _draft(s, "d1")
+        d.tournament_match_id = 999
+        await s.flush()
+        out = await link_draft_to_match(s, "d1", m.id, "u1")
+    assert out.status == "already_linked"
+
+
+@pytest.mark.asyncio
+async def test_link_rejects_played_match(test_db):
+    async with test_db() as s:
+        t, r, parts = await _make_tournament(s)
+        m = TournamentMatch(round_id=r.id, team_a_participant_id=parts[0].id,
+                            team_b_participant_id=parts[1].id, team_a_wins=5, team_b_wins=0)
+        s.add(m); await s.flush()
+        await _draft(s, "d1")
+        out = await link_draft_to_match(s, "d1", m.id, "u1")
+    assert out.status == "match_played"
+
+
+@pytest.mark.asyncio
+async def test_link_rejects_match_taken_by_other_draft(test_db):
+    async with test_db() as s:
+        t, r, parts = await _make_tournament(s)
+        m = TournamentMatch(round_id=r.id, team_a_participant_id=parts[0].id,
+                            team_b_participant_id=parts[1].id)
+        s.add(m); await s.flush()
+        await _draft(s, "d1")
+        s.add(DraftSession(session_id="other", guild_id="g1", session_type="premade",
+                           tournament_match_id=m.id))
+        await s.flush()
+        out = await link_draft_to_match(s, "d1", m.id, "u1")
+    assert out.status == "match_taken"
