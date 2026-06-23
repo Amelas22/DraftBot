@@ -112,6 +112,10 @@ async def link_draft_to_match(session, session_id, match_id, actor_id):
     draft's sides are reversed (so the victory hook records the right way round),
     then sets DraftSession.tournament_match_id.
     """
+    # Re-validate against staleness between nudge-post and confirm. This is not a
+    # hard lock: two simultaneous confirms in separate transactions could both pass
+    # under SQLite WAL. That race is rare (human-paced clicks) and self-corrects —
+    # set_result is correction-safe, so a later finish overwrites rather than double-counts.
     draft = (await session.execute(
         select(DraftSession).where(DraftSession.session_id == session_id)
     )).scalars().first()

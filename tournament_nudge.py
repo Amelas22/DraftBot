@@ -210,7 +210,8 @@ async def collect_nudge_views(now=None):
                 session, tournament, d.team_a_name, d.team_b_name)
             built = build_nudge_view(d.session_id, candidates)
             if built is not None:
-                out.append((d.session_id, built[1]))
+                _content, view = built
+                out.append((d.session_id, view))
     return out
 
 

@@ -41,7 +41,6 @@ async def test_multiple_candidates_build_select_view():
 import os
 import tempfile
 
-import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -90,7 +89,6 @@ async def test_perform_link_links_draft(patched_db):
         await s.commit()
         match_id = m.id
 
-    from tournament_nudge import perform_link
     outcome = await perform_link("d1", match_id, "u1")
     assert outcome.status == "linked"
 
