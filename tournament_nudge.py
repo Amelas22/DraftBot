@@ -7,7 +7,7 @@ import discord
 from loguru import logger
 
 from database.db_session import db_session
-from services.tournament_linking import link_draft_to_match
+from services.tournament_linking import link_draft_to_match, match_summary
 
 
 def _match_label(c):
@@ -71,5 +71,80 @@ def build_nudge_view(session_id, candidates):
     return content, TournamentLinkSelectView(session_id, candidates)
 
 
+async def perform_link(session_id, match_id, actor_id):
+    """Open a session, link, log the actor on success. db_session() commits on exit."""
+    async with db_session() as session:
+        outcome = await link_draft_to_match(session, session_id, match_id, actor_id)
+    # No extra commit: db_session() commits on normal exit; failure paths made no writes.
+    if outcome.status == "linked":
+        logger.info(f"Premade draft {session_id} linked to tournament match "
+                    f"{match_id} by {actor_id}")
+    return outcome
+
+
+_FAIL_TEXT = {
+    "already_linked": "This draft is already linked to a tournament match.",
+    "match_played": "That match already has a recorded result.",
+    "match_taken": "That match was just linked to another draft.",
+    "no_match": "That match no longer exists.",
+}
+
+
+async def apply_confirmation(session_id, match_id, actor_id, actor_mention, public_message):
+    """Link, edit the public nudge message (dropping its control), return ephemeral note.
+
+    On success: attribution note naming the match + the acting user. On any
+    terminal failure: a failure note. Either way the public control is removed.
+    """
+    outcome = await perform_link(session_id, match_id, actor_id)
+    if outcome.status == "linked":
+        public_note = (f"✅ Linked to **{outcome.a_name}** vs **{outcome.b_name}** "
+                       f"(Round {outcome.round_number}) by {actor_mention} — "
+                       f"the result records automatically.")
+        ephemeral = "Linked. ✅"
+    else:
+        public_note = f"❌ {_FAIL_TEXT.get(outcome.status, 'Could not link.')}"
+        ephemeral = public_note
+    if public_message is not None:
+        try:
+            await public_message.edit(content=public_note, view=None)
+        except discord.HTTPException:
+            pass
+    return ephemeral
+
+
+class LinkConfirmView(discord.ui.View):
+    """Ephemeral Confirm/Cancel shown after a button click or dropdown pick."""
+
+    def __init__(self, session_id, match_id, public_message):
+        super().__init__(timeout=120)
+        self.session_id = session_id
+        self.match_id = match_id
+        self.public_message = public_message  # the public nudge message to edit
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
+    async def confirm(self, button, interaction):
+        note = await apply_confirmation(
+            self.session_id, self.match_id, str(interaction.user.id),
+            interaction.user.mention, self.public_message)
+        await interaction.response.edit_message(content=note, view=None)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, button, interaction):
+        await interaction.response.edit_message(content="Cancelled.", view=None)
+
+
 async def prompt_link_confirmation(interaction, session_id, match_id):
-    raise NotImplementedError  # implemented in Task 4
+    async with db_session() as session:
+        summary = await match_summary(session, match_id)
+    if summary is None:
+        await interaction.response.send_message("That match no longer exists.", ephemeral=True)
+        return
+    a_name, b_name, round_number = summary
+    view = LinkConfirmView(session_id, match_id, interaction.message)
+    await interaction.response.send_message(
+        content=(f"Link this draft to **{a_name}** vs **{b_name}** (Round {round_number})? "
+                 f"The result will record into the tournament automatically when the "
+                 f"draft finishes."),
+        view=view, ephemeral=True,
+    )
