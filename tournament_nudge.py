@@ -5,9 +5,12 @@ can both import it without a cog import cycle.
 """
 import discord
 from loguru import logger
+from sqlalchemy import select
 
 from database.db_session import db_session
-from services.tournament_linking import link_draft_to_match, match_summary
+from models.draft_session import DraftSession
+from services.tournament_linking import link_draft_to_match, match_summary, resolve_candidate_matches
+from services.tournament_service import get_active_tournament
 
 
 def _match_label(c):
@@ -148,3 +151,31 @@ async def prompt_link_confirmation(interaction, session_id, match_id):
                  f"draft finishes."),
         view=view, ephemeral=True,
     )
+
+
+async def post_premade_nudge(channel, guild_id, session_id, team_a_name, team_b_name):
+    """Resolve candidates for a freshly-created premade draft and post the nudge.
+
+    No-op when the guild has no active tournament, the draft is already linked
+    (e.g. a Play-button launch sets tournament_match_id), or no candidate fits.
+    """
+    async with db_session() as session:
+        draft = (await session.execute(
+            select(DraftSession).where(DraftSession.session_id == session_id)
+        )).scalars().first()
+        # If the draft exists and is already linked (e.g. Play-button launch), skip nudge.
+        if draft is not None and draft.tournament_match_id is not None:
+            return
+        tournament = await get_active_tournament(session, guild_id)
+        if tournament is None:
+            return
+        candidates = await resolve_candidate_matches(
+            session, tournament, team_a_name, team_b_name)
+    built = build_nudge_view(session_id, candidates)
+    if built is None:
+        return
+    content, view = built
+    try:
+        await channel.send(content=content, view=view)
+    except discord.HTTPException as e:
+        logger.warning(f"Could not post tournament-link nudge for {session_id}: {e}")

@@ -169,3 +169,68 @@ async def test_apply_confirmation_failure_drops_control(patched_db):
     note = await apply_confirmation("d1", match_id, "u1", "<@u1>", msg)
     assert note.startswith("❌")
     assert msg.edits == [(note, None)] or (len(msg.edits) == 1 and msg.edits[0][1] is None)
+
+
+class _FakeChannel:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, content=None, view=None):
+        self.sent.append((content, view))
+        return object()
+
+
+@pytest.mark.asyncio
+async def test_post_premade_nudge_posts_when_candidate(patched_db):
+    from tournament_nudge import post_premade_nudge, TournamentLinkButtonView
+    async with patched_db() as s:
+        t = Tournament(guild_id="g1", name="T", total_rounds=1, current_round=1,
+                       status="active", format="manual")
+        s.add(t); await s.flush()
+        r = TournamentRound(tournament_id=t.id, round_number=1); s.add(r); await s.flush()
+        pa = TournamentParticipant(tournament_id=t.id, team_id=1, team_name="Latecomers",
+                                   captain_user_id="1")
+        pb = TournamentParticipant(tournament_id=t.id, team_id=2, team_name="Strixhaven Dropouts",
+                                   captain_user_id="2")
+        s.add_all([pa, pb]); await s.flush()
+        s.add(TournamentMatch(round_id=r.id, team_a_participant_id=pa.id, team_b_participant_id=pb.id))
+        await s.commit()
+
+    ch = _FakeChannel()
+    await post_premade_nudge(ch, "g1", "d1", "Latecomers", "Strixhaven Dropouts")
+    assert len(ch.sent) == 1
+    assert isinstance(ch.sent[0][1], TournamentLinkButtonView)
+
+
+@pytest.mark.asyncio
+async def test_post_premade_nudge_silent_without_tournament(patched_db):
+    from tournament_nudge import post_premade_nudge
+    ch = _FakeChannel()
+    await post_premade_nudge(ch, "g1", "d1", "Latecomers", "Strixhaven Dropouts")
+    assert ch.sent == []
+
+
+@pytest.mark.asyncio
+async def test_post_premade_nudge_silent_when_draft_already_linked(patched_db):
+    # A ▶ Play-button launch creates a premade draft with tournament_match_id set;
+    # the hook must NOT nudge it (spec guard #2).
+    from tournament_nudge import post_premade_nudge
+    async with patched_db() as s:
+        t = Tournament(guild_id="g1", name="T", total_rounds=1, current_round=1,
+                       status="active", format="manual")
+        s.add(t); await s.flush()
+        r = TournamentRound(tournament_id=t.id, round_number=1); s.add(r); await s.flush()
+        pa = TournamentParticipant(tournament_id=t.id, team_id=1, team_name="Latecomers",
+                                   captain_user_id="1")
+        pb = TournamentParticipant(tournament_id=t.id, team_id=2, team_name="Strixhaven Dropouts",
+                                   captain_user_id="2")
+        s.add_all([pa, pb]); await s.flush()
+        m = TournamentMatch(round_id=r.id, team_a_participant_id=pa.id, team_b_participant_id=pb.id)
+        s.add(m); await s.flush()
+        s.add(DraftSession(session_id="d1", guild_id="g1", session_type="premade",
+                           team_a_name="Latecomers", team_b_name="Strixhaven Dropouts",
+                           tournament_match_id=m.id))
+        await s.commit()
+    ch = _FakeChannel()
+    await post_premade_nudge(ch, "g1", "d1", "Latecomers", "Strixhaven Dropouts")
+    assert ch.sent == []
