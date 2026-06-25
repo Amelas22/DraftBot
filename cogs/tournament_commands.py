@@ -491,6 +491,26 @@ class TournamentCog(commands.Cog):
             tournament.standings_channel_id = str(message.channel.id)
             tournament.standings_message_id = str(message.id)
 
+    @tournament.command(name="refresh_standings", description="Admin: re-render the standings message from current results")
+    @has_bot_manager_role()
+    async def refresh_standings(self, ctx):
+        if not await self._check_enabled(ctx):
+            return
+        await ctx.defer(ephemeral=True)
+        async with db_session() as session:
+            tournament = await get_active_tournament(session, ctx.guild.id)
+            if tournament is None:
+                await ctx.followup.send("There is no active tournament.", ephemeral=True)
+                return
+            tournament_id = tournament.id
+            has_message = tournament.standings_message_id is not None
+        if has_message:
+            await update_standings_message(self.bot, tournament_id)
+        else:
+            await self._post_standings(ctx, tournament_id)
+        logger.info(f"Standings message refreshed for tournament {tournament_id} by {ctx.author.id}")
+        await ctx.followup.send("✅ Standings refreshed.", ephemeral=True)
+
     @tournament.command(name="status", description="Show the current tournament and its teams")
     async def status(self, ctx):
         if not await self._check_enabled(ctx):
