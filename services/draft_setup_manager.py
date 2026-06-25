@@ -11,7 +11,7 @@ import urllib.parse
 import discord
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from config import get_draftmancer_websocket_url, get_draftmancer_base_url, get_draftmancer_session_url
+from config import get_draftmancer_websocket_url, get_draftmancer_base_url, get_draftmancer_session_url, is_test_mode
 from database.db_session import db_session
 from models.draft_session import DraftSession
 from models.match import MatchResult
@@ -45,6 +45,17 @@ MAX_USER_ID_LOOKUP_ATTEMPTS = 5  # Max attempts to find bot's userID in session
 USER_ID_LOOKUP_RETRY_DELAY = 0.5  # Seconds between userID lookup attempts
 DRAFT_LOG_WAIT_ATTEMPTS = 20    # Poll for the draftLog push after endDraft (10s total)
 DRAFT_LOG_WAIT_INTERVAL = 0.5   # Seconds between draftLog availability checks
+# Draft-setup timings. In test mode (TEST_MODE=true) these are shortened so an
+# end-to-end draft completes and publishes in seconds; production uses the real
+# durations. PUBLISH_DELAY_SECONDS aligns with the Draftmancer unlock timer in prod.
+if is_test_mode():
+    PUBLISH_DELAY_SECONDS = 30            # publish ~30s after draft-end (prod: 3h)
+    DRAFT_PICK_TIMER_SECONDS = 3          # fast auto-pick so test drafts finish quickly (prod: 60s)
+    DRAFT_LOG_UNLOCK_TIMER_MINUTES = 1    # Draftmancer public unlock (prod: 180 min)
+else:
+    PUBLISH_DELAY_SECONDS = 180 * 60      # post logs when Draftmancer auto-unlocks (matches setDraftLogUnlockTimer)
+    DRAFT_PICK_TIMER_SECONDS = 60
+    DRAFT_LOG_UNLOCK_TIMER_MINUTES = 180
 OWNERSHIP_CLAIM_TIMEOUT = 3.0  # Seconds to wait for ownership claim confirmation
 SOCKET_OPERATION_DELAY = 0.5  # Seconds between socket operations
 CONNECTION_CHECK_INTERVAL = 10  # Seconds between connection check iterations
@@ -212,10 +223,6 @@ class DraftSetupManager:
         self.removing_unexpected_user = False
         self.timeout_message_id = None
 
-        # Draft logs variables
-        self.logs_collection_attempted = False
-        self.logs_collection_in_progress = False
-        self.logs_collection_success = False
         self.session_type = "team"  # Default to team drafts
 
         
@@ -249,10 +256,6 @@ class DraftSetupManager:
         self.session_users_received = False
         self.ready_check_in_progress = False
         self.settings_updated = False
-        self.log_collection_task = None
-        self.log_collection_retry_count = 0 
-        self.MAX_LOG_COLLECTION_RETRIES = 5
-        self.log_release_vote_active = False
         
     # Add a listener to capture draft logs
     async def _on_draft_log(self, draft_log):
@@ -308,6 +311,9 @@ class DraftSetupManager:
                 await self.capture_draft_log(self.current_draft_log)
             else:
                 self.logger.warning(f"No draft log available to capture for {self.session_id}")
+            # Schedule the publish (post links) for when Draftmancer makes the log
+            # public (~180 min). Posting is decoupled from match completion.
+            asyncio.create_task(self.schedule_publish(PUBLISH_DELAY_SECONDS))
 
     # Listen for Pause or Unpause (Resume)
     async def _on_draft_paused(self, data):
@@ -725,81 +731,6 @@ class DraftSetupManager:
             self.logger.error(f"Error connecting to new session: {e}")
             return False
 
-    async def collect_draft_logs(self):
-        """Collect draft logs and process them"""
-        if self.logs_collection_attempted or self.logs_collection_in_progress:
-            self.logger.info("Log collection already attempted or in progress, skipping")
-            return
-        
-        self.logs_collection_in_progress = True
-        self.logger.info("Starting draft log collection")
-        
-        try:
-            # Get session type information from database
-            await self.fetch_draft_info()
-            
-            # Attempt to fetch draft log data
-            for attempt in range(36):  # Try up to 36 times (3 hours)
-                data_fetched = await self.fetch_draft_log_data()
-                if data_fetched:
-                    self.logs_collection_success = True
-                    self.logger.info(f"Successfully collected draft logs on attempt {attempt+1}")
-                    break
-                
-                self.logger.info(f"Draft log data not available on attempt {attempt+1}, waiting 5 minutes before retrying")
-                await asyncio.sleep(300)  # Wait 5 minutes before retrying
-            
-            if not self.logs_collection_success:
-                self.logger.warning("Failed to collect draft logs after multiple attempts")
-        
-        except Exception as e:
-            self.logger.exception(f"Error collecting draft logs: {e}")
-        
-        finally:
-            self.logs_collection_attempted = True
-            self.logs_collection_in_progress = False
-            
-            # If we collected logs successfully, check victory status before disconnect
-            if self.logs_collection_success:
-                self.logger.info("Log collection successful, checking victory status before disconnect")
-                await self._handle_victory_aware_disconnect()
-            else:
-                self.logger.info("Log collection failed, bot will remain connected")
-
-    async def fetch_draft_log_data(self):
-        """Fetch draft log data from the Draftmancer API"""
-        base_url = get_draftmancer_base_url()
-        url = f"{base_url}/getDraftLog/DB{self.draft_id}"
-        
-        self.logger.info(f"Fetching draft log data from {url}")
-        
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.get(url) as response:
-                    if response.status == 200:
-                        draft_data = await response.json()
-                        
-                        # Check if we have user picks
-                        has_picks = False
-                        for user_data in draft_data.get("users", {}).values():
-                            if user_data.get("picks") and len(user_data.get("picks")) > 0:
-                                has_picks = True
-                                break
-                        
-                        if not has_picks:
-                            self.logger.info(f"Draft log data for {self.draft_id} has no picks yet")
-                            return False
-                        
-                        # Save the data
-                        await self.save_draft_log_data(draft_data)
-                        return True
-                    else:
-                        self.logger.warning(f"Failed to fetch draft log data: status code {response.status}")
-                        return False
-            except Exception as e:
-                self.logger.error(f"Exception while fetching draft log data: {e}")
-                return False
-
     async def capture_draft_log(self, draft_data):
         """Persist the draft log as soon as the draft ends, WITHOUT posting it.
 
@@ -869,72 +800,72 @@ class DraftSetupManager:
             self.logger.exception(f"Error capturing draft log: {e}")
             return False
 
-    async def save_draft_log_data(self, draft_data):
-        """Save draft log data to database and process it"""
+    async def publish_draft_log(self, release=False):
+        """Post the captured draft log to Discord and mark it published.
+
+        Reads the already-captured `draft_data` from the DB (capture runs at
+        draft-end), posts the MagicProTools embed, and sets `data_received`.
+        Works without a live socket — it operates on the saved data. Idempotent:
+        a session already published (`data_received`) is skipped.
+
+        When `release=True` (manual early release) and the socket is still
+        connected, the Draftmancer log is unlocked first via `shareDraftLog`; the
+        timer-driven path does not release (Draftmancer auto-unlocks on its own).
+        """
         try:
-
-            # Save to DigitalOcean Spaces
-            upload_successful = await self.save_to_digitalocean_spaces(draft_data)
-            
-            # Extract and store first picks for each user and pack
-            draftmancer_user_picks = {}
-            for user_id, user_data in draft_data["users"].items():
-                user_pack_picks = self.get_pack_first_picks(draft_data, user_id)
-                draftmancer_user_picks[user_id] = user_pack_picks
-            
-            # We need to convert Draftmancer user IDs to Discord user IDs
-            discord_user_pack_picks = {}
-            
-            # Use a fresh database session for this operation
             async with db_session() as session:
-                # Get the draft session within this session context
-                stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
-                result = await session.execute(stmt)
-                draft_session = result.scalar_one_or_none()
-                
+                draft_session = (await session.execute(
+                    select(DraftSession).filter(DraftSession.session_id == self.session_id)
+                )).scalar_one_or_none()
                 if not draft_session:
-                    self.logger.warning(f"No draft session found for session_id: {self.session_id}")
+                    self.logger.warning(f"No draft session for {self.session_id}; cannot publish")
                     return False
+                if draft_session.data_received:
+                    self.logger.info(f"Draft log already published for {self.session_id}; skipping")
+                    return True
+                draft_data = draft_session.draft_data
 
-                # Get Discord IDs from sign_ups
-                if draft_session.sign_ups:
-                    # Get list of Discord user IDs from sign_ups
-                    discord_ids = list(draft_session.sign_ups.keys())
-                    
-                    # Sort users by seat number
-                    sorted_users = sorted(
-                        [(user_id, user_data) for user_id, user_data in draft_data["users"].items()],
-                        key=lambda item: item[1].get("seatNum", 999)
-                    )
-                    
-                    # Map Draftmancer user IDs to Discord user IDs based on draft seat order
-                    for idx, (draft_user_id, _) in enumerate(sorted_users):
-                        if idx < len(discord_ids):
-                            discord_id = discord_ids[idx]
-                            if draft_user_id in draftmancer_user_picks:
-                                discord_user_pack_picks[discord_id] = draftmancer_user_picks[draft_user_id]
-                
-                # Update draft session directly in this session context
-                if upload_successful:
-                    draft_session.data_received = True
-                    draft_session.pack_first_picks = discord_user_pack_picks
-                    self.logger.info(f"Stored first picks for {len(discord_user_pack_picks)} users with Discord IDs as keys")
-                else:
-                    draft_session.draft_data = draft_data
-                    self.logger.info(f"Draft log data saved in database for {self.draft_id}")
-                
-                # Commit changes
-                await session.commit()
-            
-            # Send MagicProTools embed to Discord if bot is available
+            if not draft_data:
+                self.logger.warning(f"No captured draft_data for {self.session_id}; nothing to publish")
+                return False
+
+            # Manual early release: unlock the Draftmancer log now (best-effort).
+            if release and self.socket_client.connected and self.current_draft_log:
+                try:
+                    log_copy = self.current_draft_log.copy()
+                    log_copy['delayed'] = False
+                    await self.socket_client.emit('shareDraftLog', log_copy)
+                    self.logger.info(f"Released Draftmancer log for {self.session_id} (manual early)")
+                except Exception as e:
+                    self.logger.error(f"Failed to release Draftmancer log for {self.session_id}: {e}")
+
+            # Post the MagicProTools embed/links to Discord.
             if self.guild_id:
                 await self.send_magicprotools_embed(draft_data)
-            
-            return upload_successful
-                
+
+            async with db_session() as session:
+                draft_session = (await session.execute(
+                    select(DraftSession).filter(DraftSession.session_id == self.session_id)
+                )).scalar_one_or_none()
+                if draft_session:
+                    draft_session.data_received = True
+                    await session.commit()
+
+            self.logger.info(f"Published draft log for {self.session_id} (release={release})")
+            return True
         except Exception as e:
-            self.logger.exception(f"Error saving draft log data: {e}")
+            self.logger.exception(f"Error publishing draft log: {e}")
             return False
+
+    async def schedule_publish(self, delay_seconds):
+        """Wait `delay_seconds`, then publish the captured log (the single
+        ~180-min timer aligned to Draftmancer's auto-unlock)."""
+        try:
+            self.logger.info(f"Scheduled publish in {delay_seconds}s for {self.session_id}")
+            await asyncio.sleep(delay_seconds)
+            await self.publish_draft_log()
+        except Exception as e:
+            self.logger.exception(f"Error in scheduled publish for {self.session_id}: {e}")
 
     async def save_to_digitalocean_spaces(self, draft_data):
         """Upload draft log data to DigitalOcean Spaces"""
@@ -1908,9 +1839,6 @@ class DraftSetupManager:
         """Mark that the draft is being cancelled manually, skip log collection"""
         self.logger.info(f"Marking draft {self.draft_id} as manually cancelled")
         self.draft_cancelled = True
-        # Set these flags to prevent log collection attempts for cancelled drafts
-        self.logs_collection_attempted = True
-        self.logs_collection_success = False
         
     async def disconnect_safely(self):
         """
@@ -2086,11 +2014,11 @@ class DraftSetupManager:
             self.logger.debug("Updating draft settings...")
             await self.socket_client.emit('setColorBalance', False)
             await self.socket_client.emit('setMaxPlayers', 10)
-            await self.socket_client.emit('setDraftLogUnlockTimer', 180)
+            await self.socket_client.emit('setDraftLogUnlockTimer', DRAFT_LOG_UNLOCK_TIMER_MINUTES)
             await self.socket_client.emit('setDraftLogRecipients', "delayed")
             await self.socket_client.emit('setPersonalLogs', True)
             await self.socket_client.emit('teamDraft', True)  # Added teamDraft setting
-            await self.socket_client.emit('setPickTimer', 60)
+            await self.socket_client.emit('setPickTimer', DRAFT_PICK_TIMER_SECONDS)
             await self.socket_client.emit('setOwnerIsPlayer', False)
             await self.socket_client.emit('boostersPerPlayer', self.packs_per_player)
             await self.socket_client.emit('cardsPerBooster', self.cards_per_pack)
@@ -2477,71 +2405,14 @@ class DraftSetupManager:
     # NOTE: connect_with_retry is now handled by self.socket_client.connect_with_retry()
 
     async def manually_unlock_draft_logs(self):
-        """
-        Manually unlock draft logs for the currently connected Draftmancer session.
-        """
-        try:
-            self.logger.info("Attempting to unlock draft logs for the connected Draftmancer session")
-            
-            # First, try to request the current draft log if we don't have it
-            if not self.current_draft_log:
-                self.logger.info("No draft log captured yet, attempting to request it")
-                
-                # Try to get the current draft log by requesting it
-                callback_future = asyncio.Future()
-                
-                def on_draft_log_response(draft_log):
-                    if draft_log:
-                        self.logger.info("Received draft log from request")
-                        self.current_draft_log = draft_log
-                    callback_future.set_result(draft_log is not None)
-                
-                # Request the current draft log
-                await self.socket_client.emit('getCurrentDraftLog', callback=on_draft_log_response)
-                
-                # Wait for response with timeout
-                try:
-                    success = await asyncio.wait_for(callback_future, timeout=5)
-                    if not success:
-                        self.logger.warning("Failed to get current draft log")
-                except asyncio.TimeoutError:
-                    self.logger.warning("Timeout waiting for draft log")
-            
-            # Now try to unlock the logs
-            if self.current_draft_log:
-                # Create a copy of the log to modify
-                draft_log = self.current_draft_log.copy()
-                
-                # Set delayed to false to make it public
-                draft_log['delayed'] = False
-                
-                # Emit the modified log
-                self.logger.info(f"Sharing draft log with delayed=false")
-                await self.socket_client.emit('shareDraftLog', draft_log)
-                
-                self.logger.info("Logs unlocked using captured draft log")
-            else:
-                # Fallback: try to create a minimal log with just the essential information
-                self.logger.warning("No draft log available, further improvement required")
-            
-            # Continue with log collection as before
-            if not self.logs_collection_attempted and not self.logs_collection_in_progress:
-                asyncio.create_task(self.schedule_log_collection(60))
-            
-            return True
-        except Exception as e:
-            self.logger.error(f"Error unlocking draft logs: {e}")
-            return False
+        """Manually release + publish the draft log now (early, before the timer).
 
-    async def schedule_log_collection(self, delay_seconds):
-        """Schedule log collection after a delay to ensure all data is available"""
-        try:
-            self.logger.info(f"Scheduling log collection in {delay_seconds} seconds")
-            await asyncio.sleep(delay_seconds)
-            await self.collect_draft_logs()
-        except Exception as e:
-            self.logger.exception(f"Error scheduling log collection: {e}")
-                
+        Used by the manual 'release logs' vote. Delegates to publish_draft_log
+        with release=True, which unlocks the Draftmancer log (shareDraftLog) when
+        still connected and posts the captured log to Discord.
+        """
+        return await self.publish_draft_log(release=True)
+
     async def update_cube(self, new_cube_id: str) -> bool:
         """
         Updates the cube ID and imports the new cube.

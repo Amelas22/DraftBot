@@ -17,7 +17,6 @@ from quiz_views_module.quiz_views import QuizPublicView
 from services.draft_analysis import DraftAnalysis
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
-from services.draft_setup_manager import DraftSetupManager
 from services.debt_service import create_debt_entries_from_stakes, get_guild_debt_rows, get_balance_with
 from debt_views import SettleDebtsView
 from debt_views.settle_views import PublicSettleDebtsView
@@ -668,7 +667,6 @@ def find_postable_results_channel(guild, name):
 
 
 async def check_and_post_victory_or_draw(bot, draft_session_id):
-    draft_manager = DraftSetupManager.get_active_manager(draft_session_id)
     async with AsyncSessionLocal() as session:
         async with session.begin():
             draft_session = await get_draft_session(draft_session_id)
@@ -936,15 +934,9 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                     else:
                         print(f"Results channel '{results_channel_name}' not found.")
 
-                    # Unlock logs for posting
-                    if draft_manager:
-                        logger.info(f"Victory/draw determined - unlocking logs for session {draft_session_id}")
-                        await draft_manager.manually_unlock_draft_logs()
-
-                        # Small delay to allow logs to process
-                        await asyncio.sleep(2)
-                    else:
-                        logger.warning(f"No active manager found for session {draft_session_id} - logs may remain locked")
+                    # Logs are posted by the deferred-capture publish timer (~180 min,
+                    # set at draft-end) or the manual release vote — no longer unlocked
+                    # at victory. See docs/superpowers/specs/2026-06-22-deferred-draft-log-capture-design.md
 
                     # Update draft win streaks (Order of the White Lotus) and collect extension info
                     draft_streak_extensions = {}
