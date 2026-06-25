@@ -20,6 +20,23 @@ class PremadeSession(BaseSession):
         self.session_details.team_a_name = self.session_details.team_a_name or "Team A"
         self.session_details.team_b_name = self.session_details.team_b_name or "Team B"
         await super().create_draft_session(interaction, bot)
+        # A ▶ Play-button launch already carries a tournament_match_id override —
+        # don't nudge those (cheap guard; post_premade_nudge re-checks the DB too).
+        if getattr(self.session_details, "tournament_match_id", None) is not None:
+            return
+        # Nudge: if this looks like an ongoing tournament match, offer to link it.
+        try:
+            from tournament_nudge import post_premade_nudge
+            await post_premade_nudge(
+                interaction.channel,
+                interaction.guild.id,
+                self.draft_manager.session_id,
+                self.session_details.team_a_name,
+                self.session_details.team_b_name,
+            )
+        except Exception as e:
+            from loguru import logger
+            logger.error(f"premade tournament nudge failed: {e}")
 
     def _create_embed_content(self):
         """Create an embed message for a premade draft session."""
