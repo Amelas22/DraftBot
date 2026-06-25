@@ -43,6 +43,8 @@ SESSION_STAGE_PAIRINGS = "pairings"
 # Connection and retry settings
 MAX_USER_ID_LOOKUP_ATTEMPTS = 5  # Max attempts to find bot's userID in session
 USER_ID_LOOKUP_RETRY_DELAY = 0.5  # Seconds between userID lookup attempts
+DRAFT_LOG_WAIT_ATTEMPTS = 20    # Poll for the draftLog push after endDraft (10s total)
+DRAFT_LOG_WAIT_INTERVAL = 0.5   # Seconds between draftLog availability checks
 OWNERSHIP_CLAIM_TIMEOUT = 3.0  # Seconds to wait for ownership claim confirmation
 SOCKET_OPERATION_DELAY = 0.5  # Seconds between socket operations
 CONNECTION_CHECK_INTERVAL = 10  # Seconds between connection check iterations
@@ -296,6 +298,16 @@ class DraftSetupManager:
                                 await channel.send("Failed to create rooms and pairings. Check logs for details.")
             else:
                 self.logger.info("Could not find guild")
+            # Capture the draft log immediately so it is never lost (Slice 1).
+            # The draftLog push may land just after endDraft; wait briefly for it.
+            for _ in range(DRAFT_LOG_WAIT_ATTEMPTS):
+                if self.current_draft_log:
+                    break
+                await asyncio.sleep(DRAFT_LOG_WAIT_INTERVAL)
+            if self.current_draft_log:
+                await self.capture_draft_log(self.current_draft_log)
+            else:
+                self.logger.warning(f"No draft log available to capture for {self.session_id}")
 
     # Listen for Pause or Unpause (Resume)
     async def _on_draft_paused(self, data):
@@ -787,6 +799,75 @@ class DraftSetupManager:
             except Exception as e:
                 self.logger.error(f"Exception while fetching draft log data: {e}")
                 return False
+
+    async def capture_draft_log(self, draft_data):
+        """Persist the draft log as soon as the draft ends, WITHOUT posting it.
+
+        Saves the raw log to the DB (`draft_data`) and DigitalOcean Spaces (raw
+        JSON + per-player MagicProTools files via save_to_digitalocean_spaces),
+        records pack first-picks, and stamps `logs_captured_at`. Does NOT post the
+        Discord embed or set `data_received` — that happens at publish.
+
+        The raw log is always written to the DB so it is never lost (publish can
+        post from `draft_data` even if Spaces failed). `logs_captured_at` /
+        `pack_first_picks` are only set when the Spaces upload succeeds, so a
+        failed upload stays retryable (logs_captured_at stays NULL -> reconnect
+        re-captures). Idempotent: a session already captured is skipped.
+        """
+        if not draft_data:
+            self.logger.warning("capture_draft_log called with no draft_data; skipping")
+            return False
+        try:
+            # Idempotency guard.
+            async with db_session() as session:
+                existing = (await session.execute(
+                    select(DraftSession).filter(DraftSession.session_id == self.session_id)
+                )).scalar_one_or_none()
+                if existing is None:
+                    self.logger.warning(f"No draft session for {self.session_id}; skipping capture")
+                    return False
+                if existing.logs_captured_at is not None:
+                    self.logger.info(f"Draft log already captured for {self.session_id}; skipping")
+                    return True
+
+            # Upload raw JSON + per-player MPT files to Spaces.
+            upload_successful = await self.save_to_digitalocean_spaces(draft_data)
+
+            async with db_session() as session:
+                draft_session = (await session.execute(
+                    select(DraftSession).filter(DraftSession.session_id == self.session_id)
+                )).scalar_one_or_none()
+                if not draft_session:
+                    # Spaces upload may already have happened; only the DB write failed.
+                    self.logger.warning(f"No draft session for {self.session_id} (spaces_upload={upload_successful})")
+                    return False
+
+                # Always persist the raw log so the data is never lost.
+                draft_session.draft_data = draft_data
+
+                # Only mark fully captured when Spaces succeeded, so a failed
+                # upload stays retryable (logs_captured_at stays NULL).
+                if upload_successful:
+                    discord_user_pack_picks = {}
+                    if draft_session.sign_ups:
+                        discord_ids = list(draft_session.sign_ups.keys())
+                        sorted_users = sorted(
+                            draft_data["users"].items(),
+                            key=lambda item: item[1].get("seatNum", 999),
+                        )
+                        for idx, (draft_user_id, _) in enumerate(sorted_users):
+                            if idx < len(discord_ids):
+                                discord_user_pack_picks[discord_ids[idx]] = self.get_pack_first_picks(draft_data, draft_user_id)
+                    draft_session.pack_first_picks = discord_user_pack_picks
+                    draft_session.logs_captured_at = datetime.now()
+
+                await session.commit()
+
+            self.logger.info(f"Captured draft log for {self.session_id} (spaces_upload={upload_successful})")
+            return upload_successful
+        except Exception as e:
+            self.logger.exception(f"Error capturing draft log: {e}")
+            return False
 
     async def save_draft_log_data(self, draft_data):
         """Save draft log data to database and process it"""
