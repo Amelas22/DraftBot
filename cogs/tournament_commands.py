@@ -45,6 +45,11 @@ def _cube_picker_for_match(interaction, match_id, a_name, b_name):
     )
 
 
+def _recorded_result_line(a_name, b_name, a_wins, b_wins):
+    """The 'result recorded' line that replaces a played match's Play button."""
+    return f"✅ Result recorded: **{a_name}** {a_wins}–{b_wins} **{b_name}**"
+
+
 async def launch_tournament_match(interaction, match_id):
     """'Play this match' button: run the draft lobby in a per-match thread.
 
@@ -59,11 +64,28 @@ async def launch_tournament_match(interaction, match_id):
             await interaction.response.send_message("This match no longer exists.", ephemeral=True)
             return
         if match.team_a_wins is not None:
-            await interaction.response.send_message(
-                "This match already has a recorded result and can't be replayed. "
-                "Ask an admin if it needs correcting.",
-                ephemeral=True,
-            )
+            # Self-heal the stale button: replace it on the public pairing message
+            # with a recorded-result line, so it's gone for everyone (not just an
+            # ephemeral notice to the clicker).
+            part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
+            part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
+            result_line = _recorded_result_line(
+                part_a.team_name, part_b.team_name, match.team_a_wins, match.team_b_wins)
+            edited = False
+            if interaction.message is not None:
+                try:
+                    existing = interaction.message.content or ""
+                    new_content = f"{existing}\n{result_line}" if existing else result_line
+                    await interaction.response.edit_message(content=new_content, view=None)
+                    edited = True
+                except discord.HTTPException:
+                    edited = False
+            if not edited:
+                await interaction.response.send_message(
+                    "This match already has a recorded result and can't be replayed. "
+                    "Ask an admin if it needs correcting.",
+                    ephemeral=True,
+                )
             return
         part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
         part_b = await session.get(TournamentParticipant, match.team_b_participant_id)

@@ -35,3 +35,10 @@ def test_register_and_status_are_open_to_everyone():
 
     assert is_bot_manager not in TournamentCog.register.checks
     assert is_bot_manager not in TournamentCog.status.checks
+
+
+def test_recorded_result_line_formats_score():
+    from cogs.tournament_commands import _recorded_result_line
+
+    line = _recorded_result_line("Latecomers", "Strixhaven Dropouts", 5, 4)
+    assert line == "✅ Result recorded: **Latecomers** 5–4 **Strixhaven Dropouts**"
