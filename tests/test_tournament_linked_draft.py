@@ -309,12 +309,17 @@ async def test_launch_refuses_already_reported_match(test_db):
             await inner.commit()
 
     interaction = MagicMock()
+    interaction.message.content = "Round 1 pairing"
+    interaction.response.edit_message = AsyncMock()
     interaction.response.send_message = AsyncMock()
     with patch("cogs.tournament_commands.db_session", fake_db_session):
         await launch_tournament_match(interaction, match_id)
 
-    interaction.response.send_message.assert_awaited_once()
-    msg = interaction.response.send_message.call_args.args[0]
-    assert "already" in msg.lower() and "result" in msg.lower()
-    # must NOT have launched a draft (no view passed)
-    assert "view" not in interaction.response.send_message.call_args.kwargs
+    # Stale Play button self-heals: the public pairing message is edited to drop
+    # the button (view=None) and show the recorded result; no draft is launched.
+    interaction.response.edit_message.assert_awaited_once()
+    kwargs = interaction.response.edit_message.call_args.kwargs
+    assert kwargs.get("view") is None
+    assert "result recorded" in kwargs["content"].lower()
+    assert "2–0" in kwargs["content"]
+    interaction.response.send_message.assert_not_awaited()
