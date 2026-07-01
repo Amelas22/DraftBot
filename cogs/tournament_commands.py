@@ -533,6 +533,63 @@ class TournamentCog(commands.Cog):
         logger.info(f"Standings message refreshed for tournament {tournament_id} by {ctx.author.id}")
         await ctx.followup.send("✅ Standings refreshed.", ephemeral=True)
 
+    @tournament.command(name="recover_draft", description="Admin: recreate channels for a reaped in-progress match draft")
+    @has_bot_manager_role()
+    async def recover_draft(
+        self,
+        ctx,
+        match_id: discord.Option(int, "Tournament match id to recover"),
+    ):
+        if not await self._check_enabled(ctx):
+            return
+        await ctx.defer(ephemeral=True)
+        from models.draft_session import DraftSession
+        from utils import recover_draft_channels
+
+        async with db_session() as session:
+            match = await session.get(TournamentMatch, match_id)
+            if match is None:
+                await ctx.followup.send(f"❌ No tournament match `{match_id}`.", ephemeral=True)
+                return
+            if match.team_a_wins is not None:
+                await ctx.followup.send(
+                    f"❌ Match `{match_id}` already has a result — nothing to recover.",
+                    ephemeral=True,
+                )
+                return
+            ds = (await session.execute(
+                select(DraftSession).where(DraftSession.tournament_match_id == match_id)
+            )).scalars().first()
+            if ds is None:
+                await ctx.followup.send(
+                    f"❌ No draft session is linked to match `{match_id}`.", ephemeral=True
+                )
+                return
+            session_id = ds.session_id
+            existing_chat = ds.draft_chat_channel
+
+        # Idempotency: refuse if the current draft-chat still resolves to a live channel.
+        if existing_chat and ctx.guild.get_channel(int(existing_chat)):
+            await ctx.followup.send(
+                f"❌ Match `{match_id}`'s draft-chat (<#{existing_chat}>) still exists — "
+                f"nothing to recover.",
+                ephemeral=True,
+            )
+            return
+
+        new_channel_id = await recover_draft_channels(self.bot, ctx.guild, session_id)
+        if new_channel_id is None:
+            await ctx.followup.send("❌ Recovery failed — see logs.", ephemeral=True)
+            return
+        logger.info(
+            f"Recovered draft for match {match_id} (session {session_id}) in guild "
+            f"{ctx.guild.id} by {ctx.author.id} -> channel {new_channel_id}"
+        )
+        await ctx.followup.send(
+            f"✅ Recovered match `{match_id}`. New draft-chat: <#{new_channel_id}>.",
+            ephemeral=True,
+        )
+
     @tournament.command(name="status", description="Show the current tournament and its teams")
     async def status(self, ctx):
         if not await self._check_enabled(ctx):
