@@ -494,3 +494,24 @@ async def get_standings_data(session, tournament_id):
         .where(TournamentRound.tournament_id == tournament_id)
     )).scalars().all()
     return rank_standings(participants, matches)
+
+
+async def tournament_match_is_unfinished(session, match_id):
+    """True iff the tournament match exists, isn't a bye, and has no result yet."""
+    if not match_id:
+        return False
+    match = await session.get(TournamentMatch, int(match_id))
+    if match is None or match.is_bye:
+        return False
+    return match.team_a_wins is None
+
+
+async def extend_deletion_if_unfinished(session, draft_session, now):
+    """Cleanup guard: if the draft's tournament match is still unfinished, push its
+    deletion_time out (7 days) so cleanup won't reap it mid-match. Returns True when
+    the session should be skipped by cleanup, False otherwise."""
+    from datetime import timedelta
+    if await tournament_match_is_unfinished(session, draft_session.tournament_match_id):
+        draft_session.deletion_time = now + timedelta(days=7)
+        return True
+    return False
