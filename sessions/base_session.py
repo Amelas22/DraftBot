@@ -132,11 +132,11 @@ class BaseSession:
         """Add signup-related fields to the embed. Override in subclasses for custom behavior."""
         embed.add_field(name="Sign-Ups:", value="No players yet.", inline=False)
 
-    def get_session_type(self):
+    def get_session_type(self) -> str:
         """Implemented in subclasses."""
         raise NotImplementedError
 
-    def get_premade_match_id(self):
+    def get_premade_match_id(self) -> int | None:
         """Return None by default, overridden in subclasses if applicable."""
         return None
 

@@ -93,7 +93,7 @@ class DraftAnalysis:
     # === Properties ===
 
     @property
-    def session_id(self) -> str:
+    def session_id(self) -> str | None:
         """Draftmancer session ID."""
         return self._indexer.session_id
 

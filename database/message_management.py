@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, cast
 import discord
 from helpers.pin_helpers import safe_pin
 from sqlalchemy import JSON, Column, Integer, String, Boolean, Float, select, text, REAL
@@ -65,7 +65,7 @@ async def fetch_all_sticky_messages(session: AsyncSession) -> list[Message]:
     result = await session.execute(
         select(Message).filter_by(is_sticky=True)
     )
-    return result.scalars().all()
+    return list(result.scalars().all())
 
 
 async def _get_guild(bot: discord.Client, guild_id: str) -> Optional[discord.Guild]:
@@ -175,7 +175,7 @@ class DraftStickyStrategy(StickyStrategy):
         updated_metadata["session_stage"] = draft_session.session_stage
 
         # Get existing embed from old message, or regenerate if not found
-        channel = await bot.fetch_channel(int(sticky_message.channel_id))
+        channel = cast(discord.TextChannel, await bot.fetch_channel(int(sticky_message.channel_id)))
         try:
             old_message = await channel.fetch_message(int(sticky_message.message_id))
             embed = old_message.embeds[0] if old_message.embeds else None
@@ -274,8 +274,9 @@ class DebtSummaryStickyStrategy(StickyStrategy):
         from debt_views.helpers import build_guild_debt_embed_pages
         from debt_views.settle_views import PublicSettleDebtsView
 
+        from helpers.utils import not_none
         guild_id = sticky_message.guild_id
-        guild = bot.get_guild(int(guild_id))
+        guild = not_none(bot.get_guild(int(guild_id)))
 
         # Re-fetch debt data to allow the sticky update to refresh content
         rows = await get_guild_debt_rows(guild_id)
@@ -353,7 +354,7 @@ async def handle_sticky_message_update(
         await session.commit()
         return StickyUpdateResult.CLEANED_UP
 
-    channel = await bot.fetch_channel(int(sticky_message.channel_id))
+    channel = cast(discord.TextChannel, await bot.fetch_channel(int(sticky_message.channel_id)))
 
     # Generate new content
     try:
@@ -366,7 +367,12 @@ async def handle_sticky_message_update(
 
     # Send new message
     try:
-        new_message = await channel.send(content=content, embed=embed, view=view)
+        send_kwargs: dict = {"content": content}
+        if embed is not None:
+            send_kwargs["embed"] = embed
+        if view is not None:
+            send_kwargs["view"] = view
+        new_message = await channel.send(**send_kwargs)
     except discord.Forbidden:
         logger.error(f"Missing permissions to send message in {channel.id}")
         return StickyUpdateResult.FAILED
@@ -543,7 +549,8 @@ async def remove_sticky_message(message: discord.Message) -> None:
         # If notification exists, try delete
         if sticky_message.notification_message_id:
             try:
-                guild = message.guild
+                from helpers.utils import not_none
+                guild = not_none(message.guild)
                 notification_channel = await find_notification_channel(guild)
                 if notification_channel:
                     notification_msg = await notification_channel.fetch_message(int(sticky_message.notification_message_id))

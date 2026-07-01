@@ -48,7 +48,7 @@ def get_crown_icon(member: discord.Member, guild: Optional[discord.Guild]) -> st
     return ""
 
 
-def get_display_name(member: discord.Member, guild: Optional[discord.Guild] = None) -> str:
+def get_display_name(member: discord.Member | discord.User, guild: Optional[discord.Guild] = None) -> str:
     """
     Get display name for a Discord member, with ring bearer and/or crown icon if applicable.
 
@@ -65,8 +65,8 @@ def get_display_name(member: discord.Member, guild: Optional[discord.Guild] = No
 
     icons = []
 
-    # Check for ring bearer icon first
-    if guild:
+    # Check for ring bearer icon first (Member-only: requires .roles)
+    if guild and isinstance(member, discord.Member):
         from config import get_config
         config = get_config(guild.id)
         rb_config = config.get("ring_bearer", {})
@@ -78,8 +78,8 @@ def get_display_name(member: discord.Member, guild: Optional[discord.Guild] = No
                 rb_icon = rb_config.get("icon", "💎")
                 icons.append(rb_icon)
 
-    # Then check for crown icon
-    crown_icon = get_crown_icon(member, guild) if guild else ""
+    # Then check for crown icon (Member-only)
+    crown_icon = get_crown_icon(member, guild) if guild and isinstance(member, discord.Member) else ""
     if crown_icon:
         icons.append(crown_icon)
 

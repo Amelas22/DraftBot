@@ -8,13 +8,14 @@ from loguru import logger
 from helpers.display_names import get_member_name_plain
 from preference_service import get_players_dm_notification_preferences
 from services.debt_service import get_balance_with
+from helpers.utils import not_none
 
 # Rate limiting constants to avoid Discord API throttling
 DM_BATCH_SIZE = 8  # Number of DMs to send per batch (matches typical draft size)
 DM_BATCH_DELAY = 1.0  # Seconds to wait between batches
 
 
-async def send_dm(bot_or_client, user_id: str, message: str, view=None, label: str = None) -> bool:
+async def send_dm(bot_or_client, user_id: str, message: str, view=None, label: str | None = None) -> bool:
     """
     Send a DM to a single user with standard error handling.
 
@@ -27,7 +28,7 @@ async def send_dm(bot_or_client, user_id: str, message: str, view=None, label: s
     who = f"{label} ({user_id})" if label else f"user {user_id}"
     logger.debug(f"Attempting DM to {who}: {message}")
     try:
-        user = bot_or_client.get_user(int(user_id)) or await bot_or_client.fetch_user(int(user_id))
+        user = not_none(bot_or_client.get_user(int(user_id)) or await bot_or_client.fetch_user(int(user_id)))
         await user.send(message, view=view)
         logger.info(f"Successfully sent DM to {who}")
         return True

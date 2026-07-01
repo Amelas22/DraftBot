@@ -16,5 +16,5 @@ class RandomSession(BaseSession):
         embed = Embed(title=title, description=description, color=Color.dark_magenta())
         return embed
 
-    def get_session_type(self):
+    def get_session_type(self) -> str:
         return "random"

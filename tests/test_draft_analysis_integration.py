@@ -48,9 +48,9 @@ async def test_draft_analysis_with_real_draft():
         if trace:
             print(f"  ✅ Found 4-pick sequence!")
             for i, pick in enumerate(trace.picks):
-                card = analysis.get_card(pick.picked_id)
+                card_name = analysis.get_card(pick.picked_id).name if pick.picked_id else "unknown"
                 print(f"     Pick {i+1}: {pick.user_name} (pickNum {pick.pick_num}, "
-                      f"{len(pick.booster_ids)} cards) → {card.name}")
+                      f"{len(pick.booster_ids)} cards) → {card_name}")
         else:
             print(f"  ❌ No 4-pick sequence found")
 
@@ -61,9 +61,9 @@ async def test_draft_analysis_with_real_draft():
             # Show first few picks to understand structure
             print(f"  First 5 picks:")
             for i, pick in enumerate(pack_picks[:5]):
-                card = analysis.get_card(pick.picked_id)
+                card_name = analysis.get_card(pick.picked_id).name if pick.picked_id else "unknown"
                 print(f"     {i+1}. {pick.user_name} pick# {pick.pick_num}: "
-                      f"{len(pick.booster_ids)} cards → {card.name}")
+                      f"{len(pick.booster_ids)} cards → {card_name}")
 
     print("")
     print(f"{'='*70}\n")

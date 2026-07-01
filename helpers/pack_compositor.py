@@ -8,7 +8,7 @@ import asyncio
 import aiohttp
 from io import BytesIO
 from PIL import Image
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from loguru import logger
 
 
@@ -141,12 +141,12 @@ class PackCompositor:
                 card_images = await asyncio.gather(*download_tasks, return_exceptions=True)
 
             # Filter out failed downloads and exceptions
-            valid_images = []
+            valid_images: List[Tuple[int, Image.Image]] = []
             for i, img in enumerate(card_images):
-                if isinstance(img, Exception):
-                    logger.warning(f"Exception downloading card {i}: {img}")
-                elif img is not None:
+                if isinstance(img, Image.Image):
                     valid_images.append((i, img))
+                elif isinstance(img, BaseException):
+                    logger.warning(f"Exception downloading card {i}: {img}")
                 else:
                     logger.warning(f"Failed to download card at index {i}")
 

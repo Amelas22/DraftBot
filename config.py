@@ -237,8 +237,8 @@ class Config:
             
         # Load existing guild configs
         for config_file in config_dir.glob("*.json"):
+            guild_id = config_file.stem
             try:
-                guild_id = config_file.stem
                 with open(config_file, "r") as f:
                     self.configs[guild_id] = json.load(f)
             except Exception as e:

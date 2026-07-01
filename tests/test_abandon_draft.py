@@ -5,8 +5,7 @@ from datetime import datetime
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
 from database.models_base import Base
 from models.draft_session import DraftSession
@@ -21,7 +20,7 @@ async def test_db():
     engine = create_async_engine(f"sqlite+aiosqlite:///{temp_db.name}")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    factory = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
     os.unlink(temp_db.name)

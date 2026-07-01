@@ -23,7 +23,7 @@ class TestCommands(commands.Cog):
     async def delete_draft_channels(
         self,
         ctx,
-        dry_run: discord.Option(bool, "Preview what would be deleted without actually deleting", default=True)
+        dry_run: discord.Option(bool, "Preview what would be deleted without actually deleting", default=True)  # pyrefly: ignore
     ):
         """Delete all draft-related channels (draft-chat*, red-team*, blue-team*) across the server."""
         await ctx.defer(ephemeral=True)

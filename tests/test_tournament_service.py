@@ -6,8 +6,7 @@ import tempfile
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from database.models_base import Base
 from models.team import Team
@@ -42,10 +41,9 @@ async def test_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    test_session_factory = sessionmaker(
+    test_session_factory = async_sessionmaker(
         engine,
         expire_on_commit=False,
-        class_=AsyncSession
     )
 
     yield test_session_factory
@@ -351,6 +349,7 @@ async def test_find_current_match_resolves_by_team_name(test_db):
         await session.commit()
 
         match = await find_current_match(session, tournament.id, "Team2")
+        assert match is not None
         participants = {match.team_a_participant_id, match.team_b_participant_id}
         team2 = (await session.execute(
             select(TournamentParticipant).where(TournamentParticipant.team_name == "Team2")
@@ -376,6 +375,7 @@ async def test_advance_round_gated_until_all_results_in(test_db):
 
         new_round = await advance_round(session, tournament.id, random.Random(7))
         await session.commit()
+        assert new_round is not None
         assert new_round.round_number == 2
         assert tournament.current_round == 2
 
@@ -542,6 +542,7 @@ async def test_finish_tournament_completes_and_returns_champion(test_db):
         await session.commit()
 
         assert tournament.status == "completed"
+        assert champion is not None
         assert champion.id == winner_id
         assert await get_active_tournament(session, "g1") is None
 

@@ -268,6 +268,7 @@ async def repost_embed(draft_id, guild_id, cube_name, session_type):
         embed = await generate_magicprotools_embed(player_logs, cube_name, db_draft_id, session_type)
         
         # Send the embed
+        # pyrefly: ignore [missing-attribute]
         await draft_logs_channel.send(embed=embed)
         print(f"Successfully sent embed to #{draft_logs_channel.name} in {guild.name}")
         

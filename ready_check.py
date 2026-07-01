@@ -2,9 +2,10 @@ import asyncio
 
 import discord
 from loguru import logger
-from typing import Dict, Iterable, List, Literal, Optional
+from typing import Dict, Iterable, List, Literal, Optional, cast
 
 from helpers.display_names import get_display_name_by_id
+from helpers.utils import not_none
 from models import SignUpHistory
 from services.state_manager import state_manager
 from services.team_creator import create_and_display_teams
@@ -249,7 +250,7 @@ class ReadyCheckSession:
 
         state_manager.set_creating_teams(session_id, True)
         try:
-            await interaction.channel.send("✅ **All players ready!** Creating teams now...")
+            await not_none(interaction.channel).send("✅ **All players ready!** Creating teams now...")
 
             bot = interaction.client
             if not (draft_session and draft_session.message_id and draft_session.draft_channel_id):
@@ -259,7 +260,7 @@ class ReadyCheckSession:
             if not channel:
                 return
 
-            message = await channel.fetch_message(int(draft_session.message_id))
+            message = await cast(discord.TextChannel, channel).fetch_message(int(draft_session.message_id))
 
             # Deferred to avoid circular import: views -> ready_check -> views
             from views import PersistentView
@@ -289,12 +290,12 @@ class ReadyCheckSession:
             mock_interaction = _ChannelInteraction(interaction, message)
             success = await create_and_display_teams(bot, session_id, mock_interaction, persistent_view)
             if success:
-                await interaction.channel.send("✅ Teams created! Check the draft message above for teams and seating order.")
+                await not_none(interaction.channel).send("✅ Teams created! Check the draft message above for teams and seating order.")
             else:
-                await interaction.channel.send("❌ Error creating teams. You can try using the Create Teams button manually.")
+                await not_none(interaction.channel).send("❌ Error creating teams. You can try using the Create Teams button manually.")
         except Exception as e:
             logger.error(f"Error auto-creating teams after ready check: {e}")
-            await interaction.channel.send(f"❌ Error creating teams: {str(e)}\nYou can try using the Create Teams button manually.")
+            await not_none(interaction.channel).send(f"❌ Error creating teams: {str(e)}\nYou can try using the Create Teams button manually.")
         finally:
             state_manager.set_creating_teams(session_id, False)
 
@@ -319,7 +320,7 @@ class ReadyCheckView(discord.ui.View):
     async def cancel_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         await interaction.response.send_message(
             "Are you sure you want to cancel the ready check?",
-            view=ReadyCheckCancelConfirmView(self.draft_session_id, interaction.user.display_name),
+            view=ReadyCheckCancelConfirmView(self.draft_session_id, not_none(interaction.user).display_name),
             ephemeral=True,
         )
 
@@ -328,13 +329,13 @@ class ReadyCheckView(discord.ui.View):
         if not rc:
             logger.warning(
                 f"Ready click against missing session {self.draft_session_id} "
-                f"by user {interaction.user.id}; live checks: "
+                f"by user {not_none(interaction.user).id}; live checks: "
                 f"{list(state_manager.ready_checks.keys())}"
             )
             await interaction.response.send_message("Session data is missing.", ephemeral=True)
             return
 
-        user_id = str(interaction.user.id)
+        user_id = str(not_none(interaction.user).id)
         if not rc.has_player(user_id):
             logger.warning(
                 f"Unauthorized ready click on {self.draft_session_id} by user {user_id} (not a participant)"
@@ -354,7 +355,7 @@ class ReadyCheckView(discord.ui.View):
                 user_id=user_id,
                 display_name=(draft_session.sign_ups or {}).get(user_id, "Unknown user"),
                 action=status,
-                guild_id=str(interaction.guild.id),
+                guild_id=str(not_none(interaction.guild).id),
             )
         except Exception as e:
             logger.error(f"Failed to record ready event for {self.draft_session_id} user {user_id}: {e}")
@@ -380,7 +381,7 @@ class ReadyCheckCancelConfirmView(discord.ui.View):
     @discord.ui.button(label="Yes, Cancel", style=discord.ButtonStyle.danger)
     async def confirm_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         for child in self.children:
-            child.disabled = True
+            cast(discord.ui.Button, child).disabled = True
         await interaction.response.edit_message(view=self)
         await ReadyCheckSession.cancel(
             self.draft_session_id,
@@ -391,5 +392,5 @@ class ReadyCheckCancelConfirmView(discord.ui.View):
     @discord.ui.button(label="No, Keep Going", style=discord.ButtonStyle.secondary)
     async def deny_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         for child in self.children:
-            child.disabled = True
+            cast(discord.ui.Button, child).disabled = True
         await interaction.response.edit_message(content="Cancelled.", view=self)

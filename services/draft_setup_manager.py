@@ -16,6 +16,7 @@ from database.db_session import db_session
 from models.draft_session import DraftSession
 from models.match import MatchResult
 from bot_registry import get_bot
+from helpers.utils import not_none
 from session import AsyncSessionLocal
 from sqlalchemy import select
 from helpers.digital_ocean_helper import DigitalOceanHelper
@@ -157,7 +158,7 @@ class DraftSetupManager:
         self.logger.info(f"Disconnected from the websocket for draft_id: DB{self.draft_id}")
         self._is_connecting = False
 
-    def __init__(self, session_id: str, draft_id: str, cube_id: str, guild_id: str = None,
+    def __init__(self, session_id: str, draft_id: str, cube_id: str, guild_id: str | None = None,
                  packs_per_player: int = DEFAULT_PACKS_PER_PLAYER,
                  cards_per_pack: int = DEFAULT_CARDS_PER_PACK):
         self.session_id = session_id
@@ -278,9 +279,9 @@ class DraftSetupManager:
             self.draft_cancelled = False  # Reset the flag for future drafts
         else:
             logger.info("Draft completed naturally - creating rooms and scheduling log collection")
-            bot = get_bot()
-            guild = bot.get_guild(int(self.guild_id))
-            channel = bot.get_channel(int(self.draft_channel_id))
+            bot = not_none(get_bot())
+            guild = bot.get_guild(int(not_none(self.guild_id)))
+            channel = bot.get_channel(int(not_none(self.draft_channel_id)))
             from views import PersistentView
             if guild:
                 # Attempt to create rooms and pairings
@@ -440,7 +441,7 @@ class DraftSetupManager:
             self.logger.error(f"Error fetching draft session from database: {e}")
             return None
 
-    def _compute_user_status(self, sign_ups: dict = None):
+    def _compute_user_status(self, sign_ups: dict | None = None):
         """
         Compute present, missing, and unexpected users based on session users and sign-ups.
 
@@ -465,7 +466,7 @@ class DraftSetupManager:
             'unexpected': session_usernames - signup_usernames
         }
 
-    async def _update_or_send_message(self, channel, message_id: str, content=None, embed=None, view=None):
+    async def _update_or_send_message(self, channel, message_id: str | None, content=None, embed=None, view=None):
         """
         Try to update an existing message, fallback to sending a new one.
 
@@ -928,8 +929,8 @@ class DraftSetupManager:
         """Find draft-logs channel and send the embed if found."""
         try:
             # Find the guild
-            bot = get_bot()
-            guild = bot.get_guild(int(self.guild_id))
+            bot = not_none(get_bot())
+            guild = bot.get_guild(int(not_none(self.guild_id)))
             if not guild:
                 self.logger.warning(f"Could not find guild with ID {self.guild_id}")
                 return
@@ -1368,8 +1369,10 @@ class DraftSetupManager:
             # Instead of trying to get the current order (which times out),
             # always reset the seating order to ensure it's correct
             self.logger.info("Resetting seating order to ensure correctness")
-            success, remaining_missing = await self.set_seating_order(self.desired_seating_order)
-            
+            # @exponential_backoff returns False if all retries are exhausted
+            result = await self.set_seating_order(self.desired_seating_order)
+            success, remaining_missing = result if result else (False, [])
+
             if success:
                 self.logger.info("Successfully reset seating order")
                 return True, "Seating order verified and reset"
@@ -1616,7 +1619,7 @@ class DraftSetupManager:
                     
                     # Notify about the error
                     if hasattr(self, 'bot') and self.bot:
-                        channel = self.bot.get_channel(int(self.draft_channel_id))
+                        channel = self.bot.get_channel(int(not_none(self.draft_channel_id)))
                         if channel:
                             await channel.send(f"Error starting draft: {response['error']}")
                 else:
@@ -1710,7 +1713,9 @@ class DraftSetupManager:
             self.seating_attempts += 1
             self.logger.info(f"Attempt {self.seating_attempts}: Setting seating order with {self.users_count} users")
 
-            success, missing_users = await self.set_seating_order(desired_seating_order)
+            # @exponential_backoff returns False if all retries are exhausted
+            result = await self.set_seating_order(desired_seating_order)
+            success, missing_users = result if result else (False, [])
 
             if success:
                 self.logger.success(f"Successfully set seating order!")
@@ -1763,7 +1768,7 @@ class DraftSetupManager:
                     await self.notify_seating_failure(missing_users)
 
     @exponential_backoff(max_retries=10, base_delay=1)
-    async def set_seating_order(self, desired_username_order):
+    async def set_seating_order(self, desired_username_order) -> tuple[bool, list[str]]:
         """
         Sets the seating order for the draft based on usernames.
         Bot is a spectator and not included in seating order.
@@ -2087,8 +2092,8 @@ class DraftSetupManager:
         self.logger.warning("Bot lost ownership past point of no return, advancing to pairings")
         await self._notify_bot_no_longer_managing()
 
-        bot = get_bot()
-        guild = bot.get_guild(int(self.guild_id))
+        bot = not_none(get_bot())
+        guild = bot.get_guild(int(not_none(self.guild_id)))
         if not channel:
             channel = await self._get_draft_channel()
 

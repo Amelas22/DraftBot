@@ -28,7 +28,7 @@ engine = create_async_engine(
 )
 
 # Create session factory
-AsyncSessionLocal = sessionmaker(
+AsyncSessionLocal = sessionmaker(  # pyrefly: ignore
     engine,
     expire_on_commit=False,
     class_=AsyncSession

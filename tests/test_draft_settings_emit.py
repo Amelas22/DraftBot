@@ -1,4 +1,5 @@
 import pytest
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
 from services.draft_setup_manager import DraftSetupManager
@@ -28,7 +29,7 @@ async def test_update_draft_settings_emits_pack_settings():
     assert result is True
     emitted = {
         call.args[0]: (call.args[1] if len(call.args) > 1 else None)
-        for call in mgr.socket_client.emit.call_args_list
+        for call in cast(AsyncMock, mgr.socket_client.emit).call_args_list
     }
     assert emitted.get("boostersPerPlayer") == 4
     assert emitted.get("cardsPerBooster") == 10
@@ -45,7 +46,7 @@ async def test_update_pack_settings_emits_and_updates_attrs():
     assert mgr.cards_per_pack == 12
     emitted = {
         call.args[0]: (call.args[1] if len(call.args) > 1 else None)
-        for call in mgr.socket_client.emit.call_args_list
+        for call in cast(AsyncMock, mgr.socket_client.emit).call_args_list
     }
     assert emitted.get("boostersPerPlayer") == 6
     assert emitted.get("cardsPerBooster") == 12

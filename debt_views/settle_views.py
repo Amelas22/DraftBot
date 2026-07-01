@@ -9,6 +9,8 @@ import traceback
 import discord
 from discord.ui import View, Button, Select, Modal, InputText
 from loguru import logger
+from typing import cast
+from helpers.utils import not_none
 
 from services.debt_service import (
     get_all_balances_for,
@@ -55,7 +57,7 @@ class SettleDebtsButton(Button):
 
     async def callback(self, interaction: discord.Interaction):
         """Handle button click - show user's debts with participants."""
-        user_id = str(interaction.user.id)
+        user_id = str(not_none(interaction.user).id)
         logger.info(f"[SettleDebts] Button clicked by user {user_id} for session {self.session_id}")
 
         try:
@@ -75,12 +77,12 @@ class SettleDebtsButton(Button):
                 )
                 return
 
-            embed = build_user_balance_embed(interaction.guild, balances)
+            embed = build_user_balance_embed(not_none(interaction.guild), balances)
             view = await _build_settle_entry_view(
                 user_id=user_id,
                 guild_id=self.guild_id,
                 balances=balances,
-                guild=interaction.guild
+                guild=not_none(interaction.guild)
             )
 
             logger.info(f"[SettleDebts] Sending balance embed with {len(balances)} counterparties")
@@ -118,7 +120,7 @@ class SettleDebtsButton(Button):
 class SettleDebtsView(View):
     """View containing the Settle Debts button for victory messages."""
 
-    def __init__(self, session_id: str, guild_id: str, timeout: float = None):
+    def __init__(self, session_id: str, guild_id: str, timeout: float | None = None):
         # No timeout for persistent views
         super().__init__(timeout=timeout)
         self.add_item(SettleDebtsButton(session_id=session_id, guild_id=guild_id))
@@ -167,7 +169,7 @@ class CounterpartySelectView(View):
     async def select_callback(self, interaction: discord.Interaction):
         """Handle counterparty selection."""
         try:
-            counterparty_id = interaction.data['values'][0]
+            counterparty_id = interaction.data['values'][0]  # pyrefly: ignore
             balance = self.balances.get(counterparty_id, 0)
 
             logger.info(f"[CounterpartySelect] User {self.user_id} selected counterparty {counterparty_id}, balance: {balance}")
@@ -274,7 +276,7 @@ class AmountInputView(View):
     async def enter_amount(self, button: Button, interaction: discord.Interaction):
         """Open modal for amount input."""
         try:
-            logger.info(f"[AmountInputView] Enter Amount clicked by user {interaction.user.id}")
+            logger.info(f"[AmountInputView] Enter Amount clicked by user {not_none(interaction.user).id}")
             modal = AmountConfirmationModal(
                 user_id=self.user_id,
                 guild_id=self.guild_id,
@@ -303,7 +305,7 @@ class AmountInputView(View):
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, button: Button, interaction: discord.Interaction):
         """Cancel settlement."""
-        logger.info(f"[AmountInputView] Cancel clicked by user {interaction.user.id}")
+        logger.info(f"[AmountInputView] Cancel clicked by user {not_none(interaction.user).id}")
         await interaction.response.edit_message(
             content="Settlement cancelled.",
             embed=None,
@@ -454,7 +456,7 @@ class TransferCreditorSelectView(View):
     async def select_callback(self, interaction: discord.Interaction):
         """Handle creditor selection - show debtor dropdown."""
         try:
-            creditor_id = interaction.data['values'][0]
+            creditor_id = interaction.data['values'][0]  # pyrefly: ignore
             transferable_debtors = self._creditor_lookup[creditor_id]
             creditor_name_plain = get_member_name_plain(self.guild, creditor_id)
             creditor_name_decorated = get_member_name(self.guild, creditor_id)
@@ -544,7 +546,7 @@ class DebtorSelectView(View):
     async def select_callback(self, interaction: discord.Interaction):
         """Handle debtor selection - open transfer amount modal."""
         try:
-            debtor_id = interaction.data['values'][0]
+            debtor_id = interaction.data['values'][0]  # pyrefly: ignore
             amount_owed, max_transfer = self._debtor_lookup[debtor_id]
             debtor_name_plain = get_member_name_plain(self.guild, debtor_id)
             debtor_name_decorated = get_member_name(self.guild, debtor_id)
@@ -622,10 +624,10 @@ class TransferAmountModal(Modal):
 
     async def callback(self, interaction: discord.Interaction):
         """Handle modal submission."""
-        logger.info(f"[TransferModal] Submitted by user {interaction.user.id}")
+        logger.info(f"[TransferModal] Submitted by user {not_none(interaction.user).id}")
 
         try:
-            amount = int(self.amount_input.value)
+            amount = int(not_none(self.amount_input.value))
             if amount <= 0:
                 await interaction.response.send_message(
                     "Amount must be positive.",
@@ -693,7 +695,7 @@ class TransferAmountModal(Modal):
 
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    async def on_error(self, interaction: discord.Interaction, error: Exception):
+    async def on_error(self, interaction: discord.Interaction, error: Exception):  # pyrefly: ignore
         logger.error(f"[TransferModal] Error: {error}")
         logger.error(f"[TransferModal] Traceback: {traceback.format_exc()}")
         try:
@@ -734,7 +736,7 @@ class TransferConfirmView(View):
     async def confirm(self, button: Button, interaction: discord.Interaction):
         """Execute the debt transfer."""
         if self._processing:
-            logger.warning(f"[TransferConfirm] Ignoring duplicate click from user {interaction.user.id}")
+            logger.warning(f"[TransferConfirm] Ignoring duplicate click from user {not_none(interaction.user).id}")
             await interaction.response.send_message(
                 "Transfer is already being processed...",
                 ephemeral=True
@@ -742,12 +744,12 @@ class TransferConfirmView(View):
             return
 
         self._processing = True
-        logger.info(f"[TransferConfirm] Confirm clicked by user {interaction.user.id}")
+        logger.info(f"[TransferConfirm] Confirm clicked by user {not_none(interaction.user).id}")
 
         await interaction.response.defer()
 
         for item in self.children:
-            item.disabled = True
+            cast(discord.ui.Button, item).disabled = True
 
         try:
             await interaction.edit_original_response(
@@ -806,7 +808,7 @@ class TransferConfirmView(View):
             logger.error(f"[TransferConfirm] Traceback: {traceback.format_exc()}")
             self._processing = False
             for item in self.children:
-                item.disabled = False
+                cast(discord.ui.Button, item).disabled = False
             try:
                 await interaction.edit_original_response(
                     content=f"Failed to record transfer: {str(e)}",
@@ -825,7 +827,7 @@ class TransferConfirmView(View):
             )
             return
 
-        logger.info(f"[TransferConfirm] Cancel clicked by user {interaction.user.id}")
+        logger.info(f"[TransferConfirm] Cancel clicked by user {not_none(interaction.user).id}")
         await interaction.response.edit_message(
             content="Transfer cancelled.",
             embed=None,
@@ -871,11 +873,11 @@ class AmountConfirmationModal(Modal):
 
     async def callback(self, interaction: discord.Interaction):
         """Handle modal submission (py-cord uses 'callback' not 'on_submit')."""
-        logger.info(f"[AmountModal] Modal submitted by user {interaction.user.id}")
+        logger.info(f"[AmountModal] Modal submitted by user {not_none(interaction.user).id}")
         logger.debug(f"[AmountModal] Amount input value: '{self.amount_input.value}'")
 
         try:
-            amount = int(self.amount_input.value)
+            amount = int(not_none(self.amount_input.value))
             logger.debug(f"[AmountModal] Parsed amount: {amount}")
             if amount <= 0:
                 logger.warning(f"[AmountModal] Invalid amount (non-positive): {amount}")
@@ -972,7 +974,7 @@ class AmountConfirmationModal(Modal):
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         logger.debug(f"[AmountModal] Confirmation sent successfully")
 
-    async def on_error(self, interaction: discord.Interaction, error: Exception):
+    async def on_error(self, interaction: discord.Interaction, error: Exception):  # pyrefly: ignore
         """Handle errors in modal submission."""
         logger.error(f"[AmountModal] Error in on_submit: {error}")
         logger.error(f"[AmountModal] Traceback: {traceback.format_exc()}")
@@ -1012,7 +1014,7 @@ class SettlementConfirmView(View):
         """Create the settlement."""
         # Guard against double-clicks
         if self._processing:
-            logger.warning(f"[SettlementConfirm] Ignoring duplicate click from user {interaction.user.id}")
+            logger.warning(f"[SettlementConfirm] Ignoring duplicate click from user {not_none(interaction.user).id}")
             await interaction.response.send_message(
                 "Settlement is already being processed...",
                 ephemeral=True
@@ -1020,7 +1022,7 @@ class SettlementConfirmView(View):
             return
 
         self._processing = True
-        logger.info(f"[SettlementConfirm] Confirm clicked by user {interaction.user.id}")
+        logger.info(f"[SettlementConfirm] Confirm clicked by user {not_none(interaction.user).id}")
 
         # Defer immediately to avoid Discord's 3-second timeout
         # Other async operations (like leaderboard updates) can delay us
@@ -1028,7 +1030,7 @@ class SettlementConfirmView(View):
 
         # Disable buttons immediately to prevent double-clicks
         for item in self.children:
-            item.disabled = True
+            cast(discord.ui.Button, item).disabled = True
 
         try:
             # Update the message to show processing state
@@ -1063,7 +1065,7 @@ class SettlementConfirmView(View):
             try:
                 asyncio.create_task(send_settlement_notification_dm(
                     bot=interaction.client,
-                    guild=interaction.guild,
+                    guild=not_none(interaction.guild),
                     guild_id=self.guild_id,
                     settler_id=self.user_id,
                     payer_id=self.payer_id,
@@ -1086,7 +1088,7 @@ class SettlementConfirmView(View):
             self._processing = False  # Allow retry on error
             # Re-enable buttons on error
             for item in self.children:
-                item.disabled = False
+                cast(discord.ui.Button, item).disabled = False
             try:
                 await interaction.edit_original_response(
                     content=f"Failed to record settlement: {str(e)}",
@@ -1105,7 +1107,7 @@ class SettlementConfirmView(View):
             )
             return
 
-        logger.info(f"[SettlementConfirm] Cancel clicked by user {interaction.user.id}")
+        logger.info(f"[SettlementConfirm] Cancel clicked by user {not_none(interaction.user).id}")
         await interaction.response.edit_message(
             content="Settlement cancelled.",
             embed=None,
@@ -1195,8 +1197,8 @@ class PublicSettleDebtsView(View):
     )
     async def settle_button(self, button: Button, interaction: discord.Interaction):
         """Handle button click - show user's debts and launch settlement flow."""
-        user_id = str(interaction.user.id)
-        guild_id = str(interaction.guild.id)
+        user_id = str(not_none(interaction.user).id)
+        guild_id = str(not_none(interaction.guild).id)
         logger.info(f"[PublicSettle] Button clicked by user {user_id} in guild {guild_id}")
 
         try:
@@ -1213,12 +1215,12 @@ class PublicSettleDebtsView(View):
                 )
                 return
 
-            embed = build_user_balance_embed(interaction.guild, balances)
+            embed = build_user_balance_embed(not_none(interaction.guild), balances)
             view = await _build_settle_entry_view(
                 user_id=user_id,
                 guild_id=guild_id,
                 balances=balances,
-                guild=interaction.guild
+                guild=not_none(interaction.guild)
             )
 
             await interaction.response.send_message(
@@ -1267,7 +1269,7 @@ class DMSettleDebtsView(View):
     )
     async def settle_button(self, button: Button, interaction: discord.Interaction):
         """Handle button click in DM - resolve guild from bot and launch settlement flow."""
-        user_id = str(interaction.user.id)
+        user_id = str(not_none(interaction.user).id)
         logger.info(f"[DMSettle] Button clicked by user {user_id} for guild {self.guild_id}")
 
         try:

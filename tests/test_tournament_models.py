@@ -6,8 +6,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from database.models_base import Base
 from models.tournament import (
@@ -27,10 +26,9 @@ async def test_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    test_session_factory = sessionmaker(
+    test_session_factory = async_sessionmaker(
         engine,
         expire_on_commit=False,
-        class_=AsyncSession
     )
 
     yield test_session_factory

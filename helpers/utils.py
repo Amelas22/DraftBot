@@ -1,3 +1,18 @@
+from typing import TypeVar
+
+_T = TypeVar("_T")
+
+
+def not_none(x: _T | None) -> _T:
+    """Assert a value is not None, raising at runtime if the assumption is wrong.
+    
+        Use this sparingly, only when you are certain of something the typechecker cannot
+        infer (pycord types frequently)
+    """
+    if x is None:
+        raise ValueError(f"Expected non-None value, got None")
+    return x
+
 
 # Define a mapping of cube names to thumbnail URLs
 # This is used for consistent cube thumbnails across the app

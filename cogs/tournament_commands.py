@@ -192,11 +192,11 @@ class TournamentCog(commands.Cog):
     async def create(
         self,
         ctx,
-        name: discord.Option(str, "Tournament name"),
-        format: discord.Option(
+        name: discord.Option(str, "Tournament name"),  # pyrefly: ignore
+        format: discord.Option(  # pyrefly: ignore
             str, "Pairing format", choices=["swiss", "round_robin", "manual"], default="swiss"
         ),
-        rounds: discord.Option(
+        rounds: discord.Option(  # pyrefly: ignore
             int, "Number of Swiss rounds (Swiss only)", min_value=1, max_value=20,
             required=False, default=None,
         ),
@@ -228,7 +228,7 @@ class TournamentCog(commands.Cog):
     async def register(
         self,
         ctx,
-        team: discord.Option(str, "Your team name"),
+        team: discord.Option(str, "Your team name"),  # pyrefly: ignore
     ):
         if not await self._check_enabled(ctx):
             return
@@ -265,8 +265,8 @@ class TournamentCog(commands.Cog):
     async def add_team(
         self,
         ctx,
-        team: discord.Option(str, "Team name"),
-        captain: discord.Option(discord.Member, "The team's captain"),
+        team: discord.Option(str, "Team name"),  # pyrefly: ignore
+        captain: discord.Option(discord.Member, "The team's captain"),  # pyrefly: ignore
     ):
         if not await self._check_enabled(ctx):
             return
@@ -291,7 +291,7 @@ class TournamentCog(commands.Cog):
     async def remove_team(
         self,
         ctx,
-        team: discord.Option(str, "Team name"),
+        team: discord.Option(str, "Team name"),  # pyrefly: ignore
     ):
         if not await self._check_enabled(ctx):
             return
@@ -312,8 +312,8 @@ class TournamentCog(commands.Cog):
     async def add_match(
         self,
         ctx,
-        team_a: discord.Option(str, "First team"),
-        team_b: discord.Option(str, "Second team"),
+        team_a: discord.Option(str, "First team"),  # pyrefly: ignore
+        team_b: discord.Option(str, "Second team"),  # pyrefly: ignore
     ):
         if not await self._check_enabled(ctx):
             return
@@ -362,9 +362,9 @@ class TournamentCog(commands.Cog):
     async def set_result(
         self,
         ctx,
-        team: discord.Option(str, "Either team in the match"),
-        team_wins: discord.Option(int, "Game wins for that team", min_value=0, max_value=10),
-        opponent_wins: discord.Option(int, "Game wins for their opponent", min_value=0, max_value=10),
+        team: discord.Option(str, "Either team in the match"),  # pyrefly: ignore
+        team_wins: discord.Option(int, "Game wins for that team", min_value=0, max_value=10),  # pyrefly: ignore
+        opponent_wins: discord.Option(int, "Game wins for their opponent", min_value=0, max_value=10),  # pyrefly: ignore
     ):
         if not await self._check_enabled(ctx):
             return
@@ -477,7 +477,7 @@ class TournamentCog(commands.Cog):
             matches = (await session.execute(
                 select(TournamentMatch).where(TournamentMatch.round_id == round_id)
             )).scalars().all()
-            rows = []
+            rows: list[tuple[int, str, str | None, bool]] = []
             for m in matches:
                 part_a = await session.get(TournamentParticipant, m.team_a_participant_id)
                 if m.is_bye:

@@ -64,6 +64,7 @@ async def backfill_player_perfect_streaks(player_id, guild_id, session):
                     guild_id=guild_id,
                     streak_length=current_streak,
                     started_at=streak_start_date,
+                    # pyrefly: ignore [unbound-name]
                     ended_at=match_date
                 )
                 session.add(streak_record)

@@ -13,7 +13,7 @@ class CubeUpdateSelectionView(BaseCubeSelectionView):
 
     submit_label = "Update Cube"
 
-    def __init__(self, session_type: str, guild_id: int, current_cube=None, on_submit=None):
+    def __init__(self, session_type: str, guild_id: int, current_cube: str | None = None, on_submit=None):
         super().__init__(session_type, guild_id, current_cube)
         self.on_submit = on_submit
 
@@ -27,4 +27,4 @@ class CubeUpdateSelectionView(BaseCubeSelectionView):
         if self.cube_choice == "custom":
             await interaction.response.send_modal(CustomCubeNameModal(self, self.on_submit))
         else:
-            await self.on_submit(interaction, self)
+            await self.on_submit(interaction, self)  # pyrefly: ignore

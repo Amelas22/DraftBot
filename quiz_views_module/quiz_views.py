@@ -1,5 +1,6 @@
 import discord
 import random
+from typing import cast
 from datetime import datetime
 from loguru import logger
 from sqlalchemy import select, update, and_
@@ -8,6 +9,7 @@ from models import QuizSession, QuizSubmission, QuizStats, DraftSession
 from services.draft_analysis import DraftAnalysis
 from models.draft_domain import PackTrace
 from helpers.display_names import get_display_name
+from helpers.utils import not_none
 
 
 # Quiz scoring constants
@@ -95,7 +97,7 @@ def _get_congratulatory_message(total_points: int, correct_count: int) -> str:
     return random.choice(messages)
 
 
-def _detect_bonus_type(correct_count: int, guesses: list, correct_answers: list) -> str:
+def _detect_bonus_type(correct_count: int, guesses: list, correct_answers: list) -> str | None:
     """
     Detect which bonus type was earned.
 
@@ -108,7 +110,7 @@ def _detect_bonus_type(correct_count: int, guesses: list, correct_answers: list)
     return None
 
 
-def _calculate_bonus_points(bonus_type: str) -> int:
+def _calculate_bonus_points(bonus_type: str | None) -> int:
     """Calculate bonus points for a given bonus type."""
     if bonus_type == "perfect":
         return PERFECT_BONUS
@@ -117,7 +119,7 @@ def _calculate_bonus_points(bonus_type: str) -> int:
     return 0
 
 
-def _format_quiz_title(total_points: int, display_id: int = None, is_existing: bool = False) -> str:
+def _format_quiz_title(total_points: int, display_id: int | None = None, is_existing: bool = False) -> str:
     """Format quiz result title with optional display ID."""
     prefix = "Your " if is_existing else ""
     quiz_num = f"#{display_id}" if display_id else ""
@@ -125,13 +127,13 @@ def _format_quiz_title(total_points: int, display_id: int = None, is_existing: b
     return f"{prefix}{quiz_ref}Results: {total_points} Points!"
 
 
-def _format_share_text(emoji_line: str, total_points: int, display_id: int = None) -> str:
+def _format_share_text(emoji_line: str, total_points: int, display_id: int | None = None) -> str:
     """Format shareable quiz result text."""
     quiz_num = f" #{display_id}" if display_id else ""
     return f"🎯 Draft Pick Quiz{quiz_num}\n{emoji_line} {total_points} pts"
 
 
-async def _format_quiz_reference(quiz_id: str = None, display_id: int = None) -> str:
+async def _format_quiz_reference(quiz_id: str | None = None, display_id: int | None = None) -> str:
     """
     Get formatted quiz reference with optional message link.
 
@@ -161,18 +163,18 @@ async def _format_quiz_reference(quiz_id: str = None, display_id: int = None) ->
 
 async def _display_results(
     interaction: discord.Interaction,
-    analysis: DraftAnalysis,
-    pack_trace: PackTrace,
+    analysis: DraftAnalysis | None,
+    pack_trace: PackTrace | None,
     guesses: list,
     correct_answers: list,
     pick_results: list,
     pick_points: list,
     total_points: int,
     correct_count: int,
-    stats: QuizStats = None,
+    stats: QuizStats | None = None,
     is_existing_submission: bool = False,
-    display_id: int = None,
-    quiz_id: str = None
+    display_id: int | None = None,
+    quiz_id: str | None = None
 ) -> None:
     """
     Unified function to display quiz results.
@@ -209,9 +211,9 @@ async def _display_results(
     for i, (guess_id, correct_id, is_correct, points) in enumerate(
         zip(guesses, correct_answers, pick_results, pick_points)
     ):
-        pick = pack_trace.picks[i]
-        guess_name = analysis.get_card(guess_id).name
-        correct_name = analysis.get_card(correct_id).name
+        pick = not_none(pack_trace).picks[i]
+        guess_name = not_none(analysis).get_card(guess_id).name
+        correct_name = not_none(analysis).get_card(correct_id).name
 
         if is_correct:
             icon = EMOJI_CORRECT
@@ -256,7 +258,7 @@ async def _display_results(
 
     # Add share button view
     share_view = ShareResultView(
-        user=interaction.user,
+        user=cast(discord.User, not_none(interaction.user)),
         emoji_line=emoji_line,
         total_points=total_points,
         correct_count=correct_count,
@@ -271,7 +273,7 @@ async def _display_results(
 class ShareResultView(discord.ui.View):
     """View with a button to share quiz results publicly."""
 
-    def __init__(self, user: discord.User, emoji_line: str, total_points: int, correct_count: int, display_id: int = None, quiz_id: str = None, bonus_type: str = None):
+    def __init__(self, user: discord.User, emoji_line: str, total_points: int, correct_count: int, display_id: int | None = None, quiz_id: str | None = None, bonus_type: str | None = None):
         super().__init__(timeout=300)  # 5 minute timeout
         self.user = user
         self.emoji_line = emoji_line
@@ -289,7 +291,7 @@ class ShareResultView(discord.ui.View):
     async def share_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         """Post results publicly to the channel."""
         # Ensure only the quiz taker can share their own results
-        if interaction.user.id != self.user.id:
+        if not_none(interaction.user).id != self.user.id:
             await interaction.response.send_message(
                 "You can only share your own results!",
                 ephemeral=True
@@ -361,7 +363,7 @@ class QuizCardSelect(discord.ui.Select):
         # Store the selected value in the parent view
         if self.values:
             self.parent_view.selections[self.pick_number] = self.values[0]
-            logger.debug(f"User {interaction.user.id} selected card for pick {self.pick_number + 1}: {self.values[0]}")
+            logger.debug(f"User {not_none(interaction.user).id} selected card for pick {self.pick_number + 1}: {self.values[0]}")
 
         await interaction.response.defer()
 
@@ -373,7 +375,7 @@ class QuizPublicView(discord.ui.View):
     Compatible with sticky message system.
     """
 
-    def __init__(self, quiz_id: str, analysis: DraftAnalysis = None, pack_trace: PackTrace = None):
+    def __init__(self, quiz_id: str, analysis: DraftAnalysis | None = None, pack_trace: PackTrace | None = None):
         super().__init__(timeout=None)  # Persistent across restarts
         self.quiz_id = quiz_id
         self.analysis = analysis
@@ -431,7 +433,7 @@ class QuizPublicView(discord.ui.View):
         Recreate QuizPublicView from stored metadata (sticky message system).
         Reloads quiz data from database and regenerates analysis/pack_trace.
         """
-        quiz_id = metadata.get("quiz_id")
+        quiz_id = str(metadata.get("quiz_id", ""))
         view = cls(quiz_id=quiz_id)
         await view._load_quiz_data()  # Load data (may fail silently)
         return view
@@ -471,7 +473,7 @@ class QuizPublicView(discord.ui.View):
             await interaction.followup.send("Quiz not found!", ephemeral=True)
             return
 
-        stats = await self._load_player_stats(str(interaction.user.id), quiz_session.guild_id)
+        stats = await self._load_player_stats(str(not_none(interaction.user).id), quiz_session.guild_id)
 
         # Use helper properties to get arrays from submission
         await _display_results(
@@ -497,7 +499,7 @@ class QuizPublicView(discord.ui.View):
     )
     async def make_guesses_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         """User clicks to participate - show ephemeral guess view"""
-        user_id = str(interaction.user.id)
+        user_id = str(not_none(interaction.user).id)
 
         # Lazy load quiz data if not available (happens after sticky message repost)
         if not await self._load_quiz_data():
@@ -528,7 +530,7 @@ class QuizPublicView(discord.ui.View):
             quiz_id=self.quiz_id,
             analysis=self.analysis,
             pack_trace=self.pack_trace,
-            user=interaction.user
+            user=cast(discord.User, not_none(interaction.user))
         )
 
         await interaction.response.send_message(
@@ -544,7 +546,7 @@ class QuizGuessView(discord.ui.View):
     Contains 4 dropdowns (one per pick) and a Submit button.
     """
 
-    def __init__(self, quiz_id: str, analysis: DraftAnalysis, pack_trace: PackTrace, user: discord.User):
+    def __init__(self, quiz_id: str, analysis: DraftAnalysis | None, pack_trace: PackTrace | None, user: discord.User):
         super().__init__(timeout=300)  # 5 minute timeout
         self.quiz_id = quiz_id
         self.analysis = analysis
@@ -554,15 +556,15 @@ class QuizGuessView(discord.ui.View):
         logger.debug(f"Created new QuizGuessView for user {user.id} (quiz {quiz_id})")
 
         # Get card options (all 15 cards from first pick)
-        first_pick = pack_trace.picks[0]
+        first_pick = not_none(pack_trace).picks[0]
         card_options = sorted([
-            (cid, analysis.get_card(cid).name)
+            (cid, not_none(analysis).get_card(cid).name)
             for cid in first_pick.booster_ids
         ], key=lambda x: x[1])  # Sort by name
 
         # Create dropdowns, one for each pick
         for i in range(NUM_PICKS):
-            pick = pack_trace.picks[i]
+            pick = not_none(pack_trace).picks[i]
             select = QuizCardSelect(
                 pick_number=i,
                 pick_user_name=pick.user_name,
@@ -638,7 +640,7 @@ class QuizGuessView(discord.ui.View):
 
         # Check if view has any selections at all (detects stale/restarted views)
         if not self.selections:
-            logger.warning(f"User {interaction.user.id} submitted with no selections stored (possible bot restart or timeout)")
+            logger.warning(f"User {not_none(interaction.user).id} submitted with no selections stored (possible bot restart or timeout)")
             await interaction.followup.send(
                 "❌ Your quiz session has expired or was lost (possibly due to bot restart).\n\n"
                 "Please click **Make Your Guesses** again to start a fresh quiz!",
@@ -650,7 +652,7 @@ class QuizGuessView(discord.ui.View):
         guesses = []
         for i in range(NUM_PICKS):
             if i not in self.selections:
-                logger.warning(f"User {interaction.user.id} missing selection for pick {i+1} (has {len(self.selections)} selections)")
+                logger.warning(f"User {not_none(interaction.user).id} missing selection for pick {i+1} (has {len(self.selections)} selections)")
                 await interaction.followup.send(
                     f"Please select a card for Pick {i+1}!",
                     ephemeral=True
@@ -658,7 +660,7 @@ class QuizGuessView(discord.ui.View):
                 return
             guesses.append(self.selections[i])
 
-        logger.info(f"User {interaction.user.id} submitting guesses: {guesses}")
+        logger.info(f"User {not_none(interaction.user).id} submitting guesses: {guesses}")
 
         # Load correct answers from database
         async with db_session() as session:

@@ -39,8 +39,9 @@ class DraftIndexer:
             draft_data: Raw draft data from Draftmancer/Spaces
             draft_session: Optional DraftSession for DB metadata and seating
         """
-        self._session_id = draft_data.get('sessionID')
-        self._draft_session = draft_session
+        self._session_id: str | None = draft_data.get('sessionID')
+        self._draft_session: Optional['DraftSession'] = draft_session
+        self._data: Dict = draft_data
 
         # Initialize index storage
         self._players: List[Player] = []
@@ -97,6 +98,15 @@ class DraftIndexer:
             user_picks = []
             for pick_data in user_data.get('picks', []):
                 pick = Pick.from_dict(user_id, player.user_name, pick_data)
+
+                # Skip malformed picks that lack pack/pick numbers - they can't
+                # be indexed and would otherwise create None-keyed entries.
+                if pick.pack_num is None or pick.pick_num is None:
+                    logger.warning(
+                        f"Skipping pick with missing pack/pick number for user "
+                        f"{user_id} (pack={pick.pack_num}, pick={pick.pick_num})"
+                    )
+                    continue
 
                 # Index by (pack, pick, user_id) tuple
                 key = (pick.pack_num, pick.pick_num, user_id)
@@ -201,7 +211,7 @@ class DraftIndexer:
         return getattr(self._draft_session, attr, default) if self._draft_session else default
 
     @property
-    def session_id(self) -> str:
+    def session_id(self) -> str | None:
         """Draftmancer session ID."""
         return self._session_id
 

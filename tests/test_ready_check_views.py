@@ -64,18 +64,21 @@ def _mock_async_session():
     return MagicMock(return_value=outer), session
 
 
-def _make_create_task_stub():
+class _CreateTaskStub:
     """Stand-in for asyncio.create_task that records and safely closes coroutines."""
-    calls = []
 
-    def stub(coro):
-        calls.append(coro)
+    def __init__(self):
+        self.calls: list = []
+
+    def __call__(self, coro):
+        self.calls.append(coro)
         if asyncio.iscoroutine(coro):
             coro.close()
         return MagicMock()
 
-    stub.calls = calls
-    return stub
+
+def _make_create_task_stub():
+    return _CreateTaskStub()
 
 
 # ---------------------------------------------------------------------------

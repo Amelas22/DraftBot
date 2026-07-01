@@ -1,0 +1,21 @@
+preset = "default"
+
+project-includes = [
+    "**/*.py",
+]
+
+project-excludes = [
+    "alembic/versions/**",
+]
+
+# SQLAlchemy 1.x-style Column() declarations type column attributes as Column[T]
+# rather than T, causing false positives when accessing them on model instances.
+replace-imports-with-any = ["sqlalchemy"]
+
+# Resolve first-party imports from the project root.
+search-path = ["."]
+
+# Use the Python on PATH — run via `pipenv run pyrefly check` so this resolves
+# to the virtualenv Python and picks up all installed packages.
+python-interpreter-path = ".venv/bin/python3"
+

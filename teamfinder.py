@@ -2,6 +2,7 @@ import discord
 from discord.ui import Button, View
 from sqlalchemy import select
 from session import AsyncSessionLocal, TeamFinder
+from helpers.utils import not_none
 
 TIMEZONES_AMERICAS = [
     ("Pacific Time (UTC-08:00)", "America/Los_Angeles"),
@@ -40,9 +41,10 @@ class TimezoneButton(Button):
         self.message_id = message_id
 
     async def callback(self, interaction: discord.Interaction):
-        user_id = str(interaction.user.id)
+        user = not_none(interaction.user)
+        user_id = str(user.id)
         timezone = self.value
-        display_name = interaction.user.display_name
+        display_name = user.display_name
 
         async with AsyncSessionLocal() as session:
             stmt = select(TeamFinder).where(TeamFinder.user_id == user_id)

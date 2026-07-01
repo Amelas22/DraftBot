@@ -1,6 +1,7 @@
 import discord
 from config import get_config, save_config
 from loguru import logger
+from helpers.utils import not_none
 
 
 def parse_cube_list(raw: str):
@@ -37,13 +38,19 @@ class CubeListModal(discord.ui.Modal):
         ))
 
     async def callback(self, interaction: discord.Interaction):
-        raw = self.children[0].value
+        raw = not_none(self.children[0].value)
         cubes, errors = parse_cube_list(raw)
 
         if errors:
             await interaction.response.send_message(
                 "❌ Could not parse the following lines:\n" + "\n".join(errors),
                 ephemeral=True,
+            )
+            return
+
+        if interaction.guild_id is None or interaction.guild is None or interaction.user is None:
+            await interaction.response.send_message(
+                "This can only be used in a server.", ephemeral=True
             )
             return
 

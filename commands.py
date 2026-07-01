@@ -1,5 +1,6 @@
 import discord
 import aiocron
+from helpers.utils import not_none
 import pytz
 import asyncio
 from session import  Team, AsyncSessionLocal, Match, WeeklyLimit, DraftSession
@@ -161,6 +162,9 @@ async def core_commands(bot):
                 return
             
             # If we get here, we have a single match
+            if not isinstance(result, str):
+                await ctx.followup.send("Could not resolve player ID.", ephemeral=True)
+                return
             opponent_id = result
             
             # Get head-to-head stats with legacy data incorporated
@@ -332,7 +336,7 @@ async def scheduled_posts(bot):
                     date_str = end_time.strftime("%B %d, %Y")
                     top_drafters_field_value = "\n".join([f"{index + 1}. **{name}:** {count} drafts" for index, (name, count) in enumerate(top_drafters)])
                     embed = discord.Embed(title=f"Open Queue Weekly Summary - Week Ending {date_str}", description="", color=discord.Color.magenta())
-                    embed.add_field(name="**Completed Drafts**", value=total_drafts, inline=False)
+                    embed.add_field(name="**Completed Drafts**", value=str(total_drafts), inline=False)
                     embed.add_field(name="**Top 10 Drafters**\n", value=top_drafters_field_value, inline=False)
                     embed.add_field(name="**Multiple Weekly Trophies**", value=undefeated_drafters_field_value or "No trophies :(", inline=False)
 
@@ -394,7 +398,7 @@ async def scheduled_posts(bot):
                     date_str = start_time.strftime("%B %d, %Y")
                     top_drafters_field_value = "\n".join([f"**{name}:** {count} drafts" for name, count in top_five_drafters])
                     embed = discord.Embed(title=f"Open Queue Daily Results - {date_str}", description="", color=discord.Color.dark_purple())
-                    embed.add_field(name="**Completed Drafts**", value=total_drafts, inline=False)
+                    embed.add_field(name="**Completed Drafts**", value=str(total_drafts), inline=False)
                     embed.add_field(name="**Top 5 Drafters**\n", value=top_drafters_field_value, inline=False)
                     embed.add_field(name="**Trophy Drafters**", value=undefeated_drafters_field_value or "No trophies :(", inline=False)
 
@@ -660,7 +664,7 @@ class CategoryDropdown(discord.ui.Select):
     
     async def callback(self, interaction: discord.Interaction):
         # Get the selected category
-        category = self.values[0]
+        category = str(self.values[0])
         
         # Create a new view to show settings in this category
         from config import get_config
@@ -759,8 +763,7 @@ class ConfigModal(discord.ui.Modal):
         self.add_item(self.value_input)
     
     async def callback(self, interaction: discord.Interaction):
-        # Get the new value
-        new_value = self.value_input.value
+        new_value = not_none(self.value_input.value)
         
         try:
             # Try to convert to appropriate type
@@ -923,7 +926,8 @@ class SetupRolesView(discord.ui.View):
     @discord.ui.button(label="Continue", style=discord.ButtonStyle.primary)
     async def continue_button(self, button, interaction):
         # Get guild roles for selection
-        guild_roles = interaction.guild.roles
+        guild = not_none(interaction.guild)
+        guild_roles = guild.roles
         
         # Filter out @everyone and integration roles
         selectable_roles = [role for role in guild_roles 
@@ -960,7 +964,7 @@ class SetupRolesView(discord.ui.View):
         )
         
         # Define callback within this scope to capture needed variables
-        async def role_select_callback(role_interaction):
+        async def role_select_callback(interaction: discord.Interaction):
             if role_select.values:
                 # Save selected role
                 self.config["roles"]["selected"] = role_select.values
@@ -969,7 +973,7 @@ class SetupRolesView(discord.ui.View):
                 self.config["roles"]["selected"] = []
             
             # Now move to matchmaking view
-            await role_interaction.response.edit_message(
+            await interaction.response.edit_message(
                 content="## Step 4: Team Balancing\n\n"
                         "How often should the bot use skill-based team balancing?\n\n"
                         "0% = Always random teams\n"
@@ -1041,7 +1045,7 @@ class MatchmakingModal(discord.ui.Modal):
     async def callback(self, interaction):
         try:
             # Parse the percentage value (handle both "50" and "50%")
-            value = self.percentage.value.strip().rstrip('%')
+            value = not_none(self.percentage.value).strip().rstrip('%')
             percentage = float(value)
             
             # Validate the range
@@ -1117,12 +1121,12 @@ class SetupConfirmView(discord.ui.View):
     async def confirm_button(self, button, interaction):
         # Create everything
         created_items = []
-        guild = interaction.guild
-        
+        guild = not_none(interaction.guild)
+
         # Create category if needed
         category = None
+        category_name = self.config["categories"].get("draft_name", "Draft Channels")
         if self.config["categories"].get("draft", False):
-            category_name = self.config["categories"].get("draft_name", "Draft Channels")
             category = await guild.create_category(category_name)
             created_items.append(f"📁 Category: {category.name}")
         

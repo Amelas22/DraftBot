@@ -20,8 +20,8 @@ async def create_ledger_entries(
     amount: int,
     source_type: str,
     source_id: str,
-    notes: str = None,
-    created_by: str = None
+    notes: str | None = None,
+    created_by: str | None = None
 ) -> tuple[DebtLedger, DebtLedger]:
     """
     Create a pair of ledger entries for a debt.
@@ -90,7 +90,7 @@ async def get_balance_with(
     guild_id: str,
     player_id: str,
     counterparty_id: str,
-    exclude_session_id: str = None
+    exclude_session_id: str | None = None
 ) -> int:
     """
     Get the net balance between two players from player's perspective.
@@ -250,7 +250,7 @@ async def create_settlement(
     payee_id: str,
     amount: int,
     settled_by: str,
-    settlement_id: str = None
+    settlement_id: str | None = None
 ) -> tuple[DebtLedger, DebtLedger]:
     """
     Create settlement entries to record a payment between two players.
@@ -388,6 +388,7 @@ async def create_settlement(
                 retry_delay *= 2  # Exponential backoff
             else:
                 raise
+    raise RuntimeError("All retries exhausted without returning or raising")
 
 
 async def create_debt_entries_from_stakes(
@@ -631,7 +632,7 @@ async def create_debt_transfer(
     debtor_id: str,
     creditor_id: str,
     amount: int,
-    transfer_id: str = None
+    transfer_id: str | None = None
 ) -> tuple:
     """
     Transfer debt: A owes B, B owes C → A owes C.
@@ -801,6 +802,7 @@ async def create_debt_transfer(
                 retry_delay *= 2
             else:
                 raise
+    raise RuntimeError("All retries exhausted without returning or raising")
 
 
 async def get_guild_debt_stats(guild_id: str, timeframe: str = "all_time") -> dict:
@@ -939,9 +941,9 @@ async def get_guild_debt_stats(guild_id: str, timeframe: str = "all_time") -> di
 
 async def get_debt_history(
     guild_id: str,
-    player_id: str = None,
+    player_id: str | None = None,
     limit: int = 25,
-    older_than_days: int = None
+    older_than_days: int | None = None
 ) -> list[DebtLedger]:
     """
     Get history of all debt entries.

@@ -8,8 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from database.models_base import Base
 from models.tournament import Tournament, TournamentParticipant
@@ -33,7 +32,7 @@ async def test_db():
     engine = create_async_engine(f"sqlite+aiosqlite:///{temp_db.name}")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    factory = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
     os.unlink(temp_db.name)
@@ -74,6 +73,7 @@ def test_standings_embed_lists_teams_in_given_order():
         _participant("Bravo", 0, losses=1),
     ]
     embed = create_standings_embed(tournament, participants)
+    assert embed.title is not None
     assert "Spring Cup" in embed.title
     body = "\n".join(f.value for f in embed.fields)
     assert "Alpha" in body and "Bravo" in body

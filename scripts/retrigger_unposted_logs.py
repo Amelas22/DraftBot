@@ -54,6 +54,7 @@ class LogRetrigger:
             
     async def find_draft_logs_channel(self, guild_id):
         """Find the draft-logs channel in the guild"""
+        # pyrefly: ignore [missing-attribute]
         guild = self.client.get_guild(int(guild_id))
         if not guild:
             print(f"Could not find guild {guild_id}")
@@ -137,7 +138,9 @@ class LogRetrigger:
                     session = self.Session()
                     try:
                         db_draft = session.query(DraftSession).filter_by(id=draft_session.id).first()
+                        # pyrefly: ignore [missing-attribute]
                         db_draft.logs_message_id = str(message.id)
+                        # pyrefly: ignore [missing-attribute]
                         db_draft.logs_channel_id = str(logs_channel.id)
                         session.commit()
                         print(f"  ✅ Posted logs and updated database")
@@ -190,6 +193,7 @@ class LogRetrigger:
             print(f"  Failed: {len(unposted_drafts) - success_count}")
             
         finally:
+            # pyrefly: ignore [missing-attribute]
             await self.client.close()
 
 async def main():

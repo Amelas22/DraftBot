@@ -35,8 +35,7 @@ from sessions.premade_session import PremadeSession
 @pytest_asyncio.fixture
 async def test_db():
     """Create a temporary test database and return a test session factory."""
-    from sqlalchemy.orm import sessionmaker
-    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
     temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
     temp_db.close()
@@ -45,10 +44,9 @@ async def test_db():
         await conn.run_sync(Base.metadata.create_all)
 
     # Create test session factory for dependency injection
-    test_session_factory = sessionmaker(
+    test_session_factory = async_sessionmaker(
         engine,
         expire_on_commit=False,
-        class_=AsyncSession
     )
 
     yield test_session_factory

@@ -49,6 +49,9 @@ async def main():
     intents.reactions = True
 
     TOKEN = os.getenv("BOT_TOKEN")
+    if not TOKEN:
+        logger.error("BOT_TOKEN environment variable is not set; cannot start the bot.")
+        return
 
     bot = commands.Bot(command_prefix="!", intents=intents)
 

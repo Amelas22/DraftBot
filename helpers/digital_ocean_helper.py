@@ -223,7 +223,7 @@ class DigitalOceanHelper:
                     self.logger.debug(f"No contents found for prefix {prefix}")
                     return []
 
-                keys = [obj['Key'] for obj in response['Contents']]
+                keys: list[str] = [obj['Key'] for obj in response['Contents']]
                 self.logger.debug(f"Found {len(keys)} keys for prefix {prefix}")
                 return keys
 

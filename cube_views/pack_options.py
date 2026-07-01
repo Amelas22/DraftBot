@@ -8,6 +8,7 @@ otherwise create.
 """
 import discord
 from config import get_cube_options
+from helpers.utils import not_none
 
 # Default pack structure (standard MTG draft / Draftmancer defaults).
 DEFAULT_PACKS_PER_PLAYER = 3
@@ -33,7 +34,8 @@ def pack_format_display(packs_per_player, cards_per_pack):
 
 def selected_value(interaction: discord.Interaction):
     """Pull the chosen string-select value from the raw interaction payload."""
-    values = (interaction.data or {}).get("values") or []
+    raw_data: dict = interaction.data or {}  # pyrefly: ignore
+    values = raw_data.get("values") or []
     return values[0] if values else None
 
 
@@ -89,8 +91,8 @@ class AdvancedOptionsModal(discord.ui.Modal):
             )
             return
 
-        self.view_ref.packs_per_player = packs
-        self.view_ref.cards_per_pack = cards
+        self.view_ref.packs_per_player = not_none(packs)
+        self.view_ref.cards_per_pack = not_none(cards)
         await interaction.response.send_message(
             f"✅ Advanced options set: **{packs}** packs per player, **{cards}** cards per pack.\n"
             "Select a cube (if you haven't) and click the green ✅ button when ready.",
@@ -138,7 +140,7 @@ class BaseCubeSelectionView(discord.ui.View):
         self.packs_per_player = DEFAULT_PACKS_PER_PLAYER
         self.cards_per_pack = DEFAULT_CARDS_PER_PACK
 
-        options = [discord.SelectOption(**opt) for opt in get_cube_options(guild_id, session_type)]
+        options = [discord.SelectOption(**opt) for opt in get_cube_options(guild_id, session_type)]  # pyrefly: ignore
         options.append(discord.SelectOption(label="Custom Cube...", value="custom"))
         self.cube_select = discord.ui.Select(placeholder="Select a Cube", options=options)
         self.cube_select.callback = self.cube_select_callback

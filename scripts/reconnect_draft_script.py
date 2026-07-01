@@ -18,6 +18,7 @@ async def main():
     
     @bot.event
     async def on_ready():
+        # pyrefly: ignore [missing-attribute]
         logger.info(f"Temporary client {bot.user.name} is connected")
         
         try:
@@ -26,6 +27,7 @@ async def main():
             
             if tasks:
                 # Wait for all tasks to complete
+                # pyrefly: ignore [no-matching-overload]
                 await asyncio.gather(*tasks, return_exceptions=True)
                 logger.info("All draft session reconnection tasks have completed")
             else:
