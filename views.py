@@ -1786,7 +1786,8 @@ class MatchResultSelect(Select):
 
                         await session.commit()  # Commit the changes to the database
 
-                        if draft_session and (draft_session.session_type == "random" or draft_session.session_type == "staked"):
+                        from helpers.skill import rating_counts_for
+                        if draft_session and rating_counts_for(draft_session.session_type):
                             streak_extensions = await update_player_stats_and_elo(match_result)
 
                             # Store streak extension info for ring bearer check later

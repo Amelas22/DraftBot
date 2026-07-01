@@ -1886,18 +1886,16 @@ async def update_player_stats_and_elo(match_result):
                 # winner.elo_rating += elo_diff
                 # loser.elo_rating -= elo_diff
 
-                # Create TrueSkill Rating objects for winner and loser
-                winner_rating = Rating(mu=winner.true_skill_mu, sigma=winner.true_skill_sigma)
-                loser_rating = Rating(mu=loser.true_skill_mu, sigma=loser.true_skill_sigma)
-
-                # Update TrueSkill ratings based on the match outcome
-                new_winner_rating, new_loser_rating = rate_1vs1(winner_rating, loser_rating)
-
-                # Update player stats with new TrueSkill ratings
-                winner.true_skill_mu = new_winner_rating.mu
-                loser.true_skill_mu = new_loser_rating.mu
-                winner.true_skill_sigma = new_winner_rating.sigma
-                loser.true_skill_sigma = new_loser_rating.sigma
+                # Update TrueSkill ratings through the shared draw-prob-0 environment
+                from helpers.skill import new_ratings
+                new_winner_mu, new_winner_sigma, new_loser_mu, new_loser_sigma = new_ratings(
+                    winner.true_skill_mu, winner.true_skill_sigma,
+                    loser.true_skill_mu, loser.true_skill_sigma,
+                )
+                winner.true_skill_mu = new_winner_mu
+                winner.true_skill_sigma = new_winner_sigma
+                loser.true_skill_mu = new_loser_mu
+                loser.true_skill_sigma = new_loser_sigma
 
                 # Update games won and lost
                 winner.games_won += 1
