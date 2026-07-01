@@ -1,5 +1,4 @@
 """Backfill recompute logic (helpers.skill.backfill_skill_ratings) on a temp DB."""
-import pytest
 from sqlalchemy import create_engine, text
 
 from helpers.skill import PRIOR_MU, PRIOR_SIGMA, backfill_skill_ratings, new_ratings
@@ -66,6 +65,7 @@ def test_single_premade_match_matches_new_ratings():
     assert round(w[1], 6) == round(exp_w_sig, 6)
     assert (w[2], w[3]) == (1, 0)   # winner: 1 game won, 0 lost
     assert round(l[0], 6) == round(exp_l_mu, 6)
+    assert round(l[1], 6) == round(exp_l_sig, 6)
     assert (l[2], l[3]) == (0, 1)   # loser: 0 won, 1 lost
 
 
