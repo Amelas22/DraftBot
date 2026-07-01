@@ -405,6 +405,74 @@ async def post_pairings(bot, guild, session_id):
         await db_session.commit()
 
 
+async def recover_draft_channels(bot, guild, session_id):
+    """Recreate the Discord rooms for a reaped premade draft and re-post its pairing
+    messages with buttons coloured by current results, then extend the draft's
+    lifespan. Returns the new draft-chat channel id, or None if the session is gone.
+
+    Used to recover a tournament match whose channels the cleanup task deleted while
+    the match was still in progress.
+    """
+    from views import PersistentView
+
+    async with AsyncSessionLocal() as db_session:
+        result = await db_session.execute(
+            select(DraftSession).filter(DraftSession.session_id == session_id)
+        )
+        draft_session = result.scalar_one_or_none()
+        if not draft_session:
+            logger.warning(f"recover_draft_channels: session {session_id} not found")
+            return None
+        team_a = list(draft_session.team_a or [])
+        team_b = list(draft_session.team_b or [])
+        session_type = draft_session.session_type
+
+    def _members(ids):
+        found = []
+        for uid in ids:
+            member = guild.get_member(int(uid))
+            if member:
+                found.append(member)
+            else:
+                logger.warning(f"recover_draft_channels: member {uid} not in guild")
+        return found
+
+    team_a_members = _members(team_a)
+    team_b_members = _members(team_b)
+    all_members = team_a_members + team_b_members
+
+    # create_team_channel persists channel_ids/draft_chat_channel and sets stage=pairings.
+    temp_view = PersistentView(bot, session_id, session_type)
+    draft_channel_id = await temp_view.create_team_channel(
+        guild, "Draft", all_members, team_a, team_b
+    )
+    await temp_view.create_team_channel(guild, "Red-Team", team_a_members, team_a, team_b)
+    await temp_view.create_team_channel(guild, "Blue-Team", team_b_members, team_a, team_b)
+
+    # Re-post the pairing messages (now coloured by stored results) into the new chat.
+    await post_pairings(bot, guild, session_id)
+
+    # Extend lifespan so the guard/cleanup won't reap it again before it's finished.
+    async with AsyncSessionLocal() as db_session:
+        async with db_session.begin():
+            await db_session.execute(
+                update(DraftSession)
+                .where(DraftSession.session_id == session_id)
+                .values(deletion_time=datetime.now() + timedelta(days=7))
+            )
+
+    chat = guild.get_channel(int(draft_channel_id)) if draft_channel_id else None
+    if chat:
+        mentions = " ".join(f"<@{uid}>" for uid in team_a + team_b)
+        await chat.send(
+            f"{mentions} — this match's channels were restored. Please report any "
+            f"remaining results with the buttons above; the tournament will update "
+            f"automatically. Good luck!"
+        )
+    logger.info(f"recover_draft_channels: recovered {session_id} into channel {draft_channel_id}")
+    return draft_channel_id
+
+
 async def calculate_team_wins(draft_session_id):
     team_a_wins = 0
     team_b_wins = 0
