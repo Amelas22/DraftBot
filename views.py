@@ -1676,19 +1676,21 @@ def pairing_button_style(match_result, team_a, team_b):
     return discord.ButtonStyle.secondary
 
 
-async def create_pairings_view(bot, guild, session_id, match_results):
+async def create_pairings_view(bot, guild, session_id, match_results, team_a=None, team_b=None):
     view = View(timeout=None)
+    team_a = team_a or []
+    team_b = team_b or []
     for match_result in match_results:
-        
-        # Initialize a MatchResultButton for each match
+
+        # Initialize a MatchResultButton for each match, coloured by its result
         button = MatchResultButton(
             bot=bot,
             session_id=session_id,
-            match_id=match_result.id,  
+            match_id=match_result.id,
             match_number=match_result.match_number,
             label=f"Match {match_result.match_number} Results",
-            style=discord.ButtonStyle.secondary,
-            row=None  
+            style=pairing_button_style(match_result, team_a, team_b),
+            row=None
         )
         view.add_item(button)
     return view

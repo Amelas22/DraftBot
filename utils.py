@@ -353,8 +353,9 @@ async def post_pairings(bot, guild, session_id):
 
             for round_number, match_results in match_results_by_round.items():
                 embed = discord.Embed(title=f"Round {round_number} Pairings", color=discord.Color.blue())
-                from views import create_pairings_view  
-                view = await create_pairings_view(bot, guild, session_id, match_results)
+                from views import create_pairings_view
+                view = await create_pairings_view(bot, guild, session_id, match_results,
+                                                  draft_session.team_a, draft_session.team_b)
 
                 for match_result in match_results:
                     player_name = get_display_name_by_id(match_result.player1_id, guild)
@@ -383,7 +384,8 @@ async def post_pairings(bot, guild, session_id):
             for round_number, match_results in match_results_by_round.items():
                 embed = discord.Embed(title=f"Round {round_number} Pairings", color=discord.Color.blue())
                 from views import create_pairings_view
-                view = await create_pairings_view(bot, guild, session_id, match_results)
+                view = await create_pairings_view(bot, guild, session_id, match_results,
+                                                  draft_session.team_a, draft_session.team_b)
 
                 for match_result in match_results:
                     player_name = get_display_name_by_id(match_result.player1_id, guild)
