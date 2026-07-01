@@ -7,7 +7,8 @@ DDL = [
     """CREATE TABLE player_stats (
         player_id TEXT, guild_id TEXT, display_name TEXT,
         true_skill_mu REAL, true_skill_sigma REAL,
-        games_won INTEGER, games_lost INTEGER)""",
+        games_won INTEGER, games_lost INTEGER,
+        PRIMARY KEY (player_id, guild_id))""",
     """CREATE TABLE draft_sessions (
         session_id TEXT, guild_id TEXT, session_type TEXT, draft_start_time TEXT)""",
     """CREATE TABLE match_results (
@@ -93,6 +94,21 @@ def test_swiss_and_test_users_excluded():
     # Player 1 played only ignored matches -> stays at the prior with 0 games.
     mu, sig, gw, gl = _rating(conn, "1")
     assert mu == PRIOR_MU and (gw, gl) == (0, 0)
+
+
+def test_premade_player_without_row_gets_inserted():
+    conn = _conn()
+    _add_player(conn, "1")            # has a row
+    # player "2" intentionally has NO player_stats row
+    _add_session(conn, "sp", "premade", "2026-01-01")
+    _add_match(conn, 1, "sp", "1", "2", "1", "2026-01-01T10:00:00")
+
+    backfill_skill_ratings(conn)
+
+    loser = _rating(conn, "2")        # previously would be None (dropped)
+    assert loser is not None
+    assert (loser[2], loser[3]) == (0, 1)          # 0 games won, 1 lost
+    assert loser[0] < PRIOR_MU                       # loser mu fell below prior
 
 
 def test_chronology_uses_submitted_then_start_time_and_counts_games():

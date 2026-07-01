@@ -103,9 +103,16 @@ def backfill_skill_ratings(connection):
     for guild_id, player_id in touched:
         key = (guild_id, player_id)
         connection.execute(
-            text("UPDATE player_stats SET true_skill_mu = :mu, true_skill_sigma = :sig, "
-                 "games_won = :gw, games_lost = :gl "
-                 "WHERE guild_id = :g AND player_id = :p"),
+            text(
+                "INSERT INTO player_stats "
+                "(player_id, guild_id, true_skill_mu, true_skill_sigma, games_won, games_lost) "
+                "VALUES (:p, :g, :mu, :sig, :gw, :gl) "
+                "ON CONFLICT(player_id, guild_id) DO UPDATE SET "
+                "true_skill_mu = excluded.true_skill_mu, "
+                "true_skill_sigma = excluded.true_skill_sigma, "
+                "games_won = excluded.games_won, "
+                "games_lost = excluded.games_lost"
+            ),
             {"mu": mu[key], "sig": sigma[key], "gw": games_won[key],
              "gl": games_lost[key], "g": guild_id, "p": player_id},
         )

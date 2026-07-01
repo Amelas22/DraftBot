@@ -1837,6 +1837,35 @@ async def check_weekly_limits(interaction, match_id, session_type=None, session_
         pass
 
 
+def _new_player_stats_row(player_id, guild_id):
+    """A fresh PlayerStats row initialised to the TrueSkill priors, for a player
+    whose first rated result is a premade match (premade drafts don't create rows
+    via update_player_stats_for_draft). Fully initialises the integer fields the
+    rating/streak update reads, since column defaults are only applied at flush.
+    drafts_participated stays 0 — this path never counts a draft."""
+    from helpers.skill import PRIOR_MU, PRIOR_SIGMA
+    return PlayerStats(
+        player_id=player_id,
+        guild_id=guild_id,
+        display_name=None,
+        drafts_participated=0,
+        games_won=0,
+        games_lost=0,
+        elo_rating=1200.0,
+        true_skill_mu=PRIOR_MU,
+        true_skill_sigma=PRIOR_SIGMA,
+        current_win_streak=0,
+        longest_win_streak=0,
+        current_perfect_streak=0,
+        longest_perfect_streak=0,
+        current_draft_win_streak=0,
+        longest_draft_win_streak=0,
+        team_drafts_won=0,
+        team_drafts_lost=0,
+        team_drafts_tied=0,
+    )
+
+
 async def update_player_stats_and_elo(match_result):
     # Initialize streak extension tracking
     streak_extensions = {
@@ -1873,6 +1902,13 @@ async def update_player_stats_and_elo(match_result):
 
             player1 = result1.scalars().first()
             player2 = result2.scalars().first()
+
+            if player1 is None:
+                player1 = _new_player_stats_row(match_result.player1_id, guild_id)
+                session.add(player1)
+            if player2 is None:
+                player2 = _new_player_stats_row(match_result.player2_id, guild_id)
+                session.add(player2)
 
             if match_result.winner_id:
                 # Determine winner and loser based on match_result
