@@ -2085,15 +2085,10 @@ async def re_register_views(bot):
                                 for match_result in match_results:
                                     from views import MatchResultButton
                                     
-                                    # Determine button style based on match result
-                                    button_style = discord.ButtonStyle.secondary  # Default for no result
-                                    
-                                    if match_result.winner_id:
-                                        # Check if winner is in team A or team B
-                                        if match_result.winner_id in draft_session.team_a:
-                                            button_style = discord.ButtonStyle.danger  # Red for Team A
-                                        elif match_result.winner_id in draft_session.team_b:
-                                            button_style = discord.ButtonStyle.primary  # Blurple for Team B
+                                    from views import pairing_button_style
+                                    button_style = pairing_button_style(
+                                        match_result, draft_session.team_a, draft_session.team_b
+                                    )
                                     
                                     button = MatchResultButton(
                                         bot=bot,

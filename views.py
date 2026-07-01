@@ -1665,6 +1665,17 @@ async def update_last_draft_timestamp(session_id, guild, bot):
             await db_session.commit()
 
 
+def pairing_button_style(match_result, team_a, team_b):
+    """Colour a pairing button by its stored result: red = Team A won,
+    blurple = Team B won, grey = not yet reported."""
+    if match_result.winner_id:
+        if match_result.winner_id in team_a:
+            return discord.ButtonStyle.danger
+        if match_result.winner_id in team_b:
+            return discord.ButtonStyle.primary
+    return discord.ButtonStyle.secondary
+
+
 async def create_pairings_view(bot, guild, session_id, match_results):
     view = View(timeout=None)
     for match_result in match_results:
