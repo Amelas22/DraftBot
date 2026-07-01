@@ -1451,6 +1451,15 @@ async def cleanup_sessions_task(bot):
 
                 # Original cleanup code for regular sessions
                 for session in sessions_to_cleanup:
+                    # Never reap a draft whose tournament match is still unfinished —
+                    # extend its lifespan instead so the pairing buttons stay alive.
+                    from services.tournament_service import extend_deletion_if_unfinished
+                    if await extend_deletion_if_unfinished(db_session, session, current_time):
+                        logger.info(
+                            f"Skipped cleanup for session {session.session_id}: tournament "
+                            f"match {session.tournament_match_id} unfinished; deletion_time extended"
+                        )
+                        continue
                     # Check if channel_ids is not None and is iterable before attempting to iterate
                     if session.channel_ids:
                         for channel_id in session.channel_ids:
