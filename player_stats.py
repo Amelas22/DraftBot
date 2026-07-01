@@ -605,7 +605,13 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
         value=lifetime_value,
         inline=False
     )
-    
+
+    # 🎯 Skill Rating (injected by stats_display.get_stats_embed_for_player)
+    skill = stats_lifetime.get('skill_rating')
+    if skill is not None:
+        value = f"{skill} (provisional)" if stats_lifetime.get('skill_provisional') else str(skill)
+        embed.add_field(name="🎯 Skill Rating", value=value, inline=False)
+
     # Add cube-specific stats if any are available
     if stats_lifetime['cube_stats']:
         # Convert to list and sort by drafts_played in descending order
