@@ -142,3 +142,55 @@ def test_contains_handles_str_stored_ids():
 def test_contains_handles_none_and_empty():
     assert not channel_ids_contains(None, 111)
     assert not channel_ids_contains([], 111)
+
+
+# ---- DraftSession.get_by_any_channel_id --------------------------------------
+
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from models.draft_session import DraftSession
+
+
+def _mock_db_session(drafts):
+    """Async-context-manager mock for models.draft_session.db_session whose
+    execute() returns the given drafts via .scalars().all()."""
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = drafts
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=result)
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=session)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    db = MagicMock(return_value=ctx)
+    return db
+
+
+@pytest.mark.asyncio
+async def test_get_by_any_channel_id_prefers_draft_chat_match():
+    direct_hit = SimpleNamespace(session_id="s1")
+    with patch.object(DraftSession, "get_by_channel_id",
+                      AsyncMock(return_value=direct_hit)) as direct:
+        found = await DraftSession.get_by_any_channel_id(555)
+    assert found is direct_hit
+    direct.assert_awaited_once_with("555")
+
+
+@pytest.mark.asyncio
+async def test_get_by_any_channel_id_falls_back_to_channel_ids():
+    other = SimpleNamespace(session_id="s0", channel_ids=[333])
+    match = SimpleNamespace(session_id="s1", channel_ids=[111, 222])  # ints, as stored
+    with patch.object(DraftSession, "get_by_channel_id",
+                      AsyncMock(return_value=None)), \
+         patch("models.draft_session.db_session", _mock_db_session([other, match])):
+        found = await DraftSession.get_by_any_channel_id("222")
+    assert found is match
+
+
+@pytest.mark.asyncio
+async def test_get_by_any_channel_id_returns_none_when_no_match():
+    with patch.object(DraftSession, "get_by_channel_id",
+                      AsyncMock(return_value=None)), \
+         patch("models.draft_session.db_session", _mock_db_session([])):
+        found = await DraftSession.get_by_any_channel_id(999)
+    assert found is None
