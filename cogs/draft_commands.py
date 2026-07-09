@@ -242,6 +242,10 @@ class DraftCommands(commands.Cog):
         if failed:
             summary += ("\n⚠️ Failed (Discord error): "
                         + ", ".join(c.mention for c in failed))
+            if any(str(c.id) == str(draft_session.draft_chat_channel)
+                   for c in failed):
+                summary += ("\n⚠️ Skipped the public announcement because "
+                            "the draft chat grant failed.")
         await ctx.followup.send(summary, ephemeral=True)
         logger.success(f"add_sub: granted {user.id} access to "
                        f"{[c.id for c in granted]} in draft "
