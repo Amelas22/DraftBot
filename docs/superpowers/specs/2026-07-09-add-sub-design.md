@@ -56,9 +56,11 @@ permission).
 For the resolved team, apply permission overwrites for the sub on:
 
 1. The draft chat channel (`draft_session.draft_chat_channel`).
-2. The team's text chat channel (identified among `channel_ids` using the same
+2. The team's text chat channel (identified among `channel_ids` using the
    naming scheme `create_team_channel` uses, e.g. `Red-Team-Chat-{draft_id}` /
-   `Blue-Team-Chat-{draft_id}`, keyed off `team_a_name`/`team_b_name`).
+   `Blue-Team-Chat-{draft_id}`; the prefixes `Red-Team` and `Blue-Team` are
+   hardcoded in `views.py`'s channel-creation code and do not vary with premade
+   team names — `team_a_name`/`team_b_name` are used for display purposes only).
 3. The team's voice channel, if one exists (premade drafts).
 
 Overwrites match what teammates receive at channel creation

@@ -86,11 +86,16 @@ class DraftSession(Base):
             return result.scalar_one_or_none()
 
     @classmethod
-    async def get_by_any_channel_id(cls, channel_id):
+    async def get_by_any_channel_id(cls, channel_id: int | str):
         """Get a draft session whose main chat OR any created channel matches.
 
         Unlike get_by_channel_id (draft_chat_channel only), this also searches
         the channel_ids JSON so lookups work from team chat channels too.
+
+        The SQL LIKE prefilter narrows candidates to sessions whose channel_ids
+        JSON contains the channel ID as a substring; the Python
+        channel_ids_contains check then confirms exact membership to avoid
+        false positives (e.g. channel 123 matching stored ID 51234).
         """
         from helpers.substitutes import channel_ids_contains
 
@@ -102,6 +107,7 @@ class DraftSession(Base):
             from sqlalchemy import desc
             query = (select(cls)
                      .where(cls.channel_ids.isnot(None))
+                     .where(cls.channel_ids.cast(String).like(f'%{channel_id}%'))
                      .order_by(desc(cls.draft_start_time)))
             result = await session.execute(query)
             for draft in result.scalars().all():

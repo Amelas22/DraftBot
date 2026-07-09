@@ -237,8 +237,11 @@ class DraftCommands(commands.Cog):
                 "they may have been deleted already.", ephemeral=True)
             return
 
-        summary = (f"Granted {user.display_name} access to: "
-                   + ", ".join(c.mention for c in granted))
+        if granted:
+            summary = (f"Granted {user.display_name} access to: "
+                       + ", ".join(c.mention for c in granted))
+        else:
+            summary = f"Could not grant {user.display_name} access to any channels."
         if failed:
             summary += ("\n⚠️ Failed (Discord error): "
                         + ", ".join(c.mention for c in failed))

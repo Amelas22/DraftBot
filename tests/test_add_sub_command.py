@@ -181,3 +181,20 @@ async def test_draft_chat_failure_skips_announcement_and_notes_it(cog):
     channels[100].send.assert_not_awaited()
     message = ctx.followup.send.await_args.args[0]
     assert "announcement" in message.lower()
+
+
+@pytest.mark.asyncio
+async def test_all_grants_failing_reports_could_not_grant(cog):
+    channels = standard_channels()
+    for channel in channels.values():
+        channel.set_permissions = AsyncMock(
+            side_effect=discord.HTTPException(MagicMock(status=500), "boom"))
+    ctx = make_ctx("1", channels)
+    draft = make_draft()
+    with patch("cogs.draft_commands.DraftSession.get_by_any_channel_id",
+               AsyncMock(return_value=draft)), \
+         patch("cogs.draft_commands.is_bot_manager", AsyncMock(return_value=False)):
+        await cog._do_add_sub(ctx, make_sub(), None)
+    message = ctx.followup.send.await_args.args[0]
+    assert "could not grant" in message.lower()
+    assert "granted" not in message.lower().split("\n")[0][:7]
