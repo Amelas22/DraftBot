@@ -1,4 +1,7 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from helpers.substitutes import (
     GrantDecision,
@@ -6,6 +9,7 @@ from helpers.substitutes import (
     is_sub_target_channel,
     resolve_sub_grant,
 )
+from models.draft_session import DraftSession
 
 
 def make_session(team_a=None, team_b=None, sign_ups=None,
@@ -145,12 +149,6 @@ def test_contains_handles_none_and_empty():
 
 
 # ---- DraftSession.get_by_any_channel_id --------------------------------------
-
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-
-from models.draft_session import DraftSession
-
 
 def _mock_db_session(drafts):
     """Async-context-manager mock for models.draft_session.db_session whose
