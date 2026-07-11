@@ -6,7 +6,6 @@ from sqlalchemy import update, select, func, or_, desc, and_
 from datetime import datetime, timedelta
 from session import AsyncSessionLocal, get_draft_session, StakeInfo, Challenge, PlayerLimit, DraftSession, MatchResult, PlayerStats, Match, Team, WeeklyLimit, StakePairing
 from sqlalchemy.orm import selectinload, joinedload
-from trueskill import Rating, rate_1vs1
 from discord.ui import View
 from models.leaderboard_message import LeaderboardMessage
 from models.win_streak_history import WinStreakHistory
@@ -31,6 +30,7 @@ from services.crown_roles import update_crown_roles_for_guild
 # {session_id: {player_id: {win_streak_increased: bool, perfect_streak_increased: bool}}}
 MATCH_STREAK_EXTENSIONS = {}
 from helpers.display_names import get_display_name, get_display_name_by_id
+from helpers.skill import PRIOR_MU, PRIOR_SIGMA, new_ratings
 from services.ring_bearer_service import update_ring_bearer_for_guild
 
 # Configuration constants
@@ -1843,7 +1843,6 @@ def _new_player_stats_row(player_id, guild_id):
     via update_player_stats_for_draft). Fully initialises the integer fields the
     rating/streak update reads, since column defaults are only applied at flush.
     drafts_participated stays 0 — this path never counts a draft."""
-    from helpers.skill import PRIOR_MU, PRIOR_SIGMA
     return PlayerStats(
         player_id=player_id,
         guild_id=guild_id,
@@ -1923,7 +1922,6 @@ async def update_player_stats_and_elo(match_result):
                 # loser.elo_rating -= elo_diff
 
                 # Update TrueSkill ratings through the shared draw-prob-0 environment
-                from helpers.skill import new_ratings
                 new_winner_mu, new_winner_sigma, new_loser_mu, new_loser_sigma = new_ratings(
                     winner.true_skill_mu, winner.true_skill_sigma,
                     loser.true_skill_mu, loser.true_skill_sigma,

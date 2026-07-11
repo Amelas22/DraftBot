@@ -99,9 +99,10 @@ def backfill_skill_ratings(connection):
         games_won[kw] += 1
         games_lost[kl] += 1
 
-    touched = set(mu) | set(games_won) | set(games_lost)
-    for guild_id, player_id in touched:
-        key = (guild_id, player_id)
+    # Every games_won/games_lost key is also a mu key (both players in each
+    # rated match get a mu entry), so iterating mu covers every touched player.
+    for key in mu:
+        guild_id, player_id = key
         connection.execute(
             text(
                 "INSERT INTO player_stats "
