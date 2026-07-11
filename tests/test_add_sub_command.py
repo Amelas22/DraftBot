@@ -106,6 +106,26 @@ async def test_admin_outside_draft_grants_chosen_team(cog):
 
 
 @pytest.mark.asyncio
+async def test_teamless_draft_grants_draft_chat_only(cog):
+    # Swiss/team-less draft: only the shared draft chat channel exists.
+    channels = {100: make_channel(100, "draft-chat-abc123")}
+    ctx = make_ctx("1", channels)  # invoker is a sign-up, not on a team
+    sub = make_sub()
+    draft = make_draft(channel_ids=[100], team_a=[], team_b=[])
+    with patch("cogs.draft_commands.DraftSession.get_by_any_channel_id",
+               AsyncMock(return_value=draft)), \
+         patch("cogs.draft_commands.is_bot_manager", AsyncMock(return_value=False)):
+        await cog._do_add_sub(ctx, sub, None)
+
+    channels[100].set_permissions.assert_awaited_once_with(
+        sub, read_messages=True, manage_messages=True)
+    channels[100].send.assert_awaited_once()
+    assert "this draft" in channels[100].send.await_args.args[0]
+    ctx.followup.send.assert_awaited_once()
+    assert ctx.followup.send.await_args.kwargs.get("ephemeral") is True
+
+
+@pytest.mark.asyncio
 async def test_not_a_draft_channel_is_ephemeral_error(cog):
     ctx = make_ctx("1", {})
     with patch("cogs.draft_commands.DraftSession.get_by_any_channel_id",

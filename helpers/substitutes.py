@@ -14,9 +14,9 @@ TEAM_B_CHANNEL_PREFIX = "Blue-Team"
 
 @dataclass
 class GrantDecision:
-    team_key: str           # "A" or "B"
-    channel_prefix: str     # "Red-Team" or "Blue-Team"
-    team_display_name: str  # premade team name, or "Red Team"/"Blue Team"
+    team_key: Optional[str]            # "A"/"B", or None for a team-less draft
+    channel_prefix: Optional[str]      # "Red-Team"/"Blue-Team", or None (draft chat only)
+    team_display_name: str             # premade team name, "Red Team"/"Blue Team", or "this draft"
 
 
 def resolve_sub_grant(
@@ -39,6 +39,12 @@ def resolve_sub_grant(
     if target_id in team_a or target_id in team_b or target_id in sign_ups:
         return None, "That user is already a participant in this draft."
 
+    if not team_a and not team_b:
+        # Team-less draft (e.g. swiss): only the shared draft chat exists.
+        if invoker_id in sign_ups or is_admin:
+            return GrantDecision(None, None, "this draft"), None
+        return None, "Only players in this draft (or bot managers) can add a sub."
+
     if invoker_id in team_a:
         team_key = "A"
     elif invoker_id in team_b:
@@ -58,17 +64,19 @@ def resolve_sub_grant(
     return GrantDecision("B", TEAM_B_CHANNEL_PREFIX, display), None
 
 
-def is_sub_target_channel(channel_name: str, draft_id: str, channel_prefix: str) -> bool:
+def is_sub_target_channel(channel_name: str, draft_id: str, channel_prefix: Optional[str]) -> bool:
     """True if channel_name is one of the channels a sub should be granted.
 
     Case-insensitive: Discord lowercases text channel names on creation,
     while voice channels keep their original casing.
+
+    channel_prefix is None for team-less drafts, where only the shared
+    draft chat exists.
     """
-    targets = {
-        f"draft-chat-{draft_id}".lower(),
-        f"{channel_prefix}-chat-{draft_id}".lower(),
-        f"{channel_prefix}-voice-{draft_id}".lower(),
-    }
+    targets = {f"draft-chat-{draft_id}".lower()}
+    if channel_prefix:
+        targets.add(f"{channel_prefix}-chat-{draft_id}".lower())
+        targets.add(f"{channel_prefix}-voice-{draft_id}".lower())
     return channel_name.lower() in targets
 
 

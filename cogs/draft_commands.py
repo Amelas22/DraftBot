@@ -257,10 +257,15 @@ class DraftCommands(commands.Cog):
         draft_chat = next(
             (c for c in granted if str(c.id) == draft_chat_id), None)
         if draft_chat:
-            await draft_chat.send(
-                f"{user.mention} was added as a substitute for "
-                f"**{decision.team_display_name}** by "
-                f"{get_display_name(ctx.author, ctx.guild)}.")
+            try:
+                await draft_chat.send(
+                    f"{user.mention} was added as a substitute for "
+                    f"**{decision.team_display_name}** by "
+                    f"{get_display_name(ctx.author, ctx.guild)}.")
+            except discord.HTTPException:
+                logger.warning(
+                    f"add_sub: grant succeeded but the public announcement "
+                    f"failed in channel {draft_chat.id}", exc_info=True)
 
 def setup(bot):
     bot.add_cog(DraftCommands(bot))

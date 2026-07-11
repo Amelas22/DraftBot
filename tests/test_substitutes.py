@@ -103,12 +103,48 @@ def test_target_in_sign_ups_is_error():
 
 
 def test_none_team_fields_are_tolerated():
+    """None team_a/team_b/sign_ups is a team-less draft — no crash, draft chat only."""
     session = SimpleNamespace(team_a=None, team_b=None, sign_ups=None,
                               team_a_name=None, team_b_name=None)
     decision, error = resolve_sub_grant(session, invoker_id="99", target_id="9",
                                         is_admin=True, team_choice="A")
     assert error is None
-    assert decision.team_key == "A"
+    assert decision.team_key is None
+    assert decision.channel_prefix is None
+
+
+# ---- team-less drafts (e.g. swiss) ------------------------------------------
+
+def test_teamless_draft_participant_gets_draft_chat_only():
+    session = make_session(team_a=[], team_b=[], sign_ups={"p1": "P1"})
+    decision, error = resolve_sub_grant(session, invoker_id="p1", target_id="sub",
+                                        is_admin=False)
+    assert error is None
+    assert decision.channel_prefix is None
+    assert decision.team_key is None
+    assert decision.team_display_name == "this draft"
+
+
+def test_teamless_draft_admin_gets_draft_chat_only():
+    session = make_session(team_a=[], team_b=[], sign_ups={"p1": "P1"})
+    decision, error = resolve_sub_grant(session, invoker_id="admin", target_id="sub",
+                                        is_admin=True)
+    assert error is None
+    assert decision.channel_prefix is None
+    assert decision.team_key is None
+
+
+def test_teamless_draft_non_participant_non_admin_rejected():
+    session = make_session(team_a=[], team_b=[], sign_ups={"p1": "P1"})
+    decision, error = resolve_sub_grant(session, invoker_id="stranger", target_id="sub",
+                                        is_admin=False)
+    assert decision is None
+    assert error is not None
+
+
+def test_teamless_target_channel_matches_draft_chat_only():
+    assert is_sub_target_channel("draft-chat-ABC", "ABC", None) is True
+    assert is_sub_target_channel("red-team-chat-ABC", "ABC", None) is False
 
 
 # ---- is_sub_target_channel --------------------------------------------------
