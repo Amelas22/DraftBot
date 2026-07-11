@@ -54,7 +54,7 @@ async def test_capture_stores_data_and_stamps_without_publishing():
                          data_received=False)
     db_factory, session = _mock_db_session(ds)
     with patch("services.draft_setup_manager.db_session", db_factory), \
-         patch.object(DraftSetupManager, "save_to_digitalocean_spaces", AsyncMock(return_value=True)) as spaces, \
+         patch.object(DraftSetupManager, "save_to_digitalocean_spaces", AsyncMock(return_value="team/x.json")) as spaces, \
          patch.object(DraftSetupManager, "get_pack_first_picks", MagicMock(return_value={})), \
          patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock()) as embed:
         ok = await m.capture_draft_log(_draft_data())
@@ -65,6 +65,7 @@ async def test_capture_stores_data_and_stamps_without_publishing():
     assert ds.data_received is False
     assert ds.draft_data is not None
     assert ds.logs_captured_at is not None
+    assert ds.spaces_object_key == "team/x.json"
     session.commit.assert_awaited()
 
 
@@ -76,7 +77,7 @@ async def test_capture_is_idempotent():
                          data_received=False)
     db_factory, _ = _mock_db_session(ds)
     with patch("services.draft_setup_manager.db_session", db_factory), \
-         patch.object(DraftSetupManager, "save_to_digitalocean_spaces", AsyncMock(return_value=True)) as spaces:
+         patch.object(DraftSetupManager, "save_to_digitalocean_spaces", AsyncMock(return_value="team/x.json")) as spaces:
         ok = await m.capture_draft_log(_draft_data())
 
     assert ok is True
@@ -99,10 +100,10 @@ async def test_capture_spaces_failure_keeps_db_copy_without_stamp():
     m = _manager()
     ds = SimpleNamespace(session_id="sid", sign_ups={"d1": "Alice", "d2": "Bob"},
                          draft_data=None, pack_first_picks=None, logs_captured_at=None,
-                         data_received=False)
+                         data_received=False, spaces_object_key=None)
     db_factory, session = _mock_db_session(ds)
     with patch("services.draft_setup_manager.db_session", db_factory), \
-         patch.object(DraftSetupManager, "save_to_digitalocean_spaces", AsyncMock(return_value=False)) as spaces, \
+         patch.object(DraftSetupManager, "save_to_digitalocean_spaces", AsyncMock(return_value=None)) as spaces, \
          patch.object(DraftSetupManager, "get_pack_first_picks", MagicMock(return_value={})), \
          patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock()) as embed:
         ok = await m.capture_draft_log(_draft_data())
@@ -112,6 +113,7 @@ async def test_capture_spaces_failure_keeps_db_copy_without_stamp():
     embed.assert_not_called()
     assert ds.draft_data is not None        # raw log still saved (data safety)
     assert ds.logs_captured_at is None      # NOT stamped -> retryable
+    assert ds.spaces_object_key is None     # upload failed -> no key, stays retryable
 
 
 @pytest.mark.asyncio
@@ -267,3 +269,16 @@ async def test_manually_unlock_delegates_to_publish_with_release():
         result = await m.manually_unlock_draft_logs()
     assert result is True
     pub.assert_awaited_once_with(release=True)
+
+
+@pytest.mark.asyncio
+async def test_save_to_spaces_returns_object_key():
+    m = DraftSetupManager.__new__(DraftSetupManager)   # bypass __init__
+    m.session_type = "team"; m.cube_id = "TestCube"
+    m.logger = MagicMock()
+    m.process_draft_logs_for_magicprotools = AsyncMock(return_value=True)
+    fake_result = MagicMock(success=True, object_path="team/TestCube-123-DBABC.json")
+    fake_helper = MagicMock(); fake_helper.upload_json = AsyncMock(return_value=fake_result)
+    with patch("services.draft_setup_manager.DigitalOceanHelper", return_value=fake_helper):
+        key = await m.save_to_digitalocean_spaces({"time": 123, "sessionID": "DBABC"})
+    assert key == "team/TestCube-123-DBABC.json"
