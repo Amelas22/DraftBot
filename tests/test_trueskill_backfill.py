@@ -111,6 +111,16 @@ def test_premade_player_without_row_gets_inserted():
     assert loser[0] < PRIOR_MU                       # loser mu fell below prior
 
 
+def test_non_numeric_player_id_does_not_crash():
+    conn = _conn()
+    _add_player(conn, "1")
+    _add_player(conn, "legacy-user")          # non-numeric id
+    _add_session(conn, "sp", "premade", "2026-01-01")
+    _add_match(conn, 1, "sp", "1", "legacy-user", "1", "2026-01-01T10:00:00")
+    backfill_skill_ratings(conn)              # must not raise
+    assert _rating(conn, "legacy-user") is not None
+
+
 def test_chronology_uses_submitted_then_start_time_and_counts_games():
     conn = _conn()
     _add_player(conn, "1"); _add_player(conn, "2")

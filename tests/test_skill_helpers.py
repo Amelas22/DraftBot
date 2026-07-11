@@ -36,9 +36,9 @@ def test_skill_rating_scales_conservative_estimate():
 
 
 def test_is_established_threshold():
-    assert is_established(9) is False
-    assert is_established(10) is True
-    assert is_established(11) is True
+    assert is_established(19) is False
+    assert is_established(20) is True
+    assert is_established(21) is True
 
 
 def test_new_ratings_moves_winner_up_loser_down_and_shrinks_sigma():

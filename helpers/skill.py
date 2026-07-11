@@ -5,7 +5,8 @@ the single environment (draw probability 0 — these matches never draw) plus th
 small pure helpers used by the live update path (utils.py), the session-type
 guard (views.py), the display slices, and the backfill migration. Keeping the
 environment and the backfill in one place guarantees live and historical values
-are computed identically.
+are computed identically. The backfill also skips TEST_MODE users; the live
+path does not, which only matters under TEST_MODE.
 
 Only depends on ``trueskill`` and ``sqlalchemy`` so it is safe to import from an
 Alembic migration (no app-model imports).
@@ -27,6 +28,17 @@ PRIOR_SIGMA = 25.0 / 3
 # Draft types whose match results move the skill rating. Swiss is excluded.
 RATING_SESSION_TYPES = ("random", "staked", "premade")
 
+# Rated games (random+staked+premade, games_won+games_lost) needed before a
+# player's rating is shown without the "(provisional)" flag.
+ESTABLISHED_GAMES = 20
+
+
+def _is_test_user(player_id):
+    """True for synthetic TEST_MODE users. Non-numeric ids (legacy/imported) are
+    treated as real, never crashing the backfill."""
+    pid = str(player_id)
+    return pid.isdigit() and int(pid) >= TEST_USER_ID_BASE
+
 
 def rating_counts_for(session_type):
     """True iff a draft of this session type should update skill ratings."""
@@ -38,9 +50,11 @@ def skill_rating(mu, sigma):
     return round((mu - 3 * sigma) * 40)
 
 
-def is_established(drafts):
-    """True once a player has enough drafts to leave 'provisional' status."""
-    return drafts >= 10
+def is_established(games):
+    """True once a player has enough rated games (incl. premade) to shed the
+    provisional label. ~20 games ≈ the repo's mid-tier match minimum and the
+    original ~10-draft intent."""
+    return games >= ESTABLISHED_GAMES
 
 
 def new_ratings(winner_mu, winner_sigma, loser_mu, loser_sigma):
@@ -86,7 +100,7 @@ def backfill_skill_ratings(connection):
             continue
         if winner_id not in (player1_id, player2_id):
             continue
-        if int(player1_id) >= TEST_USER_ID_BASE or int(player2_id) >= TEST_USER_ID_BASE:
+        if _is_test_user(player1_id) or _is_test_user(player2_id):
             continue
         loser_id = player2_id if winner_id == player1_id else player1_id
         kw = (guild_id, winner_id)
@@ -103,6 +117,7 @@ def backfill_skill_ratings(connection):
     # rated match get a mu entry), so iterating mu covers every touched player.
     for key in mu:
         guild_id, player_id = key
+        # ON CONFLICT upsert assumes SQLite/Postgres syntax (the repo's SQLite).
         connection.execute(
             text(
                 "INSERT INTO player_stats "
