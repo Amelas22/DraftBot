@@ -197,4 +197,4 @@ async def test_all_grants_failing_reports_could_not_grant(cog):
         await cog._do_add_sub(ctx, make_sub(), None)
     message = ctx.followup.send.await_args.args[0]
     assert "could not grant" in message.lower()
-    assert "granted" not in message.lower().split("\n")[0][:7]
+    assert not message.lower().startswith("granted")

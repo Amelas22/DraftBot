@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, DateTime, JSON, Boolean, text
 from sqlalchemy.orm import relationship
-from sqlalchemy import select
+from sqlalchemy import select, desc
 from datetime import datetime
 from urllib.parse import quote
 from database.models_base import Base
@@ -104,7 +104,6 @@ class DraftSession(Base):
         if found:
             return found
         async with db_session() as session:
-            from sqlalchemy import desc
             query = (select(cls)
                      .where(cls.channel_ids.isnot(None))
                      .where(cls.channel_ids.cast(String).like(f'%{channel_id}%'))

@@ -215,6 +215,7 @@ class DraftCommands(commands.Cog):
             await ctx.followup.send(error, ephemeral=True)
             return
 
+        draft_chat_id = str(draft_session.draft_chat_channel)
         granted, failed = [], []
         for channel_id in draft_session.channel_ids:
             channel = ctx.guild.get_channel(int(channel_id))
@@ -245,8 +246,7 @@ class DraftCommands(commands.Cog):
         if failed:
             summary += ("\n⚠️ Failed (Discord error): "
                         + ", ".join(c.mention for c in failed))
-            if any(str(c.id) == str(draft_session.draft_chat_channel)
-                   for c in failed):
+            if any(str(c.id) == draft_chat_id for c in failed):
                 summary += ("\n⚠️ Skipped the public announcement because "
                             "the draft chat grant failed.")
         await ctx.followup.send(summary, ephemeral=True)
@@ -255,8 +255,7 @@ class DraftCommands(commands.Cog):
                        f"{draft_session.session_id}")
 
         draft_chat = next(
-            (c for c in granted
-             if str(c.id) == str(draft_session.draft_chat_channel)), None)
+            (c for c in granted if str(c.id) == draft_chat_id), None)
         if draft_chat:
             await draft_chat.send(
                 f"{user.mention} was added as a substitute for "
