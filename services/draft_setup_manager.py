@@ -762,7 +762,7 @@ class DraftSetupManager:
                     return True
 
             # Upload raw JSON + per-player MPT files to Spaces.
-            upload_successful = await self.save_to_digitalocean_spaces(draft_data)
+            object_key = await self.save_to_digitalocean_spaces(draft_data)
 
             async with db_session() as session:
                 draft_session = (await session.execute(
@@ -770,7 +770,7 @@ class DraftSetupManager:
                 )).scalar_one_or_none()
                 if not draft_session:
                     # Spaces upload may already have happened; only the DB write failed.
-                    self.logger.warning(f"No draft session for {self.session_id} (spaces_upload={upload_successful})")
+                    self.logger.warning(f"No draft session for {self.session_id} (spaces_key={object_key})")
                     return False
 
                 # Always persist the raw log so the data is never lost.
@@ -778,7 +778,7 @@ class DraftSetupManager:
 
                 # Only mark fully captured when Spaces succeeded, so a failed
                 # upload stays retryable (logs_captured_at stays NULL).
-                if upload_successful:
+                if object_key:
                     discord_user_pack_picks = {}
                     if draft_session.sign_ups:
                         discord_ids = list(draft_session.sign_ups.keys())
@@ -791,11 +791,12 @@ class DraftSetupManager:
                                 discord_user_pack_picks[discord_ids[idx]] = self.get_pack_first_picks(draft_data, draft_user_id)
                     draft_session.pack_first_picks = discord_user_pack_picks
                     draft_session.logs_captured_at = datetime.now()
+                    draft_session.spaces_object_key = object_key
 
                 await session.commit()
 
-            self.logger.info(f"Captured draft log for {self.session_id} (spaces_upload={upload_successful})")
-            return upload_successful
+            self.logger.info(f"Captured draft log for {self.session_id} (spaces_key={object_key})")
+            return bool(object_key)
         except Exception as e:
             self.logger.exception(f"Error capturing draft log: {e}")
             return False
@@ -868,7 +869,8 @@ class DraftSetupManager:
             self.logger.exception(f"Error in scheduled publish for {self.session_id}: {e}")
 
     async def save_to_digitalocean_spaces(self, draft_data):
-        """Upload draft log data to DigitalOcean Spaces"""
+        """Upload draft log data to DigitalOcean Spaces. Returns the object key
+        (e.g. 'team/cube-ts-id.json') on success, or None on failure."""
         start_time = draft_data.get("time")
         draft_id = draft_data.get("sessionID")
         
@@ -888,15 +890,15 @@ class DraftSetupManager:
                 
                 # If upload successful, also generate and upload MagicProTools format logs
                 await self.process_draft_logs_for_magicprotools(draft_data, do_helper)
-                
-                return True
+
+                return result.object_path
             else:
                 self.logger.warning("Failed to upload draft log data to DigitalOcean Spaces")
-                return False
-                
+                return None
+
         except Exception as e:
             self.logger.error(f"Error uploading to DigitalOcean Space: {e}")
-            return False
+            return None
 
     async def process_draft_logs_for_magicprotools(self, draft_data, do_helper):
         """Process the draft log and generate formatted logs for each player."""

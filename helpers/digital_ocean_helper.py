@@ -214,16 +214,20 @@ class DigitalOceanHelper:
 
             async with client as s3:
                 self.logger.debug(f"Listing objects with bucket={self.bucket}, prefix={prefix}")
-                response = await s3.list_objects_v2(
-                    Bucket=self.bucket,
-                    Prefix=prefix
-                )
-
-                if 'Contents' not in response:
-                    self.logger.debug(f"No contents found for prefix {prefix}")
-                    return []
-
-                keys = [obj['Key'] for obj in response['Contents']]
+                keys = []
+                continuation_token = None
+                while True:
+                    kwargs = {"Bucket": self.bucket, "Prefix": prefix}
+                    if continuation_token:
+                        kwargs["ContinuationToken"] = continuation_token
+                    response = await s3.list_objects_v2(**kwargs)
+                    keys.extend(obj["Key"] for obj in response.get("Contents", []))
+                    continuation_token = response.get("NextContinuationToken")
+                    if not (response.get("IsTruncated") and continuation_token):
+                        # Stop when the API says we're done, or defensively if it
+                        # claims truncation but omits the token (avoids re-fetching
+                        # the first page forever).
+                        break
                 self.logger.debug(f"Found {len(keys)} keys for prefix {prefix}")
                 return keys
 
