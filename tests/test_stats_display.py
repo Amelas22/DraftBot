@@ -194,3 +194,35 @@ class TestGetStatsEmbedForPlayer:
         assert embed.footer is not None
         assert embed.footer.text is not None
         assert len(embed.footer.text) > 0
+
+    @pytest.mark.asyncio
+    async def test_player_skill_rating_established(self, test_db):
+        from stats_display import _player_skill_rating
+        async with AsyncSessionLocal() as session:
+            session.add(PlayerStats(
+                player_id="555", guild_id="g", display_name="P",
+                true_skill_mu=30.0, true_skill_sigma=1.0,
+                games_won=15, games_lost=10))          # 25 >= 20 -> established
+            await session.commit()
+        rating, provisional = await _player_skill_rating("555", "g")
+        assert rating == 1080
+        assert provisional is False
+
+    @pytest.mark.asyncio
+    async def test_player_skill_rating_provisional(self, test_db):
+        from stats_display import _player_skill_rating
+        async with AsyncSessionLocal() as session:
+            session.add(PlayerStats(
+                player_id="556", guild_id="g", display_name="P",
+                true_skill_mu=30.0, true_skill_sigma=1.0,
+                games_won=3, games_lost=2))            # 5 < 20 -> provisional
+            await session.commit()
+        rating, provisional = await _player_skill_rating("556", "g")
+        assert rating == 1080
+        assert provisional is True
+
+    @pytest.mark.asyncio
+    async def test_player_skill_rating_none_when_no_row(self, test_db):
+        from stats_display import _player_skill_rating
+        rating, provisional = await _player_skill_rating("999", "g")
+        assert rating is None and provisional is None
