@@ -8,6 +8,8 @@ from views import MatchResultSelect
 from config import is_money_server
 from preference_service import get_player_dm_notification_preference, update_player_dm_notification_preference
 from helpers.display_names import get_display_name
+from helpers.permissions import is_bot_manager
+from helpers.substitutes import is_sub_target_channel, resolve_sub_grant
 
 class DraftCommands(commands.Cog):
     def __init__(self, bot):
@@ -174,6 +176,96 @@ class DraftCommands(commands.Cog):
                 "Failed to update your DM notification preference. Please try again later.",
                 ephemeral=True
             )
+
+    @discord.slash_command(
+        name='add_sub',
+        description="Grant a substitute access to this draft's chat and a team chat",
+        guild_ids=None
+    )
+    async def add_sub(
+        self,
+        ctx,
+        user: discord.Option(discord.Member, "The substitute to grant access"),
+        team: discord.Option(str, "Sub's team (only needed if you're not in this draft)",
+                             choices=["A", "B"], required=False, default=None),
+    ):
+        """Grant a substitute channel access without changing draft data."""
+        logger.info(f"Received add_sub from {ctx.author.id} for {user.id} "
+                    f"in channel {ctx.channel_id}")
+        await ctx.response.defer(ephemeral=True)
+        await self._do_add_sub(ctx, user, team)
+
+    async def _do_add_sub(self, ctx, user, team):
+        draft_session = await DraftSession.get_by_any_channel_id(ctx.channel_id)
+        if not draft_session:
+            await ctx.followup.send(
+                "This command can only be used in a draft's channels.",
+                ephemeral=True)
+            return
+        if not draft_session.channel_ids:
+            await ctx.followup.send(
+                "This draft's channels haven't been created yet — "
+                "add the sub once teams and channels exist.", ephemeral=True)
+            return
+
+        is_admin = await is_bot_manager(ctx)
+        decision, error = resolve_sub_grant(
+            draft_session, str(ctx.author.id), str(user.id), is_admin, team)
+        if error:
+            await ctx.followup.send(error, ephemeral=True)
+            return
+
+        draft_chat_id = str(draft_session.draft_chat_channel)
+        granted, failed = [], []
+        for channel_id in draft_session.channel_ids:
+            channel = ctx.guild.get_channel(int(channel_id))
+            if not channel or not is_sub_target_channel(
+                    channel.name, draft_session.draft_id, decision.channel_prefix):
+                continue
+            try:
+                # Same overwrites teammates get at channel creation
+                await channel.set_permissions(
+                    user, read_messages=True, manage_messages=True)
+                granted.append(channel)
+            except discord.HTTPException:
+                logger.exception(f"add_sub: failed to set permissions on "
+                                 f"channel {channel.id}")
+                failed.append(channel)
+
+        if not granted and not failed:
+            await ctx.followup.send(
+                "Could not find this draft's channels — "
+                "they may have been deleted already.", ephemeral=True)
+            return
+
+        if granted:
+            summary = (f"Granted {user.display_name} access to: "
+                       + ", ".join(c.mention for c in granted))
+        else:
+            summary = f"Could not grant {user.display_name} access to any channels."
+        if failed:
+            summary += ("\n⚠️ Failed (Discord error): "
+                        + ", ".join(c.mention for c in failed))
+            if any(str(c.id) == draft_chat_id for c in failed):
+                summary += ("\n⚠️ Skipped the public announcement because "
+                            "the draft chat grant failed.")
+        await ctx.followup.send(summary, ephemeral=True)
+        logger.success(f"add_sub: granted {user.id} access to "
+                       f"{[c.id for c in granted]} in draft "
+                       f"{draft_session.session_id}")
+
+        draft_chat = next(
+            (c for c in granted if str(c.id) == draft_chat_id), None)
+        if draft_chat:
+            try:
+                await draft_chat.send(
+                    f"{user.mention} was added as a substitute for "
+                    f"**{decision.team_display_name}** by "
+                    f"{get_display_name(ctx.author, ctx.guild)}.")
+            except discord.HTTPException:
+                logger.warning(
+                    f"add_sub: grant succeeded but the public announcement "
+                    f"failed in channel {draft_chat.id}", exc_info=True)
 
 def setup(bot):
     bot.add_cog(DraftCommands(bot))

@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, DateTime, JSON, Boolean, text
 from sqlalchemy.orm import relationship
-from sqlalchemy import select
+from sqlalchemy import select, desc
 from datetime import datetime
 from urllib.parse import quote
 from database.models_base import Base
@@ -84,7 +84,36 @@ class DraftSession(Base):
             query = select(cls).filter_by(draft_chat_channel=channel_id)
             result = await session.execute(query)
             return result.scalar_one_or_none()
-    
+
+    @classmethod
+    async def get_by_any_channel_id(cls, channel_id: int | str):
+        """Get a draft session whose main chat OR any created channel matches.
+
+        Unlike get_by_channel_id (draft_chat_channel only), this also searches
+        the channel_ids JSON so lookups work from team chat channels too.
+
+        The SQL LIKE prefilter narrows candidates to sessions whose channel_ids
+        JSON contains the channel ID as a substring; the Python
+        channel_ids_contains check then confirms exact membership to avoid
+        false positives (e.g. channel 123 matching stored ID 51234).
+        """
+        from helpers.substitutes import channel_ids_contains
+
+        channel_id = str(channel_id)
+        found = await cls.get_by_channel_id(channel_id)
+        if found:
+            return found
+        async with db_session() as session:
+            query = (select(cls)
+                     .where(cls.channel_ids.isnot(None))
+                     .where(cls.channel_ids.cast(String).like(f'%{channel_id}%'))
+                     .order_by(desc(cls.draft_start_time)))
+            result = await session.execute(query)
+            for draft in result.scalars().all():
+                if channel_ids_contains(draft.channel_ids, channel_id):
+                    return draft
+        return None
+
     def is_user_participating(self, user_id: str) -> bool:
         """Check if a user is participating in this draft session"""
         return user_id in self.team_a or user_id in self.team_b
