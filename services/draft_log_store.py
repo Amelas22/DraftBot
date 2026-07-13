@@ -41,16 +41,29 @@ def render_pool(draft_data: dict, user_id: str) -> str:
 def map_discord_to_draftmancer(draft_data: dict, sign_ups: dict) -> dict[str, str]:
     """Map Discord user ids -> Draftmancer user ids by seat order, mirroring the
     mapping capture_draft_log uses for pack_first_picks (sign-up insertion order
-    lined up against users sorted by seatNum)."""
+    lined up against users sorted by seatNum).
+
+    Bot users (isBot truthy) are excluded before alignment, since they never
+    correspond to a Discord sign-up and would otherwise shift the mapping. If
+    the remaining player count doesn't match the sign-up count, we can't trust
+    a positional alignment - return {} rather than risk posting one player's
+    pool to a different player's private channel."""
     discord_ids = list((sign_ups or {}).keys())
-    sorted_users = sorted(
-        (draft_data.get("users") or {}).items(),
-        key=lambda item: item[1].get("seatNum", 999),
-    )
+    real_users = [
+        item for item in (draft_data.get("users") or {}).items()
+        if not item[1].get("isBot")
+    ]
+    if len(real_users) != len(discord_ids):
+        logger.warning(
+            "map_discord_to_draftmancer: player count mismatch "
+            f"({len(real_users)} draftmancer players vs {len(discord_ids)} sign-ups); "
+            "refusing to guess an alignment, returning empty mapping"
+        )
+        return {}
+    sorted_users = sorted(real_users, key=lambda item: item[1].get("seatNum", 999))
     mapping: dict[str, str] = {}
     for idx, (dm_user_id, _) in enumerate(sorted_users):
-        if idx < len(discord_ids):
-            mapping[discord_ids[idx]] = dm_user_id
+        mapping[discord_ids[idx]] = dm_user_id
     return mapping
 
 
@@ -61,9 +74,10 @@ def _find_team_channel(
 ) -> discord.abc.GuildChannel | None:
     """Resolve the private team channel whose name starts with `prefix` (e.g.
     'Red-Team') among the session's channel_ids."""
+    prefix_lower = prefix.lower()
     for cid in channel_ids or []:
         channel = guild.get_channel(int(cid))
-        if channel is not None and getattr(channel, "name", "").startswith(prefix):
+        if channel is not None and getattr(channel, "name", "").lower().startswith(prefix_lower):
             return channel
     return None
 
@@ -132,8 +146,26 @@ async def post_team_logs(session_id: str, bot) -> bool:
         )
         return False
 
+    # A team only "needs" a channel if it has members to post pools for. If a
+    # needed team's channel didn't resolve, this run is incomplete: still post
+    # best-effort to whichever channel(s) did resolve, but don't stamp, so the
+    # reconciler retries and the unresolved team isn't permanently skipped.
+    red_ok = red is not None or not team_a
+    blue_ok = blue is not None or not team_b
+    fully_resolved = red_ok and blue_ok
+
+    if not fully_resolved:
+        logger.warning(
+            f"post_team_logs: only partial team channels resolved for session {session_id} "
+            f"(red={'ok' if red_ok else 'missing'}, blue={'ok' if blue_ok else 'missing'}); "
+            "posting best-effort and leaving team_logs_posted_at unset for retry"
+        )
+
     await _post_pools_for_team(red, team_a, mapping, draft_data, sign_ups)
     await _post_pools_for_team(blue, team_b, mapping, draft_data, sign_ups)
+
+    if not fully_resolved:
+        return False
 
     async with db_session() as session:
         ds = (await session.execute(

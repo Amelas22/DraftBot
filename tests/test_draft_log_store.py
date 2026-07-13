@@ -54,6 +54,34 @@ def test_map_discord_to_draftmancer_by_seat_order():
     assert mapping == {"disc_a": "dm_a", "disc_b": "dm_b"}
 
 
+def test_map_discord_to_draftmancer_excludes_bot_users():
+    log = {
+        "carddata": {"c1": {"name": "Lightning Bolt"}, "c2": {"name": "Counterspell"}},
+        "users": {
+            "dm_bot": {"userName": "DraftBot", "seatNum": 0, "isBot": True, "cards": []},
+            "dm_a": {"userName": "Alice", "seatNum": 1, "cards": ["c1"]},
+            "dm_b": {"userName": "Bob", "seatNum": 2, "cards": ["c2"]},
+        },
+    }
+    sign_ups = {"disc_a": "Alice", "disc_b": "Bob"}
+    mapping = map_discord_to_draftmancer(log, sign_ups)
+    assert mapping == {"disc_a": "dm_a", "disc_b": "dm_b"}
+
+
+def test_map_discord_to_draftmancer_returns_empty_on_count_mismatch():
+    log = {
+        "carddata": {},
+        "users": {
+            "dm_a": {"userName": "Alice", "seatNum": 0, "cards": []},
+            "dm_b": {"userName": "Bob", "seatNum": 1, "cards": []},
+            "dm_c": {"userName": "Carol", "seatNum": 2, "cards": []},
+        },
+    }
+    sign_ups = {"disc_a": "Alice", "disc_b": "Bob"}  # 2 sign-ups vs 3 real players
+    mapping = map_discord_to_draftmancer(log, sign_ups)
+    assert mapping == {}
+
+
 def _channel(name):
     ch = MagicMock()
     ch.name = name
@@ -93,6 +121,75 @@ async def test_post_team_logs_scopes_pools_to_own_team_and_stamps():
     blue_names = [c.kwargs["file"][1] for c in blue.send.await_args_list]
     assert red_names == ["Alice.txt"]
     assert blue_names == ["Bob.txt"]
+
+
+@pytest.mark.asyncio
+async def test_post_team_logs_matches_lowercased_discord_channel_names():
+    """Discord stores text-channel names lowercased in production, e.g.
+    'red-team-chat-abc', not 'Red-Team-Chat-ABC'. Channel matching must be
+    case-insensitive or post_team_logs silently posts nothing in prod."""
+    ds = SimpleNamespace(
+        session_id="sid", draft_id="ABC", guild_id="42",
+        draft_data=_team_log(), team_logs_posted_at=None,
+        team_a=["disc_a"], team_b=["disc_b"],
+        sign_ups={"disc_a": "Alice", "disc_b": "Bob"},
+        channel_ids=[111, 222],
+    )
+    session = MagicMock()
+    result = MagicMock(); result.scalar_one_or_none.return_value = ds
+    session.execute = AsyncMock(return_value=result); session.commit = AsyncMock()
+    ctx = MagicMock(); ctx.__aenter__ = AsyncMock(return_value=session); ctx.__aexit__ = AsyncMock(return_value=None)
+
+    red = _channel("red-team-chat-abc")
+    blue = _channel("blue-team-chat-abc")
+    guild = MagicMock()
+    guild.get_channel = lambda cid: {111: red, 222: blue}.get(cid)
+    bot = MagicMock(); bot.get_guild.return_value = guild
+
+    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
+         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)):
+        ok = await post_team_logs("sid", bot)
+
+    assert ok is True
+    assert ds.team_logs_posted_at is not None
+    red_names = [c.kwargs["file"][1] for c in red.send.await_args_list]
+    blue_names = [c.kwargs["file"][1] for c in blue.send.await_args_list]
+    assert red_names == ["Alice.txt"]
+    assert blue_names == ["Bob.txt"]
+
+
+@pytest.mark.asyncio
+async def test_post_team_logs_partial_channel_resolution_does_not_stamp():
+    """If only one team's channel resolves, we should still post to it (best
+    effort) but must NOT stamp team_logs_posted_at, since the other team's
+    members never got their pools and need a retry."""
+    ds = SimpleNamespace(
+        session_id="sid", draft_id="ABC", guild_id="42",
+        draft_data=_team_log(), team_logs_posted_at=None,
+        team_a=["disc_a"], team_b=["disc_b"],
+        sign_ups={"disc_a": "Alice", "disc_b": "Bob"},
+        channel_ids=[111, 222],
+    )
+    session = MagicMock()
+    result = MagicMock(); result.scalar_one_or_none.return_value = ds
+    session.execute = AsyncMock(return_value=result); session.commit = AsyncMock()
+    ctx = MagicMock(); ctx.__aenter__ = AsyncMock(return_value=session); ctx.__aexit__ = AsyncMock(return_value=None)
+
+    red = _channel("Red-Team-Chat-ABC")
+    guild = MagicMock()
+    # Only Red resolves; Blue's channel id has no matching channel.
+    guild.get_channel = lambda cid: {111: red}.get(cid)
+    bot = MagicMock(); bot.get_guild.return_value = guild
+
+    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
+         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)):
+        ok = await post_team_logs("sid", bot)
+
+    assert ok is False
+    assert ds.team_logs_posted_at is None
+    red_names = [c.kwargs["file"][1] for c in red.send.await_args_list]
+    assert red_names == ["Alice.txt"]
+    session.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
