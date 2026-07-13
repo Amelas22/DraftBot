@@ -51,7 +51,7 @@ async def test_capture_stores_data_and_stamps_without_publishing():
     m = _manager()
     ds = SimpleNamespace(session_id="sid", sign_ups={"d1": "Alice", "d2": "Bob"},
                          draft_data=None, pack_first_picks=None, logs_captured_at=None,
-                         data_received=False)
+                         unlock_at=None, data_received=False)
     db_factory, session = _mock_db_session(ds)
     with patch("services.draft_setup_manager.db_session", db_factory), \
          patch.object(DraftSetupManager, "save_to_digitalocean_spaces", AsyncMock(return_value="team/x.json")) as spaces, \
@@ -65,6 +65,8 @@ async def test_capture_stores_data_and_stamps_without_publishing():
     assert ds.data_received is False
     assert ds.draft_data is not None
     assert ds.logs_captured_at is not None
+    assert ds.unlock_at is not None
+    assert ds.unlock_at > ds.logs_captured_at
     assert ds.spaces_object_key == "team/x.json"
     session.commit.assert_awaited()
 
@@ -229,18 +231,7 @@ async def test_publish_release_skips_when_disconnected():
 
 
 @pytest.mark.asyncio
-async def test_schedule_publish_calls_publish_after_delay():
-    m = _manager()
-    with patch("services.draft_setup_manager.asyncio.sleep", AsyncMock()) as sleep, \
-         patch.object(DraftSetupManager, "publish_draft_log", AsyncMock()) as pub:
-        await m.schedule_publish(123)
-    sleep.assert_awaited_once_with(123)
-    pub.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_on_end_draft_schedules_publish():
-    from services.draft_setup_manager import PUBLISH_DELAY_SECONDS
+async def test_on_end_draft_posts_team_pools():
     m = _manager()
     m.draft_cancelled = False
     m.draft_channel_id = "999"
@@ -248,18 +239,11 @@ async def test_on_end_draft_schedules_publish():
     bot = MagicMock()
     bot.get_guild.return_value = None
     bot.get_channel.return_value = None
-
-    def _stub_create_task(coro):
-        if asyncio.iscoroutine(coro):
-            coro.close()
-        return MagicMock()
-
     with patch("services.draft_setup_manager.get_bot", return_value=bot), \
          patch.object(DraftSetupManager, "capture_draft_log", AsyncMock()), \
-         patch.object(DraftSetupManager, "schedule_publish", MagicMock(return_value=None)) as sched, \
-         patch("services.draft_setup_manager.asyncio.create_task", _stub_create_task):
+         patch("services.draft_setup_manager.post_team_logs", AsyncMock()) as team:
         await m._on_end_draft()
-    sched.assert_called_once_with(PUBLISH_DELAY_SECONDS)
+    team.assert_awaited_once_with(m.session_id, bot)
 
 
 @pytest.mark.asyncio

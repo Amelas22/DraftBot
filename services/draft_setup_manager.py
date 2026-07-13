@@ -22,6 +22,7 @@ from helpers.digital_ocean_helper import DigitalOceanHelper
 from helpers.magicprotools_helper import MagicProtoolsHelper
 from notification_service import send_ready_check_dms
 from services.draft_socket_client import DraftSocketClient
+from services.draft_log_store import post_team_logs
 from cube_views.pack_options import DEFAULT_PACKS_PER_PLAYER, DEFAULT_CARDS_PER_PACK
 
 # Constants
@@ -309,11 +310,16 @@ class DraftSetupManager:
                 await asyncio.sleep(DRAFT_LOG_WAIT_INTERVAL)
             if self.current_draft_log:
                 await self.capture_draft_log(self.current_draft_log)
+                # Push-primary: post each team its own pools immediately (private
+                # team channels). The reconciler retries this if it fails.
+                try:
+                    await post_team_logs(self.session_id, bot)
+                except Exception as e:
+                    self.logger.error(f"Eager team-pool post failed for {self.session_id}: {e}")
             else:
                 self.logger.warning(f"No draft log available to capture for {self.session_id}")
-            # Schedule the publish (post links) for when Draftmancer makes the log
-            # public (~180 min). Posting is decoupled from match completion.
-            asyncio.create_task(self.schedule_publish(PUBLISH_DELAY_SECONDS))
+            # Publishing the public embed is the reconciler's job (restart-safe);
+            # no in-memory timer here.
 
     # Listen for Pause or Unpause (Resume)
     async def _on_draft_paused(self, data):
@@ -791,6 +797,9 @@ class DraftSetupManager:
                                 discord_user_pack_picks[discord_ids[idx]] = self.get_pack_first_picks(draft_data, draft_user_id)
                     draft_session.pack_first_picks = discord_user_pack_picks
                     draft_session.logs_captured_at = datetime.now()
+                    draft_session.unlock_at = draft_session.logs_captured_at + timedelta(
+                        seconds=PUBLISH_DELAY_SECONDS
+                    )
                     draft_session.spaces_object_key = object_key
 
                 await session.commit()
