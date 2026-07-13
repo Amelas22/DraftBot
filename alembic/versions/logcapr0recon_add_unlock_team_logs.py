@@ -18,6 +18,21 @@ def upgrade():
         batch_op.add_column(sa.Column("unlock_at", sa.DateTime(), nullable=True))
         batch_op.add_column(sa.Column("team_logs_posted_at", sa.DateTime(), nullable=True))
 
+    # Backfill unlock_at for drafts captured but not yet published at deploy time,
+    # so the new reconciler publishes them (the old in-memory publish timer is gone).
+    # 180 minutes mirrors the production PUBLISH_DELAY; bounded to the last day so we
+    # don't resurrect ancient unpublished drafts.
+    op.execute(
+        """
+        UPDATE draft_sessions
+        SET unlock_at = datetime(logs_captured_at, '+180 minutes')
+        WHERE logs_captured_at IS NOT NULL
+          AND unlock_at IS NULL
+          AND (data_received = 0 OR data_received IS NULL)
+          AND logs_captured_at >= datetime('now', '-1 day')
+        """
+    )
+
 
 def downgrade():
     with op.batch_alter_table("draft_sessions") as batch_op:
