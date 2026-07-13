@@ -160,9 +160,11 @@ async def test_post_team_logs_matches_lowercased_discord_channel_names():
 
 @pytest.mark.asyncio
 async def test_post_team_logs_partial_channel_resolution_does_not_stamp():
-    """If only one team's channel resolves, we should still post to it (best
-    effort) but must NOT stamp team_logs_posted_at, since the other team's
-    members never got their pools and need a retry."""
+    """All-or-nothing: if only one team's channel resolves, post NOTHING this
+    call (not even to the resolved team), don't stamp team_logs_posted_at, and
+    return False so the reconciler retries next tick. Posting best-effort to
+    the resolved channel would re-post to it (duplicate, player-visible pool
+    files) on every retry tick until the other channel resolves."""
     ds = SimpleNamespace(
         session_id="sid", draft_id="ABC", guild_id="42",
         draft_data=_team_log(), team_logs_posted_at=None,
@@ -187,8 +189,7 @@ async def test_post_team_logs_partial_channel_resolution_does_not_stamp():
 
     assert ok is False
     assert ds.team_logs_posted_at is None
-    red_names = [c.kwargs["file"][1] for c in red.send.await_args_list]
-    assert red_names == ["Alice.txt"]
+    red.send.assert_not_awaited()
     session.commit.assert_not_awaited()
 
 

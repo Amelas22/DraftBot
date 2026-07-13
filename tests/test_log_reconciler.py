@@ -78,11 +78,18 @@ async def test_reconcile_posts_pending_team_logs_and_publishes_due_embeds(test_d
     team-posted (swiss/winston drafts have no Red-Team/Blue-Team channels,
     so post_team_logs can never succeed for them and they'd be re-selected
     every tick forever).
+    G: captured 4 days ago, team-posted already, unlock_at in the PAST,
+    data_received False -> otherwise looks due-publish, but is outside the
+    72h publish retry window (e.g. guild has no draft-logs channel so
+    data_received can never flip True) -> must NOT be published, else this
+    row gets re-selected and rebuilds a transient manager every tick forever.
 
     This runs the REAL `select(...).filter(...)` against seeded rows, so it
     fails if the `unlock_at <= now` guard is ever removed or weakened, or if
     the pending-team query's recency/session-type bounds are ever removed or
-    weakened (see task-5-report.md for the RED/GREEN demonstration)."""
+    weakened, or if the due-publish query's recency bound is ever removed or
+    weakened (see task-5-report.md / fixE-report.md for the RED/GREEN
+    demonstration)."""
     now = datetime.now()
     await _seed("A", captured_at=now, unlock_at=now + timedelta(hours=3),
                 team_posted_at=None, data_received=False)
@@ -96,6 +103,8 @@ async def test_reconcile_posts_pending_team_logs_and_publishes_due_embeds(test_d
                 team_posted_at=None, data_received=False)
     await _seed("E", captured_at=now, unlock_at=now + timedelta(hours=3),
                 team_posted_at=None, data_received=False, session_type="swiss")
+    await _seed("G", captured_at=now - timedelta(days=4), unlock_at=now - timedelta(minutes=1),
+                team_posted_at=now, data_received=False)
 
     bot = MagicMock()
     fake_mgr = MagicMock()
@@ -112,8 +121,8 @@ async def test_reconcile_posts_pending_team_logs_and_publishes_due_embeds(test_d
     team.assert_any_call("A", bot)
     team.assert_any_call("D", bot)
     MgrCls.assert_called_once()                          # transient manager built once
-    assert MgrCls.call_args.kwargs["session_id"] == "B"  # ...for B, not C
-    fake_mgr.publish_draft_log.assert_awaited_once()      # only the due one (B, not C)
+    assert MgrCls.call_args.kwargs["session_id"] == "B"  # ...for B, not C or G
+    fake_mgr.publish_draft_log.assert_awaited_once()      # only the due one (B, not C/G)
 
 
 @pytest.mark.asyncio

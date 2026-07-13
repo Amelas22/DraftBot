@@ -19,6 +19,12 @@ TEAM_POST_RETRY_WINDOW_HOURS: int = 72  # 3 days: long enough to recover a real
 # post failure (bot/Discord down; league matches span days and a sub may need
 # a teammate's pool a day or two later) while still bounded so pre-existing/
 # historical captured rows aren't swept and re-posted forever.
+PUBLISH_RETRY_WINDOW_HOURS: int = 72  # 3 days: same rationale as
+# TEAM_POST_RETRY_WINDOW_HOURS above. publish_draft_log only stamps
+# data_received on a real send, so a guild with no draft-logs channel (or a
+# persistent send failure) would otherwise leave data_received False forever,
+# causing the row to be re-selected -- and a transient manager rebuilt -- on
+# every tick indefinitely.
 CAPTURE_LOG_WAIT_ATTEMPTS: int = 20    # ~10s waiting for the join-delivered log
 CAPTURE_LOG_WAIT_INTERVAL: float = 0.5
 
@@ -85,12 +91,17 @@ async def reconcile_publish_and_team_logs(bot) -> None:
         except Exception as e:
             logger.error(f"[reconciler] team-pool retry failed for {ds.session_id}: {e}")
 
-    # Due public embeds: captured, unlock passed, not yet published.
+    # Due public embeds: captured, unlock passed, not yet published. Bounded
+    # by publish_retry_cutoff so a draft that can never publish (e.g. no
+    # draft-logs channel in the guild) ages out instead of being re-selected
+    # -- and rebuilding a transient manager -- forever.
     now = datetime.now()
+    publish_retry_cutoff: datetime = now - timedelta(hours=PUBLISH_RETRY_WINDOW_HOURS)
     async with db_session() as session:
         due_publish = (await session.execute(
             select(DraftSession).filter(
                 DraftSession.logs_captured_at.isnot(None),
+                DraftSession.logs_captured_at >= publish_retry_cutoff,
                 DraftSession.data_received == False,   # noqa: E712
                 DraftSession.unlock_at.isnot(None),
                 DraftSession.unlock_at <= now,

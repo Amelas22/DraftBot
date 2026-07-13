@@ -147,9 +147,10 @@ async def post_team_logs(session_id: str, bot) -> bool:
         return False
 
     # A team only "needs" a channel if it has members to post pools for. If a
-    # needed team's channel didn't resolve, this run is incomplete: still post
-    # best-effort to whichever channel(s) did resolve, but don't stamp, so the
-    # reconciler retries and the unresolved team isn't permanently skipped.
+    # needed team's channel didn't resolve, this run is incomplete. Post
+    # nothing (all-or-nothing): posting best-effort to whichever channel(s)
+    # did resolve would re-post to that already-served, player-visible
+    # channel on every retry tick until the other channel resolves too.
     red_ok = red is not None or not team_a
     blue_ok = blue is not None or not team_b
     fully_resolved = red_ok and blue_ok
@@ -158,14 +159,12 @@ async def post_team_logs(session_id: str, bot) -> bool:
         logger.warning(
             f"post_team_logs: only partial team channels resolved for session {session_id} "
             f"(red={'ok' if red_ok else 'missing'}, blue={'ok' if blue_ok else 'missing'}); "
-            "posting best-effort and leaving team_logs_posted_at unset for retry"
+            "posting nothing this call and leaving team_logs_posted_at unset for retry"
         )
+        return False
 
     await _post_pools_for_team(red, team_a, mapping, draft_data, sign_ups)
     await _post_pools_for_team(blue, team_b, mapping, draft_data, sign_ups)
-
-    if not fully_resolved:
-        return False
 
     async with db_session() as session:
         ds = (await session.execute(
