@@ -867,16 +867,6 @@ class DraftSetupManager:
             self.logger.exception(f"Error publishing draft log: {e}")
             return False
 
-    async def schedule_publish(self, delay_seconds):
-        """Wait `delay_seconds`, then publish the captured log (the single
-        ~180-min timer aligned to Draftmancer's auto-unlock)."""
-        try:
-            self.logger.info(f"Scheduled publish in {delay_seconds}s for {self.session_id}")
-            await asyncio.sleep(delay_seconds)
-            await self.publish_draft_log()
-        except Exception as e:
-            self.logger.exception(f"Error in scheduled publish for {self.session_id}: {e}")
-
     async def save_to_digitalocean_spaces(self, draft_data):
         """Upload draft log data to DigitalOcean Spaces. Returns the object key
         (e.g. 'team/cube-ts-id.json') on success, or None on failure."""
