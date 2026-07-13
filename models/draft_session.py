@@ -48,6 +48,8 @@ class DraftSession(Base):
     data_received = Column(Boolean, default=False)
     logs_captured_at = Column(DateTime)  # set when the log is captured to DB/Spaces (pre-publish)
     spaces_object_key = Column(String(256), nullable=True)  # DigitalOcean Spaces object path
+    unlock_at = Column(DateTime)              # when the public embed may publish (logs_captured_at + PUBLISH_DELAY; manual release = now)
+    team_logs_posted_at = Column(DateTime)    # when per-team pools were posted to team channels (immediate; no time gate)
     cube = Column(String(128))
     live_draft_message_id = Column(String(64))
     min_stake = Column(Integer, default=10, server_default=text('10'))
