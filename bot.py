@@ -8,7 +8,7 @@ from database.message_management import setup_sticky_handler
 from database.db_session import init_db, ensure_guild_id_in_tables
 from utils import cleanup_sessions_task, check_inactive_players_task
 from commands import core_commands, scheduled_posts
-from reconnect_drafts import reconnect_recent_draft_sessions, reconnect_draft_setup_sessions
+from reconnect_drafts import reconnect_draft_setup_sessions
 from bot_registry import register_bot
 from preference_service import PlayerPreferences
 
@@ -94,7 +94,6 @@ async def main():
         from tournament_nudge import re_register_premade_nudges
         await re_register_premade_nudges(bot)
         logger.info("Re-registered team finder")
-        bot.loop.create_task(delayed_log_collection(bot))
 
     @bot.event
     async def on_guild_join(guild):
@@ -115,21 +114,6 @@ async def main():
         from helpers.permissions import handle_application_command_error
         await handle_application_command_error(ctx, error)
 
-    async def delayed_log_collection(bot):
-        # Wait 65 seconds
-        await asyncio.sleep(65)
-        try:
-            # Reconnect to sessions needing log collection
-            logger.info("Starting draft log collection reconnection...")
-            log_tasks = await reconnect_recent_draft_sessions(bot)
-            if log_tasks:
-                logger.info(f"Created {len(log_tasks)} draft log collection reconnection tasks")
-                await monitor_reconnection_tasks(log_tasks, "log collection")
-            else:
-                logger.info("No draft log collection sessions to reconnect")
-        except Exception as e:
-            logger.error(f"Error setting up draft reconnections: {e}")
-            
     async def monitor_reconnection_tasks(managers, task_type=""):
         """Process managers sequentially with a 1-second delay between each"""
         try:
@@ -138,7 +122,7 @@ async def main():
                 try:
 
                     # Start this specific connection and create a task to monitor it
-                    task = asyncio.create_task(manager.keep_connection_alive()) if task_type == "setup" else asyncio.create_task(manager.keep_draft_session_alive())
+                    task = asyncio.create_task(manager.keep_connection_alive())
                     logger.info(f"Started task {i+1}/{len(managers)} for draft ID: {manager.draft_id}")
                     
                     # Add a 1-second delay before the next task

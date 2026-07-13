@@ -9,6 +9,7 @@ of being replaced by a call-order-keyed mock.
 import os
 import tempfile
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,6 +19,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from database.db_session import AsyncSessionLocal
 from database.models_base import Base
 from models.draft_session import DraftSession
+from services.draft_setup_manager import DraftSetupManager
 from services.log_reconciler import reconcile_publish_and_team_logs
 
 
@@ -148,3 +150,28 @@ async def test_reconcile_reuses_active_manager_without_clobbering_registry(test_
     MgrCls.assert_not_called()                        # no transient construction
     live_manager.publish_draft_log.assert_awaited_once()
     assert fake_registry["T2"] is live_manager        # not clobbered or removed
+
+
+from services.log_reconciler import reconcile_capture
+
+
+@pytest.mark.asyncio
+async def test_reconcile_capture_spawns_and_captures_uncaptured_drafts():
+    now = datetime.now()
+    row = SimpleNamespace(session_id="U", logs_captured_at=None, draft_id="du",
+                          cube="cu", guild_id="1", session_type="team",
+                          teams_start_time=now, session_stage="pairings")
+    result = MagicMock(); result.scalars.return_value = MagicMock(all=lambda: [row])
+    session = MagicMock(); session.execute = AsyncMock(return_value=result)
+    ctx = MagicMock(); ctx.__aenter__ = AsyncMock(return_value=session); ctx.__aexit__ = AsyncMock(return_value=None)
+
+    mgr = MagicMock()
+    mgr.current_draft_log = {"users": {}}     # log arrived on join
+    mgr.capture_draft_log = AsyncMock()
+
+    with patch("services.log_reconciler.db_session", MagicMock(return_value=ctx)), \
+         patch.object(DraftSetupManager, "spawn_for_existing_session", AsyncMock(return_value=mgr)), \
+         patch("services.log_reconciler.asyncio.sleep", AsyncMock()):
+        await reconcile_capture(MagicMock())
+
+    mgr.capture_draft_log.assert_awaited_once_with(mgr.current_draft_log)

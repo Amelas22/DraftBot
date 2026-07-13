@@ -3,7 +3,7 @@ re-fires idempotent steps the push path left pending. Pure-DB actions
 (team-pool retry, delayed public embed) live here; the socket capture-retry is
 added in reconcile_capture (Task 6)."""
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from loguru import logger
 from sqlalchemy import select
@@ -14,6 +14,44 @@ from services.draft_log_store import post_team_logs
 from services.draft_setup_manager import ACTIVE_MANAGERS, DraftSetupManager
 
 RECONCILE_INTERVAL_SECONDS: int = 60
+CAPTURE_RETRY_WINDOW_HOURS: int = 12   # only chase recently-active drafts
+CAPTURE_LOG_WAIT_ATTEMPTS: int = 20    # ~10s waiting for the join-delivered log
+CAPTURE_LOG_WAIT_INTERVAL: float = 0.5
+
+
+async def reconcile_capture(bot) -> None:
+    """Backup for a missed endDraft push: reconnect the owner socket for
+    uncaptured, recently-active drafts and capture the log the session
+    re-delivers on join. Bounded by Draftmancer's ~28-min retention."""
+    cutoff = datetime.now() - timedelta(hours=CAPTURE_RETRY_WINDOW_HOURS)
+    async with db_session() as session:
+        uncaptured = (await session.execute(
+            select(DraftSession).filter(
+                DraftSession.logs_captured_at.is_(None),
+                DraftSession.session_stage == "pairings",
+                DraftSession.teams_start_time.isnot(None),
+                DraftSession.teams_start_time >= cutoff,
+                DraftSession.session_type != "winston",
+            )
+        )).scalars().all()
+
+    for ds in uncaptured:
+        session_id = ds.session_id
+        try:
+            manager = await DraftSetupManager.spawn_for_existing_session(session_id, bot)
+            if manager is None:
+                continue
+            for _ in range(CAPTURE_LOG_WAIT_ATTEMPTS):
+                if getattr(manager, "current_draft_log", None):
+                    break
+                await asyncio.sleep(CAPTURE_LOG_WAIT_INTERVAL)
+            draft_log = getattr(manager, "current_draft_log", None)
+            if draft_log:
+                await manager.capture_draft_log(draft_log)
+            else:
+                logger.info(f"[reconciler] no log yet for {session_id}; will retry next tick")
+        except Exception as e:
+            logger.error(f"[reconciler] capture retry failed for {session_id}: {e}")
 
 
 async def reconcile_publish_and_team_logs(bot) -> None:
@@ -75,6 +113,7 @@ async def run_log_reconciler(bot) -> None:
     logger.info("[reconciler] starting draft-log reconciler loop")
     while True:
         try:
+            await reconcile_capture(bot)
             await reconcile_publish_and_team_logs(bot)
         except Exception as e:
             logger.exception(f"[reconciler] tick failed: {e}")
