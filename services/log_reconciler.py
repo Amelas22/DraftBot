@@ -15,6 +15,7 @@ from services.draft_setup_manager import ACTIVE_MANAGERS, DraftSetupManager
 
 RECONCILE_INTERVAL_SECONDS: int = 60
 CAPTURE_RETRY_WINDOW_HOURS: int = 12   # only chase recently-active drafts
+TEAM_POST_RETRY_WINDOW_HOURS: int = 12  # only chase recently-captured team pools
 CAPTURE_LOG_WAIT_ATTEMPTS: int = 20    # ~10s waiting for the join-delivered log
 CAPTURE_LOG_WAIT_INTERVAL: float = 0.5
 
@@ -57,12 +58,20 @@ async def reconcile_capture(bot) -> None:
 async def reconcile_publish_and_team_logs(bot) -> None:
     """Retry pending team-pool posts, and publish the public embed for captured
     drafts whose unlock_at has passed. Both actions are idempotent."""
-    # Pending team-pool posts: captured but not yet posted.
+    # Pending team-pool posts: captured but not yet posted. Bounded to recently
+    # captured drafts of session types that actually have Red-Team/Blue-Team
+    # channels -- otherwise every historical captured draft (team_logs_posted_at
+    # is a new column, NULL on all pre-existing rows) and every swiss/winston
+    # draft (which structurally can't be team-posted) would be re-selected on
+    # every tick forever.
+    team_post_cutoff: datetime = datetime.now() - timedelta(hours=TEAM_POST_RETRY_WINDOW_HOURS)
     async with db_session() as session:
         pending_team = (await session.execute(
             select(DraftSession).filter(
                 DraftSession.logs_captured_at.isnot(None),
                 DraftSession.team_logs_posted_at.is_(None),
+                DraftSession.logs_captured_at >= team_post_cutoff,
+                DraftSession.session_type.notin_(["winston", "swiss"]),
             )
         )).scalars().all()
     for ds in pending_team:

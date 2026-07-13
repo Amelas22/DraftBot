@@ -41,14 +41,15 @@ async def test_db():
     os.unlink(temp_db.name)
 
 
-async def _seed(session_id, *, captured_at, unlock_at, team_posted_at, data_received):
+async def _seed(session_id, *, captured_at, unlock_at, team_posted_at, data_received,
+                 session_type="team"):
     async with AsyncSessionLocal() as session:
         session.add(DraftSession(
             session_id=session_id,
             draft_id=f"d{session_id}",
             cube=f"c{session_id}",
             guild_id="1",
-            session_type="team",
+            session_type=session_type,
             logs_captured_at=captured_at,
             unlock_at=unlock_at,
             team_logs_posted_at=team_posted_at,
@@ -65,10 +66,19 @@ async def test_reconcile_posts_pending_team_logs_and_publishes_due_embeds(test_d
     False -> due-publish (publish_draft_log only).
     C: captured, team-posted already, unlock_at in the FUTURE, data_received
     False -> must NOT publish.
+    D: an OLD team draft (captured 2 days ago), team_logs_posted_at NULL ->
+    must NOT be team-posted (proves the recency bound on the pending-team
+    query; otherwise every historical captured draft gets re-selected
+    forever).
+    E: a recent SWISS draft, team_logs_posted_at NULL -> must NOT be
+    team-posted (swiss/winston drafts have no Red-Team/Blue-Team channels,
+    so post_team_logs can never succeed for them and they'd be re-selected
+    every tick forever).
 
     This runs the REAL `select(...).filter(...)` against seeded rows, so it
-    fails if the `unlock_at <= now` guard is ever removed or weakened (see
-    task-5-report.md for the RED/GREEN demonstration)."""
+    fails if the `unlock_at <= now` guard is ever removed or weakened, or if
+    the pending-team query's recency/session-type bounds are ever removed or
+    weakened (see task-5-report.md for the RED/GREEN demonstration)."""
     now = datetime.now()
     await _seed("A", captured_at=now, unlock_at=now + timedelta(hours=3),
                 team_posted_at=None, data_received=False)
@@ -76,6 +86,10 @@ async def test_reconcile_posts_pending_team_logs_and_publishes_due_embeds(test_d
                 team_posted_at=now, data_received=False)
     await _seed("C", captured_at=now, unlock_at=now + timedelta(hours=3),
                 team_posted_at=now, data_received=False)
+    await _seed("D", captured_at=now - timedelta(days=2), unlock_at=now + timedelta(hours=3),
+                team_posted_at=None, data_received=False)
+    await _seed("E", captured_at=now, unlock_at=now + timedelta(hours=3),
+                team_posted_at=None, data_received=False, session_type="swiss")
 
     bot = MagicMock()
     fake_mgr = MagicMock()
