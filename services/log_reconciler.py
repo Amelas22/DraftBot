@@ -50,13 +50,16 @@ async def reconcile_publish_and_team_logs(bot) -> None:
             # over constructing a transient one that would leak into / clobber
             # the module-global ACTIVE_MANAGERS registry.
             manager = DraftSetupManager.get_active_manager(ds.session_id)
-            created_transient = manager is None
-            if created_transient:
+            created_transient = False
+            if manager is None:
                 manager = DraftSetupManager(
                     session_id=ds.session_id, draft_id=ds.draft_id, cube_id=ds.cube,
                     guild_id=ds.guild_id,
                 )
+                # Only the transient path needs session_type set from the DB row; a reused
+                # active manager already carries its own (authoritative) session_type.
                 manager.session_type = ds.session_type or "team"
+                created_transient = True
             manager.set_bot_instance(bot)
             try:
                 await manager.publish_draft_log()   # release=False: no socket used
