@@ -6,11 +6,14 @@ from __future__ import annotations
 
 import io
 from datetime import datetime
+from typing import Iterable
 
 import discord
+from loguru import logger
 from sqlalchemy import select
 
 from database.db_session import db_session
+from helpers.substitutes import TEAM_A_CHANNEL_PREFIX, TEAM_B_CHANNEL_PREFIX
 from models.draft_session import DraftSession
 
 
@@ -51,7 +54,11 @@ def map_discord_to_draftmancer(draft_data: dict, sign_ups: dict) -> dict[str, st
     return mapping
 
 
-def _find_team_channel(guild, channel_ids, prefix: str):
+def _find_team_channel(
+    guild: discord.Guild,
+    channel_ids: Iterable[int | str],
+    prefix: str,
+) -> discord.abc.GuildChannel | None:
     """Resolve the private team channel whose name starts with `prefix` (e.g.
     'Red-Team') among the session's channel_ids."""
     for cid in channel_ids or []:
@@ -61,7 +68,13 @@ def _find_team_channel(guild, channel_ids, prefix: str):
     return None
 
 
-async def _post_pools_for_team(channel, member_discord_ids, mapping, draft_data, sign_ups):
+async def _post_pools_for_team(
+    channel: discord.abc.GuildChannel | None,
+    member_discord_ids: list[str],
+    mapping: dict[str, str],
+    draft_data: dict,
+    sign_ups: dict,
+) -> None:
     """Post one .txt pool attachment per team member to their team channel."""
     if channel is None:
         return
@@ -107,8 +120,18 @@ async def post_team_logs(session_id: str, bot) -> bool:
         return False
 
     mapping = map_discord_to_draftmancer(draft_data, sign_ups)
-    red = _find_team_channel(guild, channel_ids, "Red-Team")
-    blue = _find_team_channel(guild, channel_ids, "Blue-Team")
+    red = _find_team_channel(guild, channel_ids, TEAM_A_CHANNEL_PREFIX)
+    blue = _find_team_channel(guild, channel_ids, TEAM_B_CHANNEL_PREFIX)
+
+    if red is None and blue is None:
+        # Neither team channel resolved, so nothing could be posted. Leave
+        # team_logs_posted_at unstamped so the reconciler retries later.
+        logger.warning(
+            f"post_team_logs: no team channels resolved for session {session_id}; "
+            "leaving team_logs_posted_at unset for retry"
+        )
+        return False
+
     await _post_pools_for_team(red, team_a, mapping, draft_data, sign_ups)
     await _post_pools_for_team(blue, team_b, mapping, draft_data, sign_ups)
 

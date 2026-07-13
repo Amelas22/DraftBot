@@ -96,6 +96,32 @@ async def test_post_team_logs_scopes_pools_to_own_team_and_stamps():
 
 
 @pytest.mark.asyncio
+async def test_post_team_logs_no_channels_found_does_not_stamp():
+    ds = SimpleNamespace(
+        session_id="sid", draft_id="ABC", guild_id="42",
+        draft_data=_team_log(), team_logs_posted_at=None,
+        team_a=["disc_a"], team_b=["disc_b"],
+        sign_ups={"disc_a": "Alice", "disc_b": "Bob"},
+        channel_ids=[111, 222],
+    )
+    session = MagicMock()
+    result = MagicMock(); result.scalar_one_or_none.return_value = ds
+    session.execute = AsyncMock(return_value=result); session.commit = AsyncMock()
+    ctx = MagicMock(); ctx.__aenter__ = AsyncMock(return_value=session); ctx.__aexit__ = AsyncMock(return_value=None)
+
+    guild = MagicMock()
+    guild.get_channel = lambda cid: None  # neither Red nor Blue channel resolves
+    bot = MagicMock(); bot.get_guild.return_value = guild
+
+    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)):
+        ok = await post_team_logs("sid", bot)
+
+    assert ok is False
+    assert ds.team_logs_posted_at is None
+    session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_post_team_logs_idempotent_when_already_posted():
     from datetime import datetime
     ds = SimpleNamespace(session_id="sid", team_logs_posted_at=datetime.now(),
