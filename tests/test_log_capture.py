@@ -163,11 +163,27 @@ async def test_publish_posts_and_marks_received():
     ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False)
     db_factory, _ = _mock_db_session(ds)
     with patch("services.draft_setup_manager.db_session", db_factory), \
-         patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock()) as embed:
+         patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock(return_value=True)) as embed:
         ok = await m.publish_draft_log()
     assert ok is True
     embed.assert_awaited_once()
     assert ds.data_received is True
+
+
+@pytest.mark.asyncio
+async def test_publish_does_not_mark_received_when_embed_not_sent():
+    """If send_magicprotools_embed reports it didn't actually send anything
+    (guild/channel missing, or an exception was swallowed), publish_draft_log
+    must NOT stamp data_received, so the reconciler retries on a later tick."""
+    m = _manager()
+    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False)
+    db_factory, _ = _mock_db_session(ds)
+    with patch("services.draft_setup_manager.db_session", db_factory), \
+         patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock(return_value=False)) as embed:
+        ok = await m.publish_draft_log()
+    assert ok is False
+    embed.assert_awaited_once()
+    assert ds.data_received is False
 
 
 @pytest.mark.asyncio
@@ -253,6 +269,27 @@ async def test_manually_unlock_delegates_to_publish_with_release():
         result = await m.manually_unlock_draft_logs()
     assert result is True
     pub.assert_awaited_once_with(release=True)
+
+
+@pytest.mark.asyncio
+async def test_keep_connection_alive_reclaims_ownership_after_initial_connect():
+    """A manager spawned by the capture-retry (spawn_for_existing_session ->
+    keep_connection_alive) must re-assert itself as session owner right after
+    the initial connect, mirroring _handle_reconnection, otherwise on an
+    inactive/ended Draftmancer session it never receives the owner log push."""
+    m = _manager()
+    m.draft_id = "ABC123"
+    m._should_disconnect = True  # break out of the while-loop on first iteration
+    m.socket_client = MagicMock()
+    m.socket_client.connected = True
+    m.socket_client.connect_with_retry = AsyncMock(return_value=True)
+    m.socket_client.disconnect = AsyncMock()
+    m._reclaim_ownership_as_spectator = AsyncMock(return_value=True)
+    m.disconnect_safely = AsyncMock()
+    with patch("services.draft_setup_manager.get_draftmancer_websocket_url", return_value="ws://x"), \
+         patch("services.draft_setup_manager.asyncio.sleep", AsyncMock()):
+        await m.keep_connection_alive()
+    m._reclaim_ownership_as_spectator.assert_awaited_once()
 
 
 @pytest.mark.asyncio

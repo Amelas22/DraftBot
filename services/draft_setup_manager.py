@@ -850,8 +850,16 @@ class DraftSetupManager:
                     self.logger.error(f"Failed to release Draftmancer log for {self.session_id}: {e}")
 
             # Post the MagicProTools embed/links to Discord.
+            sent = False
             if self.guild_id:
-                await self.send_magicprotools_embed(draft_data)
+                sent = await self.send_magicprotools_embed(draft_data)
+
+            if not sent:
+                self.logger.warning(
+                    f"MagicProTools embed not sent for {self.session_id}; "
+                    "leaving data_received unset so publish is retried"
+                )
+                return False
 
             async with db_session() as session:
                 draft_session = (await session.execute(
@@ -925,42 +933,49 @@ class DraftSetupManager:
 
     # This method has been replaced by using the MagicProtoolsHelper.submit_to_api method
 
-    async def send_magicprotools_embed(self, draft_data):
-        """Find draft-logs channel and send the embed if found."""
+    async def send_magicprotools_embed(self, draft_data) -> bool:
+        """Find draft-logs channel and send the embed if found.
+
+        Returns:
+            bool: True if the embed was actually sent to a channel, False if
+            the guild/`draft-logs` channel wasn't found or an exception was
+            caught. Callers (e.g. `publish_draft_log`) rely on this to decide
+            whether the publish should be retried later.
+        """
         try:
             # Find the guild
             bot = get_bot()
             guild = bot.get_guild(int(self.guild_id))
             if not guild:
                 self.logger.warning(f"Could not find guild with ID {self.guild_id}")
-                return
-            
+                return False
+
             # Find a channel named "draft-logs"
             draft_logs_channel = None
             for channel in guild.channels:
                 if channel.name.lower() == "draft-logs" and hasattr(channel, "send"):
                     draft_logs_channel = channel
                     break
-            
+
             if draft_logs_channel:
                 # Generate the embed and send it
                 embed = await self.generate_magicprotools_embed(draft_data)
                 message = await draft_logs_channel.send(embed=embed)
                 self.logger.info(f"Sent MagicProTools links to #{draft_logs_channel.name} in {guild.name}")
-                
+
                 # Save the channel and message IDs to the database
                 async with db_session() as session:
                     # Get a fresh reference to the draft session
                     stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
                     result = await session.execute(stmt)
                     draft_session = result.scalar_one_or_none()
-                    
+
                     if draft_session:
                         draft_session.logs_channel_id = str(draft_logs_channel.id)
                         draft_session.logs_message_id = str(message.id)
                         await session.commit()
                         self.logger.info(f"Saved logs channel and message IDs for session {self.session_id}")
-                    
+
                         # Update victory messages to include the logs link
                         # Import the function here to avoid circular imports
                         from utils import check_and_post_victory_or_draw
@@ -969,11 +984,14 @@ class DraftSetupManager:
                             self.logger.info(f"Successfully updated victory messages with logs link for session {self.session_id}")
                         except Exception as e:
                             self.logger.error(f"Error updating victory messages with logs link: {e}")
+                return True
             else:
                 self.logger.warning(f"No 'draft-logs' channel found in guild {guild.name}, skipping embed message")
+                return False
         except Exception as e:
             self.logger.error(f"Error sending MagicProTools embed: {e}")
-            
+            return False
+
     async def generate_magicprotools_embed(self, draft_data):
         """Generate a Discord embed with MagicProTools links for all drafters"""
         try:
@@ -2355,6 +2373,13 @@ class DraftSetupManager:
         if not await self.socket_client.connect_with_retry(websocket_url):
             self.logger.error("Initial connection failed after retries. Aborting.")
             return
+
+        # Reclaim ownership as spectator right after the initial connect too,
+        # not just on reconnection (see _handle_reconnection). Without this, a
+        # manager spawned by the capture-retry never re-asserts itself as
+        # session owner, so on an inactive/ended Draftmancer session it won't
+        # receive the owner log push and the capture-retry waits forever.
+        await self._reclaim_ownership_as_spectator()
 
         try:
             iteration = 0
