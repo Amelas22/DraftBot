@@ -15,9 +15,14 @@ from services.draft_setup_manager import ACTIVE_MANAGERS, DraftSetupManager
 
 RECONCILE_INTERVAL_SECONDS: int = 60
 CAPTURE_RETRY_WINDOW_HOURS: int = 12   # only chase recently-active drafts
-TEAM_POST_RETRY_WINDOW_HOURS: int = 12  # only chase recently-captured team pools
+TEAM_POST_RETRY_WINDOW_HOURS: int = 72  # 3 days: long enough to recover a real
+# post failure (bot/Discord down; league matches span days and a sub may need
+# a teammate's pool a day or two later) while still bounded so pre-existing/
+# historical captured rows aren't swept and re-posted forever.
 CAPTURE_LOG_WAIT_ATTEMPTS: int = 20    # ~10s waiting for the join-delivered log
 CAPTURE_LOG_WAIT_INTERVAL: float = 0.5
+
+_RECONCILER_RUNNING: bool = False  # guards against on_ready firing on every gateway reconnect
 
 
 async def reconcile_capture(bot) -> None:
@@ -29,7 +34,7 @@ async def reconcile_capture(bot) -> None:
         uncaptured = (await session.execute(
             select(DraftSession).filter(
                 DraftSession.logs_captured_at.is_(None),
-                DraftSession.session_stage == "pairings",
+                DraftSession.session_stage.in_(["teams", "pairings"]),
                 DraftSession.teams_start_time.isnot(None),
                 DraftSession.teams_start_time >= cutoff,
                 DraftSession.session_type != "winston",
@@ -118,7 +123,16 @@ async def reconcile_publish_and_team_logs(bot) -> None:
 
 
 async def run_log_reconciler(bot) -> None:
-    """Periodic backup loop. Runs forever; each tick is best-effort."""
+    """Periodic backup loop. Runs forever; each tick is best-effort.
+
+    Discord fires on_ready on every gateway reconnect, and bot.py's on_ready
+    starts this loop -- guard against a second concurrent loop (which would
+    cause duplicate team-pool posts / duplicate public embeds)."""
+    global _RECONCILER_RUNNING
+    if _RECONCILER_RUNNING:
+        logger.info("[reconciler] reconciler already running; skipping duplicate start")
+        return
+    _RECONCILER_RUNNING = True
     logger.info("[reconciler] starting draft-log reconciler loop")
     while True:
         try:

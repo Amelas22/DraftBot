@@ -20,6 +20,7 @@ from database.db_session import AsyncSessionLocal
 from database.models_base import Base
 from models.draft_session import DraftSession
 from services.draft_setup_manager import DraftSetupManager
+import services.log_reconciler as log_reconciler_module
 from services.log_reconciler import reconcile_publish_and_team_logs
 
 
@@ -66,10 +67,13 @@ async def test_reconcile_posts_pending_team_logs_and_publishes_due_embeds(test_d
     False -> due-publish (publish_draft_log only).
     C: captured, team-posted already, unlock_at in the FUTURE, data_received
     False -> must NOT publish.
-    D: an OLD team draft (captured 2 days ago), team_logs_posted_at NULL ->
-    must NOT be team-posted (proves the recency bound on the pending-team
-    query; otherwise every historical captured draft gets re-selected
-    forever).
+    D: a team draft captured 2 days ago, team_logs_posted_at NULL -> a real
+    post failure (bot/Discord down) can legitimately take this long to
+    recover from, so it MUST still be team-posted (72h retry window).
+    F: a team draft captured 4 days ago, team_logs_posted_at NULL -> outside
+    the 72h retry window, so must NOT be team-posted (proves the recency
+    bound on the pending-team query still exists; otherwise every historical
+    captured draft gets re-selected forever).
     E: a recent SWISS draft, team_logs_posted_at NULL -> must NOT be
     team-posted (swiss/winston drafts have no Red-Team/Blue-Team channels,
     so post_team_logs can never succeed for them and they'd be re-selected
@@ -88,6 +92,8 @@ async def test_reconcile_posts_pending_team_logs_and_publishes_due_embeds(test_d
                 team_posted_at=now, data_received=False)
     await _seed("D", captured_at=now - timedelta(days=2), unlock_at=now + timedelta(hours=3),
                 team_posted_at=None, data_received=False)
+    await _seed("F", captured_at=now - timedelta(days=4), unlock_at=now + timedelta(hours=3),
+                team_posted_at=None, data_received=False)
     await _seed("E", captured_at=now, unlock_at=now + timedelta(hours=3),
                 team_posted_at=None, data_received=False, session_type="swiss")
 
@@ -102,7 +108,9 @@ async def test_reconcile_posts_pending_team_logs_and_publishes_due_embeds(test_d
          patch("services.log_reconciler.DraftSetupManager", MgrCls):
         await reconcile_publish_and_team_logs(bot)
 
-    team.assert_awaited_once_with("A", bot)              # only the team-pending one
+    assert team.await_count == 2                          # A and D (not F, C, E, B)
+    team.assert_any_call("A", bot)
+    team.assert_any_call("D", bot)
     MgrCls.assert_called_once()                          # transient manager built once
     assert MgrCls.call_args.kwargs["session_id"] == "B"  # ...for B, not C
     fake_mgr.publish_draft_log.assert_awaited_once()      # only the due one (B, not C)
@@ -185,6 +193,55 @@ async def test_reconcile_capture_spawns_and_captures_uncaptured_drafts():
 
     with patch("services.log_reconciler.db_session", MagicMock(return_value=ctx)), \
          patch.object(DraftSetupManager, "spawn_for_existing_session", AsyncMock(return_value=mgr)), \
+         patch("services.log_reconciler.asyncio.sleep", AsyncMock()):
+        await reconcile_capture(MagicMock())
+
+    mgr.capture_draft_log.assert_awaited_once_with(mgr.current_draft_log)
+
+
+@pytest.mark.asyncio
+async def test_run_log_reconciler_guards_against_concurrent_start():
+    """on_ready fires on every gateway reconnect, so bot.py's on_ready could
+    call run_log_reconciler more than once per process -> duplicate concurrent
+    loops -> duplicate team-pool posts / duplicate public embeds. A second
+    call made while a loop is already "running" (module flag set) must return
+    immediately without ever awaiting the per-tick reconcile functions."""
+    log_reconciler_module._RECONCILER_RUNNING = True
+    try:
+        with patch("services.log_reconciler.reconcile_capture", AsyncMock()) as cap, \
+             patch("services.log_reconciler.reconcile_publish_and_team_logs", AsyncMock()) as pub:
+            await log_reconciler_module.run_log_reconciler(MagicMock())
+
+        cap.assert_not_awaited()
+        pub.assert_not_awaited()
+    finally:
+        log_reconciler_module._RECONCILER_RUNNING = False
+
+
+@pytest.mark.asyncio
+async def test_reconcile_capture_selects_teams_stage_draft(test_db):
+    """A draft's session_stage is "teams" from team creation THROUGH drafting,
+    and only flips to "pairings" inside _on_end_draft (via
+    create_rooms_pairings). If the bot is down when Draftmancer emits
+    endDraft, the draft stays "teams" forever -- so the capture-retry query
+    must select "teams"-stage rows too, not only "pairings". Uses the real
+    DB-backed `select(...).filter(...)` (unlike the mocked-session test above)
+    so it actually exercises the session_stage predicate."""
+    now = datetime.now()
+    async with AsyncSessionLocal() as session:
+        session.add(DraftSession(
+            session_id="TEAMS1", draft_id="d-teams1", cube="c-teams1",
+            guild_id="1", session_type="team",
+            logs_captured_at=None, teams_start_time=now,
+            session_stage="teams",
+        ))
+        await session.commit()
+
+    mgr = MagicMock()
+    mgr.current_draft_log = {"users": {}}     # log arrived on join
+    mgr.capture_draft_log = AsyncMock()
+
+    with patch.object(DraftSetupManager, "spawn_for_existing_session", AsyncMock(return_value=mgr)), \
          patch("services.log_reconciler.asyncio.sleep", AsyncMock()):
         await reconcile_capture(MagicMock())
 
