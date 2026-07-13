@@ -64,6 +64,8 @@ async def main():
         
         bot.loop.create_task(cleanup_sessions_task(bot))
         bot.loop.create_task(check_inactive_players_task(bot))
+        from services.log_reconciler import run_log_reconciler
+        bot.loop.create_task(run_log_reconciler(bot))
         try:
             # Reconnect to sessions needing setup
             logger.info("Starting draft setup reconnection...")
