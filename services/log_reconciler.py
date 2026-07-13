@@ -11,7 +11,7 @@ from sqlalchemy import select
 from database.db_session import db_session
 from models.draft_session import DraftSession
 from services.draft_log_store import post_team_logs
-from services.draft_setup_manager import DraftSetupManager
+from services.draft_setup_manager import ACTIVE_MANAGERS, DraftSetupManager
 
 RECONCILE_INTERVAL_SECONDS: int = 60
 
@@ -46,13 +46,23 @@ async def reconcile_publish_and_team_logs(bot) -> None:
         )).scalars().all()
     for ds in due_publish:
         try:
-            manager = DraftSetupManager(
-                session_id=ds.session_id, draft_id=ds.draft_id, cube_id=ds.cube,
-                guild_id=ds.guild_id,
-            )
-            manager.session_type = ds.session_type or "team"
+            # Prefer an already-active manager (real state, idempotent publish)
+            # over constructing a transient one that would leak into / clobber
+            # the module-global ACTIVE_MANAGERS registry.
+            manager = DraftSetupManager.get_active_manager(ds.session_id)
+            created_transient = manager is None
+            if created_transient:
+                manager = DraftSetupManager(
+                    session_id=ds.session_id, draft_id=ds.draft_id, cube_id=ds.cube,
+                    guild_id=ds.guild_id,
+                )
+                manager.session_type = ds.session_type or "team"
             manager.set_bot_instance(bot)
-            await manager.publish_draft_log()   # release=False: no socket used
+            try:
+                await manager.publish_draft_log()   # release=False: no socket used
+            finally:
+                if created_transient and ACTIVE_MANAGERS.get(ds.session_id) is manager:
+                    del ACTIVE_MANAGERS[ds.session_id]
         except Exception as e:
             logger.error(f"[reconciler] publish retry failed for {ds.session_id}: {e}")
 
