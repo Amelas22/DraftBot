@@ -205,7 +205,7 @@ class TestGetStatsEmbedForPlayer:
                 games_won=15, games_lost=10))          # 25 >= 20 -> established
             await session.commit()
         rating, provisional = await _player_skill_rating("555", "g")
-        assert rating == 1080
+        assert rating == 1716    # 1500 + (30-25) * (25/55) * 95
         assert provisional is False
 
     @pytest.mark.asyncio
@@ -218,7 +218,7 @@ class TestGetStatsEmbedForPlayer:
                 games_won=3, games_lost=2))            # 5 < 20 -> provisional
             await session.commit()
         rating, provisional = await _player_skill_rating("556", "g")
-        assert rating == 1080
+        assert rating == 1568    # 1500 + (30-25) * (5/35) * 95
         assert provisional is True
 
     @pytest.mark.asyncio

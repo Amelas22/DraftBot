@@ -45,9 +45,33 @@ def rating_counts_for(session_type):
     return session_type in RATING_SESSION_TYPES
 
 
-def skill_rating(mu, sigma):
-    """Scaled, Elo-like conservative rating for display: round((mu - 3*sigma) * 40)."""
-    return round((mu - 3 * sigma) * 40)
+# Display anchoring: a new player shows exactly RATING_ANCHOR; each TrueSkill
+# mu point moves the display by up to RATING_POINTS_PER_MU, discounted by a
+# games-based shrink factor g/(g + RATING_SHRINK_GAMES). The shrink keeps
+# short hot streaks from spiking past long proven records (a 16-6 newcomer
+# earns less than half of their mu edge until ~30 games), while the anchor
+# still holds exactly at zero games. 95/mu is wider than the
+# win-probability-faithful Elo conversion (~45/mu) on purpose — it puts the
+# server's top proven players around ~1850, matching the familiar MTG Elo
+# Project scale, at the cost of overstating win odds implied by point gaps.
+RATING_ANCHOR = 1500
+RATING_POINTS_PER_MU = 95
+RATING_SHRINK_GAMES = 30
+
+
+def skill_rating(mu, sigma, games):
+    """Elo-anchored display rating with small-sample shrinkage.
+
+    round(1500 + (mu - 25) * g/(g+30) * 95): a new player shows exactly 1500,
+    the strongest proven players reach ~1850, and a hot short record is pulled
+    toward the anchor until it is earned over more games. Uses mu alone (not
+    the mu - 3*sigma conservative floor) so the anchor holds for new players
+    too; the "(provisional)" label under ESTABLISHED_GAMES flags the remaining
+    uncertainty.
+    """
+    del sigma  # kept in the signature for call-site stability
+    weight = games / (games + RATING_SHRINK_GAMES)
+    return round(RATING_ANCHOR + (mu - PRIOR_MU) * weight * RATING_POINTS_PER_MU)
 
 
 def is_established(games):

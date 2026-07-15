@@ -34,7 +34,7 @@ async def _player_skill_rating(player_id, guild_id):
         return None, None
     mu, sigma, games_won, games_lost = row
     games = (games_won or 0) + (games_lost or 0)
-    return skill_rating(mu, sigma), not is_established(games)
+    return skill_rating(mu, sigma, games), not is_established(games)
 
 
 async def get_stats_embed_for_player(
