@@ -1523,26 +1523,6 @@ class PersistentView(discord.ui.View):
                     await interaction.followup.send("Pairings posted.", ephemeral=True)
                     logger.debug("Sent confirmation to interaction")
 
-                draft_setup_manager = DraftSetupManager.get_active_manager(session_id)
-                if not draft_setup_manager:
-                    draft_link = session.draft_link
-                    guild_id = int(guild.id)
-                    if draft_link:
-                        logger.debug("Starting DraftLogManager for live session keep-alive")
-                        from datacollections import DraftLogManager
-                        manager = DraftLogManager(
-                            session.session_id,
-                            draft_link,
-                            session.draft_id,
-                            session.session_type,
-                            session.cube,
-                            discord_client=bot,
-                            guild_id=guild_id
-                        )
-                        asyncio.create_task(manager.keep_draft_session_alive())
-                    else:
-                        logger.warning("Draft link not found for session_id={}", session_id)
-
                 logger.info("create_rooms_pairings completed successfully for session_id={}", session_id)
                 return True
 
