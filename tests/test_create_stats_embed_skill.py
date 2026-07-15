@@ -26,18 +26,21 @@ def _field(embed, name):
     return next((f for f in embed.fields if f.name == name), None)
 
 
+SCALE_NOTE = "\n*New players start at 1500 · a 100-point gap ≈ 60% match favorite*"
+
+
 @pytest.mark.asyncio
 async def test_established_rating_shown_plain():
-    lifetime = _stats(skill_rating=1030, skill_provisional=False)
+    lifetime = _stats(skill_rating=1620, skill_provisional=False)
     embed = await create_stats_embed(_User(), _stats(), _stats(), lifetime)
-    assert _field(embed, "🎯 Skill Rating").value == "1030"
+    assert _field(embed, "🎯 Skill Rating").value == "1620" + SCALE_NOTE
 
 
 @pytest.mark.asyncio
 async def test_provisional_rating_labelled():
-    lifetime = _stats(skill_rating=412, skill_provisional=True)
+    lifetime = _stats(skill_rating=1552, skill_provisional=True)
     embed = await create_stats_embed(_User(), _stats(), _stats(), lifetime)
-    assert _field(embed, "🎯 Skill Rating").value == "412 (provisional)"
+    assert _field(embed, "🎯 Skill Rating").value == "1552 (provisional)" + SCALE_NOTE
 
 
 @pytest.mark.asyncio
