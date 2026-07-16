@@ -19,6 +19,7 @@ from services.draft_setup_manager import DraftSetupManager
 from services.state_manager import state_manager
 from services.stake_service import calculate_and_store_stakes
 from preference_service import get_players_bet_capping_preferences
+from helpers.team_display import team_labels
 from notification_service import send_teams_created_dms
 
 
@@ -237,8 +238,8 @@ async def _create_teams_embed(session, team_a_names, team_b_names, seating_order
 
     # Add team fields for non-swiss
     if session.session_type != 'swiss' and team_a_names and team_b_names:
-        team_a_label = "🔴 Team Red" if session_type in ["random", "staked"] else session.team_a_name
-        team_b_label = "🔵 Team Blue" if session_type in ["random", "staked"] else session.team_b_name
+        team_a_label, team_b_label = team_labels(
+            session_type, session.team_a_name, session.team_b_name)
 
         embed.add_field(name=team_a_label, value="\n".join(team_a_names), inline=True)
         embed.add_field(name=team_b_label, value="\n".join(team_b_names), inline=True)
@@ -281,14 +282,13 @@ async def _create_channel_announcement_embed(session, seating_order, stake_info_
     if team_a_links:
         team_name = "Team Red" if session.session_type in ["random", "staked"] else session.team_a_name
         team_name = team_name if team_name else "Team A"
-        add_links_to_embed_safely(channel_embed, team_a_links, f"{team_name} Draft Links",
-                                  "red" if session.session_type in ["random", "staked"] else "")
+        # team A is always 🔴 red, so color the links field regardless of session type.
+        add_links_to_embed_safely(channel_embed, team_a_links, f"{team_name} Draft Links", "red")
 
     if team_b_links:
         team_name = "Team Blue" if session.session_type in ["random", "staked"] else session.team_b_name
         team_name = team_name if team_name else "Team B"
-        add_links_to_embed_safely(channel_embed, team_b_links, f"{team_name} Draft Links",
-                                  "blue" if session.session_type in ["random", "staked"] else "")
+        add_links_to_embed_safely(channel_embed, team_b_links, f"{team_name} Draft Links", "blue")
 
     channel_embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
 

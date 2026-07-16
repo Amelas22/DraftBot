@@ -78,6 +78,53 @@ def test_admin_without_team_choice_is_error():
     assert "team" in error.lower()
 
 
+def test_admin_chooses_red_grants_team_a():
+    session = make_session(team_a=["1"], team_b=["2"],
+                           team_a_name="Goblins", team_b_name="Elves")
+    decision, error = resolve_sub_grant(session, invoker_id="99", target_id="9",
+                                        is_admin=True, team_choice="Red")
+    assert error is None
+    assert decision.team_key == "A"
+    assert decision.channel_prefix == "Red-Team"
+    assert decision.team_display_name == "Goblins"
+
+
+def test_admin_chooses_blue_grants_team_b():
+    session = make_session(team_a=["1"], team_b=["2"],
+                           team_a_name="Goblins", team_b_name="Elves")
+    decision, error = resolve_sub_grant(session, invoker_id="99", target_id="9",
+                                        is_admin=True, team_choice="Blue")
+    assert error is None
+    assert decision.team_key == "B"
+    assert decision.channel_prefix == "Blue-Team"
+    assert decision.team_display_name == "Elves"
+
+
+def test_color_choice_is_case_insensitive():
+    session = make_session(team_a=["1"], team_b=["2"])
+    decision, error = resolve_sub_grant(session, invoker_id="99", target_id="9",
+                                        is_admin=True, team_choice="red")
+    assert error is None
+    assert decision.team_key == "A"
+
+
+def test_legacy_letter_choice_still_accepted():
+    """A/B keep working so existing callers/tests don't break."""
+    session = make_session(team_a=["1"], team_b=["2"])
+    decision, error = resolve_sub_grant(session, invoker_id="99", target_id="9",
+                                        is_admin=True, team_choice="b")
+    assert error is None
+    assert decision.team_key == "B"
+
+
+def test_admin_invalid_team_choice_names_the_colors():
+    session = make_session(team_a=["1"], team_b=["2"])
+    decision, error = resolve_sub_grant(session, invoker_id="99", target_id="9",
+                                        is_admin=True, team_choice="Green")
+    assert decision is None
+    assert "red" in error.lower() and "blue" in error.lower()
+
+
 def test_non_participant_non_admin_is_error():
     session = make_session(team_a=["1"], team_b=["2"])
     decision, error = resolve_sub_grant(session, invoker_id="99", target_id="9",

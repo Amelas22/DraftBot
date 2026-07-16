@@ -12,6 +12,23 @@ TEAM_A_CHANNEL_PREFIX = "Red-Team"
 TEAM_B_CHANNEL_PREFIX = "Blue-Team"
 
 
+def normalize_team_choice(team_choice: Optional[str]) -> Optional[str]:
+    """Map a user-supplied team choice to ``"A"``/``"B"``, or None if unrecognized.
+
+    Accepts colors (Red/Blue) and legacy letters (A/B), case-insensitively.
+    Red is team_a, Blue is team_b — matching the Red-Team/Blue-Team channels
+    and the 🔴/🔵 labels shown on the team embeds.
+    """
+    if not team_choice:
+        return None
+    normalized = team_choice.strip().lower()
+    if normalized in ("red", "a"):
+        return "A"
+    if normalized in ("blue", "b"):
+        return "B"
+    return None
+
+
 @dataclass
 class GrantDecision:
     team_key: Optional[str]            # "A"/"B", or None for a team-less draft
@@ -50,10 +67,10 @@ def resolve_sub_grant(
     elif invoker_id in team_b:
         team_key = "B"
     elif is_admin:
-        if team_choice not in ("A", "B"):
+        team_key = normalize_team_choice(team_choice)
+        if team_key is None:
             return None, ("You're not on a team in this draft — pass the "
-                          "`team` option (A or B) to choose the sub's team.")
-        team_key = team_choice
+                          "`team` option (Red or Blue) to choose the sub's team.")
     else:
         return None, "Only players in this draft (or bot managers) can add a sub."
 

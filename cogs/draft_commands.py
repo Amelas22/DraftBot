@@ -186,8 +186,8 @@ class DraftCommands(commands.Cog):
         self,
         ctx,
         user: discord.Option(discord.Member, "The substitute to grant access"),
-        team: discord.Option(str, "Sub's team (only needed if you're not in this draft)",
-                             choices=["A", "B"], required=False, default=None),
+        team: discord.Option(str, "Sub's team color (only needed if you're not in this draft)",
+                             choices=["Red", "Blue"], required=False, default=None),
     ):
         """Grant a substitute channel access without changing draft data."""
         logger.info(f"Received add_sub from {ctx.author.id} for {user.id} "

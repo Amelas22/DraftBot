@@ -57,14 +57,16 @@ class PremadeSession(BaseSession):
         return embed
 
     def _add_signup_fields(self, embed):
-        """Add team-specific fields for premade drafts instead of generic sign-ups."""
-        embed.add_field(
-            name=self.session_details.team_a_name or "Team A",
-            value="No players yet.",
-            inline=True,
+        """Add team-specific fields for premade drafts instead of generic sign-ups.
+
+        Color-coded (🔴 team A / 🔵 team B) so the color is an unambiguous key —
+        matching the join buttons, the team channels, and add_sub's Red/Blue option.
+        """
+        from helpers.team_display import team_labels
+        team_a_label, team_b_label = team_labels(
+            "premade",
+            self.session_details.team_a_name,
+            self.session_details.team_b_name,
         )
-        embed.add_field(
-            name=self.session_details.team_b_name or "Team B",
-            value="No players yet.",
-            inline=True,
-        )
+        embed.add_field(name=team_a_label, value="No players yet.", inline=True)
+        embed.add_field(name=team_b_label, value="No players yet.", inline=True)

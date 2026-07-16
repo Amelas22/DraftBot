@@ -5,6 +5,7 @@ from sqlalchemy import select, not_
 from session import AsyncSessionLocal, DraftSession, MatchResult, get_draft_session
 from utils import calculate_team_wins
 from helpers.display_names import get_display_name, get_display_name_by_id
+from helpers.team_display import team_labels
 from loguru import logger
 
 async def manage_live_drafts_channel(bot, guild):
@@ -104,14 +105,16 @@ async def generate_live_draft_embed(bot, draft_session):
         color=discord.Color.blue()
     )
     
-    # Add team fields
-    embed.add_field(name="🔴 Team Red", value="\n".join(team_a_names) or "No players", inline=True)
-    embed.add_field(name="🔵 Team Blue", value="\n".join(team_b_names) or "No players", inline=True)
+    # Add team fields (color-coded; named teams show their actual name)
+    team_a_label, team_b_label = team_labels(
+        draft_session.session_type, draft_session.team_a_name, draft_session.team_b_name)
+    embed.add_field(name=team_a_label, value="\n".join(team_a_names) or "No players", inline=True)
+    embed.add_field(name=team_b_label, value="\n".join(team_b_names) or "No players", inline=True)
     
-    # Add scoreboard
+    # Add scoreboard (same color-coded labels as the roster fields above)
     embed.add_field(
         name="**Current Score**",
-        value=f"🔴 Team Red: {team_a_wins}\n🔵 Team Blue: {team_b_wins}\n",
+        value=f"{team_a_label}: {team_a_wins}\n{team_b_label}: {team_b_wins}\n",
         inline=False
     )
     

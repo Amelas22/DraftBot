@@ -129,8 +129,14 @@ class PersistentView(discord.ui.View):
 
 
     def _add_premade_buttons(self):
-        self._add_button(self.team_a_name, "green", "Team_A", self.team_assignment_callback)
-        self._add_button(self.team_b_name, "red", "Team_B", self.team_assignment_callback)
+        # Color-code the team-join buttons: 🔴 team A (red), 🔵 team B (blurple —
+        # closest to blue). The emoji in the label is the unambiguous key (Discord
+        # has no true-blue style and several other buttons are also blurple); it
+        # matches the team embeds, the Red-Team/Blue-Team channels, and add_sub's
+        # Red/Blue option. Buttons route by custom_id, so relabeling is safe.
+        from helpers.team_display import TEAM_A_COLOR, TEAM_B_COLOR
+        self._add_button(f"{TEAM_A_COLOR} {self.team_a_name}", "red", "Team_A", self.team_assignment_callback)
+        self._add_button(f"{TEAM_B_COLOR} {self.team_b_name}", "blurple", "Team_B", self.team_assignment_callback)
         self._add_button("Generate Seating Order", "primary", "generate_seating", self.randomize_teams_callback)
 
         # Add test button only if global test mode is enabled
@@ -1202,15 +1208,27 @@ class PersistentView(discord.ui.View):
         team_a_names = [get_display_name_by_id(str(user_id), guild, session.sign_ups.get(str(user_id), "Unknown User")) for user_id in (session.team_a or [])]
         team_b_names = [get_display_name_by_id(str(user_id), guild, session.sign_ups.get(str(user_id), "Unknown User")) for user_id in (session.team_b or [])]
 
-        # Find the index of the Team A and Team B fields in the embed
-        team_a_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith(session.team_a_name or "Team A")), None)
-        team_b_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith(session.team_b_name or "Team B")), None)
+        # Fields are color-keyed (🔴 team A / 🔵 team B). Match on the color first
+        # — it's stable across updates — but also accept a bare team-name prefix so
+        # in-flight queues created before color-coding still update (they get
+        # upgraded to the colored label on this rewrite).
+        from helpers.team_display import team_labels, TEAM_A_COLOR, TEAM_B_COLOR
+        label_a, label_b = team_labels(
+            session.session_type, session.team_a_name, session.team_b_name)
 
-        # Update the fields if found
+        def _field_index(color, name):
+            return next((i for i, e in enumerate(embed.fields)
+                         if e.name.startswith(color)
+                         or e.name.startswith(name or "Team")), None)
+
+        team_a_index = _field_index(TEAM_A_COLOR, session.team_a_name)
+        team_b_index = _field_index(TEAM_B_COLOR, session.team_b_name)
+
+        # Update the fields if found, preserving the 🔴/🔵 color key.
         if team_a_index is not None:
-            embed.set_field_at(team_a_index, name=f"{session.team_a_name} ({len(session.team_a or [])}):", value="\n".join(team_a_names) if team_a_names else "No players yet.", inline=True)
+            embed.set_field_at(team_a_index, name=f"{label_a} ({len(session.team_a or [])}):", value="\n".join(team_a_names) if team_a_names else "No players yet.", inline=True)
         if team_b_index is not None:
-            embed.set_field_at(team_b_index, name=f"{session.team_b_name} ({len(session.team_b or [])}):", value="\n".join(team_b_names) if team_b_names else "No players yet.", inline=True)
+            embed.set_field_at(team_b_index, name=f"{label_b} ({len(session.team_b or [])}):", value="\n".join(team_b_names) if team_b_names else "No players yet.", inline=True)
 
         # Edit the original message with the updated embed
         await message.edit(embed=embed)

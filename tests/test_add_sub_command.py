@@ -106,6 +106,26 @@ async def test_admin_outside_draft_grants_chosen_team(cog):
 
 
 @pytest.mark.asyncio
+async def test_admin_picks_color_grants_matching_team(cog):
+    # Named-team draft: admin outside the draft picks the color, not A/B.
+    channels = standard_channels()
+    ctx = make_ctx("99", channels)  # not in draft
+    sub = make_sub()
+    draft = make_draft()
+    draft.team_a_name, draft.team_b_name = "Goblins", "Elves"
+    with patch("cogs.draft_commands.DraftSession.get_by_any_channel_id",
+               AsyncMock(return_value=draft)), \
+         patch("cogs.draft_commands.is_bot_manager", AsyncMock(return_value=True)):
+        await cog._do_add_sub(ctx, sub, "Red")  # Red == team_a
+
+    channels[100].set_permissions.assert_awaited_once()  # draft chat
+    channels[101].set_permissions.assert_awaited_once()  # red-team chat
+    channels[102].set_permissions.assert_not_awaited()   # blue-team chat
+    # Announcement names the actual team the admin chose
+    assert "Goblins" in channels[100].send.await_args.args[0]
+
+
+@pytest.mark.asyncio
 async def test_teamless_draft_grants_draft_chat_only(cog):
     # Swiss/team-less draft: only the shared draft chat channel exists.
     channels = {100: make_channel(100, "draft-chat-abc123")}
