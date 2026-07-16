@@ -1588,3 +1588,75 @@ class TestGetDebtHistory:
         # Verify they're in descending order by creation time
         for i in range(len(entries) - 1):
             assert entries[i].created_at >= entries[i + 1].created_at
+
+
+from unittest.mock import patch
+from services.debt_service import get_top_net_creditors, get_most_outstanding_creditors
+
+
+class TestTopNetCreditors:
+    """Tests for the Most Outstanding leaderboard query."""
+
+    async def _owe(self, guild, debtor, creditor, amount):
+        await create_ledger_entries(
+            guild_id=guild, debtor_id=debtor, creditor_id=creditor,
+            amount=amount, source_type="draft", source_id=f"s-{debtor}-{creditor}",
+        )
+
+    @pytest.mark.asyncio
+    async def test_ranks_net_creditors_desc_and_excludes_non_creditors(self, test_db):
+        g = "g1"
+        # bob owes alice 120; carol owes alice 30  -> alice net +150
+        await self._owe(g, "bob", "alice", 120)
+        await self._owe(g, "carol", "alice", 30)
+        # dave owes bob 200 -> bob net (-120 + 200) = +80
+        await self._owe(g, "dave", "bob", 200)
+        # carol net -30 (excluded), dave net -200 (excluded)
+
+        result = await get_top_net_creditors(g, limit=3)
+
+        assert result == [("alice", 150), ("bob", 80)]
+
+    @pytest.mark.asyncio
+    async def test_excludes_net_zero_players(self, test_db):
+        g = "g2"
+        # alice and bob owe each other equally -> both net 0
+        await self._owe(g, "bob", "alice", 50)
+        await self._owe(g, "alice", "bob", 50)
+
+        result = await get_top_net_creditors(g, limit=3)
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_respects_limit(self, test_db):
+        g = "g3"
+        for i, amt in enumerate([10, 40, 30, 20]):
+            await self._owe(g, f"debtor{i}", f"cred{i}", amt)
+        # nets: cred1=40, cred2=30, cred3=20, cred0=10 -> top 2 = cred1, cred2
+        result = await get_top_net_creditors(g, limit=2)
+
+        assert result == [("cred1", 40), ("cred2", 30)]
+
+    @pytest.mark.asyncio
+    async def test_scoped_to_guild(self, test_db):
+        await self._owe("gA", "bob", "alice", 99)
+        await self._owe("gB", "dan", "carol", 5)
+
+        result = await get_top_net_creditors("gA", limit=3)
+
+        assert result == [("alice", 99)]
+
+    @pytest.mark.asyncio
+    async def test_gate_returns_empty_on_non_money_server(self, test_db):
+        await self._owe("gX", "bob", "alice", 99)
+        with patch("config.is_money_server", return_value=False):
+            result = await get_most_outstanding_creditors("gX", limit=3)
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_gate_delegates_on_money_server(self, test_db):
+        await self._owe("gY", "bob", "alice", 99)
+        with patch("config.is_money_server", return_value=True):
+            result = await get_most_outstanding_creditors("gY", limit=3)
+        assert result == [("alice", 99)]
