@@ -1150,11 +1150,12 @@ class PublicSettleDebtsView(View):
             await interaction.response.defer()
             return
 
-        from services.debt_service import get_guild_debt_rows
+        from services.debt_service import get_guild_debt_rows, get_most_outstanding_creditors
         from debt_views.helpers import build_guild_debt_embed_pages
 
         rows = await get_guild_debt_rows(str(guild.id))
-        pages = build_guild_debt_embed_pages(guild, rows)
+        top_creditors = await get_most_outstanding_creditors(str(guild.id))
+        pages = build_guild_debt_embed_pages(guild, rows, top_creditors=top_creditors)
 
         current_page = self._get_current_page_from_embed(interaction)
         new_page = current_page + direction
