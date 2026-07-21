@@ -17,7 +17,7 @@ from quiz_views_module.quiz_views import QuizPublicView
 from helpers.magicprotools_helper import MagicProtoolsHelper
 from helpers.pack_compositor import PackCompositor
 from helpers.permissions import has_bot_manager_role
-from helpers.quiz_threads import spawn_discussion_thread
+from helpers.quiz_threads import DISCUSSION_THREAD_STARTER, spawn_discussion_thread
 from config import get_config
 
 # Quiz configuration constants
@@ -327,8 +327,7 @@ class QuizCommands(commands.Cog):
                 message,
                 f"💡 Pick Quiz #{display_id} — Discussion (spoilers)" if display_id
                 else "💡 Pick Quiz — Discussion (spoilers)",
-                "💬 Discuss the quiz here — spoilers ahead! Use **Share Results** on your "
-                "result to drop your score.",
+                DISCUSSION_THREAD_STARTER,
             )
         except Exception as e:
             logger.warning(f"[QUIZ] discussion thread spawn failed for {quiz_id}: {e}")

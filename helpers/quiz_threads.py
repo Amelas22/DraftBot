@@ -9,6 +9,11 @@ from loguru import logger
 
 THREAD_ARCHIVE_MINUTES = 4320  # 3 days
 
+DISCUSSION_THREAD_STARTER = (
+    "💬 Discuss the quiz here — spoilers ahead! Use **Share Results** on your "
+    "result to drop your score."
+)
+
 
 async def spawn_discussion_thread(message, name: str, starter: str) -> Optional[discord.Thread]:
     """Create a public discussion thread on `message` and post the starter text.
