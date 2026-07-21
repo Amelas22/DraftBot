@@ -84,7 +84,23 @@ def build_guild_debt_embed(guild: discord.Guild, rows: list, include_description
     return embed
 
 
-def build_guild_debt_embed_pages(guild: discord.Guild, rows: list, per_page: int = 10, include_description: bool = True) -> list:
+_MEDALS = ("🥇", "🥈", "🥉")
+
+
+def _build_most_outstanding_field(guild, top_creditors):
+    """Return (name, value) for the 🏆 Most Outstanding leaderboard field, or
+    None when there are no net creditors."""
+    if not top_creditors:
+        return None
+    lines = []
+    for rank, (player_id, net) in enumerate(top_creditors):
+        medal = _MEDALS[rank] if rank < len(_MEDALS) else f"{rank + 1}."
+        name = get_member_name(guild, player_id)
+        lines.append(f"{medal} {name} — {net} tix")
+    return "🏆 Most Outstanding", "\n".join(lines)
+
+
+def build_guild_debt_embed_pages(guild: discord.Guild, rows: list, per_page: int = 10, include_description: bool = True, top_creditors: list = None) -> list:
     """
     Build a list of paginated guild debt summary embeds.
 
@@ -126,6 +142,11 @@ def build_guild_debt_embed_pages(guild: discord.Guild, rows: list, per_page: int
             description=description,
             color=discord.Color.orange()
         )
+
+        if page_num == 0:
+            leaderboard = _build_most_outstanding_field(guild, top_creditors)
+            if leaderboard:
+                embed.add_field(name=leaderboard[0], value=leaderboard[1], inline=False)
 
         debt_lines = []
         for row in page_rows:

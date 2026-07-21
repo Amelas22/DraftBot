@@ -1022,3 +1022,39 @@ async def get_guild_debt_rows(guild_id: str) -> list:
         )
         result = await session.execute(query)
         return result.all()
+
+
+async def get_top_net_creditors(guild_id: str, limit: int = 3) -> list:
+    """Top net creditors in a guild: players whose summed ledger balance is
+    positive (owed more than they owe), highest first.
+
+    Returns a list of (player_id, net) tuples, length 0..limit. The sum is the
+    live/outstanding net — settlements post offsetting entries, so a settled
+    creditor nets to zero and drops off.
+    """
+    async with db_session() as session:
+        query = (
+            select(
+                DebtLedger.player_id,
+                func.sum(DebtLedger.amount).label('net')
+            )
+            .where(DebtLedger.guild_id == guild_id)
+            .group_by(DebtLedger.player_id)
+            .having(func.sum(DebtLedger.amount) > 0)
+            .order_by(func.sum(DebtLedger.amount).desc())
+            .limit(limit)
+        )
+        result = await session.execute(query)
+        return [(row.player_id, row.net) for row in result.all()]
+
+
+async def get_most_outstanding_creditors(guild_id: str, limit: int = 3) -> list:
+    """Top creditors for the debt-summary leaderboard, gated to staked servers.
+
+    Returns [] on non-money servers so the section never renders there and no
+    query runs. On money servers, delegates to get_top_net_creditors.
+    """
+    from config import is_money_server
+    if not is_money_server(guild_id):
+        return []
+    return await get_top_net_creditors(guild_id, limit)

@@ -1209,8 +1209,10 @@ async def update_debt_summary_for_guild(bot, guild_id: str):
                         logger.warning(f"Failed to delete legacy debt summary message: {e}")
 
                 # Get all debts and build embed pages
+                from services.debt_service import get_most_outstanding_creditors
                 rows = await get_guild_debt_rows(guild_id)
-                pages = build_guild_debt_embed_pages(guild, rows)
+                top_creditors = await get_most_outstanding_creditors(guild_id)
+                pages = build_guild_debt_embed_pages(guild, rows, top_creditors=top_creditors)
                 view = PublicSettleDebtsView(pages=pages)
 
                 new_message = await channel.send(embed=pages[0], view=view)

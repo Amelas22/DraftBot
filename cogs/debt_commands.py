@@ -351,7 +351,10 @@ class DebtCommands(commands.Cog):
             await ctx.followup.send("No outstanding debts in this guild.")
             return
 
-        pages = build_guild_debt_embed_pages(ctx.guild, rows, include_description=False)
+        from services.debt_service import get_most_outstanding_creditors
+        top_creditors = await get_most_outstanding_creditors(str(ctx.guild.id))
+        pages = build_guild_debt_embed_pages(
+            ctx.guild, rows, include_description=False, top_creditors=top_creditors)
         await ctx.followup.send(embed=pages[0])
 
     @discord.slash_command(name="debts-post", description="[Admin] Post public debt summary with settle button")
@@ -387,7 +390,9 @@ class DebtCommands(commands.Cog):
                     logger.warning(f"Could not delete old debt summary message: {e}")
 
             # Build and post the public message
-            pages = build_guild_debt_embed_pages(ctx.guild, rows)
+            from services.debt_service import get_most_outstanding_creditors
+            top_creditors = await get_most_outstanding_creditors(guild_id)
+            pages = build_guild_debt_embed_pages(ctx.guild, rows, top_creditors=top_creditors)
             view = PublicSettleDebtsView(pages=pages)
             public_message = await ctx.channel.send(embed=pages[0], view=view)
 
