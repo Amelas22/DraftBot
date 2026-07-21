@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from database.db_session import AsyncSessionLocal
 from database.models_base import Base
 from models.quiz_scheduling import QuizChannel, QuizSchedule
+from cogs.quiz_scheduling_cog import QuizSchedulingCog
 
 
 @pytest_asyncio.fixture
@@ -48,31 +49,29 @@ def _ctx():
     return ctx
 
 
-@pytest.mark.asyncio
-async def test_add_quiz_schedule_persists_trophy_type(test_db):
-    from cogs.quiz_scheduling_cog import QuizSchedulingCog
+@pytest_asyncio.fixture
+async def cog_and_channel(test_db):
     async with AsyncSessionLocal() as s:
         async with s.begin():
             s.add(QuizChannel(channel_id="c1", guild_id="g1"))
     cog = QuizSchedulingCog(bot=MagicMock())
-    ctx = _ctx()
     channel = MagicMock(); channel.id = "c1"; channel.mention = "#quiz"
-    await cog.add_quiz_schedule.callback(cog, ctx, channel, 18, 0, "trophy")
+    return cog, channel
+
+
+@pytest.mark.asyncio
+async def test_add_quiz_schedule_persists_trophy_type(cog_and_channel):
+    cog, channel = cog_and_channel
+    await cog.add_quiz_schedule.callback(cog, _ctx(), channel, 18, 0, "trophy")
     async with AsyncSessionLocal() as s:
         row = (await s.execute(select(QuizSchedule).where(QuizSchedule.post_time == "18:00"))).scalar_one()
     assert row.quiz_type == "trophy"
 
 
 @pytest.mark.asyncio
-async def test_add_quiz_schedule_defaults_to_pick(test_db):
-    from cogs.quiz_scheduling_cog import QuizSchedulingCog
-    async with AsyncSessionLocal() as s:
-        async with s.begin():
-            s.add(QuizChannel(channel_id="c1", guild_id="g1"))
-    cog = QuizSchedulingCog(bot=MagicMock())
-    ctx = _ctx()
-    channel = MagicMock(); channel.id = "c1"; channel.mention = "#quiz"
-    await cog.add_quiz_schedule.callback(cog, ctx, channel, 10, 0)  # no type
+async def test_add_quiz_schedule_defaults_to_pick(cog_and_channel):
+    cog, channel = cog_and_channel
+    await cog.add_quiz_schedule.callback(cog, _ctx(), channel, 10, 0)  # no type
     async with AsyncSessionLocal() as s:
         row = (await s.execute(select(QuizSchedule).where(QuizSchedule.post_time == "10:00"))).scalar_one()
     assert row.quiz_type == "pick"
@@ -80,7 +79,6 @@ async def test_add_quiz_schedule_defaults_to_pick(test_db):
 
 @pytest.mark.asyncio
 async def test_get_channel_schedules_includes_type(test_db):
-    from cogs.quiz_scheduling_cog import QuizSchedulingCog
     async with AsyncSessionLocal() as s:
         async with s.begin():
             s.add(QuizChannel(channel_id="c1", guild_id="g1"))
