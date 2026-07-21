@@ -24,6 +24,7 @@ class QuizSchedule(Base):
     id = Column(Integer, primary_key=True, nullable=True, autoincrement=True)
     channel_id = Column(Text, ForeignKey('quiz_channels.channel_id', ondelete='CASCADE'), nullable=False)
     post_time = Column(Text, nullable=False)  # Format: "HH:MM"
+    quiz_type = Column(Text, nullable=False, server_default=text("'pick'"), default="pick")  # 'pick' | 'trophy'
 
     # Relationship
     channel = relationship("QuizChannel", back_populates="quiz_schedules")
