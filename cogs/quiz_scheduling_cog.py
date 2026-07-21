@@ -85,7 +85,8 @@ class QuizSchedulingCog(commands.Cog):
         ctx,
         channel: discord.TextChannel,
         hour: int,
-        minute: int
+        minute: int,
+        quiz_type: discord.Option(str, "Which quiz to post", choices=["pick", "trophy"]) = "pick",
     ):
         """
         Add a posting schedule for quizzes
@@ -95,6 +96,7 @@ class QuizSchedulingCog(commands.Cog):
         channel: The channel to add a schedule for
         hour: Hour of day (0-23)
         minute: Minute of hour (0-59)
+        quiz_type: Which quiz to post (default: pick)
         """
         await ctx.defer(ephemeral=True)
 
@@ -135,7 +137,8 @@ class QuizSchedulingCog(commands.Cog):
 
             if existing_schedule:
                 await ctx.followup.send(
-                    f"A schedule for {post_time} already exists in {channel.mention}.",
+                    f"A schedule for {post_time} already exists in {channel.mention} "
+                    f"(**{existing_schedule.quiz_type}**). Remove it first to change the type.",
                     ephemeral=True
                 )
                 return
@@ -143,14 +146,16 @@ class QuizSchedulingCog(commands.Cog):
             # Create new schedule
             new_schedule = QuizSchedule(
                 channel_id=str(channel.id),
-                post_time=post_time
+                post_time=post_time,
+                quiz_type=quiz_type,
             )
 
             session.add(new_schedule)
             await session.commit()
 
         await ctx.followup.send(
-            f"✅ Successfully added quiz posting schedule at {post_time} ({quiz_channel.time_zone}) for {channel.mention}",
+            f"✅ Successfully added a **{quiz_type}** quiz posting schedule at {post_time} "
+            f"({quiz_channel.time_zone}) for {channel.mention}",
             ephemeral=True
         )
 
@@ -197,7 +202,9 @@ class QuizSchedulingCog(commands.Cog):
             )
             return
 
-        schedule_list = "\n".join([f"• ID: {schedule[0]} - Time: {schedule[1]}" for schedule in schedules])
+        schedule_list = "\n".join(
+            f"• ID: {sid} - Time: {ptime} - Type: {qtype}" for (sid, ptime, qtype) in schedules
+        )
 
         await ctx.followup.send(
             f"**Status:** {enabled_status}\n\nPosting schedules for {channel.mention}:\n{schedule_list}",
@@ -401,13 +408,13 @@ class QuizSchedulingCog(commands.Cog):
         )
 
     async def get_channel_schedules(self, channel_id) -> List[tuple]:
-        """Get all schedules for a channel as (id, post_time) tuples"""
+        """Get all schedules for a channel as (id, post_time, quiz_type) tuples"""
         async with db_session() as session:
             stmt = select(QuizSchedule).where(QuizSchedule.channel_id == str(channel_id))
             result = await session.execute(stmt)
             schedules = result.scalars().all()
 
-            return [(schedule.id, schedule.post_time) for schedule in schedules]
+            return [(schedule.id, schedule.post_time, schedule.quiz_type) for schedule in schedules]
 
 def setup(bot):
     bot.add_cog(QuizSchedulingCog(bot))

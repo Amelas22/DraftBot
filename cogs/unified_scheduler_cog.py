@@ -1,5 +1,4 @@
 import discord
-import random
 from discord.ext import commands, tasks
 from datetime import datetime
 from loguru import logger
@@ -10,11 +9,14 @@ from models.draft_logs import LogChannel, PostSchedule
 from models.quiz_scheduling import QuizChannel, QuizSchedule
 
 
-def choose_scheduled_quiz_poster(rng, pick_poster, trophy_poster):
-    """Randomized [primary, fallback] poster order for a scheduled quiz slot."""
-    posters = [pick_poster, trophy_poster]
-    rng.shuffle(posters)
-    return posters
+def select_scheduled_poster(quiz_type, pick_cog, trophy_cog):
+    """Return the cog that posts this schedule's quiz_type, or None if that cog
+    isn't loaded / the type is unknown. No random choice, no cross-type fallback."""
+    if quiz_type == "pick":
+        return pick_cog
+    if quiz_type == "trophy":
+        return trophy_cog
+    return None
 
 
 class UnifiedSchedulerCog(commands.Cog):
@@ -109,34 +111,33 @@ class UnifiedSchedulerCog(commands.Cog):
                         if current_time == schedule.post_time:
                             logger.info(f"Posting quiz in channel {quiz_channel.channel_id} at {current_time} {quiz_channel.time_zone}")
 
-                            # Get the quiz commands cogs and build the candidate posters
+                            # Get the quiz commands cogs and route by this schedule's quiz_type
                             pick_cog = self.bot.get_cog("QuizCommands")
                             trophy_cog = self.bot.get_cog("TrophyQuizCommands")
-                            posters = []
-                            if pick_cog:
-                                posters.append(lambda: pick_cog.post_scheduled_quiz(quiz_channel.channel_id))
-                            if trophy_cog:
-                                posters.append(lambda: trophy_cog.post_scheduled_trophy_quiz(quiz_channel.channel_id))
+                            cog = select_scheduled_poster(schedule.quiz_type, pick_cog, trophy_cog)
 
-                            if posters:
-                                if len(posters) == 2:
-                                    posters = choose_scheduled_quiz_poster(random.Random(), *posters)
-
-                                posted = False
-                                for poster in posters:
-                                    if await poster():
-                                        posted = True
-                                        break
-
-                                if posted:
-                                    # Update last_post timestamp
-                                    quiz_channel.last_post = datetime.now()
-                                    session.add(quiz_channel)
-                                    await session.commit()
+                            if cog is None:
+                                if schedule.quiz_type not in ("pick", "trophy"):
+                                    reason = f"unknown quiz_type '{schedule.quiz_type}'"
                                 else:
-                                    logger.warning(f"Failed to post quiz to channel {quiz_channel.channel_id}")
+                                    reason = f"no cog loaded for '{schedule.quiz_type}' quizzes"
+                                logger.warning(
+                                    f"Skipping scheduled quiz in channel {quiz_channel.channel_id}: {reason}"
+                                )
+                                continue
+
+                            if schedule.quiz_type == "pick":
+                                posted = await cog.post_scheduled_quiz(quiz_channel.channel_id)
+                            else:  # trophy
+                                posted = await cog.post_scheduled_trophy_quiz(quiz_channel.channel_id)
+
+                            if posted:
+                                # Update last_post timestamp
+                                quiz_channel.last_post = datetime.now()
+                                session.add(quiz_channel)
+                                await session.commit()
                             else:
-                                logger.error("QuizCommands cog not found")
+                                logger.warning(f"Failed to post quiz to channel {quiz_channel.channel_id}")
 
                     except Exception as e:
                         logger.error(f"Error posting scheduled quiz to channel {quiz_channel.channel_id}: {e}", exc_info=True)
