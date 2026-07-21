@@ -11,8 +11,9 @@ from models.leaderboard_message import LeaderboardMessage
 from models.win_streak_history import WinStreakHistory
 from models.perfect_streak_history import PerfectStreakHistory
 from models.draft_streak_history import DraftStreakHistory
-from models import QuizSession
+from models import QuizSession, TrophyQuizSession
 from quiz_views_module.quiz_views import QuizPublicView
+from quiz_views_module.trophy_quiz_views import TrophyQuizView
 from services.draft_analysis import DraftAnalysis
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
@@ -2257,6 +2258,36 @@ async def re_register_views(bot):
                 logger.warning(f"Quiz message or channel not found for quiz: {quiz_session.quiz_id}")
             except Exception as e:
                 logger.error(f"Failed to re-register quiz view: {quiz_session.quiz_id}, error: {e}", exc_info=True)
+
+        # Re-register trophy quiz views for all recent trophy quizzes so their
+        # persistent dropdowns/buttons keep working after a restart (mirrors the
+        # pick-quiz re-registration above).
+        async with db_session.begin():
+            stmt = select(TrophyQuizSession).where(
+                TrophyQuizSession.posted_at >= cutoff_date
+            ).order_by(desc(TrophyQuizSession.posted_at))
+            result = await db_session.execute(stmt)
+            trophy_quiz_sessions = result.scalars().all()
+
+        logger.info(f"Found {len(trophy_quiz_sessions)} recent trophy quiz sessions to re-register")
+
+        for trophy_quiz in trophy_quiz_sessions:
+            if not trophy_quiz.message_id or not trophy_quiz.channel_id:
+                continue
+
+            channel = bot.get_channel(int(trophy_quiz.channel_id))
+            if not channel:
+                continue
+
+            try:
+                message = await channel.fetch_message(int(trophy_quiz.message_id))
+                view = TrophyQuizView(trophy_quiz.quiz_id, trophy_quiz.decks)
+                await message.edit(view=view)
+                logger.info(f"Re-registered trophy quiz view for quiz: {trophy_quiz.quiz_id}")
+            except discord.NotFound:
+                logger.warning(f"Trophy quiz message or channel not found for quiz: {trophy_quiz.quiz_id}")
+            except Exception as e:
+                logger.error(f"Failed to re-register trophy quiz view: {trophy_quiz.quiz_id}, error: {e}", exc_info=True)
 
         # Cleanup: Unpin quiz messages older than the rejoin cutoff
         logger.info("Cleaning up old quiz messages (unpinning messages older than rejoin cutoff)")
