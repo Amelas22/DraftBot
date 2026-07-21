@@ -117,9 +117,12 @@ class UnifiedSchedulerCog(commands.Cog):
                             cog = select_scheduled_poster(schedule.quiz_type, pick_cog, trophy_cog)
 
                             if cog is None:
+                                if schedule.quiz_type not in ("pick", "trophy"):
+                                    reason = f"unknown quiz_type '{schedule.quiz_type}'"
+                                else:
+                                    reason = f"no cog loaded for '{schedule.quiz_type}' quizzes"
                                 logger.warning(
-                                    f"No cog loaded to post a '{schedule.quiz_type}' quiz "
-                                    f"in channel {quiz_channel.channel_id}"
+                                    f"Skipping scheduled quiz in channel {quiz_channel.channel_id}: {reason}"
                                 )
                                 continue
 
