@@ -6,12 +6,12 @@ from services.draft_log_store import render_pool, map_discord_to_draftmancer
 DIRECTION_POINTS = 4
 EXACT_POINTS = 3     # flat: same for any exactly-correct record (keeps max constant)
 EXTREME_TARGET_RATE = 1 / 2   # extreme and middle equally likely (no-hedge point under flat scoring)
-REVEAL_COST = 2  # points deducted (floored at 0) when a player pays to reveal names
+CHANGE_COST = 2  # points deducted (floored at 0) when a player pays to change their answer
 
 
-def apply_reveal_cost(base_total: int, revealed: bool) -> int:
-    """Final quiz score after an optional pay-to-reveal-names penalty, floored at 0."""
-    return max(0, base_total - REVEAL_COST) if revealed else base_total
+def apply_change_cost(base_total: int, changed: bool) -> int:
+    """Final quiz score after an optional pay-to-change-answer penalty, floored at 0."""
+    return max(0, base_total - CHANGE_COST) if changed else base_total
 
 
 def record_label(wins: int) -> str:

@@ -39,12 +39,12 @@ async def test_ranks_by_total_points(test_db):
             session.add(TrophyQuizSubmission(
                 quiz_id="g-1", player_id="lo", display_name="Lo",
                 guesses=[], direction_correct=True, exact_points=[],
-                points_earned=4
+                points_earned=4, finalized=True
             ))
             session.add(TrophyQuizSubmission(
                 quiz_id="g-1", player_id="hi", display_name="Hi",
                 guesses=[], direction_correct=True, exact_points=[],
-                points_earned=12
+                points_earned=12, finalized=True
             ))
 
     async with AsyncSessionLocal() as session:
