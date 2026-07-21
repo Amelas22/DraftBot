@@ -24,16 +24,28 @@ async def spawn_discussion_thread(message, name: str, starter: str) -> Optional[
 
 async def post_quiz_share(interaction, quiz_message_id, text: str) -> None:
     """Post the share text into the quiz's discussion thread (its id == the quiz
-    message id), or fall back to the interaction's channel. Never raises."""
-    target = None
+    message id), or fall back to the interaction's channel. Never raises — a share
+    is best-effort, so a resolve/send failure degrades rather than surfacing as a
+    failed interaction."""
+    thread = None
     if quiz_message_id:
         try:
             tid = int(quiz_message_id)
-            target = (interaction.guild.get_thread(tid) if interaction.guild else None)
-            if target is None:
-                target = interaction.client.get_channel(tid)
+            thread = (interaction.guild.get_thread(tid) if interaction.guild else None)
+            if thread is None:
+                thread = interaction.client.get_channel(tid)
         except Exception:
-            target = None
-    if target is None:
-        target = interaction.channel
-    await target.send(text)
+            thread = None
+
+    # Try the thread first; if its send fails (e.g. archived+locked), fall back to
+    # the channel. Swallow a final failure so Share never errors the interaction.
+    if thread is not None:
+        try:
+            await thread.send(text)
+            return
+        except Exception as e:
+            logger.warning(f"[quiz-thread] share to thread failed, falling back to channel: {e}")
+    try:
+        await interaction.channel.send(text)
+    except Exception as e:
+        logger.warning(f"[quiz-thread] share to channel failed: {e}")

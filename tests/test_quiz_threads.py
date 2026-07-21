@@ -52,3 +52,27 @@ async def test_post_share_falls_back_when_no_message_id():
                                   client=SimpleNamespace(get_channel=lambda tid: None))
     await post_quiz_share(interaction, None, "my score")
     channel.send.assert_awaited_once_with("my score")
+
+
+@pytest.mark.asyncio
+async def test_post_share_falls_back_to_channel_when_thread_send_raises():
+    """If the resolved thread's send fails (e.g. archived+locked), fall back to
+    the channel rather than propagate to the Share button."""
+    thread = SimpleNamespace(send=AsyncMock(side_effect=RuntimeError("thread locked")))
+    guild = SimpleNamespace(get_thread=lambda tid: thread)
+    channel = SimpleNamespace(send=AsyncMock())
+    interaction = SimpleNamespace(guild=guild, channel=channel,
+                                  client=SimpleNamespace(get_channel=lambda tid: None))
+    await post_quiz_share(interaction, "555", "my score")
+    channel.send.assert_awaited_once_with("my score")
+
+
+@pytest.mark.asyncio
+async def test_post_share_swallows_when_both_targets_raise():
+    """Never raises: if even the channel send fails, swallow (share is best-effort)."""
+    thread = SimpleNamespace(send=AsyncMock(side_effect=RuntimeError("thread")))
+    guild = SimpleNamespace(get_thread=lambda tid: thread)
+    channel = SimpleNamespace(send=AsyncMock(side_effect=RuntimeError("channel")))
+    interaction = SimpleNamespace(guild=guild, channel=channel,
+                                  client=SimpleNamespace(get_channel=lambda tid: None))
+    await post_quiz_share(interaction, "555", "my score")  # must not raise
