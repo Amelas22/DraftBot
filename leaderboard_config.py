@@ -98,6 +98,12 @@ CATEGORY_CONFIGS = {
         "color": discord.Color.from_rgb(138, 43, 226),  # Blue-violet
         "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['total_points']} points ({p['total_quizzes']} quizzes, {p['accuracy_percentage']:.1f}% accuracy)"
     },
+    "trophy_quiz_points": {
+        "title": "Trophy Quiz Leaderboard",
+        "description_template": "Players with the most trophy-quiz points",
+        "color": discord.Color.from_rgb(212, 175, 55),  # Trophy gold
+        "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['total_points']} points ({p['total_quizzes']} quizzes)"
+    },
     "draft_win_streak": {
         "title": "Order of the White Lotus",
         "description_template": "Longest consecutive draft win streaks (min {streak_min} draft wins)",

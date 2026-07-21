@@ -17,15 +17,9 @@ from helpers.substitutes import TEAM_A_CHANNEL_PREFIX, TEAM_B_CHANNEL_PREFIX
 from models.draft_session import DraftSession
 
 
-def render_pool(draft_data: dict, user_id: str) -> str:
-    """Importable decklist for one drafter's full pool: `"<count> <CardName>"`
-    lines from `users[user_id].cards`, using the front-face card name. Returns
-    "" if the user or their cards are missing."""
-    users = draft_data.get("users") or {}
-    user = users.get(user_id) or {}
-    carddata = draft_data.get("carddata") or {}
-    card_ids = user.get("cards") or []
-
+def _grouped_lines(card_ids: list, carddata: dict) -> list:
+    """`"<count> <CardName>"` lines for `card_ids`, grouped by name (using the
+    front-face card name) and ordered by first appearance."""
     counts: dict[str, int] = {}
     order: list[str] = []
     for cid in card_ids:
@@ -35,7 +29,18 @@ def render_pool(draft_data: dict, user_id: str) -> str:
         if name not in counts:
             order.append(name)
         counts[name] = counts.get(name, 0) + 1
-    return "\n".join(f"{counts[name]} {name}" for name in order)
+    return [f"{counts[name]} {name}" for name in order]
+
+
+def render_pool(draft_data: dict, user_id: str) -> str:
+    """Importable decklist for one drafter's full pool: `"<count> <CardName>"`
+    lines from `users[user_id].cards`, using the front-face card name. Returns
+    "" if the user or their cards are missing."""
+    users = draft_data.get("users") or {}
+    user = users.get(user_id) or {}
+    carddata = draft_data.get("carddata") or {}
+    card_ids = user.get("cards") or []
+    return "\n".join(_grouped_lines(card_ids, carddata))
 
 
 def map_discord_to_draftmancer(draft_data: dict, sign_ups: dict) -> dict[str, str]:
@@ -174,3 +179,40 @@ async def post_team_logs(session_id: str, bot) -> bool:
             ds.team_logs_posted_at = datetime.now()
             await session.commit()
     return True
+
+
+_BASIC_LAND_NAMES = {"W": "Plains", "U": "Island", "B": "Swamp", "R": "Mountain", "G": "Forest", "C": "Wastes"}
+
+
+def split_decklist(draft_data: dict, user_id: str) -> dict:
+    """Split a drafter's pool into built main deck, basic-land counts, and sideboard.
+
+    Uses users[user_id].decklist when the player built a deck (non-empty main);
+    otherwise falls back to the full pool as main with no basics/sideboard.
+    """
+    user = (draft_data.get("users") or {}).get(user_id) or {}
+    decklist = user.get("decklist") or {}
+    main = decklist.get("main") or []
+    if main:
+        return {
+            "main": list(main),
+            "basics": dict(decklist.get("lands") or {}),
+            "side": list(decklist.get("side") or []),
+        }
+    return {"main": list(user.get("cards") or []), "basics": {}, "side": []}
+
+
+def build_mtgo_deck_text(split: dict, carddata: dict) -> str:
+    """MTGO-format deck text: main + basics, then a blank line and the sideboard
+    (sideboard block omitted when empty)."""
+    main_lines = _grouped_lines(split.get("main") or [], carddata)
+    basics = split.get("basics") or {}
+    # Emit basics in a stable WUBRGC order (not the source-map order).
+    for color, name in _BASIC_LAND_NAMES.items():
+        count = basics.get(color, 0)
+        if count:
+            main_lines.append(f"{count} {name}")
+    side_lines = _grouped_lines(split.get("side") or [], carddata)
+    if side_lines:
+        return "\n".join(main_lines) + "\n\n" + "\n".join(side_lines)
+    return "\n".join(main_lines)
