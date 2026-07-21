@@ -1075,7 +1075,11 @@ class PersistentView(discord.ui.View):
 
         user_id = str(interaction.user.id)
         custom_id = button.custom_id
-        user_name = get_display_name(interaction.user, interaction.guild)
+        # Store the RAW nickname (like every other sign-up path) — sign_ups values
+        # are used verbatim as Draftmancer usernames and for seating matches.
+        # get_display_name() prepends custom-emoji icons (e.g. ring bearer/crown)
+        # that render as literal "<:name:id>" codes outside Discord.
+        user_name = interaction.user.display_name
 
         primary_team = secondary_team = primary_key = secondary_key = None
 
