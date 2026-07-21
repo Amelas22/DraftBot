@@ -116,13 +116,14 @@ class UnifiedSchedulerCog(commands.Cog):
                             trophy_cog = self.bot.get_cog("TrophyQuizCommands")
                             cog = select_scheduled_poster(schedule.quiz_type, pick_cog, trophy_cog)
 
-                            posted = False
                             if cog is None:
                                 logger.warning(
                                     f"No cog loaded to post a '{schedule.quiz_type}' quiz "
                                     f"in channel {quiz_channel.channel_id}"
                                 )
-                            elif schedule.quiz_type == "pick":
+                                continue
+
+                            if schedule.quiz_type == "pick":
                                 posted = await cog.post_scheduled_quiz(quiz_channel.channel_id)
                             else:  # trophy
                                 posted = await cog.post_scheduled_trophy_quiz(quiz_channel.channel_id)
