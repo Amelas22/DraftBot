@@ -1,4 +1,5 @@
 import discord
+import random
 from discord.ext import commands, tasks
 from datetime import datetime
 from loguru import logger
@@ -7,6 +8,13 @@ import pytz
 from database.db_session import db_session
 from models.draft_logs import LogChannel, PostSchedule
 from models.quiz_scheduling import QuizChannel, QuizSchedule
+
+
+def choose_scheduled_quiz_poster(rng, pick_poster, trophy_poster):
+    """Randomized [primary, fallback] poster order for a scheduled quiz slot."""
+    posters = [pick_poster, trophy_poster]
+    rng.shuffle(posters)
+    return posters
 
 
 class UnifiedSchedulerCog(commands.Cog):
@@ -101,11 +109,26 @@ class UnifiedSchedulerCog(commands.Cog):
                         if current_time == schedule.post_time:
                             logger.info(f"Posting quiz in channel {quiz_channel.channel_id} at {current_time} {quiz_channel.time_zone}")
 
-                            # Get the quiz commands cog and call its post method
-                            quiz_commands_cog = self.bot.get_cog("QuizCommands")
-                            if quiz_commands_cog:
-                                success = await quiz_commands_cog.post_scheduled_quiz(quiz_channel.channel_id)
-                                if success:
+                            # Get the quiz commands cogs and build the candidate posters
+                            pick_cog = self.bot.get_cog("QuizCommands")
+                            trophy_cog = self.bot.get_cog("TrophyQuizCommands")
+                            posters = []
+                            if pick_cog:
+                                posters.append(lambda: pick_cog.post_scheduled_quiz(quiz_channel.channel_id))
+                            if trophy_cog:
+                                posters.append(lambda: trophy_cog.post_scheduled_trophy_quiz(quiz_channel.channel_id))
+
+                            if posters:
+                                if len(posters) == 2:
+                                    posters = choose_scheduled_quiz_poster(random.Random(), *posters)
+
+                                posted = False
+                                for poster in posters:
+                                    if await poster():
+                                        posted = True
+                                        break
+
+                                if posted:
                                     # Update last_post timestamp
                                     quiz_channel.last_post = datetime.now()
                                     session.add(quiz_channel)
