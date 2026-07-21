@@ -16,21 +16,33 @@ class MagicProtoolsHelper:
         self.do_helper = DigitalOceanHelper()
         self.api_key = os.getenv("MPT_API_KEY")
         
-    def convert_to_magicprotools_format(self, draft_log: Dict[str, Any], user_id: str) -> str:
+    def extract_deck_token(self, url: Optional[str]) -> Optional[str]:
+        """Return the `deck` query-param token from an /api/draft/add result URL, or None."""
+        if not url:
+            return None
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        tokens = params.get("deck")
+        return tokens[0] if tokens else None
+
+    def convert_to_magicprotools_format(self, draft_log: Dict[str, Any], user_id: str, anonymize: bool = False) -> str:
         """Convert a draft log JSON to MagicProTools format for a specific user."""
         output = []
-        
+
         # Basic draft info
         output.append(f"Event #: {draft_log['sessionID']}_{draft_log['time']}")
         output.append(f"Time: {datetime.fromtimestamp(draft_log['time']/1000).strftime('%a, %d %b %Y %H:%M:%S GMT')}")
         output.append(f"Players:")
-        
+
         # Add player names
+        opponent = 0
         for player_id, user_data in draft_log['users'].items():
             if player_id == user_id:
-                output.append(f"--> {user_data['userName']}")
+                name = "Drafter" if anonymize else user_data['userName']
+                output.append(f"--> {name}")
             else:
-                output.append(f"    {user_data['userName']}")
+                opponent += 1
+                name = f"Player {opponent}" if anonymize else user_data['userName']
+                output.append(f"    {name}")
         
         output.append("")
         
@@ -237,6 +249,41 @@ class MagicProtoolsHelper:
             self.logger.error(f"Error generating and uploading MagicProTools format logs: {e}")
             return result
     
+    async def submit_deck_view(self, user_id: str, draft_data: Dict[str, Any], deck_text: str) -> Optional[str]:
+        """Upload the anonymized draft + deck to MPT; return the /deck/show URL or None."""
+        if not self.api_key:
+            self.logger.warning(f"[MPT] No API key; cannot build deck view (user_id: {user_id})")
+            return None
+        try:
+            draft = self.convert_to_magicprotools_format(draft_data, user_id, anonymize=True)
+            data = {"draft": draft, "deck": deck_text, "apiKey": self.api_key, "platform": "mtgadraft"}
+            headers = {
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": "https://draftmancer.com",
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post("https://magicprotools.com/api/draft/add",
+                                        headers=headers, data=data) as resp:
+                    if resp.status != 200:
+                        self.logger.warning(f"[MPT] deck view non-200: {resp.status} (user_id: {user_id})")
+                        return None
+                    body = await resp.json()
+            if body.get("error") or "url" not in body:
+                self.logger.warning(
+                    f"[MPT] deck view bad body: error={body.get('error')!r} url_present={'url' in body} "
+                    f"(user_id: {user_id})"
+                )
+                return None
+            token = self.extract_deck_token(body["url"])
+            if not token:
+                self.logger.warning(f"[MPT] deck view: no deck token in returned url (user_id: {user_id})")
+                return None
+            return f"https://magicprotools.com/deck/show?id={token}"
+        except Exception as e:
+            self.logger.error(f"[MPT] deck view submit failed: {e} (user_id: {user_id})")
+            return None
+
     def get_pack_first_picks(self, draft_data: Dict[str, Any], user_id: str) -> Dict[str, str]:
         """
         Extract the first pick card name for each pack for a specific user

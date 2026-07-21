@@ -24,6 +24,40 @@ QUIZ_NUM_PICKS = 4  # Number of picks to quiz on
 ELIGIBLE_DRAFT_DAYS = 365  # Look back 1 year for eligible drafts
 
 
+async def build_pack_image_or_abort(
+    *,
+    enabled: bool,
+    draft_data: Optional[dict],
+    booster_ids: List[str],
+    quiz_id: str,
+    images_config: dict,
+) -> Tuple[Optional[discord.File], bool]:
+    """Return (discord.File|None, abort: bool).
+
+    - flag off  -> (None, False): caller posts with no image.
+    - flag on, composite ok -> (File, False).
+    - flag on, composite None/raises -> (None, True): caller must NOT post."""
+    if not (enabled and draft_data):
+        return None, False
+    try:
+        compositor = PackCompositor(
+            card_width=images_config.get("card_width", 244),
+            card_height=images_config.get("card_height", 340),
+            border_pixels=images_config.get("border_pixels", 5),
+        )
+        image_bytes = await compositor.create_pack_composite(
+            booster_ids, draft_data.get("carddata", {})
+        )
+    except Exception as e:
+        logger.error(f"[QUIZ_IMAGE] Pack composite raised for quiz {quiz_id}: {e}", exc_info=True)
+        return None, True
+    if not image_bytes:
+        logger.error(f"[QUIZ_IMAGE] Pack composite None for quiz {quiz_id}; aborting post")
+        return None, True
+    fresh = BytesIO(image_bytes.getvalue())
+    return discord.File(fp=fresh, filename=f"quiz_pack_{quiz_id}.jpg"), False
+
+
 async def _generate_next_display_id(guild_id: str) -> int:
     """
     Generate the next sequential display ID for a guild.
@@ -217,6 +251,31 @@ class QuizCommands(commands.Cog):
         }
         correct_answers = [pick.picked_id for pick in pack_trace.picks]
 
+        # Generate pack composite image if enabled and draft data available.
+        # This must happen BEFORE the QuizSession is persisted: an
+        # enabled-but-unbuildable image aborts the whole quiz, and
+        # _select_random_draft_and_seat treats ANY row for a
+        # (draft_session_id, starting_seat) as "used" (no message_id
+        # filter) - persisting first would orphan a row and permanently
+        # burn that draft+seat combo.
+        config = get_config(guild_id)
+        quiz_images_config = config.get("features", {}).get("quiz_pack_images", {})
+        images_enabled = quiz_images_config.get("enabled", False)
+
+        logger.info(f"[QUIZ_IMAGE] Feature enabled: {images_enabled}, draft_data available: {draft_data is not None}")
+
+        pack_image_file, abort = await build_pack_image_or_abort(
+            enabled=images_enabled,
+            draft_data=draft_data,
+            booster_ids=pack_trace.picks[0].booster_ids,
+            quiz_id=quiz_id,
+            images_config=quiz_images_config,
+        )
+        if abort:
+            # Image was expected (feature enabled) but could not be built - do not post
+            logger.error(f"[QUIZ_IMAGE] Aborting quiz post for {quiz_id}: pack image required but unavailable")
+            return None
+
         async with db_session() as session:
             quiz_session = QuizSession(
                 quiz_id=quiz_id,
@@ -238,76 +297,14 @@ class QuizCommands(commands.Cog):
         embed = self.create_quiz_embed(draft_session, pack_trace, analysis, mpt_url, display_id)
         view = QuizPublicView(quiz_id, analysis, pack_trace)
 
-        # Generate pack composite image if enabled and draft data available
-        pack_image_file = None
-        config = get_config(guild_id)
-        quiz_images_config = config.get("features", {}).get("quiz_pack_images", {})
-
-        logger.info(f"[QUIZ_IMAGE] Feature enabled: {quiz_images_config.get('enabled', False)}, draft_data available: {draft_data is not None}")
-
-        if quiz_images_config.get("enabled", False) and draft_data:
-            try:
-                logger.info(f"[QUIZ_IMAGE] Starting pack composite generation for quiz {quiz_id}")
-                compositor = PackCompositor(
-                    card_width=quiz_images_config.get("card_width", 244),
-                    card_height=quiz_images_config.get("card_height", 340),
-                    border_pixels=quiz_images_config.get("border_pixels", 5)
-                )
-                first_pick = pack_trace.picks[0]
-                carddata = draft_data.get("carddata", {})
-                logger.info(f"[QUIZ_IMAGE] Carddata has {len(carddata)} cards, pack has {len(first_pick.booster_ids)} cards")
-
-                image_bytes = await compositor.create_pack_composite(
-                    first_pick.booster_ids,
-                    carddata
-                )
-
-                if image_bytes:
-                    # Get the image data and create a fresh BytesIO
-                    # This ensures Discord can read it without any pointer issues
-                    image_data = image_bytes.getvalue()
-                    logger.info(f"[QUIZ_IMAGE] Composite created successfully, size: {len(image_data)} bytes")
-
-                    # Create a fresh BytesIO from the data for Discord
-                    fresh_bytes = BytesIO(image_data)
-
-                    pack_image_file = discord.File(
-                        fp=fresh_bytes,
-                        filename=f"quiz_pack_{quiz_id}.jpg"
-                    )
-                    # Update embed to reference the attachment
-                    embed.set_image(url=f"attachment://quiz_pack_{quiz_id}.jpg")
-                    logger.info(f"[QUIZ_IMAGE] Discord.File created and embed.set_image() called for quiz {quiz_id}")
-                else:
-                    logger.warning(f"[QUIZ_IMAGE] Composite generation returned None")
-            except Exception as e:
-                logger.error(f"[QUIZ_IMAGE] Pack composite generation failed: {e}", exc_info=True)
-        else:
-            logger.info(f"[QUIZ_IMAGE] Skipping pack image generation")
-
         # Post message with embed and optional pack image
         if pack_image_file:
+            embed.set_image(url=f"attachment://quiz_pack_{quiz_id}.jpg")
             logger.info(f"[QUIZ_IMAGE] Posting quiz with pack image attachment")
-            logger.info(f"[QUIZ_IMAGE] About to call channel.send() - embed={type(embed).__name__}, file={type(pack_image_file).__name__}, view={type(view).__name__}")
-
-            # Try posting with image
-            try:
-                logger.info(f"[QUIZ_IMAGE] Attempting to post with image...")
-                message = await channel.send(embed=embed, file=pack_image_file, view=view)
-                logger.info(f"[QUIZ_IMAGE] Successfully posted with image! message_id={message.id}")
-            except discord.Forbidden as e:
-                logger.error(f"[QUIZ_IMAGE] Permission denied (403) posting with image: {e}. Falling back to no image.")
-                logger.warning(f"[QUIZ_IMAGE] Bot needs 'Attach Files' permission in channel {channel_id}")
-                # Fall back to posting without image
-                message = await channel.send(embed=embed, view=view)
-                logger.info(f"[QUIZ_IMAGE] Posted without image due to permissions. message_id={message.id}")
-            except Exception as e:
-                logger.error(f"[QUIZ_IMAGE] Unexpected error posting with image: {e}", exc_info=True)
-                # Fall back to posting without image
-                message = await channel.send(embed=embed, view=view)
-                logger.info(f"[QUIZ_IMAGE] Posted without image due to error. message_id={message.id}")
-
-            logger.info(f"[QUIZ_IMAGE] channel.send() completed, message_id={message.id}")
+            message = await channel.send(embed=embed, file=pack_image_file, view=view)
+            logger.info(f"[QUIZ_IMAGE] Successfully posted with image! message_id={message.id}")
+        else:
+            message = await channel.send(embed=embed, view=view)
 
         # Update QuizSession with message_id
         async with db_session() as session:
