@@ -85,3 +85,70 @@ async def test_submit_deck_view_none_without_key():
     h = MagicProtoolsHelper()
     h.api_key = None
     assert await h.submit_deck_view("dmA", _draft_log(), "x") is None
+
+
+def _capturing_session(json_body):
+    """Like _ok_session but exposes the post mock so tests can inspect the POST body."""
+    resp = MagicMock()
+    resp.status = 200
+    resp.json = AsyncMock(return_value=json_body)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=resp)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    sess = MagicMock()
+    sess.post = MagicMock(return_value=cm)
+    outer = MagicMock()
+    outer.__aenter__ = AsyncMock(return_value=sess)
+    outer.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=outer), sess.post
+
+
+@pytest.mark.asyncio
+async def test_submit_draft_returns_raw_url_and_includes_deck_field():
+    h = MagicProtoolsHelper()
+    h.api_key = "k"
+    factory, post = _capturing_session({"url": "https://magicprotools.com/draft/show?id=D&deck=TOK"})
+    with patch("helpers.magicprotools_helper.aiohttp.ClientSession", factory):
+        url = await h._submit_draft("dmA", _draft_log(), deck_text="4 Lightning Bolt\n")
+    assert url == "https://magicprotools.com/draft/show?id=D&deck=TOK"
+    body = post.call_args.kwargs["data"]
+    assert body["deck"] == "4 Lightning Bolt\n"
+    assert body["apiKey"] == "k" and body["platform"] == "mtgadraft"
+
+
+@pytest.mark.asyncio
+async def test_submit_draft_omits_deck_field_when_no_deck_text():
+    h = MagicProtoolsHelper()
+    h.api_key = "k"
+    factory, post = _capturing_session({"url": "https://magicprotools.com/draft/show?id=D"})
+    with patch("helpers.magicprotools_helper.aiohttp.ClientSession", factory):
+        url = await h._submit_draft("dmA", _draft_log())
+    assert url == "https://magicprotools.com/draft/show?id=D"
+    assert "deck" not in post.call_args.kwargs["data"]
+
+
+@pytest.mark.asyncio
+async def test_submit_draft_passes_anonymize_flag():
+    h = MagicProtoolsHelper()
+    h.api_key = "k"
+    factory, post = _capturing_session({"url": "https://magicprotools.com/draft/show?id=D"})
+    with patch("helpers.magicprotools_helper.aiohttp.ClientSession", factory):
+        await h._submit_draft("dmA", _draft_log(), anonymize=True)
+    draft_field = post.call_args.kwargs["data"]["draft"]
+    assert "RealAlice" not in draft_field and "--> Drafter" in draft_field
+
+
+@pytest.mark.asyncio
+async def test_submit_draft_none_without_key():
+    h = MagicProtoolsHelper()
+    h.api_key = None
+    assert await h._submit_draft("dmA", _draft_log()) is None
+
+
+@pytest.mark.asyncio
+async def test_submit_draft_none_on_error_body():
+    h = MagicProtoolsHelper()
+    h.api_key = "k"
+    factory, _ = _capturing_session({"error": "bad"})
+    with patch("helpers.magicprotools_helper.aiohttp.ClientSession", factory):
+        assert await h._submit_draft("dmA", _draft_log(), deck_text="x") is None

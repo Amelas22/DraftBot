@@ -101,85 +101,66 @@ class MagicProtoolsHelper:
         
         return "\n".join(output)
     
-    async def submit_to_api(self, user_id: str, draft_data: Dict[str, Any]) -> Optional[str]:
-        """
-        Submit draft data directly to MagicProTools API
-        
-        Args:
-            user_id: The ID of the user for the draft log
-            draft_data: The draft log data
-            
-        Returns:
-            The MagicProTools URL if successful, None otherwise
-        """
+    async def _submit_draft(
+        self,
+        user_id: str,
+        draft_data: Dict[str, Any],
+        deck_text: Optional[str] = None,
+        anonymize: bool = False,
+    ) -> Optional[str]:
+        """Shared /api/draft/add POST core. Returns the raw MPT url (which carries
+        `&deck=` when deck_text is given), or None on any failure."""
         session_id = draft_data.get("sessionID", "unknown")
         user_name = draft_data.get("users", {}).get(user_id, {}).get("userName", "unknown")
-        
-        self.logger.info(f"[MPT] Submitting draft to MagicProTools API for user {user_name} (ID: {user_id}) in session {session_id}")
-        
         if not self.api_key:
-            self.logger.warning(f"[MPT] Missing MagicProTools API key, cannot submit directly for user {user_name}")
+            self.logger.warning(
+                f"[MPT] Missing API key, cannot submit for user {user_name} (session {session_id})"
+            )
             return None
-            
         try:
-            # Convert to MagicProTools format
-            self.logger.debug(f"[MPT] Converting draft to MagicProTools format for user {user_name}")
-            mpt_format = self.convert_to_magicprotools_format(draft_data, user_id)
-            
-            # Create the API request
-            url = "https://magicprotools.com/api/draft/add"
+            draft = self.convert_to_magicprotools_format(draft_data, user_id, anonymize=anonymize)
+            data = {"draft": draft, "apiKey": self.api_key, "platform": "mtgadraft"}
+            if deck_text:
+                data["deck"] = deck_text
             headers = {
                 "Accept": "application/json, text/plain, */*",
                 "Content-Type": "application/x-www-form-urlencoded",
-                "Referer": "https://draftmancer.com"
+                "Referer": "https://draftmancer.com",
             }
-            
-            # Use proper form data handling in aiohttp
-            data = {
-                "draft": mpt_format,
-                "apiKey": self.api_key,
-                "platform": "mtgadraft"
-            }
-            
-            # Log key information
-            self.logger.info(f"[MPT] Sending API request to {url} for user {user_name}")
-            
-            # Make the request using aiohttp's built-in form data handling
+            self.logger.info(
+                f"[MPT] Submitting draft for user {user_name} (session {session_id}, "
+                f"deck={'yes' if deck_text else 'no'}, anonymize={anonymize})"
+            )
             async with aiohttp.ClientSession() as session:
-                try:
-                    self.logger.debug(f"[MPT] Sending POST request for user {user_name}")
-                    async with session.post(url, headers=headers, data=data) as response:
-                        self.logger.info(f"[MPT] API response status: {response.status} for user {user_name}")
-                        
-                        if response.status == 200:
-                            json_response = await response.json()
-                            
-                            if "url" in json_response and not json_response.get("error"):
-                                result_url = json_response["url"]
-                                self.logger.info(f"[MPT] SUCCESS: Got direct URL for user {user_name}: {result_url}")
-                                return result_url
-                            else:
-                                error = json_response.get("error", "Unknown error")
-                                self.logger.warning(f"[MPT] API returned error for user {user_name}: {error}")
-                                self.logger.debug(f"[MPT] Full API response: {json_response}")
-                                return None
-                        else:
-                            self.logger.warning(f"[MPT] API returned non-200 status for user {user_name}: {response.status}")
-                            try:
-                                response_text = await response.text()
-                                self.logger.debug(f"[MPT] Response body: {response_text[:200]}...")
-                            except Exception as text_err:
-                                self.logger.debug(f"[MPT] Could not get response text: {text_err}")
-                            return None
-                except aiohttp.ClientError as ce:
-                    self.logger.error(f"[MPT] HTTP client error for user {user_name}: {ce}")
-                    return None
-            
-            return None  # Return None if unsuccessful
+                async with session.post("https://magicprotools.com/api/draft/add",
+                                        headers=headers, data=data) as resp:
+                    if resp.status != 200:
+                        self.logger.warning(
+                            f"[MPT] non-200 status {resp.status} for user {user_name} (session {session_id})"
+                        )
+                        try:
+                            self.logger.debug(f"[MPT] Response body: {(await resp.text())[:200]}")
+                        except Exception as text_err:
+                            self.logger.debug(f"[MPT] Could not read response body: {text_err}")
+                        return None
+                    body = await resp.json()
+            if body.get("error") or "url" not in body:
+                self.logger.warning(
+                    f"[MPT] bad body for user {user_name}: error={body.get('error')!r} "
+                    f"url_present={'url' in body}"
+                )
+                return None
+            result_url = body["url"]
+            self.logger.info(f"[MPT] SUCCESS: got url for user {user_name}: {result_url}")
+            return result_url
         except Exception as e:
-            self.logger.error(f"[MPT] Error submitting to MagicProTools API for user {user_name}: {e}")
-            self.logger.debug(f"[MPT] Exception details: {repr(e)}")
+            self.logger.error(f"[MPT] submit failed for user {user_name}: {e}")
             return None
+
+    async def submit_to_api(self, user_id: str, draft_data: Dict[str, Any]) -> Optional[str]:
+        """Submit draft data directly to the MagicProTools API. Returns the MPT
+        URL if successful, None otherwise."""
+        return await self._submit_draft(user_id, draft_data, anonymize=False)
     
     async def upload_draft_logs(
         self, 
@@ -251,38 +232,14 @@ class MagicProtoolsHelper:
     
     async def submit_deck_view(self, user_id: str, draft_data: Dict[str, Any], deck_text: str) -> Optional[str]:
         """Upload the anonymized draft + deck to MPT; return the /deck/show URL or None."""
-        if not self.api_key:
-            self.logger.warning(f"[MPT] No API key; cannot build deck view (user_id: {user_id})")
+        url = await self._submit_draft(user_id, draft_data, deck_text=deck_text, anonymize=True)
+        if not url:
             return None
-        try:
-            draft = self.convert_to_magicprotools_format(draft_data, user_id, anonymize=True)
-            data = {"draft": draft, "deck": deck_text, "apiKey": self.api_key, "platform": "mtgadraft"}
-            headers = {
-                "Accept": "application/json, text/plain, */*",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Referer": "https://draftmancer.com",
-            }
-            async with aiohttp.ClientSession() as session:
-                async with session.post("https://magicprotools.com/api/draft/add",
-                                        headers=headers, data=data) as resp:
-                    if resp.status != 200:
-                        self.logger.warning(f"[MPT] deck view non-200: {resp.status} (user_id: {user_id})")
-                        return None
-                    body = await resp.json()
-            if body.get("error") or "url" not in body:
-                self.logger.warning(
-                    f"[MPT] deck view bad body: error={body.get('error')!r} url_present={'url' in body} "
-                    f"(user_id: {user_id})"
-                )
-                return None
-            token = self.extract_deck_token(body["url"])
-            if not token:
-                self.logger.warning(f"[MPT] deck view: no deck token in returned url (user_id: {user_id})")
-                return None
-            return f"https://magicprotools.com/deck/show?id={token}"
-        except Exception as e:
-            self.logger.error(f"[MPT] deck view submit failed: {e} (user_id: {user_id})")
+        token = self.extract_deck_token(url)
+        if not token:
+            self.logger.warning(f"[MPT] deck view: no deck token in returned url (user_id: {user_id})")
             return None
+        return f"https://magicprotools.com/deck/show?id={token}"
 
     def get_pack_first_picks(self, draft_data: Dict[str, Any], user_id: str) -> Dict[str, str]:
         """
