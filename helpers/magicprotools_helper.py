@@ -214,13 +214,13 @@ class MagicProtoolsHelper:
                 user_filename = f"DraftLog_{user_id}.txt"
                 
                 # Upload to DO Spaces
-                result = await self.do_helper.upload_text(
+                upload = await self.do_helper.upload_text(
                     mpt_format,
                     base_path,
                     user_filename
                 )
 
-                if result.success:
+                if upload.success:
                     # Get the public URL
                     txt_key = f"{base_path}/{user_filename}"
                     txt_url = self.do_helper.get_public_url(txt_key)
