@@ -31,7 +31,7 @@ async def post_quiz_share(interaction, quiz_message_id, text: str) -> None:
     if quiz_message_id:
         try:
             tid = int(quiz_message_id)
-            thread = (interaction.guild.get_thread(tid) if interaction.guild else None)
+            thread = interaction.guild.get_thread(tid) if interaction.guild else None
             if thread is None:
                 thread = interaction.client.get_channel(tid)
         except Exception:

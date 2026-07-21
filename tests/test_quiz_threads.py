@@ -5,6 +5,11 @@ import pytest
 from helpers.quiz_threads import spawn_discussion_thread, post_quiz_share
 
 
+def make_interaction(guild, channel):
+    return SimpleNamespace(guild=guild, channel=channel,
+                            client=SimpleNamespace(get_channel=lambda tid: None))
+
+
 @pytest.mark.asyncio
 async def test_spawn_creates_thread_and_posts_starter():
     thread = SimpleNamespace(send=AsyncMock())
@@ -28,8 +33,7 @@ async def test_post_share_goes_to_thread_when_resolved():
     thread = SimpleNamespace(send=AsyncMock())
     guild = SimpleNamespace(get_thread=lambda tid: thread)
     channel = SimpleNamespace(send=AsyncMock())
-    interaction = SimpleNamespace(guild=guild, channel=channel,
-                                  client=SimpleNamespace(get_channel=lambda tid: None))
+    interaction = make_interaction(guild, channel)
     await post_quiz_share(interaction, "555", "my score")
     thread.send.assert_awaited_once_with("my score")
     channel.send.assert_not_called()
@@ -39,8 +43,7 @@ async def test_post_share_goes_to_thread_when_resolved():
 async def test_post_share_falls_back_to_channel_when_no_thread():
     guild = SimpleNamespace(get_thread=lambda tid: None)
     channel = SimpleNamespace(send=AsyncMock())
-    interaction = SimpleNamespace(guild=guild, channel=channel,
-                                  client=SimpleNamespace(get_channel=lambda tid: None))
+    interaction = make_interaction(guild, channel)
     await post_quiz_share(interaction, "555", "my score")
     channel.send.assert_awaited_once_with("my score")
 
@@ -48,8 +51,7 @@ async def test_post_share_falls_back_to_channel_when_no_thread():
 @pytest.mark.asyncio
 async def test_post_share_falls_back_when_no_message_id():
     channel = SimpleNamespace(send=AsyncMock())
-    interaction = SimpleNamespace(guild=None, channel=channel,
-                                  client=SimpleNamespace(get_channel=lambda tid: None))
+    interaction = make_interaction(None, channel)
     await post_quiz_share(interaction, None, "my score")
     channel.send.assert_awaited_once_with("my score")
 
@@ -61,8 +63,7 @@ async def test_post_share_falls_back_to_channel_when_thread_send_raises():
     thread = SimpleNamespace(send=AsyncMock(side_effect=RuntimeError("thread locked")))
     guild = SimpleNamespace(get_thread=lambda tid: thread)
     channel = SimpleNamespace(send=AsyncMock())
-    interaction = SimpleNamespace(guild=guild, channel=channel,
-                                  client=SimpleNamespace(get_channel=lambda tid: None))
+    interaction = make_interaction(guild, channel)
     await post_quiz_share(interaction, "555", "my score")
     channel.send.assert_awaited_once_with("my score")
 
@@ -73,6 +74,5 @@ async def test_post_share_swallows_when_both_targets_raise():
     thread = SimpleNamespace(send=AsyncMock(side_effect=RuntimeError("thread")))
     guild = SimpleNamespace(get_thread=lambda tid: thread)
     channel = SimpleNamespace(send=AsyncMock(side_effect=RuntimeError("channel")))
-    interaction = SimpleNamespace(guild=guild, channel=channel,
-                                  client=SimpleNamespace(get_channel=lambda tid: None))
+    interaction = make_interaction(guild, channel)
     await post_quiz_share(interaction, "555", "my score")  # must not raise
