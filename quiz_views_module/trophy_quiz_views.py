@@ -224,15 +224,29 @@ async def _finalize(quiz_id: str, user_id: str, final_guesses: list, changed: bo
     result = score_submission(final_guesses, [deck["wins"] for deck in decks])
     points = apply_change_cost(result["total"], changed)
     async with db_session() as session:
-        sub = await session.get(TrophyQuizSubmission, (quiz_id, user_id))
-        if sub is None or sub.finalized:
-            return False
-        sub.guesses = final_guesses
-        sub.direction_correct = result["direction_correct"]
-        sub.exact_points = result["exact_points"]
-        sub.points_earned = points
-        sub.changed_answer = changed
-        sub.finalized = True
+        # Atomic transition: the conditional UPDATE only matches a not-yet-finalized
+        # row, so exactly one caller wins even across separate view instances (two
+        # decide views, or a decide + change view). The participant increment is
+        # gated on that win, so it happens exactly once — the per-view lock alone
+        # can't guarantee this because the racing handlers live on different views.
+        res = await session.execute(
+            update(TrophyQuizSubmission)
+            .where(
+                TrophyQuizSubmission.quiz_id == quiz_id,
+                TrophyQuizSubmission.player_id == user_id,
+                TrophyQuizSubmission.finalized.is_(False),
+            )
+            .values(
+                guesses=final_guesses,
+                direction_correct=result["direction_correct"],
+                exact_points=result["exact_points"],
+                points_earned=points,
+                changed_answer=changed,
+                finalized=True,
+            )
+        )
+        if res.rowcount == 0:
+            return False  # no pending row, or another call already finalized it
         await session.execute(
             update(TrophyQuizSession)
             .where(TrophyQuizSession.quiz_id == quiz_id)
@@ -440,11 +454,14 @@ class TrophyGuessView(discord.ui.View):
                 changed = guesses != self.initial_guesses
                 did = await _finalize(self.quiz_id, user_id, guesses, changed, self.decks)
                 if not did:
-                    # already finalized elsewhere — show the committed result
+                    # already finalized elsewhere — show the committed result (guard
+                    # sub None defensively, though a change-mode view always has a row)
                     sub = await _get_submission(self.quiz_id, user_id)
+                    final_guesses = sub.guesses if sub is not None else guesses
+                    final_changed = sub.changed_answer if sub is not None else changed
                     await _send_final_reveal(
-                        interaction, self.quiz_id, self.decks, sub.guesses,
-                        sub.changed_answer, prefix="*(You already submitted this quiz)*\n")
+                        interaction, self.quiz_id, self.decks, final_guesses,
+                        final_changed, prefix="*(You already submitted this quiz)*\n")
                     return
                 logger.info(
                     f"User {user_id} finalized trophy quiz {self.quiz_id} via change "

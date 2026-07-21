@@ -268,6 +268,29 @@ async def test_keep_is_idempotent_participants_counted_once(test_db):
     assert qs.total_participants == 1                        # counted once
 
 
+@pytest.mark.asyncio
+async def test_finalize_idempotent_across_separate_views(test_db):
+    """A user with two finalize-capable views (e.g. two Decide views from clicking
+    Play twice while pending) must still count once — the per-view lock can't span
+    instances, so _finalize's atomic conditional UPDATE is what guarantees it."""
+    await _seed_session()
+    user = SimpleNamespace(id=1, display_name="Alice", name="a")
+    gv = TrophyGuessView("q1", _DECKS, user)
+    gv.selections = {"A": 3, "B": 0}
+    await gv.submit_button.callback(_interaction(user))
+
+    decide_a = TrophyDecideView("q1", _DECKS, user, [3, 0])
+    decide_b = TrophyDecideView("q1", _DECKS, user, [3, 0])   # a second instance
+    await decide_a.keep_button.callback(_interaction(user))
+    await decide_b.keep_button.callback(_interaction(user))   # different view, no shared lock
+
+    async with AsyncSessionLocal() as s:
+        qs = await s.get(TrophyQuizSession, "q1")
+    assert qs.total_participants == 1                        # atomic finalize → once
+    sub = await _submission("q1", "1")
+    assert sub.finalized is True and sub.points_earned == 10
+
+
 # ---- share (leak-safe, thread-routed) --------------------------------------
 
 @pytest.mark.asyncio

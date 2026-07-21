@@ -22,6 +22,10 @@ def upgrade():
         "trophy_quiz_submissions",
         sa.Column("changed_answer", sa.Boolean(), nullable=False, server_default=sa.text("0")),
     )
+    # Every submission that existed under the old one-submission mechanic was a
+    # committed answer — backfill it as finalized so historical leaderboard points
+    # are preserved and returning players aren't re-treated as pending.
+    op.execute("UPDATE trophy_quiz_submissions SET finalized = 1")
     op.drop_table("trophy_quiz_reveals")
 
 
