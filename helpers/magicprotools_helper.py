@@ -6,6 +6,7 @@ import aiohttp
 from typing import Dict, Any, Optional, List
 
 from .digital_ocean_helper import DigitalOceanHelper
+from services.draft_log_store import split_decklist, build_mtgo_deck_text
 
 
 class MagicProtoolsHelper:
@@ -158,9 +159,17 @@ class MagicProtoolsHelper:
             return None
 
     async def submit_to_api(self, user_id: str, draft_data: Dict[str, Any]) -> Optional[str]:
-        """Submit draft data directly to the MagicProTools API. Returns the MPT
-        URL if successful, None otherwise."""
-        return await self._submit_draft(user_id, draft_data, anonymize=False)
+        """Submit draft data to the MagicProTools API with the player's built deck
+        attached (best-effort), so the returned URL opens the draft with that deck.
+        Returns the MPT URL if successful, None otherwise."""
+        deck_text = None
+        try:
+            split = split_decklist(draft_data, user_id)
+            deck_text = build_mtgo_deck_text(split, draft_data.get("carddata", {})) or None
+        except Exception as e:
+            self.logger.warning(f"[MPT] deck build failed for user {user_id}, submitting draft-only: {e}")
+            deck_text = None
+        return await self._submit_draft(user_id, draft_data, deck_text=deck_text, anonymize=False)
     
     async def upload_draft_logs(
         self, 
