@@ -8,6 +8,7 @@ import pytz
 from typing import Optional, List
 from database.db_session import db_session
 from models.draft_logs import LogChannel, BackupLog, UserSubmission, PostSchedule
+from helpers.permissions import has_bot_manager_role
 
 class DraftLogsCog(commands.Cog):
     """
@@ -22,7 +23,7 @@ class DraftLogsCog(commands.Cog):
         name="setup_draft_logs",
         description="Set up a channel for posting draft logs"
     )
-    @commands.has_permissions(administrator=True)
+    @has_bot_manager_role()
     async def setup_draft_logs(
         self, 
         ctx,
@@ -76,7 +77,7 @@ class DraftLogsCog(commands.Cog):
         name="add_log_schedule",
         description="Add a posting schedule for draft logs"
     )
-    @commands.has_permissions(administrator=True)
+    @has_bot_manager_role()
     async def add_log_schedule(
         self,
         ctx,
@@ -154,7 +155,7 @@ class DraftLogsCog(commands.Cog):
         name="list_log_schedules",
         description="List all posting schedules for a channel"
     )
-    @commands.has_permissions(administrator=True)
+    @has_bot_manager_role()
     async def list_log_schedules(
         self,
         ctx,
@@ -204,7 +205,7 @@ class DraftLogsCog(commands.Cog):
         name="remove_log_schedule",
         description="Remove a posting schedule"
     )
-    @commands.has_permissions(administrator=True)
+    @has_bot_manager_role()
     async def remove_log_schedule(
         self,
         ctx,
@@ -262,7 +263,7 @@ class DraftLogsCog(commands.Cog):
         name="add_backup_log",
         description="Add a backup draft log (Admin only)"
     )
-    @commands.has_permissions(administrator=True)
+    @has_bot_manager_role()
     async def add_backup_log(
         self,
         ctx,
@@ -405,7 +406,7 @@ class DraftLogsCog(commands.Cog):
         name="post_draft_log_now",
         description="Immediately post a draft log (Admin only)"
     )
-    @commands.has_permissions(administrator=True)
+    @has_bot_manager_role()
     async def post_now(
         self,
         ctx,
@@ -430,7 +431,7 @@ class DraftLogsCog(commands.Cog):
         name="list_draft_logs",
         description="List available logs (Admin only)"
     )
-    @commands.has_permissions(administrator=True)
+    @has_bot_manager_role()
     async def list_logs(
         self, 
         ctx, 
@@ -476,7 +477,7 @@ class DraftLogsCog(commands.Cog):
         name="delete_draft_log",
         description="Delete a specific log (Admin only)"
     )
-    @commands.has_permissions(administrator=True)
+    @has_bot_manager_role()
     async def delete_log(
         self,
         ctx,
@@ -516,7 +517,7 @@ class DraftLogsCog(commands.Cog):
         name="reset_draft_logs",
         description="Reset all used flags for logs (Admin only)"
     )
-    @commands.has_permissions(administrator=True)
+    @has_bot_manager_role()
     async def reset_logs(
         self,
         ctx,
@@ -564,7 +565,7 @@ class DraftLogsCog(commands.Cog):
         name="enable_draft_logs",
         description="Enable automatic draft log posting for a channel"
     )
-    @commands.has_permissions(manage_channels=True)
+    @has_bot_manager_role()
     async def enable_draft_logs(
         self,
         ctx,
@@ -610,7 +611,7 @@ class DraftLogsCog(commands.Cog):
         name="disable_draft_logs",
         description="Disable automatic draft log posting for a channel"
     )
-    @commands.has_permissions(manage_channels=True)
+    @has_bot_manager_role()
     async def disable_draft_logs(
         self,
         ctx,

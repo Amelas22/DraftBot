@@ -16,6 +16,7 @@ from services.draft_data_loader import load_from_spaces
 from quiz_views_module.quiz_views import QuizPublicView
 from helpers.magicprotools_helper import MagicProtoolsHelper
 from helpers.pack_compositor import PackCompositor
+from helpers.permissions import has_bot_manager_role
 from config import get_config
 
 # Quiz configuration constants
@@ -327,7 +328,7 @@ class QuizCommands(commands.Cog):
         description='[MOD] Post a draft pick quiz for the channel',
         guild_ids=None
     )
-    @commands.has_permissions(manage_roles=True)  # Mod permission check
+    @has_bot_manager_role()  # accepts Bot Lord / Bot Manager roles OR Manage Roles
     async def post_quiz(self, ctx):
         """Post a public quiz that all users can participate in"""
         logger.info(f"Post quiz command received from user {ctx.author.id} in guild {ctx.guild.id}")

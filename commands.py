@@ -12,6 +12,7 @@ from loguru import logger
 from discord.ext import commands
 from legacy_stats import get_legacy_player_stats, get_legacy_head_to_head_stats
 from helpers.display_names import get_display_name
+from helpers.permissions import has_bot_manager_role
 
 
 async def core_commands(bot):
@@ -54,7 +55,7 @@ async def core_commands(bot):
     #             await session.commit()
     #     await ctx.followup.send("Click your timezone below to add your name to that timezone. You can click any name to open a DM with that user to coordiante finding teammates. Clicking the timezone again (once signed up) will remove your name from the list.", ephemeral=True)
     @bot.slash_command(name="setup", description="Configure your server with an interactive setup wizard")
-    @commands.has_permissions(administrator=True)
+    @has_bot_manager_role()
     async def setup_wizard(ctx):
         """Start an interactive server setup wizard"""
         await ctx.respond("Starting server setup wizard...", ephemeral=True)
@@ -71,7 +72,7 @@ async def core_commands(bot):
         )
 
     @bot.slash_command(name="configure", description="Configure bot settings with an easy interface")
-    @commands.has_permissions(administrator=True)
+    @has_bot_manager_role()
     async def configure_ui(ctx):
         """Interactive configuration system with dropdowns and modals"""
         from config import get_config
@@ -184,7 +185,7 @@ async def core_commands(bot):
             await ctx.followup.send("An error occurred while fetching the record. Please try again later.", ephemeral=True)
     # Add a setup function to initialize the legacy data
     @bot.slash_command(name="setup_legacy_data", description="Admin Only: Setup legacy data for stats tracking")
-    @commands.has_permissions(administrator=True)
+    @has_bot_manager_role()
     async def setup_legacy_data(ctx):
         """Admin command to initialize legacy data for stats tracking."""
         await ctx.defer(ephemeral=True)

@@ -128,6 +128,68 @@ def test_quiz_scheduling_commands_use_bot_manager_check():
         )
 
 
+def test_post_trophy_quiz_uses_bot_manager_check():
+    """/post_trophy_quiz must accept the Bot Lord / Bot Manager roles (not only
+    the Discord Manage Roles permission), like the other mod commands."""
+    from cogs.trophy_quiz_commands import TrophyQuizCommands
+
+    cmd = TrophyQuizCommands.post_trophy_quiz
+    assert is_bot_manager in cmd.checks, (
+        "/post_trophy_quiz should use the unified bot-manager check "
+        "(has_bot_manager_role), not commands.has_permissions(manage_roles)"
+    )
+
+
+def test_post_quiz_uses_bot_manager_check():
+    """/post_quiz (pick quiz) has the same latent gap and must also accept the
+    manager roles, not only the Manage Roles permission."""
+    from cogs.quiz_commands import QuizCommands
+
+    cmd = QuizCommands.post_quiz
+    assert is_bot_manager in cmd.checks, (
+        "/post_quiz should use the unified bot-manager check"
+    )
+
+
+def test_draft_logs_admin_commands_use_bot_manager_check():
+    """The draft-log admin/channel commands were gated by has_permissions
+    (administrator / manage_channels); they must now use the unified check so
+    Bot Lord / Bot Manager roles grant access too."""
+    from cogs.draft_logs_cog import DraftLogsCog
+
+    gated = (
+        "setup_draft_logs", "add_log_schedule", "list_log_schedules",
+        "remove_log_schedule", "add_backup_log", "post_now", "list_logs",
+        "delete_log", "reset_logs", "enable_draft_logs", "disable_draft_logs",
+    )
+    for name in gated:
+        cmd = getattr(DraftLogsCog, name)
+        assert is_bot_manager in cmd.checks, (
+            f"/{name} should use the unified bot-manager check"
+        )
+
+
+def test_no_command_uses_raw_has_permissions_gate():
+    """Regression guard: the has_permissions(...) anti-pattern (which ignores the
+    Bot Lord / Bot Manager roles and only honours a raw Discord permission) must
+    not be reintroduced on any command. All gated commands use
+    has_bot_manager_role() so the denial message is accurate everywhere."""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    files = [root / "commands.py"] + sorted((root / "cogs").glob("*.py"))
+    offenders = []
+    for path in files:
+        for i, line in enumerate(path.read_text().splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("@") and "has_permissions(" in stripped:
+                offenders.append(f"{path.relative_to(root)}:{i}: {stripped}")
+    assert not offenders, (
+        "Use @has_bot_manager_role() instead of @commands.has_permissions(...):\n"
+        + "\n".join(offenders)
+    )
+
+
 # ---- handle_application_command_error ---------------------------------------
 
 @pytest.mark.asyncio
