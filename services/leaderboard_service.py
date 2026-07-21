@@ -8,6 +8,8 @@ from models.perfect_streak_history import PerfectStreakHistory
 from models.draft_streak_history import DraftStreakHistory
 from models.player import PlayerStats
 from models import QuizStats, QuizSubmission, QuizSession
+from models.trophy_quiz_submission import TrophyQuizSubmission
+from models.trophy_quiz_session import TrophyQuizSession
 
 # Win Streak minimum requirements by timeframe
 STREAK_MINIMUMS = {
@@ -387,6 +389,9 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
         elif category == "quiz_points":
             # Use dedicated function for quiz stats (doesn't need draft aggregation)
             sorted_players = await get_quiz_points_leaderboard_data(guild_id, timeframe, limit, session)
+
+        elif category == "trophy_quiz_points":
+            sorted_players = await get_trophy_quiz_points_leaderboard_data(guild_id, timeframe, limit, session)
 
         elif category == "draft_win_streak":
             # Use dedicated function for draft win streak (Order of the White Lotus)
@@ -892,6 +897,44 @@ async def get_quiz_points_leaderboard_data(guild_id, timeframe, limit, session):
             })
 
     # Apply limit
+    return leaderboard_data[:limit]
+
+
+async def get_trophy_quiz_points_leaderboard_data(guild_id, timeframe, limit, session):
+    """Rank players by summed TrophyQuizSubmission.points_earned in the guild.
+    Aggregates submissions directly for all timeframes; separate from the pick
+    quiz's quiz_points leaderboard."""
+    # Calculate date cutoff for timeframe
+    if timeframe == "90d":
+        cutoff_date = datetime.now() - timedelta(days=90)
+    elif timeframe == "30d":
+        cutoff_date = datetime.now() - timedelta(days=30)
+    elif timeframe == "14d":
+        cutoff_date = datetime.now() - timedelta(days=14)
+    else:
+        cutoff_date = None
+
+    stmt = select(TrophyQuizSubmission).join(
+        TrophyQuizSession,
+        TrophyQuizSubmission.quiz_id == TrophyQuizSession.quiz_id
+    ).where(TrophyQuizSession.guild_id == str(guild_id))
+    if cutoff_date is not None:
+        stmt = stmt.where(TrophyQuizSubmission.submitted_at >= cutoff_date)
+
+    submissions = (await session.execute(stmt)).scalars().all()
+
+    player_aggregates = {}
+    for sub in submissions:
+        agg = player_aggregates.setdefault(sub.player_id, {
+            "player_id": sub.player_id,
+            "display_name": sub.display_name,
+            "total_points": 0,
+            "total_quizzes": 0
+        })
+        agg["total_points"] += sub.points_earned
+        agg["total_quizzes"] += 1
+
+    leaderboard_data = sorted(player_aggregates.values(), key=lambda p: p["total_points"], reverse=True)
     return leaderboard_data[:limit]
 
 

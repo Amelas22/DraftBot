@@ -568,6 +568,8 @@ class AdminCommands(commands.Cog):
                     leaderboard_record.perfect_streak_view_message_id = None
                     leaderboard_record.quiz_points_view_message_id = None
                     leaderboard_record.draft_win_streak_view_message_id = None
+                    leaderboard_record.trophy_quiz_points_view_message_id = None
+                    leaderboard_record.trophy_quiz_points_timeframe = None
 
                     await session.commit()
                     logger.info(f"Leaderboard channel changed to {channel.name} for guild {ctx.guild.name} by {ctx.author.name}")

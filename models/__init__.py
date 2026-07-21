@@ -20,6 +20,9 @@ from .quiz_scheduling import QuizChannel, QuizSchedule
 from .debt_ledger import DebtLedger
 from .debt_summary_message import DebtSummaryMessage
 from .tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
+from .trophy_quiz_session import TrophyQuizSession
+from .trophy_quiz_submission import TrophyQuizSubmission
+from .trophy_quiz_reveal import TrophyQuizReveal
 
 # Export all models
 __all__ = [
@@ -56,5 +59,8 @@ __all__ = [
     'Tournament',
     'TournamentParticipant',
     'TournamentRound',
-    'TournamentMatch'
+    'TournamentMatch',
+    'TrophyQuizSession',
+    'TrophyQuizSubmission',
+    'TrophyQuizReveal',
 ]
