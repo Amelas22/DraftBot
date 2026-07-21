@@ -111,14 +111,16 @@ async def test_post_team_logs_scopes_pools_to_own_team_and_stamps():
     bot = MagicMock(); bot.get_guild.return_value = guild
 
     with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
-         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)):
+         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
+         patch("services.draft_log_store.PileImageBuilder") as PIB:
+        PIB.return_value.build = AsyncMock(return_value=None)   # best-effort: no image → txt only
         ok = await post_team_logs("sid", bot)
 
     assert ok is True
     assert ds.team_logs_posted_at is not None
-    # Red got Alice's pool only; Blue got Bob's pool only
-    red_names = [c.kwargs["file"][1] for c in red.send.await_args_list]
-    blue_names = [c.kwargs["file"][1] for c in blue.send.await_args_list]
+    # Red got Alice's pool only; Blue got Bob's pool only (as .txt attachments)
+    red_names = [f[1] for c in red.send.await_args_list for f in c.kwargs["files"]]
+    blue_names = [f[1] for c in blue.send.await_args_list for f in c.kwargs["files"]]
     assert red_names == ["Alice.txt"]
     assert blue_names == ["Bob.txt"]
 
@@ -147,15 +149,81 @@ async def test_post_team_logs_matches_lowercased_discord_channel_names():
     bot = MagicMock(); bot.get_guild.return_value = guild
 
     with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
-         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)):
+         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
+         patch("services.draft_log_store.PileImageBuilder") as PIB:
+        PIB.return_value.build = AsyncMock(return_value=None)
         ok = await post_team_logs("sid", bot)
 
     assert ok is True
     assert ds.team_logs_posted_at is not None
-    red_names = [c.kwargs["file"][1] for c in red.send.await_args_list]
-    blue_names = [c.kwargs["file"][1] for c in blue.send.await_args_list]
+    red_names = [f[1] for c in red.send.await_args_list for f in c.kwargs["files"]]
+    blue_names = [f[1] for c in blue.send.await_args_list for f in c.kwargs["files"]]
     assert red_names == ["Alice.txt"]
     assert blue_names == ["Bob.txt"]
+
+
+@pytest.mark.asyncio
+async def test_post_team_logs_attaches_deck_image_alongside_txt():
+    """When a pile image builds, the member's post carries BOTH the .txt and a
+    .jpg deck image in one message."""
+    import io as _io
+    ds = SimpleNamespace(
+        session_id="sid", draft_id="ABC", guild_id="42",
+        draft_data=_team_log(), team_logs_posted_at=None,
+        team_a=["disc_a"], team_b=[],
+        sign_ups={"disc_a": "Alice", "disc_b": "Bob"},   # 2 signups == 2 non-bot users
+        channel_ids=[111],
+    )
+    session = MagicMock()
+    result = MagicMock(); result.scalar_one_or_none.return_value = ds
+    session.execute = AsyncMock(return_value=result); session.commit = AsyncMock()
+    ctx = MagicMock(); ctx.__aenter__ = AsyncMock(return_value=session); ctx.__aexit__ = AsyncMock(return_value=None)
+
+    red = _channel("Red-Team-Chat-ABC")
+    guild = MagicMock(); guild.get_channel = lambda cid: {111: red}.get(cid)
+    bot = MagicMock(); bot.get_guild.return_value = guild
+
+    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
+         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
+         patch("services.draft_log_store.PileImageBuilder") as PIB:
+        PIB.return_value.build = AsyncMock(return_value=_io.BytesIO(b"\xff\xd8jpg"))
+        ok = await post_team_logs("sid", bot)
+
+    assert ok is True
+    names = [f[1] for c in red.send.await_args_list for f in c.kwargs["files"]]
+    assert names == ["Alice.txt", "Alice.jpg"]      # both attachments, one message
+
+
+@pytest.mark.asyncio
+async def test_post_team_logs_still_posts_txt_when_image_build_raises():
+    """Best-effort: an image build failure must NOT block the .txt post or the
+    stamp (the .txt is the deliverable; post_team_logs is reconciler-driven)."""
+    ds = SimpleNamespace(
+        session_id="sid", draft_id="ABC", guild_id="42",
+        draft_data=_team_log(), team_logs_posted_at=None,
+        team_a=["disc_a"], team_b=[],
+        sign_ups={"disc_a": "Alice", "disc_b": "Bob"},   # 2 signups == 2 non-bot users
+        channel_ids=[111],
+    )
+    session = MagicMock()
+    result = MagicMock(); result.scalar_one_or_none.return_value = ds
+    session.execute = AsyncMock(return_value=result); session.commit = AsyncMock()
+    ctx = MagicMock(); ctx.__aenter__ = AsyncMock(return_value=session); ctx.__aexit__ = AsyncMock(return_value=None)
+
+    red = _channel("Red-Team-Chat-ABC")
+    guild = MagicMock(); guild.get_channel = lambda cid: {111: red}.get(cid)
+    bot = MagicMock(); bot.get_guild.return_value = guild
+
+    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
+         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
+         patch("services.draft_log_store.PileImageBuilder") as PIB:
+        PIB.return_value.build = AsyncMock(side_effect=RuntimeError("scryfall down"))
+        ok = await post_team_logs("sid", bot)
+
+    assert ok is True                                # still succeeded
+    assert ds.team_logs_posted_at is not None        # still stamped
+    names = [f[1] for c in red.send.await_args_list for f in c.kwargs["files"]]
+    assert names == ["Alice.txt"]                    # txt only, image skipped
 
 
 @pytest.mark.asyncio
