@@ -325,7 +325,9 @@ class ShareResultView(discord.ui.View):
         message_id = None
         if self.quiz_id:
             async with db_session() as session:
-                qs = (await session.execute(select(QuizSession).where(QuizSession.quiz_id == self.quiz_id))).scalar_one_or_none()
+                stmt = select(QuizSession).where(QuizSession.quiz_id == self.quiz_id)
+                result = await session.execute(stmt)
+                qs = result.scalar_one_or_none()
             message_id = qs.message_id if qs else None
 
         # Disable the button before sharing
