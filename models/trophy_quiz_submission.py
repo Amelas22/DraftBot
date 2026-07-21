@@ -12,4 +12,9 @@ class TrophyQuizSubmission(Base):
     direction_correct = Column(Boolean, nullable=False, default=False)
     exact_points = Column(JSON, nullable=False)       # [ptsA, ptsB]
     points_earned = Column(Integer, nullable=False)
+    # Two-phase submit: a pending row (finalized=False) holds the player's initial
+    # guess after they submit and see the pilots' names; it becomes finalized when
+    # they Keep or Pay-2-to-change. changed_answer records whether they paid to revise.
+    finalized = Column(Boolean, nullable=False, server_default=text('0'), default=False)
+    changed_answer = Column(Boolean, nullable=False, server_default=text('0'), default=False)
     submitted_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))

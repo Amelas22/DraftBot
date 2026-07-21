@@ -917,7 +917,12 @@ async def get_trophy_quiz_points_leaderboard_data(guild_id, timeframe, limit, se
     stmt = select(TrophyQuizSubmission).join(
         TrophyQuizSession,
         TrophyQuizSubmission.quiz_id == TrophyQuizSession.quiz_id
-    ).where(TrophyQuizSession.guild_id == str(guild_id))
+    ).where(
+        TrophyQuizSession.guild_id == str(guild_id),
+        # Only committed answers count; a pending (unfinalized) row is a player who
+        # submitted an initial guess but never chose Keep or Pay-to-change.
+        TrophyQuizSubmission.finalized.is_(True),
+    )
     if cutoff_date is not None:
         stmt = stmt.where(TrophyQuizSubmission.submitted_at >= cutoff_date)
 
