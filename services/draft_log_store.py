@@ -13,6 +13,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from database.db_session import db_session
+from helpers.pile_compositor import PileImageBuilder
 from helpers.substitutes import TEAM_A_CHANNEL_PREFIX, TEAM_B_CHANNEL_PREFIX
 from models.draft_session import DraftSession
 
@@ -108,9 +109,25 @@ async def _post_pools_for_team(
                 or (sign_ups or {}).get(discord_id) or discord_id)
         safe = "".join(c for c in str(name) if c.isalnum() or c in " _-").strip() or str(discord_id)
         fp = io.BytesIO(pool.encode("utf-8"))
+        files = [discord.File(fp, filename=f"{safe}.txt")]
+
+        # Best-effort mana-value pile image (main deck + sideboard) alongside the
+        # .txt. The .txt is the deliverable and post_team_logs is reconciler-driven,
+        # so any image failure (Scryfall exhaustion -> build None, or an exception)
+        # is logged and skipped — never blocking the post or the stamp.
+        try:
+            split = split_decklist(draft_data, dm_user_id)
+            image = await PileImageBuilder().build(
+                split["main"], split["side"], draft_data.get("carddata", {})
+            )
+            if image:
+                files.append(discord.File(io.BytesIO(image.getvalue()), filename=f"{safe}.jpg"))
+        except Exception as e:
+            logger.warning(f"[team-logs] deck image failed for {name} ({dm_user_id}): {e}")
+
         await channel.send(
             content=f"**{name}** — drafted pool ({pool.count(chr(10)) + 1} cards):",
-            file=discord.File(fp, filename=f"{safe}.txt"),
+            files=files,
         )
 
 
