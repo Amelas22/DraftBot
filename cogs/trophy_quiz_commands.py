@@ -9,6 +9,7 @@ from loguru import logger
 from sqlalchemy import and_, func, select, update
 
 from database.db_session import db_session
+from helpers.permissions import has_bot_manager_role
 from helpers.magicprotools_helper import MagicProtoolsHelper
 from helpers.pile_compositor import PileImageBuilder
 from models import DraftSession, MatchResult, TrophyQuizSession
@@ -311,7 +312,7 @@ class TrophyQuizCommands(commands.Cog):
         description='[MOD] Post a trophy record quiz for the channel',
         guild_ids=None
     )
-    @commands.has_permissions(manage_roles=True)  # Mod permission check
+    @has_bot_manager_role()  # accepts Bot Lord / Bot Manager roles OR Manage Roles
     async def post_trophy_quiz(self, ctx):
         """Post a public trophy record quiz that all users can participate in."""
         logger.info(f"Post trophy quiz command received from user {ctx.author.id} in guild {ctx.guild.id}")
