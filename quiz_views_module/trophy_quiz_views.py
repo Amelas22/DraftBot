@@ -263,6 +263,19 @@ async def _send_final_reveal(interaction, quiz_id: str, decks: list, guesses: li
     )
 
 
+async def _reveal_if_finalized(interaction, quiz_id: str, decks: list, sub) -> bool:
+    """If `sub` is a finalized submission, show its committed result (with the
+    "already submitted" prefix) and return True so the caller stops. Returns
+    False when there's nothing to show (no submission, or still pending)."""
+    if sub is None or not sub.finalized:
+        return False
+    await _send_final_reveal(
+        interaction, quiz_id, decks, sub.guesses, sub.changed_answer,
+        prefix="*(You already submitted this quiz)*\n",
+    )
+    return True
+
+
 async def _reveal_names_and_decide(interaction, quiz_id: str, decks: list, user, initial_guesses: list):
     """Reveal ONLY the pilots' names (not records/score) and present the
     Keep / Pay-2-to-change choice on the player's locked initial guess."""
@@ -330,11 +343,7 @@ class TrophyQuizView(discord.ui.View):
         Keep/Change choice (pending submission), or show the result (finalized)."""
         user_id = str(interaction.user.id)
         sub = await _get_submission(self.quiz_id, user_id)
-        if sub is not None and sub.finalized:
-            await _send_final_reveal(
-                interaction, self.quiz_id, self.decks, sub.guesses, sub.changed_answer,
-                prefix="*(You already submitted this quiz)*\n",
-            )
+        if await _reveal_if_finalized(interaction, self.quiz_id, self.decks, sub):
             return
         if sub is not None:  # pending: resume on the locked initial guess
             await _reveal_names_and_decide(interaction, self.quiz_id, self.decks, interaction.user, sub.guesses)
@@ -417,10 +426,7 @@ class TrophyGuessView(discord.ui.View):
                     # A submission already exists (concurrent double-submit or a
                     # resume). Route to the right state rather than duplicate.
                     sub = await _get_submission(self.quiz_id, user_id)
-                    if sub is not None and sub.finalized:
-                        await _send_final_reveal(
-                            interaction, self.quiz_id, self.decks, sub.guesses,
-                            sub.changed_answer, prefix="*(You already submitted this quiz)*\n")
+                    if await _reveal_if_finalized(interaction, self.quiz_id, self.decks, sub):
                         return
                     initial = sub.guesses if sub is not None else guesses
                     await _reveal_names_and_decide(
@@ -482,10 +488,7 @@ class TrophyDecideView(discord.ui.View):
         async with self._lock:
             user_id = str(interaction.user.id)
             sub = await _get_submission(self.quiz_id, user_id)
-            if sub is not None and sub.finalized:
-                await _send_final_reveal(
-                    interaction, self.quiz_id, self.decks, sub.guesses, sub.changed_answer,
-                    prefix="*(You already submitted this quiz)*\n")
+            if await _reveal_if_finalized(interaction, self.quiz_id, self.decks, sub):
                 return
             await interaction.response.send_message(
                 f"Revise your records, then **Submit** (−{CHANGE_COST} points if you change anything):",
