@@ -439,3 +439,45 @@ async def test_try_next_draft_bounded_then_gives_up(test_db, monkeypatch):
     msg = await cog._select_prep_and_post("g1", channel, "mod")
     assert msg is None
     assert calls["n"] == trophy_quiz_commands.MAX_POST_ATTEMPTS   # bounded
+
+
+@pytest.mark.asyncio
+async def test_post_spawns_discussion_thread(test_db):
+    guild_id = "g1"
+    eligible_data = await _seed_draft("d-eligible", guild_id, 6, _WITH_EXTREME)
+    draft, deck_pair, draft_data = await _select_eligible_with_data(guild_id, eligible_data)
+    cog = trophy_quiz_commands.TrophyQuizCommands(bot=None)
+    channel = _FakeChannel()
+    spawned = []
+    async def fake_spawn(message, name, starter):
+        spawned.append(name); return None
+    with patch("helpers.magicprotools_helper.MagicProtoolsHelper.submit_deck_view",
+               AsyncMock(return_value="https://magicprotools.com/deck/show?id=T")), \
+         patch("cogs.trophy_quiz_commands.PileImageBuilder.build",
+               AsyncMock(side_effect=lambda *a, **k: _fake_jpeg())), \
+         patch("cogs.trophy_quiz_commands.spawn_discussion_thread", fake_spawn):
+        message = await cog._create_and_post_trophy_quiz(
+            guild_id=guild_id, channel=channel, draft_session=draft,
+            deck_pair=deck_pair, posted_by="mod", draft_data=draft_data)
+    assert message is not None
+    assert spawned and "Discussion (spoilers)" in spawned[0]
+
+
+@pytest.mark.asyncio
+async def test_post_succeeds_even_if_thread_spawn_raises(test_db):
+    guild_id = "g1"
+    eligible_data = await _seed_draft("d-eligible", guild_id, 6, _WITH_EXTREME)
+    draft, deck_pair, draft_data = await _select_eligible_with_data(guild_id, eligible_data)
+    cog = trophy_quiz_commands.TrophyQuizCommands(bot=None)
+    channel = _FakeChannel()
+    async def boom(*a, **k):
+        raise RuntimeError("no perms")
+    with patch("helpers.magicprotools_helper.MagicProtoolsHelper.submit_deck_view",
+               AsyncMock(return_value="https://magicprotools.com/deck/show?id=T")), \
+         patch("cogs.trophy_quiz_commands.PileImageBuilder.build",
+               AsyncMock(side_effect=lambda *a, **k: _fake_jpeg())), \
+         patch("cogs.trophy_quiz_commands.spawn_discussion_thread", boom):
+        message = await cog._create_and_post_trophy_quiz(
+            guild_id=guild_id, channel=channel, draft_session=draft,
+            deck_pair=deck_pair, posted_by="mod", draft_data=draft_data)
+    assert message is not None   # quiz still posted; spawn failure must not break it

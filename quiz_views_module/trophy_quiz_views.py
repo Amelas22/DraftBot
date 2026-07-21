@@ -8,6 +8,7 @@ from models import TrophyQuizSession, TrophyQuizSubmission
 from services.trophy_quiz_service import score_submission, record_label, REVEAL_COST, apply_reveal_cost
 from services.trophy_quiz_reveal_store import has_revealed, record_reveal
 from helpers.display_names import get_display_name
+from helpers.quiz_threads import post_quiz_share
 
 # Record dropdown options: (wins, label). Values are the win count as a string
 # ("3".."0"), matched against services.trophy_quiz_service record semantics.
@@ -151,16 +152,24 @@ class TrophyShareView(discord.ui.View):
             f"\n```\n{share_text}\n```"
         )
 
+        message_id = None
+        if self.quiz_id:
+            async with db_session() as session:
+                qs = await session.get(TrophyQuizSession, self.quiz_id)
+            message_id = qs.message_id if qs else None
+
         button.disabled = True
         button.label = "✓ Shared!"
 
         await interaction.response.edit_message(view=self)
-        # Post as a standalone channel message, NOT interaction.followup.send:
-        # a followup on a component interaction is delivered as a reply to the
-        # button's message (the ephemeral reveal), and Discord surfaces that
-        # reveal's drafter names / actual records in the reply preview to
-        # everyone. channel.send carries no reference, so nothing leaks.
-        await interaction.channel.send(message)
+        # Post as a standalone message, NOT interaction.followup.send: a followup
+        # on a component interaction is delivered as a reply to the button's
+        # message (the ephemeral reveal), and Discord surfaces that reveal's
+        # drafter names / actual records in the reply preview to everyone.
+        # post_quiz_share does a plain .send with no reply reference (routing
+        # into the quiz's discussion thread when available, else the channel),
+        # so nothing leaks.
+        await post_quiz_share(interaction, message_id, message)
 
         logger.info(
             f"User {self.user.id} ({get_display_name(self.user)}) shared trophy quiz "

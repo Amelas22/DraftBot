@@ -17,6 +17,7 @@ from services.draft_data_loader import load_from_spaces
 from services.draft_log_store import map_discord_to_draftmancer, split_decklist, build_mtgo_deck_text
 from services.trophy_quiz_service import select_two_decks
 from quiz_views_module.trophy_quiz_views import TrophyQuizView
+from helpers.quiz_threads import DISCUSSION_THREAD_STARTER, spawn_discussion_thread
 from utils import safe_pin
 
 ELIGIBLE_DRAFT_DAYS = 365  # Look back 1 year for eligible drafts
@@ -243,6 +244,16 @@ class TrophyQuizCommands(commands.Cog):
             )
 
         await safe_pin(message)
+
+        try:
+            await spawn_discussion_thread(
+                message,
+                f"🏆 Trophy Quiz #{display_id} — Discussion (spoilers)" if display_id
+                else "🏆 Trophy Quiz — Discussion (spoilers)",
+                DISCUSSION_THREAD_STARTER,
+            )
+        except Exception as e:
+            logger.warning(f"[trophy-quiz] discussion thread spawn failed for {quiz_id}: {e}")
 
         return message
 

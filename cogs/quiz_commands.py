@@ -17,6 +17,7 @@ from quiz_views_module.quiz_views import QuizPublicView
 from helpers.magicprotools_helper import MagicProtoolsHelper
 from helpers.pack_compositor import PackCompositor
 from helpers.permissions import has_bot_manager_role
+from helpers.quiz_threads import DISCUSSION_THREAD_STARTER, spawn_discussion_thread
 from config import get_config
 
 # Quiz configuration constants
@@ -320,6 +321,16 @@ class QuizCommands(commands.Cog):
 
         # Pin the quiz message
         await safe_pin(message)
+
+        try:
+            await spawn_discussion_thread(
+                message,
+                f"💡 Pick Quiz #{display_id} — Discussion (spoilers)" if display_id
+                else "💡 Pick Quiz — Discussion (spoilers)",
+                DISCUSSION_THREAD_STARTER,
+            )
+        except Exception as e:
+            logger.warning(f"[QUIZ] discussion thread spawn failed for {quiz_id}: {e}")
 
         return message
 

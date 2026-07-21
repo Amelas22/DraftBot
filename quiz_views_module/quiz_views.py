@@ -8,6 +8,7 @@ from models import QuizSession, QuizSubmission, QuizStats, DraftSession
 from services.draft_analysis import DraftAnalysis
 from models.draft_domain import PackTrace
 from helpers.display_names import get_display_name
+from helpers.quiz_threads import post_quiz_share
 
 
 # Quiz scoring constants
@@ -321,6 +322,14 @@ class ShareResultView(discord.ui.View):
             f"\n```\n{share_text}\n```"
         )
 
+        message_id = None
+        if self.quiz_id:
+            async with db_session() as session:
+                stmt = select(QuizSession).where(QuizSession.quiz_id == self.quiz_id)
+                result = await session.execute(stmt)
+                qs = result.scalar_one_or_none()
+            message_id = qs.message_id if qs else None
+
         # Disable the button before sharing
         button.disabled = True
         button.label = "✓ Shared!"
@@ -328,8 +337,10 @@ class ShareResultView(discord.ui.View):
         # Edit the original message first to update the button
         await interaction.response.edit_message(view=self)
 
-        # Then post publicly as a followup
-        await interaction.followup.send(message)
+        # Post into the quiz's discussion thread (falls back to the channel
+        # if unavailable) instead of interaction.followup, which would reply
+        # to this ephemeral message.
+        await post_quiz_share(interaction, message_id, message)
 
         logger.info(f"User {self.user.id} ({get_display_name(self.user)}) shared quiz results publicly: {self.total_points} points")
 

@@ -1,9 +1,17 @@
 import asyncio
+import os
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import discord
 import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from database.db_session import AsyncSessionLocal
+from database.models_base import Base
+from models import TrophyQuizSession
 from quiz_views_module.trophy_quiz_views import (
     build_reveal_lines,
     TrophyQuizView,
@@ -11,6 +19,17 @@ from quiz_views_module.trophy_quiz_views import (
     TrophyShareView,
 )
 from services.trophy_quiz_service import score_submission
+
+
+@pytest_asyncio.fixture
+async def test_db():
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.db'); tmp.close()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp.name}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    AsyncSessionLocal.configure(bind=engine)
+    yield engine
+    await engine.dispose(); os.unlink(tmp.name)
 
 
 _DECKS = [
@@ -175,3 +194,30 @@ async def test_reveal_after_submit_does_not_record(monkeypatch):
     text = (sent.args[0] if sent.args else sent.kwargs.get("content")) or ""
     assert "<@u1>" in text and "<@u2>" in text           # names still shown (free, already visible)
     assert "will apply" not in text                      # no penalty note
+
+
+@pytest.mark.asyncio
+async def test_trophy_share_posts_via_thread_helper(test_db, monkeypatch):
+    # seed a session with a message_id so the share can resolve the thread target
+    async with AsyncSessionLocal() as s:
+        async with s.begin():
+            s.add(TrophyQuizSession(quiz_id="q1", display_id=1, guild_id="g", channel_id="c",
+                                    message_id="555", draft_session_id="d",
+                                    decks=[{"slot": "A", "drafter_id": "u1", "wins": 3, "pool": "x"},
+                                           {"slot": "B", "drafter_id": "u2", "wins": 0, "pool": "y"}],
+                                    posted_by="mod"))
+    import quiz_views_module.trophy_quiz_views as tv
+    seen = {}
+    async def fake_post(interaction, message_id, text):
+        seen["message_id"] = message_id; seen["text"] = text
+    monkeypatch.setattr(tv, "post_quiz_share", fake_post)
+
+    user = SimpleNamespace(id=42, display_name="Alice", name="alice")
+    view = TrophyShareView(user=user, emoji_line="🟩⬛", total_points=7, quiz_id="q1", display_id=1)
+    interaction = SimpleNamespace(user=user, channel=SimpleNamespace(send=AsyncMock()),
+                                  response=SimpleNamespace(edit_message=AsyncMock()),
+                                  followup=SimpleNamespace(send=AsyncMock()))
+    await view.share_button.callback(interaction)
+    assert seen.get("message_id") == "555"
+    assert "7" in seen["text"] and "🟩⬛" in seen["text"]
+    interaction.channel.send.assert_not_called()
