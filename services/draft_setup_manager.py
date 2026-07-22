@@ -7,7 +7,6 @@ import aiohttp
 import json
 import os
 import pytz
-import urllib.parse
 import discord
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -71,6 +70,15 @@ load_dotenv()
 
 # Global registry to track active manager instances
 ACTIVE_MANAGERS = {}
+
+
+def mpt_embed_field_value(direct_url):
+    """Embed field value for one player's MagicProTools link, or an unavailable
+    note when the direct API push returned no URL."""
+    if direct_url:
+        return f"[View on MagicProTools]({direct_url})"
+    return "_log temporarily unavailable_"
+
 
 class StopRetryException(Exception):
     """Exception to signal that retries should be aborted."""
@@ -894,10 +902,6 @@ class DraftSetupManager:
 
             if result.success:
                 self.logger.info(f"Draft log data uploaded to DigitalOcean Space: {result.object_path}")
-                
-                # If upload successful, also generate and upload MagicProTools format logs
-                await self.process_draft_logs_for_magicprotools(draft_data, do_helper)
-
                 return result.object_path
             else:
                 self.logger.warning("Failed to upload draft log data to DigitalOcean Spaces")
@@ -906,28 +910,6 @@ class DraftSetupManager:
         except Exception as e:
             self.logger.error(f"Error uploading to DigitalOcean Space: {e}")
             return None
-
-    async def process_draft_logs_for_magicprotools(self, draft_data, do_helper):
-        """Process the draft log and generate formatted logs for each player."""
-        try:
-            session_id = draft_data.get("sessionID")
-            
-            # Use the MagicProtoolsHelper to upload draft logs
-            user_mpt_data = await self.mpt_helper.upload_draft_logs(
-                draft_data,
-                session_id,
-                self.session_type
-            )
-            
-            if user_mpt_data:
-                self.logger.info(f"All MagicProTools format logs generated and uploaded for draft {session_id}")
-                return True
-            else:
-                self.logger.warning(f"No MagicProTools format logs were generated for draft {session_id}")
-                return False
-        except Exception as e:
-            self.logger.error(f"Error generating MagicProTools format logs: {e}")
-            return False
 
     # This method has been replaced by using the MagicProtoolsHelper.convert_to_magicprotools_format method
 
@@ -995,11 +977,8 @@ class DraftSetupManager:
     async def generate_magicprotools_embed(self, draft_data):
         """Generate a Discord embed with MagicProTools links for all drafters"""
         try:
-            # Create DigitalOcean helper for getting URLs
-            do_helper = DigitalOceanHelper()
             session_id = draft_data.get("sessionID")
-            folder = "swiss" if self.session_type == "swiss" else "team"
-            
+
             # Get the draft session to access sign_ups and start time
             async with db_session() as session:
                 # Get draft session in this session context
@@ -1105,70 +1084,30 @@ class DraftSetupManager:
                 if discord_name:
                     display_name = f"{team_emoji} {user_name} - {discord_name}{record_str} {trophy_emoji}"
                 
-                # Get paths for MagicProTools
-                folder_path = f"draft_logs/{folder}/{session_id}"
-                filename = f"DraftLog_{user_id}.txt"
-                
-                # Get the URLs from the DigitalOcean helper
-                txt_key = f"{folder_path}/{filename}"
-                txt_url = do_helper.get_public_url(txt_key)
-                # Fallback: Generate import URL
-
-                
-                # Try to get or generate URL from MagicProTools helper
-                self.logger.info(f"Attempting to get MagicProTools URL for user {user_name} (ID: {user_id})")
+                self.logger.info(f"Getting MagicProTools URL for {user_name} (ID: {user_id})")
+                direct_mpt_url = None
                 try:
-                    # Try to get a direct URL from MagicProTools API
-                    self.logger.debug(f"Calling mpt_helper.submit_to_api for user {user_name}")
                     direct_mpt_url = await self.mpt_helper.submit_to_api(user_id, draft_data)
-                    
-                    if direct_mpt_url:
-                        self.logger.info(f"SUCCESS: Got direct MagicProTools URL for {user_name}: {direct_mpt_url}")
-                        # If API call successful, use the direct URL
-                        final_mpt_url = direct_mpt_url
-                        embed.add_field(
-                            name=display_name,
-                            value=f"[View on MagicProTools]({direct_mpt_url})",
-                            inline=False
-                        )
-                        
-                        # Get Discord ID and store the link in our dictionary
-                        if discord_id:
-                            magicprotools_links[discord_id] = {
-                                "name": discord_name_by_user_id.get(user_id, user_name),
-                                "link": direct_mpt_url
-                            }
-                            self.logger.debug(f"Stored MagicProTools link for Discord user {discord_id}")
-                        else:
-                            self.logger.warning(f"No Discord ID mapping found for user {user_name} (ID: {user_id})")
-                        
-                        self.logger.debug(f"Using DIRECT URL for {user_name} - skipping fallback code")
-                        continue
-                    else:
-                        self.logger.warning(f"API call succeeded but returned no URL for user {user_name} - falling back to import URL")
                 except Exception as e:
-                    self.logger.error(f"ERROR submitting to MagicProTools API for {user_name}: {str(e)}")
-                    self.logger.debug(f"Exception details for {user_name}: {repr(e)}")
-                
-                # Fallback: Add field with raw log link and import link (only executed if API method failed or didn't return a URL)
-                mpt_url = f"https://magicprotools.com/draft/import?url={urllib.parse.quote(txt_url)}"
-                final_mpt_url = mpt_url  # Default to import URL                self.logger.info(f"Using FALLBACK import URL for {user_name}: {mpt_url}")
+                    self.logger.error(f"Error submitting to MagicProTools API for {user_name}: {e}")
+
+                if not direct_mpt_url:
+                    self.logger.warning(f"No MagicProTools URL for {user_name}; showing unavailable note")
+
                 embed.add_field(
                     name=display_name,
-                    value=f"[Import to MagicProTools]({mpt_url})",
-                    inline=False
+                    value=mpt_embed_field_value(direct_mpt_url),
+                    inline=False,
                 )
-                
-                # Get Discord ID and store the link in our dictionary
-                if discord_id:
+
+                if direct_mpt_url and discord_id:
                     magicprotools_links[discord_id] = {
                         "name": discord_name_by_user_id.get(user_id, user_name),
-                        "link": final_mpt_url
+                        "link": direct_mpt_url,
                     }
-                    self.logger.debug(f"Stored fallback MagicProTools link for Discord user {discord_id}")
-                else:
-                    self.logger.warning(f"No Discord ID mapping found for user {user_name} during fallback (ID: {user_id})")
-            
+                elif not discord_id:
+                    self.logger.warning(f"No Discord ID mapping for {user_name} (ID: {user_id})")
+
             # Update the database with the MagicProTools links
             if magicprotools_links and draft_session:
                 try:

@@ -297,7 +297,6 @@ async def test_save_to_spaces_returns_object_key():
     m = DraftSetupManager.__new__(DraftSetupManager)   # bypass __init__
     m.session_type = "team"; m.cube_id = "TestCube"
     m.logger = MagicMock()
-    m.process_draft_logs_for_magicprotools = AsyncMock(return_value=True)
     fake_result = MagicMock(success=True, object_path="team/TestCube-123-DBABC.json")
     fake_helper = MagicMock(); fake_helper.upload_json = AsyncMock(return_value=fake_result)
     with patch("services.draft_setup_manager.DigitalOceanHelper", return_value=fake_helper):
