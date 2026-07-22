@@ -11,7 +11,9 @@ from stats_display import get_stats_embed_for_player
 from loguru import logger
 from discord.ext import commands
 from legacy_stats import get_legacy_player_stats, get_legacy_head_to_head_stats
-from helpers.display_names import get_display_name
+from helpers.display_names import get_display_name, get_display_name_by_id
+from models.match import MatchResult
+from helpers.trophy_deck_links import session_trophy_links, render_grouped_trophy_decks
 from helpers.permissions import has_bot_manager_role
 
 
@@ -313,20 +315,27 @@ async def scheduled_posts(bot):
                     top_drafters = username_counts.most_common(10)
 
 
-                    drafter_counts = Counter()
+                    match_rows = (await db_session.execute(
+                        select(MatchResult).where(
+                            MatchResult.session_id.in_([s.session_id for s in sessions])
+                        )
+                    )).scalars().all()
+                    matches_by_session = {}
+                    for m in match_rows:
+                        matches_by_session.setdefault(m.session_id, []).append(m)
+
+                    trophies = []
                     for session in sessions:
-                        if session.trophy_drafters:
-                            drafter_counts.update(session.trophy_drafters)
-
-                    # Filter and sort drafters who have two or more trophies
-                    filtered_trophy_drafters = {drafter: count for drafter, count in drafter_counts.items() if count >= 2}
-                    sorted_trophy_drafters = sorted(filtered_trophy_drafters.items(), key=lambda item: item[1], reverse=True)
-
-                    # Format the drafter names and their counts for display
-                    if sorted_trophy_drafters:
-                        undefeated_drafters_field_value = "\n".join([f"{index + 1}. {drafter} x{count}" for index, (drafter, count) in enumerate(sorted_trophy_drafters)])
-                    else:
-                        undefeated_drafters_field_value = "No drafters with 2 or more trophies."
+                        trophies.extend(session_trophy_links(
+                            matches_by_session.get(session.session_id, []),
+                            session.magicprotools_links,
+                        ))
+                    undefeated_drafters_field_value = render_grouped_trophy_decks(
+                        trophies,
+                        name_by_id=lambda pid: get_display_name_by_id(pid, guild),
+                        min_count=2,
+                        sort_by_count=True,
+                    )
 
                     total_drafts = len(sessions)
 
@@ -381,13 +390,26 @@ async def scheduled_posts(bot):
                     top_five_drafters = username_counts.most_common(5)
 
 
-                    drafter_counts = Counter()
-                    for session in sessions:
-                        undefeated_drafters = list(session.trophy_drafters) if session.trophy_drafters else []
-                        drafter_counts.update(undefeated_drafters)
+                    match_rows = (await db_session.execute(
+                        select(MatchResult).where(
+                            MatchResult.session_id.in_([s.session_id for s in sessions])
+                        )
+                    )).scalars().all()
+                    matches_by_session = {}
+                    for m in match_rows:
+                        matches_by_session.setdefault(m.session_id, []).append(m)
 
-                    # Format the drafter names and their counts for display
-                    undefeated_drafters_field_value = "\n".join([f"{drafter} x{count}" if count > 1 else drafter for drafter, count in drafter_counts.items()])
+                    trophies = []
+                    for session in sessions:
+                        trophies.extend(session_trophy_links(
+                            matches_by_session.get(session.session_id, []),
+                            session.magicprotools_links,
+                        ))
+                    undefeated_drafters_field_value = render_grouped_trophy_decks(
+                        trophies,
+                        name_by_id=lambda pid: get_display_name_by_id(pid, guild),
+                        min_count=1,
+                    )
 
 
                     total_drafts = len(sessions)
