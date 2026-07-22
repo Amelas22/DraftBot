@@ -894,10 +894,6 @@ class DraftSetupManager:
 
             if result.success:
                 self.logger.info(f"Draft log data uploaded to DigitalOcean Space: {result.object_path}")
-                
-                # If upload successful, also generate and upload MagicProTools format logs
-                await self.process_draft_logs_for_magicprotools(draft_data, do_helper)
-
                 return result.object_path
             else:
                 self.logger.warning("Failed to upload draft log data to DigitalOcean Spaces")
@@ -906,28 +902,6 @@ class DraftSetupManager:
         except Exception as e:
             self.logger.error(f"Error uploading to DigitalOcean Space: {e}")
             return None
-
-    async def process_draft_logs_for_magicprotools(self, draft_data, do_helper):
-        """Process the draft log and generate formatted logs for each player."""
-        try:
-            session_id = draft_data.get("sessionID")
-            
-            # Use the MagicProtoolsHelper to upload draft logs
-            user_mpt_data = await self.mpt_helper.upload_draft_logs(
-                draft_data,
-                session_id,
-                self.session_type
-            )
-            
-            if user_mpt_data:
-                self.logger.info(f"All MagicProTools format logs generated and uploaded for draft {session_id}")
-                return True
-            else:
-                self.logger.warning(f"No MagicProTools format logs were generated for draft {session_id}")
-                return False
-        except Exception as e:
-            self.logger.error(f"Error generating MagicProTools format logs: {e}")
-            return False
 
     # This method has been replaced by using the MagicProtoolsHelper.convert_to_magicprotools_format method
 
