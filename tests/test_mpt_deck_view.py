@@ -46,6 +46,40 @@ def test_non_anonymized_output_unchanged():
     assert "--> RealAlice" in out and "    RealBob" in out
 
 
+def _draft_log_with_dfc():
+    return {
+        "sessionID": "s1", "time": 1000, "setRestriction": [],
+        "users": {
+            "dmA": {"userName": "A", "picks": [
+                {"packNum": 0, "pickNum": 0, "booster": ["dfc", "front"], "pick": [0]}]},
+        },
+        "carddata": {
+            # name ALREADY contains the combined "Front // Back" AND has a back face
+            "dfc": {"name": "The Legend of Roku // Avatar Roku",
+                    "back": {"name": "Avatar Roku"}, "set": "tla"},
+            # front-only name with a back face — should be combined exactly once
+            "front": {"name": "Delver of Secrets",
+                      "back": {"name": "Insectile Aberration"}, "set": "isd"},
+        },
+    }
+
+
+def test_dfc_name_not_tripled_when_already_combined():
+    h = _helper()
+    out = h.convert_to_magicprotools_format(_draft_log_with_dfc(), "dmA")
+    # back face must not be appended a second time
+    assert "Avatar Roku // Avatar Roku" not in out
+    assert "The Legend of Roku // Avatar Roku" in out            # present exactly once, combined
+    # a front-only name still gets its back appended once
+    assert "Delver of Secrets // Insectile Aberration" in out
+
+
+def test_pack_first_picks_dfc_name_not_tripled():
+    h = _helper()
+    picks = h.get_pack_first_picks(_draft_log_with_dfc(), "dmA")
+    assert picks["0"] == "The Legend of Roku // Avatar Roku"
+
+
 def _ok_session(json_body):
     resp = MagicMock()
     resp.status = 200
