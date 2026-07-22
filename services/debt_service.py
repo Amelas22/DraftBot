@@ -1048,13 +1048,52 @@ async def get_top_net_creditors(guild_id: str, limit: int = 3) -> list:
         return [(row.player_id, row.net) for row in result.all()]
 
 
+async def get_most_involved_players(guild_id: str, limit: int = 3) -> list:
+    """Players ranked by how many distinct debt relationships they're involved in
+    (owed + owing), most first.
+
+    The ledger is double-entry, so grouping by player_id counts both debts the
+    player owes and debts owed to them. Only relationships with a non-zero net
+    balance count. Ties broken by larger total outstanding amount, then player_id.
+
+    Returns a list of (player_id, count) tuples, length 0..limit.
+    """
+    async with db_session() as session:
+        pairs = (
+            select(
+                DebtLedger.player_id.label("player_id"),
+                DebtLedger.counterparty_id.label("counterparty_id"),
+                func.sum(DebtLedger.amount).label("balance"),
+            )
+            .where(DebtLedger.guild_id == guild_id)
+            .group_by(DebtLedger.player_id, DebtLedger.counterparty_id)
+            .having(func.sum(DebtLedger.amount) != 0)
+            .subquery()
+        )
+        query = (
+            select(
+                pairs.c.player_id,
+                func.count().label("debt_count"),
+            )
+            .group_by(pairs.c.player_id)
+            .order_by(
+                func.count().desc(),
+                func.sum(func.abs(pairs.c.balance)).desc(),
+                pairs.c.player_id.asc(),
+            )
+            .limit(limit)
+        )
+        result = await session.execute(query)
+        return [(row.player_id, row.debt_count) for row in result.all()]
+
+
 async def get_most_outstanding_creditors(guild_id: str, limit: int = 3) -> list:
     """Top creditors for the debt-summary leaderboard, gated to staked servers.
 
     Returns [] on non-money servers so the section never renders there and no
-    query runs. On money servers, delegates to get_top_net_creditors.
+    query runs. On money servers, delegates to get_most_involved_players.
     """
     from config import is_money_server
     if not is_money_server(guild_id):
         return []
-    return await get_top_net_creditors(guild_id, limit)
+    return await get_most_involved_players(guild_id, limit)

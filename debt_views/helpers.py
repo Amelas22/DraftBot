@@ -88,15 +88,17 @@ _MEDALS = ("🥇", "🥈", "🥉")
 
 
 def _build_most_outstanding_field(guild, top_creditors):
-    """Return (name, value) for the 🏆 Most Outstanding leaderboard field, or
-    None when there are no net creditors."""
+    """Return (name, value) for the 🏆 Most Outstanding leaderboard field, or None
+    when nobody is involved in outstanding debts. Ranks by the number of debt
+    relationships each player is involved in (owed + owing)."""
     if not top_creditors:
         return None
     lines = []
-    for rank, (player_id, net) in enumerate(top_creditors):
+    for rank, (player_id, count) in enumerate(top_creditors):
         medal = _MEDALS[rank] if rank < len(_MEDALS) else f"{rank + 1}."
         name = get_member_name(guild, player_id)
-        lines.append(f"{medal} {name} — {net} tix")
+        unit = "debt" if count == 1 else "debts"
+        lines.append(f"{medal} {name} — {count} {unit}")
     return "🏆 Most Outstanding", "\n".join(lines)
 
 
@@ -143,10 +145,9 @@ def build_guild_debt_embed_pages(guild: discord.Guild, rows: list, per_page: int
             color=discord.Color.orange()
         )
 
-        if page_num == 0:
-            leaderboard = _build_most_outstanding_field(guild, top_creditors)
-            if leaderboard:
-                embed.add_field(name=leaderboard[0], value=leaderboard[1], inline=False)
+        leaderboard = _build_most_outstanding_field(guild, top_creditors)
+        if leaderboard:
+            embed.add_field(name=leaderboard[0], value=leaderboard[1], inline=False)
 
         debt_lines = []
         for row in page_rows:
