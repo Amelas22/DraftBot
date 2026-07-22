@@ -1591,7 +1591,7 @@ class TestGetDebtHistory:
 
 
 from unittest.mock import patch
-from services.debt_service import get_top_net_creditors, get_most_outstanding_creditors
+from services.debt_service import get_top_net_creditors, get_most_outstanding_creditors, get_most_involved_players
 
 
 class TestTopNetCreditors:
@@ -1656,7 +1656,69 @@ class TestTopNetCreditors:
 
     @pytest.mark.asyncio
     async def test_gate_delegates_on_money_server(self, test_db):
-        await self._owe("gY", "bob", "alice", 99)
+        # alice involved in 2 debts, so she tops the involvement ranking
+        await self._owe("gY", "alice", "bob", 40)
+        await self._owe("gY", "alice", "carol", 60)
         with patch("config.is_money_server", return_value=True):
             result = await get_most_outstanding_creditors("gY", limit=3)
-        assert result == [("alice", 99)]
+        assert result[0] == ("alice", 2)
+
+
+class TestMostInvolvedPlayers:
+    """Tests for the involvement-count leaderboard query."""
+
+    async def _owe(self, guild, debtor, creditor, amount):
+        await create_ledger_entries(
+            guild_id=guild, debtor_id=debtor, creditor_id=creditor,
+            amount=amount, source_type="draft", source_id=f"s-{debtor}-{creditor}-{amount}",
+        )
+
+    @pytest.mark.asyncio
+    async def test_counts_both_directions(self, test_db):
+        g = "mi1"
+        await self._owe(g, "alice", "bob", 10)     # alice owes bob
+        await self._owe(g, "alice", "carol", 20)   # alice owes carol
+        await self._owe(g, "dave", "alice", 30)    # dave owes alice
+        result = await get_most_involved_players(g, limit=5)
+        counts = dict(result)
+        assert counts["alice"] == 3   # 2 owing + 1 owed
+        assert counts["bob"] == 1
+        assert counts["carol"] == 1
+        assert counts["dave"] == 1
+
+    @pytest.mark.asyncio
+    async def test_excludes_net_zero_relationships(self, test_db):
+        g = "mi2"
+        await self._owe(g, "alice", "bob", 50)
+        await self._owe(g, "bob", "alice", 50)   # cancels out
+        result = await get_most_involved_players(g, limit=5)
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_orders_by_count_then_amount(self, test_db):
+        g = "mi3"
+        await self._owe(g, "alice", "x", 5)
+        await self._owe(g, "alice", "y", 5)      # alice: 2 debts
+        await self._owe(g, "bob", "z", 999)      # bob: 1 debt, big
+        result = await get_most_involved_players(g, limit=5)
+        assert result[0] == ("alice", 2)          # count beats amount
+        assert ("bob", 1) in result
+
+    @pytest.mark.asyncio
+    async def test_amount_tiebreak_on_equal_counts(self, test_db):
+        g = "mi4"
+        await self._owe(g, "alice", "p", 10)
+        await self._owe(g, "bob", "q", 500)       # both 1 debt; bob larger
+        result = await get_most_involved_players(g, limit=5)
+        order = [pid for pid, _ in result]
+        assert order.index("bob") < order.index("alice")
+
+    @pytest.mark.asyncio
+    async def test_respects_limit_and_guild(self, test_db):
+        g = "mi5"
+        await self._owe(g, "a", "b", 10)
+        await self._owe(g, "a", "c", 10)          # a: 2
+        await self._owe(g, "d", "e", 10)
+        await self._owe("other", "z", "y", 99)    # different guild
+        result = await get_most_involved_players(g, limit=1)
+        assert result == [("a", 2)]
