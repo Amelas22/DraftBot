@@ -49,6 +49,32 @@ def _card_image(card):
     return imgs.get("en") or imgs.get("normal") or next(iter(imgs.values()), "") or ""
 
 
+def assert_js_parses(js, label="viewer bundle"):
+    """Fail loudly if the concatenated viewer JS isn't parseable as one script.
+
+    The hosted page inlines every viewer module into a SINGLE <script>, so a
+    top-level name collision between two modules is a redeclaration SyntaxError
+    that silently breaks the whole page (no JS runs, the replay never loads).
+    node's own test runner can't catch this — it loads each module separately —
+    so we parse-check the actual concatenation here before shipping.
+    """
+    import subprocess
+    import tempfile
+
+    fd, path = tempfile.mkstemp(suffix=".js")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(js)
+        result = subprocess.run(["node", "--check", path], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise SystemExit(
+                f"{label} does not parse — likely a top-level name collision "
+                f"between viewer modules:\n{result.stderr.strip()}"
+            )
+    finally:
+        os.unlink(path)
+
+
 def build_table_data(draft_data, viewer_user_id):
     users = draft_data.get("users", {})
     carddata = draft_data.get("carddata", {})
@@ -95,6 +121,7 @@ async def main():
 
     css = _read("src/viewer/viewer.css")
     combined_js = "\n\n".join(f"// ===== {p} =====\n{_read(p)}" for p in JS_FILES)
+    assert_js_parses(combined_js)  # never ship a bundle that won't run
 
     html = _read("viewer.html")
     html = html.replace(

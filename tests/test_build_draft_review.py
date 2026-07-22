@@ -40,6 +40,14 @@ def test_build_table_data_excludes_viewer_and_shapes_seats():
     assert seat["picks"][1]["name"] == "Arid Mesa"               # P2p1 pick included
 
 
+def test_assert_js_parses_catches_top_level_collision():
+    import pytest
+    mod = _load()
+    mod.assert_js_parses("const X = 1;\nfunction f(){}\n")   # valid: no raise
+    with pytest.raises(SystemExit):
+        mod.assert_js_parses("const COLORS = 1;\nconst COLORS = 2;\n")   # redeclaration
+
+
 def test_build_table_data_image_from_language_or_scryfall_shape():
     mod = _load()
     # language-keyed (en) resolves; Scryfall-shaped {normal} also resolves as fallback
