@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 import asyncio
-import json
 import os
 import urllib.parse
 import argparse
 import aiohttp
 import discord
 from dotenv import load_dotenv
-from aiobotocore.session import get_session
+
+from models import DraftSession
+from helpers.digital_ocean_helper import DigitalOceanHelper
+from helpers.magicprotools_helper import MagicProtoolsHelper
 
 # Try to load from .env file
 load_dotenv()
@@ -20,104 +22,63 @@ parser.add_argument('--cube', help='The name of the cube', default="Custom Cube"
 parser.add_argument('--type', help='The session type (team or swiss)', default="team")
 parser.add_argument('--token', help='Discord bot token (overrides environment variable)')
 
-# Parse arguments early to get potential token
-args, unknown = parser.parse_known_args()
-
 # Get environment variables
 DO_SPACES_REGION = os.getenv("DO_SPACES_REGION")
 DO_SPACES_ENDPOINT = os.getenv("DO_SPACES_RAW_ENDPOINT")
 DO_SPACES_KEY = os.getenv("DO_SPACES_KEY")
 DO_SPACES_SECRET = os.getenv("DO_SPACES_SECRET")
 DO_SPACES_BUCKET = os.getenv("DO_SPACES_BUCKET")
-DISCORD_TOKEN = args.token if args.token else os.getenv("BOT_TOKEN")
+DISCORD_TOKEN = os.getenv("BOT_TOKEN")
 MPT_API_KEY = os.getenv("MPT_API_KEY")
-
-# Check for required tokens
-if not DISCORD_TOKEN:
-    print("ERROR: Discord token not found! Use --token parameter or set DISCORD_TOKEN environment variable.")
-    exit(1)
-
-if not MPT_API_KEY:
-    print("ERROR: MagicProTools API key not found! Set MPT_API_KEY environment variable.")
-    exit(1)
 
 # Setup Discord client
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
+
+def player_logs_from_draft_data(draft_data):
+    """Derive per-player MagicProTools text from a full draft-log JSON, replacing
+    the removed per-player .txt archive as the recovery-script data source."""
+    helper = MagicProtoolsHelper()
+    logs = {}
+    for user_id, user_data in draft_data.get("users", {}).items():
+        logs[user_id] = {
+            "name": user_data.get("userName", "Unknown Player"),
+            "log_text": helper.convert_to_magicprotools_format(draft_data, user_id),
+        }
+    return logs
+
+
 async def fetch_draft_logs(draft_id, session_type="team"):
-    """Fetch individual draft log files for all players."""
+    """Fetch the draft's JSON archive from DigitalOcean Spaces and derive
+    per-player MagicProTools text from it."""
     print(f"Fetching draft logs for {draft_id}...")
-    
+
+    candidate_ids = [draft_id]
     if not draft_id.startswith("DB"):
-        draft_id = f"DB{draft_id}"
-    
-    folder = "swiss" if session_type.lower() == "swiss" else "team"
-    logs_prefix = f"magic-draft-logs/draft_logs/{folder}/{draft_id}/"
-    
-    session = get_session()
-    async with session.create_client(
-        's3',
-        region_name=DO_SPACES_REGION,
-        endpoint_url=DO_SPACES_ENDPOINT,
-        aws_access_key_id=DO_SPACES_KEY,
-        aws_secret_access_key=DO_SPACES_SECRET
-    ) as s3_client:
-        try:
-            # List all log files
-            response = await s3_client.list_objects_v2(
-                Bucket=DO_SPACES_BUCKET,
-                Prefix=logs_prefix
-            )
-            
-            log_files = [obj.get('Key') for obj in response.get('Contents', [])]
-            if not log_files:
-                print(f"No log files found for draft ID {draft_id}")
-                return None
-                
-            print(f"Found {len(log_files)} draft log files.")
-            
-            # Download each log file
-            player_logs = {}
-            for log_file in log_files:
-                try:
-                    # Extract player info from filename
-                    filename = log_file.split('/')[-1]
-                    if filename.startswith('DraftLog_'):
-                        user_id = filename[9:].split('.')[0]  # Extract user ID portion
-                        
-                        # Download the log file
-                        file_response = await s3_client.get_object(
-                            Bucket=DO_SPACES_BUCKET,
-                            Key=log_file
-                        )
-                        log_content = await file_response['Body'].read()
-                        log_text = log_content.decode('utf-8')
-                        
-                        # Parse player name from the log
-                        player_name = "Unknown Player"
-                        lines = log_text.split('\n')
-                        for i, line in enumerate(lines):
-                            if line == "Players:":
-                                for j in range(i+1, min(i+10, len(lines))):
-                                    if lines[j].startswith("-->"):
-                                        player_name = lines[j][4:].strip()
-                                        break
-                        
-                        # Store the log
-                        player_logs[user_id] = {
-                            "name": player_name,
-                            "log": log_text
-                        }
-                        print(f"Downloaded log for {player_name} ({user_id})")
-                except Exception as e:
-                    print(f"Error downloading log file {log_file}: {e}")
-            
-            return player_logs
-                
-        except Exception as e:
-            print(f"Error fetching draft logs: {e}")
-            return None
+        candidate_ids.append(f"DB{draft_id}")
+
+    draft_session = None
+    for candidate_id in candidate_ids:
+        draft_session = await DraftSession.get_by_session_id(candidate_id)
+        if draft_session:
+            break
+
+    if not draft_session:
+        print(f"No draft session found for ID {draft_id}")
+        return None
+
+    object_key = draft_session.spaces_object_key
+    if not object_key:
+        print(f"Draft session {draft_id} has no spaces_object_key; JSON archive unavailable")
+        return None
+
+    draft_data = await DigitalOceanHelper().download_json(object_key)
+    if not draft_data:
+        print(f"Failed to download draft log JSON from {object_key}")
+        return None
+
+    return player_logs_from_draft_data(draft_data)
 
 async def submit_to_mpt_api(log_text):
     """Submit draft log directly to MagicProTools API."""
@@ -165,28 +126,22 @@ async def submit_to_mpt_api(log_text):
 async def generate_magicprotools_embed(player_logs, cube_name, draft_id, session_type="team"):
     """Generate a Discord embed with MagicProTools links for all drafters."""
     try:
-        folder = "swiss" if session_type.lower() == "swiss" else "team"
-        
         embed = discord.Embed(
             title=f"Draft Log: {draft_id}",
             description=f"View your draft on MagicProTools with the links below:\nDraft Type: {session_type.title()}, Cube: {cube_name}",
             color=0x3498db  # Blue color
         )
-        
+
         # For each player, submit their log to the API and get a direct link
         for user_id, player_data in player_logs.items():
             player_name = player_data["name"]
-            log_text = player_data["log"]
-            
+            log_text = player_data["log_text"]
+
             print(f"Processing {player_name}'s log...")
-            
+
             # Submit to MagicProTools API
             mpt_url = await submit_to_mpt_api(log_text)
-            
-            # Generate fallback URL
-            txt_key = f"magic-draft-logs/draft_logs/{folder}/{draft_id}/DraftLog_{user_id}.txt"
-            txt_url = f"https://{DO_SPACES_BUCKET}.{DO_SPACES_REGION}.digitaloceanspaces.com/{txt_key}"
-            
+
             # Add field to embed
             if mpt_url:
                 embed.add_field(
@@ -275,6 +230,21 @@ async def repost_embed(draft_id, guild_id, cube_name, session_type):
         print(f"Error processing draft: {e}")
 
 if __name__ == "__main__":
+    # Parse arguments early to get potential token
+    args, unknown = parser.parse_known_args()
+
+    if args.token:
+        DISCORD_TOKEN = args.token
+
+    # Check for required tokens
+    if not DISCORD_TOKEN:
+        print("ERROR: Discord token not found! Use --token parameter or set DISCORD_TOKEN environment variable.")
+        exit(1)
+
+    if not MPT_API_KEY:
+        print("ERROR: MagicProTools API key not found! Set MPT_API_KEY environment variable.")
+        exit(1)
+
     try:
         # Run the Discord client
         asyncio.run(client.start(DISCORD_TOKEN))
