@@ -55,3 +55,32 @@ def test_build_table_data_image_from_language_or_scryfall_shape():
     assert mod._card_image({"image_uris": {"normal": "n"}}) == "n"
     assert mod._card_image({"image_uris": {"ja": "j"}}) == "j"    # any language when no en
     assert mod._card_image({}) == ""
+
+
+def _pass_draft():
+    # pack-0 pass order me -> a -> b -> c (a fully-wheeled card seen by all, in order)
+    def picks(seq_by_pick):
+        return [{"packNum": 0, "pickNum": p, "booster": ["W"], "pick": [0]} for p in seq_by_pick]
+    return {"users": {
+        "me": {"userName": "Me", "picks": picks([0])},
+        "ua": {"userName": "A", "picks": picks([1])},
+        "ub": {"userName": "B", "picks": picks([2])},
+        "uc": {"userName": "C", "picks": picks([3])},
+    }, "carddata": {"W": {"name": "W", "colors": [], "rating": 1}}}
+
+
+def test_build_seat_ring_from_pass_order():
+    mod = _load()
+    # shared physical card "W" seen by all four in pass order me,a,b,c
+    dd = _pass_draft()
+    for uid, seqpick in [("me", 0), ("ua", 1), ("ub", 2), ("uc", 3)]:
+        dd["users"][uid]["picks"][0]["booster"] = ["W"]
+    ring = mod.build_seat_ring(dd, "me")
+    assert ring == ["Me", "A", "B", "C"]
+
+
+def test_build_seat_ring_none_when_ambiguous():
+    mod = _load()
+    dd = {"users": {"me": {"userName": "Me", "picks": []},
+                    "x": {"userName": "X", "picks": []}}, "carddata": {}}
+    assert mod.build_seat_ring(dd, "me") is None

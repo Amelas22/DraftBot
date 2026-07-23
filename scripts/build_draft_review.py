@@ -97,6 +97,40 @@ def build_table_data(draft_data, viewer_user_id):
     return {"seats": seats}
 
 
+def build_seat_ring(draft_data, viewer_user_id):
+    """Seat names starting at the viewer, in Pack-1 pass direction, derived from
+    pick adjacency (consecutive pickers of the same booster card in pack 0 are
+    seat-neighbors). Returns None if a clean N-cycle can't be walked."""
+    from collections import defaultdict, Counter
+    users = draft_data.get("users", {})
+    name = {uid: u.get("userName") for uid, u in users.items()}
+    seen = defaultdict(list)  # cardid -> [(pickNum, uid)]
+    for uid, u in users.items():
+        for pk in u.get("picks", []):
+            if pk.get("packNum") != 0:
+                continue
+            for cid in pk.get("booster", []):
+                seen[cid].append((pk.get("pickNum"), uid))
+    votes = defaultdict(Counter)  # uid -> Counter(next uid)
+    for lst in seen.values():
+        lst.sort(key=lambda t: t[0])
+        for (p1, u1), (p2, u2) in zip(lst, lst[1:]):
+            if p2 == p1 + 1 and u1 != u2:
+                votes[u1][u2] += 1
+    n = len(users)
+    if n < 2:
+        return None
+    ring, cur, used = [viewer_user_id], viewer_user_id, {viewer_user_id}
+    for _ in range(n - 1):
+        if not votes.get(cur):
+            return None
+        nxt = votes[cur].most_common(1)[0][0]
+        if nxt in used:
+            return None
+        ring.append(nxt); used.add(nxt); cur = nxt
+    return [name[uid] for uid in ring]
+
+
 async def main():
     dd = await DigitalOceanHelper().download_json(KEY)
     if not dd:
@@ -115,6 +149,7 @@ async def main():
         raise SystemExit("aber not found in draft")
     log = MagicProtoolsHelper().convert_to_magicprotools_format(dd, aber)
     table = build_table_data(dd, aber)
+    table["ring"] = build_seat_ring(dd, aber)
 
     with open(os.path.join(OUT, "aber_log.txt"), "w", encoding="utf-8") as f:
         f.write(log)
