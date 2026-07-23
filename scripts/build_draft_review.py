@@ -15,6 +15,7 @@ from helpers.magicprotools_helper import MagicProtoolsHelper
 
 KEY = "team/PowerLSV-1784686408228-DBUNQVWXO0.json"
 EXT = "/home/rothenell/mtg/draftmancer-wheel-extension"
+ANALYSIS = "/home/rothenell/mtg/DraftBot/analysis_data"
 OUT = "/tmp/claude-1000/-home-rothenell-mtg-DraftBot/8b656e8c-720b-45a4-bb3e-a5aace655c47/scratchpad"
 
 # Same order as viewer.html.
@@ -75,7 +76,28 @@ def assert_js_parses(js, label="viewer bundle"):
         os.unlink(path)
 
 
-def build_table_data(draft_data, viewer_user_id):
+def cube_family_from_key(key):
+    """'team/PowerLSV-…json' -> 'powerlsv' (first '-'-delimited token of the basename)."""
+    base = key.rsplit("/", 1)[-1]
+    return base.split("-", 1)[0].lower()
+
+
+def load_signal_map(fam, analysis_dir):
+    """name -> {arch, lift, wheel} from strategy_<fam>.json; {} if the file is missing."""
+    path = os.path.join(analysis_dir, f"strategy_{fam}.json")
+    if not os.path.exists(path):
+        return {}
+    data = json.load(open(path, encoding="utf-8"))
+    out = {}
+    for r in data.get("cards", []):
+        nm = r.get("name")
+        if nm:
+            out[nm] = {"arch": r.get("arch"), "lift": r.get("arch_lift"), "wheel": r.get("wheel")}
+    return out
+
+
+def build_table_data(draft_data, viewer_user_id, signal_map=None):
+    signal_map = signal_map or {}
     users = draft_data.get("users", {})
     carddata = draft_data.get("carddata", {})
     seats = []
@@ -92,6 +114,9 @@ def build_table_data(draft_data, viewer_user_id):
                     "rating": c.get("rating"), "cmc": c.get("cmc"),
                     "type": c.get("type") or "",
                     "img": _card_image(c),
+                    "arch": (signal_map.get(c.get("name")) or {}).get("arch"),
+                    "lift": (signal_map.get(c.get("name")) or {}).get("lift"),
+                    "wheel": (signal_map.get(c.get("name")) or {}).get("wheel"),
                 })
         seats.append({"name": u.get("userName"), "picks": picks})
     return {"seats": seats}
@@ -148,7 +173,8 @@ async def main():
     if not aber:
         raise SystemExit("aber not found in draft")
     log = MagicProtoolsHelper().convert_to_magicprotools_format(dd, aber)
-    table = build_table_data(dd, aber)
+    signal_map = load_signal_map(cube_family_from_key(KEY), ANALYSIS)
+    table = build_table_data(dd, aber, signal_map)
     table["ring"] = build_seat_ring(dd, aber)
 
     with open(os.path.join(OUT, "aber_log.txt"), "w", encoding="utf-8") as f:

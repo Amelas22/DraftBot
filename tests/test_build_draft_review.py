@@ -36,8 +36,40 @@ def test_build_table_data_excludes_viewer_and_shapes_seats():
     seat = tbl["seats"][0]
     assert seat["picks"][0] == {"pack": 0, "pick": 0, "name": "Minsc & Boo",
                                 "colors": ["R", "G"], "rating": 2.97, "cmc": 5,
-                                "type": "Legendary Creature", "img": "http://img/minsc"}  # English preferred
+                                "type": "Legendary Creature", "img": "http://img/minsc",
+                                "arch": None, "lift": None, "wheel": None}  # English preferred
     assert seat["picks"][1]["name"] == "Arid Mesa"               # P2p1 pick included
+
+
+def test_cube_family_from_key():
+    mod = _load()
+    assert mod.cube_family_from_key("team/PowerLSV-1784686408228-DBX.json") == "powerlsv"
+    assert mod.cube_family_from_key("swiss/LSVCube-1-DBY.json") == "lsvcube"
+
+
+def test_load_signal_map_missing_file_is_empty(tmp_path):
+    mod = _load()
+    assert mod.load_signal_map("nope", str(tmp_path)) == {}
+
+
+def test_load_signal_map_reads_cards(tmp_path):
+    import json
+    (tmp_path / "strategy_x.json").write_text(json.dumps(
+        {"cards": [{"name": "Reanimate", "arch": "UB", "arch_lift": 3.2, "wheel": 0.01}]}))
+    mod = _load()
+    assert mod.load_signal_map("x", str(tmp_path)) == {"Reanimate": {"arch": "UB", "lift": 3.2, "wheel": 0.01}}
+
+
+def test_build_table_data_attaches_signal_fields():
+    mod = _load()
+    dd = _draft_data()  # existing helper (PDunny took "Minsc & Boo")
+    sm = {"Minsc & Boo": {"arch": "RG", "lift": 2.1, "wheel": 0.2}}
+    tbl = mod.build_table_data(dd, "me", sm)
+    p0 = tbl["seats"][0]["picks"][0]
+    assert (p0["arch"], p0["lift"], p0["wheel"]) == ("RG", 2.1, 0.2)
+    # a card not in the map → nulls
+    p1 = tbl["seats"][0]["picks"][1]
+    assert (p1["arch"], p1["lift"], p1["wheel"]) == (None, None, None)
 
 
 def test_assert_js_parses_catches_top_level_collision():
