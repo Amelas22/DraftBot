@@ -59,6 +59,26 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                     await interaction.followup.send("There must be an even number of players to fire.")
                     return False
 
+                if session.session_type == 'premade':
+                    # Drop team members who left (removed from sign_ups but still in
+                    # team_a/team_b) so a stale id can't KeyError downstream, then
+                    # require the teams to be non-empty and equal — an even total
+                    # alone allows a lopsided split (e.g. 2-vs-0).
+                    team_a = [uid for uid in (session.team_a or []) if uid in session.sign_ups]
+                    team_b = [uid for uid in (session.team_b or []) if uid in session.sign_ups]
+                    if not team_a or not team_b or len(team_a) != len(team_b):
+                        await interaction.followup.send(
+                            "Premade teams must be non-empty and equal size "
+                            f"(currently {len(team_a)} vs {len(team_b)})."
+                        )
+                        return False
+                    if team_a != list(session.team_a or []) or team_b != list(session.team_b or []):
+                        session.team_a = team_a
+                        session.team_b = team_b
+                        await db_session.execute(update(DraftSession)
+                                            .where(DraftSession.session_id == session.session_id)
+                                            .values(team_a=team_a, team_b=team_b))
+
                 # Update session timing and stage
                 session.teams_start_time = datetime.now()
                 if session.session_type == 'premade':
