@@ -217,6 +217,17 @@ async def split_into_teams(bot, draft_session_id):
                 else:
                     print(f"No sign-ups found for session {draft_session_id}")
 
+def reorder_sign_ups(sign_ups, ordered_ids):
+    """Return a new sign_ups dict reordered to `ordered_ids`, keyed by user id
+    with the stored names unchanged.
+
+    Reordering by user id (never by display name) is what keeps decorated or
+    markdown-escaped display names from breaking the mapping — see PR #349. Used
+    by both the premade and swiss seating paths.
+    """
+    return {user_id: sign_ups[user_id] for user_id in ordered_ids}
+
+
 async def generate_seating_order(bot, draft_session, command_type=None):
     guild = bot.get_guild(int(draft_session.guild_id))
 

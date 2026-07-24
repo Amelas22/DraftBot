@@ -14,7 +14,7 @@ from sqlalchemy import update, select
 
 from session import AsyncSessionLocal, DraftSession, StakeInfo
 from models.draft_session import DraftSession as DraftSessionModel
-from utils import split_into_teams, generate_seating_order, get_formatted_stake_pairs, check_weekly_limits, add_links_to_embed_safely
+from utils import split_into_teams, generate_seating_order, reorder_sign_ups, get_formatted_stake_pairs, check_weekly_limits, add_links_to_embed_safely
 from services.draft_setup_manager import DraftSetupManager
 from services.state_manager import state_manager
 from services.stake_service import calculate_and_store_stakes
@@ -105,7 +105,7 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                         # decorated display name is only for the embed) — mapping by
                         # name would KeyError on icon-decorated / markdown-escaped names.
                         seating_pairs = await generate_seating_order(bot, session)
-                        new_sign_ups = {user_id: session.sign_ups[user_id] for user_id, _ in seating_pairs}
+                        new_sign_ups = reorder_sign_ups(session.sign_ups, [user_id for user_id, _ in seating_pairs])
                         seating_order = [name for _, name in seating_pairs]
 
                         await db_session.execute(update(DraftSession)
@@ -121,7 +121,7 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                     sign_ups_list = list(session.sign_ups.keys())
                     random.shuffle(sign_ups_list)
                     seating_order = [session.sign_ups[user_id] for user_id in sign_ups_list]
-                    new_sign_ups = {user_id: session.sign_ups[user_id] for user_id in sign_ups_list}
+                    new_sign_ups = reorder_sign_ups(session.sign_ups, sign_ups_list)
                     await db_session.execute(update(DraftSession)
                                         .where(DraftSession.session_id == session.session_id)
                                         .values(sign_ups=new_sign_ups))
