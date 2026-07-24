@@ -231,10 +231,15 @@ def reorder_sign_ups(sign_ups, ordered_ids):
 async def generate_seating_order(bot, draft_session, command_type=None):
     guild = bot.get_guild(int(draft_session.guild_id))
 
+    # Only seat team members who are still signed up. A player who leaves is
+    # removed from sign_ups but may remain in team_a/team_b; seating a stale id
+    # would then KeyError in the caller's reorder_sign_ups (sign_ups[stale_id]).
+    sign_ups = draft_session.sign_ups or {}
+
     # Pair each user id with its member object; test users resolve to None and
     # fall back to their sign_ups display name instead of being dropped.
-    team_a_pairs = [(user_id, guild.get_member(int(user_id))) for user_id in draft_session.team_a]
-    team_b_pairs = [(user_id, guild.get_member(int(user_id))) for user_id in draft_session.team_b]
+    team_a_pairs = [(user_id, guild.get_member(int(user_id))) for user_id in draft_session.team_a if user_id in sign_ups]
+    team_b_pairs = [(user_id, guild.get_member(int(user_id))) for user_id in draft_session.team_b if user_id in sign_ups]
 
     random.shuffle(team_a_pairs)
     random.shuffle(team_b_pairs)
