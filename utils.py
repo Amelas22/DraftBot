@@ -2574,16 +2574,20 @@ async def get_missing_stake_players(session_id):
             
             return missing_players
         
-async def get_formatted_stake_pairs(session_id, sign_ups):
+async def get_stake_pairs(session_id, sign_ups):
     """
-    Get all stake pairs for a draft session, formatted for display.
-    
+    Get all stake pairs for a draft session as structured data.
+
+    Returns the pairs as (red_name, blue_name, amount) tuples so callers can
+    render them however they like — no delimiter-based reparsing needed.
+
     Args:
         session_id: The draft session ID
         sign_ups: Dict mapping player IDs to display names
-        
+
     Returns:
-        tuple: (formatted_stake_lines, total_stakes)
+        tuple: (stake_pairs, total_stakes) where stake_pairs is a list of
+        (red_name, blue_name, amount), sorted by amount (highest first).
     """
     # Fetch all stake information
     async with AsyncSessionLocal() as db_session:
@@ -2592,13 +2596,12 @@ async def get_formatted_stake_pairs(session_id, sign_ups):
             draft_stmt = select(DraftSession).where(DraftSession.session_id == session_id)
             draft_result = await db_session.execute(draft_stmt)
             draft_session = draft_result.scalars().first()
-            
+
             if not draft_session:
                 return [], 0
-                
+
             # Create sets of team members for quick lookup
             team_red_members = set(draft_session.team_a)
-            team_blue_members = set(draft_session.team_b)
 
             # Get all stake pairings for this session
             pairing_stmt = select(StakePairing).where(StakePairing.session_id == session_id)
@@ -2639,14 +2642,30 @@ async def get_formatted_stake_pairs(session_id, sign_ups):
 
                 # Add to total stake
                 total_stake += pairing.amount
-            
+
             # Sort by amount (highest first)
             unique_pairs.sort(key=lambda x: x[2], reverse=True)
-            
-            # Format for display - Team Red player vs Team Blue player
-            formatted_lines = [f"{a} vs {b}: {amount} tix" for a, b, amount in unique_pairs]
-            
-            return formatted_lines, total_stake
+
+            return unique_pairs, total_stake
+
+
+async def get_formatted_stake_pairs(session_id, sign_ups):
+    """
+    Get all stake pairs for a draft session, formatted for display.
+
+    Args:
+        session_id: The draft session ID
+        sign_ups: Dict mapping player IDs to display names
+
+    Returns:
+        tuple: (formatted_stake_lines, total_stakes)
+    """
+    stake_pairs, total_stake = await get_stake_pairs(session_id, sign_ups)
+
+    # Format for display - Team Red player vs Team Blue player
+    formatted_lines = [f"{a} vs {b}: {amount} tix" for a, b, amount in stake_pairs]
+
+    return formatted_lines, total_stake
 
 async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
     """

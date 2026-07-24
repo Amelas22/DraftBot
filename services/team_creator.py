@@ -14,7 +14,7 @@ from sqlalchemy import update, select
 
 from session import AsyncSessionLocal, DraftSession, StakeInfo
 from models.draft_session import DraftSession as DraftSessionModel
-from utils import split_into_teams, generate_seating_order, reorder_sign_ups, get_formatted_stake_pairs, check_weekly_limits, add_links_to_embed_safely
+from utils import split_into_teams, generate_seating_order, reorder_sign_ups, get_stake_pairs, check_weekly_limits, add_links_to_embed_safely
 from services.draft_setup_manager import DraftSetupManager
 from services.state_manager import state_manager
 from services.stake_service import calculate_and_store_stakes
@@ -223,13 +223,12 @@ async def _add_stake_info_to_embed(embed, session, stake_info_by_player):
     if not stake_info_by_player:
         return
 
-    stake_lines, total_stakes = await get_formatted_stake_pairs(session.session_id, session.sign_ups)
+    stake_pairs, total_stakes = await get_stake_pairs(session.session_id, session.sign_ups)
 
-    formatted_lines = []
-    for line in stake_lines:
-        parts = line.split(': ')
-        names = parts[0].split(' vs ')
-        formatted_lines.append(f"**{names[0]}** vs **{names[1]}**: {parts[1]}")
+    formatted_lines = [
+        f"**{red_name}** vs **{blue_name}**: {amount} tix"
+        for red_name, blue_name, amount in stake_pairs
+    ]
 
     if formatted_lines:
         add_links_to_embed_safely(embed, formatted_lines, f"Bets (Total: {total_stakes} tix)")
