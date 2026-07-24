@@ -82,7 +82,12 @@ async def test_seating_order_uses_sign_up_names_for_non_members():
     with patch.object(utils, "get_display_name", lambda member, g: member.display_name):
         order = await utils.generate_seating_order(bot, draft_session)
 
+    # generate_seating_order returns (user_id, display_name) pairs
     assert len(order) == 4, f"test users were dropped from seating: {order}"
-    assert "[TEST] Alpha User 2" in order
-    assert "[TEST] Bravo User 2" in order
-    assert "Member111" in order and "Member222" in order
+    ids = [uid for uid, _ in order]
+    names = [name for _, name in order]
+    assert "[TEST] Alpha User 2" in names
+    assert "[TEST] Bravo User 2" in names
+    assert "Member111" in names and "Member222" in names
+    # test users keep their id even though they're not guild members
+    assert "900000000000000001" in ids and "900000000000000002" in ids

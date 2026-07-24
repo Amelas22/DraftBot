@@ -100,11 +100,13 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                 if session.session_type != "swiss":
                     sign_ups_list = list(session.sign_ups.keys())
                     if session.session_type == "premade":
-                        seating_order = await generate_seating_order(bot, session)
-
-                        # Update sign_ups to match seating order
-                        name_to_id = {name: user_id for user_id, name in session.sign_ups.items()}
-                        new_sign_ups = {name_to_id[name]: name for name in seating_order}
+                        # (user_id, decorated_display_name) pairs. Reorder sign_ups by
+                        # the user_id and keep the RAW stored names as values (the
+                        # decorated display name is only for the embed) — mapping by
+                        # name would KeyError on icon-decorated / markdown-escaped names.
+                        seating_pairs = await generate_seating_order(bot, session)
+                        new_sign_ups = {user_id: session.sign_ups[user_id] for user_id, _ in seating_pairs}
+                        seating_order = [name for _, name in seating_pairs]
 
                         await db_session.execute(update(DraftSession)
                                             .where(DraftSession.session_id == session.session_id)

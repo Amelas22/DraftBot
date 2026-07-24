@@ -233,12 +233,18 @@ async def generate_seating_order(bot, draft_session, command_type=None):
             return get_display_name(member, guild)
         return (draft_session.sign_ups or {}).get(user_id, "Unknown User")
 
+    # Return (user_id, display_name) pairs. Callers reorder sign_ups by the
+    # user_id (never by the display name) — get_display_name adds role icons and
+    # markdown-escapes, so the decorated name doesn't match the raw sign_ups name
+    # and a name-keyed reverse lookup would KeyError.
     seating_order = []
     for i in range(max(len(team_a_pairs), len(team_b_pairs))):
         if i < len(team_a_pairs):
-            seating_order.append(display(*team_a_pairs[i]))
+            user_id, member = team_a_pairs[i]
+            seating_order.append((user_id, display(user_id, member)))
         if i < len(team_b_pairs):
-            seating_order.append(display(*team_b_pairs[i]))
+            user_id, member = team_b_pairs[i]
+            seating_order.append((user_id, display(user_id, member)))
 
     return seating_order
 
