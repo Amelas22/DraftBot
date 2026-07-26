@@ -1,0 +1,21 @@
+# Incremental type checking.
+#
+# Only the files listed in `project-includes` are checked, and they are checked
+# at `strict`. This is deliberate: rather than turning the checker on across the
+# whole codebase at once, modules are opted in one at a time as they're cleaned
+# up, so the type coverage grows gradually and each step stays reviewable.
+#
+# See CLAUDE.md ("Type checking") before adding an entry.
+preset = "strict"
+
+project-includes = [
+    "ready_check.py",
+]
+
+# SQLAlchemy 1.x-style Column() declarations type column attributes as Column[T]
+# rather than T, which would produce a false positive on every model attribute
+# access.
+replace-imports-with-any = ["sqlalchemy"]
+
+# Resolve first-party imports from the project root.
+search-path = ["."]

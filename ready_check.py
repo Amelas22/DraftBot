@@ -2,13 +2,14 @@ import asyncio
 
 import discord
 from loguru import logger
-from typing import Dict, Iterable, List, Literal, Optional
+from typing import Any, Dict, Iterable, List, Literal, Optional, cast
 
 from helpers.display_names import get_display_name_by_id
+from helpers.utils import not_none
 from models import SignUpHistory
 from services.state_manager import state_manager
 from services.team_creator import create_and_display_teams
-from session import get_draft_session
+from session import DraftSession, get_draft_session
 
 PlayerStatus = Literal['ready', 'not_ready', 'no_response']
 
@@ -85,9 +86,9 @@ class ReadyCheckSession:
 
     # --- Discord message operations (instance) ---
 
-    async def build_embed(self, sign_ups: dict, guild=None) -> discord.Embed:
+    async def build_embed(self, sign_ups: dict[str, str], guild: discord.Guild | None = None) -> discord.Embed:
         """Build a ready check embed from current player state."""
-        def get_names(user_ids):
+        def get_names(user_ids: list[str]) -> str:
             names = []
             for uid in user_ids:
                 if guild:
@@ -107,7 +108,7 @@ class ReadyCheckSession:
         embed.add_field(name="No Response", value=get_names(self.no_response), inline=False)
         return embed
 
-    async def delete_message(self, channel) -> None:
+    async def delete_message(self, channel: discord.abc.Messageable | None) -> None:
         """Delete the Discord ready check message. No-op if message is missing or already gone."""
         if not (self.message_id and channel):
             return
@@ -119,7 +120,8 @@ class ReadyCheckSession:
         except Exception as e:
             logger.error(f"Error deleting ready check message {self.message_id}: {e}")
 
-    async def refresh_embed(self, channel, sign_ups: dict, guild=None, title: Optional[str] = None) -> bool:
+    async def refresh_embed(self, channel: discord.abc.Messageable, sign_ups: dict[str, str],
+                            guild: discord.Guild | None = None, title: Optional[str] = None) -> bool:
         """Rebuild the embed and edit the Discord message in-place.
         Returns True on success. On NotFound, clears message_id and returns False.
         """
@@ -139,7 +141,8 @@ class ReadyCheckSession:
             logger.error(f"Error refreshing ready check embed: {e}")
             return False
 
-    async def run_timeout(self, session_id: str, channel, guild) -> None:
+    async def run_timeout(self, session_id: str, channel: discord.abc.Messageable,
+                          guild: discord.Guild | None) -> None:
         """After READY_CHECK_TIMEOUT_SECONDS, if THIS check is still the active one
         and stalled (some players never responded), audit the non-responders, delete
         the stale message, drop the state, and post a notice.
@@ -194,7 +197,7 @@ class ReadyCheckSession:
     # --- class-level entry points (fetch session from state, delegate to instance) ---
 
     @classmethod
-    async def cleanup(cls, session_id: str, channel) -> None:
+    async def cleanup(cls, session_id: str, channel: discord.abc.Messageable | None) -> None:
         """Delete the ready check message and remove the session from state."""
         rc = state_manager.get_ready_check(session_id)
         if rc:
@@ -202,7 +205,7 @@ class ReadyCheckSession:
         state_manager.remove_ready_check(session_id)
 
     @classmethod
-    async def cancel(cls, session_id: str, channel, cancelled_by: str) -> None:
+    async def cancel(cls, session_id: str, channel: discord.abc.Messageable, cancelled_by: str) -> None:
         """Abort the ready check: delete the message, drop the state, and announce it.
 
         The draft message's Ready Check button is never disabled (the debounce in
@@ -212,7 +215,8 @@ class ReadyCheckSession:
         await channel.send(f"**{cancelled_by}** cancelled the ready check.")
 
     @classmethod
-    async def sync_added_player(cls, session_id: str, user_id: str, draft_session, interaction: discord.Interaction) -> None:
+    async def sync_added_player(cls, session_id: str, user_id: str, draft_session: DraftSession,
+                                interaction: discord.Interaction) -> None:
         """Add a newly joined player to the active ready check and refresh the embed."""
         rc = state_manager.get_ready_check(session_id)
         if not rc:
@@ -221,7 +225,8 @@ class ReadyCheckSession:
         await rc.refresh_embed(interaction.channel, draft_session.sign_ups, guild=interaction.guild)
 
     @classmethod
-    async def sync_removed_player(cls, session_id: str, user_id: str, draft_session, interaction: discord.Interaction) -> None:
+    async def sync_removed_player(cls, session_id: str, user_id: str, draft_session: DraftSession,
+                                  interaction: discord.Interaction) -> None:
         """Remove a player from the active ready check, refresh the embed, and trigger auto-create if all ready."""
         rc = state_manager.get_ready_check(session_id)
         if not rc:
@@ -232,7 +237,8 @@ class ReadyCheckSession:
             await cls.handle_all_ready(session_id, draft_session, interaction)
 
     @classmethod
-    async def handle_all_ready(cls, session_id: str, draft_session, interaction: discord.Interaction) -> None:
+    async def handle_all_ready(cls, session_id: str, draft_session: DraftSession,
+                               interaction: discord.Interaction) -> None:
         """Update the ready check embed to the all-ready state, then create teams."""
         rc = state_manager.get_ready_check(session_id)
         if rc:
@@ -249,7 +255,7 @@ class ReadyCheckSession:
 
         state_manager.set_creating_teams(session_id, True)
         try:
-            await interaction.channel.send("✅ **All players ready!** Creating teams now...")
+            await not_none(interaction.channel).send("✅ **All players ready!** Creating teams now...")
 
             bot = interaction.client
             if not (draft_session and draft_session.message_id and draft_session.draft_channel_id):
@@ -259,7 +265,7 @@ class ReadyCheckSession:
             if not channel:
                 return
 
-            message = await channel.fetch_message(int(draft_session.message_id))
+            message = await cast(discord.TextChannel, channel).fetch_message(int(draft_session.message_id))
 
             # Deferred to avoid circular import: views -> ready_check -> views
             from views import PersistentView
@@ -273,7 +279,7 @@ class ReadyCheckSession:
             )
 
             class _ChannelInteraction:
-                def __init__(self, original, msg):
+                def __init__(self, original: discord.Interaction, msg: discord.Message):
                     self.user = original.user
                     self.guild = original.guild
                     self.guild_id = original.guild_id
@@ -289,18 +295,18 @@ class ReadyCheckSession:
             mock_interaction = _ChannelInteraction(interaction, message)
             success = await create_and_display_teams(bot, session_id, mock_interaction, persistent_view)
             if success:
-                await interaction.channel.send("✅ Teams created! Check the draft message above for teams and seating order.")
+                await not_none(interaction.channel).send("✅ Teams created! Check the draft message above for teams and seating order.")
             else:
-                await interaction.channel.send("❌ Error creating teams. You can try using the Create Teams button manually.")
+                await not_none(interaction.channel).send("❌ Error creating teams. You can try using the Create Teams button manually.")
         except Exception as e:
             logger.error(f"Error auto-creating teams after ready check: {e}")
-            await interaction.channel.send(f"❌ Error creating teams: {str(e)}\nYou can try using the Create Teams button manually.")
+            await not_none(interaction.channel).send(f"❌ Error creating teams: {str(e)}\nYou can try using the Create Teams button manually.")
         finally:
             state_manager.set_creating_teams(session_id, False)
 
 
 class ReadyCheckView(discord.ui.View):
-    def __init__(self, draft_session_id):
+    def __init__(self, draft_session_id: str):
         super().__init__(timeout=None)
         self.draft_session_id = draft_session_id
         self.ready_button.custom_id = f"ready_check_ready_{self.draft_session_id}"
@@ -308,18 +314,18 @@ class ReadyCheckView(discord.ui.View):
         self.cancel_button.custom_id = f"ready_check_cancel_{self.draft_session_id}"
 
     @discord.ui.button(label="Ready", style=discord.ButtonStyle.green, custom_id="placeholder_ready")
-    async def ready_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+    async def ready_button(self, button: discord.ui.Button[Any], interaction: discord.Interaction):
         await self._handle_status(interaction, "ready")
 
     @discord.ui.button(label="Not Ready", style=discord.ButtonStyle.red, custom_id="placeholder_not_ready")
-    async def not_ready_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+    async def not_ready_button(self, button: discord.ui.Button[Any], interaction: discord.Interaction):
         await self._handle_status(interaction, "not_ready")
 
     @discord.ui.button(label="Cancel Check", style=discord.ButtonStyle.grey, custom_id="placeholder_cancel_rc")
-    async def cancel_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+    async def cancel_button(self, button: discord.ui.Button[Any], interaction: discord.Interaction):
         await interaction.response.send_message(
             "Are you sure you want to cancel the ready check?",
-            view=ReadyCheckCancelConfirmView(self.draft_session_id, interaction.user.display_name),
+            view=ReadyCheckCancelConfirmView(self.draft_session_id, not_none(interaction.user).display_name),
             ephemeral=True,
         )
 
@@ -328,13 +334,13 @@ class ReadyCheckView(discord.ui.View):
         if not rc:
             logger.warning(
                 f"Ready click against missing session {self.draft_session_id} "
-                f"by user {interaction.user.id}; live checks: "
+                f"by user {not_none(interaction.user).id}; live checks: "
                 f"{list(state_manager.ready_checks.keys())}"
             )
             await interaction.response.send_message("Session data is missing.", ephemeral=True)
             return
 
-        user_id = str(interaction.user.id)
+        user_id = str(not_none(interaction.user).id)
         if not rc.has_player(user_id):
             logger.warning(
                 f"Unauthorized ready click on {self.draft_session_id} by user {user_id} (not a participant)"
@@ -354,7 +360,7 @@ class ReadyCheckView(discord.ui.View):
                 user_id=user_id,
                 display_name=(draft_session.sign_ups or {}).get(user_id, "Unknown user"),
                 action=status,
-                guild_id=str(interaction.guild.id),
+                guild_id=str(not_none(interaction.guild).id),
             )
         except Exception as e:
             logger.error(f"Failed to record ready event for {self.draft_session_id} user {user_id}: {e}")
@@ -378,18 +384,18 @@ class ReadyCheckCancelConfirmView(discord.ui.View):
         self.cancelled_by = cancelled_by
 
     @discord.ui.button(label="Yes, Cancel", style=discord.ButtonStyle.danger)
-    async def confirm_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+    async def confirm_button(self, button: discord.ui.Button[Any], interaction: discord.Interaction):
         for child in self.children:
-            child.disabled = True
+            cast(discord.ui.Button[Any], child).disabled = True
         await interaction.response.edit_message(view=self)
         await ReadyCheckSession.cancel(
             self.draft_session_id,
-            interaction.channel,
+            not_none(interaction.channel),
             cancelled_by=self.cancelled_by,
         )
 
     @discord.ui.button(label="No, Keep Going", style=discord.ButtonStyle.secondary)
-    async def deny_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+    async def deny_button(self, button: discord.ui.Button[Any], interaction: discord.Interaction):
         for child in self.children:
-            child.disabled = True
+            cast(discord.ui.Button[Any], child).disabled = True
         await interaction.response.edit_message(content="Cancelled.", view=self)
