@@ -3,6 +3,7 @@ from models.session_details import SessionDetails
 from session import DraftSession, AsyncSessionLocal
 from datetime import datetime, timedelta
 from helpers.utils import get_cube_thumbnail_url
+from helpers.draft_footer import apply_draft_footer
 from views import PersistentView
 import discord
 from services.draft_setup_manager import DraftSetupManager
@@ -102,7 +103,6 @@ class BaseSession:
         # This will be implemented by subclasses
         embed = self._create_embed_content()
 
-
         # Add a dedicated Cube field (easier to update in views.py)
         cube_field_value = f"[{self.session_details.cube_choice}](https://cubecobra.com/cube/list/{self.session_details.cube_choice})"
         embed.add_field(name="Cube:", value=cube_field_value, inline=True)
@@ -121,6 +121,14 @@ class BaseSession:
 
         # Add thumbnail
         embed.set_thumbnail(url=get_cube_thumbnail_url(self.session_details.cube_choice))
+
+        # Universal draft metadata, stamped identically on every post for this
+        # draft so they read consistently and share one searchable identifier.
+        apply_draft_footer(
+            embed,
+            self.session_details.draft_id,
+            self.session_details.cube_choice,
+        )
 
         return embed
 

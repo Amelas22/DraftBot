@@ -1,0 +1,109 @@
+"""Unit tests for the universal draft metadata footer (helpers/draft_footer.py)."""
+from types import SimpleNamespace
+
+import discord
+import pytest
+
+from helpers.draft_footer import (
+    apply_draft_footer,
+    apply_draft_footer_from_session,
+    draft_footer_text,
+)
+from ready_check import ReadyCheckSession
+from sessions.random_session import RandomSession
+
+
+def _session_details(**overrides):
+    details = dict(
+        session_id="123456789012345678-1753500000",
+        draft_id="A7K2M9QZ",
+        cube_choice="LSVCube",
+        draft_start_time=1753500000,
+        packs_per_player=3,
+        cards_per_pack=15,
+        guild_id="1",
+        team_a_name=None,
+        team_b_name=None,
+    )
+    details.update(overrides)
+    return SimpleNamespace(**details)
+
+
+def test_footer_text_is_labelled_and_free_of_markdown():
+    # Footers render markdown literally, so none of it may leak through.
+    text = draft_footer_text("A7K2M9QZ", "LSVCube")
+    assert text == "ID: A7K2M9QZ • Cube: LSVCube"
+    assert "`" not in text
+    assert "-#" not in text
+
+
+def test_missing_pieces_drop_their_labels_too():
+    assert draft_footer_text("A7K2M9QZ", None) == "ID: A7K2M9QZ"
+    assert draft_footer_text(None, "LSVCube") == "Cube: LSVCube"
+    assert draft_footer_text(None, None) == ""
+
+
+def test_no_footer_is_set_when_there_is_nothing_to_show():
+    embed = discord.Embed(title="Draft")
+    apply_draft_footer(embed, None, None)
+    assert "footer" not in embed.to_dict()
+
+
+def test_embed_timestamp_is_left_alone():
+    # Setting it would render an unlabelled time next to the message's own
+    # timestamp, reading as the post time rather than anything about the draft.
+    embed = discord.Embed(title="Draft")
+    apply_draft_footer(embed, "A7K2M9QZ", "LSVCube")
+    assert embed.timestamp is None
+
+
+def test_from_session_uses_draft_id_not_session_id():
+    draft_session = SimpleNamespace(
+        session_id="123456789012345678-1753500000",
+        draft_id="A7K2M9QZ",
+        cube="LSVCube",
+    )
+    embed = apply_draft_footer_from_session(discord.Embed(title="Draft"), draft_session)
+    assert embed.footer.text == "ID: A7K2M9QZ • Cube: LSVCube"
+    assert "123456789012345678" not in embed.footer.text
+
+
+def test_signup_and_later_posts_share_an_identical_footer():
+    # The whole point: every post for one draft carries the same stamp.
+    signup = RandomSession(
+        _session_details(), session_factory=lambda: None
+    ).create_embed()
+    log = apply_draft_footer_from_session(
+        discord.Embed(title="Draft Log"),
+        SimpleNamespace(draft_id="A7K2M9QZ", cube="LSVCube"),
+    )
+    assert signup.footer.text == log.footer.text == "ID: A7K2M9QZ • Cube: LSVCube"
+
+
+@pytest.mark.asyncio
+async def test_ready_check_embed_carries_the_footer():
+    rc = ReadyCheckSession(["1", "2"])
+    embed = await rc.build_embed(
+        {"1": "alice", "2": "bob"},
+        draft_session=SimpleNamespace(draft_id="A7K2M9QZ", cube="LSVCube"),
+    )
+    assert embed.footer.text == "ID: A7K2M9QZ • Cube: LSVCube"
+
+
+@pytest.mark.asyncio
+async def test_ready_check_embed_omits_footer_without_a_session():
+    # draft_session is optional; callers that lack one must not crash.
+    rc = ReadyCheckSession(["1"])
+    embed = await rc.build_embed({"1": "alice"})
+    assert "footer" not in embed.to_dict()
+
+
+def test_draft_session_embed_carries_the_footer():
+    payload = RandomSession(
+        _session_details(), session_factory=lambda: None
+    ).create_embed().to_dict()
+
+    assert payload["footer"]["text"] == "ID: A7K2M9QZ • Cube: LSVCube"
+    assert "timestamp" not in payload
+    # No icon: the cube art is already the embed thumbnail.
+    assert "icon_url" not in payload["footer"]

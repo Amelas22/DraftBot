@@ -818,7 +818,7 @@ class PersistentView(discord.ui.View):
         # keeping the button live so a stalled check can be re-fired once it lapses.
 
         # Generate the initial embed with personalized links
-        embed = await rc.build_embed(session.sign_ups, guild=interaction.guild)
+        embed = await rc.build_embed(session.sign_ups, guild=interaction.guild, draft_session=session)
         
         # Create the view with the buttons
         view = ReadyCheckView(self.draft_session_id)

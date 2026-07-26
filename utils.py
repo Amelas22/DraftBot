@@ -14,6 +14,7 @@ from models.draft_streak_history import DraftStreakHistory
 from models import QuizSession, TrophyQuizSession
 from quiz_views_module.quiz_views import QuizPublicView
 from quiz_views_module.trophy_quiz_views import TrophyQuizView
+from helpers.draft_footer import apply_draft_footer_from_session
 from services.draft_analysis import DraftAnalysis
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
@@ -627,7 +628,7 @@ async def generate_draft_summary_embed(bot, draft_session_id):
             else:
                 # Code for Swiss drafts
                 sign_ups_list = list(draft_session.sign_ups.keys())
-                title = f"Swiss Draft - Session {draft_session.draft_id}"
+                title = "Swiss Draft"
                 description = f"Draft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
                 discord_color = discord.Color.dark_magenta()
                 embed = discord.Embed(title=title, description=description, color=discord_color)
@@ -635,6 +636,9 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                 embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
                 bet_embed = None  # Swiss drafts don't have bet outcomes
 
+            # Shared draft metadata footer, on the main embed only — bet_embed
+            # carries its own settled-total footer.
+            apply_draft_footer_from_session(embed, draft_session)
             return embed, bet_embed
         
 
@@ -684,7 +688,7 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
                 )
 
     elif team_a_wins == 0 and team_b_wins == 0:
-        title = f"Draft-{draft_session.draft_id} Standings" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
+        title = "Draft Standings" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
         description = "If a drafter is missing from this channel, they likely can still see the channel but have the Discord invisible setting on."
         discord_color = discord.Color.dark_blue()
     elif team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0:
@@ -692,7 +696,7 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
         description = f"Draft Start: <t:{int(draft_session.draft_start_time.timestamp())}:F>"
         discord_color = discord.Color.light_grey()
     else:
-        title = f"Draft-{draft_session.draft_id} Standings" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
+        title = "Draft Standings" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
         description = "If a drafter is missing from this channel, they likely can still see the channel but have the Discord invisible setting on."
         discord_color = discord.Color.dark_blue()
     return title, description, discord_color
@@ -852,6 +856,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                                             seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
                                             embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
                                             embed.add_field(name="Standings", value=standings, inline=False)
+                                            apply_draft_footer_from_session(embed, draft_session)
 
                                             if draft_chat_channel:
                                                 await post_or_update_victory_message(bot, session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat')
