@@ -140,34 +140,40 @@ async def pending_pairings(session_id=None, limit=200):
       {sessionId, matchNumber, playerA, playerB, discordA, discordB, sessionType}
     """
     async with db_session() as session:
+        # Select ONLY the columns we use — not the whole DraftSession entity. Lighter for a
+        # bulk poll, and doesn't drag in unrelated columns (which also makes it robust to a
+        # dev DB that's a schema version behind on some other DraftSession column).
         conds = [MatchResult.winner_id == None]
         if session_id is not None:
             conds.append(MatchResult.session_id == session_id)
-        stmt = (select(MatchResult, DraftSession).join(DraftSession)
+        stmt = (select(MatchResult.session_id, MatchResult.match_number,
+                       MatchResult.player1_id, MatchResult.player2_id,
+                       DraftSession.session_type)
+                .join(DraftSession, DraftSession.session_id == MatchResult.session_id)
                 .where(*conds)
                 .order_by(MatchResult.session_id, MatchResult.match_number)
                 .limit(limit))
         rows = (await session.execute(stmt)).all()
 
     discord_ids = set()
-    for mr, _ds in rows:
-        discord_ids.add(mr.player1_id)
-        discord_ids.add(mr.player2_id)
+    for r in rows:
+        discord_ids.add(r.player1_id)
+        discord_ids.add(r.player2_id)
     names = await MtgoAccount.usernames_for_discord_ids(discord_ids)
 
     out = []
-    for mr, ds in rows:
-        a = names.get(str(mr.player1_id))
-        b = names.get(str(mr.player2_id))
+    for r in rows:
+        a = names.get(str(r.player1_id))
+        b = names.get(str(r.player2_id))
         if not a or not b:
             continue  # both players must be linked for the worker to match them
         out.append({
-            "sessionId": mr.session_id,
-            "matchNumber": mr.match_number,
+            "sessionId": r.session_id,
+            "matchNumber": r.match_number,
             "playerA": a,
             "playerB": b,
-            "discordA": mr.player1_id,
-            "discordB": mr.player2_id,
-            "sessionType": ds.session_type,
+            "discordA": r.player1_id,
+            "discordB": r.player2_id,
+            "sessionType": r.session_type,
         })
     return out
