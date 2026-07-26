@@ -66,6 +66,9 @@ async def main():
         bot.loop.create_task(check_inactive_players_task(bot))
         from services.log_reconciler import run_log_reconciler
         bot.loop.create_task(run_log_reconciler(bot))
+        # MTGO worker result-reporting endpoint (no-op unless MTGO_API_TOKEN is set)
+        from services.mtgo_result_api import start_result_api
+        bot.loop.create_task(start_result_api(bot))
         try:
             # Reconnect to sessions needing setup
             logger.info("Starting draft setup reconnection...")

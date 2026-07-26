@@ -70,6 +70,29 @@ class MatchResult(Base):
             return result.scalars().first()
 
     @classmethod
+    async def find_unreported_for_pair(cls, player_a_id: str, player_b_id: str, session_id: str = None):
+        """Earliest unreported match between two players (unordered pair).
+
+        Used to map a finished MTGO game (which only yields the two players) to the
+        pairing it corresponds to. If session_id is given the search is scoped to it;
+        otherwise it searches across sessions (the worker may not know the session).
+        """
+        a, b = str(player_a_id), str(player_b_id)
+        async with db_session() as session:
+            conds = [
+                cls.winner_id == None,
+                or_(
+                    and_(cls.player1_id == a, cls.player2_id == b),
+                    and_(cls.player1_id == b, cls.player2_id == a),
+                ),
+            ]
+            if session_id is not None:
+                conds.append(cls.session_id == session_id)
+            stmt = select(cls).where(and_(*conds)).order_by(cls.match_number)
+            result = await session.execute(stmt)
+            return result.scalars().first()
+
+    @classmethod
     async def get_by_id(cls, result_id: int):
         """Get a match result by its ID"""
         async with db_session() as session:
