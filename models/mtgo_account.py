@@ -89,6 +89,21 @@ class MtgoAccount(Base):
             return await session.get(cls, str(discord_user_id))
 
     @classmethod
+    async def usernames_for_discord_ids(cls, discord_user_ids):
+        """Batch forward lookup: {discord_user_id -> mtgo_username} for the linked ones.
+
+        Unlinked ids are simply absent from the result. One query instead of N — used
+        when resolving a whole pairing list for the worker.
+        """
+        ids = [str(d) for d in discord_user_ids if d is not None]
+        if not ids:
+            return {}
+        async with db_session() as session:
+            rows = (await session.execute(
+                select(cls).where(cls.discord_user_id.in_(ids)))).scalars().all()
+            return {r.discord_user_id: r.mtgo_username for r in rows}
+
+    @classmethod
     async def unlink(cls, discord_user_id):
         """Remove a link. Returns True if a row was deleted."""
         async with db_session() as session:

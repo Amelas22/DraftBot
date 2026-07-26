@@ -12,6 +12,10 @@ bogus result, which an admin can override).
 
 Endpoints (all require  Authorization: Bearer <MTGO_API_TOKEN> ):
   GET  /health
+  GET  /pairings/active[?sessionId=...]
+       -> {pairings: [{sessionId, matchNumber, playerA, playerB, discordA, discordB,
+           sessionType}]}  — pending pairings whose BOTH players have linked MTGO
+       accounts; the worker uses these to know which player-pairs to watch for.
   POST /matches/report
        body: {playerA, playerB, winner, gamesWinner, gamesLoser, [sessionId], [mtgoMatchId]}
        playerA/playerB/winner are MTGO usernames; winner must equal playerA or playerB.
@@ -30,7 +34,7 @@ try:
 except Exception:  # pragma: no cover
     web = None
 
-from services.mtgo_result_service import report_mtgo_match
+from services.mtgo_result_service import report_mtgo_match, pending_pairings
 
 
 def _authorized(request) -> bool:
@@ -54,6 +58,17 @@ async def start_result_api(bot):
         if not _authorized(request):
             return web.json_response({"error": "unauthorized"}, status=401)
         return web.json_response({"ok": True})
+
+    async def pairings(request):
+        if not _authorized(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        session_id = request.query.get("sessionId")
+        try:
+            rows = await pending_pairings(session_id=session_id)
+        except Exception as e:
+            logger.exception(f"[mtgo-api] pairings failed: {e}")
+            return web.json_response({"error": "internal error"}, status=500)
+        return web.json_response({"pairings": rows})
 
     async def report(request):
         if not _authorized(request):
@@ -87,7 +102,11 @@ async def start_result_api(bot):
         return web.json_response({"status": status, "detail": detail}, status=http_status)
 
     app = web.Application()
-    app.add_routes([web.get("/health", health), web.post("/matches/report", report)])
+    app.add_routes([
+        web.get("/health", health),
+        web.get("/pairings/active", pairings),
+        web.post("/matches/report", report),
+    ])
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host, port)
