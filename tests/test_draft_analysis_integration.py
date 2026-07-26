@@ -4,10 +4,19 @@ Tests for DraftAnalysis class - quiz-agnostic draft parsing and pack tracing.
 
 import pytest
 import asyncio
+from helpers.digital_ocean_helper import DigitalOceanHelper
 from services.draft_analysis import DraftAnalysis
 from services.draft_data_loader import load_from_spaces
 
+# This module hits a real draft stored in DigitalOcean Spaces, so it only runs
+# for contributors whose environment carries the DO_SPACES_* credentials.
+spaces_configured = DigitalOceanHelper().config_valid
 
+
+@pytest.mark.skipif(
+    not spaces_configured,
+    reason="Requires DigitalOcean Spaces credentials (DO_SPACES_*)",
+)
 @pytest.mark.asyncio
 async def test_draft_analysis_with_real_draft():
     """Test DraftAnalysis with a real draft from Spaces."""
