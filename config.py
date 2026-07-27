@@ -33,7 +33,8 @@ class Config:
                 "session_roles": {
                     "winston": "Winston Gamer",
                 },
-                "timeout": "the pit"
+                "timeout": "the pit",
+                "extra_draft_channel_access": ["Scryfall"]  # Bot/utility roles granted read+send in every draft channel
             },
             "timezone": "US/Eastern",
             "external": {
@@ -143,7 +144,8 @@ class Config:
                 "session_roles": {
                     "winston": "Winston Gamer",
                 },
-                "suspected_bot": "suspected bot"
+                "suspected_bot": "suspected bot",
+                "extra_draft_channel_access": ["Scryfall"]  # Bot/utility roles granted read+send in every draft channel
             },
             "timezone": "US/Eastern",
             "external": {
@@ -378,6 +380,12 @@ def get_dm_notifications_default(guild_id):
     config = get_config(guild_id)
     return config.get("notifications", {}).get("dm_notifications_default", True)
 
+def get_extra_draft_channel_access_roles(guild_id):
+    """Get the list of role names auto-granted read+send access to every draft channel
+    (e.g. the Scryfall card-lookup bot's role)"""
+    config = get_config(guild_id)
+    return config.get("roles", {}).get("extra_draft_channel_access", ["Scryfall"])
+
 def get_league_challenge_hours(guild_id):
     """Get league challenge timeout in hours"""
     timeout_config = get_timeout_config(guild_id)
@@ -397,7 +405,13 @@ def migrate_configs():
         if "roles" in config and "timeout" not in config["roles"]:
             config["roles"]["timeout"] = "the pit"
             updated = True
-            
+
+        # Add extra_draft_channel_access roles if missing (bot/utility roles auto-granted
+        # access to every draft channel, e.g. the Scryfall card-lookup bot)
+        if "roles" in config and "extra_draft_channel_access" not in config["roles"]:
+            config["roles"]["extra_draft_channel_access"] = ["Scryfall"]
+            updated = True
+
         # Add timeout configuration if missing
         if "timeouts" not in config:
             # Special handling for test guild - give it longer timeouts and cleanup exemption

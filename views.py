@@ -1288,7 +1288,7 @@ class PersistentView(discord.ui.View):
     
 
     async def create_team_channel(self, guild, team_name, team_members, team_a=None, team_b=None):
-        from config import get_config, is_special_guild
+        from config import get_config, get_extra_draft_channel_access_roles, is_special_guild
 
         config = get_config(guild.id)
         draft_category = discord.utils.get(guild.categories, name=config["categories"]["draft"])
@@ -1313,6 +1313,17 @@ class PersistentView(discord.ui.View):
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             guild.me: discord.PermissionOverwrite(read_messages=True, manage_messages=True)
         }
+
+        # Bot/utility roles (e.g. the Scryfall card-lookup bot) get read+send in every
+        # draft channel, including team-specific ones. Missing roles are skipped
+        # silently since not every guild has invited every configured bot.
+        for role_name in get_extra_draft_channel_access_roles(guild.id):
+            role = discord.utils.get(guild.roles, name=role_name)
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                logger.info(f"Granting '{role_name}' role access to channel '{channel_name}'")
+            else:
+                logger.debug(f"Extra-channel-access role '{role_name}' not found in guild {guild.name}")
 
         # Only add admin roles to the Draft chat, not to team-specific channels
         if team_name == "Draft":
