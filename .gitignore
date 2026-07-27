@@ -170,3 +170,4 @@ cython_debug/
 #.idea/
 card_analysis_cache/
 drafts.db.backup.*
+analysis_data/
