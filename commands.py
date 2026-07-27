@@ -78,7 +78,11 @@ async def core_commands(bot):
     async def configure_ui(ctx):
         """Interactive configuration system with dropdowns and modals"""
         from config import get_config
-        
+
+        if ctx.guild is None:
+            await ctx.respond("This command must be used in a server, not a DM.", ephemeral=True)
+            return
+
         # Get the current config
         config = get_config(ctx.guild.id)
         
@@ -666,6 +670,11 @@ class CategoryDropdown(discord.ui.Select):
         options = []
         for category in config.keys():
             if isinstance(config[category], dict):
+                # Only include categories with at least one setting SettingDropdown
+                # can actually show (scalar values) - otherwise that menu ends up
+                # with zero options, which Discord's API rejects outright.
+                if not any(isinstance(v, (str, int, bool, float)) or v is None for v in config[category].values()):
+                    continue
                 # Only include dictionary items (categories of settings)
                 label = category.replace("_", " ").title()  # Format as readable text
                 options.append(discord.SelectOption(
