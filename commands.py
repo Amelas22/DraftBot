@@ -78,11 +78,7 @@ async def core_commands(bot):
     async def configure_ui(ctx):
         """Interactive configuration system with dropdowns and modals"""
         from config import get_config
-
-        if ctx.guild is None:
-            await ctx.respond("This command must be used in a server, not a DM.", ephemeral=True)
-            return
-
+        
         # Get the current config
         config = get_config(ctx.guild.id)
         
