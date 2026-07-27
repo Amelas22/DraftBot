@@ -651,6 +651,17 @@ async def weekly_summary(bot):
                 if channel:
                     await channel.send(embed=embed)
 
+def _is_configurable_value(value):
+    """A value the /configure UI can render as an editable setting.
+
+    Both CategoryDropdown (deciding which categories to list) and
+    SettingDropdown (deciding which settings to render) must agree on this:
+    if they diverge, a category can be listed with zero renderable settings,
+    which makes Discord reject the empty-options dropdown.
+    """
+    return isinstance(value, (str, int, bool, float)) or value is None
+
+
 class ConfigCategorySelector(discord.ui.View):
     def __init__(self, config):
         super().__init__(timeout=300)  # 5 minute timeout
@@ -666,6 +677,11 @@ class CategoryDropdown(discord.ui.Select):
         options = []
         for category in config.keys():
             if isinstance(config[category], dict):
+                # Only include categories with at least one setting SettingDropdown
+                # can actually show - otherwise that menu ends up with zero
+                # options, which Discord's API rejects outright.
+                if not any(_is_configurable_value(v) for v in config[category].values()):
+                    continue
                 # Only include dictionary items (categories of settings)
                 label = category.replace("_", " ").title()  # Format as readable text
                 options.append(discord.SelectOption(
@@ -717,7 +733,7 @@ class SettingDropdown(discord.ui.Select):
         options = []
         for setting, value in config[category].items():
             # Only include simple values as configurable settings
-            if isinstance(value, (str, int, bool, float)) or value is None:
+            if _is_configurable_value(value):
                 label = setting.replace("_", " ").title()
                 current_value = str(value)
                 # Truncate long values
