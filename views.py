@@ -1298,7 +1298,7 @@ class PersistentView(discord.ui.View):
     
 
     async def create_team_channel(self, guild, team_name, team_members, team_a=None, team_b=None):
-        from config import get_config, is_special_guild
+        from config import get_config, get_bots_with_draft_access, is_special_guild
 
         config = get_config(guild.id)
         draft_category = discord.utils.get(guild.categories, name=config["categories"]["draft"])
@@ -1323,6 +1323,18 @@ class PersistentView(discord.ui.View):
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             guild.me: discord.PermissionOverwrite(read_messages=True, manage_messages=True)
         }
+
+        # Bots with draft access (e.g. the Scryfall card-lookup bot) get read+send in
+        # every draft channel, including team-specific ones and the premade voice
+        # channels created below. Only bot-managed integration roles (the role Discord
+        # creates when a bot is invited) are honored: they cannot be assigned to
+        # humans, so a same-named vanity role can't be used to read private team
+        # channels.
+        wanted_bots = set(get_bots_with_draft_access(guild.id))
+        bot_roles = [r for r in guild.roles if r.name in wanted_bots and r.tags and r.tags.bot_id]
+        for role in bot_roles:
+            overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        logger.info(f"Draft-access bot roles on '{channel_name}': {[r.name for r in bot_roles] or 'none'}")
 
         # Only add admin roles to the Draft chat, not to team-specific channels
         if team_name == "Draft":
