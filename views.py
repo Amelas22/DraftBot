@@ -1288,7 +1288,7 @@ class PersistentView(discord.ui.View):
     
 
     async def create_team_channel(self, guild, team_name, team_members, team_a=None, team_b=None):
-        from config import get_config, get_draft_assistant_roles, is_special_guild
+        from config import get_config, get_bots_with_draft_access, is_special_guild
 
         config = get_config(guild.id)
         draft_category = discord.utils.get(guild.categories, name=config["categories"]["draft"])
@@ -1314,20 +1314,20 @@ class PersistentView(discord.ui.View):
             guild.me: discord.PermissionOverwrite(read_messages=True, manage_messages=True)
         }
 
-        # Draft-assistant bots (e.g. the Scryfall card-lookup bot) get read+send in
+        # Bots with draft access (e.g. the Scryfall card-lookup bot) get read+send in
         # every draft channel, including team-specific ones and the premade voice
         # channels created below. Missing roles are skipped silently since not every
         # guild has invited every configured bot. Only bot-managed integration roles
         # (the role Discord creates when a bot is invited) are honored: they cannot be
         # assigned to humans, so a same-named vanity role can't be used to read
         # private team channels.
-        for role_name in get_draft_assistant_roles(guild.id):
+        for role_name in get_bots_with_draft_access(guild.id):
             role = discord.utils.get(guild.roles, name=role_name)
             if role is None:
-                logger.debug(f"Draft-assistant role '{role_name}' not found in guild {guild.name}")
+                logger.debug(f"Draft-access bot role '{role_name}' not found in guild {guild.name}")
             elif role.tags is None or role.tags.bot_id is None:
                 logger.warning(
-                    f"Draft-assistant role '{role_name}' in guild {guild.name} is not a "
+                    f"Draft-access bot role '{role_name}' in guild {guild.name} is not a "
                     f"bot-managed role; skipping channel access grant"
                 )
             else:

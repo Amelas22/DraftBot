@@ -11,10 +11,10 @@ SPECIAL_GUILD_ID = "336345350535118849"
 # Change this to switch between environments (prod, beta, dev)
 DRAFTMANCER_BASE_URL = "https://draftmancer.com"
 
-# Assistant bots granted read+send in every draft channel (incl. private team
+# Bots granted read+send in every draft channel (incl. private team
 # channels). Matched against bot-managed integration roles only — the role a
 # bot auto-creates when invited — so "Scryfall" works with zero guild setup.
-DEFAULT_DRAFT_ASSISTANT_ROLES = ["Scryfall"]
+DEFAULT_BOTS_WITH_DRAFT_ACCESS = ["Scryfall"]
 
 def is_test_mode() -> bool:
     """Returns True if TEST_MODE env var is set to a truthy value."""
@@ -39,7 +39,7 @@ class Config:
                     "winston": "Winston Gamer",
                 },
                 "timeout": "the pit",
-                "draft_assistants": list(DEFAULT_DRAFT_ASSISTANT_ROLES)  # Assistant-bot roles granted read+send in every draft channel
+                "bots_with_draft_access": list(DEFAULT_BOTS_WITH_DRAFT_ACCESS)  # Bot roles granted read+send in every draft channel
             },
             "timezone": "US/Eastern",
             "external": {
@@ -150,7 +150,7 @@ class Config:
                     "winston": "Winston Gamer",
                 },
                 "suspected_bot": "suspected bot",
-                "draft_assistants": list(DEFAULT_DRAFT_ASSISTANT_ROLES)  # Assistant-bot roles granted read+send in every draft channel
+                "bots_with_draft_access": list(DEFAULT_BOTS_WITH_DRAFT_ACCESS)  # Bot roles granted read+send in every draft channel
             },
             "timezone": "US/Eastern",
             "external": {
@@ -385,12 +385,12 @@ def get_dm_notifications_default(guild_id):
     config = get_config(guild_id)
     return config.get("notifications", {}).get("dm_notifications_default", True)
 
-def get_draft_assistant_roles(guild_id):
-    """Get the list of assistant-bot role names auto-granted read+send access to every
-    draft channel (e.g. the Scryfall card-lookup bot's role). Only bot-managed
+def get_bots_with_draft_access(guild_id):
+    """Get the list of bot role names auto-granted read+send access to every draft
+    channel (e.g. the Scryfall card-lookup bot's role). Only bot-managed
     integration roles are honored at grant time."""
     config = get_config(guild_id)
-    return config.get("roles", {}).get("draft_assistants", list(DEFAULT_DRAFT_ASSISTANT_ROLES))
+    return config.get("roles", {}).get("bots_with_draft_access", list(DEFAULT_BOTS_WITH_DRAFT_ACCESS))
 
 def get_league_challenge_hours(guild_id):
     """Get league challenge timeout in hours"""
@@ -412,10 +412,10 @@ def migrate_configs():
             config["roles"]["timeout"] = "the pit"
             updated = True
 
-        # Add draft_assistants roles if missing (assistant-bot roles auto-granted
+        # Add bots_with_draft_access if missing (bot roles auto-granted
         # access to every draft channel, e.g. the Scryfall card-lookup bot)
-        if "roles" in config and "draft_assistants" not in config["roles"]:
-            config["roles"]["draft_assistants"] = list(DEFAULT_DRAFT_ASSISTANT_ROLES)
+        if "roles" in config and "bots_with_draft_access" not in config["roles"]:
+            config["roles"]["bots_with_draft_access"] = list(DEFAULT_BOTS_WITH_DRAFT_ACCESS)
             updated = True
 
         # Add timeout configuration if missing
