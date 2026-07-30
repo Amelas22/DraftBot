@@ -1320,13 +1320,11 @@ class PersistentView(discord.ui.View):
         # creates when a bot is invited) are honored: they cannot be assigned to
         # humans, so a same-named vanity role can't be used to read private team
         # channels.
-        for role_name in get_bots_with_draft_access(guild.id):
-            role = discord.utils.get(guild.roles, name=role_name)
-            bot_managed = role is not None and role.tags is not None and role.tags.bot_id is not None
-            if bot_managed:
-                overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-            status = "granted" if bot_managed else "skipped (not bot-managed)" if role else "skipped (role not found)"
-            logger.info(f"Draft-access bot role '{role_name}' on '{channel_name}': {status}")
+        wanted_bots = set(get_bots_with_draft_access(guild.id))
+        bot_roles = [r for r in guild.roles if r.name in wanted_bots and r.tags and r.tags.bot_id]
+        for role in bot_roles:
+            overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        logger.info(f"Draft-access bot roles on '{channel_name}': {[r.name for r in bot_roles] or 'none'}")
 
         # Only add admin roles to the Draft chat, not to team-specific channels
         if team_name == "Draft":
