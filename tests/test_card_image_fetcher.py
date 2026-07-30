@@ -161,3 +161,93 @@ async def test_200_with_non_image_body_advances_to_next_rung():
     assert img is not None
     assert session.requested.count(CAPTURED) == 1               # no retry on same rung
     assert session.requested[-1] == BY_ID                       # advanced to next rung
+
+
+# Draftmancer draft logs store image_uris keyed by LANGUAGE, not by size
+# (the shape that made every team-log card fall through to the rate-limited
+# api.scryfall.com rungs on 7/29).
+LANG_CARDDATA = {
+    "cid3": {
+        "name": "Black Lotus",
+        "image_uris": {"en": "https://cards.scryfall.io/border_crop/lotus.jpg"},
+    },
+    "cid4": {
+        "name": "Phantasmal Image",
+        "image_uris": {
+            "fr": "https://cards.scryfall.io/border_crop/image-fr.jpg",
+            "ja": "https://cards.scryfall.io/border_crop/image-ja.jpg",
+        },
+    },
+}
+
+
+def test_ladder_uses_language_keyed_image_uris_as_first_rung():
+    ladder = build_image_url_ladder("cid3", LANG_CARDDATA)
+    assert ladder[0] == "https://cards.scryfall.io/border_crop/lotus.jpg"
+    assert "api.scryfall.com" in ladder[1]        # API rungs demoted, not gone
+
+
+def test_ladder_falls_back_to_any_language_when_en_missing():
+    ladder = build_image_url_ladder("cid4", LANG_CARDDATA)
+    assert ladder[0] in (
+        "https://cards.scryfall.io/border_crop/image-fr.jpg",
+        "https://cards.scryfall.io/border_crop/image-ja.jpg",
+    )
+
+
+def test_ladder_prefers_normal_over_language_keys():
+    carddata = {"cid5": {"name": "X", "image_uris": {
+        "en": "http://cdn/en.jpg", "normal": "http://cdn/normal.jpg"}}}
+    assert build_image_url_ladder("cid5", carddata)[0] == "http://cdn/normal.jpg"
+
+
+def test_dfc_face_language_keyed_uris_used():
+    carddata = {"cid6": {"name": "Some DFC", "card_faces": [
+        {"image_uris": {"en": "http://cdn/face-en.jpg"}},
+        {"image_uris": {"en": "http://cdn/back-en.jpg"}},
+    ]}}
+    ladder = build_image_url_ladder("cid6", carddata)
+    assert ladder[0] == "http://cdn/face-en.jpg"   # front face only
+    assert "http://cdn/back-en.jpg" not in ladder
+
+
+# ---- Scryfall API throttle -----------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _reset_scryfall_throttle():
+    import helpers.card_image_fetcher as cif
+    cif._scryfall_next_slot = 0.0
+    yield
+    cif._scryfall_next_slot = 0.0
+
+
+@pytest.mark.asyncio
+async def test_api_calls_are_paced_by_global_throttle():
+    import helpers.card_image_fetcher as cif
+    with patch("helpers.card_image_fetcher.asyncio.sleep", new=AsyncMock()) as slept:
+        await cif._throttle_scryfall()          # first call: slot free, no sleep
+        await cif._throttle_scryfall()          # second call: must wait ~one interval
+    assert slept.await_count == 1
+    waited = slept.await_args.args[0]
+    assert 0 < waited <= cif._SCRYFALL_MIN_INTERVAL
+
+
+@pytest.mark.asyncio
+async def test_cdn_fetch_is_not_throttled():
+    session = _FakeSession({CAPTURED: [_FakeResp(200, _png_bytes())]})
+    with patch("helpers.card_image_fetcher._throttle_scryfall", new=AsyncMock()) as thr:
+        img = await fetch_card_image(session, "cid1", CARDDATA)
+    assert img is not None
+    thr.assert_not_awaited()                    # captured CDN rung: no throttle
+
+
+@pytest.mark.asyncio
+async def test_api_rung_goes_through_throttle():
+    session = _FakeSession({
+        CAPTURED: [_FakeResp(404)],
+        BY_NAME: [_FakeResp(200, _png_bytes())],
+    })
+    with patch("helpers.card_image_fetcher._throttle_scryfall", new=AsyncMock()) as thr:
+        img = await fetch_card_image(session, "cid1", CARDDATA)
+    assert img is not None
+    assert thr.await_count == 2                 # by-id attempt + by-name attempt

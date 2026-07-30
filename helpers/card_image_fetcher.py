@@ -22,21 +22,53 @@ SCRYFALL_HEADERS = {
 }
 _TRANSIENT_STATUSES = {429, 500, 502, 503, 504}
 
+# Global pacing for api.scryfall.com (Scryfall asks for <=10 req/s; direct
+# cards.scryfall.io CDN fetches are exempt). Shared across every concurrent
+# build in the process — per-build pacing would still stampede in aggregate.
+_SCRYFALL_MIN_INTERVAL = 0.11
+_scryfall_next_slot = 0.0  # time.monotonic() when the next API call may go
+
+
+async def _throttle_scryfall() -> None:
+    """Reserve the next api.scryfall.com slot and sleep until it arrives.
+    The read-reserve of `_scryfall_next_slot` has no await between them, so
+    concurrent tasks can't grab the same slot (single-threaded event loop)."""
+    global _scryfall_next_slot
+    now = time.monotonic()
+    wait = _scryfall_next_slot - now
+    _scryfall_next_slot = max(now, _scryfall_next_slot) + _SCRYFALL_MIN_INTERVAL
+    if wait > 0:
+        await asyncio.sleep(wait)
+
+
+def _direct_image_url(image_uris: dict) -> Optional[str]:
+    """Direct CDN URL from an image_uris dict in either known shape: Scryfall's
+    size-keyed ({"normal": url, ...}) or Draftmancer's language-keyed
+    ({"en": url, "fr": url, ...}, as in captured draft logs). Preferring these
+    over the api.scryfall.com rungs matters: CDN fetches are not rate-limited,
+    while a whole pod's worth of API fetches gets 429-stormed."""
+    if not image_uris:
+        return None
+    for key in ("normal", "en"):
+        if image_uris.get(key):
+            return image_uris[key]
+    return next((url for url in image_uris.values() if url), None)
+
 
 def build_image_url_ladder(card_id: str, carddata: dict) -> List[str]:
     """Ordered, de-duplicated candidate image URLs for one card."""
     urls: List[str] = []
     info = carddata.get(card_id) or {}
 
-    image_uris = info.get("image_uris") or {}
-    if image_uris.get("normal"):
-        urls.append(image_uris["normal"])
+    captured = _direct_image_url(info.get("image_uris") or {})
+    if captured:
+        urls.append(captured)
 
     faces = info.get("card_faces") or []
     if faces:
-        face_uris = (faces[0] or {}).get("image_uris") or {}
-        if face_uris.get("normal"):
-            urls.append(face_uris["normal"])
+        face = _direct_image_url((faces[0] or {}).get("image_uris") or {})
+        if face:
+            urls.append(face)
 
     urls.append(f"https://api.scryfall.com/cards/{card_id}?format=image&version=normal")
 
@@ -64,11 +96,14 @@ async def fetch_card_image(
     backoff and falling through the URL ladder. `deadline` is an absolute
     time.monotonic() timestamp; once passed the fetch gives up immediately."""
     for url in build_image_url_ladder(card_id, carddata):
-        headers = SCRYFALL_HEADERS if "api.scryfall.com" in url else None
+        is_api = "api.scryfall.com" in url
+        headers = SCRYFALL_HEADERS if is_api else None
         for attempt in range(max_retries):
             if deadline is not None and time.monotonic() >= deadline:
                 logger.warning(f"[card-image] deadline exceeded fetching {card_id}")
                 return None
+            if is_api:
+                await _throttle_scryfall()
             try:
                 async with session.get(
                     url,
