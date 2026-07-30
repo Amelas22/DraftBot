@@ -1316,24 +1316,17 @@ class PersistentView(discord.ui.View):
 
         # Bots with draft access (e.g. the Scryfall card-lookup bot) get read+send in
         # every draft channel, including team-specific ones and the premade voice
-        # channels created below. Missing roles are skipped silently since not every
-        # guild has invited every configured bot. Only bot-managed integration roles
-        # (the role Discord creates when a bot is invited) are honored: they cannot be
-        # assigned to humans, so a same-named vanity role can't be used to read
-        # private team channels.
+        # channels created below. Only bot-managed integration roles (the role Discord
+        # creates when a bot is invited) are honored: they cannot be assigned to
+        # humans, so a same-named vanity role can't be used to read private team
+        # channels.
         for role_name in get_bots_with_draft_access(guild.id):
             role = discord.utils.get(guild.roles, name=role_name)
-            if role is None:
-                logger.debug(f"Draft-access bot role '{role_name}' not found in guild {guild.name}")
-                continue
-            if role.tags is None or role.tags.bot_id is None:
-                logger.warning(
-                    f"Draft-access bot role '{role_name}' in guild {guild.name} is not a "
-                    f"bot-managed role; skipping channel access grant"
-                )
-                continue
-            overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-            logger.info(f"Granting '{role_name}' role access to channel '{channel_name}'")
+            bot_managed = role is not None and role.tags is not None and role.tags.bot_id is not None
+            if bot_managed:
+                overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            status = "granted" if bot_managed else "skipped (not bot-managed)" if role else "skipped (role not found)"
+            logger.info(f"Draft-access bot role '{role_name}' on '{channel_name}': {status}")
 
         # Only add admin roles to the Draft chat, not to team-specific channels
         if team_name == "Draft":
