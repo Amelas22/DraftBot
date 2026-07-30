@@ -261,3 +261,35 @@ async def test_post_team_logs_idempotent_when_already_posted():
         ok = await post_team_logs("sid", bot)
     assert ok is True
     bot.get_guild.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_post_team_logs_concurrent_calls_post_once():
+    """The endDraft push and a reconciler tick can call while one run is still
+    in flight (slow image builds); the overlapping call must be dropped, not
+    re-post the pools."""
+    import asyncio
+    ds = _team_ds()
+    _, ctx = _db_ctx(ds)
+
+    red = _channel("Red-Team-Chat-ABC")
+    blue = _channel("Blue-Team-Chat-ABC")
+
+    async def slow_send(*a, **k):
+        await asyncio.sleep(0.05)   # keep run 1 in flight while run 2 starts
+    red.send = AsyncMock(side_effect=slow_send)
+    blue.send = AsyncMock(side_effect=slow_send)
+    bot = _bot_for({111: red, 222: blue})
+
+    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
+         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
+         patch("services.draft_log_store.PileImageBuilder") as PIB:
+        PIB.return_value.build = AsyncMock(return_value=None)
+        results = await asyncio.gather(
+            post_team_logs("sid", bot),
+            post_team_logs("sid", bot),
+        )
+
+    assert sorted(results) == [False, True]          # one ran, one was dropped
+    assert red.send.await_count == 1                 # Alice posted exactly once
+    assert blue.send.await_count == 1                # Bob posted exactly once
