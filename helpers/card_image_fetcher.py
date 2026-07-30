@@ -23,20 +23,34 @@ SCRYFALL_HEADERS = {
 _TRANSIENT_STATUSES = {429, 500, 502, 503, 504}
 
 
+def _direct_image_url(image_uris: dict) -> Optional[str]:
+    """Direct CDN URL from an image_uris dict in either known shape: Scryfall's
+    size-keyed ({"normal": url, ...}) or Draftmancer's language-keyed
+    ({"en": url, "fr": url, ...}, as in captured draft logs). Preferring these
+    over the api.scryfall.com rungs matters: CDN fetches are not rate-limited,
+    while a whole pod's worth of API fetches gets 429-stormed."""
+    if not image_uris:
+        return None
+    for key in ("normal", "en"):
+        if image_uris.get(key):
+            return image_uris[key]
+    return next((url for url in image_uris.values() if url), None)
+
+
 def build_image_url_ladder(card_id: str, carddata: dict) -> List[str]:
     """Ordered, de-duplicated candidate image URLs for one card."""
     urls: List[str] = []
     info = carddata.get(card_id) or {}
 
-    image_uris = info.get("image_uris") or {}
-    if image_uris.get("normal"):
-        urls.append(image_uris["normal"])
+    captured = _direct_image_url(info.get("image_uris") or {})
+    if captured:
+        urls.append(captured)
 
     faces = info.get("card_faces") or []
     if faces:
-        face_uris = (faces[0] or {}).get("image_uris") or {}
-        if face_uris.get("normal"):
-            urls.append(face_uris["normal"])
+        face = _direct_image_url((faces[0] or {}).get("image_uris") or {})
+        if face:
+            urls.append(face)
 
     urls.append(f"https://api.scryfall.com/cards/{card_id}?format=image&version=normal")
 

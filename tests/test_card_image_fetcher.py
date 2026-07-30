@@ -161,3 +161,51 @@ async def test_200_with_non_image_body_advances_to_next_rung():
     assert img is not None
     assert session.requested.count(CAPTURED) == 1               # no retry on same rung
     assert session.requested[-1] == BY_ID                       # advanced to next rung
+
+
+# Draftmancer draft logs store image_uris keyed by LANGUAGE, not by size
+# (the shape that made every team-log card fall through to the rate-limited
+# api.scryfall.com rungs on 7/29).
+LANG_CARDDATA = {
+    "cid3": {
+        "name": "Black Lotus",
+        "image_uris": {"en": "https://cards.scryfall.io/border_crop/lotus.jpg"},
+    },
+    "cid4": {
+        "name": "Phantasmal Image",
+        "image_uris": {
+            "fr": "https://cards.scryfall.io/border_crop/image-fr.jpg",
+            "ja": "https://cards.scryfall.io/border_crop/image-ja.jpg",
+        },
+    },
+}
+
+
+def test_ladder_uses_language_keyed_image_uris_as_first_rung():
+    ladder = build_image_url_ladder("cid3", LANG_CARDDATA)
+    assert ladder[0] == "https://cards.scryfall.io/border_crop/lotus.jpg"
+    assert "api.scryfall.com" in ladder[1]        # API rungs demoted, not gone
+
+
+def test_ladder_falls_back_to_any_language_when_en_missing():
+    ladder = build_image_url_ladder("cid4", LANG_CARDDATA)
+    assert ladder[0] in (
+        "https://cards.scryfall.io/border_crop/image-fr.jpg",
+        "https://cards.scryfall.io/border_crop/image-ja.jpg",
+    )
+
+
+def test_ladder_prefers_normal_over_language_keys():
+    carddata = {"cid5": {"name": "X", "image_uris": {
+        "en": "http://cdn/en.jpg", "normal": "http://cdn/normal.jpg"}}}
+    assert build_image_url_ladder("cid5", carddata)[0] == "http://cdn/normal.jpg"
+
+
+def test_dfc_face_language_keyed_uris_used():
+    carddata = {"cid6": {"name": "Some DFC", "card_faces": [
+        {"image_uris": {"en": "http://cdn/face-en.jpg"}},
+        {"image_uris": {"en": "http://cdn/back-en.jpg"}},
+    ]}}
+    ladder = build_image_url_ladder("cid6", carddata)
+    assert ladder[0] == "http://cdn/face-en.jpg"   # front face only
+    assert "http://cdn/back-en.jpg" not in ladder
