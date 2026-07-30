@@ -19,6 +19,7 @@ from session import AsyncSessionLocal
 from sqlalchemy import select
 from helpers.digital_ocean_helper import DigitalOceanHelper
 from helpers.magicprotools_helper import MagicProtoolsHelper
+from helpers.seating import resolve_seating_ids
 from notification_service import send_ready_check_dms
 from services.draft_socket_client import DraftSocketClient
 from services.draft_log_store import post_team_logs
@@ -1742,27 +1743,15 @@ class DraftSetupManager:
                     self.logger.info(f"Found DraftBot ID: {bot_id} (will be excluded from seating)")
                     break
             
-            # Create mapping of usernames to userIDs, excluding the bot
-            username_to_userid = {}
-            for user in self.session_users:
-                user_id = user.get('userID')
-                username = user.get('userName')
-                
-                if user_id != bot_id and username:  # Exclude bot from mapping
-                    username_to_userid[username] = user_id
-                    self.logger.debug(f"Mapped {username} to {user_id}")
-            
-            # Convert the username order to userID order
-            user_id_order = []
-            missing_users = []
-            
-            for username in desired_username_order:
-                if username in username_to_userid:
-                    user_id_order.append(username_to_userid[username])
-                    self.logger.debug(f"Added {username} to seating order")
-                else:
-                    missing_users.append(username)
-                    self.logger.warning(f"Username '{username}' not found in session")
+            # Map the desired username order to userIDs. Each occurrence of a
+            # duplicate display name consumes a DISTINCT userID — a plain name->id
+            # dict would collapse duplicates, seating one userID twice and dropping
+            # the other same-named player.
+            user_id_order, missing_users = resolve_seating_ids(
+                self.session_users, desired_username_order, bot_id
+            )
+            for username in missing_users:
+                self.logger.warning(f"Username '{username}' not found in session")
             
             if not user_id_order:
                 self.logger.error("No valid userIDs found for the provided usernames")
