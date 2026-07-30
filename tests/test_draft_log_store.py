@@ -1,3 +1,4 @@
+import io
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -89,26 +90,53 @@ def _channel(name):
     return ch
 
 
-@pytest.mark.asyncio
-async def test_post_team_logs_scopes_pools_to_own_team_and_stamps():
-    ds = SimpleNamespace(
+def _team_ds(team_b=("disc_b",), channel_ids=(111, 222)):
+    """DraftSession stand-in for post_team_logs: Alice (disc_a) on team A, Bob
+    (disc_b) on team B, unposted, with the Red/Blue channel ids. sign_ups always
+    holds both players so the sign-up count matches _team_log()'s two non-bot
+    users; single-team tests override team_b/channel_ids."""
+    return SimpleNamespace(
         session_id="sid", draft_id="ABC", guild_id="42",
         draft_data=_team_log(), team_logs_posted_at=None,
-        team_a=["disc_a"], team_b=["disc_b"],
+        team_a=["disc_a"], team_b=list(team_b),
         sign_ups={"disc_a": "Alice", "disc_b": "Bob"},
-        channel_ids=[111, 222],
+        channel_ids=list(channel_ids),
     )
-    # db_session yields ds twice (read, then stamp)
-    session = MagicMock()
+
+
+def _db_ctx(ds):
+    """`(session, ctx)` standing in for `async with db_session() as session`,
+    where every query resolves to `ds` (post_team_logs reads it once, then
+    re-reads it to stamp). Returns `session` too so tests can assert on commit."""
     result = MagicMock(); result.scalar_one_or_none.return_value = ds
+    session = MagicMock()
     session.execute = AsyncMock(return_value=result); session.commit = AsyncMock()
     ctx = MagicMock(); ctx.__aenter__ = AsyncMock(return_value=session); ctx.__aexit__ = AsyncMock(return_value=None)
+    return session, ctx
 
+
+def _bot_for(channels):
+    """Bot whose guild resolves exactly the given `{channel_id: channel}` map;
+    any other channel id resolves to None."""
+    guild = MagicMock()
+    guild.get_channel = lambda cid: channels.get(cid)
+    bot = MagicMock(); bot.get_guild.return_value = guild
+    return bot
+
+
+def _attachment_names(channel):
+    """Filenames of every attachment across all `channel.send` calls, in order.
+    These tests patch discord.File to a ("FILE", filename) tuple."""
+    return [f[1] for call in channel.send.await_args_list for f in call.kwargs["files"]]
+
+
+@pytest.mark.asyncio
+async def test_post_team_logs_scopes_pools_to_own_team_and_stamps():
+    ds = _team_ds()
+    _, ctx = _db_ctx(ds)
     red = _channel("Red-Team-Chat-ABC")
     blue = _channel("Blue-Team-Chat-ABC")
-    guild = MagicMock()
-    guild.get_channel = lambda cid: {111: red, 222: blue}.get(cid)
-    bot = MagicMock(); bot.get_guild.return_value = guild
+    bot = _bot_for({111: red, 222: blue})
 
     with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
          patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
@@ -119,10 +147,8 @@ async def test_post_team_logs_scopes_pools_to_own_team_and_stamps():
     assert ok is True
     assert ds.team_logs_posted_at is not None
     # Red got Alice's pool only; Blue got Bob's pool only (as .txt attachments)
-    red_names = [f[1] for c in red.send.await_args_list for f in c.kwargs["files"]]
-    blue_names = [f[1] for c in blue.send.await_args_list for f in c.kwargs["files"]]
-    assert red_names == ["Alice.txt"]
-    assert blue_names == ["Bob.txt"]
+    assert _attachment_names(red) == ["Alice.txt"]
+    assert _attachment_names(blue) == ["Bob.txt"]
 
 
 @pytest.mark.asyncio
@@ -130,23 +156,11 @@ async def test_post_team_logs_matches_lowercased_discord_channel_names():
     """Discord stores text-channel names lowercased in production, e.g.
     'red-team-chat-abc', not 'Red-Team-Chat-ABC'. Channel matching must be
     case-insensitive or post_team_logs silently posts nothing in prod."""
-    ds = SimpleNamespace(
-        session_id="sid", draft_id="ABC", guild_id="42",
-        draft_data=_team_log(), team_logs_posted_at=None,
-        team_a=["disc_a"], team_b=["disc_b"],
-        sign_ups={"disc_a": "Alice", "disc_b": "Bob"},
-        channel_ids=[111, 222],
-    )
-    session = MagicMock()
-    result = MagicMock(); result.scalar_one_or_none.return_value = ds
-    session.execute = AsyncMock(return_value=result); session.commit = AsyncMock()
-    ctx = MagicMock(); ctx.__aenter__ = AsyncMock(return_value=session); ctx.__aexit__ = AsyncMock(return_value=None)
-
+    ds = _team_ds()
+    _, ctx = _db_ctx(ds)
     red = _channel("red-team-chat-abc")
     blue = _channel("blue-team-chat-abc")
-    guild = MagicMock()
-    guild.get_channel = lambda cid: {111: red, 222: blue}.get(cid)
-    bot = MagicMock(); bot.get_guild.return_value = guild
+    bot = _bot_for({111: red, 222: blue})
 
     with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
          patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
@@ -156,63 +170,38 @@ async def test_post_team_logs_matches_lowercased_discord_channel_names():
 
     assert ok is True
     assert ds.team_logs_posted_at is not None
-    red_names = [f[1] for c in red.send.await_args_list for f in c.kwargs["files"]]
-    blue_names = [f[1] for c in blue.send.await_args_list for f in c.kwargs["files"]]
-    assert red_names == ["Alice.txt"]
-    assert blue_names == ["Bob.txt"]
+    assert _attachment_names(red) == ["Alice.txt"]
+    assert _attachment_names(blue) == ["Bob.txt"]
 
 
 @pytest.mark.asyncio
 async def test_post_team_logs_attaches_deck_image_alongside_txt():
     """When a pile image builds, the member's post carries BOTH the .txt and a
     .jpg deck image in one message."""
-    import io as _io
-    ds = SimpleNamespace(
-        session_id="sid", draft_id="ABC", guild_id="42",
-        draft_data=_team_log(), team_logs_posted_at=None,
-        team_a=["disc_a"], team_b=[],
-        sign_ups={"disc_a": "Alice", "disc_b": "Bob"},   # 2 signups == 2 non-bot users
-        channel_ids=[111],
-    )
-    session = MagicMock()
-    result = MagicMock(); result.scalar_one_or_none.return_value = ds
-    session.execute = AsyncMock(return_value=result); session.commit = AsyncMock()
-    ctx = MagicMock(); ctx.__aenter__ = AsyncMock(return_value=session); ctx.__aexit__ = AsyncMock(return_value=None)
-
+    ds = _team_ds(team_b=(), channel_ids=(111,))
+    _, ctx = _db_ctx(ds)
     red = _channel("Red-Team-Chat-ABC")
-    guild = MagicMock(); guild.get_channel = lambda cid: {111: red}.get(cid)
-    bot = MagicMock(); bot.get_guild.return_value = guild
+    bot = _bot_for({111: red})
 
     with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
          patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
          patch("services.draft_log_store.PileImageBuilder") as PIB:
-        PIB.return_value.build = AsyncMock(return_value=_io.BytesIO(b"\xff\xd8jpg"))
+        PIB.return_value.build = AsyncMock(return_value=io.BytesIO(b"\xff\xd8jpg"))
         ok = await post_team_logs("sid", bot)
 
     assert ok is True
-    names = [f[1] for c in red.send.await_args_list for f in c.kwargs["files"]]
-    assert names == ["Alice.txt", "Alice.jpg"]      # both attachments, one message
+    # Both attachments, one message.
+    assert _attachment_names(red) == ["Alice.txt", "Alice.jpg"]
 
 
 @pytest.mark.asyncio
 async def test_post_team_logs_still_posts_txt_when_image_build_raises():
     """Best-effort: an image build failure must NOT block the .txt post or the
     stamp (the .txt is the deliverable; post_team_logs is reconciler-driven)."""
-    ds = SimpleNamespace(
-        session_id="sid", draft_id="ABC", guild_id="42",
-        draft_data=_team_log(), team_logs_posted_at=None,
-        team_a=["disc_a"], team_b=[],
-        sign_ups={"disc_a": "Alice", "disc_b": "Bob"},   # 2 signups == 2 non-bot users
-        channel_ids=[111],
-    )
-    session = MagicMock()
-    result = MagicMock(); result.scalar_one_or_none.return_value = ds
-    session.execute = AsyncMock(return_value=result); session.commit = AsyncMock()
-    ctx = MagicMock(); ctx.__aenter__ = AsyncMock(return_value=session); ctx.__aexit__ = AsyncMock(return_value=None)
-
+    ds = _team_ds(team_b=(), channel_ids=(111,))
+    _, ctx = _db_ctx(ds)
     red = _channel("Red-Team-Chat-ABC")
-    guild = MagicMock(); guild.get_channel = lambda cid: {111: red}.get(cid)
-    bot = MagicMock(); bot.get_guild.return_value = guild
+    bot = _bot_for({111: red})
 
     with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
          patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
@@ -220,10 +209,9 @@ async def test_post_team_logs_still_posts_txt_when_image_build_raises():
         PIB.return_value.build = AsyncMock(side_effect=RuntimeError("scryfall down"))
         ok = await post_team_logs("sid", bot)
 
-    assert ok is True                                # still succeeded
-    assert ds.team_logs_posted_at is not None        # still stamped
-    names = [f[1] for c in red.send.await_args_list for f in c.kwargs["files"]]
-    assert names == ["Alice.txt"]                    # txt only, image skipped
+    assert ok is True                                       # still succeeded
+    assert ds.team_logs_posted_at is not None               # still stamped
+    assert _attachment_names(red) == ["Alice.txt"]          # txt only, image skipped
 
 
 @pytest.mark.asyncio
@@ -233,23 +221,10 @@ async def test_post_team_logs_partial_channel_resolution_does_not_stamp():
     return False so the reconciler retries next tick. Posting best-effort to
     the resolved channel would re-post to it (duplicate, player-visible pool
     files) on every retry tick until the other channel resolves."""
-    ds = SimpleNamespace(
-        session_id="sid", draft_id="ABC", guild_id="42",
-        draft_data=_team_log(), team_logs_posted_at=None,
-        team_a=["disc_a"], team_b=["disc_b"],
-        sign_ups={"disc_a": "Alice", "disc_b": "Bob"},
-        channel_ids=[111, 222],
-    )
-    session = MagicMock()
-    result = MagicMock(); result.scalar_one_or_none.return_value = ds
-    session.execute = AsyncMock(return_value=result); session.commit = AsyncMock()
-    ctx = MagicMock(); ctx.__aenter__ = AsyncMock(return_value=session); ctx.__aexit__ = AsyncMock(return_value=None)
-
+    ds = _team_ds()
+    session, ctx = _db_ctx(ds)
     red = _channel("Red-Team-Chat-ABC")
-    guild = MagicMock()
-    # Only Red resolves; Blue's channel id has no matching channel.
-    guild.get_channel = lambda cid: {111: red}.get(cid)
-    bot = MagicMock(); bot.get_guild.return_value = guild
+    bot = _bot_for({111: red})   # only Red resolves; Blue's channel id has no match
 
     with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
          patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)):
@@ -263,21 +238,9 @@ async def test_post_team_logs_partial_channel_resolution_does_not_stamp():
 
 @pytest.mark.asyncio
 async def test_post_team_logs_no_channels_found_does_not_stamp():
-    ds = SimpleNamespace(
-        session_id="sid", draft_id="ABC", guild_id="42",
-        draft_data=_team_log(), team_logs_posted_at=None,
-        team_a=["disc_a"], team_b=["disc_b"],
-        sign_ups={"disc_a": "Alice", "disc_b": "Bob"},
-        channel_ids=[111, 222],
-    )
-    session = MagicMock()
-    result = MagicMock(); result.scalar_one_or_none.return_value = ds
-    session.execute = AsyncMock(return_value=result); session.commit = AsyncMock()
-    ctx = MagicMock(); ctx.__aenter__ = AsyncMock(return_value=session); ctx.__aexit__ = AsyncMock(return_value=None)
-
-    guild = MagicMock()
-    guild.get_channel = lambda cid: None  # neither Red nor Blue channel resolves
-    bot = MagicMock(); bot.get_guild.return_value = guild
+    ds = _team_ds()
+    session, ctx = _db_ctx(ds)
+    bot = _bot_for({})   # neither Red nor Blue channel resolves
 
     with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)):
         ok = await post_team_logs("sid", bot)
@@ -292,10 +255,7 @@ async def test_post_team_logs_idempotent_when_already_posted():
     from datetime import datetime
     ds = SimpleNamespace(session_id="sid", team_logs_posted_at=datetime.now(),
                          draft_data=_team_log())
-    session = MagicMock()
-    result = MagicMock(); result.scalar_one_or_none.return_value = ds
-    session.execute = AsyncMock(return_value=result); session.commit = AsyncMock()
-    ctx = MagicMock(); ctx.__aenter__ = AsyncMock(return_value=session); ctx.__aexit__ = AsyncMock(return_value=None)
+    _, ctx = _db_ctx(ds)
     bot = MagicMock()
     with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)):
         ok = await post_team_logs("sid", bot)

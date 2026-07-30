@@ -108,8 +108,7 @@ async def _post_pools_for_team(
         name = (draft_data["users"][dm_user_id].get("userName")
                 or (sign_ups or {}).get(discord_id) or discord_id)
         safe = "".join(c for c in str(name) if c.isalnum() or c in " _-").strip() or str(discord_id)
-        fp = io.BytesIO(pool.encode("utf-8"))
-        files = [discord.File(fp, filename=f"{safe}.txt")]
+        files = [discord.File(io.BytesIO(pool.encode("utf-8")), filename=f"{safe}.txt")]
 
         # Best-effort mana-value pile image (main deck + sideboard) alongside the
         # .txt. The .txt is the deliverable and post_team_logs is reconciler-driven,
