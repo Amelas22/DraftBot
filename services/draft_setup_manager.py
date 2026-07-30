@@ -170,9 +170,11 @@ class DraftSetupManager:
 
     def __init__(self, session_id: str, draft_id: str, cube_id: str, guild_id: str = None,
                  packs_per_player: int = DEFAULT_PACKS_PER_PLAYER,
-                 cards_per_pack: int = DEFAULT_CARDS_PER_PACK):
+                 cards_per_pack: int = DEFAULT_CARDS_PER_PACK,
+                 friendly_id: str = None):
         self.session_id = session_id
         self.draft_id = draft_id
+        self.friendly_id = friendly_id
         self.cube_id = cube_id
         self.guild_id = guild_id
         self.packs_per_player = packs_per_player
@@ -1029,7 +1031,7 @@ class DraftSetupManager:
                 description=f"View your draft in MagicProTools with the links below:\n\n**Draft Start:** {formatted_start_time}",
                 color=0x3498db  # Blue color
             )
-            apply_draft_footer(embed, self.draft_id, self.cube_id)
+            apply_draft_footer(embed, self.friendly_id, self.cube_id)
             
             # Get list of sign_ups keys (Discord user IDs) and values (display names or dictionaries)
             sign_up_discord_ids = list(sign_ups.keys())
@@ -1130,7 +1132,7 @@ class DraftSetupManager:
             )
             # Stamp the fallback too — a failed log is exactly when someone needs
             # to know which draft it belonged to.
-            return apply_draft_footer(fallback, self.draft_id, self.cube_id)
+            return apply_draft_footer(fallback, self.friendly_id, self.cube_id)
 
     def get_pack_first_picks(self, draft_data, user_id):
         """Extract the first pick card name for each pack for a specific user."""

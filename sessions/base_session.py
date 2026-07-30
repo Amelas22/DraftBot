@@ -25,13 +25,14 @@ class BaseSession:
         async with self.session_factory() as session:
             async with session.begin():
                 # Step 1: Set up the draft session
-                new_draft_session = self.setup_draft_session(session)
+                new_draft_session = self.setup_draft_session(session, self.session_details.friendly_id)
                 await session.commit()
-                
+
                 # Step 2: Set up draft manager and start connection
                 self.draft_manager = DraftSetupManager(
                     session_id=new_draft_session.session_id,
                     draft_id=new_draft_session.draft_id,
+                    friendly_id=new_draft_session.friendly_id,
                     cube_id=new_draft_session.cube,
                     guild_id=new_draft_session.guild_id,
                     packs_per_player=new_draft_session.packs_per_player,
@@ -72,16 +73,17 @@ class BaseSession:
         if self.draft_manager and self.draft_manager.socket_client.connected:
             await self.draft_manager.socket_client.disconnect()
 
-    def setup_draft_session(self, session):
+    def setup_draft_session(self, session, friendly_id=None):
         # Set deletion time based on guild configuration
         session_deletion_hours = get_session_deletion_hours(self.session_details.guild_id)
         deletion_time = datetime.now() + timedelta(hours=session_deletion_hours)
-            
+
         new_draft_session = DraftSession(
             session_id=self.session_details.session_id,
             guild_id=str(self.session_details.guild_id),
             draft_link=self.session_details.draft_link,
             draft_id=self.session_details.draft_id,
+            friendly_id=friendly_id,
             draft_start_time=datetime.fromtimestamp(self.session_details.draft_start_time),
             deletion_time=deletion_time,
             session_type=self.get_session_type(),
@@ -126,7 +128,7 @@ class BaseSession:
         # draft so they read consistently and share one searchable identifier.
         apply_draft_footer(
             embed,
-            self.session_details.draft_id,
+            self.session_details.friendly_id,
             self.session_details.cube_choice,
         )
 

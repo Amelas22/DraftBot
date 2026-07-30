@@ -116,8 +116,8 @@ async def reconcile_publish_and_team_logs(bot) -> None:
             created_transient = False
             if manager is None:
                 manager = DraftSetupManager(
-                    session_id=ds.session_id, draft_id=ds.draft_id, cube_id=ds.cube,
-                    guild_id=ds.guild_id,
+                    session_id=ds.session_id, draft_id=ds.draft_id, friendly_id=ds.friendly_id,
+                    cube_id=ds.cube, guild_id=ds.guild_id,
                 )
                 # Only the transient path needs session_type set from the DB row; a reused
                 # active manager already carries its own (authoritative) session_type.

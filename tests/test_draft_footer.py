@@ -17,6 +17,7 @@ def _session_details(**overrides):
     details = dict(
         session_id="123456789012345678-1753500000",
         draft_id="A7K2M9QZ",
+        friendly_id="lightning-bolt-7",
         cube_choice="LSVCube",
         draft_start_time=1753500000,
         packs_per_player=3,
@@ -57,15 +58,17 @@ def test_embed_timestamp_is_left_alone():
     assert embed.timestamp is None
 
 
-def test_from_session_uses_draft_id_not_session_id():
+def test_from_session_uses_friendly_id_not_draft_id_or_session_id():
     draft_session = SimpleNamespace(
         session_id="123456789012345678-1753500000",
         draft_id="A7K2M9QZ",
+        friendly_id="lightning-bolt-7",
         cube="LSVCube",
     )
     embed = apply_draft_footer_from_session(discord.Embed(title="Draft"), draft_session)
-    assert embed.footer.text == "ID: A7K2M9QZ • Cube: LSVCube"
+    assert embed.footer.text == "ID: lightning-bolt-7 • Cube: LSVCube"
     assert "123456789012345678" not in embed.footer.text
+    assert "A7K2M9QZ" not in embed.footer.text
 
 
 def test_signup_and_later_posts_share_an_identical_footer():
@@ -75,9 +78,9 @@ def test_signup_and_later_posts_share_an_identical_footer():
     ).create_embed()
     log = apply_draft_footer_from_session(
         discord.Embed(title="Draft Log"),
-        SimpleNamespace(draft_id="A7K2M9QZ", cube="LSVCube"),
+        SimpleNamespace(friendly_id="lightning-bolt-7", cube="LSVCube"),
     )
-    assert signup.footer.text == log.footer.text == "ID: A7K2M9QZ • Cube: LSVCube"
+    assert signup.footer.text == log.footer.text == "ID: lightning-bolt-7 • Cube: LSVCube"
 
 
 @pytest.mark.asyncio
@@ -85,9 +88,9 @@ async def test_ready_check_embed_carries_the_footer():
     rc = ReadyCheckSession(["1", "2"])
     embed = await rc.build_embed(
         {"1": "alice", "2": "bob"},
-        draft_session=SimpleNamespace(draft_id="A7K2M9QZ", cube="LSVCube"),
+        draft_session=SimpleNamespace(friendly_id="lightning-bolt-7", cube="LSVCube"),
     )
-    assert embed.footer.text == "ID: A7K2M9QZ • Cube: LSVCube"
+    assert embed.footer.text == "ID: lightning-bolt-7 • Cube: LSVCube"
 
 
 @pytest.mark.asyncio
@@ -103,7 +106,7 @@ def test_draft_session_embed_carries_the_footer():
         _session_details(), session_factory=lambda: None
     ).create_embed().to_dict()
 
-    assert payload["footer"]["text"] == "ID: A7K2M9QZ • Cube: LSVCube"
+    assert payload["footer"]["text"] == "ID: lightning-bolt-7 • Cube: LSVCube"
     assert "timestamp" not in payload
     # No icon: the cube art is already the embed thumbnail.
     assert "icon_url" not in payload["footer"]

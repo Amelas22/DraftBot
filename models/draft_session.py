@@ -24,6 +24,7 @@ class DraftSession(Base):
     draft_chat_channel = Column(String(64))
     guild_id = Column(String(64))
     draft_id = Column(String(64))
+    friendly_id = Column(String(32))
     trophy_drafters = Column(JSON)
     team_a = Column(JSON)
     team_b = Column(JSON)
@@ -196,6 +197,15 @@ class DraftSession(Base):
         """Get a draft session by its draft ID"""
         async with db_session() as session:
             query = select(cls).filter_by(draft_id=draft_id)
+            result = await session.execute(query)
+            return result.scalar_one_or_none()
+
+    @classmethod
+    async def get_by_friendly_id(cls, guild_id: str, friendly_id: str):
+        """Get a draft session by its friendly id, scoped to a guild since
+        friendly_id is only unique within a guild."""
+        async with db_session() as session:
+            query = select(cls).filter_by(guild_id=guild_id, friendly_id=friendly_id)
             result = await session.execute(query)
             return result.scalar_one_or_none()
 
