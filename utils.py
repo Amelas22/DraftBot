@@ -1584,9 +1584,9 @@ async def cleanup_sessions_task(bot):
                                 msg = await draft_channel.fetch_message(int(session.message_id))
                                 if msg:
                                     # Send cancellation notification
-                                    await draft_channel.send(f"Queue for Draft-{session.friendly_id} has been cancelled due to inactivity (no new signups for 180 minutes).")
+                                    await draft_channel.send(f"Queue for `{session.friendly_id}` has been cancelled due to inactivity (no new signups for 180 minutes).")
                                     await msg.delete()
-                                    logger.info(f"Cancelled inactive queue for session {session.session_id} (Draft-{session.friendly_id})")
+                                    logger.info(f"Cancelled inactive queue for session {session.session_id} ({session.friendly_id})")
                             except discord.NotFound:
                                 pass
                             except discord.HTTPException as e:
