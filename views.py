@@ -47,6 +47,18 @@ from preference_service import get_players_bet_capping_preferences
 # between them is asserted in one place; re-exported here for the cooldown logic.
 from ready_check import READY_CHECK_DEBOUNCE_SECONDS
 
+# Synthetic sign-ups minted by the TEST_MODE "Add Test Users" button use
+# TEST_USER_ID_START + i as fake Discord IDs. Real snowflakes passed 9e17
+# around Oct 2021, so a bare `>= TEST_USER_ID_START` check matches real
+# newer accounts — membership must be a tight range gated on test mode.
+TEST_USER_ID_START = 900000000000000000
+TEST_USER_ID_END = TEST_USER_ID_START + 100
+
+
+def is_synthetic_test_user(user_id: str) -> bool:
+    """True only for fake test-mode sign-ups, never for real Discord accounts."""
+    return is_test_mode() and TEST_USER_ID_START <= int(user_id) < TEST_USER_ID_END
+
 
 class PersistentView(discord.ui.View):
 
@@ -278,7 +290,7 @@ class PersistentView(discord.ui.View):
             if i == 0:
                 user_id = bot_user_id
             else:
-                user_id = str(900000000000000000 + i)
+                user_id = str(TEST_USER_ID_START + i)
             name = test_names[i]
             fake_users[user_id] = name
             logger.info(f"Generated test user: {name} with ID {user_id}")
@@ -778,12 +790,10 @@ class PersistentView(discord.ui.View):
 
         # Build the initial ready check state.
         # All players start as no_response; initiator and test users are marked ready immediately.
-        TEST_USER_ID_START = 900000000000000000
-
         rc = ReadyCheckSession(player_ids=session.sign_ups.keys())
         rc.set_status(user_id, 'ready')
         for uid in session.sign_ups.keys():
-            if uid != user_id and int(uid) >= TEST_USER_ID_START:
+            if uid != user_id and is_synthetic_test_user(uid):
                 rc.set_status(uid, 'ready')
                 logger.debug(f"Auto-marked test user {uid} as ready")
 
