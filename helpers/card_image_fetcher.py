@@ -22,6 +22,24 @@ SCRYFALL_HEADERS = {
 }
 _TRANSIENT_STATUSES = {429, 500, 502, 503, 504}
 
+# Global pacing for api.scryfall.com (Scryfall asks for <=10 req/s; direct
+# cards.scryfall.io CDN fetches are exempt). Shared across every concurrent
+# build in the process — per-build pacing would still stampede in aggregate.
+_SCRYFALL_MIN_INTERVAL = 0.11
+_scryfall_next_slot = 0.0  # time.monotonic() when the next API call may go
+
+
+async def _throttle_scryfall() -> None:
+    """Reserve the next api.scryfall.com slot and sleep until it arrives.
+    The read-reserve of `_scryfall_next_slot` has no await between them, so
+    concurrent tasks can't grab the same slot (single-threaded event loop)."""
+    global _scryfall_next_slot
+    now = time.monotonic()
+    wait = _scryfall_next_slot - now
+    _scryfall_next_slot = max(now, _scryfall_next_slot) + _SCRYFALL_MIN_INTERVAL
+    if wait > 0:
+        await asyncio.sleep(wait)
+
 
 def _direct_image_url(image_uris: dict) -> Optional[str]:
     """Direct CDN URL from an image_uris dict in either known shape: Scryfall's
@@ -78,11 +96,14 @@ async def fetch_card_image(
     backoff and falling through the URL ladder. `deadline` is an absolute
     time.monotonic() timestamp; once passed the fetch gives up immediately."""
     for url in build_image_url_ladder(card_id, carddata):
-        headers = SCRYFALL_HEADERS if "api.scryfall.com" in url else None
+        is_api = "api.scryfall.com" in url
+        headers = SCRYFALL_HEADERS if is_api else None
         for attempt in range(max_retries):
             if deadline is not None and time.monotonic() >= deadline:
                 logger.warning(f"[card-image] deadline exceeded fetching {card_id}")
                 return None
+            if is_api:
+                await _throttle_scryfall()
             try:
                 async with session.get(
                     url,
