@@ -14,25 +14,25 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
-def _premade_session(sign_ups):
+def _premade_session(sign_ups, team_a=None, team_b=None):
     session = MagicMock()
     session.session_type = "premade"
     session.session_id = "fake-session-123"
     session.sign_ups = dict(sign_ups)
     ids = list(sign_ups.keys())
-    session.team_a = ids[:3]
-    session.team_b = ids[3:]
+    session.team_a = team_a if team_a is not None else ids[:len(ids) // 2]
+    session.team_b = team_b if team_b is not None else ids[len(ids) // 2:]
     session.tracked_draft = False
     session.premade_match_id = None
     return session
 
 
-async def _run_premade(sign_ups, seating_return):
+async def _run_premade(sign_ups, seating_return, team_a=None, team_b=None):
     """Run create_and_display_teams for a premade draft with generate_seating_order
     mocked to return `seating_return`. Returns (result, mock_logger, session)."""
     from services import team_creator
 
-    session = _premade_session(sign_ups)
+    session = _premade_session(sign_ups, team_a=team_a, team_b=team_b)
     select_result = MagicMock()
     select_result.scalars.return_value.first.return_value = session
 
@@ -118,3 +118,24 @@ async def test_premade_seating_maps_by_id_not_decorated_name():
     assert set(session.sign_ups.keys()) == set(sign_ups)
     assert all(session.sign_ups[uid] == sign_ups[uid] for uid in sign_ups)
     assert list(session.sign_ups.keys()) == [uid for uid, _ in seating]
+
+
+@pytest.mark.asyncio
+async def test_premade_rejects_unbalanced_teams():
+    """A premade with an even total but a lopsided split (2-vs-0) must be rejected,
+    not seated into a broken draft with only one team (Codex finding)."""
+    sign_ups = {"111": "A", "222": "B"}                 # even total = 2
+    result, _mock_logger, _session = await _run_premade(
+        sign_ups, [("111", "A"), ("222", "B")], team_a=["111", "222"], team_b=[])
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_premade_balance_counts_only_signed_up_members():
+    """Balance is measured on team members still in sign_ups — a stale id left in a
+    team (from the leave flow) must not tip an otherwise-balanced draft into rejection."""
+    sign_ups = {"111": "A", "222": "B", "333": "C", "444": "D"}
+    result, _mock_logger, _session = await _run_premade(
+        sign_ups, [("111", "A"), ("333", "C"), ("222", "B"), ("444", "D")],
+        team_a=["111", "222", "999"], team_b=["333", "444"])   # 999 not signed up
+    assert result is True                                # effective 2-vs-2 → allowed
