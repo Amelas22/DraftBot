@@ -26,3 +26,32 @@ def test_synthetic_id_in_test_mode_is_auto_readied(monkeypatch):
     # The button mints TEST_USER_ID_START + i for small i; all must qualify.
     for i in range(1, 9):
         assert is_synthetic_test_user(str(TEST_USER_ID_START + i))
+
+
+BOT_USER_ID = "1000000000000000001"   # the bot's own snowflake (arbitrary)
+
+
+def test_bot_id_signup_is_test_signup_in_test_mode(monkeypatch):
+    """The first 'Add Test Users' slot reuses the bot's own id; it must
+    auto-ready like the synthetic users or a test ready check never completes."""
+    monkeypatch.setenv("TEST_MODE", "true")
+    from views import is_test_signup
+    assert is_test_signup(BOT_USER_ID, BOT_USER_ID)
+
+
+def test_bot_id_signup_not_test_signup_outside_test_mode(monkeypatch):
+    monkeypatch.delenv("TEST_MODE", raising=False)
+    from views import is_test_signup
+    assert not is_test_signup(BOT_USER_ID, BOT_USER_ID)
+
+
+def test_real_player_still_not_test_signup_in_test_mode(monkeypatch):
+    monkeypatch.setenv("TEST_MODE", "true")
+    from views import is_test_signup
+    assert not is_test_signup(REAL_NEW_ACCOUNT_ID, BOT_USER_ID)
+
+
+def test_synthetic_users_still_covered_by_is_test_signup(monkeypatch):
+    monkeypatch.setenv("TEST_MODE", "true")
+    from views import is_test_signup
+    assert is_test_signup(str(TEST_USER_ID_START + 1), BOT_USER_ID)
