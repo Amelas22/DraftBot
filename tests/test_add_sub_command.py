@@ -35,10 +35,11 @@ def make_sub(user_id=9):
     return sub
 
 
-def make_draft(draft_id="abc123", channel_ids=None, draft_chat_channel="100",
+def make_draft(draft_id="abc123", friendly_id="abc123", channel_ids=None, draft_chat_channel="100",
                team_a=("1",), team_b=("2",)):
     return SimpleNamespace(
         draft_id=draft_id,
+        friendly_id=friendly_id,
         session_id="sess_123",
         channel_ids=channel_ids if channel_ids is not None else [100, 101, 102],
         draft_chat_channel=draft_chat_channel,
