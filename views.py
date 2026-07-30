@@ -1325,14 +1325,15 @@ class PersistentView(discord.ui.View):
             role = discord.utils.get(guild.roles, name=role_name)
             if role is None:
                 logger.debug(f"Draft-access bot role '{role_name}' not found in guild {guild.name}")
-            elif role.tags is None or role.tags.bot_id is None:
+                continue
+            if role.tags is None or role.tags.bot_id is None:
                 logger.warning(
                     f"Draft-access bot role '{role_name}' in guild {guild.name} is not a "
                     f"bot-managed role; skipping channel access grant"
                 )
-            else:
-                overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-                logger.info(f"Granting '{role_name}' role access to channel '{channel_name}'")
+                continue
+            overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            logger.info(f"Granting '{role_name}' role access to channel '{channel_name}'")
 
         # Only add admin roles to the Draft chat, not to team-specific channels
         if team_name == "Draft":
