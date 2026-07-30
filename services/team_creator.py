@@ -120,8 +120,8 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                 else:
                     sign_ups_list = list(session.sign_ups.keys())
                     random.shuffle(sign_ups_list)
-                    seating_order = [session.sign_ups[user_id] for user_id in sign_ups_list]
                     new_sign_ups = reorder_sign_ups(session.sign_ups, sign_ups_list)
+                    seating_order = list(new_sign_ups.values())
                     await db_session.execute(update(DraftSession)
                                         .where(DraftSession.session_id == session.session_id)
                                         .values(sign_ups=new_sign_ups))
