@@ -130,9 +130,29 @@ async def _post_pools_for_team(
         )
 
 
+# Sessions with a post_team_logs run currently in flight. The endDraft push
+# path and the 60s reconciler tick can both call within one run's duration
+# (image builds can stretch a run past several ticks), and the
+# team_logs_posted_at stamp is only written at the END of a successful run —
+# so the stamp alone cannot prevent overlapping duplicate runs.
+_POSTS_IN_FLIGHT: set[str] = set()
+
+
 async def post_team_logs(session_id: str, bot) -> bool:
     """Post each team's own members' pools to its private team channel, then
-    stamp team_logs_posted_at. Idempotent; safe to call before unlock_at."""
+    stamp team_logs_posted_at. Idempotent; safe to call before unlock_at.
+    Concurrent calls for the same session are dropped (False) while one runs."""
+    if session_id in _POSTS_IN_FLIGHT:
+        logger.info(f"post_team_logs already in flight for {session_id}; dropping duplicate call")
+        return False
+    _POSTS_IN_FLIGHT.add(session_id)
+    try:
+        return await _post_team_logs_locked(session_id, bot)
+    finally:
+        _POSTS_IN_FLIGHT.discard(session_id)
+
+
+async def _post_team_logs_locked(session_id: str, bot) -> bool:
     async with db_session() as session:
         ds = (await session.execute(
             select(DraftSession).filter(DraftSession.session_id == session_id)
