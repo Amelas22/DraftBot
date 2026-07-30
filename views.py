@@ -60,6 +60,14 @@ def is_synthetic_test_user(user_id: str) -> bool:
     return is_test_mode() and TEST_USER_ID_START <= int(user_id) < TEST_USER_ID_END
 
 
+def is_test_signup(user_id: str, bot_user_id: str) -> bool:
+    """True for any sign-up minted by the TEST_MODE "Add Test Users" button:
+    the synthetic high-ID users, plus the first slot which reuses the bot's own
+    id (so guild.get_member() resolves) and therefore sits below
+    TEST_USER_ID_START."""
+    return is_synthetic_test_user(user_id) or (is_test_mode() and user_id == bot_user_id)
+
+
 class PersistentView(discord.ui.View):
 
     # AUTO_PAIRINGS_TASKS = {}  # session_id -> task
@@ -792,8 +800,9 @@ class PersistentView(discord.ui.View):
         # All players start as no_response; initiator and test users are marked ready immediately.
         rc = ReadyCheckSession(player_ids=session.sign_ups.keys())
         rc.set_status(user_id, 'ready')
+        bot_user_id = str(interaction.client.user.id)
         for uid in session.sign_ups.keys():
-            if uid != user_id and is_synthetic_test_user(uid):
+            if uid != user_id and is_test_signup(uid, bot_user_id):
                 rc.set_status(uid, 'ready')
                 logger.debug(f"Auto-marked test user {uid} as ready")
 
