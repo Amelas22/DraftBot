@@ -5,11 +5,11 @@ import pytest
 import pytest_asyncio
 import tempfile
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from database.models_base import Base
 from database.db_session import AsyncSessionLocal
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from models.debt_ledger import DebtLedger
 from services.debt_service import (
@@ -23,7 +23,8 @@ from services.debt_service import (
     get_guild_debt_stats,
     get_debt_history,
     get_total_owed_map,
-    get_guild_debt_rows
+    get_guild_debt_rows,
+    get_owed_maps
 )
 from models.stake import StakeInfo
 from models.stake_pairing import StakePairing
@@ -1783,3 +1784,97 @@ class TestGetGuildDebtRows:
         rows = await get_guild_debt_rows("g1")
         assert [(r.player_id, r.counterparty_id, r.balance) for r in rows] == [
             ("carol", "bob", -70), ("alice", "bob", -30)]
+
+
+class TestGetOwedMaps:
+    """get_owed_maps: (total, week-old) outstanding debt; old = per-pair
+    min(owed now, owed as of cutoff) — active debt that has aged."""
+
+    CUTOFF_DAYS = 7
+
+    def _cutoff(self):
+        return datetime.now() - timedelta(days=self.CUTOFF_DAYS)
+
+    async def _owe(self, guild, debtor, creditor, amount, source_type="draft",
+                   source_id=None):
+        await create_ledger_entries(
+            guild_id=guild, debtor_id=debtor, creditor_id=creditor,
+            amount=amount, source_type=source_type,
+            source_id=source_id or f"s-{debtor}-{creditor}-{amount}",
+        )
+
+    async def _backdate(self, source_id, days=8):
+        """Age both ledger entries of a source to `days` ago."""
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                await session.execute(
+                    update(DebtLedger)
+                    .where(DebtLedger.source_id == source_id)
+                    .values(created_at=datetime.now() - timedelta(days=days))
+                )
+
+    @pytest.mark.asyncio
+    async def test_untouched_old_debt_counts_in_full(self, test_db):
+        await self._owe("g1", "alice", "bob", 150, source_id="old1")
+        await self._backdate("old1")
+        totals, old = await get_owed_maps("g1", ["alice"], self._cutoff())
+        assert totals == {"alice": 150}
+        assert old == {"alice": 150}
+
+    @pytest.mark.asyncio
+    async def test_settled_old_debt_counts_zero(self, test_db):
+        # Owed 200 for over a week, fully paid yesterday: no debt, no warning.
+        await self._owe("g1", "alice", "bob", 200, source_id="old2")
+        await self._backdate("old2")
+        await self._owe("g1", "bob", "alice", 200, source_type="settlement")
+        totals, old = await get_owed_maps("g1", ["alice"], self._cutoff())
+        assert totals == {}
+        assert old == {}
+
+    @pytest.mark.asyncio
+    async def test_new_debt_gets_grace_week(self, test_db):
+        # Fresh 200 from last night: outstanding, but not old yet.
+        await self._owe("g1", "alice", "bob", 200)
+        totals, old = await get_owed_maps("g1", ["alice"], self._cutoff())
+        assert totals == {"alice": 200}
+        assert old == {}
+
+    @pytest.mark.asyncio
+    async def test_paid_down_old_debt_counts_remainder(self, test_db):
+        # 200 aged, 150 paid this week: 50 outstanding, all of it old.
+        await self._owe("g1", "alice", "bob", 200, source_id="old3")
+        await self._backdate("old3")
+        await self._owe("g1", "bob", "alice", 150, source_type="settlement")
+        totals, old = await get_owed_maps("g1", ["alice"], self._cutoff())
+        assert totals == {"alice": 50}
+        assert old == {"alice": 50}
+
+    @pytest.mark.asyncio
+    async def test_pair_min_fresh_debt_cannot_mask_paid_old_debt(self, test_db):
+        # Old 120 to bob fully paid this week; fresh 120 to carol incurred.
+        # Player-total math would see 120 then and 120 now and call it old;
+        # pair-level min must yield zero old debt.
+        await self._owe("g1", "alice", "bob", 120, source_id="old4")
+        await self._backdate("old4")
+        await self._owe("g1", "bob", "alice", 120, source_type="settlement")
+        await self._owe("g1", "alice", "carol", 120)
+        totals, old = await get_owed_maps("g1", ["alice"], self._cutoff())
+        assert totals == {"alice": 120}
+        assert old == {}
+
+    @pytest.mark.asyncio
+    async def test_old_debt_sums_across_pairs(self, test_db):
+        await self._owe("g1", "alice", "bob", 60, source_id="old5")
+        await self._owe("g1", "alice", "carol", 70, source_id="old6")
+        await self._backdate("old5")
+        await self._backdate("old6")
+        totals, old = await get_owed_maps("g1", ["alice"], self._cutoff())
+        assert totals == {"alice": 130}
+        assert old == {"alice": 130}
+
+    @pytest.mark.asyncio
+    async def test_empty_players_and_guild_scoping(self, test_db):
+        assert await get_owed_maps("g1", [], self._cutoff()) == ({}, {})
+        await self._owe("g1", "alice", "bob", 150, source_id="old7")
+        await self._backdate("old7")
+        assert await get_owed_maps("g2", ["alice"], self._cutoff()) == ({}, {})
