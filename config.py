@@ -16,8 +16,8 @@ DRAFTMANCER_BASE_URL = "https://draftmancer.com"
 # bot auto-creates when invited — so "Scryfall" works with zero guild setup.
 DEFAULT_BOTS_WITH_DRAFT_ACCESS = ["Scryfall"]
 
-# Tix total-owed at/above which a staked signup line shows a debt warning.
-# 0 disables the warning for a guild.
+# Tix of week-old outstanding debt strictly above which a staked signup line
+# shows a debt warning. 0 disables the warning for a guild.
 DEFAULT_DEBT_WARNING_THRESHOLD = 100
 
 def is_test_mode() -> bool:
@@ -439,6 +439,8 @@ def migrate_configs():
         # Rebase debt_warning_threshold from the old total-debt default to the
         # aged-debt default (the knob now measures week-old outstanding debt;
         # 50 was the universal old default, so 50 == unconfigured intent)
+        # Note: value-based with no one-shot marker — re-fires every startup,
+        # so a deliberate post-migration value of exactly 50 won't stick.
         if "stakes" in config and config["stakes"].get("debt_warning_threshold") == 50:
             config["stakes"]["debt_warning_threshold"] = 100
             updated = True
