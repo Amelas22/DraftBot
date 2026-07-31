@@ -6,19 +6,28 @@ are never modified (see PR #349 — decorating stored names broke seating)."""
 from loguru import logger
 
 
-def debt_warning_suffix(total_owed, threshold) -> str:
-    """The trailing marker (e.g. " ⚠️ owes 75 tix") when total_owed reaches
-    threshold, else "". A falsy threshold disables warnings entirely."""
-    if not threshold or not total_owed or total_owed < threshold:
+# Days a debt must remain outstanding before it counts toward the warning
+# threshold. Code constant on purpose — the threshold is per-guild config,
+# the age window is not (YAGNI until someone asks).
+DEBT_WARNING_AGE_DAYS = 7
+
+
+def debt_warning_suffix(total_owed, old_owed, threshold) -> str:
+    """The trailing marker (e.g. " ⚠️ owes 150 tix") when the player's
+    week-old outstanding debt strictly exceeds threshold. Displays the total
+    outstanding amount; triggers on the aged portion only. A falsy threshold
+    disables warnings entirely."""
+    if not threshold or not old_owed or old_owed <= threshold:
         return ""
     return f" ⚠️ owes {total_owed} tix"
 
 
-def format_staked_sign_ups(sign_ups, stake_info_by_player, owed_map, threshold,
-                           display_name_for, session_id: str = "") -> str:
+def format_staked_sign_ups(sign_ups, stake_info_by_player, owed_map, old_owed_map,
+                           threshold, display_name_for, session_id: str = "") -> str:
     """The staked draft message's Sign-Ups field text: one line per player with
-    stake, cap emoji, display name, and (over-threshold players only) the debt
-    warning suffix. Identical to the historical format when owed_map is empty."""
+    stake, cap emoji, display name, and (players whose week-old debt exceeds
+    threshold only) the debt warning suffix. Identical to the historical format
+    when the maps are empty."""
     entries = []
     for user_id, stored_name in sign_ups.items():
         display_name = display_name_for(user_id, stored_name)
@@ -37,7 +46,7 @@ def format_staked_sign_ups(sign_ups, stake_info_by_player, owed_map, threshold,
 
     lines = []
     for user_id, display_name, stake_amount, emoji in entries:
-        suffix = debt_warning_suffix(owed_map.get(user_id), threshold)
+        suffix = debt_warning_suffix(owed_map.get(user_id), old_owed_map.get(user_id), threshold)
         if stake_amount == "Not set":
             lines.append(f"❌ Not set: {display_name}{suffix}")
         else:
