@@ -21,7 +21,9 @@ from services.debt_service import (
     create_debt_entries_from_stakes,
     adjust_debt,
     get_guild_debt_stats,
-    get_debt_history
+    get_debt_history,
+    get_total_owed_map,
+    get_guild_debt_rows
 )
 from models.stake import StakeInfo
 from models.stake_pairing import StakePairing
@@ -1722,3 +1724,45 @@ class TestMostInvolvedPlayers:
         await self._owe("other", "z", "y", 99)    # different guild
         result = await get_most_involved_players(g, limit=1)
         assert result == [("a", 2)]
+
+
+class TestGetTotalOwedMap:
+    """get_total_owed_map: sum of negative pair balances per player, batched."""
+
+    @pytest.mark.asyncio
+    async def test_being_owed_does_not_offset_owing(self, test_db):
+        # Alice owes Bob 30; Carol owes Alice 100. Alice's total owed is 30.
+        await create_ledger_entries("g1", "alice", "bob", 30, "draft", "s1")
+        await create_ledger_entries("g1", "carol", "alice", 100, "draft", "s2")
+        owed = await get_total_owed_map("g1", ["alice", "bob", "carol"])
+        assert owed["alice"] == 30
+        assert owed["carol"] == 100
+        assert "bob" not in owed          # owed money, owes nothing
+
+    @pytest.mark.asyncio
+    async def test_multiple_debts_sum_and_settlements_offset(self, test_db):
+        await create_ledger_entries("g1", "alice", "bob", 30, "draft", "s1")
+        await create_ledger_entries("g1", "alice", "carol", 40, "draft", "s2")
+        # Alice pays Bob 10 back (settlement: bob as debtor, alice as creditor)
+        await create_ledger_entries("g1", "bob", "alice", 10, "settlement", "x1")
+        owed = await get_total_owed_map("g1", ["alice"])
+        assert owed == {"alice": 60}      # (30-10) + 40
+
+    @pytest.mark.asyncio
+    async def test_empty_and_absent_players(self, test_db):
+        assert await get_total_owed_map("g1", []) == {}
+        assert await get_total_owed_map("g1", ["nobody"]) == {}
+
+    @pytest.mark.asyncio
+    async def test_guild_scoped(self, test_db):
+        await create_ledger_entries("g1", "alice", "bob", 30, "draft", "s1")
+        assert await get_total_owed_map("g2", ["alice"]) == {}
+
+    @pytest.mark.asyncio
+    async def test_get_guild_debt_rows_unchanged_by_refactor(self, test_db):
+        # Regression pin: same rows, debtor perspective, largest debt first.
+        await create_ledger_entries("g1", "alice", "bob", 30, "draft", "s1")
+        await create_ledger_entries("g1", "carol", "bob", 70, "draft", "s2")
+        rows = await get_guild_debt_rows("g1")
+        assert [(r.player_id, r.counterparty_id, r.balance) for r in rows] == [
+            ("carol", "bob", -70), ("alice", "bob", -30)]
