@@ -17,6 +17,7 @@ from services.debt_service import (
     get_all_balances_for,
     get_balance_with,
     get_entries_since_last_settlement,
+    get_active_debt_entries,
     create_settlement,
     get_guild_debt_rows
 )
@@ -191,7 +192,8 @@ class DebtCommands(commands.Cog):
 
     @debts.command(name="history", description="View full debt history with a player")
     @option("player", discord.Member, description="The player to check history with")
-    async def debts_history(self, ctx: discord.ApplicationContext, player: discord.Member):
+    @option("active_only", bool, description="Only the entries composing the current outstanding balance", default=False)
+    async def debts_history(self, ctx: discord.ApplicationContext, player: discord.Member, active_only: bool = False):
         """View full audit history with a specific player."""
         await ctx.defer(ephemeral=True)
 
@@ -203,23 +205,33 @@ class DebtCommands(commands.Cog):
             await ctx.followup.send("You can't have debts with yourself!")
             return
 
-        # Get ALL entries (not just since last settlement)
-        async with db_session() as session:
-            query = (
-                select(DebtLedger)
-                .where(
-                    DebtLedger.guild_id == guild_id,
-                    DebtLedger.player_id == user_id,
-                    DebtLedger.counterparty_id == counterparty_id
+        if active_only:
+            # Just the entries that add up to today's balance (empty when settled)
+            entries = await get_active_debt_entries(guild_id, user_id, counterparty_id)
+            if not entries:
+                await ctx.followup.send(
+                    f"No active debt with {player.display_name} — you're all settled up! 🎉"
                 )
-                .order_by(DebtLedger.created_at.desc())
-                .limit(50)
-            )
-            result = await session.execute(query)
-            entries = result.scalars().all()
+                return
+        else:
+            # Get ALL entries (not just since last settlement)
+            async with db_session() as session:
+                query = (
+                    select(DebtLedger)
+                    .where(
+                        DebtLedger.guild_id == guild_id,
+                        DebtLedger.player_id == user_id,
+                        DebtLedger.counterparty_id == counterparty_id
+                    )
+                    .order_by(DebtLedger.created_at.desc())
+                    .limit(50)
+                )
+                result = await session.execute(query)
+                entries = result.scalars().all()
 
         embed = discord.Embed(
-            title=f"Debt History with {player.display_name}",
+            title=(f"Active Debt with {player.display_name}" if active_only
+                   else f"Debt History with {player.display_name}"),
             color=discord.Color.purple()
         )
 
