@@ -130,6 +130,10 @@ class DebtAdminCommands(commands.Cog):
             # Update debt summary message if it exists
             await update_debt_summary_for_guild(self.bot, str(ctx.guild.id))
 
+            # Clear/update debt warnings on any open staked queues promptly
+            from utils import refresh_open_staked_queues
+            await refresh_open_staked_queues(self.bot, str(ctx.guild.id))
+
             # Format success message
             direction = "more" if amount > 0 else "less"
             logger.info(

@@ -787,6 +787,13 @@ class TransferConfirmView(View):
             except Exception as e:
                 logger.warning(f"[TransferConfirm] Failed to trigger debt summary update: {e}")
 
+            # Clear/update debt warnings on any open staked queues promptly
+            try:
+                from utils import refresh_open_staked_queues
+                asyncio.create_task(refresh_open_staked_queues(interaction.client, self.guild_id))
+            except Exception as e:
+                logger.warning(f"[TransferConfirm] Failed to trigger staked queue refresh: {e}")
+
             # Notify debtor and creditor via DM
             try:
                 asyncio.create_task(send_debt_transfer_dms(
@@ -1079,6 +1086,13 @@ class SettlementConfirmView(View):
                 asyncio.create_task(update_debt_summary_for_guild(interaction.client, self.guild_id))
             except Exception as e:
                 logger.warning(f"[SettlementConfirm] Failed to trigger debt summary update: {e}")
+
+            # Clear/update debt warnings on any open staked queues promptly
+            try:
+                from utils import refresh_open_staked_queues
+                asyncio.create_task(refresh_open_staked_queues(interaction.client, self.guild_id))
+            except Exception as e:
+                logger.warning(f"[SettlementConfirm] Failed to trigger staked queue refresh: {e}")
 
         except Exception as e:
             logger.error(f"[SettlementConfirm] Failed to create settlement: {e}")
