@@ -310,6 +310,9 @@ class DebtAdminCommands(commands.Cog):
                 color=discord.Color.purple()
             )
 
+            from debt_views.helpers import describe_draft_sources
+            draft_labels = await describe_draft_sources(ctx.guild, entries)
+
             # Group entries by (source_id, debtor, creditor) to show each
             # debt pair separately — a single draft can produce multiple pairs.
             # We key on the sorted player pair so both sides collapse into one line.
@@ -345,7 +348,7 @@ class DebtAdminCommands(commands.Cog):
 
                 # Add source-specific info
                 if rep_entry.source_type == 'draft':
-                    source_info = f"Draft #{rep_entry.source_id}"
+                    source_info = draft_labels.get(rep_entry.source_id, f"Draft #{rep_entry.source_id}")
                 elif rep_entry.source_type == 'settlement':
                     source_info = "Settlement"
                     if rep_entry.created_by:

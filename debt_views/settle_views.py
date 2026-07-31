@@ -19,7 +19,7 @@ from services.debt_service import (
     create_debt_transfer
 )
 from notification_service import send_debt_transfer_dms, send_settlement_notification_dm
-from .helpers import TRANSIENT_ERRORS, get_member_name, get_member_name_plain, format_entry_source, build_user_balance_embed
+from .helpers import TRANSIENT_ERRORS, get_member_name, get_member_name_plain, format_entry_source, describe_draft_sources, build_user_balance_embed
 
 
 async def _build_settle_entry_view(
@@ -206,9 +206,10 @@ class CounterpartySelectView(View):
 
             # Show breakdown
             if entries:
+                draft_labels = await describe_draft_sources(self.guild, entries)
                 breakdown_lines = []
                 for entry in entries[-10:]:  # Last 10 entries
-                    source = format_entry_source(entry)
+                    source = format_entry_source(entry, draft_labels)
 
                     if entry.amount < 0:
                         breakdown_lines.append(f"{source}: You owe {abs(entry.amount)} tix")
