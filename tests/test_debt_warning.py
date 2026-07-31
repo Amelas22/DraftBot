@@ -1,4 +1,8 @@
 """Tests for the staked-signup debt warning marker and Sign-Ups formatter."""
+import sys
+
+from loguru import logger
+
 from helpers.debt_warning import debt_warning_suffix, format_staked_sign_ups
 
 
@@ -63,8 +67,6 @@ def test_empty_signups():
 
 
 def test_overflow_logs_warning(capsys):
-    from loguru import logger
-    import sys
     hid = logger.add(sys.stderr, level="WARNING")
     try:
         sign_ups = {str(i): "N" * 60 for i in range(20)}   # force > 1000 chars

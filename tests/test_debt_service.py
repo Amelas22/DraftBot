@@ -1729,11 +1729,18 @@ class TestMostInvolvedPlayers:
 class TestGetTotalOwedMap:
     """get_total_owed_map: sum of negative pair balances per player, batched."""
 
+    async def _owe(self, guild, debtor, creditor, amount, source_type="draft"):
+        await create_ledger_entries(
+            guild_id=guild, debtor_id=debtor, creditor_id=creditor,
+            amount=amount, source_type=source_type,
+            source_id=f"s-{debtor}-{creditor}-{amount}",
+        )
+
     @pytest.mark.asyncio
     async def test_being_owed_does_not_offset_owing(self, test_db):
         # Alice owes Bob 30; Carol owes Alice 100. Alice's total owed is 30.
-        await create_ledger_entries("g1", "alice", "bob", 30, "draft", "s1")
-        await create_ledger_entries("g1", "carol", "alice", 100, "draft", "s2")
+        await self._owe("g1", "alice", "bob", 30)
+        await self._owe("g1", "carol", "alice", 100)
         owed = await get_total_owed_map("g1", ["alice", "bob", "carol"])
         assert owed["alice"] == 30
         assert owed["carol"] == 100
@@ -1741,10 +1748,10 @@ class TestGetTotalOwedMap:
 
     @pytest.mark.asyncio
     async def test_multiple_debts_sum_and_settlements_offset(self, test_db):
-        await create_ledger_entries("g1", "alice", "bob", 30, "draft", "s1")
-        await create_ledger_entries("g1", "alice", "carol", 40, "draft", "s2")
+        await self._owe("g1", "alice", "bob", 30)
+        await self._owe("g1", "alice", "carol", 40)
         # Alice pays Bob 10 back (settlement: bob as debtor, alice as creditor)
-        await create_ledger_entries("g1", "bob", "alice", 10, "settlement", "x1")
+        await self._owe("g1", "bob", "alice", 10, source_type="settlement")
         owed = await get_total_owed_map("g1", ["alice"])
         assert owed == {"alice": 60}      # (30-10) + 40
 
@@ -1755,14 +1762,24 @@ class TestGetTotalOwedMap:
 
     @pytest.mark.asyncio
     async def test_guild_scoped(self, test_db):
-        await create_ledger_entries("g1", "alice", "bob", 30, "draft", "s1")
+        await self._owe("g1", "alice", "bob", 30)
         assert await get_total_owed_map("g2", ["alice"]) == {}
 
+
+class TestGetGuildDebtRows:
+    """Regression pin for get_guild_debt_rows after it moved onto the shared
+    negative-pair-balance query."""
+
     @pytest.mark.asyncio
-    async def test_get_guild_debt_rows_unchanged_by_refactor(self, test_db):
-        # Regression pin: same rows, debtor perspective, largest debt first.
-        await create_ledger_entries("g1", "alice", "bob", 30, "draft", "s1")
-        await create_ledger_entries("g1", "carol", "bob", 70, "draft", "s2")
+    async def test_debtor_perspective_largest_debt_first(self, test_db):
+        await create_ledger_entries(
+            guild_id="g1", debtor_id="alice", creditor_id="bob",
+            amount=30, source_type="draft", source_id="s1",
+        )
+        await create_ledger_entries(
+            guild_id="g1", debtor_id="carol", creditor_id="bob",
+            amount=70, source_type="draft", source_id="s2",
+        )
         rows = await get_guild_debt_rows("g1")
         assert [(r.player_id, r.counterparty_id, r.balance) for r in rows] == [
             ("carol", "bob", -70), ("alice", "bob", -30)]
