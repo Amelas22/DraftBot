@@ -80,13 +80,18 @@ async def test_routine_win_is_undecorated(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_unrated_session_type_skips_stats_fetch(monkeypatch):
-    async def exploding_fetch(guild_id, player_ids):
-        raise AssertionError("stats must not be fetched for unrated types")
-    monkeypatch.setattr(utils, "_fetch_player_stats_map", exploding_fetch)
+    calls = []
+
+    async def recording_fetch(guild_id, player_ids):
+        calls.append((guild_id, player_ids))
+        return {}
+
+    monkeypatch.setattr(utils, "_fetch_player_stats_map", recording_fetch)
     title, _, _ = await utils.determine_draft_outcome(
         _Bot(), _session(session_type="winston"), team_a_wins=5, team_b_wins=2,
         half_matches=3, total_matches=7,
     )
+    assert calls == []
     assert "UPSET" not in title
 
 
