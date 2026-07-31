@@ -995,11 +995,13 @@ async def get_debt_history(
         return list(entries)
 
 
-async def _negative_pair_balances(guild_id: str, player_ids=None):
+async def _negative_pair_balances(guild_id: str, player_ids=None, created_before=None):
     """Grouped pairwise balances that are negative (player owes counterparty).
 
     Single source of truth for the ledger's debt-sign convention — both the
     guild-wide debt rows and the per-player total-owed map derive from it.
+    With created_before, sums only entries older than that instant — the
+    ledger is append-only, so this IS the pair balance as of that time.
     """
     query = (
         select(
@@ -1014,6 +1016,8 @@ async def _negative_pair_balances(guild_id: str, player_ids=None):
     )
     if player_ids is not None:
         query = query.where(DebtLedger.player_id.in_(list(player_ids)))
+    if created_before is not None:
+        query = query.where(DebtLedger.created_at < created_before)
     async with db_session() as session:
         result = await session.execute(query)
         return result.all()
@@ -1030,6 +1034,34 @@ async def get_total_owed_map(guild_id: str, player_ids) -> dict[str, int]:
     for row in rows:
         totals[row.player_id] = totals.get(row.player_id, 0) + int(-row.balance)
     return totals
+
+
+async def get_owed_maps(guild_id: str, player_ids, aged_cutoff) -> tuple[dict[str, int], dict[str, int]]:
+    """(total_owed_map, old_owed_map) for the given players.
+
+    total_owed_map: current outstanding debt per player (as get_total_owed_map).
+    old_owed_map: per player, the sum over creditor pairs of
+    min(owed_now, owed_as_of_aged_cutoff) — debt that is both currently
+    outstanding and was already owed at the cutoff. Settling always shrinks
+    it; debt incurred after the cutoff never enters it. Players with zero
+    in a map are absent from that map.
+    """
+    if not player_ids:
+        return {}, {}
+    now_rows = await _negative_pair_balances(guild_id, player_ids=player_ids)
+    aged_rows = await _negative_pair_balances(
+        guild_id, player_ids=player_ids, created_before=aged_cutoff
+    )
+    now_pairs = {(r.player_id, r.counterparty_id): int(-r.balance) for r in now_rows}
+    aged_pairs = {(r.player_id, r.counterparty_id): int(-r.balance) for r in aged_rows}
+    totals: dict[str, int] = {}
+    old_totals: dict[str, int] = {}
+    for (player_id, counterparty_id), owed_now in now_pairs.items():
+        totals[player_id] = totals.get(player_id, 0) + owed_now
+        aged = min(owed_now, aged_pairs.get((player_id, counterparty_id), 0))
+        if aged > 0:
+            old_totals[player_id] = old_totals.get(player_id, 0) + aged
+    return totals, old_totals
 
 
 async def get_guild_debt_rows(guild_id: str) -> list:

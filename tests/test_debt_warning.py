@@ -6,28 +6,32 @@ from loguru import logger
 from helpers.debt_warning import debt_warning_suffix, format_staked_sign_ups
 
 
-def _fmt(sign_ups, stakes, owed=None, threshold=50):
+def _fmt(sign_ups, stakes, owed=None, old_owed=None, threshold=100):
     return format_staked_sign_ups(
-        sign_ups, stakes, owed or {}, threshold,
+        sign_ups, stakes, owed or {}, old_owed if old_owed is not None else (owed or {}),
+        threshold,
         display_name_for=lambda uid, stored: stored,
     )
 
 
 # ---- debt_warning_suffix -------------------------------------------------------------
 
-def test_suffix_at_and_above_threshold():
-    assert debt_warning_suffix(50, 50) == " ⚠️ owes 50 tix"
-    assert debt_warning_suffix(75, 50) == " ⚠️ owes 75 tix"
+def test_suffix_displays_total_but_triggers_on_old_debt():
+    assert debt_warning_suffix(150, 120, 100) == " ⚠️ owes 150 tix"
 
 
-def test_suffix_below_threshold_or_no_debt():
-    assert debt_warning_suffix(49, 50) == ""
-    assert debt_warning_suffix(0, 50) == ""
-    assert debt_warning_suffix(None, 50) == ""
+def test_suffix_strictly_greater_than_threshold():
+    assert debt_warning_suffix(150, 100, 100) == ""      # exactly at: no warning
+    assert debt_warning_suffix(150, 101, 100) == " ⚠️ owes 150 tix"
+
+
+def test_suffix_no_old_debt_means_no_warning_even_with_large_total():
+    assert debt_warning_suffix(500, 0, 100) == ""
+    assert debt_warning_suffix(500, None, 100) == ""
 
 
 def test_suffix_threshold_zero_disables():
-    assert debt_warning_suffix(1000, 0) == ""
+    assert debt_warning_suffix(1000, 900, 0) == ""
 
 
 # ---- format_staked_sign_ups ----------------------------------------------------------
@@ -52,14 +56,17 @@ def test_flagged_player_gets_suffix():
     sign_ups = {"1": "Alice", "2": "Bob"}
     stakes = {"1": {"amount": 50, "is_capped": True},
               "2": {"amount": 20, "is_capped": True}}
-    out = _fmt(sign_ups, stakes, owed={"1": 75, "2": 30}, threshold=50)
-    assert "🧢 50 tix: Alice ⚠️ owes 75 tix" in out
+    # Alice: 150 total, 120 of it old -> warns, displays the 150 total.
+    # Bob: 130 total but only 40 old -> under the bar, no marker.
+    out = _fmt(sign_ups, stakes, owed={"1": 150, "2": 130},
+               old_owed={"1": 120, "2": 40}, threshold=100)
+    assert "🧢 50 tix: Alice ⚠️ owes 150 tix" in out
     assert "🧢 20 tix: Bob" in out and "Bob ⚠️" not in out
 
 
 def test_not_set_line_can_carry_suffix():
-    out = _fmt({"1": "Alice"}, {}, owed={"1": 90}, threshold=50)
-    assert out == "**Players (1):**\n❌ Not set: Alice ⚠️ owes 90 tix"
+    out = _fmt({"1": "Alice"}, {}, owed={"1": 190}, threshold=100)
+    assert out == "**Players (1):**\n❌ Not set: Alice ⚠️ owes 190 tix"
 
 
 def test_empty_signups():

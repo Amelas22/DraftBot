@@ -16,7 +16,7 @@ from sqlalchemy import update, select, and_
 from sqlalchemy.orm import selectinload
 from helpers.utils import get_cube_thumbnail_url
 from helpers.display_names import get_display_name, get_display_name_by_id
-from helpers.debt_warning import format_staked_sign_ups
+from helpers.debt_warning import format_staked_sign_ups, DEBT_WARNING_AGE_DAYS
 from utils import (
     calculate_pairings,
     get_formatted_stake_pairs,
@@ -2215,12 +2215,16 @@ async def update_draft_message(bot, session_id):
             # Debt warnings: best-effort, render-time only. A lookup failure
             # renders the plain list — it must never block the embed update.
             owed_map = {}
+            old_owed_map = {}
             threshold = get_debt_warning_threshold(draft_session.guild_id)
             if threshold:
                 try:
-                    from services.debt_service import get_total_owed_map
-                    owed_map = await get_total_owed_map(
-                        str(draft_session.guild_id), list(draft_session.sign_ups.keys())
+                    from services.debt_service import get_owed_maps
+                    aged_cutoff = datetime.now() - timedelta(days=DEBT_WARNING_AGE_DAYS)
+                    owed_map, old_owed_map = await get_owed_maps(
+                        str(draft_session.guild_id),
+                        list(draft_session.sign_ups.keys()),
+                        aged_cutoff,
                     )
                 except Exception as e:
                     logger.warning(f"[debt-warning] lookup failed for {session_id}: {e}; "
@@ -2229,6 +2233,7 @@ async def update_draft_message(bot, session_id):
                 draft_session.sign_ups,
                 stake_info_by_player,
                 owed_map,
+                old_owed_map,
                 threshold,
                 display_name_for=lambda uid, stored: get_display_name_by_id(uid, guild, stored),
                 session_id=session_id,
