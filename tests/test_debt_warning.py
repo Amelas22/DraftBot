@@ -65,7 +65,10 @@ def test_empty_signups():
 def test_overflow_logs_warning(capsys):
     from loguru import logger
     import sys
-    logger.add(sys.stderr, level="WARNING")
-    sign_ups = {str(i): "N" * 60 for i in range(20)}   # force > 1000 chars
-    _fmt(sign_ups, {})
-    assert "exceeds single-field limit" in capsys.readouterr().err
+    hid = logger.add(sys.stderr, level="WARNING")
+    try:
+        sign_ups = {str(i): "N" * 60 for i in range(20)}   # force > 1000 chars
+        _fmt(sign_ups, {})
+        assert "exceeds single-field limit" in capsys.readouterr().err
+    finally:
+        logger.remove(hid)

@@ -1272,9 +1272,9 @@ async def refresh_open_staked_queues(bot, guild_id: str) -> None:
     except Exception as e:
         logger.warning(f"[debt-warning] open-queue lookup failed for guild {guild_id}: {e}")
         return
+    from views import update_draft_message  # lazy: views imports utils
     for ds in open_sessions:
         try:
-            from views import update_draft_message  # lazy: views imports utils
             await update_draft_message(bot, ds.session_id)
         except Exception as e:
             logger.warning(f"[debt-warning] queue refresh failed for {ds.session_id}: {e}")
