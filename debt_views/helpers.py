@@ -6,7 +6,12 @@ across debt_commands.py and settle_views.py.
 """
 import discord
 import aiohttp
+from sqlalchemy import select
+
+from config import get_config
+from database.db_session import db_session
 from helpers.display_names import get_member_name, get_member_name_plain
+from models.draft_session import DraftSession
 
 # Network errors that are transient and should be logged but not re-raised
 TRANSIENT_ERRORS = (
@@ -16,17 +21,22 @@ TRANSIENT_ERRORS = (
 )
 
 
-def format_entry_source(entry) -> str:
+def format_entry_source(entry, draft_labels: dict | None = None) -> str:
     """
     Format a debt ledger entry's source for display.
 
     Args:
         entry: A DebtLedger model instance
+        draft_labels: Optional {session_id: label} from describe_draft_sources;
+            draft entries fall back to the raw "Draft #<session_id>" form when
+            no label is available.
 
     Returns:
-        Formatted string like "Draft #123" or "Settlement"
+        Formatted string like "[LSVCube · Jul 29](jump-url)" or "Settlement"
     """
     if entry.source_type == 'draft':
+        if draft_labels and entry.source_id in draft_labels:
+            return draft_labels[entry.source_id]
         return f"Draft #{entry.source_id}"
     elif entry.source_type == 'settlement':
         return "Settlement"
@@ -34,6 +44,55 @@ def format_entry_source(entry) -> str:
         return "Transfer"
     else:
         return entry.source_type.title()
+
+
+def _draft_label(cube, when, guild_id=None, channel_id=None, message_id=None) -> str:
+    """"[LSVCube · Jul 29](jump-url)" — or the same text unlinked when the
+    draft has no surviving victory message to jump to."""
+    text = cube or "Draft"
+    if when:
+        text += f" · {when.strftime('%b %d')}"
+    if guild_id and channel_id and message_id:
+        return f"[{text}](https://discord.com/channels/{guild_id}/{channel_id}/{message_id})"
+    return text
+
+
+async def describe_draft_sources(guild: discord.Guild, entries) -> dict[str, str]:
+    """
+    Readable labels for the draft entries among `entries`:
+    {session_id: "[<cube> · <date>](link)"}.
+
+    The link targets the draft's victory post in the guild's results channel —
+    the one draft message that survives channel cleanup (team/draft-chat
+    messages are deleted after a draft). Drafts without a victory message get
+    unlinked text; session ids with no surviving DraftSession row are omitted
+    so format_entry_source falls back to the legacy "Draft #id" form.
+    """
+    session_ids = {e.source_id for e in entries if e.source_type == "draft"}
+    if not session_ids:
+        return {}
+
+    async with db_session() as session:
+        rows = (await session.execute(
+            select(DraftSession).where(DraftSession.session_id.in_(session_ids))
+        )).scalars().all()
+
+    results_channel_name = get_config(guild.id).get("channels", {}).get("draft_results")
+    results_channel = (
+        discord.utils.get(guild.text_channels, name=results_channel_name)
+        if results_channel_name else None
+    )
+
+    return {
+        ds.session_id: _draft_label(
+            ds.cube,
+            ds.teams_start_time or ds.draft_start_time,
+            guild_id=guild.id,
+            channel_id=results_channel.id if results_channel else None,
+            message_id=ds.victory_message_id_results_channel,
+        )
+        for ds in rows
+    }
 
 
 def build_guild_debt_embed(guild: discord.Guild, rows: list, include_description: bool = True) -> discord.Embed:

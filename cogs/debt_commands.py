@@ -26,7 +26,7 @@ from debt_views.settle_views import (
     AmountInputView,
     PublicSettleDebtsView
 )
-from debt_views.helpers import get_member_name, get_member_name_plain, format_entry_source, build_guild_debt_embed, build_guild_debt_embed_pages
+from debt_views.helpers import get_member_name, get_member_name_plain, format_entry_source, describe_draft_sources, build_guild_debt_embed, build_guild_debt_embed_pages
 from database.db_session import db_session
 from models.debt_ledger import DebtLedger
 from models.debt_summary_message import DebtSummaryMessage
@@ -161,9 +161,10 @@ class DebtCommands(commands.Cog):
 
         # Breakdown since last settlement
         if entries:
+            draft_labels = await describe_draft_sources(ctx.guild, entries)
             breakdown_lines = []
             for entry in entries[-15:]:  # Last 15 entries
-                source = format_entry_source(entry)
+                source = format_entry_source(entry, draft_labels)
                 date_str = entry.created_at.strftime("%b %d") if entry.created_at else ""
 
                 if entry.amount < 0:
@@ -237,10 +238,11 @@ class DebtCommands(commands.Cog):
         )
 
         if entries:
+            draft_labels = await describe_draft_sources(ctx.guild, entries)
             history_lines = []
             for entry in entries:
                 date_str = entry.created_at.strftime("%b %d") if entry.created_at else "?"
-                source = format_entry_source(entry)
+                source = format_entry_source(entry, draft_labels)
 
                 if entry.amount < 0:
                     history_lines.append(f"{date_str}: {source} - You owe {abs(entry.amount)} tix")
@@ -318,9 +320,10 @@ class DebtCommands(commands.Cog):
 
         # Show breakdown
         if entries:
+            draft_labels = await describe_draft_sources(ctx.guild, entries)
             breakdown_lines = []
             for entry in entries[-10:]:
-                source = format_entry_source(entry)
+                source = format_entry_source(entry, draft_labels)
 
                 if entry.amount < 0:
                     breakdown_lines.append(f"{source}: You owe {abs(entry.amount)} tix")
