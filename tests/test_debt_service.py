@@ -22,6 +22,7 @@ from services.debt_service import (
     adjust_debt,
     get_guild_debt_stats,
     get_debt_history,
+    get_active_debt_entries,
     get_total_owed_map,
     get_guild_debt_rows,
     get_owed_maps
@@ -1878,3 +1879,58 @@ class TestGetOwedMaps:
         await self._owe("g1", "alice", "bob", 150, source_id="old7")
         await self._backdate("old7")
         assert await get_owed_maps("g2", ["alice"], self._cutoff()) == ({}, {})
+
+
+class TestActiveDebtFilters:
+    """get_active_debt_entries + get_debt_history(active_only=True): 'active'
+    means composing the current nonzero balance — settled-to-zero relationships
+    drop out entirely."""
+
+    async def _entry(self, guild, debtor, creditor, amount, source_type="draft"):
+        await create_ledger_entries(
+            guild_id=guild, debtor_id=debtor, creditor_id=creditor,
+            amount=amount, source_type=source_type,
+            source_id=f"{source_type}-{debtor}-{creditor}-{amount}",
+        )
+
+    @pytest.mark.asyncio
+    async def test_active_entries_empty_when_settled_to_zero(self, test_db):
+        await self._entry("g1", "alice", "bob", 30)
+        await self._entry("g1", "bob", "alice", 30, source_type="settlement")  # pays it off
+        assert await get_active_debt_entries("g1", "alice", "bob") == []
+
+    @pytest.mark.asyncio
+    async def test_active_entries_start_after_last_zero_balance(self, test_db):
+        await self._entry("g1", "alice", "bob", 30)                             # -30
+        await self._entry("g1", "bob", "alice", 30, source_type="settlement")   # 0: tab closed
+        await self._entry("g1", "alice", "bob", 40)                             # -40: new tab
+        await self._entry("g1", "bob", "alice", 15, source_type="settlement")   # -25: partial
+        entries = await get_active_debt_entries("g1", "alice", "bob")
+        assert [e.amount for e in entries] == [15, -40]      # newest first, only the open tab
+
+    @pytest.mark.asyncio
+    async def test_partial_settlement_does_not_close_the_tab(self, test_db):
+        await self._entry("g1", "alice", "bob", 30)
+        await self._entry("g1", "bob", "alice", 10, source_type="settlement")
+        await self._entry("g1", "alice", "bob", 20)
+        entries = await get_active_debt_entries("g1", "alice", "bob")
+        assert len(entries) == 3                             # balance never touched zero
+
+    @pytest.mark.asyncio
+    async def test_history_active_only_excludes_settled_pairs(self, test_db):
+        await self._entry("g1", "alice", "bob", 30)
+        await self._entry("g1", "bob", "alice", 30, source_type="settlement")   # settled pair
+        await self._entry("g1", "alice", "carol", 40)                           # active pair
+        entries = await get_debt_history("g1", active_only=True)
+        assert entries, "active pair's entries must be returned"
+        pairs = {(e.player_id, e.counterparty_id) for e in entries}
+        assert pairs == {("alice", "carol"), ("carol", "alice")}  # both orientations
+        # sanity: without the filter the settled pair is present
+        all_entries = await get_debt_history("g1")
+        assert any({e.player_id, e.counterparty_id} == {"alice", "bob"} for e in all_entries)
+
+    @pytest.mark.asyncio
+    async def test_history_active_only_empty_when_no_debt(self, test_db):
+        await self._entry("g1", "alice", "bob", 30)
+        await self._entry("g1", "bob", "alice", 30, source_type="settlement")
+        assert await get_debt_history("g1", active_only=True) == []

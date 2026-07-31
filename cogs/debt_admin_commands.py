@@ -268,13 +268,15 @@ class DebtAdminCommands(commands.Cog):
     @option("player", discord.User, description="Filter by specific player (optional)", required=False)
     @option("limit", int, description="Number of entries to show (max 100)", default=25, min_value=1, max_value=100)
     @option("older_than_days", int, description="Only show entries older than this many days (optional)", required=False, min_value=1)
+    @option("active_only", bool, description="Only entries for pairs with outstanding balances", default=False)
     @has_bot_manager_role()
     async def debt_admin_history(
         self,
         ctx: discord.ApplicationContext,
         player: discord.User = None,
         limit: int = 25,
-        older_than_days: int = None
+        older_than_days: int = None,
+        active_only: bool = False
     ):
         """View complete debt history (drafts, settlements, and admin modifications)."""
         await ctx.defer(ephemeral=True)
@@ -283,12 +285,14 @@ class DebtAdminCommands(commands.Cog):
             guild_id = str(ctx.guild.id)
             player_id = str(player.id) if player else None
 
-            entries = await get_debt_history(guild_id, player_id, limit, older_than_days)
+            entries = await get_debt_history(guild_id, player_id, limit, older_than_days, active_only)
 
             if not entries:
                 filter_msg = f" for {player.display_name}" if player else ""
                 if older_than_days:
                     filter_msg += f" older than {older_than_days} days"
+                if active_only:
+                    filter_msg += " with active debt"
                 await ctx.followup.send(f"No debt history found{filter_msg}.", ephemeral=True)
                 return
 
@@ -298,6 +302,8 @@ class DebtAdminCommands(commands.Cog):
                 title += f" - {player.display_name}"
             if older_than_days:
                 title += f" (older than {older_than_days} days)"
+            if active_only:
+                title += " (active debts only)"
 
             embed = discord.Embed(
                 title=title,

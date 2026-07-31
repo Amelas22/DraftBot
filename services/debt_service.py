@@ -5,7 +5,7 @@ import asyncio
 import uuid
 from datetime import datetime, timedelta
 from loguru import logger
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, tuple_
 from sqlalchemy.exc import OperationalError
 from database.db_session import db_session
 from models.debt_ledger import DebtLedger
@@ -941,7 +941,8 @@ async def get_debt_history(
     guild_id: str,
     player_id: str = None,
     limit: int = 25,
-    older_than_days: int = None
+    older_than_days: int = None,
+    active_only: bool = False
 ) -> list[DebtLedger]:
     """
     Get history of all debt entries.
@@ -955,6 +956,8 @@ async def get_debt_history(
         player_id: Optional - filter to entries involving this player
         limit: Maximum number of entries to return (default 25, max 100)
         older_than_days: Optional - only return entries older than this many days
+        active_only: Optional - only return entries for pairs whose current
+            balance is nonzero (settled-to-zero relationships drop out)
 
     Returns:
         List of DebtLedger entries
@@ -977,6 +980,21 @@ async def get_debt_history(
                 )
             )
 
+        if active_only:
+            # A pair with outstanding debt shows a negative balance from exactly
+            # one perspective; ledger rows exist from both, so admit both
+            # orientations of every indebted pair.
+            negative_rows = await _negative_pair_balances(guild_id)
+            active_pairs = set()
+            for row in negative_rows:
+                active_pairs.add((row.player_id, row.counterparty_id))
+                active_pairs.add((row.counterparty_id, row.player_id))
+            if not active_pairs:
+                return []
+            query = query.where(
+                tuple_(DebtLedger.player_id, DebtLedger.counterparty_id).in_(active_pairs)
+            )
+
         if older_than_days is not None:
             cutoff = datetime.utcnow() - timedelta(days=older_than_days)
             query = query.where(DebtLedger.created_at < cutoff)
@@ -993,6 +1011,39 @@ async def get_debt_history(
         )
 
         return list(entries)
+
+
+async def get_active_debt_entries(
+    guild_id: str,
+    player_id: str,
+    counterparty_id: str
+) -> list[DebtLedger]:
+    """
+    Get the ledger entries that compose the player's CURRENT balance with a
+    counterparty: everything after the last moment the pair's running balance
+    touched zero. Returns [] when the current balance is zero (no active debt
+    in either direction). Newest first, matching the history displays.
+    """
+    async with db_session() as session:
+        query = (
+            select(DebtLedger)
+            .where(
+                DebtLedger.guild_id == guild_id,
+                DebtLedger.player_id == player_id,
+                DebtLedger.counterparty_id == counterparty_id,
+            )
+            .order_by(DebtLedger.created_at.asc(), DebtLedger.id.asc())
+        )
+        result = await session.execute(query)
+        entries = list(result.scalars().all())
+
+    running = 0
+    active_start = 0
+    for i, entry in enumerate(entries):
+        running += entry.amount
+        if running == 0:
+            active_start = i + 1
+    return list(reversed(entries[active_start:]))
 
 
 async def _negative_pair_balances(guild_id: str, player_ids=None, created_before=None):
