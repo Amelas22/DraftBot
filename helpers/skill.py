@@ -132,18 +132,30 @@ def underdog_odds_text(winner_prob):
     return f"~{round((1 - winner_prob) / winner_prob)}:1"
 
 
+DISCORD_TITLE_LIMIT = 256
+
+
 def apply_upset_decoration(title, description, winner_prob):
     """Winner-framed victory flair. Returns (title, description) unchanged
-    when the win wasn't an upset. Loser names must never appear here."""
+    when the win wasn't an upset. Loser names must never appear here.
+
+    If the flair prefix would push the title past Discord's 256-char embed
+    title limit, the original title is kept as-is (Discord 400s on oversized
+    titles, which would otherwise take down the victory post entirely); the
+    description flair line is always added since the 4096-char description
+    limit is never at risk here.
+    """
     tier = upset_tier(winner_prob)
     if tier == "upset":
+        flaired_title = f"🚨 UPSET VICTORY — {title}"
         return (
-            f"🚨 UPSET VICTORY — {title}",
+            title if len(flaired_title) > DISCORD_TITLE_LIMIT else flaired_title,
             f"{description}\nThey won as {underdog_odds_text(winner_prob)} underdogs!",
         )
     if tier == "legendary":
+        flaired_title = f"🌟 LEGENDARY UPSET — {title}"
         return (
-            f"🌟 LEGENDARY UPSET — {title}",
+            title if len(flaired_title) > DISCORD_TITLE_LIMIT else flaired_title,
             f"{description}\nThey defied {underdog_odds_text(winner_prob)} odds "
             "— one of the rarest results this server produces!",
         )

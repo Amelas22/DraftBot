@@ -108,6 +108,20 @@ async def test_stats_failure_still_posts_plain_victory(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_premade_upset_win_decorates_team_name_title(monkeypatch):
+    # Team A (priors, display 1500) beats team B (display 1738s) in a premade
+    # match: winner prob ~0.20 -> legendary. Premade titles are built from
+    # team_a_name/team_b_name, not player names.
+    _patch_stats(monkeypatch, {"4": STRONG, "5": STRONG, "6": STRONG})
+    title, description, _ = await utils.determine_draft_outcome(
+        _Bot(), _session(session_type="premade"),
+        team_a_wins=5, team_b_wins=2, half_matches=3, total_matches=7,
+    )
+    assert title == "🌟 LEGENDARY UPSET — Alpha has won the match!"
+    assert "~4:1 odds" in description
+
+
+@pytest.mark.asyncio
 async def test_draw_gets_no_decoration(monkeypatch):
     _patch_stats(monkeypatch, {"4": STRONG, "5": STRONG, "6": STRONG})
     title, _, _ = await utils.determine_draft_outcome(

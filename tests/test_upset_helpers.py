@@ -79,3 +79,21 @@ def test_apply_upset_decoration_legendary_tier():
 def test_apply_upset_decoration_no_tier_is_passthrough():
     assert apply_upset_decoration("T", "D", 0.60) == ("T", "D")
     assert apply_upset_decoration("T", "D", 0.35) == ("T", "D")
+
+
+def test_apply_upset_decoration_long_title_skips_prefix_to_respect_discord_limit():
+    # 250-char title + either flair prefix would exceed Discord's 256-char title
+    # limit, so the title must pass through unchanged while the description
+    # (4096-char limit, always safe) still gets the flair line.
+    long_title = "A" * 250
+    title, desc = apply_upset_decoration(long_title, "Draft Start: X", 0.30)
+    assert title == long_title
+    assert "They won as ~2:1 underdogs!" in desc
+    assert desc.startswith("Draft Start: X")
+
+
+def test_apply_upset_decoration_normal_title_still_gets_prefix():
+    # Sanity check the guard doesn't affect ordinary short titles.
+    title, desc = apply_upset_decoration("Congratulations!", "D", 0.30)
+    assert title == "🚨 UPSET VICTORY — Congratulations!"
+    assert "They won as ~2:1 underdogs!" in desc
