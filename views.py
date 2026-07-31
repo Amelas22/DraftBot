@@ -5,7 +5,7 @@ import pytz
 from datetime import datetime, timedelta
 from discord import SelectOption
 from discord.ui import Button, View, Select, select
-from config import is_test_mode, should_reset_on_signup, get_queue_inactivity_minutes
+from config import is_test_mode, should_reset_on_signup, get_queue_inactivity_minutes, get_debt_warning_threshold
 from notification_service import send_ready_check_dms
 from ready_check import ReadyCheckView, ReadyCheckSession
 from draft_organization.stake_calculator import calculate_stakes_with_strategy
@@ -16,6 +16,7 @@ from sqlalchemy import update, select, and_
 from sqlalchemy.orm import selectinload
 from helpers.utils import get_cube_thumbnail_url
 from helpers.display_names import get_display_name, get_display_name_by_id
+from helpers.debt_warning import format_staked_sign_ups
 from utils import (
     calculate_pairings,
     get_formatted_stake_pairs,
@@ -2211,36 +2212,27 @@ async def update_draft_message(bot, session_id):
         guild = channel.guild
 
         if draft_session.session_type == "staked":
-            sign_ups_list = []
-            for user_id, stored_name in draft_session.sign_ups.items():
-                # Get display name with crown icon
-                display_name = get_display_name_by_id(user_id, guild, stored_name)
-                # Default to "Not set" if no stake has been set yet
-                if user_id in stake_info_by_player:
-                    stake_amount = stake_info_by_player[user_id]['amount']
-                    is_capped = stake_info_by_player[user_id]['is_capped']
-                    capped_emoji = "🧢" if is_capped else "🏎️"  # Cap emoji for capped, lightning for uncapped
-                    sign_ups_list.append((user_id, display_name, stake_amount, is_capped, capped_emoji))
-                else:
-                    sign_ups_list.append((user_id, display_name, "Not set", True, "❓"))
-
-            # Sort by stake amount (highest first)
-            # Convert "Not set" to -1 for sorting purposes
-            def sort_key(item):
-                stake = item[2]
-                return -1 if stake == "Not set" else stake
-
-            sign_ups_list.sort(key=sort_key, reverse=True)
-
-            # Format with stakes and capping status
-            formatted_sign_ups = []
-            for user_id, display_name, stake_amount, is_capped, emoji in sign_ups_list:
-                if stake_amount == "Not set":
-                    formatted_sign_ups.append(f"❌ Not set: {display_name}")
-                else:
-                    formatted_sign_ups.append(f"{emoji} {stake_amount} tix: {display_name}")
-
-            sign_ups_str = f"**Players ({sign_up_count}):**\n" + ('\n'.join(formatted_sign_ups) if formatted_sign_ups else 'No players yet.')
+            # Debt warnings: best-effort, render-time only. A lookup failure
+            # renders the plain list — it must never block the embed update.
+            owed_map = {}
+            threshold = get_debt_warning_threshold(draft_session.guild_id)
+            if threshold:
+                try:
+                    from services.debt_service import get_total_owed_map
+                    owed_map = await get_total_owed_map(
+                        str(draft_session.guild_id), list(draft_session.sign_ups.keys())
+                    )
+                except Exception as e:
+                    logger.warning(f"[debt-warning] lookup failed for {session_id}: {e}; "
+                                   "rendering without markers")
+            sign_ups_str = format_staked_sign_ups(
+                draft_session.sign_ups,
+                stake_info_by_player,
+                owed_map,
+                threshold,
+                display_name_for=lambda uid, stored: get_display_name_by_id(uid, guild, stored),
+                session_id=session_id,
+            )
         else:
             if draft_session.sign_ups:
                 # Get display names with crown icons
