@@ -1886,13 +1886,11 @@ class TestActiveDebtFilters:
     means composing the current nonzero balance — settled-to-zero relationships
     drop out entirely."""
 
-    _seq = 0
-
     async def _entry(self, guild, debtor, creditor, amount, source_type="draft"):
-        type(self)._seq += 1
         await create_ledger_entries(
             guild_id=guild, debtor_id=debtor, creditor_id=creditor,
-            amount=amount, source_type=source_type, source_id=f"active-{self._seq}",
+            amount=amount, source_type=source_type,
+            source_id=f"{source_type}-{debtor}-{creditor}-{amount}",
         )
 
     @pytest.mark.asyncio

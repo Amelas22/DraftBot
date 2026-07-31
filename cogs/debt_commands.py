@@ -206,14 +206,16 @@ class DebtCommands(commands.Cog):
             return
 
         if active_only:
-            # Just the entries that add up to today's balance (empty when settled)
+            title = f"Active Debt with {player.display_name}"
             entries = await get_active_debt_entries(guild_id, user_id, counterparty_id)
+            # No entries means the pair is settled up: say so rather than show an empty embed
             if not entries:
                 await ctx.followup.send(
                     f"No active debt with {player.display_name} — you're all settled up! 🎉"
                 )
                 return
         else:
+            title = f"Debt History with {player.display_name}"
             # Get ALL entries (not just since last settlement)
             async with db_session() as session:
                 query = (
@@ -230,8 +232,7 @@ class DebtCommands(commands.Cog):
                 entries = result.scalars().all()
 
         embed = discord.Embed(
-            title=(f"Active Debt with {player.display_name}" if active_only
-                   else f"Debt History with {player.display_name}"),
+            title=title,
             color=discord.Color.purple()
         )
 

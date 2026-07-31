@@ -5,7 +5,7 @@ import asyncio
 import uuid
 from datetime import datetime, timedelta
 from loguru import logger
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, tuple_
 from sqlalchemy.exc import OperationalError
 from database.db_session import db_session
 from models.debt_ledger import DebtLedger
@@ -984,7 +984,6 @@ async def get_debt_history(
             # A pair with outstanding debt shows a negative balance from exactly
             # one perspective; ledger rows exist from both, so admit both
             # orientations of every indebted pair.
-            from sqlalchemy import tuple_
             negative_rows = await _negative_pair_balances(guild_id)
             active_pairs = set()
             for row in negative_rows:

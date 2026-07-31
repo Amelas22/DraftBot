@@ -285,8 +285,7 @@ class DebtAdminCommands(commands.Cog):
             guild_id = str(ctx.guild.id)
             player_id = str(player.id) if player else None
 
-            entries = await get_debt_history(guild_id, player_id, limit, older_than_days,
-                                             active_only=active_only)
+            entries = await get_debt_history(guild_id, player_id, limit, older_than_days, active_only)
 
             if not entries:
                 filter_msg = f" for {player.display_name}" if player else ""
