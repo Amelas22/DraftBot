@@ -669,11 +669,7 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
         # plain victory message. Uses post-draft ratings on purpose (spec).
         if rating_counts_for(draft_session.session_type):
             try:
-                loser_team_ids = (
-                    draft_session.team_b
-                    if winner_team_ids == draft_session.team_a
-                    else draft_session.team_a
-                )
+                loser_team_ids = draft_session.team_b if team_a_wins > team_b_wins else draft_session.team_a
                 stats_map = await _fetch_player_stats_map(
                     draft_session.guild_id,
                     list(winner_team_ids) + list(loser_team_ids),
