@@ -31,7 +31,14 @@ from services.crown_roles import update_crown_roles_for_guild
 # {session_id: {player_id: {win_streak_increased: bool, perfect_streak_increased: bool}}}
 MATCH_STREAK_EXTENSIONS = {}
 from helpers.display_names import get_display_name, get_display_name_by_id
-from helpers.skill import PRIOR_MU, PRIOR_SIGMA, new_ratings
+from helpers.skill import (
+    PRIOR_MU,
+    PRIOR_SIGMA,
+    apply_upset_decoration,
+    new_ratings,
+    rating_counts_for,
+    winner_probability_from_stats,
+)
 from services.ring_bearer_service import update_ring_bearer_for_guild
 
 # Configuration constants
@@ -657,6 +664,28 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
             title = "Draft Outcome"
             description = f"Draft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
             discord_color = discord.Color.gold()
+
+        # Upset callout: decorative only — any failure falls through to the
+        # plain victory message. Uses post-draft ratings on purpose (spec).
+        if rating_counts_for(draft_session.session_type):
+            try:
+                loser_team_ids = (
+                    draft_session.team_b
+                    if winner_team_ids == draft_session.team_a
+                    else draft_session.team_a
+                )
+                stats_map = await _fetch_player_stats_map(
+                    draft_session.guild_id,
+                    list(winner_team_ids) + list(loser_team_ids),
+                )
+                winner_prob = winner_probability_from_stats(
+                    stats_map, winner_team_ids, loser_team_ids
+                )
+                title, description = apply_upset_decoration(title, description, winner_prob)
+            except Exception as e:
+                logger.warning(
+                    f"Upset callout skipped for session {draft_session.session_id}: {e}"
+                )
 
     elif team_a_wins == 0 and team_b_wins == 0:
         title = f"Draft-{draft_session.draft_id} Standings" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
@@ -1885,6 +1914,28 @@ async def check_weekly_limits(interaction, match_id, session_type=None, session_
     else:
         # If no limits are exceeded, proceed with your draft creation or next steps here.
         pass
+
+
+async def _fetch_player_stats_map(guild_id, player_ids):
+    """{player_id: (mu, sigma, rated_games)} for this guild's PlayerStats rows.
+
+    Players without a row are simply absent — winner_probability_from_stats
+    substitutes the prior for them.
+    """
+    async with AsyncSessionLocal() as session:
+        stmt = select(PlayerStats).where(
+            PlayerStats.guild_id == guild_id,
+            PlayerStats.player_id.in_(player_ids),
+        )
+        rows = (await session.execute(stmt)).scalars().all()
+        return {
+            row.player_id: (
+                row.true_skill_mu,
+                row.true_skill_sigma,
+                (row.games_won or 0) + (row.games_lost or 0),
+            )
+            for row in rows
+        }
 
 
 def _new_player_stats_row(player_id, guild_id):
