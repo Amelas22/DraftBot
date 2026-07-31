@@ -91,6 +91,12 @@ def is_established(games):
 UPSET_THRESHOLD = 0.35
 LEGENDARY_UPSET_THRESHOLD = 0.25
 
+# TEST_MODE only: pinned (mu, sigma, games) making synthetic test users a
+# guaranteed heavy underdog (display rating ≈ -806), so any bot win exercises
+# the legendary-upset path end to end without engineering real rating gaps.
+# Applied in utils._fetch_player_stats_map, gated on is_test_mode().
+TEST_USER_RATING_FLOOR = (0.0, PRIOR_SIGMA, 1000)
+
 
 def team_win_probability(team_a_stats, team_b_stats):
     """P(team A wins) via the Elo logistic on average display ratings.

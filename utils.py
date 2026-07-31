@@ -23,7 +23,7 @@ from debt_views.settle_views import PublicSettleDebtsView
 from debt_views.helpers import build_guild_debt_embed_pages
 from models.debt_summary_message import DebtSummaryMessage
 from loguru import logger
-from config import is_cleanup_exempt
+from config import is_cleanup_exempt, is_test_mode
 from leaderboard_config import AUTO_UPDATE_CATEGORIES
 from services.crown_roles import update_crown_roles_for_guild
 
@@ -1917,6 +1917,10 @@ async def _fetch_player_stats_map(guild_id, player_ids):
 
     Players without a row are simply absent — winner_probability_from_stats
     substitutes the prior for them.
+
+    TEST_MODE only: synthetic test users are pinned to TEST_USER_RATING_FLOOR
+    so a bot team is always a heavy underdog — any bot win exercises the
+    legendary-upset callout end to end.
     """
     async with AsyncSessionLocal() as session:
         stmt = select(PlayerStats).where(
@@ -1924,7 +1928,7 @@ async def _fetch_player_stats_map(guild_id, player_ids):
             PlayerStats.player_id.in_(player_ids),
         )
         rows = (await session.execute(stmt)).scalars().all()
-        return {
+        stats_map = {
             row.player_id: (
                 row.true_skill_mu,
                 row.true_skill_sigma,
@@ -1932,6 +1936,12 @@ async def _fetch_player_stats_map(guild_id, player_ids):
             )
             for row in rows
         }
+    if is_test_mode():
+        from helpers.skill import TEST_USER_RATING_FLOOR, _is_test_user
+        for pid in player_ids:
+            if _is_test_user(pid):
+                stats_map[str(pid)] = TEST_USER_RATING_FLOOR
+    return stats_map
 
 
 def _new_player_stats_row(player_id, guild_id):

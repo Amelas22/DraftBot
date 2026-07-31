@@ -97,3 +97,17 @@ def test_apply_upset_decoration_normal_title_still_gets_prefix():
     title, desc = apply_upset_decoration("Congratulations!", "D", 0.30)
     assert title == "🚨 UPSET VICTORY — Congratulations!"
     assert "They won as ~2:1 underdogs!" in desc
+
+
+def test_test_user_rating_floor_makes_bots_legendary_underdogs():
+    # A full team pinned to the TEST_MODE floor must always compute as a
+    # sub-legendary-threshold underdog against even brand-new real players,
+    # so any bot win in TEST_MODE demonstrates the callout.
+    from helpers.skill import TEST_USER_RATING_FLOOR
+
+    p = team_win_probability([TEST_USER_RATING_FLOOR] * 3, [PRIOR] * 3)
+    assert p < LEGENDARY_UPSET_THRESHOLD
+    # ...and stays legendary even with one real (prior-rated) player carried
+    # on the bot team, e.g. mixed test lobbies.
+    p_mixed = team_win_probability([TEST_USER_RATING_FLOOR] * 2 + [PRIOR], [PRIOR] * 3)
+    assert p_mixed < LEGENDARY_UPSET_THRESHOLD
