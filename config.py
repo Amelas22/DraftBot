@@ -16,6 +16,10 @@ DRAFTMANCER_BASE_URL = "https://draftmancer.com"
 # bot auto-creates when invited — so "Scryfall" works with zero guild setup.
 DEFAULT_BOTS_WITH_DRAFT_ACCESS = ["Scryfall"]
 
+# Tix total-owed at/above which a staked signup line shows a debt warning.
+# 0 disables the warning for a guild.
+DEFAULT_DEBT_WARNING_THRESHOLD = 50
+
 def is_test_mode() -> bool:
     """Returns True if TEST_MODE env var is set to a truthy value."""
     return os.environ.get("TEST_MODE", "false").lower() in ("true", "1", "yes")
@@ -81,7 +85,8 @@ class Config:
             },
             "stakes": {
                 "use_optimized_algorithm": True,
-                "stake_multiple": 10
+                "stake_multiple": 10,
+                "debt_warning_threshold": DEFAULT_DEBT_WARNING_THRESHOLD
             },
             "activity_tracking": {
                 "enabled": False,
@@ -188,11 +193,12 @@ class Config:
                 }
             },
             "matchmaking": {
-                "trueskill_chance": 60  
+                "trueskill_chance": 60
             },
             "stakes": {
                 "use_optimized_algorithm": True,
-                "stake_multiple": 10
+                "stake_multiple": 10,
+                "debt_warning_threshold": DEFAULT_DEBT_WARNING_THRESHOLD
             },
             "activity_tracking": {
                 "enabled": False,
@@ -392,6 +398,12 @@ def get_bots_with_draft_access(guild_id):
     config = get_config(guild_id)
     return config.get("roles", {}).get("bots_with_draft_access", list(DEFAULT_BOTS_WITH_DRAFT_ACCESS))
 
+def get_debt_warning_threshold(guild_id):
+    """Tix total-owed at/above which a staked signup shows a debt warning
+    to other players. 0 (or missing stakes config entirely) disables."""
+    config = get_config(guild_id)
+    return config.get("stakes", {}).get("debt_warning_threshold", DEFAULT_DEBT_WARNING_THRESHOLD)
+
 def get_league_challenge_hours(guild_id):
     """Get league challenge timeout in hours"""
     timeout_config = get_timeout_config(guild_id)
@@ -416,6 +428,11 @@ def migrate_configs():
         # access to every draft channel, e.g. the Scryfall card-lookup bot)
         if "roles" in config and "bots_with_draft_access" not in config["roles"]:
             config["roles"]["bots_with_draft_access"] = list(DEFAULT_BOTS_WITH_DRAFT_ACCESS)
+            updated = True
+
+        # Add debt_warning_threshold if missing (staked signup debt warnings)
+        if "stakes" in config and "debt_warning_threshold" not in config["stakes"]:
+            config["stakes"]["debt_warning_threshold"] = DEFAULT_DEBT_WARNING_THRESHOLD
             updated = True
 
         # Add timeout configuration if missing

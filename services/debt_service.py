@@ -995,6 +995,43 @@ async def get_debt_history(
         return list(entries)
 
 
+async def _negative_pair_balances(guild_id: str, player_ids=None):
+    """Grouped pairwise balances that are negative (player owes counterparty).
+
+    Single source of truth for the ledger's debt-sign convention — both the
+    guild-wide debt rows and the per-player total-owed map derive from it.
+    """
+    query = (
+        select(
+            DebtLedger.player_id,
+            DebtLedger.counterparty_id,
+            func.sum(DebtLedger.amount).label('balance')
+        )
+        .where(DebtLedger.guild_id == guild_id)
+        .group_by(DebtLedger.player_id, DebtLedger.counterparty_id)
+        .having(func.sum(DebtLedger.amount) < 0)
+        .order_by(func.sum(DebtLedger.amount).asc())
+    )
+    if player_ids is not None:
+        query = query.where(DebtLedger.player_id.in_(list(player_ids)))
+    async with db_session() as session:
+        result = await session.execute(query)
+        return result.all()
+
+
+async def get_total_owed_map(guild_id: str, player_ids) -> dict[str, int]:
+    """Total outstanding debt per player: the sum of their negative pair
+    balances as a positive int. Being owed money does not offset owing.
+    Players with no outstanding debt are absent from the map."""
+    if not player_ids:
+        return {}
+    rows = await _negative_pair_balances(guild_id, player_ids=player_ids)
+    totals: dict[str, int] = {}
+    for row in rows:
+        totals[row.player_id] = totals.get(row.player_id, 0) + int(-row.balance)
+    return totals
+
+
 async def get_guild_debt_rows(guild_id: str) -> list:
     """
     Get all debt relationships for a guild (from debtor perspective).
@@ -1008,20 +1045,7 @@ async def get_guild_debt_rows(guild_id: str) -> list:
     Returns:
         List of Row objects with player_id, counterparty_id, balance attributes
     """
-    async with db_session() as session:
-        query = (
-            select(
-                DebtLedger.player_id,
-                DebtLedger.counterparty_id,
-                func.sum(DebtLedger.amount).label('balance')
-            )
-            .where(DebtLedger.guild_id == guild_id)
-            .group_by(DebtLedger.player_id, DebtLedger.counterparty_id)
-            .having(func.sum(DebtLedger.amount) < 0)
-            .order_by(func.sum(DebtLedger.amount).asc())
-        )
-        result = await session.execute(query)
-        return result.all()
+    return await _negative_pair_balances(guild_id)
 
 
 async def get_top_net_creditors(guild_id: str, limit: int = 3) -> list:

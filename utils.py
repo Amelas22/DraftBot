@@ -1254,6 +1254,31 @@ async def update_debt_summary_for_guild(bot, guild_id: str):
         logger.error(f"Error updating debt summary for guild {guild_id}: {e}")
 
 
+async def refresh_open_staked_queues(bot, guild_id: str) -> None:
+    """Best-effort re-render of the queue message of every open staked session
+    in a guild (still in signup phase: teams_start_time unset), so debt-warning
+    markers reflect a just-completed settlement/transfer/adjustment without
+    waiting for the next signup event. Never raises: a display refresh must
+    not break the debt flow that triggered it."""
+    try:
+        async with AsyncSessionLocal() as db_session:
+            stmt = select(DraftSession).filter(
+                DraftSession.guild_id == str(guild_id),
+                DraftSession.session_type == "staked",
+                DraftSession.teams_start_time.is_(None),
+            )
+            result = await db_session.execute(stmt)
+            open_sessions = result.scalars().all()
+    except Exception as e:
+        logger.warning(f"[debt-warning] open-queue lookup failed for guild {guild_id}: {e}")
+        return
+    from views import update_draft_message  # lazy: views imports utils
+    for draft_session in open_sessions:
+        try:
+            await update_draft_message(bot, draft_session.session_id)
+        except Exception as e:
+            logger.warning(f"[debt-warning] queue refresh failed for {draft_session.session_id}: {e}")
+
 
 async def remove_lock_after_delay(draft_session_id, delay):
     await asyncio.sleep(delay)
