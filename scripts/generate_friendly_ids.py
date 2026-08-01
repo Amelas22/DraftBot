@@ -110,12 +110,6 @@ def slugify(card_name: str) -> str:
     return slug
 
 
-def is_real_card(card: dict) -> bool:
-    """Filter out joke sets (Un-sets etc.) and digital-only cards (Alchemy
-    rebalances, Arena-only cards), which aren't "real" paper Magic cards."""
-    return card.get("set_type") != "funny" and not card.get("digital", False)
-
-
 MIN_TOKEN_LENGTH = 3
 
 
@@ -130,7 +124,7 @@ def build_friendly_ids(cards: list, min_length: int, max_length: int) -> list:
     ids = []
     for card in cards:
         name = card.get("name")
-        if not name or not is_real_card(card):
+        if not name:
             continue
         slug = slugify(name)
         if not (min_length <= len(slug) <= max_length):
