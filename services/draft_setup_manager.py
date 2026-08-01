@@ -2449,7 +2449,9 @@ class DraftSetupManager:
         manager = cls(
             session_id=session_id,
             draft_id=draft_session.draft_id,
-            cube_id=draft_session.cube
+            friendly_id=draft_session.friendly_id,
+            cube_id=draft_session.cube,
+            guild_id=draft_session.guild_id,
         )
         
         manager.set_bot_instance(bot)
