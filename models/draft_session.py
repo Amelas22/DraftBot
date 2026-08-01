@@ -202,12 +202,19 @@ class DraftSession(Base):
 
     @classmethod
     async def get_by_friendly_id(cls, guild_id: str, friendly_id: str):
-        """Get a draft session by its friendly id, scoped to a guild since
-        friendly_id is only unique within a guild."""
+        """Get a draft session by its friendly id, scoped to a guild.
+
+        friendly_id isn't enforced unique -- duplicates within a guild can
+        happen, so this returns the most recently created match rather than
+        raising on more than one result."""
         async with db_session() as session:
-            query = select(cls).filter_by(guild_id=guild_id, friendly_id=friendly_id)
+            query = (
+                select(cls)
+                .filter_by(guild_id=guild_id, friendly_id=friendly_id)
+                .order_by(cls.id.desc())
+            )
             result = await session.execute(query)
-            return result.scalar_one_or_none()
+            return result.scalars().first()
 
     def get_draft_link_for_user(self, user_name: str) -> str:
         """
