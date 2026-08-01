@@ -124,7 +124,10 @@ def build_friendly_ids(cards: list, min_length: int, max_length: int) -> list:
     ids = []
     for card in cards:
         name = card.get("name")
-        if not name:
+        # Scryfall flags the handful of cards WotC has officially retired for
+        # racist depictions/names (e.g. "Invoke Prejudice") -- keep them out
+        # regardless of any other filter here.
+        if not name or card.get("content_warning"):
             continue
         slug = slugify(name)
         if not (min_length <= len(slug) <= max_length):
