@@ -29,6 +29,7 @@ Usage:
 import argparse
 import gzip
 import json
+import os
 import re
 import sys
 import tempfile
@@ -44,6 +45,12 @@ MARKER = "### AUTO GENERATED FRIENDLY ID LIST BELOW HERE\n### DO NOT EDIT\n"
 
 SCRIPT_DIR = Path(__file__).parent
 DEFAULT_TARGET_FILE = SCRIPT_DIR.parent / "helpers" / "friendly_id.py"
+
+# Below this, something is badly wrong (filter drift, --limit misuse) rather
+# than a legitimate narrow pool -- refuse to write it. get_friendly_id()
+# indexes into the pool unconditionally, so an empty/tiny one breaks every
+# draft creation, not just this script.
+MIN_POOL_SIZE = 100
 
 
 def fetch_bytes(url: str) -> bytes:
@@ -158,6 +165,13 @@ def main():
     if args.limit is not None:
         ids = ids[: args.limit]
 
+    if len(ids) < MIN_POOL_SIZE:
+        sys.exit(
+            f"Only generated {len(ids)} ids (minimum {MIN_POOL_SIZE}) -- refusing to "
+            "write a pool this small. Check --min-length/--max-length/--limit, or "
+            "whether Scryfall's card data or filters changed."
+        )
+
     inject_friendly_ids(args.target_file, ids)
 
     print(f"Wrote {len(ids)} friendly ids into {args.target_file}")
@@ -182,7 +196,17 @@ def inject_friendly_ids(target_file: Path, ids: list) -> None:
 
     before_marker = content.split(MARKER, 1)[0]
     new_content = before_marker + MARKER + render_list_literal(ids) + "\n"
-    target_file.write_text(new_content)
+
+    # Write-then-rename so a crash or interrupt mid-write can't leave
+    # target_file (a real source file used elsewhere) truncated or corrupt.
+    fd, tmp_path = tempfile.mkstemp(dir=target_file.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(new_content)
+        os.replace(tmp_path, target_file)
+    except BaseException:
+        os.unlink(tmp_path)
+        raise
 
 
 if __name__ == "__main__":
