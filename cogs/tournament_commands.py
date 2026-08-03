@@ -14,6 +14,7 @@ from services.tournament_formatter import create_standings_embed, update_standin
 from services.tournament_service import (
     advance_round,
     add_match,
+    count_unreported_matches,
     create_tournament,
     finish_tournament,
     find_current_match,
@@ -728,6 +729,8 @@ class TournamentCog(commands.Cog):
             standings = await get_standings_data(session, tournament.id)
             # Only teams that actually completed registration can win the pot.
             ranked = [(p.captain_user_id, p.team_name) for p in standings if p.status == "paid"]
+            # A tournament can be finished early with results still missing — warn before paying.
+            unreported = await count_unreported_matches(session, tournament.id)
 
         if fee <= 0:
             await ctx.followup.send(f"**{t_name}** had no entry fee — nothing to pay out.", ephemeral=True)
@@ -745,13 +748,19 @@ class TournamentCog(commands.Cog):
             return
 
         # Preview + require confirmation before disbursing real value.
+        warning = ""
+        if unreported > 0:
+            warning = (f"\n\n⚠️ **{unreported} match(es) still unreported** — these count as 0–0, so "
+                       f"standings may not be final. Report the results first unless you're finishing "
+                       f"intentionally.")
         embed = discord.Embed(
             title=f"Confirm payout — {t_name} (#{t_id})",
             description=(
                 f"Prize pool: **{pool} tix** · Split: **{escrow.describe_structure(struct)}**\n\n"
-                f"{_format_payout_lines(allocations)}\n\n"
+                f"{_format_payout_lines(allocations)}"
+                f"{warning}\n\n"
                 f"This credits real tix to the winners' wallets and can't be undone."),
-            color=discord.Color.gold(),
+            color=discord.Color.orange() if unreported > 0 else discord.Color.gold(),
         )
         view = PayoutConfirmView(
             str(ctx.guild.id), t_id, t_name, pool, struct, allocations, ctx.author.id)

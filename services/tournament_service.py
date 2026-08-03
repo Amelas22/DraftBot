@@ -524,6 +524,25 @@ async def get_standings_data(session, tournament_id):
     return rank_standings(participants, matches)
 
 
+async def count_unreported_matches(session, tournament_id):
+    """Non-bye matches in this tournament with no result yet (team_a_wins IS NULL).
+
+    A tournament can be finished (status='completed') with matches still unreported — those
+    count as 0-0, so standings aren't truly final. Payout surfaces this before disbursing.
+    """
+    stmt = (
+        select(func.count())
+        .select_from(TournamentMatch)
+        .join(TournamentRound, TournamentMatch.round_id == TournamentRound.id)
+        .where(
+            TournamentRound.tournament_id == tournament_id,
+            TournamentMatch.is_bye.is_(False),
+            TournamentMatch.team_a_wins.is_(None),
+        )
+    )
+    return int((await session.execute(stmt)).scalar_one())
+
+
 async def tournament_match_is_unfinished(session, match_id):
     """True iff the tournament match exists, isn't a bye, and has no result yet."""
     if not match_id:
