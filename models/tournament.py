@@ -55,7 +55,8 @@ class TournamentParticipant(Base):
     # escrow isn't secured yet. Only 'paid' participants are seeded when the tournament starts.
     status = Column(String(16), nullable=False, default='paid', server_default=text("'paid'"))
     # The captain's WalletTx reserve holding the fee — cancelled to refund (drop before
-    # start), retained as the pot after start. Null for free/grandfathered participants.
+    # start), or settled into the tournament's prize wallet when it starts. Null for
+    # free / grandfathered / comped participants.
     escrow_tx_id = Column(Integer, nullable=True)
     paid_at = Column(DateTime, nullable=True)
 

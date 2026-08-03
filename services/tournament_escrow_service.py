@@ -8,10 +8,14 @@ with a per-participant ``source`` so it's idempotent and refundable:
               flip the participant to 'paid'. Reusing an existing reserve makes it safe to
               retry after a crash between reserving and marking paid.
   * refund  — cancel the reserve (drop before start); the tix become spendable again.
-  * on start — nothing moves: the reserve simply stays (now non-refundable). It is never
-              *settled*, because settling would remove tix from the captain's wallet with no
-              holder to receive them, breaking the vault == SUM(wallets) audit. The held
-              reserves ARE the pot; a future payout phase settles + redistributes them.
+  * on start — reallocate: each held reserve moves into the tournament's PRIZE WALLET
+              (settle the captain's reserve to 'done' AND credit the prize wallet the same
+              amount, in one transaction). That's an internal transfer, so vault ==
+              SUM(wallets) is preserved; the prize wallet now holds the pot, and a future
+              payout phase pays it out to the winners.
+
+The prize wallet is an ordinary wallet holder with a synthetic id (``prize:tourney:<id>``), so
+it's counted by the reconciliation audit and can later ``pay`` out to winners like any wallet.
 """
 from datetime import datetime
 
@@ -27,6 +31,11 @@ from services import wallet_service
 def escrow_source(tournament_id, participant_id) -> str:
     """Stable per-participant tag on the reserve (idempotency + refund handle + pot sum)."""
     return f"tourney:{tournament_id}:{participant_id}"
+
+
+def prize_wallet_id(tournament_id) -> str:
+    """Synthetic wallet holder for a tournament's prize pool (an ordinary WalletTx player_id)."""
+    return f"prize:tourney:{tournament_id}"
 
 
 async def mark_paid(participant_id: int, reserve_tx_id: int) -> bool:
@@ -134,3 +143,53 @@ async def total_escrowed(guild_id: str, tournament_id: int) -> int:
             )
         )
         return int(-(result.scalar() or 0))  # reserves are negative; report positive held
+
+
+async def reallocate_to_prize(session, guild_id: str, tournament_id: int) -> dict:
+    """Move every held escrow reserve into the tournament's prize wallet — run INSIDE the
+    caller's session so it commits atomically with ``start_tournament`` (seed + reallocate
+    together, or neither).
+
+    For each paid participant still holding a pending 'escrow' reserve: settle that reserve to
+    'done' (the captain's tix leave their wallet) AND credit the prize wallet the same amount
+    ('done'). Because it's an internal transfer, SUM(done) — and thus the vault==wallets audit —
+    is unchanged. Idempotent: a reserve that's already settled/cancelled is skipped, so a
+    re-run moves nothing. Returns {moved, count, prize_id}."""
+    prize_id = prize_wallet_id(tournament_id)
+    parts = (await session.execute(
+        select(TournamentParticipant).where(
+            TournamentParticipant.tournament_id == tournament_id,
+            TournamentParticipant.status == "paid",
+            TournamentParticipant.escrow_tx_id.isnot(None),
+        ))).scalars().all()
+
+    moved = 0
+    count = 0
+    for p in parts:
+        tx = await session.get(WalletTx, p.escrow_tx_id)
+        if tx is None or tx.status != "pending":
+            continue  # comped (no reserve), already reallocated, or refunded
+        fee = -tx.amount  # the reserve is a negative debit
+        tx.status = "done"  # settle the captain's debit
+        session.add(WalletTx(
+            guild_id=guild_id, player_id=prize_id, kind="receive", amount=fee, status="done",
+            counterparty_id=p.captain_user_id, source=f"prize:{tournament_id}:{p.id}",
+            notes=f"entry fee to prize pool: {p.team_name}"))
+        moved += fee
+        count += 1
+    await session.flush()
+    logger.info(f"prize reallocation: tournament {tournament_id} moved {moved} tix "
+                f"from {count} team(s) into {prize_id}")
+    return {"moved": moved, "count": count, "prize_id": prize_id}
+
+
+async def prize_pool(guild_id: str, tournament_id: int) -> int:
+    """The tournament's prize wallet balance (settled tix available to pay out)."""
+    async with db_session() as session:
+        result = await session.execute(
+            select(func.coalesce(func.sum(WalletTx.amount), 0)).where(
+                WalletTx.guild_id == guild_id,
+                WalletTx.player_id == prize_wallet_id(tournament_id),
+                WalletTx.status == "done",
+            ))
+        return int(result.scalar() or 0)

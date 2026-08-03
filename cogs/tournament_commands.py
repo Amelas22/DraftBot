@@ -491,9 +491,17 @@ class TournamentCog(commands.Cog):
                     return
                 tournament_id = tournament.id
                 tournament_name = tournament.name
+                fee = tournament.entry_fee or 0
                 await start_tournament(session, tournament.id, random.Random())
+                # Reallocate held escrow into the prize wallet in the SAME transaction, so
+                # seeding and the pot move commit together (or neither does).
+                pot = 0
+                if fee > 0:
+                    pot = (await escrow.reallocate_to_prize(
+                        session, str(ctx.guild.id), tournament_id))["moved"]
             logger.info(f"Tournament {tournament_id} started in guild {ctx.guild.id} by {ctx.author.id}")
-            await ctx.followup.send(f"🏆 **{tournament_name}** has started!")
+            pot_line = f" 🏦 Prize pool: **{pot} tix**." if fee > 0 else ""
+            await ctx.followup.send(f"🏆 **{tournament_name}** has started!{pot_line}")
             await self._post_schedule(ctx, tournament_id)
             await self._post_standings(ctx, tournament_id)
         except ValueError as e:
@@ -738,6 +746,7 @@ class TournamentCog(commands.Cog):
             return
         await ctx.defer()
         registration = False
+        active_fee = 0
         async with db_session() as session:
             tournament = await get_active_tournament(session, ctx.guild.id)
             if tournament is None:
@@ -752,9 +761,14 @@ class TournamentCog(commands.Cog):
             else:
                 participants = await get_standings_data(session, tournament.id)
                 embed = create_standings_embed(tournament, participants)
+                active_fee = tournament.entry_fee or 0
+                active_id = tournament.id
         if registration:
             held = await escrow.total_escrowed(str(ctx.guild.id), t_id) if fee > 0 else 0
             embed = self._registration_embed(t_name, t_status, parts, fee, held)
+        elif active_fee > 0:
+            pool = await escrow.prize_pool(str(ctx.guild.id), active_id)
+            embed.add_field(name="🏦 Prize pool", value=f"{pool} tix", inline=False)
         await ctx.followup.send(embed=embed)
 
     def _registration_embed(self, name, status, parts, fee=0, held=0):
