@@ -109,6 +109,9 @@ async def register_team(session, tournament_id, team_name, captain_user_id):
         team_id=team.TeamID,
         team_name=team.TeamName,
         captain_user_id=str(captain_user_id),
+        # A paid tournament starts a new team as 'pending' until escrow is secured;
+        # a free tournament (entry_fee 0) leaves it 'paid' (the column default).
+        status="pending" if (tournament.entry_fee or 0) > 0 else "paid",
     )
     session.add(participant)
     await session.flush()
@@ -225,17 +228,22 @@ async def start_tournament(session, tournament_id, rng):
     if tournament.status != "registration":
         raise ValueError(f"'{tournament.name}' is already {tournament.status}.")
     participants = await list_participants(session, tournament_id)
-    if len(participants) < 2:
-        raise ValueError("At least 2 teams must be registered to start.")
+    # Only teams that completed registration (escrow paid) are seeded. Free
+    # tournaments mark everyone 'paid', so this is a no-op there.
+    paid = [p for p in participants if p.status == "paid"]
+    if len(paid) < 2:
+        raise ValueError(
+            "At least 2 teams must have completed registration (entry fee paid) to start."
+        )
 
     tournament.status = "active"
     if tournament.format == "round_robin":
-        return await _build_round_robin(session, tournament, participants, rng)
+        return await _build_round_robin(session, tournament, paid, rng)
     if tournament.format == "manual":
         return await _open_manual_schedule(session, tournament)
 
     _, matches = await _create_round_with_pairings(
-        session, tournament, participants, set(), rng
+        session, tournament, paid, set(), rng
     )
     return matches
 
@@ -262,6 +270,11 @@ async def add_match(session, tournament_id, team_a_name, team_b_name):
         raise ValueError(f"'{missing}' is not registered for this tournament.")
     if a.id == b.id:
         raise ValueError("A team can't be scheduled against itself.")
+    unpaid = [p.team_name for p in (a, b) if p.status != "paid"]
+    if unpaid:
+        raise ValueError(
+            f"{' and '.join(unpaid)} hasn't completed registration (entry fee unpaid)."
+        )
 
     rounds = (await session.execute(
         select(TournamentRound)

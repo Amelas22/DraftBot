@@ -32,7 +32,7 @@ from sqlalchemy.exc import OperationalError
 from database.db_session import db_session
 from models.wallet_tx import WalletTx
 
-VALID_KINDS = {"deposit", "withdraw", "pay", "receive", "adjust"}
+VALID_KINDS = {"deposit", "withdraw", "pay", "receive", "adjust", "escrow"}
 
 
 @dataclass
@@ -145,6 +145,23 @@ async def get_history(guild_id: str, player_id: str = None, limit: int = 25) -> 
         query = query.order_by(WalletTx.created_at.desc(), WalletTx.id.desc()).limit(limit)
         result = await session.execute(query)
         return list(result.scalars().all())
+
+
+async def get_pending_reserve(guild_id: str, player_id: str, source: str) -> WalletTx | None:
+    """The player's outstanding ('pending') reserve carrying this exact ``source`` tag, or
+    None. Lets a reservation be made idempotent: re-securing the same tournament entry can
+    reuse the existing hold instead of stacking a second one (e.g. after a crash between
+    reserving and marking the participant paid)."""
+    async with db_session() as session:
+        result = await session.execute(
+            select(WalletTx).where(
+                WalletTx.guild_id == guild_id,
+                WalletTx.player_id == player_id,
+                WalletTx.source == source,
+                WalletTx.status == "pending",
+            ).order_by(WalletTx.id).limit(1)
+        )
+        return result.scalars().first()
 
 
 # ---------------------------------------------------------------------------
