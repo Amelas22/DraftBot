@@ -22,6 +22,7 @@ from .debt_summary_message import DebtSummaryMessage
 from .tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
 from .trophy_quiz_session import TrophyQuizSession
 from .trophy_quiz_submission import TrophyQuizSubmission
+from .mtgo_account import MtgoAccount
 
 # Export all models
 __all__ = [
@@ -61,4 +62,5 @@ __all__ = [
     'TournamentMatch',
     'TrophyQuizSession',
     'TrophyQuizSubmission',
+    'MtgoAccount',
 ]
