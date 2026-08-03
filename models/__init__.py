@@ -23,6 +23,7 @@ from .tournament import Tournament, TournamentMatch, TournamentParticipant, Tour
 from .trophy_quiz_session import TrophyQuizSession
 from .trophy_quiz_submission import TrophyQuizSubmission
 from .mtgo_account import MtgoAccount
+from .wallet_tx import WalletTx
 
 # Export all models
 __all__ = [
@@ -63,4 +64,5 @@ __all__ = [
     'TrophyQuizSession',
     'TrophyQuizSubmission',
     'MtgoAccount',
+    'WalletTx',
 ]
