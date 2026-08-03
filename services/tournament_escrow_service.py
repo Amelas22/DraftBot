@@ -38,6 +38,48 @@ def prize_wallet_id(tournament_id) -> str:
     return f"prize:tourney:{tournament_id}"
 
 
+# Prize-pool split presets (top-heavy, per MTG convention). Ratios need not sum to 100 —
+# compute_allocations normalizes by the sum of the places actually paid.
+PAYOUT_STRUCTURES = {
+    "winner_take_all": [100],
+    "top2": [65, 35],
+    "top3": [50, 30, 20],
+    "top4": [40, 30, 20, 10],
+}
+
+
+def describe_structure(name: str) -> str:
+    ratios = PAYOUT_STRUCTURES.get(name)
+    if not ratios:
+        return name
+    if name == "winner_take_all":
+        return "winner-take-all"
+    return f"top {len(ratios)} ({'/'.join(str(r) for r in ratios)})"
+
+
+def compute_allocations(pool: int, structure: str, ranked: list) -> list:
+    """Split ``pool`` tix over the ranked teams by the named structure.
+
+    ``ranked`` is [(captain_id, team_name)] in finish order (1st first). Returns
+    [(place, captain_id, team_name, amount)] for amounts > 0. Integer tix; the whole pool is
+    always distributed — normalized to the places actually paid (so fewer teams than the
+    structure names just concentrates the split), with the rounding remainder going to 1st."""
+    ratios = PAYOUT_STRUCTURES.get(structure) or PAYOUT_STRUCTURES["winner_take_all"]
+    n = min(len(ratios), len(ranked))
+    if n == 0 or pool <= 0:
+        return []
+    ratios = ratios[:n]
+    total_ratio = sum(ratios)
+    amounts = [pool * r // total_ratio for r in ratios]  # floor
+    amounts[0] += pool - sum(amounts)  # remainder (and any truncated tail) -> 1st
+    out = []
+    for i in range(n):
+        if amounts[i] > 0:
+            captain_id, team_name = ranked[i]
+            out.append((i + 1, captain_id, team_name, amounts[i]))
+    return out
+
+
 async def mark_paid(participant_id: int, reserve_tx_id: int) -> bool:
     """Flip a participant to 'paid', recording the reserve that backs its escrow."""
     async with db_session() as session:
@@ -193,3 +235,54 @@ async def prize_pool(guild_id: str, tournament_id: int) -> int:
                 WalletTx.status == "done",
             ))
         return int(result.scalar() or 0)
+
+
+def _payout_like(tournament_id) -> str:
+    return f"payout:{tournament_id}:%"
+
+
+async def is_paid_out(tournament_id: int) -> bool:
+    """True once any payout has been booked for this tournament (idempotency guard)."""
+    async with db_session() as session:
+        r = await session.execute(
+            select(WalletTx.id).where(WalletTx.source.like(_payout_like(tournament_id))).limit(1))
+        return r.scalar() is not None
+
+
+async def execute_payout(guild_id: str, tournament_id: int, allocations: list) -> dict:
+    """Disburse the prize pool to the winners' captains, atomically in one transaction.
+
+    ``allocations`` is [(place, captain_id, team_name, amount)]. For each, debits the prize
+    wallet and credits the captain (an internal transfer, so vault==SUM(wallets) holds).
+    Idempotent by source ``payout:<tid>:<place>`` — a re-run books nothing. Refuses to pay
+    more than the pool holds. Returns {ok, already_paid?, paid, total, pool} or {ok:False,error}."""
+    prize_id = prize_wallet_id(tournament_id)
+    async with db_session() as session:
+        already = await session.execute(
+            select(WalletTx.id).where(WalletTx.source.like(_payout_like(tournament_id))).limit(1))
+        if already.scalar():
+            return {"ok": True, "already_paid": True}
+
+        pool = int((await session.execute(
+            select(func.coalesce(func.sum(WalletTx.amount), 0)).where(
+                WalletTx.guild_id == guild_id, WalletTx.player_id == prize_id,
+                WalletTx.status == "done"))).scalar() or 0)
+        total = sum(amount for _, _, _, amount in allocations)
+        if total > pool:
+            return {"ok": False, "error": f"allocations ({total}) exceed the prize pool ({pool})"}
+
+        for place, captain_id, team_name, amount in allocations:
+            if amount <= 0:
+                continue
+            source = f"payout:{tournament_id}:{place}"
+            note = f"tournament prize (place {place}): {team_name}"
+            session.add(WalletTx(
+                guild_id=guild_id, player_id=prize_id, kind="pay", amount=-amount, status="done",
+                counterparty_id=captain_id, source=source, notes=note))
+            session.add(WalletTx(
+                guild_id=guild_id, player_id=captain_id, kind="receive", amount=amount, status="done",
+                counterparty_id=prize_id, source=source, notes=note))
+        await session.flush()
+        logger.info(f"payout: tournament {tournament_id} distributed {total} tix to "
+                    f"{len(allocations)} team(s)")
+        return {"ok": True, "paid": allocations, "total": total, "pool": pool}

@@ -18,6 +18,7 @@ from services.tournament_service import (
     finish_tournament,
     find_current_match,
     get_active_tournament,
+    get_latest_completed_tournament,
     get_standings_data,
     list_participants,
     register_team,
@@ -228,6 +229,10 @@ class TournamentCog(commands.Cog):
         entry_fee: discord.Option(
             int, "Per-team entry fee in tix (0 = free)", min_value=0, default=0
         ),
+        payout: discord.Option(
+            str, "Prize-pool split for entry-fee tournaments",
+            choices=["winner_take_all", "top2", "top3", "top4"], default="winner_take_all"
+        ),
     ):
         if not await self._check_enabled(ctx):
             return
@@ -245,13 +250,14 @@ class TournamentCog(commands.Cog):
         try:
             async with db_session() as session:
                 tournament = await create_tournament(
-                    session, ctx.guild.id, name, total_rounds, format=format, entry_fee=entry_fee
+                    session, ctx.guild.id, name, total_rounds, format=format,
+                    entry_fee=entry_fee, payout_structure=payout
                 )
             logger.info(f"Tournament '{name}' ({format}) created in guild {ctx.guild.id} by {ctx.author.id}")
             detail = f"{tournament.total_rounds} rounds" if format == "swiss" else format.replace("_", "-")
             fee_line = (
                 f" Entry fee: **{entry_fee} {EVENT_TICKET}(s)** per team — a team is registered "
-                f"once its captain's escrow is received."
+                f"once its captain's escrow is received. Payout: **{escrow.describe_structure(payout)}**."
                 if entry_fee > 0 else ""
             )
             await ctx.followup.send(
@@ -566,13 +572,79 @@ class TournamentCog(commands.Cog):
                     return
                 tournament_id = tournament.id
                 tournament_name = tournament.name
+                fee = tournament.entry_fee or 0
                 champion = await finish_tournament(session, tournament.id)
             champ_text = f"Champion: **{champion.team_name}** 🏆" if champion else "No teams competed."
             logger.info(f"Tournament {tournament_id} finished in guild {ctx.guild.id} by {ctx.author.id}")
-            await ctx.followup.send(f"🏁 **{tournament_name}** is complete! {champ_text}")
+            payout_hint = ""
+            if fee > 0:
+                pool = await escrow.prize_pool(str(ctx.guild.id), tournament_id)
+                if pool > 0 and not await escrow.is_paid_out(tournament_id):
+                    payout_hint = f"\n🏦 Prize pool: **{pool} tix** — run `/tournament payout` to distribute it."
+            await ctx.followup.send(f"🏁 **{tournament_name}** is complete! {champ_text}{payout_hint}")
             await update_standings_message(self.bot, tournament_id)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
+
+    @tournament.command(name="payout", description="Admin: distribute the prize pool to the winners")
+    @has_bot_manager_role()
+    async def payout(
+        self,
+        ctx,
+        structure: discord.Option(
+            str, "Override the declared payout split",
+            choices=["winner_take_all", "top2", "top3", "top4"], required=False, default=None
+        ),
+    ):
+        if not await self._check_enabled(ctx):
+            return
+        await ctx.defer()
+        async with db_session() as session:
+            tournament = await get_latest_completed_tournament(session, ctx.guild.id)
+            if tournament is None:
+                await ctx.followup.send("There is no completed tournament to pay out.", ephemeral=True)
+                return
+            t_id, t_name = tournament.id, tournament.name
+            fee = tournament.entry_fee or 0
+            struct = structure or tournament.payout_structure or "winner_take_all"
+            standings = await get_standings_data(session, tournament.id)
+            # Only teams that actually completed registration can win the pot.
+            ranked = [(p.captain_user_id, p.team_name) for p in standings if p.status == "paid"]
+
+        if fee <= 0:
+            await ctx.followup.send(f"**{t_name}** had no entry fee — nothing to pay out.", ephemeral=True)
+            return
+        if await escrow.is_paid_out(t_id):
+            await ctx.followup.send(f"**{t_name}** has already been paid out.", ephemeral=True)
+            return
+        pool = await escrow.prize_pool(str(ctx.guild.id), t_id)
+        if pool <= 0:
+            await ctx.followup.send(f"**{t_name}** has no prize pool to distribute.", ephemeral=True)
+            return
+        allocations = escrow.compute_allocations(pool, struct, ranked)
+        if not allocations:
+            await ctx.followup.send("No eligible winners to pay.", ephemeral=True)
+            return
+
+        res = await escrow.execute_payout(str(ctx.guild.id), t_id, allocations)
+        if not res.get("ok"):
+            await ctx.followup.send(f"❌ Payout failed: {res.get('error')}", ephemeral=True)
+            return
+        if res.get("already_paid"):
+            await ctx.followup.send(f"**{t_name}** was already paid out.", ephemeral=True)
+            return
+
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+        lines = "\n".join(
+            f"{medals.get(place, f'{place}.')} <@{cap}> (**{name}**) — **{amt} tix**"
+            for place, cap, name, amt in allocations
+        )
+        logger.info(f"Tournament {t_id} paid out {res['total']} tix in guild {ctx.guild.id} by {ctx.author.id}")
+        await ctx.followup.send(
+            f"🏦 **{t_name}** — prize pool of **{pool} tix** paid out "
+            f"(*{escrow.describe_structure(struct)}*):\n{lines}\n"
+            f"Winners can `/wallet withdraw` to MTGO or `/wallet pay` teammates."
+        )
 
     @tournament.command(name="next_round", description="Admin: pair the next Swiss round (all results must be in)")
     @has_bot_manager_role()
@@ -757,6 +829,7 @@ class TournamentCog(commands.Cog):
                 registration = True
                 t_id, t_name, t_status = tournament.id, tournament.name, tournament.status
                 fee = tournament.entry_fee or 0
+                payout_struct = tournament.payout_structure or "winner_take_all"
                 parts = [(p.team_name, p.captain_user_id, p.status) for p in participants]
             else:
                 participants = await get_standings_data(session, tournament.id)
@@ -765,16 +838,18 @@ class TournamentCog(commands.Cog):
                 active_id = tournament.id
         if registration:
             held = await escrow.total_escrowed(str(ctx.guild.id), t_id) if fee > 0 else 0
-            embed = self._registration_embed(t_name, t_status, parts, fee, held)
+            embed = self._registration_embed(t_name, t_status, parts, fee, held, payout_struct)
         elif active_fee > 0:
             pool = await escrow.prize_pool(str(ctx.guild.id), active_id)
             embed.add_field(name="🏦 Prize pool", value=f"{pool} tix", inline=False)
         await ctx.followup.send(embed=embed)
 
-    def _registration_embed(self, name, status, parts, fee=0, held=0):
+    def _registration_embed(self, name, status, parts, fee=0, held=0, payout_struct=None):
         desc = f"**Status:** {status.title()}"
         if fee > 0:
             desc += f"\n**Entry fee:** {fee} tix/team · **Escrow held:** {held} tix"
+            if payout_struct:
+                desc += f"\n**Payout:** {escrow.describe_structure(payout_struct)}"
         embed = discord.Embed(title=f"🏆 {name}", description=desc, color=discord.Color.gold())
         if parts:
             teams = "\n".join(

@@ -31,6 +31,10 @@ class Tournament(Base):
     # registering captain must have the fee held in their wallet before the team counts
     # as registered (see services/tournament_escrow_service.py).
     entry_fee = Column(Integer, nullable=False, default=0, server_default=text('0'))
+    # How the prize pool is split at payout, declared up front so entrants know it before
+    # they pay: 'winner_take_all' | 'top2' | 'top3' | 'top4' (see PAYOUT_STRUCTURES).
+    payout_structure = Column(String(32), nullable=False, default='winner_take_all',
+                              server_default=text("'winner_take_all'"))
     created_at = Column(DateTime, default=datetime.now)
     # Where the auto-updating standings message lives (edited in place on every result)
     standings_channel_id = Column(String(64), nullable=True)
