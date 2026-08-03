@@ -167,6 +167,106 @@ async def re_register_tournament_views(bot):
     logger.info(f"Re-registered {len(matches)} tournament play buttons")
 
 
+_PLACE_MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
+
+
+def _format_payout_lines(allocations):
+    """Render [(place, captain_id, team_name, amount)] as medal-prefixed payout lines."""
+    return "\n".join(
+        f"{_PLACE_MEDALS.get(place, f'{place}.')} <@{cap}> (**{name}**) — **{amt} tix**"
+        for place, cap, name, amt in allocations
+    )
+
+
+class PayoutConfirmView(discord.ui.View):
+    """Final confirmation before disbursing a prize pool. Mirrors SettlementConfirmView:
+    invoker-only, 120s timeout, double-click guarded. Disburses only on Confirm; the actual
+    transfer (escrow.execute_payout) is idempotent, so a race can't double-pay."""
+
+    def __init__(self, guild_id, tournament_id, t_name, pool, struct, allocations, author_id):
+        super().__init__(timeout=120)
+        self.guild_id = guild_id
+        self.tournament_id = tournament_id
+        self.t_name = t_name
+        self.pool = pool
+        self.struct = struct
+        self.allocations = allocations
+        self.author_id = str(author_id)
+        self.message = None
+        self._processing = False
+
+    async def interaction_check(self, interaction):
+        if str(interaction.user.id) != self.author_id:
+            await interaction.response.send_message(
+                "Only the admin who started this payout can confirm it.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm payout", style=discord.ButtonStyle.success, emoji="🏦")
+    async def confirm(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if self._processing:
+            await interaction.response.send_message("Payout is already processing…", ephemeral=True)
+            return
+        self._processing = True
+        await interaction.response.defer()
+        for item in self.children:
+            item.disabled = True
+        try:
+            res = await escrow.execute_payout(self.guild_id, self.tournament_id, self.allocations)
+            if not res.get("ok"):
+                self._processing = False
+                for item in self.children:
+                    item.disabled = False
+                await interaction.edit_original_response(
+                    content=f"❌ Payout failed: {res.get('error')}", view=self)
+                return
+            if res.get("already_paid"):
+                await interaction.edit_original_response(
+                    content=f"**{self.t_name}** was already paid out.", embed=None, view=None)
+                self.stop()
+                return
+            await interaction.edit_original_response(
+                content=f"✅ Paid out **{res['total']} tix** for **{self.t_name}**.", embed=None, view=None)
+            announcement = (
+                f"🏦 **{self.t_name}** — prize pool of **{self.pool} tix** paid out "
+                f"(*{escrow.describe_structure(self.struct)}*):\n{_format_payout_lines(self.allocations)}\n"
+                f"Winners can `/wallet withdraw` to MTGO or `/wallet pay` teammates."
+            )
+            try:
+                await interaction.channel.send(announcement)
+            except Exception as e:
+                logger.warning(f"[PayoutConfirm] public announcement failed: {e}")
+            logger.info(f"Tournament {self.tournament_id} paid out {res['total']} tix by {interaction.user.id}")
+            self.stop()
+        except Exception as e:
+            logger.error(f"[PayoutConfirm] execute failed: {e}")
+            self._processing = False
+            for item in self.children:
+                item.disabled = False
+            try:
+                await interaction.edit_original_response(content=f"❌ Payout error: {e}", view=self)
+            except Exception:
+                pass
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if self._processing:
+            await interaction.response.send_message("Payout is processing, can't cancel now.", ephemeral=True)
+            return
+        await interaction.response.edit_message(content="Payout cancelled.", embed=None, view=None)
+        self.stop()
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(content="Payout confirmation expired — run `/tournament payout` again.",
+                                        embed=None, view=None)
+            except Exception:
+                pass
+
+
 class TournamentCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -580,17 +680,22 @@ class TournamentCog(commands.Cog):
             if fee > 0:
                 pool = await escrow.prize_pool(str(ctx.guild.id), tournament_id)
                 if pool > 0 and not await escrow.is_paid_out(tournament_id):
-                    payout_hint = f"\n🏦 Prize pool: **{pool} tix** — run `/tournament payout` to distribute it."
-            await ctx.followup.send(f"🏁 **{tournament_name}** is complete! {champ_text}{payout_hint}")
+                    payout_hint = (f"\n🏦 Prize pool: **{pool} tix** — run `/tournament payout` "
+                                   f"(this tournament is #{tournament_id}) to distribute it.")
+            await ctx.followup.send(f"🏁 **{tournament_name}** (#{tournament_id}) is complete! {champ_text}{payout_hint}")
             await update_standings_message(self.bot, tournament_id)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
 
-    @tournament.command(name="payout", description="Admin: distribute the prize pool to the winners")
+    @tournament.command(name="payout", description="Admin: distribute a tournament's prize pool to the winners")
     @has_bot_manager_role()
     async def payout(
         self,
         ctx,
+        tournament_id: discord.Option(
+            int, "Which tournament to pay out (defaults to the most recently finished)",
+            required=False, default=None
+        ),
         structure: discord.Option(
             str, "Override the declared payout split",
             choices=["winner_take_all", "top2", "top3", "top4"], required=False, default=None
@@ -598,12 +703,25 @@ class TournamentCog(commands.Cog):
     ):
         if not await self._check_enabled(ctx):
             return
-        await ctx.defer()
+        await ctx.defer(ephemeral=True)
         async with db_session() as session:
-            tournament = await get_latest_completed_tournament(session, ctx.guild.id)
-            if tournament is None:
-                await ctx.followup.send("There is no completed tournament to pay out.", ephemeral=True)
-                return
+            if tournament_id is not None:
+                tournament = await session.get(Tournament, tournament_id)
+                if tournament is None or str(tournament.guild_id) != str(ctx.guild.id):
+                    await ctx.followup.send(f"No tournament #{tournament_id} in this server.", ephemeral=True)
+                    return
+                if tournament.status != "completed":
+                    await ctx.followup.send(
+                        f"**{tournament.name}** is {tournament.status}, not completed — only a "
+                        f"finished tournament can be paid out.", ephemeral=True)
+                    return
+            else:
+                tournament = await get_latest_completed_tournament(session, ctx.guild.id)
+                if tournament is None:
+                    await ctx.followup.send(
+                        "There is no completed tournament to pay out. Pass a `tournament_id` to target one.",
+                        ephemeral=True)
+                    return
             t_id, t_name = tournament.id, tournament.name
             fee = tournament.entry_fee or 0
             struct = structure or tournament.payout_structure or "winner_take_all"
@@ -615,7 +733,7 @@ class TournamentCog(commands.Cog):
             await ctx.followup.send(f"**{t_name}** had no entry fee — nothing to pay out.", ephemeral=True)
             return
         if await escrow.is_paid_out(t_id):
-            await ctx.followup.send(f"**{t_name}** has already been paid out.", ephemeral=True)
+            await ctx.followup.send(f"**{t_name}** (#{t_id}) has already been paid out.", ephemeral=True)
             return
         pool = await escrow.prize_pool(str(ctx.guild.id), t_id)
         if pool <= 0:
@@ -623,28 +741,21 @@ class TournamentCog(commands.Cog):
             return
         allocations = escrow.compute_allocations(pool, struct, ranked)
         if not allocations:
-            await ctx.followup.send("No eligible winners to pay.", ephemeral=True)
+            await ctx.followup.send("No eligible (paid) winners to pay.", ephemeral=True)
             return
 
-        res = await escrow.execute_payout(str(ctx.guild.id), t_id, allocations)
-        if not res.get("ok"):
-            await ctx.followup.send(f"❌ Payout failed: {res.get('error')}", ephemeral=True)
-            return
-        if res.get("already_paid"):
-            await ctx.followup.send(f"**{t_name}** was already paid out.", ephemeral=True)
-            return
-
-        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-        lines = "\n".join(
-            f"{medals.get(place, f'{place}.')} <@{cap}> (**{name}**) — **{amt} tix**"
-            for place, cap, name, amt in allocations
+        # Preview + require confirmation before disbursing real value.
+        embed = discord.Embed(
+            title=f"Confirm payout — {t_name} (#{t_id})",
+            description=(
+                f"Prize pool: **{pool} tix** · Split: **{escrow.describe_structure(struct)}**\n\n"
+                f"{_format_payout_lines(allocations)}\n\n"
+                f"This credits real tix to the winners' wallets and can't be undone."),
+            color=discord.Color.gold(),
         )
-        logger.info(f"Tournament {t_id} paid out {res['total']} tix in guild {ctx.guild.id} by {ctx.author.id}")
-        await ctx.followup.send(
-            f"🏦 **{t_name}** — prize pool of **{pool} tix** paid out "
-            f"(*{escrow.describe_structure(struct)}*):\n{lines}\n"
-            f"Winners can `/wallet withdraw` to MTGO or `/wallet pay` teammates."
-        )
+        view = PayoutConfirmView(
+            str(ctx.guild.id), t_id, t_name, pool, struct, allocations, ctx.author.id)
+        view.message = await ctx.followup.send(embed=embed, view=view, ephemeral=True)
 
     @tournament.command(name="next_round", description="Admin: pair the next Swiss round (all results must be in)")
     @has_bot_manager_role()
