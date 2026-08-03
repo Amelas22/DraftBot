@@ -19,7 +19,7 @@ from loguru import logger
 from sqlalchemy import func, select
 
 from database.db_session import db_session
-from models.tournament import TournamentParticipant
+from models.tournament import Tournament, TournamentParticipant
 from models.wallet_tx import WalletTx
 from services import wallet_service
 
@@ -78,6 +78,38 @@ async def secure_from_wallet(guild_id: str, captain_id: str, participant_id: int
 
     await mark_paid(participant_id, reserve.id)
     return {"ok": True, "done": True, "reserved": fee}
+
+
+async def drop_with_refund(tournament_id: int, team_name: str) -> dict:
+    """Remove a team AND release its escrow hold, atomically in one transaction (so the
+    participant delete and the reserve cancel can never half-apply — a team can't end up
+    seeded-but-unpaid, nor deleted-but-still-holding tix). Registration phase only.
+
+    Returns {team_name, refunded}. Raises ValueError like tournament_service.remove_team."""
+    async with db_session() as session:
+        tournament = await session.get(Tournament, tournament_id)
+        if tournament is None:
+            raise ValueError("Tournament not found.")
+        if tournament.status != "registration":
+            raise ValueError(f"Teams cannot be removed once '{tournament.name}' has started.")
+        stmt = select(TournamentParticipant).where(
+            TournamentParticipant.tournament_id == tournament_id,
+            func.lower(TournamentParticipant.team_name) == team_name.strip().lower(),
+        )
+        p = (await session.execute(stmt)).scalars().first()
+        if p is None:
+            raise ValueError(f"'{team_name}' is not registered for this tournament.")
+        refunded = 0
+        if p.escrow_tx_id:
+            tx = await session.get(WalletTx, p.escrow_tx_id)
+            if tx is not None and tx.status == "pending":
+                tx.status = "cancelled"
+                refunded = -tx.amount
+        name = p.team_name
+        await session.delete(p)
+        await session.flush()
+        logger.info(f"escrow: dropped '{name}' from tournament {tournament_id} (refunded {refunded})")
+        return {"team_name": name, "refunded": refunded}
 
 
 async def refund_reserve(escrow_tx_id: int) -> bool:

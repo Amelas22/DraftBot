@@ -46,13 +46,14 @@ async def _participant_by_name(session, tournament_id, team_name):
     return (await session.execute(stmt)).scalars().first()
 
 
-async def create_tournament(session, guild_id, name, total_rounds, format="swiss"):
+async def create_tournament(session, guild_id, name, total_rounds, format="swiss", entry_fee=0):
     """Create a tournament in registration status.
 
     ``format`` is 'swiss', 'round_robin', or 'manual'. For the all-open formats
     total_rounds is set at start (derived from the schedule), so callers may
-    pass 0. Raises ValueError if the guild already has a registration/active
-    tournament (one active per guild keeps other commands argument-free).
+    pass 0. ``entry_fee`` is the per-team escrow in tix (0 = free). Raises
+    ValueError if the guild already has a registration/active tournament (one
+    active per guild keeps other commands argument-free).
     """
     if format not in ("swiss",) + ALL_OPEN_FORMATS:
         raise ValueError(f"Unknown tournament format: {format}")
@@ -63,7 +64,8 @@ async def create_tournament(session, guild_id, name, total_rounds, format="swiss
             "Finish it before creating a new tournament."
         )
     tournament = Tournament(
-        guild_id=str(guild_id), name=name, total_rounds=total_rounds, format=format
+        guild_id=str(guild_id), name=name, total_rounds=total_rounds, format=format,
+        entry_fee=max(0, int(entry_fee or 0)),
     )
     session.add(tournament)
     await session.flush()
