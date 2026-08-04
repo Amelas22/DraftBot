@@ -213,10 +213,11 @@ def backfill_skill_ratings(connection):
         {"mu": PRIOR_MU, "sig": PRIOR_SIGMA},
     )
 
+    type_list = ", ".join(f"'{t}'" for t in RATING_SESSION_TYPES)
     rows = connection.execute(text(
         "SELECT m.player1_id, m.player2_id, m.winner_id, d.guild_id "
         "FROM match_results m JOIN draft_sessions d ON m.session_id = d.session_id "
-        "WHERE d.session_type IN ('random', 'staked', 'premade') "
+        f"WHERE d.session_type IN ({type_list}) "
         "AND m.winner_id IS NOT NULL "
         "ORDER BY COALESCE(m.result_submitted_at, d.draft_start_time), m.id"
     )).fetchall()
