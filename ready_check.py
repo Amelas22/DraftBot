@@ -5,6 +5,7 @@ from loguru import logger
 from typing import Dict, Iterable, List, Literal, Optional
 
 from helpers.display_names import get_display_name_by_id
+from helpers.draft_footer import apply_draft_footer_from_session
 from models import SignUpHistory
 from services.state_manager import state_manager
 from services.team_creator import create_and_display_teams
@@ -85,8 +86,12 @@ class ReadyCheckSession:
 
     # --- Discord message operations (instance) ---
 
-    async def build_embed(self, sign_ups: dict, guild=None) -> discord.Embed:
-        """Build a ready check embed from current player state."""
+    async def build_embed(self, sign_ups: dict, guild=None, draft_session=None) -> discord.Embed:
+        """Build a ready check embed from current player state.
+
+        `draft_session`, when supplied, stamps the shared draft metadata footer
+        so this post matches the rest of the draft's messages.
+        """
         def get_names(user_ids):
             names = []
             for uid in user_ids:
@@ -105,6 +110,8 @@ class ReadyCheckSession:
         embed.add_field(name="Ready", value=get_names(self.ready), inline=False)
         embed.add_field(name="Not Ready", value=get_names(self.not_ready), inline=False)
         embed.add_field(name="No Response", value=get_names(self.no_response), inline=False)
+        if draft_session:
+            apply_draft_footer_from_session(embed, draft_session)
         return embed
 
     async def delete_message(self, channel) -> None:
@@ -119,14 +126,15 @@ class ReadyCheckSession:
         except Exception as e:
             logger.error(f"Error deleting ready check message {self.message_id}: {e}")
 
-    async def refresh_embed(self, channel, sign_ups: dict, guild=None, title: Optional[str] = None) -> bool:
+    async def refresh_embed(self, channel, sign_ups: dict, guild=None, title: Optional[str] = None,
+                            draft_session=None) -> bool:
         """Rebuild the embed and edit the Discord message in-place.
         Returns True on success. On NotFound, clears message_id and returns False.
         """
         if not self.message_id:
             return False
         try:
-            embed = await self.build_embed(sign_ups, guild=guild)
+            embed = await self.build_embed(sign_ups, guild=guild, draft_session=draft_session)
             if title:
                 embed.title = title
             msg = await channel.fetch_message(self.message_id)
@@ -218,7 +226,8 @@ class ReadyCheckSession:
         if not rc:
             return
         rc.add_player(user_id)
-        await rc.refresh_embed(interaction.channel, draft_session.sign_ups, guild=interaction.guild)
+        await rc.refresh_embed(interaction.channel, draft_session.sign_ups, guild=interaction.guild,
+                               draft_session=draft_session)
 
     @classmethod
     async def sync_removed_player(cls, session_id: str, user_id: str, draft_session, interaction: discord.Interaction) -> None:
@@ -227,7 +236,8 @@ class ReadyCheckSession:
         if not rc:
             return
         rc.remove_player(user_id)
-        updated = await rc.refresh_embed(interaction.channel, draft_session.sign_ups, guild=interaction.guild)
+        updated = await rc.refresh_embed(interaction.channel, draft_session.sign_ups, guild=interaction.guild,
+                                         draft_session=draft_session)
         if updated and rc.all_ready():
             await cls.handle_all_ready(session_id, draft_session, interaction)
 
@@ -240,7 +250,8 @@ class ReadyCheckSession:
                 interaction.channel,
                 draft_session.sign_ups,
                 guild=interaction.guild,
-                title="✅ Ready Check Complete - All Players Ready!"
+                title="✅ Ready Check Complete - All Players Ready!",
+                draft_session=draft_session
             )
 
         if state_manager.is_creating_teams(session_id):
@@ -364,7 +375,8 @@ class ReadyCheckView(discord.ui.View):
             f"counts={rc.counts()}; complete={rc.all_ready()}"
         )
 
-        embed = await rc.build_embed(draft_session.sign_ups, guild=interaction.guild)
+        embed = await rc.build_embed(draft_session.sign_ups, guild=interaction.guild,
+                                     draft_session=draft_session)
         await interaction.response.edit_message(embed=embed, view=self)
 
         if rc.all_ready():

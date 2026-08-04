@@ -140,6 +140,34 @@ async def test_random_draft_basic_creation(test_db):
 
 
 @pytest.mark.asyncio
+async def test_friendly_id_is_persisted_on_draft_session(test_db):
+    """The friendly_id generated on SessionDetails must actually make it onto
+    the persisted DraftSession row -- nothing else enforces this threading."""
+    interaction = create_mock_interaction()
+    session_details = create_session_details(interaction)
+    random_session = RandomSession(session_details, session_factory=test_db)
+
+    mock_draft_manager = MagicMock()
+    mock_draft_manager.keep_connection_alive = AsyncMock()
+    mock_draft_manager.socket_client = MagicMock()
+    mock_draft_manager.socket_client.connected = False
+
+    with patch('sessions.base_session.DraftSetupManager', return_value=mock_draft_manager), \
+         patch('sessions.base_session.PersistentView'), \
+         patch('sessions.base_session.make_message_sticky', new_callable=AsyncMock), \
+         patch('sessions.base_session.get_session_deletion_hours', return_value=5), \
+         patch('sessions.base_session.get_cube_thumbnail_url', return_value='https://example.com/thumb.jpg'):
+        await random_session.create_draft_session(interaction, interaction.client)
+
+    draft = await get_draft_by_session_id(session_details.session_id, test_db)
+    assert draft is not None
+    assert draft.friendly_id, "friendly_id should be persisted on the row"
+    assert draft.friendly_id == session_details.friendly_id, (
+        "persisted friendly_id should be the one generated on SessionDetails, not a fresh one"
+    )
+
+
+@pytest.mark.asyncio
 async def test_random_draft_has_signup_field(test_db):
     """Verify random draft has Sign-Ups field, not team fields."""
     # Arrange

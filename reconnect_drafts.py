@@ -55,6 +55,7 @@ async def reconnect_draft_setup_sessions(discord_client):
                 manager = DraftSetupManager(
                     session_id=session.session_id,
                     draft_id=session.draft_id,
+                    friendly_id=session.friendly_id,
                     cube_id=session.cube,
                     guild_id=session.guild_id,
                     packs_per_player=getattr(session, 'packs_per_player', None) or DEFAULT_PACKS_PER_PLAYER,

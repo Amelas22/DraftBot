@@ -818,7 +818,7 @@ class PersistentView(discord.ui.View):
         # keeping the button live so a stalled check can be re-fired once it lapses.
 
         # Generate the initial embed with personalized links
-        embed = await rc.build_embed(session.sign_ups, guild=interaction.guild)
+        embed = await rc.build_embed(session.sign_ups, guild=interaction.guild, draft_session=session)
         
         # Create the view with the buttons
         view = ReadyCheckView(self.draft_session_id)
@@ -1320,7 +1320,7 @@ class PersistentView(discord.ui.View):
         if not session:
             logger.error(f"Draft session not found for session_id={self.draft_session_id} in create_team_channel")
             return
-        channel_name = f"{team_name}-Chat-{session.draft_id}"
+        channel_name = f"{team_name}-Chat-{session.friendly_id}"
 
         logger.info(f"Creating team channel '{channel_name}' for session {self.draft_session_id}, team: {team_name}")
 
@@ -1370,7 +1370,7 @@ class PersistentView(discord.ui.View):
 
         if session.premade_match_id and team_name != "Draft" and session.session_type == "premade":
             # Construct voice channel name
-            voice_channel_name = f"{team_name}-Voice-{session.draft_id}"
+            voice_channel_name = f"{team_name}-Voice-{session.friendly_id}"
             # Create the voice channel with the same permissions as the text channel
             voice_channel = await guild.create_voice_channel(name=voice_channel_name, overwrites=overwrites, category=voice_category)
             # Store the voice channel ID

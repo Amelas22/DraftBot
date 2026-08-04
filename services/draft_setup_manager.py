@@ -18,6 +18,7 @@ from bot_registry import get_bot
 from session import AsyncSessionLocal
 from sqlalchemy import select
 from helpers.digital_ocean_helper import DigitalOceanHelper
+from helpers.draft_footer import apply_draft_footer
 from helpers.magicprotools_helper import MagicProtoolsHelper
 from helpers.seating import resolve_seating_ids
 from notification_service import send_ready_check_dms
@@ -169,9 +170,11 @@ class DraftSetupManager:
 
     def __init__(self, session_id: str, draft_id: str, cube_id: str, guild_id: str = None,
                  packs_per_player: int = DEFAULT_PACKS_PER_PLAYER,
-                 cards_per_pack: int = DEFAULT_CARDS_PER_PACK):
+                 cards_per_pack: int = DEFAULT_CARDS_PER_PACK,
+                 friendly_id: str = None):
         self.session_id = session_id
         self.draft_id = draft_id
+        self.friendly_id = friendly_id
         self.cube_id = cube_id
         self.guild_id = guild_id
         self.packs_per_player = packs_per_player
@@ -978,8 +981,6 @@ class DraftSetupManager:
     async def generate_magicprotools_embed(self, draft_data):
         """Generate a Discord embed with MagicProTools links for all drafters"""
         try:
-            session_id = draft_data.get("sessionID")
-
             # Get the draft session to access sign_ups and start time
             async with db_session() as session:
                 # Get draft session in this session context
@@ -1026,10 +1027,11 @@ class DraftSetupManager:
                                 player_records.setdefault(match.player1_id, {"wins": 0, "losses": 0})["losses"] += 1
             
             embed = discord.Embed(
-                title=f"Draft Log: Cube: {self.cube_id}, Session:{session_id}",
+                title="Draft Log",
                 description=f"View your draft in MagicProTools with the links below:\n\n**Draft Start:** {formatted_start_time}",
                 color=0x3498db  # Blue color
             )
+            apply_draft_footer(embed, self.friendly_id, self.cube_id)
             
             # Get list of sign_ups keys (Discord user IDs) and values (display names or dictionaries)
             sign_up_discord_ids = list(sign_ups.keys())
@@ -1123,11 +1125,14 @@ class DraftSetupManager:
         except Exception as e:
             self.logger.error(f"Error generating Discord embed: {e}")
             # Return a basic embed if there's an error
-            return discord.Embed(
-                title=f"Draft Log: {draft_data.get('sessionID')}",
+            fallback = discord.Embed(
+                title="Draft Log",
                 description="Error generating MagicProTools links. Check logs for details.",
                 color=0xFF0000  # Red color
             )
+            # Stamp the fallback too — a failed log is exactly when someone needs
+            # to know which draft it belonged to.
+            return apply_draft_footer(fallback, self.friendly_id, self.cube_id)
 
     def get_pack_first_picks(self, draft_data, user_id):
         """Extract the first pick card name for each pack for a specific user."""
@@ -2444,7 +2449,9 @@ class DraftSetupManager:
         manager = cls(
             session_id=session_id,
             draft_id=draft_session.draft_id,
-            cube_id=draft_session.cube
+            friendly_id=draft_session.friendly_id,
+            cube_id=draft_session.cube,
+            guild_id=draft_session.guild_id,
         )
         
         manager.set_bot_instance(bot)

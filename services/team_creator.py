@@ -13,6 +13,7 @@ import random
 from sqlalchemy import update, select
 
 from session import AsyncSessionLocal, DraftSession, StakeInfo
+from helpers.draft_footer import apply_draft_footer_from_session
 from models.draft_session import DraftSession as DraftSessionModel
 from utils import split_into_teams, generate_seating_order, reorder_sign_ups, get_formatted_stake_pairs, check_weekly_limits, add_links_to_embed_safely
 from services.draft_setup_manager import DraftSetupManager
@@ -240,7 +241,7 @@ async def _create_teams_embed(session, team_a_names, team_b_names, seating_order
 
     title_prefix = "Winston " if session.session_type == 'winston' else ""
     embed = discord.Embed(
-        title=f"{title_prefix}Draft-{session.draft_id} is Ready!",
+        title=f"{title_prefix}Draft is Ready!",
         description=f"**Chosen Cube: [{session.cube}]"
                     f"(https://cubecobra.com/cube/list/{session.cube})**\n\n"
                     "Host of Draftmancer must manually adjust seating as per below. \n**TURN OFF RANDOM SEATING SETTING IN DRAFTMANCER**"
@@ -270,6 +271,8 @@ async def _create_teams_embed(session, team_a_names, team_b_names, seating_order
     # Add stakes for staked drafts
     if session_type == "staked":
         await _add_stake_info_to_embed(embed, session, stake_info_by_player)
+
+    apply_draft_footer_from_session(embed, session)
 
     return embed
 
@@ -317,6 +320,8 @@ async def _create_channel_announcement_embed(session, seating_order, stake_info_
     # Add stakes for staked drafts
     if session_type == "staked":
         await _add_stake_info_to_embed(channel_embed, session, stake_info_by_player)
+
+    apply_draft_footer_from_session(channel_embed, session)
 
     return channel_embed
 

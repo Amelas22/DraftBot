@@ -5,6 +5,7 @@ from sqlalchemy import select, not_
 from session import AsyncSessionLocal, DraftSession, MatchResult, get_draft_session
 from utils import calculate_team_wins
 from helpers.display_names import get_display_name, get_display_name_by_id
+from helpers.draft_footer import apply_draft_footer_from_session
 from loguru import logger
 
 async def manage_live_drafts_channel(bot, guild):
@@ -173,6 +174,8 @@ async def generate_live_draft_embed(bot, draft_session):
                 value="\n".join(stake_lines),
                 inline=False
             )
+
+    apply_draft_footer_from_session(embed, draft_session)
 
     return embed
 
