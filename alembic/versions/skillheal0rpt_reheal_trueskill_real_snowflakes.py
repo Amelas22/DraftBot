@@ -10,7 +10,7 @@ fresh replay of the intact match_results ledger heals player_stats exactly.
 Data-only migration: no schema change. Downgrade is a no-op.
 
 Revision ID: skillheal0rpt
-Revises: trophreguess0
+Revises: cc4fcb545e83
 Create Date: 2026-08-04
 """
 from alembic import op
@@ -18,7 +18,7 @@ from alembic import op
 from helpers.skill import backfill_skill_ratings
 
 revision = "skillheal0rpt"
-down_revision = "trophreguess0"
+down_revision = "cc4fcb545e83"
 branch_labels = None
 depends_on = None
 
