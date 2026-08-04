@@ -28,7 +28,7 @@ from utils import (
     split_content_for_embed,
     update_draft_summary_message,
     check_and_post_victory_or_draw,
-    update_player_stats_and_elo,
+    apply_result_report,
     check_weekly_limits,
     update_player_stats_for_draft,
     add_links_to_embed_safely,
@@ -1793,9 +1793,10 @@ class MatchResultSelect(Select):
 
                     if match_result:
                         # Update the match result based on the selection
+                        previous_winner_id = match_result.winner_id
                         match_result.player1_wins = player1_wins
                         match_result.player2_wins = player2_wins
-                        if winner_indicator != '0':  
+                        if winner_indicator != '0':
                             winner_id = match_result.player1_id if winner_indicator == '1' else match_result.player2_id
                         match_result.winner_id = winner_id
                         match_result.result_submitted_at = datetime.now()
@@ -1804,28 +1805,32 @@ class MatchResultSelect(Select):
 
                         from helpers.skill import rating_counts_for
                         if draft_session and rating_counts_for(draft_session.session_type):
-                            streak_extensions = await update_player_stats_and_elo(match_result)
+                            # Only a first report applies an incremental rating
+                            # update; re-reports must not double-count and a
+                            # winner correction replays the ledger instead.
+                            action, streak_extensions = await apply_result_report(match_result, previous_winner_id)
 
-                            # Store streak extension info for ring bearer check later
-                            from utils import store_match_streak_extensions
-                            store_match_streak_extensions(
-                                self.session_id,
-                                match_result.player1_id,
-                                match_result.player2_id,
-                                streak_extensions
-                            )
-
-                            # Check for ring bearer transfer if there was a winner
-                            if winner_id:
-                                loser_id = match_result.player2_id if winner_id == match_result.player1_id else match_result.player1_id
-                                from services.ring_bearer_service import check_match_defeat_transfer
-                                await check_match_defeat_transfer(
-                                    bot=self.bot,
-                                    guild_id=str(draft_session.guild_id),
-                                    winner_id=winner_id,
-                                    loser_id=loser_id,
-                                    session_id=self.session_id
+                            if action == "apply":
+                                # Store streak extension info for ring bearer check later
+                                from utils import store_match_streak_extensions
+                                store_match_streak_extensions(
+                                    self.session_id,
+                                    match_result.player1_id,
+                                    match_result.player2_id,
+                                    streak_extensions
                                 )
+
+                                # Check for ring bearer transfer if there was a winner
+                                if winner_id:
+                                    loser_id = match_result.player2_id if winner_id == match_result.player1_id else match_result.player1_id
+                                    from services.ring_bearer_service import check_match_defeat_transfer
+                                    await check_match_defeat_transfer(
+                                        bot=self.bot,
+                                        guild_id=str(draft_session.guild_id),
+                                        winner_id=winner_id,
+                                        loser_id=loser_id,
+                                        session_id=self.session_id
+                                    )
             
             if draft_session:
                 await update_draft_summary_message(self.bot, self.session_id)

@@ -7,6 +7,12 @@ draft session's sign_ups names (see utils.generate_seating_order).
 
 TEST_USER_ID_BASE = 900000000000000000
 
+# Synthetic ids are allocated sequentially from the base (see next_id below),
+# so anything at or past this ceiling is a real Discord snowflake. Post-2021
+# accounts have ids >= 9e17 too — a bare ">= TEST_USER_ID_BASE" check
+# misclassifies them as test users.
+TEST_USER_ID_CEILING = TEST_USER_ID_BASE + 1000
+
 
 def plan_premade_test_users(team_a, team_b, team_a_name, team_b_name,
                             team_size=3, existing_ids=None):
@@ -26,6 +32,10 @@ def plan_premade_test_users(team_a, team_b, team_a_name, team_b_name,
         candidate = TEST_USER_ID_BASE
         while str(candidate) in taken:
             candidate += 1
+        if candidate >= TEST_USER_ID_CEILING:
+            # Enforce the band at the producer: everything at or past the
+            # ceiling is classified as a real account (helpers/skill.py).
+            raise RuntimeError("synthetic test-user id band exhausted")
         taken.add(str(candidate))
         return str(candidate)
 

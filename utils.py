@@ -2,7 +2,7 @@ import random
 import discord
 import asyncio
 import pytz
-from sqlalchemy import update, select, func, or_, desc, and_
+from sqlalchemy import update, select, func, or_, desc, and_, create_engine
 from datetime import datetime, timedelta
 from session import AsyncSessionLocal, get_draft_session, StakeInfo, Challenge, PlayerLimit, DraftSession, MatchResult, PlayerStats, Match, Team, WeeklyLimit, StakePairing
 from sqlalchemy.orm import selectinload, joinedload
@@ -35,8 +35,10 @@ from helpers.skill import (
     PRIOR_MU,
     PRIOR_SIGMA,
     apply_upset_decoration,
+    backfill_skill_ratings,
     new_ratings,
     rating_counts_for,
+    rating_update_action,
     winner_probability_from_stats,
 )
 from services.ring_bearer_service import update_ring_bearer_for_guild
@@ -1970,6 +1972,55 @@ def _new_player_stats_row(player_id, guild_id):
         team_drafts_lost=0,
         team_drafts_tied=0,
     )
+
+
+async def recompute_skill_ratings():
+    """Heal player_stats by replaying the full match_results ledger.
+
+    Used when a reported winner is corrected: the wrong incremental update is
+    already baked into mu/sigma and TrueSkill updates are order-dependent, so
+    the only exact repair is a from-scratch replay. Streaks and
+    drafts_participated are left untouched (same contract as the backfill).
+
+    The replay is tens of thousands of pure-CPU TrueSkill updates, so it runs
+    in a worker thread on its own short-lived sync connection (to the same
+    database AsyncSessionLocal is bound to) instead of stalling the event loop.
+    """
+    url = AsyncSessionLocal.kw["bind"].url.render_as_string(
+        hide_password=False).replace("+aiosqlite", "")
+
+    def _replay():
+        engine = create_engine(url)
+        try:
+            with engine.begin() as conn:
+                backfill_skill_ratings(conn)
+        finally:
+            engine.dispose()
+
+    await asyncio.to_thread(_replay)
+
+
+async def apply_result_report(match_result, previous_winner_id):
+    """Live-path rating bookkeeping for a submitted or re-submitted result.
+
+    previous_winner_id must be the row's winner as it was BEFORE this report
+    was written — capture it before mutating the row, or a first report is
+    indistinguishable from a duplicate. Only the first report of a winner
+    applies an incremental update; re-selecting a result (score corrections,
+    a teammate reporting the same match) must not double-count; a winner
+    change heals by replaying the ledger.
+
+    Returns (action, streak_extensions): the rating_update_action taken, and
+    streak extensions when an incremental update ran (else None). Callers
+    should gate first-report-only side effects (streak storage, ring-bearer
+    transfer) on action == "apply".
+    """
+    action = rating_update_action(previous_winner_id, match_result.winner_id)
+    if action == "apply":
+        return action, await update_player_stats_and_elo(match_result)
+    if action == "recompute":
+        await recompute_skill_ratings()
+    return action, None
 
 
 async def update_player_stats_and_elo(match_result):

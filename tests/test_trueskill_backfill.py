@@ -79,21 +79,55 @@ def test_reset_wipes_prior_values_for_unrated_players():
     assert (gw, gl) == (0, 0)
 
 
-def test_swiss_and_test_users_excluded():
+def test_swiss_excluded():
     conn = _conn()
     _add_player(conn, "1"); _add_player(conn, "2")
-    big = str(900000000000000000 + 5)
-    _add_player(conn, big)
     _add_session(conn, "sw", "swiss", "2026-01-01")
     _add_match(conn, 1, "sw", "1", "2", "1", "2026-01-01T10:00:00")   # swiss: ignored
-    _add_session(conn, "sp", "premade", "2026-01-02")
-    _add_match(conn, 2, "sp", "1", big, "1", "2026-01-02T10:00:00")   # test user: ignored
 
     backfill_skill_ratings(conn)
 
     # Player 1 played only ignored matches -> stays at the prior with 0 games.
     mu, sig, gw, gl = _rating(conn, "1")
     assert mu == PRIOR_MU and (gw, gl) == (0, 0)
+
+
+def test_backfill_rates_everyone_the_live_path_rates():
+    # The live path has never filtered test users, so the backfill must not
+    # either — a prod DB contains no synthetic ids (TEST_MODE never runs
+    # there), and in a TEST_MODE dev DB rating them is harmless. Any filter
+    # divergence between the two paths is how real games got dropped once.
+    conn = _conn()
+    _add_player(conn, "1")
+    synthetic = str(900000000000000000 + 5)
+    _add_session(conn, "sp", "premade", "2026-01-02")
+    _add_match(conn, 1, "sp", "1", synthetic, "1", "2026-01-02T10:00:00")
+
+    backfill_skill_ratings(conn)
+
+    mu, sig, gw, gl = _rating(conn, "1")
+    assert (gw, gl) == (1, 0)
+    assert mu > PRIOR_MU
+    assert _rating(conn, synthetic) is not None
+
+
+def test_real_post2021_snowflakes_are_rated_not_dropped():
+    conn = _conn()
+    _add_player(conn, "1")
+    # Discord snowflake from a 2024-created account: numerically above
+    # TEST_USER_ID_BASE but a real player whose games must count.
+    real_new_account = "1306388347043971156"
+    _add_session(conn, "sp", "premade", "2026-01-01")
+    _add_match(conn, 1, "sp", "1", real_new_account, "1", "2026-01-01T10:00:00")
+
+    backfill_skill_ratings(conn)
+
+    w = _rating(conn, "1")
+    assert (w[2], w[3]) == (1, 0)
+    l = _rating(conn, real_new_account)
+    assert l is not None
+    assert (l[2], l[3]) == (0, 1)
+    assert l[0] < PRIOR_MU
 
 
 def test_premade_player_without_row_gets_inserted():
