@@ -10,7 +10,6 @@ from player_stats import get_player_statistics, create_stats_embed
 from stats_display import get_stats_embed_for_player
 from loguru import logger
 from discord.ext import commands
-from legacy_stats import get_legacy_player_stats, get_legacy_head_to_head_stats
 from helpers.display_names import get_display_name, get_display_name_by_id
 from models.match import MatchResult
 from helpers.trophy_deck_links import session_trophy_links, render_grouped_trophy_decks
@@ -140,10 +139,7 @@ async def core_commands(bot):
         
         try:
             # Import needed functions
-            from player_stats import find_discord_id_by_display_name_fuzzy, create_head_to_head_embed
-            # Import the new combined stats function
-            from legacy_stats import get_head_to_head_stats_with_legacy
-            
+            from player_stats import find_discord_id_by_display_name_fuzzy, create_head_to_head_embed, get_head_to_head_stats
             # Use fuzzy search to find potential matches
             result, opponent_display_name, multiple_matches = await find_discord_id_by_display_name_fuzzy(opponent_name, guild_id)
             
@@ -166,8 +162,7 @@ async def core_commands(bot):
             # If we get here, we have a single match
             opponent_id = result
             
-            # Get head-to-head stats with legacy data incorporated
-            h2h_stats = await get_head_to_head_stats_with_legacy(user_id, opponent_id, user_display_name, opponent_display_name, guild_id)
+            h2h_stats = await get_head_to_head_stats(user_id, opponent_id, user_display_name, opponent_display_name, guild_id)
             
             # Get the opponent user object if possible
             opponent_user = None
@@ -185,62 +180,6 @@ async def core_commands(bot):
         except Exception as e:
             logger.error(f"Error in record command: {e}")
             await ctx.followup.send("An error occurred while fetching the record. Please try again later.", ephemeral=True)
-    # Add a setup function to initialize the legacy data
-    @bot.slash_command(name="setup_legacy_data", description="Admin Only: Setup legacy data for stats tracking")
-    @has_bot_manager_role()
-    async def setup_legacy_data(ctx):
-        """Admin command to initialize legacy data for stats tracking."""
-        await ctx.defer(ephemeral=True)
-        
-        try:
-            from legacy_stats import load_legacy_data, process_legacy_drafts
-            
-            # Check if the CSV files exist
-            match_results_df, draft_results_df = load_legacy_data()
-            if match_results_df is None or draft_results_df is None:
-                await ctx.followup.send("Legacy data files not found. Please place matchResults.csv and draftResults.csv in the 'legacy_data' directory.", ephemeral=True)
-                return
-            
-            # Process the data
-            processed_drafts = process_legacy_drafts()
-            
-            # Show summary
-            guild_id = str(ctx.guild.id)
-            is_legacy_guild = guild_id == "715228693529886760"  # Check if this is the guild the legacy data is for
-            
-            embed = discord.Embed(
-                title="Legacy Data Setup",
-                description="Legacy data has been processed and is ready to use.",
-                color=discord.Color.green()
-            )
-            
-            embed.add_field(
-                name="Statistics",
-                value=f"Processed {len(processed_drafts)} drafts from the legacy data.",
-                inline=False
-            )
-            
-            embed.add_field(
-                name="Data Status",
-                value=f"Legacy data {'will' if is_legacy_guild else 'will not'} be included in stats for this guild.",
-                inline=False
-            )
-            
-            if not is_legacy_guild:
-                embed.add_field(
-                    name="Note",
-                    value=f"This guild ID ({guild_id}) does not match the legacy data guild ID (715228693529886760). "
-                        f"Legacy data will only be included for the matching guild.",
-                    inline=False
-                )
-            
-            await ctx.followup.send(embed=embed, ephemeral=True)
-            
-        except Exception as e:
-            logger.error(f"Error in setup_legacy_data command: {e}")
-            await ctx.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
-            
-                
 
     @bot.event
     async def on_reaction_add(reaction, user):

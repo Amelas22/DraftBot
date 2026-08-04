@@ -1,8 +1,6 @@
 """
-Core statistics utilities shared between player_stats and legacy_stats modules.
-
-This module contains pure utility functions with no dependencies on other stats modules,
-breaking the circular dependency between player_stats.py and legacy_stats.py.
+Pure statistics utilities used by player_stats (no dependencies on other
+stats modules).
 """
 from datetime import datetime, timedelta
 

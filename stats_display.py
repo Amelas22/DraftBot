@@ -1,12 +1,10 @@
 """
 High-level statistics display functions.
 
-This module combines player_stats and legacy_stats to create formatted
-displays for Discord. It sits at the top of the dependency chain.
+This module formats player_stats data into Discord displays. It sits at the top of the dependency chain.
 """
 import discord
-from player_stats import create_stats_embed
-from legacy_stats import get_player_statistics_with_legacy
+from player_stats import create_stats_embed, get_player_statistics
 from sqlalchemy import select
 from database.db_session import AsyncSessionLocal
 from models.player import PlayerStats
@@ -71,9 +69,9 @@ async def get_stats_embed_for_player(
         user = MockUser(player_id, display_name)
 
     # Get stats for all 3 timeframes
-    stats_weekly = await get_player_statistics_with_legacy(player_id, 'week', display_name, guild_id)
-    stats_monthly = await get_player_statistics_with_legacy(player_id, 'month', display_name, guild_id)
-    stats_lifetime = await get_player_statistics_with_legacy(player_id, None, display_name, guild_id)
+    stats_weekly = await get_player_statistics(player_id, 'week', display_name, guild_id)
+    stats_monthly = await get_player_statistics(player_id, 'month', display_name, guild_id)
+    stats_lifetime = await get_player_statistics(player_id, None, display_name, guild_id)
 
     # Skill rating from stored TrueSkill μ/σ, gated on lifetime rated games.
     rating, provisional = await _player_skill_rating(player_id, guild_id)
