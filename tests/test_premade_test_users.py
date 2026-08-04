@@ -121,3 +121,17 @@ async def test_seating_order_excludes_team_ids_removed_from_sign_ups():
     ids = [uid for uid, _ in order]
     assert "999" not in ids                              # stale id not seated
     assert set(ids) <= set(draft_session.sign_ups)       # every seated id is in sign_ups
+
+
+def test_next_id_never_leaves_the_synthetic_band():
+    # _is_test_user classifies only [TEST_USER_ID_BASE, TEST_USER_ID_CEILING) as
+    # synthetic, so the allocator must refuse to mint ids past the ceiling —
+    # otherwise classification and allocation drift apart silently (the shape
+    # of the bug that once dropped real players' games).
+    from helpers.test_users import TEST_USER_ID_BASE, TEST_USER_ID_CEILING, plan_premade_test_users
+    full_band = {str(i) for i in range(TEST_USER_ID_BASE, TEST_USER_ID_CEILING)}
+    try:
+        plan_premade_test_users([], [], "A", "B", team_size=1, existing_ids=full_band)
+    except RuntimeError:
+        return
+    raise AssertionError("allocator minted an id outside the synthetic band")

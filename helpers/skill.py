@@ -5,8 +5,9 @@ the single environment (draw probability 0 — these matches never draw) plus th
 small pure helpers used by the live update path (utils.py), the session-type
 guard (views.py), the display slices, and the backfill migration. Keeping the
 environment and the backfill in one place guarantees live and historical values
-are computed identically. The backfill also skips TEST_MODE users; the live
-path does not, which only matters under TEST_MODE.
+are computed identically: both rate every 1v1 result in rated session types,
+with no player filtering (prod data contains no synthetic TEST_MODE users, and
+a divergence here once silently dropped thousands of real games).
 
 Only depends on ``trueskill`` and ``sqlalchemy`` so it is safe to import from an
 Alembic migration (no app-model imports).
@@ -16,7 +17,7 @@ from collections import defaultdict
 from sqlalchemy import text
 from trueskill import TrueSkill
 
-from helpers.test_users import TEST_USER_ID_BASE
+from helpers.test_users import TEST_USER_ID_BASE, TEST_USER_ID_CEILING
 
 # All library defaults except draw_probability: mu0=25, sigma0=25/3, beta=25/6,
 # tau=25/300. These match the player_stats column defaults.
@@ -34,15 +35,34 @@ ESTABLISHED_GAMES = 20
 
 
 def _is_test_user(player_id):
-    """True for synthetic TEST_MODE users. Non-numeric ids (legacy/imported) are
-    treated as real, never crashing the backfill."""
+    """True for synthetic TEST_MODE users: the sequential allocator band only.
+    Real post-2021 Discord snowflakes are also >= TEST_USER_ID_BASE and must
+    never match. Used solely for the TEST_MODE display floor
+    (utils._fetch_player_stats_map) — never to filter rating updates."""
     pid = str(player_id)
-    return pid.isdigit() and int(pid) >= TEST_USER_ID_BASE
+    return pid.isdigit() and TEST_USER_ID_BASE <= int(pid) < TEST_USER_ID_CEILING
 
 
 def rating_counts_for(session_type):
     """True iff a draft of this session type should update skill ratings."""
     return session_type in RATING_SESSION_TYPES
+
+
+def rating_update_action(previous_winner_id, new_winner_id):
+    """What the live path must do when a result is (re)submitted.
+
+    'apply'     — first real report: one incremental TrueSkill update.
+    'none'      — nothing rateable changed (no-play report, or a re-report
+                  keeping the same winner, e.g. a 2-0 -> 2-1 score fix).
+    'recompute' — the stored winner changed (flip or un-report): the old
+                  update is baked into player_stats and TrueSkill updates
+                  are order-dependent, so heal by replaying the ledger.
+    """
+    if previous_winner_id is None:
+        return "apply" if new_winner_id else "none"
+    if previous_winner_id == new_winner_id:
+        return "none"
+    return "recompute"
 
 
 # Display anchoring: a new player shows exactly RATING_ANCHOR; each TrueSkill
@@ -181,8 +201,8 @@ def backfill_skill_ratings(connection):
     """Recompute μ/σ and games-won/lost for every player from scratch.
 
     Resets all player_stats to the prior with zero rating-games, then replays all
-    random/staked/premade 1v1 results chronologically per guild (excluding test
-    users, self-matches, and rows whose winner is not one of the two players) and
+    random/staked/premade 1v1 results chronologically per guild (excluding
+    self-matches and rows whose winner is not one of the two players) and
     writes the final values back. Streaks, drafts_participated, and elo_rating are
     left untouched. Takes a SQLAlchemy Connection so it works from an Alembic
     migration (op.get_bind()) and from tests.
@@ -210,8 +230,6 @@ def backfill_skill_ratings(connection):
         if not player1_id or not player2_id or player1_id == player2_id:
             continue
         if winner_id not in (player1_id, player2_id):
-            continue
-        if _is_test_user(player1_id) or _is_test_user(player2_id):
             continue
         loser_id = player2_id if winner_id == player1_id else player1_id
         kw = (guild_id, winner_id)
