@@ -152,3 +152,28 @@ async def test_debts_history_command_ignores_card_rows(test_db):
     history_after = [f.value for f in embed_after.fields]
 
     assert history_after == history_before
+
+
+@pytest.mark.asyncio
+async def test_create_card_loan_writes_mirrored_pair(test_db):
+    lender_row, borrower_row = await debt_service.create_card_loan(
+        guild_id="g", lender_id="2", borrower_id="1",
+        card_name="  Lightning Bolt ", quantity=4, created_by="2")
+    assert lender_row.player_id == "2" and lender_row.amount == 4
+    assert borrower_row.player_id == "1" and borrower_row.amount == -4
+    assert lender_row.card_name == "Lightning Bolt"      # trimmed
+    assert lender_row.source_type == "card_loan"
+    assert lender_row.source_id == borrower_row.source_id
+    # tix balance between the pair is untouched
+    assert await debt_service.get_balance_with("g", "1", "2") == 0
+
+
+@pytest.mark.asyncio
+async def test_create_card_loan_rejects_bad_input(test_db):
+    for kwargs in [
+        dict(lender_id="1", borrower_id="1", card_name="Bolt", quantity=1),
+        dict(lender_id="1", borrower_id="2", card_name="   ", quantity=1),
+        dict(lender_id="1", borrower_id="2", card_name="Bolt", quantity=0),
+    ]:
+        with pytest.raises(ValueError):
+            await debt_service.create_card_loan(guild_id="g", **kwargs)

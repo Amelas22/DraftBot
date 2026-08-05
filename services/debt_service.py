@@ -86,6 +86,52 @@ async def create_ledger_entries(
         return debtor_entry, creditor_entry
 
 
+async def create_card_loan(
+    guild_id: str,
+    lender_id: str,
+    borrower_id: str,
+    card_name: str,
+    quantity: int,
+    created_by: str = None
+) -> tuple[DebtLedger, DebtLedger]:
+    """Record a card loan as a mirrored pair of card-entity entries.
+
+    Same double-entry shape as tix (create_ledger_entries), but `amount` is
+    the signed number of copies and `card_name` names the entity. The lender
+    is owed the copies back (+quantity); the borrower owes them (-quantity).
+    """
+    card_name = (card_name or "").strip()
+    if lender_id == borrower_id:
+        raise ValueError("Cannot lend cards to yourself")
+    if not card_name:
+        raise ValueError("Card name is required")
+    if quantity < 1:
+        raise ValueError("Quantity must be at least 1")
+
+    source_id = str(uuid.uuid4())
+    logger.info(
+        f"Card loan: {lender_id} lends {quantity}x {card_name!r} to "
+        f"{borrower_id} in {guild_id}")
+
+    async with db_session() as session:
+        lender_entry = DebtLedger(
+            guild_id=guild_id, player_id=lender_id,
+            counterparty_id=borrower_id, amount=quantity,
+            source_type="card_loan", source_id=source_id,
+            card_name=card_name, created_by=created_by)
+        borrower_entry = DebtLedger(
+            guild_id=guild_id, player_id=borrower_id,
+            counterparty_id=lender_id, amount=-quantity,
+            source_type="card_loan", source_id=source_id,
+            card_name=card_name, created_by=created_by)
+        session.add(lender_entry)
+        session.add(borrower_entry)
+        await session.commit()
+        await session.refresh(lender_entry)
+        await session.refresh(borrower_entry)
+        return lender_entry, borrower_entry
+
+
 async def get_balance_with(
     guild_id: str,
     player_id: str,
