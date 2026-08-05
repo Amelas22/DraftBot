@@ -306,3 +306,30 @@ def test_build_debt_pair_lines_annotates_and_appends_card_only_pairs():
         "P5 owes P6: 1 card",
     ]
     assert total == 35
+
+
+@pytest.mark.asyncio
+async def test_sticky_debt_summary_refresh_shows_card_only_debts(test_db):
+    """The post-settlement sticky refresh must render card-only guilds as
+    outstanding, not 'No outstanding debts!' (regression: the strategy was
+    the one panel path not passing card_pairs)."""
+    from unittest.mock import MagicMock
+    from database.message_management import DebtSummaryStickyStrategy
+
+    await debt_service.create_card_loan(
+        guild_id="123", lender_id="1", borrower_id="2", card_name="Bolt", quantity=2)
+
+    sticky = MagicMock()
+    sticky.guild_id = "123"
+    sticky.content = ""
+    sticky.view_metadata = {"view_type": "debt_summary"}
+    bot = MagicMock()
+    guild_stub = MagicMock()
+    guild_stub.get_member.return_value = None  # names fall back to "User <id>"
+    bot.get_guild.return_value = guild_stub
+
+    _, embed, _, _ = await DebtSummaryStickyStrategy().generate_content(sticky, bot, None)
+
+    field_text = "\n".join(f.value for f in embed.fields)
+    assert "No outstanding debts!" not in field_text
+    assert "1 card" in field_text  # one open position: 2x Bolt, 2 owes 1
