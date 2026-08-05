@@ -398,7 +398,7 @@ class CardQuantityModal(Modal):
                      f"returned ({self.counterparty_name})."),
             embed=None, view=None)
 
-    async def on_error(self, interaction: discord.Interaction, error: Exception):
+    async def on_error(self, error: Exception, interaction: discord.Interaction):
         """Handle errors in modal submission."""
         logger.error(f"[CardQuantityModal] Error in on_submit: {error}")
         logger.error(f"[CardQuantityModal] Traceback: {traceback.format_exc()}")
