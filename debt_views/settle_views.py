@@ -398,6 +398,21 @@ class CardQuantityModal(Modal):
                      f"returned ({self.counterparty_name})."),
             embed=None, view=None)
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        """Handle errors in modal submission."""
+        logger.error(f"[CardQuantityModal] Error in on_submit: {error}")
+        logger.error(f"[CardQuantityModal] Traceback: {traceback.format_exc()}")
+        try:
+            await interaction.response.send_message(
+                f"An error occurred: {str(error)}",
+                ephemeral=True
+            )
+        except discord.errors.InteractionResponded:
+            await interaction.followup.send(
+                f"An error occurred: {str(error)}",
+                ephemeral=True
+            )
+
 
 class SettleEntitySelectView(View):
     """Settle-flow entity picker: tix and/or open card positions.
@@ -422,6 +437,8 @@ class SettleEntitySelectView(View):
             discord.SelectOption(label=c["label"][:100], value=c["key"])
             for c in build_entity_choices(net_balance, positions)
         ]
+        # Limit to 25 options (Discord limit)
+        options = options[:25]
         select = Select(placeholder="What are you settling?",
                          options=options)
         select.callback = self._on_select

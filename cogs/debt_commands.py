@@ -25,7 +25,6 @@ from services.debt_service import (
 )
 from debt_views.settle_views import (
     CounterpartySelectView,
-    AmountInputView,
     PublicSettleDebtsView,
     SettleEntitySelectView,
     format_card_positions
