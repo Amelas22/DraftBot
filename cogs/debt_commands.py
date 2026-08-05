@@ -8,6 +8,7 @@ Commands:
 - /settle @player - Settle debts with a player
 - /debts-admin - Admin view of all guild debts
 """
+import asyncio
 import discord
 from discord.ext import commands
 from discord.commands import SlashCommandGroup, option
@@ -407,6 +408,13 @@ class DebtCommands(commands.Cog):
         except ValueError as e:
             await ctx.followup.send(str(e), ephemeral=True)
             return
+
+        # Update debt summary in background (lending changes the panel too)
+        try:
+            from utils import update_debt_summary_for_guild
+            asyncio.create_task(update_debt_summary_for_guild(ctx.bot, guild_id))
+        except Exception as e:
+            logger.warning(f"[Lend] Failed to trigger debt summary update: {e}")
 
         qty_label = f"{quantity}x " if quantity > 1 else ""
         if direction == "lent-to-them":

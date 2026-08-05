@@ -445,6 +445,14 @@ class CardQuantityModal(Modal):
         except ValueError as e:
             await interaction.response.send_message(str(e), ephemeral=True)
             return
+
+        # Update debt summary in background (same as tix settlements)
+        try:
+            from utils import update_debt_summary_for_guild
+            asyncio.create_task(update_debt_summary_for_guild(interaction.client, self.guild_id))
+        except Exception as e:
+            logger.warning(f"[CardQuantityModal] Failed to trigger debt summary update: {e}")
+
         await interaction.response.edit_message(
             content=(f"Recorded: {quantity}x {self.position['card_name']} "
                      f"returned ({self.counterparty_name})."),
