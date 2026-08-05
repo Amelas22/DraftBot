@@ -12,6 +12,11 @@ from models.debt_ledger import DebtLedger
 from models.stake import StakeInfo
 from models.stake_pairing import StakePairing
 
+# The tix/card discriminator, stated once: a debt_ledger row is tix iff it has
+# no card_name. Every tix-facing query MUST include this predicate; card
+# queries go through _open_card_groups instead.
+TIX_ONLY = DebtLedger.card_name.is_(None)
+
 
 async def create_ledger_entries(
     guild_id: str,
@@ -21,7 +26,8 @@ async def create_ledger_entries(
     source_type: str,
     source_id: str,
     notes: str = None,
-    created_by: str = None
+    created_by: str = None,
+    card_name: str = None
 ) -> tuple[DebtLedger, DebtLedger]:
     """
     Create a pair of ledger entries for a debt.
@@ -35,10 +41,12 @@ async def create_ledger_entries(
         debtor_id: The player who owes money
         creditor_id: The player who is owed money
         amount: The amount owed (positive integer)
-        source_type: 'draft', 'settlement', or 'admin'
-        source_id: session_id for drafts, UUID for settlements/admin
+        source_type: 'draft', 'settlement', 'admin', 'card_loan', or 'card_return'
+        source_id: session_id for drafts, UUID otherwise
         notes: Optional human-readable context
         created_by: Optional - who recorded this entry
+        card_name: None for tix (the default, every legacy row); set when the
+            pair's entity is copies of that card and `amount` is the quantity
 
     Returns:
         Tuple of (debtor_entry, creditor_entry)
@@ -46,7 +54,8 @@ async def create_ledger_entries(
     if amount <= 0:
         raise ValueError("Amount must be positive")
 
-    logger.info(f"Creating ledger entries: {debtor_id} owes {creditor_id} {amount} tix (source: {source_type}/{source_id})")
+    unit = card_name if card_name else "tix"
+    logger.info(f"Creating ledger entries: {debtor_id} owes {creditor_id} {amount} {unit} (source: {source_type}/{source_id})")
 
     async with db_session() as session:
         # Entry from debtor's perspective (they owe, so negative)
@@ -58,7 +67,8 @@ async def create_ledger_entries(
             source_type=source_type,
             source_id=source_id,
             notes=notes,
-            created_by=created_by
+            created_by=created_by,
+            card_name=card_name
         )
 
         # Entry from creditor's perspective (they are owed, so positive)
@@ -70,7 +80,8 @@ async def create_ledger_entries(
             source_type=source_type,
             source_id=source_id,
             notes=notes,
-            created_by=created_by
+            created_by=created_by,
+            card_name=card_name
         )
 
         session.add(debtor_entry)
@@ -84,6 +95,69 @@ async def create_ledger_entries(
         logger.debug(f"Created ledger entries with IDs: {debtor_entry.id}, {creditor_entry.id}")
 
         return debtor_entry, creditor_entry
+
+
+def _validated_card_args(party_a: str, party_b: str, card_name: str,
+                         quantity: int, self_error: str) -> str:
+    """Shared validation for the card adapters; returns the trimmed name."""
+    card_name = (card_name or "").strip()
+    if party_a == party_b:
+        raise ValueError(self_error)
+    if not card_name:
+        raise ValueError("Card name is required")
+    if quantity < 1:
+        raise ValueError("Quantity must be at least 1")
+    return card_name
+
+
+async def create_card_loan(
+    guild_id: str,
+    lender_id: str,
+    borrower_id: str,
+    card_name: str,
+    quantity: int,
+    created_by: str = None
+) -> tuple[DebtLedger, DebtLedger]:
+    """Record a card loan as a mirrored pair of card-entity entries.
+
+    Same double-entry shape as tix (create_ledger_entries), but `amount` is
+    the signed number of copies and `card_name` names the entity. The lender
+    is owed the copies back (+quantity); the borrower owes them (-quantity).
+    """
+    card_name = _validated_card_args(lender_id, borrower_id, card_name, quantity,
+                                     "Cannot lend cards to yourself")
+    # The borrower owes the copies back: borrower = debtor, lender = creditor.
+    borrower_entry, lender_entry = await create_ledger_entries(
+        guild_id=guild_id, debtor_id=borrower_id, creditor_id=lender_id,
+        amount=quantity, source_type="card_loan", source_id=str(uuid.uuid4()),
+        card_name=card_name, created_by=created_by)
+    return lender_entry, borrower_entry
+
+
+async def create_card_return(
+    guild_id: str,
+    returner_id: str,
+    owner_id: str,
+    card_name: str,
+    quantity: int,
+    created_by: str = None
+) -> tuple[DebtLedger, DebtLedger]:
+    """Record copies of a card handed back: the offsetting pair of a loan.
+
+    The returner's negative position moves toward zero (+quantity on their
+    row); the owner's positive position shrinks (-quantity). Over-returning
+    flips the position — the ledger doesn't police quantities, the UI only
+    offers open amounts (mirrors tix overpayment semantics).
+    """
+    card_name = _validated_card_args(returner_id, owner_id, card_name, quantity,
+                                     "Cannot return cards to yourself")
+    # Returning offsets the loan: the owner's claim shrinks (owner = debtor
+    # side of this event), the returner's owed count rises toward zero.
+    owner_entry, returner_entry = await create_ledger_entries(
+        guild_id=guild_id, debtor_id=owner_id, creditor_id=returner_id,
+        amount=quantity, source_type="card_return", source_id=str(uuid.uuid4()),
+        card_name=card_name, created_by=created_by)
+    return returner_entry, owner_entry
 
 
 async def get_balance_with(
@@ -115,7 +189,8 @@ async def get_balance_with(
         conditions = [
             DebtLedger.guild_id == guild_id,
             DebtLedger.player_id == player_id,
-            DebtLedger.counterparty_id == counterparty_id
+            DebtLedger.counterparty_id == counterparty_id,
+            TIX_ONLY,
         ]
 
         # Exclude entries from a specific session if requested
@@ -164,7 +239,8 @@ async def get_all_balances_for(
             )
             .where(
                 DebtLedger.guild_id == guild_id,
-                DebtLedger.player_id == player_id
+                DebtLedger.player_id == player_id,
+                TIX_ONLY,
             )
             .group_by(DebtLedger.counterparty_id)
             .having(func.sum(DebtLedger.amount) != 0)
@@ -208,7 +284,8 @@ async def get_entries_since_last_settlement(
                 DebtLedger.guild_id == guild_id,
                 DebtLedger.player_id == player_id,
                 DebtLedger.counterparty_id == counterparty_id,
-                DebtLedger.source_type.in_(['settlement', 'transfer'])
+                DebtLedger.source_type.in_(['settlement', 'transfer']),
+                TIX_ONLY,
             )
             .order_by(DebtLedger.created_at.desc())
             .limit(1)
@@ -223,7 +300,8 @@ async def get_entries_since_last_settlement(
             .where(
                 DebtLedger.guild_id == guild_id,
                 DebtLedger.player_id == player_id,
-                DebtLedger.counterparty_id == counterparty_id
+                DebtLedger.counterparty_id == counterparty_id,
+                TIX_ONLY,
             )
             .order_by(DebtLedger.created_at.asc())
         )
@@ -314,7 +392,8 @@ async def create_settlement(
                 balance_query = select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
                     DebtLedger.guild_id == guild_id,
                     DebtLedger.player_id == payer_id,
-                    DebtLedger.counterparty_id == payee_id
+                    DebtLedger.counterparty_id == payee_id,
+                    TIX_ONLY,
                 )
                 balance_result = await session.execute(balance_query)
                 current_balance = balance_result.scalar()
@@ -694,7 +773,8 @@ async def create_debt_transfer(
                 a_owes_b_query = select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
                     DebtLedger.guild_id == guild_id,
                     DebtLedger.player_id == debtor_id,
-                    DebtLedger.counterparty_id == transferrer_id
+                    DebtLedger.counterparty_id == transferrer_id,
+                    TIX_ONLY,
                 )
                 a_owes_b_result = await session.execute(a_owes_b_query)
                 a_balance_with_b = a_owes_b_result.scalar()
@@ -712,7 +792,8 @@ async def create_debt_transfer(
                 b_owes_c_query = select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
                     DebtLedger.guild_id == guild_id,
                     DebtLedger.player_id == transferrer_id,
-                    DebtLedger.counterparty_id == creditor_id
+                    DebtLedger.counterparty_id == creditor_id,
+                    TIX_ONLY,
                 )
                 b_owes_c_result = await session.execute(b_owes_c_query)
                 b_balance_with_c = b_owes_c_result.scalar()
@@ -849,7 +930,10 @@ async def get_guild_debt_stats(guild_id: str, timeframe: str = "all_time") -> di
                 DebtLedger.counterparty_id,
                 func.sum(DebtLedger.amount).label('balance')
             )
-            .where(DebtLedger.guild_id == guild_id)
+            .where(
+                DebtLedger.guild_id == guild_id,
+                TIX_ONLY,
+            )
             .group_by(DebtLedger.player_id, DebtLedger.counterparty_id)
             .having(func.sum(DebtLedger.amount) != 0)
         )
@@ -879,7 +963,10 @@ async def get_guild_debt_stats(guild_id: str, timeframe: str = "all_time") -> di
         activity_query = select(
             DebtLedger.player_id,
             func.count(DebtLedger.id).label('entry_count')
-        ).where(DebtLedger.guild_id == guild_id)
+        ).where(
+            DebtLedger.guild_id == guild_id,
+            TIX_ONLY,
+        )
 
         if cutoff_time:
             activity_query = activity_query.where(DebtLedger.created_at >= cutoff_time)
@@ -895,7 +982,8 @@ async def get_guild_debt_stats(guild_id: str, timeframe: str = "all_time") -> di
 
         # Get total entry count for recent activity
         recent_count_query = select(func.count(DebtLedger.id)).where(
-            DebtLedger.guild_id == guild_id
+            DebtLedger.guild_id == guild_id,
+            TIX_ONLY,
         )
         if cutoff_time:
             recent_count_query = recent_count_query.where(DebtLedger.created_at >= cutoff_time)
@@ -907,7 +995,10 @@ async def get_guild_debt_stats(guild_id: str, timeframe: str = "all_time") -> di
         source_query = select(
             DebtLedger.source_type,
             func.count(DebtLedger.id).label('count')
-        ).where(DebtLedger.guild_id == guild_id)
+        ).where(
+            DebtLedger.guild_id == guild_id,
+            TIX_ONLY,
+        )
 
         if cutoff_time:
             source_query = source_query.where(DebtLedger.created_at >= cutoff_time)
@@ -967,7 +1058,10 @@ async def get_debt_history(
     async with db_session() as session:
         query = (
             select(DebtLedger)
-            .where(DebtLedger.guild_id == guild_id)
+            .where(
+                DebtLedger.guild_id == guild_id,
+                TIX_ONLY,
+            )
         )
 
         if player_id:
@@ -1031,6 +1125,7 @@ async def get_active_debt_entries(
                 DebtLedger.guild_id == guild_id,
                 DebtLedger.player_id == player_id,
                 DebtLedger.counterparty_id == counterparty_id,
+                TIX_ONLY,
             )
             .order_by(DebtLedger.created_at.asc(), DebtLedger.id.asc())
         )
@@ -1060,7 +1155,10 @@ async def _negative_pair_balances(guild_id: str, player_ids=None, created_before
             DebtLedger.counterparty_id,
             func.sum(DebtLedger.amount).label('balance')
         )
-        .where(DebtLedger.guild_id == guild_id)
+        .where(
+            DebtLedger.guild_id == guild_id,
+            TIX_ONLY,
+        )
         .group_by(DebtLedger.player_id, DebtLedger.counterparty_id)
         .having(func.sum(DebtLedger.amount) < 0)
         .order_by(func.sum(DebtLedger.amount).asc())
@@ -1145,7 +1243,10 @@ async def get_top_net_creditors(guild_id: str, limit: int = 3) -> list:
                 DebtLedger.player_id,
                 func.sum(DebtLedger.amount).label('net')
             )
-            .where(DebtLedger.guild_id == guild_id)
+            .where(
+                DebtLedger.guild_id == guild_id,
+                TIX_ONLY,
+            )
             .group_by(DebtLedger.player_id)
             .having(func.sum(DebtLedger.amount) > 0)
             .order_by(func.sum(DebtLedger.amount).desc())
@@ -1172,7 +1273,10 @@ async def get_most_involved_players(guild_id: str, limit: int = 3) -> list:
                 DebtLedger.counterparty_id.label("counterparty_id"),
                 func.sum(DebtLedger.amount).label("balance"),
             )
-            .where(DebtLedger.guild_id == guild_id)
+            .where(
+                DebtLedger.guild_id == guild_id,
+                TIX_ONLY,
+            )
             .group_by(DebtLedger.player_id, DebtLedger.counterparty_id)
             .having(func.sum(DebtLedger.amount) != 0)
             .subquery()
@@ -1204,3 +1308,78 @@ async def get_most_outstanding_creditors(guild_id: str, limit: int = 3) -> list:
     if not is_money_server(guild_id):
         return []
     return await get_most_involved_players(guild_id, limit)
+
+
+async def _open_card_groups(
+    guild_id: str,
+    player_id: str = None,
+    counterparty_id: str = None
+) -> dict[tuple, dict]:
+    """The one card-netting computation every card query projects from.
+
+    Groups card rows by (player, counterparty, LOWER(TRIM(card_name))) and
+    sums the signed quantities. Returns {key: {"player_id", "counterparty_id",
+    "card_name", "net"}} for non-zero nets only; `card_name` carries the most
+    recently recorded spelling.
+    """
+    conditions = [
+        DebtLedger.guild_id == guild_id,
+        DebtLedger.card_name.isnot(None),
+    ]
+    if player_id:
+        conditions.append(DebtLedger.player_id == player_id)
+    if counterparty_id:
+        conditions.append(DebtLedger.counterparty_id == counterparty_id)
+
+    async with db_session() as session:
+        rows = (await session.execute(
+            select(DebtLedger).where(*conditions).order_by(DebtLedger.id)
+        )).scalars().all()
+
+    groups: dict[tuple, dict] = {}
+    for row in rows:
+        key = (row.player_id, row.counterparty_id, row.card_name.strip().lower())
+        group = groups.setdefault(key, {
+            "player_id": row.player_id,
+            "counterparty_id": row.counterparty_id,
+            "card_name": row.card_name,
+            "net": 0,
+        })
+        group["net"] += row.amount
+        group["card_name"] = row.card_name  # later rows win the spelling
+    return {k: g for k, g in groups.items() if g["net"] != 0}
+
+
+async def get_open_card_positions(
+    guild_id: str,
+    player_id: str,
+    counterparty_id: str = None
+) -> list[dict]:
+    """Net card positions for a player, per counterparty and card.
+
+    Projection of _open_card_groups from one player's perspective, ordered
+    by counterparty then card key. Positive net = owed to the player.
+    """
+    groups = await _open_card_groups(guild_id, player_id, counterparty_id)
+    return [
+        {"counterparty_id": g["counterparty_id"], "card_name": g["card_name"],
+         "net": g["net"]}
+        for _, g in sorted(groups.items(), key=lambda kv: kv[0][1:])
+    ]
+
+
+async def get_guild_card_pair_counts(guild_id: str) -> dict[tuple, int]:
+    """Open card positions per (debtor, creditor) pair, guild-wide.
+
+    Projection of _open_card_groups: every open position appears exactly
+    once, keyed on its negative (debtor) side — the mirrored positive rows
+    are the same positions seen from the creditor. Used by the public debt
+    summary panel.
+    """
+    groups = await _open_card_groups(guild_id)
+    counts: dict[tuple, int] = {}
+    for g in groups.values():
+        if g["net"] < 0:
+            pair = (g["player_id"], g["counterparty_id"])
+            counts[pair] = counts.get(pair, 0) + 1
+    return counts

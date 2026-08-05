@@ -42,6 +42,11 @@ class DebtLedger(Base):
     source_id = Column(String(64), nullable=True)  # session_id for drafts
     notes = Column(String(256), nullable=True)  # Human-readable context
 
+    # Multi-entity support: NULL = the entry is tix (all pre-existing rows);
+    # set = the entry is copies of this card and `amount` is the signed
+    # quantity (same sign convention as tix). See /lend design spec.
+    card_name = Column(String(128), nullable=True)
+
     # Timestamps
     created_at = Column(DateTime, default=datetime.now)
     created_by = Column(String(64), nullable=True)  # Who recorded this entry

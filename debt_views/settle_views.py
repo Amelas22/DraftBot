@@ -14,16 +14,87 @@ from services.debt_service import (
     get_all_balances_for,
     get_balance_with,
     get_entries_since_last_settlement,
+    get_open_card_positions,
     create_settlement,
     get_transferable_debtors,
     create_debt_transfer
 )
 from notification_service import send_debt_transfer_dms, send_settlement_notification_dm
-from .helpers import TRANSIENT_ERRORS, get_member_name, get_member_name_plain, format_entry_source, describe_draft_sources, build_user_balance_embed
+from .helpers import TRANSIENT_ERRORS, get_member_name, get_member_name_plain, format_entry_source, describe_draft_sources, build_user_balance_embed, format_card_quantity, card_count_label
+
+
+def format_card_positions(positions: list[dict]) -> str:
+    """Embed text for open card positions, both directions."""
+    def qty_name(p):
+        return format_card_quantity(p["card_name"], abs(p["net"]))
+
+    owed_to_you = [qty_name(p) for p in positions if p["net"] > 0]
+    you_owe = [qty_name(p) for p in positions if p["net"] < 0]
+    lines = []
+    if owed_to_you:
+        lines.append(f"They owe you: {', '.join(owed_to_you)}")
+    if you_owe:
+        lines.append(f"You owe: {', '.join(you_owe)}")
+    return "\n".join(lines)
+
+
+def build_entity_choices(net_balance: int, positions: list[dict]) -> list[dict]:
+    """Selectable entities for the settle flow: tix (iff nonzero) + each card.
+
+    Keys: 'tix' or 'card:<index into positions>'. Labels name the entity and
+    the open amount so the select reads like the embed.
+    """
+    choices = []
+    if net_balance != 0:
+        direction = "You owe" if net_balance < 0 else "They owe you"
+        choices.append({"key": "tix", "label": f"tix — {direction} {abs(net_balance)} tix"})
+    for idx, p in enumerate(positions):
+        direction = "You owe" if p["net"] < 0 else "They owe you"
+        choices.append({
+            "key": f"card:{idx}",
+            "label": f"{p['card_name']} — {direction} {abs(p['net'])}",
+        })
+    return choices
+
+
+def group_positions_by_counterparty(positions: list[dict]) -> dict[str, list[dict]]:
+    """{counterparty_id: [position, ...]} from get_open_card_positions output."""
+    grouped: dict[str, list[dict]] = {}
+    for p in positions:
+        grouped.setdefault(p["counterparty_id"], []).append(p)
+    return grouped
+
+
+def merge_counterparty_entries(balances: dict, positions_by_cp: dict) -> dict:
+    """Union of tix balances and open card positions per counterparty.
+
+    Returns {counterparty_id: {"balance": int, "card_count": int}} so the
+    counterparty picker can list people you only exchange cards with (their
+    tix balance is 0) alongside tix counterparties.
+    """
+    merged = {
+        cp: {"balance": bal, "card_count": 0}
+        for cp, bal in balances.items()
+    }
+    for cp, positions in positions_by_cp.items():
+        entry = merged.setdefault(cp, {"balance": 0, "card_count": 0})
+        entry["card_count"] = len(positions)
+    return merged
+
+
+async def gather_settle_state(guild_id: str, user_id: str) -> tuple[dict, dict]:
+    """(tix balances, open card positions grouped by counterparty) for the
+    settle entry surfaces. Shared by every Settle button/command entry."""
+    balances, positions = await asyncio.gather(
+        get_all_balances_for(guild_id=guild_id, player_id=user_id),
+        get_open_card_positions(guild_id, user_id),
+    )
+    return balances, group_positions_by_counterparty(positions)
 
 
 async def _build_settle_entry_view(
-    user_id: str, guild_id: str, balances: dict, guild: discord.Guild
+    user_id: str, guild_id: str, balances: dict, guild: discord.Guild,
+    positions_by_cp: dict = None
 ) -> View:
     """Build the appropriate entry view: SettleOrTransferView if transfers are available, else CounterpartySelectView."""
     for cid, bal in balances.items():
@@ -33,10 +104,12 @@ async def _build_settle_entry_view(
             )
             if transferable:
                 return SettleOrTransferView(
-                    user_id=user_id, guild_id=guild_id, balances=balances, guild=guild
+                    user_id=user_id, guild_id=guild_id, balances=balances, guild=guild,
+                    positions_by_cp=positions_by_cp
                 )
     return CounterpartySelectView(
-        user_id=user_id, guild_id=guild_id, balances=balances, guild=guild
+        user_id=user_id, guild_id=guild_id, balances=balances, guild=guild,
+        positions_by_cp=positions_by_cp
     )
 
 
@@ -61,26 +134,24 @@ class SettleDebtsButton(Button):
         try:
             # Get all non-zero balances for this user
             logger.debug(f"[SettleDebts] Fetching balances for user {user_id} in guild {self.guild_id}")
-            balances = await get_all_balances_for(
-                guild_id=self.guild_id,
-                player_id=user_id
-            )
-            logger.debug(f"[SettleDebts] Found balances: {balances}")
+            balances, positions_by_cp = await gather_settle_state(self.guild_id, user_id)
+            logger.debug(f"[SettleDebts] Found balances: {balances}, card counterparties: {list(positions_by_cp)}")
 
-            if not balances:
-                logger.info(f"[SettleDebts] No balances found for user {user_id}")
+            if not balances and not positions_by_cp:
+                logger.info(f"[SettleDebts] No balances or card positions for user {user_id}")
                 await interaction.response.send_message(
                     "You have no outstanding debts with anyone.",
                     ephemeral=True
                 )
                 return
 
-            embed = build_user_balance_embed(interaction.guild, balances)
+            embed = build_user_balance_embed(interaction.guild, balances, positions_by_cp)
             view = await _build_settle_entry_view(
                 user_id=user_id,
                 guild_id=self.guild_id,
                 balances=balances,
-                guild=interaction.guild
+                guild=interaction.guild,
+                positions_by_cp=positions_by_cp
             )
 
             logger.info(f"[SettleDebts] Sending balance embed with {len(balances)} counterparties")
@@ -127,25 +198,30 @@ class SettleDebtsView(View):
 class CounterpartySelectView(View):
     """View with dropdown to select which counterparty to settle with."""
 
-    def __init__(self, user_id: str, guild_id: str, balances: dict, guild: discord.Guild):
+    def __init__(self, user_id: str, guild_id: str, balances: dict, guild: discord.Guild,
+                 positions_by_cp: dict = None):
         super().__init__(timeout=300)  # 5 minute timeout
         self.user_id = user_id
         self.guild_id = guild_id
         self.balances = balances
         self.guild = guild
 
-        logger.debug(f"[CounterpartySelect] Creating view for user {user_id} with {len(balances)} counterparties")
+        merged = merge_counterparty_entries(balances, positions_by_cp or {})
+        logger.debug(f"[CounterpartySelect] Creating view for user {user_id} with {len(merged)} counterparties")
 
-        # Build select options
+        # Build select options (tix and/or card counterparties)
         options = []
-        for counterparty_id, balance in balances.items():
+        for counterparty_id, entry in merged.items():
             name = get_member_name_plain(guild, counterparty_id)  # Use plain name for dropdown
 
-            # Determine direction
-            if balance < 0:
-                direction = f"You owe {abs(balance)} tix"
-            else:
-                direction = f"They owe you {balance} tix"
+            parts = []
+            if entry["balance"] < 0:
+                parts.append(f"You owe {abs(entry['balance'])} tix")
+            elif entry["balance"] > 0:
+                parts.append(f"They owe you {entry['balance']} tix")
+            if entry["card_count"]:
+                parts.append(card_count_label(entry["card_count"]))
+            direction = " · ".join(parts)
 
             options.append(discord.SelectOption(
                 label=name[:100],  # Discord limit
@@ -181,6 +257,10 @@ class CounterpartySelectView(View):
             )
             logger.debug(f"[CounterpartySelect] Found {len(entries)} entries")
 
+            positions = await get_open_card_positions(
+                self.guild_id, self.user_id, counterparty_id=counterparty_id
+            )
+
             name_decorated = get_member_name(self.guild, counterparty_id)
             name_plain = get_member_name_plain(self.guild, counterparty_id)
 
@@ -190,14 +270,14 @@ class CounterpartySelectView(View):
                 color=discord.Color.blue()
             )
 
-            # Show net balance
+            # Show net balance (omit when the pair is cards-only)
             if balance < 0:
                 embed.add_field(
                     name="Net Balance",
                     value=f"You owe **{abs(balance)} tix**",
                     inline=False
                 )
-            else:
+            elif balance > 0:
                 embed.add_field(
                     name="Net Balance",
                     value=f"They owe you **{balance} tix**",
@@ -225,16 +305,24 @@ class CounterpartySelectView(View):
                     inline=False
                 )
 
-            embed.set_footer(text="Click 'Enter Amount' to confirm the payment amount")
+            if positions:
+                embed.add_field(
+                    name="Cards",
+                    value=format_card_positions(positions),
+                    inline=False
+                )
 
-            # Create view with amount input button
-            view = AmountInputView(
+            embed.set_footer(text="Pick what you're settling, then enter the quantity")
+
+            # Same per-entity flow as the /settle slash command
+            view = SettleEntitySelectView(
                 user_id=self.user_id,
                 guild_id=self.guild_id,
                 counterparty_id=counterparty_id,
                 net_balance=balance,
                 counterparty_name_plain=name_plain,
-                counterparty_name_decorated=name_decorated
+                counterparty_name_decorated=name_decorated,
+                positions=positions
             )
 
             logger.debug(f"[CounterpartySelect] Editing message with breakdown embed")
@@ -256,12 +344,88 @@ class CounterpartySelectView(View):
                 )
 
 
-class AmountInputView(View):
-    """View with button to enter settlement amount."""
+class CardQuantityModal(Modal):
+    """Quantity entry for returning copies of ONE card.
+
+    The card being returned is fixed in the modal TITLE — modal titles are
+    not editable, which is what makes the entity unambiguous (spec).
+    """
+
+    def __init__(self, guild_id: str, user_id: str, counterparty_id: str,
+                 counterparty_name: str, position: dict):
+        super().__init__(title=f"Return: {position['card_name']}"[:45])
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.counterparty_id = counterparty_id
+        self.counterparty_name = counterparty_name
+        self.position = position
+        self.add_item(InputText(
+            label=f"Copies (open: {abs(position['net'])})",
+            value=str(abs(position["net"])),
+            max_length=4))
+
+    async def callback(self, interaction: discord.Interaction):
+        from services.debt_service import create_card_return
+        try:
+            quantity = int(self.children[0].value.strip())
+        except ValueError:
+            await interaction.response.send_message(
+                "Enter a whole number of copies.", ephemeral=True)
+            return
+        if quantity < 1:
+            await interaction.response.send_message(
+                "Quantity must be at least 1.", ephemeral=True)
+            return
+
+        # Whoever holds the cards is the returner.
+        if self.position["net"] < 0:
+            returner_id, owner_id = self.user_id, self.counterparty_id
+        else:
+            returner_id, owner_id = self.counterparty_id, self.user_id
+        try:
+            await create_card_return(
+                guild_id=self.guild_id, returner_id=returner_id,
+                owner_id=owner_id, card_name=self.position["card_name"],
+                quantity=quantity, created_by=self.user_id)
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+
+        # Update debt summary in background (same as tix settlements)
+        from utils import fire_debt_summary_refresh
+        fire_debt_summary_refresh(interaction.client, self.guild_id, "CardQuantityModal")
+
+        await interaction.response.edit_message(
+            content=(f"Recorded: {quantity}x {self.position['card_name']} "
+                     f"returned ({self.counterparty_name})."),
+            embed=None, view=None)
+
+    async def on_error(self, error: Exception, interaction: discord.Interaction):
+        """Handle errors in modal submission."""
+        logger.error(f"[CardQuantityModal] Error in on_submit: {error}")
+        logger.error(f"[CardQuantityModal] Traceback: {traceback.format_exc()}")
+        try:
+            await interaction.response.send_message(
+                f"An error occurred: {str(error)}",
+                ephemeral=True
+            )
+        except discord.errors.InteractionResponded:
+            await interaction.followup.send(
+                f"An error occurred: {str(error)}",
+                ephemeral=True
+            )
+
+
+class SettleEntitySelectView(View):
+    """Settle-flow entity picker: tix and/or open card positions.
+
+    Selecting tix opens the existing AmountConfirmationModal; selecting a
+    card opens CardQuantityModal for that position.
+    """
 
     def __init__(self, user_id: str, guild_id: str, counterparty_id: str,
                  net_balance: int, counterparty_name_plain: str,
-                 counterparty_name_decorated: str):
+                 counterparty_name_decorated: str, positions: list[dict]):
         super().__init__(timeout=300)
         self.user_id = user_id
         self.guild_id = guild_id
@@ -269,68 +433,70 @@ class AmountInputView(View):
         self.net_balance = net_balance
         self.counterparty_name_plain = counterparty_name_plain
         self.counterparty_name_decorated = counterparty_name_decorated
-        logger.debug(f"[AmountInputView] Created for user {user_id}, counterparty {counterparty_id}, balance {net_balance}")
+        self.positions = positions
 
-    @discord.ui.button(label="Enter Amount", style=discord.ButtonStyle.primary)
-    async def enter_amount(self, button: Button, interaction: discord.Interaction):
-        """Open modal for amount input."""
+        options = [
+            discord.SelectOption(label=c["label"][:100], value=c["key"])
+            for c in build_entity_choices(net_balance, positions)
+        ]
+        # Limit to 25 options (Discord limit)
+        options = options[:25]
+        select = Select(placeholder="What are you settling?",
+                         options=options)
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction):
         try:
-            logger.info(f"[AmountInputView] Enter Amount clicked by user {interaction.user.id}")
-            modal = AmountConfirmationModal(
-                user_id=self.user_id,
-                guild_id=self.guild_id,
-                counterparty_id=self.counterparty_id,
-                net_balance=self.net_balance,
-                counterparty_name_plain=self.counterparty_name_plain,
-                counterparty_name_decorated=self.counterparty_name_decorated
-            )
-            logger.debug(f"[AmountInputView] Sending modal")
+            key = interaction.data["values"][0]
+            if key == "tix":
+                modal = AmountConfirmationModal(
+                    user_id=self.user_id, guild_id=self.guild_id,
+                    counterparty_id=self.counterparty_id,
+                    net_balance=self.net_balance,
+                    counterparty_name_plain=self.counterparty_name_plain,
+                    counterparty_name_decorated=self.counterparty_name_decorated)
+            else:
+                position = self.positions[int(key.split(":", 1)[1])]
+                modal = CardQuantityModal(
+                    guild_id=self.guild_id, user_id=self.user_id,
+                    counterparty_id=self.counterparty_id,
+                    counterparty_name=self.counterparty_name_plain,
+                    position=position)
             await interaction.response.send_modal(modal)
-            logger.debug(f"[AmountInputView] Modal sent successfully")
         except Exception as e:
-            logger.error(f"[AmountInputView] Error opening modal: {e}")
-            logger.error(f"[AmountInputView] Traceback: {traceback.format_exc()}")
+            logger.error(f"[SettleEntitySelectView] Error: {e}")
             try:
                 await interaction.response.send_message(
-                    f"An error occurred: {str(e)}",
-                    ephemeral=True
-                )
+                    f"An error occurred: {str(e)}", ephemeral=True)
             except discord.errors.InteractionResponded:
                 await interaction.followup.send(
-                    f"An error occurred: {str(e)}",
-                    ephemeral=True
-                )
+                    f"An error occurred: {str(e)}", ephemeral=True)
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, button: Button, interaction: discord.Interaction):
-        """Cancel settlement."""
-        logger.info(f"[AmountInputView] Cancel clicked by user {interaction.user.id}")
-        await interaction.response.edit_message(
-            content="Settlement cancelled.",
-            embed=None,
-            view=None
-        )
 
 class SettleOrTransferView(View):
     """View that asks the user whether they want to settle or transfer debt."""
 
-    def __init__(self, user_id: str, guild_id: str, balances: dict, guild: discord.Guild):
+    def __init__(self, user_id: str, guild_id: str, balances: dict, guild: discord.Guild,
+                 positions_by_cp: dict = None):
         super().__init__(timeout=300)
         self.user_id = user_id
         self.guild_id = guild_id
         self.balances = balances
         self.guild = guild
+        self.positions_by_cp = positions_by_cp or {}
 
     @discord.ui.button(label="Settle a Debt", style=discord.ButtonStyle.primary, emoji="\U0001f4b0")
     async def settle_button(self, button: Button, interaction: discord.Interaction):
         """Go to the normal settle flow."""
         try:
-            embed = build_user_balance_embed(self.guild, self.balances)
+            embed = build_user_balance_embed(self.guild, self.balances, self.positions_by_cp)
             view = CounterpartySelectView(
                 user_id=self.user_id,
                 guild_id=self.guild_id,
                 balances=self.balances,
-                guild=self.guild
+                guild=self.guild,
+                positions_by_cp=self.positions_by_cp
             )
             await interaction.response.edit_message(embed=embed, view=view)
         except TRANSIENT_ERRORS as e:
@@ -782,11 +948,8 @@ class TransferConfirmView(View):
             logger.info(f"[TransferConfirm] Transfer completed successfully")
 
             # Update debt summary in background
-            try:
-                from utils import update_debt_summary_for_guild
-                asyncio.create_task(update_debt_summary_for_guild(interaction.client, self.guild_id))
-            except Exception as e:
-                logger.warning(f"[TransferConfirm] Failed to trigger debt summary update: {e}")
+            from utils import fire_debt_summary_refresh
+            fire_debt_summary_refresh(interaction.client, self.guild_id, "TransferConfirm")
 
             # Clear/update debt warnings on any open staked queues promptly
             try:
@@ -1082,11 +1245,8 @@ class SettlementConfirmView(View):
                 logger.warning(f"[SettlementConfirm] Failed to send settlement notification DM: {e}")
 
             # Update debt summary in background (lazy import to avoid circular import)
-            try:
-                from utils import update_debt_summary_for_guild
-                asyncio.create_task(update_debt_summary_for_guild(interaction.client, self.guild_id))
-            except Exception as e:
-                logger.warning(f"[SettlementConfirm] Failed to trigger debt summary update: {e}")
+            from utils import fire_debt_summary_refresh
+            fire_debt_summary_refresh(interaction.client, self.guild_id, "SettlementConfirm")
 
             # Clear/update debt warnings on any open staked queues promptly
             try:
@@ -1165,12 +1325,9 @@ class PublicSettleDebtsView(View):
             await interaction.response.defer()
             return
 
-        from services.debt_service import get_guild_debt_rows, get_most_outstanding_creditors
-        from debt_views.helpers import build_guild_debt_embed_pages
+        from debt_views.helpers import build_debt_summary_pages
 
-        rows = await get_guild_debt_rows(str(guild.id))
-        top_creditors = await get_most_outstanding_creditors(str(guild.id))
-        pages = build_guild_debt_embed_pages(guild, rows, top_creditors=top_creditors)
+        pages = await build_debt_summary_pages(guild)
 
         current_page = self._get_current_page_from_embed(interaction)
         new_page = current_page + direction
@@ -1217,24 +1374,22 @@ class PublicSettleDebtsView(View):
 
         try:
             # Get all non-zero balances for this user
-            balances = await get_all_balances_for(
-                guild_id=guild_id,
-                player_id=user_id
-            )
+            balances, positions_by_cp = await gather_settle_state(guild_id, user_id)
 
-            if not balances:
+            if not balances and not positions_by_cp:
                 await interaction.response.send_message(
                     "You have no outstanding debts with anyone.",
                     ephemeral=True
                 )
                 return
 
-            embed = build_user_balance_embed(interaction.guild, balances)
+            embed = build_user_balance_embed(interaction.guild, balances, positions_by_cp)
             view = await _build_settle_entry_view(
                 user_id=user_id,
                 guild_id=guild_id,
                 balances=balances,
-                guild=interaction.guild
+                guild=interaction.guild,
+                positions_by_cp=positions_by_cp
             )
 
             await interaction.response.send_message(
@@ -1295,24 +1450,22 @@ class DMSettleDebtsView(View):
                 )
                 return
 
-            balances = await get_all_balances_for(
-                guild_id=self.guild_id,
-                player_id=user_id
-            )
+            balances, positions_by_cp = await gather_settle_state(self.guild_id, user_id)
 
-            if not balances:
+            if not balances and not positions_by_cp:
                 await interaction.response.send_message(
                     "You have no outstanding debts with anyone.",
                     ephemeral=True
                 )
                 return
 
-            embed = build_user_balance_embed(guild, balances)
+            embed = build_user_balance_embed(guild, balances, positions_by_cp)
             view = await _build_settle_entry_view(
                 user_id=user_id,
                 guild_id=self.guild_id,
                 balances=balances,
-                guild=guild
+                guild=guild,
+                positions_by_cp=positions_by_cp
             )
 
             await interaction.response.send_message(

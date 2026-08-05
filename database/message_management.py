@@ -270,17 +270,13 @@ class DebtSummaryStickyStrategy(StickyStrategy):
         self, sticky_message: Message, bot: discord.Client, session: AsyncSession
     ) -> Tuple[str, Optional[discord.Embed], Optional[discord.ui.View], Dict[str, Any]]:
         # Function-local imports to avoid circular dependencies
-        from services.debt_service import get_guild_debt_rows, get_most_outstanding_creditors
-        from debt_views.helpers import build_guild_debt_embed_pages
+        from debt_views.helpers import build_debt_summary_pages
         from debt_views.settle_views import PublicSettleDebtsView
 
-        guild_id = sticky_message.guild_id
-        guild = bot.get_guild(int(guild_id))
+        guild = bot.get_guild(int(sticky_message.guild_id))
 
         # Re-fetch debt data to allow the sticky update to refresh content
-        rows = await get_guild_debt_rows(guild_id)
-        top_creditors = await get_most_outstanding_creditors(guild_id)
-        pages = build_guild_debt_embed_pages(guild, rows, top_creditors=top_creditors)
+        pages = await build_debt_summary_pages(guild)
 
         view = PublicSettleDebtsView(pages=pages)
 

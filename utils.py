@@ -18,10 +18,9 @@ from helpers.draft_footer import apply_draft_footer_from_session
 from services.draft_analysis import DraftAnalysis
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
-from services.debt_service import create_debt_entries_from_stakes, get_guild_debt_rows, get_balance_with
+from services.debt_service import create_debt_entries_from_stakes, get_balance_with
 from debt_views import SettleDebtsView
 from debt_views.settle_views import PublicSettleDebtsView
-from debt_views.helpers import build_guild_debt_embed_pages
 from models.debt_summary_message import DebtSummaryMessage
 from loguru import logger
 from config import is_cleanup_exempt, is_test_mode
@@ -1096,7 +1095,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                     ))
 
                     # Update debt summary in background (if one exists for this guild)
-                    asyncio.create_task(update_debt_summary_for_guild(bot, draft_session.guild_id))
+                    fire_debt_summary_refresh(bot, draft_session.guild_id, "StakeDebts")
 
 
 async def update_leaderboards_for_guild(bot, guild_id: str, session_id=None, streak_extensions=None):
@@ -1209,6 +1208,16 @@ async def update_leaderboards_for_guild(bot, guild_id: str, session_id=None, str
         logger.error(f"Error updating leaderboards for guild {guild_id}: {e}")
 
 
+def fire_debt_summary_refresh(client, guild_id: str, context: str):
+    """Fire-and-forget panel refresh after any ledger mutation (tix
+    settlement, transfer, card loan, card return). One helper so no
+    mutation path can forget the try/except + create_task dance."""
+    try:
+        asyncio.create_task(update_debt_summary_for_guild(client, guild_id))
+    except Exception as e:
+        logger.warning(f"[{context}] Failed to trigger debt summary update: {e}")
+
+
 async def update_debt_summary_for_guild(bot, guild_id: str):
     """Update the debt summary message for a guild (force refresh using sticky message system).
 
@@ -1264,10 +1273,8 @@ async def update_debt_summary_for_guild(bot, guild_id: str):
                         logger.warning(f"Failed to delete legacy debt summary message: {e}")
 
                 # Get all debts and build embed pages
-                from services.debt_service import get_most_outstanding_creditors
-                rows = await get_guild_debt_rows(guild_id)
-                top_creditors = await get_most_outstanding_creditors(guild_id)
-                pages = build_guild_debt_embed_pages(guild, rows, top_creditors=top_creditors)
+                from debt_views.helpers import build_debt_summary_pages
+                pages = await build_debt_summary_pages(guild)
                 view = PublicSettleDebtsView(pages=pages)
 
                 new_message = await channel.send(embed=pages[0], view=view)
