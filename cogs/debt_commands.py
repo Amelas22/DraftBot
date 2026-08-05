@@ -19,7 +19,8 @@ from services.debt_service import (
     get_entries_since_last_settlement,
     get_active_debt_entries,
     create_settlement,
-    get_guild_debt_rows
+    get_guild_debt_rows,
+    create_card_loan
 )
 from debt_views.settle_views import (
     CounterpartySelectView,
@@ -355,6 +356,45 @@ class DebtCommands(commands.Cog):
         )
 
         await ctx.followup.send(embed=embed, view=view)
+
+    @discord.slash_command(name="lend", description="Record a card loan between you and another player")
+    @option("player", discord.Member, description="The other player")
+    @option("direction", str, description="Which way the cards went",
+            choices=["lent-to-them", "borrowed-from-them"])
+    @option("card", str, description="Card name (free text, e.g. 'Lightning Bolt')")
+    @option("quantity", int, description="Number of copies", default=1, min_value=1)
+    async def lend(self, ctx: discord.ApplicationContext, player: discord.Member,
+                   direction: str, card: str, quantity: int = 1):
+        """Record a card loan in the debt ledger."""
+        await ctx.defer(ephemeral=True)
+
+        user_id = str(ctx.author.id)
+        other_id = str(player.id)
+        guild_id = str(ctx.guild.id)
+
+        if direction == "lent-to-them":
+            lender_id, borrower_id = user_id, other_id
+        else:
+            lender_id, borrower_id = other_id, user_id
+
+        try:
+            lender_row, _ = await create_card_loan(
+                guild_id=guild_id, lender_id=lender_id, borrower_id=borrower_id,
+                card_name=card, quantity=quantity, created_by=user_id)
+        except ValueError as e:
+            await ctx.followup.send(str(e), ephemeral=True)
+            return
+
+        qty_label = f"{quantity}x " if quantity > 1 else ""
+        if direction == "lent-to-them":
+            summary = f"You lent **{qty_label}{lender_row.card_name}** to {player.display_name}."
+        else:
+            summary = f"You borrowed **{qty_label}{lender_row.card_name}** from {player.display_name}."
+        embed = discord.Embed(
+            title="Card loan recorded",
+            description=f"{summary}\nUse `/settle` with them to view or return cards.",
+            color=discord.Color.blue())
+        await ctx.followup.send(embed=embed, ephemeral=True)
 
     @discord.slash_command(name="debts-admin", description="[Admin] View all debts in the guild")
     @has_bot_manager_role()
