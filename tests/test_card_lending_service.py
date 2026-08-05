@@ -325,6 +325,7 @@ async def test_sticky_debt_summary_refresh_shows_card_only_debts(test_db):
     sticky.view_metadata = {"view_type": "debt_summary"}
     bot = MagicMock()
     guild_stub = MagicMock()
+    guild_stub.id = 123  # build_debt_summary_pages derives guild_id from this
     guild_stub.get_member.return_value = None  # names fall back to "User <id>"
     bot.get_guild.return_value = guild_stub
 

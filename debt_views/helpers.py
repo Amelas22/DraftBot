@@ -185,6 +185,26 @@ def _build_most_outstanding_field(guild, top_creditors):
     return "🏆 Most Outstanding", "\n".join(lines)
 
 
+async def build_debt_summary_pages(guild: discord.Guild, include_description: bool = True) -> list:
+    """THE debt summary panel builder: owns all data fetching (tix pair rows,
+    open card pair counts, the leaderboard) so every render path — /debts-post,
+    /debts-admin, sticky refresh, pagination, background updates — produces
+    identical content by construction. Render paths must not fetch panel data
+    themselves."""
+    from services.debt_service import (
+        get_guild_debt_rows,
+        get_guild_card_pair_counts,
+        get_most_outstanding_creditors,
+    )
+    guild_id = str(guild.id)
+    rows = await get_guild_debt_rows(guild_id)
+    top_creditors = await get_most_outstanding_creditors(guild_id)
+    card_pairs = await get_guild_card_pair_counts(guild_id)
+    return build_guild_debt_embed_pages(
+        guild, rows, include_description=include_description,
+        top_creditors=top_creditors, card_pairs=card_pairs)
+
+
 def build_guild_debt_embed_pages(guild: discord.Guild, rows: list, per_page: int = 10, include_description: bool = True, top_creditors: list = None, card_pairs: dict = None) -> list:
     """
     Build a list of paginated guild debt summary embeds.

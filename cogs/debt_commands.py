@@ -20,8 +20,6 @@ from services.debt_service import (
     get_entries_since_last_settlement,
     get_active_debt_entries,
     create_settlement,
-    get_guild_debt_rows,
-    get_guild_card_pair_counts,
     create_card_loan,
     get_open_card_positions
 )
@@ -31,7 +29,7 @@ from debt_views.settle_views import (
     SettleEntitySelectView,
     format_card_positions
 )
-from debt_views.helpers import get_member_name, get_member_name_plain, format_entry_source, describe_draft_sources, build_guild_debt_embed, build_guild_debt_embed_pages
+from debt_views.helpers import get_member_name, get_member_name_plain, format_entry_source, describe_draft_sources
 from database.db_session import db_session
 from models.debt_ledger import DebtLedger
 from models.debt_summary_message import DebtSummaryMessage
@@ -410,11 +408,8 @@ class DebtCommands(commands.Cog):
             return
 
         # Update debt summary in background (lending changes the panel too)
-        try:
-            from utils import update_debt_summary_for_guild
-            asyncio.create_task(update_debt_summary_for_guild(ctx.bot, guild_id))
-        except Exception as e:
-            logger.warning(f"[Lend] Failed to trigger debt summary update: {e}")
+        from utils import fire_debt_summary_refresh
+        fire_debt_summary_refresh(ctx.bot, guild_id, "Lend")
 
         qty_label = f"{quantity}x " if quantity > 1 else ""
         if direction == "lent-to-them":
@@ -433,18 +428,8 @@ class DebtCommands(commands.Cog):
         """Admin view of all outstanding debts in the guild."""
         await ctx.defer(ephemeral=True)
 
-        rows = await get_guild_debt_rows(str(ctx.guild.id))
-        card_pairs = await get_guild_card_pair_counts(str(ctx.guild.id))
-
-        if not rows and not card_pairs:
-            await ctx.followup.send("No outstanding debts in this guild.")
-            return
-
-        from services.debt_service import get_most_outstanding_creditors
-        top_creditors = await get_most_outstanding_creditors(str(ctx.guild.id))
-        pages = build_guild_debt_embed_pages(
-            ctx.guild, rows, include_description=False, top_creditors=top_creditors,
-            card_pairs=card_pairs)
+        from debt_views.helpers import build_debt_summary_pages
+        pages = await build_debt_summary_pages(ctx.guild, include_description=False)
         await ctx.followup.send(embed=pages[0])
 
     @discord.slash_command(name="debts-post", description="[Admin] Post public debt summary with settle button")
@@ -455,8 +440,6 @@ class DebtCommands(commands.Cog):
 
         guild_id = str(ctx.guild.id)
         channel_id = str(ctx.channel.id)
-
-        rows = await get_guild_debt_rows(guild_id)
 
         async with db_session() as session:
             # Check if there's an existing debt summary message for this guild
@@ -480,11 +463,8 @@ class DebtCommands(commands.Cog):
                     logger.warning(f"Could not delete old debt summary message: {e}")
 
             # Build and post the public message
-            from services.debt_service import get_most_outstanding_creditors, get_guild_card_pair_counts
-            top_creditors = await get_most_outstanding_creditors(guild_id)
-            card_pairs = await get_guild_card_pair_counts(guild_id)
-            pages = build_guild_debt_embed_pages(ctx.guild, rows, top_creditors=top_creditors,
-                                                 card_pairs=card_pairs)
+            from debt_views.helpers import build_debt_summary_pages
+            pages = await build_debt_summary_pages(ctx.guild)
             view = PublicSettleDebtsView(pages=pages)
             public_message = await ctx.channel.send(embed=pages[0], view=view)
 

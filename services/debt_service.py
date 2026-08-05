@@ -21,7 +21,8 @@ async def create_ledger_entries(
     source_type: str,
     source_id: str,
     notes: str = None,
-    created_by: str = None
+    created_by: str = None,
+    card_name: str = None
 ) -> tuple[DebtLedger, DebtLedger]:
     """
     Create a pair of ledger entries for a debt.
@@ -35,10 +36,12 @@ async def create_ledger_entries(
         debtor_id: The player who owes money
         creditor_id: The player who is owed money
         amount: The amount owed (positive integer)
-        source_type: 'draft', 'settlement', or 'admin'
-        source_id: session_id for drafts, UUID for settlements/admin
+        source_type: 'draft', 'settlement', 'admin', 'card_loan', or 'card_return'
+        source_id: session_id for drafts, UUID otherwise
         notes: Optional human-readable context
         created_by: Optional - who recorded this entry
+        card_name: None for tix (the default, every legacy row); set when the
+            pair's entity is copies of that card and `amount` is the quantity
 
     Returns:
         Tuple of (debtor_entry, creditor_entry)
@@ -46,7 +49,8 @@ async def create_ledger_entries(
     if amount <= 0:
         raise ValueError("Amount must be positive")
 
-    logger.info(f"Creating ledger entries: {debtor_id} owes {creditor_id} {amount} tix (source: {source_type}/{source_id})")
+    unit = card_name if card_name else "tix"
+    logger.info(f"Creating ledger entries: {debtor_id} owes {creditor_id} {amount} {unit} (source: {source_type}/{source_id})")
 
     async with db_session() as session:
         # Entry from debtor's perspective (they owe, so negative)
@@ -58,7 +62,8 @@ async def create_ledger_entries(
             source_type=source_type,
             source_id=source_id,
             notes=notes,
-            created_by=created_by
+            created_by=created_by,
+            card_name=card_name
         )
 
         # Entry from creditor's perspective (they are owed, so positive)
@@ -70,7 +75,8 @@ async def create_ledger_entries(
             source_type=source_type,
             source_id=source_id,
             notes=notes,
-            created_by=created_by
+            created_by=created_by,
+            card_name=card_name
         )
 
         session.add(debtor_entry)
@@ -84,6 +90,19 @@ async def create_ledger_entries(
         logger.debug(f"Created ledger entries with IDs: {debtor_entry.id}, {creditor_entry.id}")
 
         return debtor_entry, creditor_entry
+
+
+def _validated_card_args(party_a: str, party_b: str, card_name: str,
+                         quantity: int, self_error: str) -> str:
+    """Shared validation for the card adapters; returns the trimmed name."""
+    card_name = (card_name or "").strip()
+    if party_a == party_b:
+        raise ValueError(self_error)
+    if not card_name:
+        raise ValueError("Card name is required")
+    if quantity < 1:
+        raise ValueError("Quantity must be at least 1")
+    return card_name
 
 
 async def create_card_loan(
@@ -100,36 +119,14 @@ async def create_card_loan(
     the signed number of copies and `card_name` names the entity. The lender
     is owed the copies back (+quantity); the borrower owes them (-quantity).
     """
-    card_name = (card_name or "").strip()
-    if lender_id == borrower_id:
-        raise ValueError("Cannot lend cards to yourself")
-    if not card_name:
-        raise ValueError("Card name is required")
-    if quantity < 1:
-        raise ValueError("Quantity must be at least 1")
-
-    source_id = str(uuid.uuid4())
-    logger.info(
-        f"Card loan: {lender_id} lends {quantity}x {card_name!r} to "
-        f"{borrower_id} in {guild_id}")
-
-    async with db_session() as session:
-        lender_entry = DebtLedger(
-            guild_id=guild_id, player_id=lender_id,
-            counterparty_id=borrower_id, amount=quantity,
-            source_type="card_loan", source_id=source_id,
-            card_name=card_name, created_by=created_by)
-        borrower_entry = DebtLedger(
-            guild_id=guild_id, player_id=borrower_id,
-            counterparty_id=lender_id, amount=-quantity,
-            source_type="card_loan", source_id=source_id,
-            card_name=card_name, created_by=created_by)
-        session.add(lender_entry)
-        session.add(borrower_entry)
-        await session.commit()
-        await session.refresh(lender_entry)
-        await session.refresh(borrower_entry)
-        return lender_entry, borrower_entry
+    card_name = _validated_card_args(lender_id, borrower_id, card_name, quantity,
+                                     "Cannot lend cards to yourself")
+    # The borrower owes the copies back: borrower = debtor, lender = creditor.
+    borrower_entry, lender_entry = await create_ledger_entries(
+        guild_id=guild_id, debtor_id=borrower_id, creditor_id=lender_id,
+        amount=quantity, source_type="card_loan", source_id=str(uuid.uuid4()),
+        card_name=card_name, created_by=created_by)
+    return lender_entry, borrower_entry
 
 
 async def create_card_return(
@@ -147,36 +144,15 @@ async def create_card_return(
     flips the position — the ledger doesn't police quantities, the UI only
     offers open amounts (mirrors tix overpayment semantics).
     """
-    card_name = (card_name or "").strip()
-    if returner_id == owner_id:
-        raise ValueError("Cannot return cards to yourself")
-    if not card_name:
-        raise ValueError("Card name is required")
-    if quantity < 1:
-        raise ValueError("Quantity must be at least 1")
-
-    source_id = str(uuid.uuid4())
-    logger.info(
-        f"Card return: {returner_id} returns {quantity}x {card_name!r} to "
-        f"{owner_id} in {guild_id}")
-
-    async with db_session() as session:
-        returner_entry = DebtLedger(
-            guild_id=guild_id, player_id=returner_id,
-            counterparty_id=owner_id, amount=quantity,
-            source_type="card_return", source_id=source_id,
-            card_name=card_name, created_by=created_by)
-        owner_entry = DebtLedger(
-            guild_id=guild_id, player_id=owner_id,
-            counterparty_id=returner_id, amount=-quantity,
-            source_type="card_return", source_id=source_id,
-            card_name=card_name, created_by=created_by)
-        session.add(returner_entry)
-        session.add(owner_entry)
-        await session.commit()
-        await session.refresh(returner_entry)
-        await session.refresh(owner_entry)
-        return returner_entry, owner_entry
+    card_name = _validated_card_args(returner_id, owner_id, card_name, quantity,
+                                     "Cannot return cards to yourself")
+    # Returning offsets the loan: the owner's claim shrinks (owner = debtor
+    # side of this event), the returner's owed count rises toward zero.
+    owner_entry, returner_entry = await create_ledger_entries(
+        guild_id=guild_id, debtor_id=owner_id, creditor_id=returner_id,
+        amount=quantity, source_type="card_return", source_id=str(uuid.uuid4()),
+        card_name=card_name, created_by=created_by)
+    return returner_entry, owner_entry
 
 
 async def get_balance_with(
@@ -1329,6 +1305,46 @@ async def get_most_outstanding_creditors(guild_id: str, limit: int = 3) -> list:
     return await get_most_involved_players(guild_id, limit)
 
 
+async def _open_card_groups(
+    guild_id: str,
+    player_id: str = None,
+    counterparty_id: str = None
+) -> dict[tuple, dict]:
+    """The one card-netting computation every card query projects from.
+
+    Groups card rows by (player, counterparty, LOWER(TRIM(card_name))) and
+    sums the signed quantities. Returns {key: {"player_id", "counterparty_id",
+    "card_name", "net"}} for non-zero nets only; `card_name` carries the most
+    recently recorded spelling.
+    """
+    conditions = [
+        DebtLedger.guild_id == guild_id,
+        DebtLedger.card_name.isnot(None),
+    ]
+    if player_id:
+        conditions.append(DebtLedger.player_id == player_id)
+    if counterparty_id:
+        conditions.append(DebtLedger.counterparty_id == counterparty_id)
+
+    async with db_session() as session:
+        rows = (await session.execute(
+            select(DebtLedger).where(*conditions).order_by(DebtLedger.id)
+        )).scalars().all()
+
+    groups: dict[tuple, dict] = {}
+    for row in rows:
+        key = (row.player_id, row.counterparty_id, row.card_name.strip().lower())
+        group = groups.setdefault(key, {
+            "player_id": row.player_id,
+            "counterparty_id": row.counterparty_id,
+            "card_name": row.card_name,
+            "net": 0,
+        })
+        group["net"] += row.amount
+        group["card_name"] = row.card_name  # later rows win the spelling
+    return {k: g for k, g in groups.items() if g["net"] != 0}
+
+
 async def get_open_card_positions(
     guild_id: str,
     player_id: str,
@@ -1336,58 +1352,29 @@ async def get_open_card_positions(
 ) -> list[dict]:
     """Net card positions for a player, per counterparty and card.
 
-    Groups card rows by (counterparty, LOWER(TRIM(card_name))) and sums the
-    signed quantities; only non-zero nets are returned. `card_name` in the
-    result is the most recently recorded spelling in the group.
+    Projection of _open_card_groups from one player's perspective, ordered
+    by counterparty then card key. Positive net = owed to the player.
     """
-    async with db_session() as session:
-        conditions = [
-            DebtLedger.guild_id == guild_id,
-            DebtLedger.player_id == player_id,
-            DebtLedger.card_name.isnot(None),
-        ]
-        if counterparty_id:
-            conditions.append(DebtLedger.counterparty_id == counterparty_id)
-
-        rows = (await session.execute(
-            select(DebtLedger).where(*conditions).order_by(DebtLedger.id)
-        )).scalars().all()
-
-    groups: dict[tuple, dict] = {}
-    for row in rows:
-        key = (row.counterparty_id, row.card_name.strip().lower())
-        group = groups.setdefault(key, {"counterparty_id": row.counterparty_id,
-                                        "card_name": row.card_name, "net": 0})
-        group["net"] += row.amount
-        group["card_name"] = row.card_name  # later rows win the spelling
-    return [g for _, g in sorted(groups.items()) if g["net"] != 0]
+    groups = await _open_card_groups(guild_id, player_id, counterparty_id)
+    return [
+        {"counterparty_id": g["counterparty_id"], "card_name": g["card_name"],
+         "net": g["net"]}
+        for _, g in sorted(groups.items(), key=lambda kv: kv[0][1:])
+    ]
 
 
 async def get_guild_card_pair_counts(guild_id: str) -> dict[tuple, int]:
     """Open card positions per (debtor, creditor) pair, guild-wide.
 
-    Returns {(debtor_id, creditor_id): number of distinct open card
-    positions the debtor owes back}. Every open position appears exactly
+    Projection of _open_card_groups: every open position appears exactly
     once, keyed on its negative (debtor) side — the mirrored positive rows
     are the same positions seen from the creditor. Used by the public debt
     summary panel.
     """
-    async with db_session() as session:
-        rows = (await session.execute(
-            select(DebtLedger).where(
-                DebtLedger.guild_id == guild_id,
-                DebtLedger.card_name.isnot(None),
-            ).order_by(DebtLedger.id)
-        )).scalars().all()
-
-    nets: dict[tuple, int] = {}
-    for row in rows:
-        key = (row.player_id, row.counterparty_id, row.card_name.strip().lower())
-        nets[key] = nets.get(key, 0) + row.amount
-
+    groups = await _open_card_groups(guild_id)
     counts: dict[tuple, int] = {}
-    for (player_id, counterparty_id, _), net in nets.items():
-        if net < 0:
-            pair = (player_id, counterparty_id)
+    for g in groups.values():
+        if g["net"] < 0:
+            pair = (g["player_id"], g["counterparty_id"])
             counts[pair] = counts.get(pair, 0) + 1
     return counts

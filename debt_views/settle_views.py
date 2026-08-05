@@ -447,11 +447,8 @@ class CardQuantityModal(Modal):
             return
 
         # Update debt summary in background (same as tix settlements)
-        try:
-            from utils import update_debt_summary_for_guild
-            asyncio.create_task(update_debt_summary_for_guild(interaction.client, self.guild_id))
-        except Exception as e:
-            logger.warning(f"[CardQuantityModal] Failed to trigger debt summary update: {e}")
+        from utils import fire_debt_summary_refresh
+        fire_debt_summary_refresh(interaction.client, self.guild_id, "CardQuantityModal")
 
         await interaction.response.edit_message(
             content=(f"Recorded: {quantity}x {self.position['card_name']} "
@@ -1006,11 +1003,8 @@ class TransferConfirmView(View):
             logger.info(f"[TransferConfirm] Transfer completed successfully")
 
             # Update debt summary in background
-            try:
-                from utils import update_debt_summary_for_guild
-                asyncio.create_task(update_debt_summary_for_guild(interaction.client, self.guild_id))
-            except Exception as e:
-                logger.warning(f"[TransferConfirm] Failed to trigger debt summary update: {e}")
+            from utils import fire_debt_summary_refresh
+            fire_debt_summary_refresh(interaction.client, self.guild_id, "TransferConfirm")
 
             # Clear/update debt warnings on any open staked queues promptly
             try:
@@ -1306,11 +1300,8 @@ class SettlementConfirmView(View):
                 logger.warning(f"[SettlementConfirm] Failed to send settlement notification DM: {e}")
 
             # Update debt summary in background (lazy import to avoid circular import)
-            try:
-                from utils import update_debt_summary_for_guild
-                asyncio.create_task(update_debt_summary_for_guild(interaction.client, self.guild_id))
-            except Exception as e:
-                logger.warning(f"[SettlementConfirm] Failed to trigger debt summary update: {e}")
+            from utils import fire_debt_summary_refresh
+            fire_debt_summary_refresh(interaction.client, self.guild_id, "SettlementConfirm")
 
             # Clear/update debt warnings on any open staked queues promptly
             try:
@@ -1389,14 +1380,9 @@ class PublicSettleDebtsView(View):
             await interaction.response.defer()
             return
 
-        from services.debt_service import get_guild_debt_rows, get_most_outstanding_creditors, get_guild_card_pair_counts
-        from debt_views.helpers import build_guild_debt_embed_pages
+        from debt_views.helpers import build_debt_summary_pages
 
-        rows = await get_guild_debt_rows(str(guild.id))
-        top_creditors = await get_most_outstanding_creditors(str(guild.id))
-        card_pairs = await get_guild_card_pair_counts(str(guild.id))
-        pages = build_guild_debt_embed_pages(guild, rows, top_creditors=top_creditors,
-                                             card_pairs=card_pairs)
+        pages = await build_debt_summary_pages(guild)
 
         current_page = self._get_current_page_from_embed(interaction)
         new_page = current_page + direction
