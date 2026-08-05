@@ -98,3 +98,57 @@ async def test_card_rows_never_touch_tix_outputs(test_db):
 
     after = await _tix_surface_snapshot()
     assert after == before
+
+
+@pytest.mark.asyncio
+async def test_debts_history_command_ignores_card_rows(test_db):
+    """/debts history's active_only=False branch runs a raw select(DebtLedger)
+    directly in cogs/debt_commands.py (not routed through debt_service). It
+    needs the same card_name IS NULL guarantee as every service-layer query."""
+    from unittest.mock import AsyncMock, MagicMock
+    from cogs.debt_commands import DebtCommands
+
+    guild_id, user_id, counterparty_id = "g", "1", "2"
+
+    await debt_service.adjust_debt(
+        guild_id=guild_id, player1_id=user_id, player2_id=counterparty_id,
+        amount=30, notes="seed debt", created_by="tester")
+
+    def make_ctx():
+        ctx = MagicMock()
+        ctx.author.id = user_id
+        ctx.guild.id = guild_id
+        ctx.defer = AsyncMock()
+        ctx.followup.send = AsyncMock()
+        return ctx
+
+    player = MagicMock()
+    player.id = counterparty_id
+    player.display_name = "Bob"
+
+    cog = DebtCommands(MagicMock())
+
+    ctx_before = make_ctx()
+    await cog.debts_history.callback(cog, ctx_before, player, active_only=False)
+    embed_before = ctx_before.followup.send.call_args.kwargs["embed"]
+    history_before = [f.value for f in embed_before.fields]
+
+    # Card rows between the same pair, inserted raw (predates the loan API).
+    async with AsyncSessionLocal() as session:
+        for player_id, cp_id, qty, name, stype in [
+            (user_id, counterparty_id, +4, "Lightning Bolt", "card_loan"),
+            (counterparty_id, user_id, -4, "Lightning Bolt", "card_loan"),
+            (user_id, counterparty_id, -2, "lightning bolt", "card_return"),
+            (counterparty_id, user_id, +2, "lightning bolt", "card_return"),
+        ]:
+            session.add(DebtLedger(
+                guild_id=guild_id, player_id=player_id, counterparty_id=cp_id,
+                amount=qty, source_type=stype, source_id="u", card_name=name))
+        await session.commit()
+
+    ctx_after = make_ctx()
+    await cog.debts_history.callback(cog, ctx_after, player, active_only=False)
+    embed_after = ctx_after.followup.send.call_args.kwargs["embed"]
+    history_after = [f.value for f in embed_after.fields]
+
+    assert history_after == history_before

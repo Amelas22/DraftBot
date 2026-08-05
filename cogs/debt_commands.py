@@ -224,7 +224,8 @@ class DebtCommands(commands.Cog):
                     .where(
                         DebtLedger.guild_id == guild_id,
                         DebtLedger.player_id == user_id,
-                        DebtLedger.counterparty_id == counterparty_id
+                        DebtLedger.counterparty_id == counterparty_id,
+                        DebtLedger.card_name.is_(None),
                     )
                     .order_by(DebtLedger.created_at.desc())
                     .limit(50)
