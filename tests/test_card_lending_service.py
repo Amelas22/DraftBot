@@ -177,3 +177,42 @@ async def test_create_card_loan_rejects_bad_input(test_db):
     ]:
         with pytest.raises(ValueError):
             await debt_service.create_card_loan(guild_id="g", **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_open_card_positions_net_case_insensitively(test_db):
+    await debt_service.create_card_loan(
+        guild_id="g", lender_id="1", borrower_id="2",
+        card_name="Lightning Bolt", quantity=4)
+    await debt_service.create_card_loan(
+        guild_id="g", lender_id="2", borrower_id="1",
+        card_name="lightning bolt", quantity=1)   # nets against, newer spelling
+    await debt_service.create_card_loan(
+        guild_id="g", lender_id="2", borrower_id="1",
+        card_name="Ragavan", quantity=1)
+    await debt_service.create_card_loan(
+        guild_id="g", lender_id="1", borrower_id="3",
+        card_name="Brainstorm", quantity=2)
+
+    positions = await debt_service.get_open_card_positions("g", "1")
+    as_map = {(p["counterparty_id"], p["card_name"].lower()): p["net"] for p in positions}
+    assert as_map == {
+        ("2", "lightning bolt"): 3,    # 4 lent - 1 borrowed back
+        ("2", "ragavan"): -1,          # player 1 owes it
+        ("3", "brainstorm"): 2,
+    }
+    # display spelling = most recent entry in the group
+    bolt = next(p for p in positions if p["card_name"].lower() == "lightning bolt")
+    assert bolt["card_name"] == "lightning bolt"
+
+    only_2 = await debt_service.get_open_card_positions("g", "1", counterparty_id="2")
+    assert {p["card_name"].lower() for p in only_2} == {"lightning bolt", "ragavan"}
+
+
+@pytest.mark.asyncio
+async def test_fully_returned_position_disappears(test_db):
+    await debt_service.create_card_loan(
+        guild_id="g", lender_id="1", borrower_id="2", card_name="Bolt", quantity=2)
+    await debt_service.create_card_loan(
+        guild_id="g", lender_id="2", borrower_id="1", card_name="Bolt", quantity=2)
+    assert await debt_service.get_open_card_positions("g", "1") == []

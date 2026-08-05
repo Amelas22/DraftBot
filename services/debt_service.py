@@ -1280,3 +1280,37 @@ async def get_most_outstanding_creditors(guild_id: str, limit: int = 3) -> list:
     if not is_money_server(guild_id):
         return []
     return await get_most_involved_players(guild_id, limit)
+
+
+async def get_open_card_positions(
+    guild_id: str,
+    player_id: str,
+    counterparty_id: str = None
+) -> list[dict]:
+    """Net card positions for a player, per counterparty and card.
+
+    Groups card rows by (counterparty, LOWER(TRIM(card_name))) and sums the
+    signed quantities; only non-zero nets are returned. `card_name` in the
+    result is the most recently recorded spelling in the group.
+    """
+    async with db_session() as session:
+        conditions = [
+            DebtLedger.guild_id == guild_id,
+            DebtLedger.player_id == player_id,
+            DebtLedger.card_name.isnot(None),
+        ]
+        if counterparty_id:
+            conditions.append(DebtLedger.counterparty_id == counterparty_id)
+
+        rows = (await session.execute(
+            select(DebtLedger).where(*conditions).order_by(DebtLedger.id)
+        )).scalars().all()
+
+    groups: dict[tuple, dict] = {}
+    for row in rows:
+        key = (row.counterparty_id, row.card_name.strip().lower())
+        group = groups.setdefault(key, {"counterparty_id": row.counterparty_id,
+                                        "card_name": row.card_name, "net": 0})
+        group["net"] += row.amount
+        group["card_name"] = row.card_name  # later rows win the spelling
+    return [g for _, g in sorted(groups.items()) if g["net"] != 0]
