@@ -18,10 +18,9 @@ from helpers.draft_footer import apply_draft_footer_from_session
 from services.draft_analysis import DraftAnalysis
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
-from services.debt_service import create_debt_entries_from_stakes, get_guild_debt_rows, get_guild_card_pair_counts, get_balance_with
+from services.debt_service import create_debt_entries_from_stakes, get_balance_with
 from debt_views import SettleDebtsView
 from debt_views.settle_views import PublicSettleDebtsView
-from debt_views.helpers import build_guild_debt_embed_pages
 from models.debt_summary_message import DebtSummaryMessage
 from loguru import logger
 from config import is_cleanup_exempt, is_test_mode

@@ -95,6 +95,16 @@ async def describe_draft_sources(guild: discord.Guild, entries) -> dict[str, str
     }
 
 
+def format_card_quantity(card_name: str, qty: int) -> str:
+    """'4x Lightning Bolt' / 'Ragavan' — THE quantity+name display form."""
+    return f"{qty}x {card_name}" if qty > 1 else card_name
+
+
+def card_count_label(count: int) -> str:
+    """'1 card' / '3 cards' — THE open-position count display form."""
+    return f"{count} card{'s' if count != 1 else ''}"
+
+
 def build_debt_pair_lines(rows: list, card_pairs: dict, name_of) -> tuple[list, int]:
     """One display line per debtor→creditor pair, tix and cards combined.
 
@@ -113,58 +123,12 @@ def build_debt_pair_lines(rows: list, card_pairs: dict, name_of) -> tuple[list, 
         line = f"{name_of(row.player_id)} owes {name_of(row.counterparty_id)}: {amount} tix"
         cards = card_pairs.pop((row.player_id, row.counterparty_id), 0)
         if cards:
-            line += f" · {cards} card{'s' if cards != 1 else ''}"
+            line += f" · {card_count_label(cards)}"
         lines.append(line)
     for (debtor_id, creditor_id), cards in card_pairs.items():
         lines.append(
-            f"{name_of(debtor_id)} owes {name_of(creditor_id)}: "
-            f"{cards} card{'s' if cards != 1 else ''}")
+            f"{name_of(debtor_id)} owes {name_of(creditor_id)}: {card_count_label(cards)}")
     return lines, total
-
-
-def build_guild_debt_embed(guild: discord.Guild, rows: list, include_description: bool = True,
-                           card_pairs: dict = None) -> discord.Embed:
-    """
-    Build a guild debt summary embed from debt rows.
-
-    Args:
-        guild: The Discord guild
-        rows: List of rows with player_id, counterparty_id, balance attributes
-        include_description: Whether to include the settle button description
-        card_pairs: Optional {(debtor_id, creditor_id): open card count} from
-            get_guild_card_pair_counts; annotates tix lines and adds
-            card-only pairs
-
-    Returns:
-        Discord embed with debt summary
-    """
-    description = "Outstanding debts in this server. Click the button below to settle your debts." if include_description else "All outstanding debts (showing debtor perspective)"
-
-    embed = discord.Embed(
-        title="Guild Debt Summary",
-        description=description,
-        color=discord.Color.orange()
-    )
-
-    lines, total = build_debt_pair_lines(
-        rows, card_pairs, lambda pid: get_member_name(guild, pid))
-    if lines:
-        embed.add_field(
-            name=f"Outstanding Debts (Total: {total} tix)",
-            value="\n".join(lines[:25]),
-            inline=False
-        )
-
-        if len(lines) > 25:
-            embed.set_footer(text=f"Showing 25 of {len(lines)} debt relationships")
-    if not lines:
-        embed.add_field(
-            name="Outstanding Debts",
-            value="No outstanding debts!",
-            inline=False
-        )
-
-    return embed
 
 
 _MEDALS = ("🥇", "🥈", "🥉")
@@ -196,10 +160,13 @@ async def build_debt_summary_pages(guild: discord.Guild, include_description: bo
         get_guild_card_pair_counts,
         get_most_outstanding_creditors,
     )
+    import asyncio
     guild_id = str(guild.id)
-    rows = await get_guild_debt_rows(guild_id)
-    top_creditors = await get_most_outstanding_creditors(guild_id)
-    card_pairs = await get_guild_card_pair_counts(guild_id)
+    rows, top_creditors, card_pairs = await asyncio.gather(
+        get_guild_debt_rows(guild_id),
+        get_most_outstanding_creditors(guild_id),
+        get_guild_card_pair_counts(guild_id),
+    )
     return build_guild_debt_embed_pages(
         guild, rows, include_description=include_description,
         top_creditors=top_creditors, card_pairs=card_pairs)
@@ -290,7 +257,7 @@ def build_user_balance_embed(guild: discord.Guild, balances: dict,
 
     def card_suffix(counterparty_id):
         count = len(positions_by_cp.get(counterparty_id, []))
-        return f" · {count} card{'s' if count != 1 else ''}" if count else ""
+        return f" · {card_count_label(count)}" if count else ""
 
     you_owe_lines = []
     owed_to_you_lines = []
@@ -304,7 +271,7 @@ def build_user_balance_embed(guild: discord.Guild, balances: dict,
             owed_to_you_lines.append(f"<@{counterparty_id}>: {balance} tix{card_suffix(counterparty_id)}")
 
     cards_only_lines = [
-        f"<@{cp}>: {len(positions)} card{'s' if len(positions) != 1 else ''}"
+        f"<@{cp}>: {card_count_label(len(positions))}"
         for cp, positions in positions_by_cp.items() if cp not in balances
     ]
     if cards_only_lines:

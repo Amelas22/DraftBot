@@ -8,14 +8,13 @@ Commands:
 - /settle @player - Settle debts with a player
 - /debts-admin - Admin view of all guild debts
 """
-import asyncio
 import discord
 from discord.ext import commands
 from discord.commands import SlashCommandGroup, option
 from loguru import logger
 
 from services.debt_service import (
-    get_all_balances_for,
+    TIX_ONLY,
     get_balance_with,
     get_entries_since_last_settlement,
     get_active_debt_entries,
@@ -54,7 +53,7 @@ class DebtCommands(commands.Cog):
         user_id = str(ctx.author.id)
         guild_id = str(ctx.guild.id)
 
-        from debt_views.settle_views import gather_settle_state, format_card_positions
+        from debt_views.settle_views import gather_settle_state
         balances, positions_by_cp = await gather_settle_state(guild_id, user_id)
 
         if not balances and not positions_by_cp:
@@ -236,7 +235,7 @@ class DebtCommands(commands.Cog):
                         DebtLedger.guild_id == guild_id,
                         DebtLedger.player_id == user_id,
                         DebtLedger.counterparty_id == counterparty_id,
-                        DebtLedger.card_name.is_(None),
+                        TIX_ONLY,
                     )
                     .order_by(DebtLedger.created_at.desc())
                     .limit(50)
@@ -320,19 +319,18 @@ class DebtCommands(commands.Cog):
         )
 
         # Show net balance
-        if balance != 0:
-            if balance < 0:
-                embed.add_field(
-                    name="Net Balance",
-                    value=f"You owe **{abs(balance)} tix**",
-                    inline=False
-                )
-            else:
-                embed.add_field(
-                    name="Net Balance",
-                    value=f"They owe you **{balance} tix**",
-                    inline=False
-                )
+        if balance < 0:
+            embed.add_field(
+                name="Net Balance",
+                value=f"You owe **{abs(balance)} tix**",
+                inline=False
+            )
+        elif balance > 0:
+            embed.add_field(
+                name="Net Balance",
+                value=f"They owe you **{balance} tix**",
+                inline=False
+            )
 
         # Show breakdown
         if entries:
@@ -411,11 +409,12 @@ class DebtCommands(commands.Cog):
         from utils import fire_debt_summary_refresh
         fire_debt_summary_refresh(ctx.bot, guild_id, "Lend")
 
-        qty_label = f"{quantity}x " if quantity > 1 else ""
+        from debt_views.helpers import format_card_quantity
+        card_label = format_card_quantity(lender_row.card_name, quantity)
         if direction == "lent-to-them":
-            summary = f"You lent **{qty_label}{lender_row.card_name}** to {player.display_name}."
+            summary = f"You lent **{card_label}** to {player.display_name}."
         else:
-            summary = f"You borrowed **{qty_label}{lender_row.card_name}** from {player.display_name}."
+            summary = f"You borrowed **{card_label}** from {player.display_name}."
         embed = discord.Embed(
             title="Card loan recorded",
             description=f"{summary}\nUse `/settle` with them to view or return cards.",

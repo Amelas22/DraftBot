@@ -20,14 +20,13 @@ from services.debt_service import (
     create_debt_transfer
 )
 from notification_service import send_debt_transfer_dms, send_settlement_notification_dm
-from .helpers import TRANSIENT_ERRORS, get_member_name, get_member_name_plain, format_entry_source, describe_draft_sources, build_user_balance_embed
+from .helpers import TRANSIENT_ERRORS, get_member_name, get_member_name_plain, format_entry_source, describe_draft_sources, build_user_balance_embed, format_card_quantity, card_count_label
 
 
 def format_card_positions(positions: list[dict]) -> str:
     """Embed text for open card positions, both directions."""
     def qty_name(p):
-        qty = abs(p["net"])
-        return f"{qty}x {p['card_name']}" if qty > 1 else p["card_name"]
+        return format_card_quantity(p["card_name"], abs(p["net"]))
 
     owed_to_you = [qty_name(p) for p in positions if p["net"] > 0]
     you_owe = [qty_name(p) for p in positions if p["net"] < 0]
@@ -86,8 +85,10 @@ def merge_counterparty_entries(balances: dict, positions_by_cp: dict) -> dict:
 async def gather_settle_state(guild_id: str, user_id: str) -> tuple[dict, dict]:
     """(tix balances, open card positions grouped by counterparty) for the
     settle entry surfaces. Shared by every Settle button/command entry."""
-    balances = await get_all_balances_for(guild_id=guild_id, player_id=user_id)
-    positions = await get_open_card_positions(guild_id, user_id)
+    balances, positions = await asyncio.gather(
+        get_all_balances_for(guild_id=guild_id, player_id=user_id),
+        get_open_card_positions(guild_id, user_id),
+    )
     return balances, group_positions_by_counterparty(positions)
 
 
@@ -219,7 +220,7 @@ class CounterpartySelectView(View):
             elif entry["balance"] > 0:
                 parts.append(f"They owe you {entry['balance']} tix")
             if entry["card_count"]:
-                parts.append(f"{entry['card_count']} card{'s' if entry['card_count'] != 1 else ''}")
+                parts.append(card_count_label(entry["card_count"]))
             direction = " · ".join(parts)
 
             options.append(discord.SelectOption(
@@ -341,62 +342,6 @@ class CounterpartySelectView(View):
                     f"An error occurred: {str(e)}",
                     ephemeral=True
                 )
-
-
-class AmountInputView(View):
-    """View with button to enter settlement amount."""
-
-    def __init__(self, user_id: str, guild_id: str, counterparty_id: str,
-                 net_balance: int, counterparty_name_plain: str,
-                 counterparty_name_decorated: str):
-        super().__init__(timeout=300)
-        self.user_id = user_id
-        self.guild_id = guild_id
-        self.counterparty_id = counterparty_id
-        self.net_balance = net_balance
-        self.counterparty_name_plain = counterparty_name_plain
-        self.counterparty_name_decorated = counterparty_name_decorated
-        logger.debug(f"[AmountInputView] Created for user {user_id}, counterparty {counterparty_id}, balance {net_balance}")
-
-    @discord.ui.button(label="Enter Amount", style=discord.ButtonStyle.primary)
-    async def enter_amount(self, button: Button, interaction: discord.Interaction):
-        """Open modal for amount input."""
-        try:
-            logger.info(f"[AmountInputView] Enter Amount clicked by user {interaction.user.id}")
-            modal = AmountConfirmationModal(
-                user_id=self.user_id,
-                guild_id=self.guild_id,
-                counterparty_id=self.counterparty_id,
-                net_balance=self.net_balance,
-                counterparty_name_plain=self.counterparty_name_plain,
-                counterparty_name_decorated=self.counterparty_name_decorated
-            )
-            logger.debug(f"[AmountInputView] Sending modal")
-            await interaction.response.send_modal(modal)
-            logger.debug(f"[AmountInputView] Modal sent successfully")
-        except Exception as e:
-            logger.error(f"[AmountInputView] Error opening modal: {e}")
-            logger.error(f"[AmountInputView] Traceback: {traceback.format_exc()}")
-            try:
-                await interaction.response.send_message(
-                    f"An error occurred: {str(e)}",
-                    ephemeral=True
-                )
-            except discord.errors.InteractionResponded:
-                await interaction.followup.send(
-                    f"An error occurred: {str(e)}",
-                    ephemeral=True
-                )
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, button: Button, interaction: discord.Interaction):
-        """Cancel settlement."""
-        logger.info(f"[AmountInputView] Cancel clicked by user {interaction.user.id}")
-        await interaction.response.edit_message(
-            content="Settlement cancelled.",
-            embed=None,
-            view=None
-        )
 
 
 class CardQuantityModal(Modal):
