@@ -132,6 +132,53 @@ async def create_card_loan(
         return lender_entry, borrower_entry
 
 
+async def create_card_return(
+    guild_id: str,
+    returner_id: str,
+    owner_id: str,
+    card_name: str,
+    quantity: int,
+    created_by: str = None
+) -> tuple[DebtLedger, DebtLedger]:
+    """Record copies of a card handed back: the offsetting pair of a loan.
+
+    The returner's negative position moves toward zero (+quantity on their
+    row); the owner's positive position shrinks (-quantity). Over-returning
+    flips the position — the ledger doesn't police quantities, the UI only
+    offers open amounts (mirrors tix overpayment semantics).
+    """
+    card_name = (card_name or "").strip()
+    if returner_id == owner_id:
+        raise ValueError("Cannot return cards to yourself")
+    if not card_name:
+        raise ValueError("Card name is required")
+    if quantity < 1:
+        raise ValueError("Quantity must be at least 1")
+
+    source_id = str(uuid.uuid4())
+    logger.info(
+        f"Card return: {returner_id} returns {quantity}x {card_name!r} to "
+        f"{owner_id} in {guild_id}")
+
+    async with db_session() as session:
+        returner_entry = DebtLedger(
+            guild_id=guild_id, player_id=returner_id,
+            counterparty_id=owner_id, amount=quantity,
+            source_type="card_return", source_id=source_id,
+            card_name=card_name, created_by=created_by)
+        owner_entry = DebtLedger(
+            guild_id=guild_id, player_id=owner_id,
+            counterparty_id=returner_id, amount=-quantity,
+            source_type="card_return", source_id=source_id,
+            card_name=card_name, created_by=created_by)
+        session.add(returner_entry)
+        session.add(owner_entry)
+        await session.commit()
+        await session.refresh(returner_entry)
+        await session.refresh(owner_entry)
+        return returner_entry, owner_entry
+
+
 async def get_balance_with(
     guild_id: str,
     player_id: str,

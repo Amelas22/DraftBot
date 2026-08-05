@@ -216,3 +216,21 @@ async def test_fully_returned_position_disappears(test_db):
     await debt_service.create_card_loan(
         guild_id="g", lender_id="2", borrower_id="1", card_name="Bolt", quantity=2)
     assert await debt_service.get_open_card_positions("g", "1") == []
+
+
+@pytest.mark.asyncio
+async def test_partial_return_reduces_net(test_db):
+    await debt_service.create_card_loan(
+        guild_id="g", lender_id="2", borrower_id="1", card_name="Bolt", quantity=4)
+    await debt_service.create_card_return(
+        guild_id="g", returner_id="1", owner_id="2", card_name="Bolt", quantity=2)
+
+    mine = await debt_service.get_open_card_positions("g", "1", counterparty_id="2")
+    assert mine == [{"counterparty_id": "2", "card_name": "Bolt", "net": -2}]
+    # over-return flips the sign, same as a tix overpayment
+    await debt_service.create_card_return(
+        guild_id="g", returner_id="1", owner_id="2", card_name="Bolt", quantity=3)
+    mine = await debt_service.get_open_card_positions("g", "1", counterparty_id="2")
+    assert mine == [{"counterparty_id": "2", "card_name": "Bolt", "net": 1}]
+    # and the guard: tix stayed at zero throughout
+    assert await debt_service.get_balance_with("g", "1", "2") == 0
