@@ -115,7 +115,8 @@ async def get_balance_with(
         conditions = [
             DebtLedger.guild_id == guild_id,
             DebtLedger.player_id == player_id,
-            DebtLedger.counterparty_id == counterparty_id
+            DebtLedger.counterparty_id == counterparty_id,
+            DebtLedger.card_name.is_(None),
         ]
 
         # Exclude entries from a specific session if requested
@@ -164,7 +165,8 @@ async def get_all_balances_for(
             )
             .where(
                 DebtLedger.guild_id == guild_id,
-                DebtLedger.player_id == player_id
+                DebtLedger.player_id == player_id,
+                DebtLedger.card_name.is_(None),
             )
             .group_by(DebtLedger.counterparty_id)
             .having(func.sum(DebtLedger.amount) != 0)
@@ -208,7 +210,8 @@ async def get_entries_since_last_settlement(
                 DebtLedger.guild_id == guild_id,
                 DebtLedger.player_id == player_id,
                 DebtLedger.counterparty_id == counterparty_id,
-                DebtLedger.source_type.in_(['settlement', 'transfer'])
+                DebtLedger.source_type.in_(['settlement', 'transfer']),
+                DebtLedger.card_name.is_(None),
             )
             .order_by(DebtLedger.created_at.desc())
             .limit(1)
@@ -223,7 +226,8 @@ async def get_entries_since_last_settlement(
             .where(
                 DebtLedger.guild_id == guild_id,
                 DebtLedger.player_id == player_id,
-                DebtLedger.counterparty_id == counterparty_id
+                DebtLedger.counterparty_id == counterparty_id,
+                DebtLedger.card_name.is_(None),
             )
             .order_by(DebtLedger.created_at.asc())
         )
@@ -314,7 +318,8 @@ async def create_settlement(
                 balance_query = select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
                     DebtLedger.guild_id == guild_id,
                     DebtLedger.player_id == payer_id,
-                    DebtLedger.counterparty_id == payee_id
+                    DebtLedger.counterparty_id == payee_id,
+                    DebtLedger.card_name.is_(None),
                 )
                 balance_result = await session.execute(balance_query)
                 current_balance = balance_result.scalar()
@@ -694,7 +699,8 @@ async def create_debt_transfer(
                 a_owes_b_query = select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
                     DebtLedger.guild_id == guild_id,
                     DebtLedger.player_id == debtor_id,
-                    DebtLedger.counterparty_id == transferrer_id
+                    DebtLedger.counterparty_id == transferrer_id,
+                    DebtLedger.card_name.is_(None),
                 )
                 a_owes_b_result = await session.execute(a_owes_b_query)
                 a_balance_with_b = a_owes_b_result.scalar()
@@ -712,7 +718,8 @@ async def create_debt_transfer(
                 b_owes_c_query = select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
                     DebtLedger.guild_id == guild_id,
                     DebtLedger.player_id == transferrer_id,
-                    DebtLedger.counterparty_id == creditor_id
+                    DebtLedger.counterparty_id == creditor_id,
+                    DebtLedger.card_name.is_(None),
                 )
                 b_owes_c_result = await session.execute(b_owes_c_query)
                 b_balance_with_c = b_owes_c_result.scalar()
@@ -849,7 +856,10 @@ async def get_guild_debt_stats(guild_id: str, timeframe: str = "all_time") -> di
                 DebtLedger.counterparty_id,
                 func.sum(DebtLedger.amount).label('balance')
             )
-            .where(DebtLedger.guild_id == guild_id)
+            .where(
+                DebtLedger.guild_id == guild_id,
+                DebtLedger.card_name.is_(None),
+            )
             .group_by(DebtLedger.player_id, DebtLedger.counterparty_id)
             .having(func.sum(DebtLedger.amount) != 0)
         )
@@ -879,7 +889,10 @@ async def get_guild_debt_stats(guild_id: str, timeframe: str = "all_time") -> di
         activity_query = select(
             DebtLedger.player_id,
             func.count(DebtLedger.id).label('entry_count')
-        ).where(DebtLedger.guild_id == guild_id)
+        ).where(
+            DebtLedger.guild_id == guild_id,
+            DebtLedger.card_name.is_(None),
+        )
 
         if cutoff_time:
             activity_query = activity_query.where(DebtLedger.created_at >= cutoff_time)
@@ -895,7 +908,8 @@ async def get_guild_debt_stats(guild_id: str, timeframe: str = "all_time") -> di
 
         # Get total entry count for recent activity
         recent_count_query = select(func.count(DebtLedger.id)).where(
-            DebtLedger.guild_id == guild_id
+            DebtLedger.guild_id == guild_id,
+            DebtLedger.card_name.is_(None),
         )
         if cutoff_time:
             recent_count_query = recent_count_query.where(DebtLedger.created_at >= cutoff_time)
@@ -907,7 +921,10 @@ async def get_guild_debt_stats(guild_id: str, timeframe: str = "all_time") -> di
         source_query = select(
             DebtLedger.source_type,
             func.count(DebtLedger.id).label('count')
-        ).where(DebtLedger.guild_id == guild_id)
+        ).where(
+            DebtLedger.guild_id == guild_id,
+            DebtLedger.card_name.is_(None),
+        )
 
         if cutoff_time:
             source_query = source_query.where(DebtLedger.created_at >= cutoff_time)
@@ -967,7 +984,10 @@ async def get_debt_history(
     async with db_session() as session:
         query = (
             select(DebtLedger)
-            .where(DebtLedger.guild_id == guild_id)
+            .where(
+                DebtLedger.guild_id == guild_id,
+                DebtLedger.card_name.is_(None),
+            )
         )
 
         if player_id:
@@ -1031,6 +1051,7 @@ async def get_active_debt_entries(
                 DebtLedger.guild_id == guild_id,
                 DebtLedger.player_id == player_id,
                 DebtLedger.counterparty_id == counterparty_id,
+                DebtLedger.card_name.is_(None),
             )
             .order_by(DebtLedger.created_at.asc(), DebtLedger.id.asc())
         )
@@ -1060,7 +1081,10 @@ async def _negative_pair_balances(guild_id: str, player_ids=None, created_before
             DebtLedger.counterparty_id,
             func.sum(DebtLedger.amount).label('balance')
         )
-        .where(DebtLedger.guild_id == guild_id)
+        .where(
+            DebtLedger.guild_id == guild_id,
+            DebtLedger.card_name.is_(None),
+        )
         .group_by(DebtLedger.player_id, DebtLedger.counterparty_id)
         .having(func.sum(DebtLedger.amount) < 0)
         .order_by(func.sum(DebtLedger.amount).asc())
@@ -1145,7 +1169,10 @@ async def get_top_net_creditors(guild_id: str, limit: int = 3) -> list:
                 DebtLedger.player_id,
                 func.sum(DebtLedger.amount).label('net')
             )
-            .where(DebtLedger.guild_id == guild_id)
+            .where(
+                DebtLedger.guild_id == guild_id,
+                DebtLedger.card_name.is_(None),
+            )
             .group_by(DebtLedger.player_id)
             .having(func.sum(DebtLedger.amount) > 0)
             .order_by(func.sum(DebtLedger.amount).desc())
@@ -1172,7 +1199,10 @@ async def get_most_involved_players(guild_id: str, limit: int = 3) -> list:
                 DebtLedger.counterparty_id.label("counterparty_id"),
                 func.sum(DebtLedger.amount).label("balance"),
             )
-            .where(DebtLedger.guild_id == guild_id)
+            .where(
+                DebtLedger.guild_id == guild_id,
+                DebtLedger.card_name.is_(None),
+            )
             .group_by(DebtLedger.player_id, DebtLedger.counterparty_id)
             .having(func.sum(DebtLedger.amount) != 0)
             .subquery()
