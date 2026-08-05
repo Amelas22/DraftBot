@@ -20,12 +20,15 @@ from services.debt_service import (
     get_active_debt_entries,
     create_settlement,
     get_guild_debt_rows,
-    create_card_loan
+    create_card_loan,
+    get_open_card_positions
 )
 from debt_views.settle_views import (
     CounterpartySelectView,
     AmountInputView,
-    PublicSettleDebtsView
+    PublicSettleDebtsView,
+    SettleEntitySelectView,
+    format_card_positions
 )
 from debt_views.helpers import get_member_name, get_member_name_plain, format_entry_source, describe_draft_sources, build_guild_debt_embed, build_guild_debt_embed_pages
 from database.db_session import db_session
@@ -290,7 +293,10 @@ class DebtCommands(commands.Cog):
             counterparty_id=counterparty_id
         )
 
-        if balance == 0:
+        positions = await get_open_card_positions(
+            guild_id, user_id, counterparty_id=counterparty_id)
+
+        if balance == 0 and not positions:
             await ctx.followup.send(f"You have no outstanding debts with {player.display_name}.")
             return
 
@@ -307,18 +313,19 @@ class DebtCommands(commands.Cog):
         )
 
         # Show net balance
-        if balance < 0:
-            embed.add_field(
-                name="Net Balance",
-                value=f"You owe **{abs(balance)} tix**",
-                inline=False
-            )
-        else:
-            embed.add_field(
-                name="Net Balance",
-                value=f"They owe you **{balance} tix**",
-                inline=False
-            )
+        if balance != 0:
+            if balance < 0:
+                embed.add_field(
+                    name="Net Balance",
+                    value=f"You owe **{abs(balance)} tix**",
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="Net Balance",
+                    value=f"They owe you **{balance} tix**",
+                    inline=False
+                )
 
         # Show breakdown
         if entries:
@@ -341,18 +348,26 @@ class DebtCommands(commands.Cog):
                 inline=False
             )
 
-        embed.set_footer(text="Click 'Enter Amount' to confirm the payment amount")
+        if positions:
+            embed.add_field(
+                name="Cards",
+                value=format_card_positions(positions),
+                inline=False
+            )
+
+        embed.set_footer(text="Pick what you're settling, then enter the quantity")
 
         name_decorated = get_member_name(ctx.guild, counterparty_id)
         name_plain = get_member_name_plain(ctx.guild, counterparty_id)
 
-        view = AmountInputView(
+        view = SettleEntitySelectView(
             user_id=user_id,
             guild_id=guild_id,
             counterparty_id=counterparty_id,
             net_balance=balance,
             counterparty_name_plain=name_plain,
-            counterparty_name_decorated=name_decorated
+            counterparty_name_decorated=name_decorated,
+            positions=positions
         )
 
         await ctx.followup.send(embed=embed, view=view)

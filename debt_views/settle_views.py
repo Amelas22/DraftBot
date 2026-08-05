@@ -22,6 +22,41 @@ from notification_service import send_debt_transfer_dms, send_settlement_notific
 from .helpers import TRANSIENT_ERRORS, get_member_name, get_member_name_plain, format_entry_source, describe_draft_sources, build_user_balance_embed
 
 
+def format_card_positions(positions: list[dict]) -> str:
+    """Embed text for open card positions, both directions."""
+    def qty_name(p):
+        qty = abs(p["net"])
+        return f"{qty}x {p['card_name']}" if qty > 1 else p["card_name"]
+
+    owed_to_you = [qty_name(p) for p in positions if p["net"] > 0]
+    you_owe = [qty_name(p) for p in positions if p["net"] < 0]
+    lines = []
+    if owed_to_you:
+        lines.append(f"They owe you: {', '.join(owed_to_you)}")
+    if you_owe:
+        lines.append(f"You owe: {', '.join(you_owe)}")
+    return "\n".join(lines)
+
+
+def build_entity_choices(net_balance: int, positions: list[dict]) -> list[dict]:
+    """Selectable entities for the settle flow: tix (iff nonzero) + each card.
+
+    Keys: 'tix' or 'card:<index into positions>'. Labels name the entity and
+    the open amount so the select reads like the embed.
+    """
+    choices = []
+    if net_balance != 0:
+        direction = "You owe" if net_balance < 0 else "They owe you"
+        choices.append({"key": "tix", "label": f"tix — {direction} {abs(net_balance)} tix"})
+    for idx, p in enumerate(positions):
+        direction = "You owe" if p["net"] < 0 else "They owe you"
+        choices.append({
+            "key": f"card:{idx}",
+            "label": f"{p['card_name']} — {direction} {abs(p['net'])}",
+        })
+    return choices
+
+
 async def _build_settle_entry_view(
     user_id: str, guild_id: str, balances: dict, guild: discord.Guild
 ) -> View:
@@ -310,6 +345,115 @@ class AmountInputView(View):
             embed=None,
             view=None
         )
+
+
+class CardQuantityModal(Modal):
+    """Quantity entry for returning copies of ONE card.
+
+    The card being returned is fixed in the modal TITLE — modal titles are
+    not editable, which is what makes the entity unambiguous (spec).
+    """
+
+    def __init__(self, guild_id: str, user_id: str, counterparty_id: str,
+                 counterparty_name: str, position: dict):
+        super().__init__(title=f"Return: {position['card_name']}"[:45])
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.counterparty_id = counterparty_id
+        self.counterparty_name = counterparty_name
+        self.position = position
+        self.add_item(InputText(
+            label=f"Copies (open: {abs(position['net'])})",
+            value=str(abs(position["net"])),
+            max_length=4))
+
+    async def callback(self, interaction: discord.Interaction):
+        from services.debt_service import create_card_return
+        try:
+            quantity = int(self.children[0].value.strip())
+        except ValueError:
+            await interaction.response.send_message(
+                "Enter a whole number of copies.", ephemeral=True)
+            return
+        if quantity < 1:
+            await interaction.response.send_message(
+                "Quantity must be at least 1.", ephemeral=True)
+            return
+
+        # Whoever holds the cards is the returner.
+        if self.position["net"] < 0:
+            returner_id, owner_id = self.user_id, self.counterparty_id
+        else:
+            returner_id, owner_id = self.counterparty_id, self.user_id
+        try:
+            await create_card_return(
+                guild_id=self.guild_id, returner_id=returner_id,
+                owner_id=owner_id, card_name=self.position["card_name"],
+                quantity=quantity, created_by=self.user_id)
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+        await interaction.response.edit_message(
+            content=(f"Recorded: {quantity}x {self.position['card_name']} "
+                     f"returned ({self.counterparty_name})."),
+            embed=None, view=None)
+
+
+class SettleEntitySelectView(View):
+    """Settle-flow entity picker: tix and/or open card positions.
+
+    Selecting tix opens the existing AmountConfirmationModal; selecting a
+    card opens CardQuantityModal for that position.
+    """
+
+    def __init__(self, user_id: str, guild_id: str, counterparty_id: str,
+                 net_balance: int, counterparty_name_plain: str,
+                 counterparty_name_decorated: str, positions: list[dict]):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.counterparty_id = counterparty_id
+        self.net_balance = net_balance
+        self.counterparty_name_plain = counterparty_name_plain
+        self.counterparty_name_decorated = counterparty_name_decorated
+        self.positions = positions
+
+        options = [
+            discord.SelectOption(label=c["label"][:100], value=c["key"])
+            for c in build_entity_choices(net_balance, positions)
+        ]
+        select = Select(placeholder="What are you settling?",
+                         options=options)
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        try:
+            key = interaction.data["values"][0]
+            if key == "tix":
+                modal = AmountConfirmationModal(
+                    user_id=self.user_id, guild_id=self.guild_id,
+                    counterparty_id=self.counterparty_id,
+                    net_balance=self.net_balance,
+                    counterparty_name_plain=self.counterparty_name_plain,
+                    counterparty_name_decorated=self.counterparty_name_decorated)
+            else:
+                position = self.positions[int(key.split(":", 1)[1])]
+                modal = CardQuantityModal(
+                    guild_id=self.guild_id, user_id=self.user_id,
+                    counterparty_id=self.counterparty_id,
+                    counterparty_name=self.counterparty_name_plain,
+                    position=position)
+            await interaction.response.send_modal(modal)
+        except Exception as e:
+            logger.error(f"[SettleEntitySelectView] Error: {e}")
+            try:
+                await interaction.response.send_message(
+                    f"An error occurred: {str(e)}", ephemeral=True)
+            except discord.errors.InteractionResponded:
+                await interaction.followup.send(
+                    f"An error occurred: {str(e)}", ephemeral=True)
+
 
 class SettleOrTransferView(View):
     """View that asks the user whether they want to settle or transfer debt."""

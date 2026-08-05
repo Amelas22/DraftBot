@@ -234,3 +234,24 @@ async def test_partial_return_reduces_net(test_db):
     assert mine == [{"counterparty_id": "2", "card_name": "Bolt", "net": 1}]
     # and the guard: tix stayed at zero throughout
     assert await debt_service.get_balance_with("g", "1", "2") == 0
+
+
+def test_format_card_positions_reads_both_directions():
+    from debt_views.settle_views import format_card_positions
+    text = format_card_positions([
+        {"counterparty_id": "2", "card_name": "Lightning Bolt", "net": 4},
+        {"counterparty_id": "2", "card_name": "Ragavan", "net": -1},
+    ])
+    assert "They owe you: 4x Lightning Bolt" in text
+    assert "You owe: Ragavan" in text
+
+
+def test_build_entity_choices_gates_tix_on_balance():
+    from debt_views.settle_views import build_entity_choices
+    positions = [{"counterparty_id": "2", "card_name": "Ragavan", "net": -1}]
+    with_tix = build_entity_choices(-30, positions)
+    assert [c["key"] for c in with_tix] == ["tix", "card:0"]
+    assert "30 tix" in with_tix[0]["label"]
+    without_tix = build_entity_choices(0, positions)
+    assert [c["key"] for c in without_tix] == ["card:0"]
+    assert "Ragavan" in without_tix[0]["label"]
