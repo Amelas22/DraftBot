@@ -1361,3 +1361,33 @@ async def get_open_card_positions(
         group["net"] += row.amount
         group["card_name"] = row.card_name  # later rows win the spelling
     return [g for _, g in sorted(groups.items()) if g["net"] != 0]
+
+
+async def get_guild_card_pair_counts(guild_id: str) -> dict[tuple, int]:
+    """Open card positions per (debtor, creditor) pair, guild-wide.
+
+    Returns {(debtor_id, creditor_id): number of distinct open card
+    positions the debtor owes back}. Every open position appears exactly
+    once, keyed on its negative (debtor) side — the mirrored positive rows
+    are the same positions seen from the creditor. Used by the public debt
+    summary panel.
+    """
+    async with db_session() as session:
+        rows = (await session.execute(
+            select(DebtLedger).where(
+                DebtLedger.guild_id == guild_id,
+                DebtLedger.card_name.isnot(None),
+            ).order_by(DebtLedger.id)
+        )).scalars().all()
+
+    nets: dict[tuple, int] = {}
+    for row in rows:
+        key = (row.player_id, row.counterparty_id, row.card_name.strip().lower())
+        nets[key] = nets.get(key, 0) + row.amount
+
+    counts: dict[tuple, int] = {}
+    for (player_id, counterparty_id, _), net in nets.items():
+        if net < 0:
+            pair = (player_id, counterparty_id)
+            counts[pair] = counts.get(pair, 0) + 1
+    return counts

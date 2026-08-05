@@ -20,6 +20,7 @@ from services.debt_service import (
     get_active_debt_entries,
     create_settlement,
     get_guild_debt_rows,
+    get_guild_card_pair_counts,
     create_card_loan,
     get_open_card_positions
 )
@@ -54,12 +55,10 @@ class DebtCommands(commands.Cog):
         user_id = str(ctx.author.id)
         guild_id = str(ctx.guild.id)
 
-        balances = await get_all_balances_for(
-            guild_id=guild_id,
-            player_id=user_id
-        )
+        from debt_views.settle_views import gather_settle_state, format_card_positions
+        balances, positions_by_cp = await gather_settle_state(guild_id, user_id)
 
-        if not balances:
+        if not balances and not positions_by_cp:
             await ctx.followup.send("You have no outstanding debts with anyone.")
             return
 
@@ -67,6 +66,16 @@ class DebtCommands(commands.Cog):
             title="Your Debt Summary",
             color=discord.Color.gold()
         )
+        if positions_by_cp:
+            card_lines = []
+            for cp, cp_positions in positions_by_cp.items():
+                header = get_member_name(ctx.guild, cp)
+                card_lines.append(f"**{header}**\n{format_card_positions(cp_positions)}")
+            embed.add_field(
+                name="Open Card Loans",
+                value="\n".join(card_lines)[:1024],
+                inline=False
+            )
 
         you_owe_lines = []
         owed_to_you_lines = []
@@ -417,15 +426,17 @@ class DebtCommands(commands.Cog):
         await ctx.defer(ephemeral=True)
 
         rows = await get_guild_debt_rows(str(ctx.guild.id))
+        card_pairs = await get_guild_card_pair_counts(str(ctx.guild.id))
 
-        if not rows:
+        if not rows and not card_pairs:
             await ctx.followup.send("No outstanding debts in this guild.")
             return
 
         from services.debt_service import get_most_outstanding_creditors
         top_creditors = await get_most_outstanding_creditors(str(ctx.guild.id))
         pages = build_guild_debt_embed_pages(
-            ctx.guild, rows, include_description=False, top_creditors=top_creditors)
+            ctx.guild, rows, include_description=False, top_creditors=top_creditors,
+            card_pairs=card_pairs)
         await ctx.followup.send(embed=pages[0])
 
     @discord.slash_command(name="debts-post", description="[Admin] Post public debt summary with settle button")
@@ -461,9 +472,11 @@ class DebtCommands(commands.Cog):
                     logger.warning(f"Could not delete old debt summary message: {e}")
 
             # Build and post the public message
-            from services.debt_service import get_most_outstanding_creditors
+            from services.debt_service import get_most_outstanding_creditors, get_guild_card_pair_counts
             top_creditors = await get_most_outstanding_creditors(guild_id)
-            pages = build_guild_debt_embed_pages(ctx.guild, rows, top_creditors=top_creditors)
+            card_pairs = await get_guild_card_pair_counts(guild_id)
+            pages = build_guild_debt_embed_pages(ctx.guild, rows, top_creditors=top_creditors,
+                                                 card_pairs=card_pairs)
             view = PublicSettleDebtsView(pages=pages)
             public_message = await ctx.channel.send(embed=pages[0], view=view)
 

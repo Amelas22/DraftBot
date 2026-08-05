@@ -14,6 +14,7 @@ from services.debt_service import (
     get_all_balances_for,
     get_balance_with,
     get_entries_since_last_settlement,
+    get_open_card_positions,
     create_settlement,
     get_transferable_debtors,
     create_debt_transfer
@@ -57,8 +58,42 @@ def build_entity_choices(net_balance: int, positions: list[dict]) -> list[dict]:
     return choices
 
 
+def group_positions_by_counterparty(positions: list[dict]) -> dict[str, list[dict]]:
+    """{counterparty_id: [position, ...]} from get_open_card_positions output."""
+    grouped: dict[str, list[dict]] = {}
+    for p in positions:
+        grouped.setdefault(p["counterparty_id"], []).append(p)
+    return grouped
+
+
+def merge_counterparty_entries(balances: dict, positions_by_cp: dict) -> dict:
+    """Union of tix balances and open card positions per counterparty.
+
+    Returns {counterparty_id: {"balance": int, "card_count": int}} so the
+    counterparty picker can list people you only exchange cards with (their
+    tix balance is 0) alongside tix counterparties.
+    """
+    merged = {
+        cp: {"balance": bal, "card_count": 0}
+        for cp, bal in balances.items()
+    }
+    for cp, positions in positions_by_cp.items():
+        entry = merged.setdefault(cp, {"balance": 0, "card_count": 0})
+        entry["card_count"] = len(positions)
+    return merged
+
+
+async def gather_settle_state(guild_id: str, user_id: str) -> tuple[dict, dict]:
+    """(tix balances, open card positions grouped by counterparty) for the
+    settle entry surfaces. Shared by every Settle button/command entry."""
+    balances = await get_all_balances_for(guild_id=guild_id, player_id=user_id)
+    positions = await get_open_card_positions(guild_id, user_id)
+    return balances, group_positions_by_counterparty(positions)
+
+
 async def _build_settle_entry_view(
-    user_id: str, guild_id: str, balances: dict, guild: discord.Guild
+    user_id: str, guild_id: str, balances: dict, guild: discord.Guild,
+    positions_by_cp: dict = None
 ) -> View:
     """Build the appropriate entry view: SettleOrTransferView if transfers are available, else CounterpartySelectView."""
     for cid, bal in balances.items():
@@ -68,10 +103,12 @@ async def _build_settle_entry_view(
             )
             if transferable:
                 return SettleOrTransferView(
-                    user_id=user_id, guild_id=guild_id, balances=balances, guild=guild
+                    user_id=user_id, guild_id=guild_id, balances=balances, guild=guild,
+                    positions_by_cp=positions_by_cp
                 )
     return CounterpartySelectView(
-        user_id=user_id, guild_id=guild_id, balances=balances, guild=guild
+        user_id=user_id, guild_id=guild_id, balances=balances, guild=guild,
+        positions_by_cp=positions_by_cp
     )
 
 
@@ -96,26 +133,24 @@ class SettleDebtsButton(Button):
         try:
             # Get all non-zero balances for this user
             logger.debug(f"[SettleDebts] Fetching balances for user {user_id} in guild {self.guild_id}")
-            balances = await get_all_balances_for(
-                guild_id=self.guild_id,
-                player_id=user_id
-            )
-            logger.debug(f"[SettleDebts] Found balances: {balances}")
+            balances, positions_by_cp = await gather_settle_state(self.guild_id, user_id)
+            logger.debug(f"[SettleDebts] Found balances: {balances}, card counterparties: {list(positions_by_cp)}")
 
-            if not balances:
-                logger.info(f"[SettleDebts] No balances found for user {user_id}")
+            if not balances and not positions_by_cp:
+                logger.info(f"[SettleDebts] No balances or card positions for user {user_id}")
                 await interaction.response.send_message(
                     "You have no outstanding debts with anyone.",
                     ephemeral=True
                 )
                 return
 
-            embed = build_user_balance_embed(interaction.guild, balances)
+            embed = build_user_balance_embed(interaction.guild, balances, positions_by_cp)
             view = await _build_settle_entry_view(
                 user_id=user_id,
                 guild_id=self.guild_id,
                 balances=balances,
-                guild=interaction.guild
+                guild=interaction.guild,
+                positions_by_cp=positions_by_cp
             )
 
             logger.info(f"[SettleDebts] Sending balance embed with {len(balances)} counterparties")
@@ -162,25 +197,30 @@ class SettleDebtsView(View):
 class CounterpartySelectView(View):
     """View with dropdown to select which counterparty to settle with."""
 
-    def __init__(self, user_id: str, guild_id: str, balances: dict, guild: discord.Guild):
+    def __init__(self, user_id: str, guild_id: str, balances: dict, guild: discord.Guild,
+                 positions_by_cp: dict = None):
         super().__init__(timeout=300)  # 5 minute timeout
         self.user_id = user_id
         self.guild_id = guild_id
         self.balances = balances
         self.guild = guild
 
-        logger.debug(f"[CounterpartySelect] Creating view for user {user_id} with {len(balances)} counterparties")
+        merged = merge_counterparty_entries(balances, positions_by_cp or {})
+        logger.debug(f"[CounterpartySelect] Creating view for user {user_id} with {len(merged)} counterparties")
 
-        # Build select options
+        # Build select options (tix and/or card counterparties)
         options = []
-        for counterparty_id, balance in balances.items():
+        for counterparty_id, entry in merged.items():
             name = get_member_name_plain(guild, counterparty_id)  # Use plain name for dropdown
 
-            # Determine direction
-            if balance < 0:
-                direction = f"You owe {abs(balance)} tix"
-            else:
-                direction = f"They owe you {balance} tix"
+            parts = []
+            if entry["balance"] < 0:
+                parts.append(f"You owe {abs(entry['balance'])} tix")
+            elif entry["balance"] > 0:
+                parts.append(f"They owe you {entry['balance']} tix")
+            if entry["card_count"]:
+                parts.append(f"{entry['card_count']} card{'s' if entry['card_count'] != 1 else ''}")
+            direction = " · ".join(parts)
 
             options.append(discord.SelectOption(
                 label=name[:100],  # Discord limit
@@ -216,6 +256,10 @@ class CounterpartySelectView(View):
             )
             logger.debug(f"[CounterpartySelect] Found {len(entries)} entries")
 
+            positions = await get_open_card_positions(
+                self.guild_id, self.user_id, counterparty_id=counterparty_id
+            )
+
             name_decorated = get_member_name(self.guild, counterparty_id)
             name_plain = get_member_name_plain(self.guild, counterparty_id)
 
@@ -225,14 +269,14 @@ class CounterpartySelectView(View):
                 color=discord.Color.blue()
             )
 
-            # Show net balance
+            # Show net balance (omit when the pair is cards-only)
             if balance < 0:
                 embed.add_field(
                     name="Net Balance",
                     value=f"You owe **{abs(balance)} tix**",
                     inline=False
                 )
-            else:
+            elif balance > 0:
                 embed.add_field(
                     name="Net Balance",
                     value=f"They owe you **{balance} tix**",
@@ -260,16 +304,24 @@ class CounterpartySelectView(View):
                     inline=False
                 )
 
-            embed.set_footer(text="Click 'Enter Amount' to confirm the payment amount")
+            if positions:
+                embed.add_field(
+                    name="Cards",
+                    value=format_card_positions(positions),
+                    inline=False
+                )
 
-            # Create view with amount input button
-            view = AmountInputView(
+            embed.set_footer(text="Pick what you're settling, then enter the quantity")
+
+            # Same per-entity flow as the /settle slash command
+            view = SettleEntitySelectView(
                 user_id=self.user_id,
                 guild_id=self.guild_id,
                 counterparty_id=counterparty_id,
                 net_balance=balance,
                 counterparty_name_plain=name_plain,
-                counterparty_name_decorated=name_decorated
+                counterparty_name_decorated=name_decorated,
+                positions=positions
             )
 
             logger.debug(f"[CounterpartySelect] Editing message with breakdown embed")
@@ -475,23 +527,26 @@ class SettleEntitySelectView(View):
 class SettleOrTransferView(View):
     """View that asks the user whether they want to settle or transfer debt."""
 
-    def __init__(self, user_id: str, guild_id: str, balances: dict, guild: discord.Guild):
+    def __init__(self, user_id: str, guild_id: str, balances: dict, guild: discord.Guild,
+                 positions_by_cp: dict = None):
         super().__init__(timeout=300)
         self.user_id = user_id
         self.guild_id = guild_id
         self.balances = balances
         self.guild = guild
+        self.positions_by_cp = positions_by_cp or {}
 
     @discord.ui.button(label="Settle a Debt", style=discord.ButtonStyle.primary, emoji="\U0001f4b0")
     async def settle_button(self, button: Button, interaction: discord.Interaction):
         """Go to the normal settle flow."""
         try:
-            embed = build_user_balance_embed(self.guild, self.balances)
+            embed = build_user_balance_embed(self.guild, self.balances, self.positions_by_cp)
             view = CounterpartySelectView(
                 user_id=self.user_id,
                 guild_id=self.guild_id,
                 balances=self.balances,
-                guild=self.guild
+                guild=self.guild,
+                positions_by_cp=self.positions_by_cp
             )
             await interaction.response.edit_message(embed=embed, view=view)
         except TRANSIENT_ERRORS as e:
@@ -1326,12 +1381,14 @@ class PublicSettleDebtsView(View):
             await interaction.response.defer()
             return
 
-        from services.debt_service import get_guild_debt_rows, get_most_outstanding_creditors
+        from services.debt_service import get_guild_debt_rows, get_most_outstanding_creditors, get_guild_card_pair_counts
         from debt_views.helpers import build_guild_debt_embed_pages
 
         rows = await get_guild_debt_rows(str(guild.id))
         top_creditors = await get_most_outstanding_creditors(str(guild.id))
-        pages = build_guild_debt_embed_pages(guild, rows, top_creditors=top_creditors)
+        card_pairs = await get_guild_card_pair_counts(str(guild.id))
+        pages = build_guild_debt_embed_pages(guild, rows, top_creditors=top_creditors,
+                                             card_pairs=card_pairs)
 
         current_page = self._get_current_page_from_embed(interaction)
         new_page = current_page + direction
@@ -1378,24 +1435,22 @@ class PublicSettleDebtsView(View):
 
         try:
             # Get all non-zero balances for this user
-            balances = await get_all_balances_for(
-                guild_id=guild_id,
-                player_id=user_id
-            )
+            balances, positions_by_cp = await gather_settle_state(guild_id, user_id)
 
-            if not balances:
+            if not balances and not positions_by_cp:
                 await interaction.response.send_message(
                     "You have no outstanding debts with anyone.",
                     ephemeral=True
                 )
                 return
 
-            embed = build_user_balance_embed(interaction.guild, balances)
+            embed = build_user_balance_embed(interaction.guild, balances, positions_by_cp)
             view = await _build_settle_entry_view(
                 user_id=user_id,
                 guild_id=guild_id,
                 balances=balances,
-                guild=interaction.guild
+                guild=interaction.guild,
+                positions_by_cp=positions_by_cp
             )
 
             await interaction.response.send_message(
@@ -1456,24 +1511,22 @@ class DMSettleDebtsView(View):
                 )
                 return
 
-            balances = await get_all_balances_for(
-                guild_id=self.guild_id,
-                player_id=user_id
-            )
+            balances, positions_by_cp = await gather_settle_state(self.guild_id, user_id)
 
-            if not balances:
+            if not balances and not positions_by_cp:
                 await interaction.response.send_message(
                     "You have no outstanding debts with anyone.",
                     ephemeral=True
                 )
                 return
 
-            embed = build_user_balance_embed(guild, balances)
+            embed = build_user_balance_embed(guild, balances, positions_by_cp)
             view = await _build_settle_entry_view(
                 user_id=user_id,
                 guild_id=self.guild_id,
                 balances=balances,
-                guild=guild
+                guild=guild,
+                positions_by_cp=positions_by_cp
             )
 
             await interaction.response.send_message(

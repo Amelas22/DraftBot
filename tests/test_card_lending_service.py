@@ -255,3 +255,54 @@ def test_build_entity_choices_gates_tix_on_balance():
     without_tix = build_entity_choices(0, positions)
     assert [c["key"] for c in without_tix] == ["card:0"]
     assert "Ragavan" in without_tix[0]["label"]
+
+
+@pytest.mark.asyncio
+async def test_guild_card_pair_counts(test_db):
+    # 1 owes 2: two open positions; 3 owes 1: one; fully-returned pair absent
+    await debt_service.create_card_loan(
+        guild_id="g", lender_id="2", borrower_id="1", card_name="Bolt", quantity=4)
+    await debt_service.create_card_loan(
+        guild_id="g", lender_id="2", borrower_id="1", card_name="Ragavan", quantity=1)
+    await debt_service.create_card_loan(
+        guild_id="g", lender_id="1", borrower_id="3", card_name="Brainstorm", quantity=2)
+    await debt_service.create_card_loan(
+        guild_id="g", lender_id="3", borrower_id="2", card_name="Daze", quantity=1)
+    await debt_service.create_card_return(
+        guild_id="g", returner_id="2", owner_id="3", card_name="Daze", quantity=1)
+
+    counts = await debt_service.get_guild_card_pair_counts("g")
+    assert counts == {("1", "2"): 2, ("3", "1"): 1}
+
+
+def test_merge_counterparty_entries_unions_tix_and_cards():
+    from debt_views.settle_views import merge_counterparty_entries
+    balances = {"2": -30, "4": 12}
+    positions_by_cp = {"2": [{"counterparty_id": "2", "card_name": "Bolt", "net": -4}],
+                       "5": [{"counterparty_id": "5", "card_name": "Ragavan", "net": 1}]}
+    merged = merge_counterparty_entries(balances, positions_by_cp)
+    assert merged == {
+        "2": {"balance": -30, "card_count": 1},
+        "4": {"balance": 12, "card_count": 0},
+        "5": {"balance": 0, "card_count": 1},
+    }
+
+
+def test_build_debt_pair_lines_annotates_and_appends_card_only_pairs():
+    from debt_views.helpers import build_debt_pair_lines
+
+    class Row:
+        def __init__(self, p, c, b):
+            self.player_id, self.counterparty_id, self.balance = p, c, b
+
+    lines, total = build_debt_pair_lines(
+        rows=[Row("1", "2", -30), Row("3", "4", -5)],
+        card_pairs={("1", "2"): 2, ("5", "6"): 1},
+        name_of=lambda pid: f"P{pid}",
+    )
+    assert lines == [
+        "P1 owes P2: 30 tix · 2 cards",
+        "P3 owes P4: 5 tix",
+        "P5 owes P6: 1 card",
+    ]
+    assert total == 35

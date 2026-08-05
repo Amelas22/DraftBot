@@ -18,7 +18,7 @@ from helpers.draft_footer import apply_draft_footer_from_session
 from services.draft_analysis import DraftAnalysis
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
-from services.debt_service import create_debt_entries_from_stakes, get_guild_debt_rows, get_balance_with
+from services.debt_service import create_debt_entries_from_stakes, get_guild_debt_rows, get_guild_card_pair_counts, get_balance_with
 from debt_views import SettleDebtsView
 from debt_views.settle_views import PublicSettleDebtsView
 from debt_views.helpers import build_guild_debt_embed_pages
@@ -1267,7 +1267,9 @@ async def update_debt_summary_for_guild(bot, guild_id: str):
                 from services.debt_service import get_most_outstanding_creditors
                 rows = await get_guild_debt_rows(guild_id)
                 top_creditors = await get_most_outstanding_creditors(guild_id)
-                pages = build_guild_debt_embed_pages(guild, rows, top_creditors=top_creditors)
+                card_pairs = await get_guild_card_pair_counts(guild_id)
+                pages = build_guild_debt_embed_pages(guild, rows, top_creditors=top_creditors,
+                                                     card_pairs=card_pairs)
                 view = PublicSettleDebtsView(pages=pages)
 
                 new_message = await channel.send(embed=pages[0], view=view)
