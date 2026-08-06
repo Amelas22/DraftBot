@@ -185,8 +185,8 @@ def test_projection_cube_and_h2h():
              opponents={"7": [1, 0]}, participants={"1", "7"}),               # 9 not an opponent here
     ]
     cubes = cube_breakdown(records)
-    assert cubes["X"] == {"wins": 2, "losses": 1}
-    assert cubes["Unknown"] == {"wins": 1, "losses": 0}
+    assert cubes["X"] == {"wins": 2, "losses": 1, "drafts": 1}
+    assert cubes["Unknown"] == {"wins": 1, "losses": 0, "drafts": 1}
     h = h2h_totals(records, "9")
     assert h["matches_played"] == 2 and h["matches_won"] == 1
     assert h["drafts_against"] == 1                   # session a: they met

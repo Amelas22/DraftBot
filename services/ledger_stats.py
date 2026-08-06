@@ -207,9 +207,11 @@ def team_record(records) -> dict:
 def cube_breakdown(records) -> dict:
     cubes: dict[str, dict] = {}
     for r in records:
-        cube = cubes.setdefault(r["cube"] or "Unknown", {"wins": 0, "losses": 0})
+        cube = cubes.setdefault(r["cube"] or "Unknown",
+                                 {"wins": 0, "losses": 0, "drafts": 0})
         cube["wins"] += r["wins"]
         cube["losses"] += r["losses"]
+        cube["drafts"] += 1
     return cubes
 
 

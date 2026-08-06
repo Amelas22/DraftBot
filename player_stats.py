@@ -162,15 +162,10 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                 team_draft_win_percentage = calculate_team_draft_win_percentage(
                     team_drafts_won, team_drafts_lost, team_drafts_tied)
 
-                # Get stats by cube type. Wins/losses come straight from the
-                # ledger fold; drafts_played (used for sorting/display in the
-                # embed) counts this player's completed sessions per cube.
-                cube_drafts_completed = {}
-                for record in records:
-                    if not record["completed"] or not record["cube"]:
-                        continue
-                    cube_drafts_completed[record["cube"]] = cube_drafts_completed.get(record["cube"], 0) + 1
-
+                # Get stats by cube type. Wins/losses/drafts come straight
+                # from the ledger fold (cube_breakdown); this dict is
+                # unfiltered -- the embed applies the "min 5 drafts" display
+                # threshold itself.
                 cube_stats = {}
                 for cube_name, cube_totals in cube_breakdown(records).items():
                     if cube_name == "Unknown":
@@ -184,7 +179,7 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                         "losses": losses,
                         "matches_played": wins + losses,
                         "matches_won": wins,
-                        "drafts_played": cube_drafts_completed.get(cube_name, 0),
+                        "drafts_played": cube_totals["drafts"],
                         "win_percentage": calculate_win_percentage(wins, losses),
                     }
 
@@ -333,11 +328,16 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
         value += "\n*New players start at 1500 · a 100-point gap ≈ 60% match favorite*"
         embed.add_field(name="🎯 Skill Rating", value=value, inline=False)
 
-    # Add cube-specific stats if any are available
-    if stats_lifetime['cube_stats']:
+    # Add cube-specific stats if any are available (min 5 drafts to display,
+    # matching the field's title)
+    displayable_cube_stats = {
+        cube_name: stats for cube_name, stats in stats_lifetime['cube_stats'].items()
+        if stats['drafts_played'] >= 5
+    }
+    if displayable_cube_stats:
         # Convert to list and sort by drafts_played in descending order
         sorted_cube_stats = sorted(
-            stats_lifetime['cube_stats'].items(),
+            displayable_cube_stats.items(),
             key=lambda x: x[1]['drafts_played'],
             reverse=True
         )
