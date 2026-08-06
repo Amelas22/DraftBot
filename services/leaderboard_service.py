@@ -122,12 +122,30 @@ def get_minimum_requirements(timeframe):
 async def get_leaderboard_data(guild_id, category="draft_record", limit=20, timeframe="lifetime"):
     """Get leaderboard data for all players in a guild"""
 
+    # Streak/quiz categories are backed by their own dedicated tables
+    # (WinStreakHistory, QuizStats, etc) and never touch the match-result
+    # ledger fold below (fetch_session_records) -- dispatch to them FIRST
+    # so they never pay for a fold whose result they'd throw away; the fold
+    # alone measured ~10s on prod-scale data.
+    dedicated_query_categories = {
+        "longest_win_streak": get_win_streak_leaderboard_data,
+        "perfect_streak": get_perfect_streak_leaderboard_data,
+        "quiz_points": get_quiz_points_leaderboard_data,
+        "trophy_quiz_points": get_trophy_quiz_points_leaderboard_data,
+        "draft_win_streak": get_draft_win_streak_leaderboard_data,
+    }
+    if category in dedicated_query_categories:
+        async with db_session() as session:
+            sorted_players = await dedicated_query_categories[category](
+                guild_id, timeframe, limit, session)
+        return sorted_players[:limit]
+
     # Get the start date for filtering based on timeframe
     start_date = get_timeframe_date(timeframe)
-    
+
     # Store player stats here
     players_data = {}
-    
+
     async with db_session() as session:
         # Count from the match-result ledger (the source of truth the rating
         # system already uses) instead of the old sign_ups/team_a/team_b
@@ -195,18 +213,22 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
                 "teammate_win_rates": {}
             }
 
-        # Second pass: teammate (Vault/Key) stats. A session's teammates are
-        # its other participants who never appear as an opponent; the
-        # session's own side_wins/side_losses (same numbers team_record
-        # uses) determine won/lost/tied for every teammate at once. Deferred
-        # to a second pass so every player's display_name is already
-        # resolved above, regardless of dict iteration order.
+        # Second pass: teammate (Vault/Key) stats. A session's teammates come
+        # straight from fetch_session_records' "teammates" set -- same side,
+        # computed from team_a/team_b, not "never appeared as an opponent"
+        # (that heuristic misclassifies an opposing player you simply never
+        # got paired against, e.g. in a 4v4 where 3 rounds only cover 3 of
+        # each player's 4 possible opponents). The session's own
+        # side_wins/side_losses (same numbers team_record uses) determine
+        # won/lost/tied for every teammate at once. Deferred to a second
+        # pass so every player's display_name is already resolved above,
+        # regardless of dict iteration order.
         for player_id, player_records in per_player.items():
             teammate_stats = players_data[player_id]["teammate_win_rates"]
             for r in player_records:
                 if not r["completed"]:
                     continue
-                teammates = r["participants"] - {player_id} - set(r["opponents"].keys())
+                teammates = r["teammates"]
                 if not teammates:
                     continue
                 if r["side_wins"] > r["side_losses"]:
@@ -311,24 +333,9 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
             # Sort by match win percentage
             sorted_players = sorted(filtered_players, key=lambda p: p["match_win_percentage"], reverse=True)
 
-        elif category == "longest_win_streak":
-            # Use dedicated function for streak queries (doesn't need draft aggregation)
-            sorted_players = await get_win_streak_leaderboard_data(guild_id, timeframe, limit, session)
-
-        elif category == "perfect_streak":
-            # Use dedicated function for perfect streak queries (2-0 wins only)
-            sorted_players = await get_perfect_streak_leaderboard_data(guild_id, timeframe, limit, session)
-
-        elif category == "quiz_points":
-            # Use dedicated function for quiz stats (doesn't need draft aggregation)
-            sorted_players = await get_quiz_points_leaderboard_data(guild_id, timeframe, limit, session)
-
-        elif category == "trophy_quiz_points":
-            sorted_players = await get_trophy_quiz_points_leaderboard_data(guild_id, timeframe, limit, session)
-
-        elif category == "draft_win_streak":
-            # Use dedicated function for draft win streak (Order of the White Lotus)
-            sorted_players = await get_draft_win_streak_leaderboard_data(guild_id, timeframe, limit, session)
+        # longest_win_streak / perfect_streak / quiz_points / trophy_quiz_points /
+        # draft_win_streak are handled by the dedicated_query_categories dispatch
+        # above, before the fold ever runs.
 
         else:
             # Default to drafts_played if category not recognized

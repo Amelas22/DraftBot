@@ -150,13 +150,86 @@ async def test_substitute_side_inferred_from_opponents(test_db):
     assert (by_pid["4"]["side_wins"], by_pid["4"]["side_losses"]) == (0, 2)
 
 
+# 4v4, 3 rounds -- NOT a full round-robin (that would take 4 rounds), so
+# each team_a player faces only 3 of team_b's 4 players and vice versa. This
+# is the guild's majority format and the exact shape of the "never faced =>
+# teammate" bug: player "1" never plays "8" purely because the schedule
+# didn't pair them this time, even though they're on opposing teams. Team A
+# wins every match, so side outcome is unambiguous.
+_4V4_TEAMS = (["1", "2", "3", "4"], ["5", "6", "7", "8"])
+_4V4_MATCHES = [
+    ("1", "5", "1", None), ("2", "6", "2", None), ("3", "7", "3", None), ("4", "8", "4", None),
+    ("1", "6", "1", None), ("2", "7", "2", None), ("3", "8", "3", None), ("4", "5", "4", None),
+    ("1", "7", "1", None), ("2", "8", "2", None), ("3", "5", "3", None), ("4", "6", "4", None),
+]
+
+
+@pytest.mark.asyncio
+async def test_never_faced_opponent_not_misclassified_as_teammate_4v4(test_db):
+    """The critical fix, at the fold + h2h_totals level: an opposing player
+    you never happened to be paired against must not read as a teammate,
+    while a real teammate (same side, also never played directly) still
+    does."""
+    from services.ledger_stats import fetch_session_records, h2h_totals
+
+    await _seed(session_id="4v4", victory="v", teams=_4V4_TEAMS,
+                matches=_4V4_MATCHES)
+    records = await fetch_session_records("g", player_id="1")
+    r = records[0]
+
+    assert "8" not in r["opponents"]           # sanity: they truly never played
+    assert "8" not in r["teammates"]           # the fix: opposing side, not a teammate
+    assert {"2", "3", "4"} <= r["teammates"]   # real teammates still classified correctly
+
+    h_never_faced = h2h_totals(records, "8")
+    assert h_never_faced["drafts_with"] == 0
+    assert h_never_faced["drafts_against"] == 1
+    assert h_never_faced["drafts_against_won"] == 1   # side_wins (12) > side_losses (0)
+
+    h_teammate = h2h_totals(records, "2")
+    assert h_teammate["drafts_with"] == 1
+    assert h_teammate["drafts_against"] == 0
+    assert h_teammate["drafts_with_won"] == 1
+
+
+@pytest.mark.asyncio
+async def test_leaderboard_teammate_stats_4v4_never_faced_not_teammate(test_db, monkeypatch):
+    """Same 4v4 fixture through get_leaderboard_data's time_vault_and_key
+    (teammate/Vault-and-Key) pass -- the never-faced opposing player must
+    not surface as a partnership, and a real teammate must."""
+    from services import leaderboard_service
+
+    # A single session can't clear the real partnership-drafts minimums
+    # (3-8 depending on timeframe); lower it so this session alone is
+    # enough to exercise the with/against classification.
+    monkeypatch.setattr(
+        leaderboard_service, "get_minimum_requirements",
+        lambda timeframe: {"drafts": 0, "matches": 0, "partnership_drafts": 1})
+
+    await _seed(session_id="4v4", victory="v", teams=_4V4_TEAMS,
+                matches=_4V4_MATCHES)
+    data = await leaderboard_service.get_leaderboard_data(
+        "g", category="time_vault_and_key", timeframe="lifetime")
+    pairs = {frozenset((p["player_id"], p["teammate_id"])) for p in data}
+
+    assert frozenset(("1", "8")) not in pairs   # never faced, opposing side -- not a partnership
+    assert frozenset(("1", "2")) in pairs       # real teammates, never faced directly either
+
+
 def _rec(**kw):
+    """teammates defaults to the old opponents-absence heuristic (fine for
+    these side-less synthetic records); pass teammates=... explicitly to
+    model a record where side, not opponents-absence, decides it."""
     base = dict(player_id="1", session_id="s", session_type="staked",
                 cube="CubeA", completed=True, started_at=None,
                 wins=0, losses=0, matches=0, opponents={},
-                side_wins=0, side_losses=0, participants=set())
+                side_wins=0, side_losses=0, participants=set(),
+                teammates=None)
     base.update(kw)
     base["matches"] = base["wins"] + base["losses"]
+    if base["teammates"] is None:
+        base["teammates"] = (
+            base["participants"] - {base["player_id"]} - set(base["opponents"].keys()))
     return base
 
 
@@ -191,6 +264,25 @@ def test_projection_cube_and_h2h():
     assert h["matches_played"] == 2 and h["matches_won"] == 1
     assert h["drafts_against"] == 1                   # session a: they met
     assert h["drafts_with"] == 0                      # session b: 9 absent entirely
+
+
+def test_cube_breakdown_groups_case_insensitively_completed_only():
+    from services.ledger_stats import cube_breakdown
+    records = [
+        _rec(session_id="a", cube="LSVCube", wins=2, losses=1),
+        _rec(session_id="b", cube="Lsvcube", wins=1, losses=0),
+        _rec(session_id="c", cube="lsvcube", wins=1, losses=1),
+        # in-progress: wins/losses still fold in, but shouldn't add to drafts
+        _rec(session_id="d", cube="Lsvcube", wins=0, losses=1, completed=False),
+        _rec(session_id="e", cube="OtherCube", wins=1, losses=0),
+    ]
+    cubes = cube_breakdown(records)
+    # 3 differently-cased spellings collapse into one entry, displayed under
+    # "Lsvcube" -- the most common spelling (b and d), tie-broken by recency.
+    assert set(cubes.keys()) == {"Lsvcube", "OtherCube"}
+    lsv = cubes["Lsvcube"]
+    assert (lsv["wins"], lsv["losses"]) == (4, 3)
+    assert lsv["drafts"] == 3          # d excluded: not completed
 
 
 def test_h2h_totals_teammate_and_opponent_win_counters():
