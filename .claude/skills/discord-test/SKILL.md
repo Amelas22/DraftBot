@@ -157,11 +157,6 @@ Stop with TaskStop on the background task when testing is done.
   (e.g. Play=1st, View Decklists=2nd; link buttons appear as `link`).
 - Ephemeral responses appear as the LAST `article` in the message list.
 - Click by ref, wait 2-3s (bot round-trip), screenshot to confirm the state.
-- The 🧪 test-fill buttons ("Add Test Users" / "Fill Teams (Test)") check REAL
-  Discord admin (`guild_permissions.administrator`), which the least-privilege
-  tester deliberately lacks — hand that single click off to the developer's
-  main account, then continue as the tester. (Create Teams / Ready Check have
-  no such gate.)
 - Ephemeral flows can carry short IN-MEMORY view timeouts (the trophy-quiz
   guess view is 5 min). Past the timeout a click is silently dropped: Discord
   shows "didn't respond in time" and NOTHING reaches the bot log. That's not a
