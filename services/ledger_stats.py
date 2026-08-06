@@ -216,8 +216,13 @@ def cube_breakdown(records) -> dict:
 
 
 def h2h_totals(records, opponent_id: str) -> dict:
+    """Per-opponent totals, three-way split (won/tied/not) mirroring
+    team_record -- a tied shared session must read as "tied" everywhere,
+    not silently collapse into a loss in one projection and a tie in
+    another."""
     matches_played = matches_won = 0
     drafts_with = drafts_against = drafts_with_won = drafts_against_won = 0
+    drafts_with_tied = drafts_against_tied = 0
     for r in records:
         pair = r["opponents"].get(opponent_id)
         if pair:
@@ -226,15 +231,24 @@ def h2h_totals(records, opponent_id: str) -> dict:
         if not r["completed"] or opponent_id not in r["participants"]:
             continue
         my_win = r["side_wins"] > r["side_losses"]
+        my_tied = r["side_wins"] == r["side_losses"]
         if pair:                       # met across the table -> opposing sides
             drafts_against += 1
-            drafts_against_won += 1 if my_win else 0
+            if my_win:
+                drafts_against_won += 1
+            elif my_tied:
+                drafts_against_tied += 1
         else:                          # in the draft but never faced -> teammates
             drafts_with += 1
-            drafts_with_won += 1 if my_win else 0
+            if my_win:
+                drafts_with_won += 1
+            elif my_tied:
+                drafts_with_tied += 1
     return {
         "matches_played": matches_played, "matches_won": matches_won,
         "drafts_with": drafts_with, "drafts_against": drafts_against,
         "drafts_with_won": drafts_with_won,
         "drafts_against_won": drafts_against_won,
+        "drafts_with_tied": drafts_with_tied,
+        "drafts_against_tied": drafts_against_tied,
     }

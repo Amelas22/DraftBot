@@ -203,12 +203,20 @@ def test_h2h_totals_teammate_and_opponent_win_counters():
         # "9" met across the table (present in opponents) with a side win.
         _rec(session_id="b", wins=1, losses=0, opponents={"9": [1, 0]},
              participants={"1", "9"}, side_wins=3, side_losses=1),
+        # teammates, tied session (side_wins == side_losses).
+        _rec(session_id="c", wins=1, losses=1, opponents={"7": [1, 1]},
+             participants={"1", "9", "7"}, side_wins=4, side_losses=4),
+        # met across the table, tied session.
+        _rec(session_id="d", wins=1, losses=1, opponents={"9": [1, 1]},
+             participants={"1", "9"}, side_wins=2, side_losses=2),
     ]
     h = h2h_totals(records, "9")
-    assert h["drafts_with"] == 1
+    assert h["drafts_with"] == 2
     assert h["drafts_with_won"] == 1
-    assert h["drafts_against"] == 1
+    assert h["drafts_with_tied"] == 1
+    assert h["drafts_against"] == 2
     assert h["drafts_against_won"] == 1
+    assert h["drafts_against_tied"] == 1
 
 
 @pytest.mark.asyncio
@@ -218,11 +226,20 @@ async def test_h2h_from_ledger_scopes_and_counts(test_db):
     await _seed(session_id="a", victory="v", teams=(["1", "2"], ["9", "8"]),
                 matches=[("1", "9", "1", None), ("2", "8", "8", None),
                          ("1", "8", "1", None), ("2", "9", "2", None)])
+    # Teammates ("1" and "9" never face each other directly here) whose
+    # side ties 1-1 -- must land as a draw, not a loss, in the dict
+    # create_head_to_head_embed reads.
+    await _seed(session_id="tie", victory="v2", teams=(["1", "9"], ["8", "7"]),
+                matches=[("1", "8", "1", None), ("9", "7", "7", None)])
     h = await get_head_to_head_stats("1", "9", "One", "Nine", "g")
     # swiss excluded: direct record is 1-0, not 1-1
     assert h["lifetime"]["matches_played"] == 1
     assert h["lifetime"]["user1_wins"] == 1
     assert h["lifetime"]["user2_wins"] == 0
+    # tied team session shows up as a draw, not a loss
+    assert h["teammate_lifetime"]["draws"] == 1
+    assert h["teammate_lifetime"]["wins"] == 0
+    assert h["teammate_lifetime"]["losses"] == 0
     # they met across the table in session "a" and user1's side won it
     assert h["opposing_lifetime"]["wins"] == 1
     assert h["opposing_lifetime"]["losses"] == 0

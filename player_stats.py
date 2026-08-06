@@ -433,18 +433,16 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
                 "user2_win_percentage": calculate_win_percentage(user2_wins, user1_wins),
             }
 
-        def _draft_record(h, played_key, won_key):
-            # h2h_totals folds ties into "not won" (a session with
-            # side_wins == side_losses isn't counted as a win) and has no
-            # separate tie counter to surface here, so draws is always 0.
+        def _draft_record(h, played_key, won_key, tied_key):
             played = h[played_key]
             won = h[won_key]
-            losses = played - won
+            drawn = h[tied_key]
+            losses = played - won - drawn
             return {
                 "wins": won,
                 "losses": losses,
-                "draws": 0,
-                "win_percentage": calculate_win_percentage(won, losses),
+                "draws": drawn,
+                "win_percentage": calculate_win_percentage(won, losses, drawn),
             }
 
         lifetime_records = await fetch_session_records(guild_id, player_id=user1_id)
@@ -459,13 +457,13 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
         h_monthly = h2h_totals(monthly_records, user2_id)
         h_weekly = h2h_totals(weekly_records, user2_id)
 
-        opposing_lifetime = _draft_record(h_lifetime, "drafts_against", "drafts_against_won")
-        opposing_monthly = _draft_record(h_monthly, "drafts_against", "drafts_against_won")
-        opposing_weekly = _draft_record(h_weekly, "drafts_against", "drafts_against_won")
+        opposing_lifetime = _draft_record(h_lifetime, "drafts_against", "drafts_against_won", "drafts_against_tied")
+        opposing_monthly = _draft_record(h_monthly, "drafts_against", "drafts_against_won", "drafts_against_tied")
+        opposing_weekly = _draft_record(h_weekly, "drafts_against", "drafts_against_won", "drafts_against_tied")
 
-        teammate_lifetime = _draft_record(h_lifetime, "drafts_with", "drafts_with_won")
-        teammate_monthly = _draft_record(h_monthly, "drafts_with", "drafts_with_won")
-        teammate_weekly = _draft_record(h_weekly, "drafts_with", "drafts_with_won")
+        teammate_lifetime = _draft_record(h_lifetime, "drafts_with", "drafts_with_won", "drafts_with_tied")
+        teammate_monthly = _draft_record(h_monthly, "drafts_with", "drafts_with_won", "drafts_with_tied")
+        teammate_weekly = _draft_record(h_weekly, "drafts_with", "drafts_with_won", "drafts_with_tied")
 
         return {
             "user1_id": user1_id,
