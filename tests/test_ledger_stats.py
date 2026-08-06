@@ -1,0 +1,122 @@
+"""The one ledger fold behind /stats, /record, and leaderboards
+(spec 2026-08-06-ledger-stats-unification-design)."""
+import os
+import tempfile
+from datetime import datetime
+
+import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from database.models_base import Base
+from database.db_session import AsyncSessionLocal
+from models.draft_session import DraftSession
+from models.match import MatchResult
+
+
+@pytest_asyncio.fixture
+async def test_db():
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+    tmp.close()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp.name}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    AsyncSessionLocal.configure(bind=engine)
+    yield engine
+    await engine.dispose()
+    os.unlink(tmp.name)
+
+
+async def _seed(session_id="s1", guild="g", stype="staked", stage="completed",
+                victory=None, teams=None, matches=(), start=None):
+    """teams: (team_a_list, team_b_list) or None (legacy-style).
+    matches: iterable of (p1, p2, winner, submitted_at_or_None)."""
+    async with AsyncSessionLocal() as s:
+        s.add(DraftSession(
+            session_id=session_id, guild_id=guild, session_type=stype,
+            session_stage=stage,
+            victory_message_id_results_channel=victory,
+            team_a=list(teams[0]) if teams else None,
+            team_b=list(teams[1]) if teams else None,
+            draft_start_time=start or datetime(2026, 1, 1),
+            cube="TestCube"))
+        for i, (p1, p2, w, ts) in enumerate(matches):
+            s.add(MatchResult(session_id=session_id, match_number=i + 1,
+                              player1_id=p1, player2_id=p2, winner_id=w,
+                              result_submitted_at=ts))
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_records_basic_team_session(test_db):
+    from services.ledger_stats import fetch_session_records
+    await _seed(teams=(["1", "2", "3"], ["4", "5", "6"]), matches=[
+        ("1", "4", "1", None), ("2", "5", "5", None), ("3", "6", "3", None),
+        ("1", "5", "1", None), ("2", "6", "2", None), ("3", "4", "3", None),
+        ("1", "6", "1", None), ("2", "4", "4", None), ("3", "5", "3", None),
+    ])
+    records = await fetch_session_records("g", player_id="1")
+    assert len(records) == 1
+    r = records[0]
+    assert (r["wins"], r["losses"], r["matches"]) == (3, 0, 3)
+    assert r["completed"] is True
+    assert r["opponents"]["4"] == [1, 0]
+    # team A won 7 of 9 session matches (winners: 1,5,3,1,2,3,1,4,3 -> A,B,A,A,A,A,A,B,A)
+    assert (r["side_wins"], r["side_losses"]) == (7, 2)
+    assert r["cube"] == "TestCube"
+    assert r["session_type"] == "staked"
+    assert r["participants"] == {"1", "2", "3", "4", "5", "6"}
+
+
+@pytest.mark.asyncio
+async def test_legacy_session_sides_from_match_positions(test_db):
+    from services.ledger_stats import fetch_session_records
+    # No teams JSON (legacy import): player1s are one side, player2s the other.
+    await _seed(session_id="legacy-9", stage=None, teams=None, matches=[
+        ("1", "4", "1", None), ("2", "5", "5", None),
+        ("1", "5", "5", None), ("2", "4", "2", None),
+    ])
+    r = next(r for r in await fetch_session_records("g", player_id="1"))
+    assert r["completed"] is True           # legacy- prefix counts as completed
+    assert (r["side_wins"], r["side_losses"]) == (2, 2)
+
+
+@pytest.mark.asyncio
+async def test_guards_and_scope(test_db):
+    from services.ledger_stats import fetch_session_records
+    await _seed(session_id="sw", stype="swiss", matches=[("1", "2", "1", None)])
+    await _seed(session_id="ok", stype="premade", victory="123", matches=[
+        ("1", "2", "1", None),        # counts (premade IS rated)
+        ("1", "1", "1", None),        # self-match: skipped
+        ("1", "3", "9", None),        # winner not a participant: skipped
+        ("1", "4", None, None),       # unreported: skipped
+    ])
+    records = await fetch_session_records("g", player_id="1")
+    assert [r["session_id"] for r in records] == ["ok"]
+    assert records[0]["matches"] == 1
+
+
+@pytest.mark.asyncio
+async def test_incomplete_native_session_flagged(test_db):
+    from services.ledger_stats import fetch_session_records
+    await _seed(session_id="mid", stage="pairings", victory=None,
+                teams=(["1"], ["2"]), matches=[("1", "2", "1", None)])
+    r = (await fetch_session_records("g", player_id="1"))[0]
+    assert r["completed"] is False
+    assert r["wins"] == 1                   # match still counts as a match
+
+
+@pytest.mark.asyncio
+async def test_since_filters_by_match_event_time(test_db):
+    from services.ledger_stats import fetch_session_records
+    await _seed(session_id="old", victory="1", start=datetime(2024, 5, 1),
+                teams=(["1"], ["2"]),
+                matches=[("1", "2", "1", None)])
+    await _seed(session_id="new", victory="1", start=datetime(2026, 6, 1),
+                teams=(["1"], ["2"]),
+                matches=[("1", "2", "2", datetime(2026, 6, 1, 12))])
+    recent = await fetch_session_records("g", player_id="1",
+                                         since=datetime(2026, 1, 1))
+    assert [r["session_id"] for r in recent] == ["new"]
+    lifetime = await fetch_session_records("g", player_id="1")
+    assert len(lifetime) == 2
