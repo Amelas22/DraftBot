@@ -169,12 +169,13 @@ Stop with TaskStop on the background task when testing is done.
 clicks on option rows by coordinate are unreliable. Proven keyboard recipe:
 1. Click the select's ref once (a second click toggles it closed — never
    double-click). Wait ~1s.
-2. One `ArrowDown` key call per step — a single call with `repeat: N` only
-   advances ONE step. The highlight starts from the CURRENT selection when the
-   select is pre-filled (change mode); on an EMPTY select the landing spot is
-   nondeterministic (one ArrowDown has landed on option 1 in one live run and
-   option 2 in another) — never assume, read the committed value off the
-   screenshot.
+2. One `ArrowDown` key call per step when the target index matters —
+   `repeat: N` has advanced N steps in some selects and only 1 in others, so
+   use it only for walking/scanning a list, never for precise selection. The
+   highlight starts from the CURRENT selection when the select is pre-filled
+   (change mode); on an EMPTY select the landing spot is nondeterministic
+   (one ArrowDown has landed on option 1 in one live run and option 2 in
+   another) — never assume, read the committed value off the screenshot.
 3. `Enter` commits; the select's label shows the chosen value. Screenshot to
    verify — a wrong-but-valid value is usually fine for flow testing; prefer
    continuing over fiddly correction loops.
@@ -194,6 +195,32 @@ clicks on option rows by coordinate are unreliable. Proven keyboard recipe:
 - Screenshot after every state transition as the visual record. Screenshots
   land in the conversation (the user also sees the live pane); they are NOT
   saved as files — say so when reporting results.
+
+## Re-verifying a merged PR (cheap, accurate, in this order)
+
+1. **Recon before the browser.** `gh pr view <n> --json title,files` +
+   `gh pr diff <n>` and derive each change's OBSERVABLE — the thing a tester
+   could actually see. (e.g. "fix /configure crashing on Cubes" observably
+   means Cubes is ABSENT from the category picker, not "try it and see".)
+   Then grep the code/config to locate the surface. No browser action until
+   the expected result is written down.
+2. **Stay developer-agnostic.** Derive guild/channel/roles from `.env`
+   (`TEST_GUILD_ID`, `TEST_CHANNEL`) and `configs/<TEST_GUILD_ID>.json` —
+   e.g. which role plays "utility bot" varies per dev; the config names it.
+   Never encode a specific server's names in a plan or in this skill.
+3. **Reuse before creating.** Artifacts from earlier runs (draft channels,
+   posted quizzes, bot log lines) often already prove a behavior — one
+   `grep` of `bot_local.log` verified a channel-permissions PR with zero
+   browser actions. Order multiple PRs cheapest-first.
+4. **Spend tokens bottom-up:** log grep < `get_page_text`/scoped
+   `read_page` (`ref_id`+`depth`+small `max_chars`) < screenshot. Screenshot
+   only to disambiguate a command picker, read dropdown options, or record a
+   visual claim. Full-page `read_page` dumps and redundant screenshots are
+   the main cost sink.
+5. **Classify honestly in the report:** live-verified / code-verified only
+   (unit tests, log) / unreachable (needs external service or a scheduled
+   trigger) — and file the testability gap instead of burning interactions
+   on an unreachable surface.
 
 ## Teardown
 
