@@ -1,10 +1,26 @@
 {
   "permissions": {
     "deny": [
-      "Edit(.env*)",
-      "Edit(**/.env*)",
-      "Write(.env*)",
-      "Write(**/.env*)"
+      "Edit(.env)",
+      "Edit(.env.*)",
+      "Edit(.env-*)",
+      "Edit(.env_*)",
+      "Edit(*.env)",
+      "Edit(**/.env)",
+      "Edit(**/.env.*)",
+      "Edit(**/.env-*)",
+      "Edit(**/.env_*)",
+      "Edit(**/*.env)",
+      "Write(.env)",
+      "Write(.env.*)",
+      "Write(.env-*)",
+      "Write(.env_*)",
+      "Write(*.env)",
+      "Write(**/.env)",
+      "Write(**/.env.*)",
+      "Write(**/.env-*)",
+      "Write(**/.env_*)",
+      "Write(**/*.env)"
     ]
   },
   "hooks": {

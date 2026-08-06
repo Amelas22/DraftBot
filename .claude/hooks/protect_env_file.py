@@ -13,9 +13,10 @@ import re
 import sys
 
 # The dotenv FAMILY: .env plus separator-joined aliases (.env.local,
-# .env-test, .env.backup, .env_prod...). The lookahead excludes unrelated
-# names like .environment_notes.txt (no separator after "env").
-ENV = r"(?:[\w./~$-]*/)?\.env(?:[._-][\w.-]*)?(?![\w-])"
+# .env-test, .env_prod...) and reverse-style names (backup.env, prod.env).
+# The lookahead excludes unrelated names like .environment_notes.txt (no
+# separator after "env").
+ENV = r"(?:[\w./~$-]*/)?[\w.-]*\.env(?:[._-][\w.-]*)?(?![\w-])"
 WRITE_PATTERNS = re.compile("|".join([
     rf"(?:>>?\s*{ENV})",                     # > .env / >> .env
     rf"(?:\bsed\b[^|;&]*-i[^|;&]*{ENV})",    # sed -i ... .env
