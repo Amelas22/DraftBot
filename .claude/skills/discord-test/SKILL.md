@@ -46,7 +46,11 @@ Different developers have different guilds/channels/accounts.
 - If any of these are missing, run **First-time setup** below before testing.
 - Test data (seeded drafts/quizzes) is OUT of scope here — if the flow under
   test needs data, run the seed scripts (see CLAUDE.md Testing section) as a
-  separate ad hoc step first.
+  separate ad hoc step first. Known signature: `/post_trophy_quiz` replying
+  "No eligible draft could be turned into a trophy quiz" means the seeded pool
+  is exhausted (each posted quiz consumes one seeded draft) — run
+  `scripts/seed_test_trophy_quiz.py --guild-id $TEST_GUILD_ID` again, then
+  re-run the command; the bot can stay up throughout.
 
 ## First-time setup (walk the developer through this)
 
@@ -153,6 +157,18 @@ Stop with TaskStop on the background task when testing is done.
   (e.g. Play=1st, View Decklists=2nd; link buttons appear as `link`).
 - Ephemeral responses appear as the LAST `article` in the message list.
 - Click by ref, wait 2-3s (bot round-trip), screenshot to confirm the state.
+- The 🧪 test-fill buttons ("Add Test Users" / "Fill Teams (Test)") check REAL
+  Discord admin (`guild_permissions.administrator`), which the least-privilege
+  tester deliberately lacks — hand that single click off to the developer's
+  main account, then continue as the tester. (Create Teams / Ready Check have
+  no such gate.)
+- Ephemeral flows can carry short IN-MEMORY view timeouts (the trophy-quiz
+  guess view is 5 min). Past the timeout a click is silently dropped: Discord
+  shows "didn't respond in time" and NOTHING reaches the bot log. That's not a
+  bug to debug — re-open the flow from the persistent channel-message button
+  (e.g. Play) and redo it briskly; never retry the dead button. Corollary: if
+  a session pauses mid-flow, assume open ephemeral controls are dead on
+  resume.
 
 **Dropdowns (string selects)** — options are NOT in the accessibility tree;
 clicks on option rows by coordinate are unreliable. Proven keyboard recipe:
@@ -160,10 +176,19 @@ clicks on option rows by coordinate are unreliable. Proven keyboard recipe:
    double-click). Wait ~1s.
 2. One `ArrowDown` key call per step — a single call with `repeat: N` only
    advances ONE step. The highlight starts from the CURRENT selection when the
-   select is pre-filled (change mode), from the top when empty.
+   select is pre-filled (change mode); on an EMPTY select the landing spot is
+   nondeterministic (one ArrowDown has landed on option 1 in one live run and
+   option 2 in another) — never assume, read the committed value off the
+   screenshot.
 3. `Enter` commits; the select's label shows the chosen value. Screenshot to
    verify — a wrong-but-valid value is usually fine for flow testing; prefer
    continuing over fiddly correction loops.
+4. Do NOT batch several dropdown flows without verifying each: in a rapid
+   click-report loop (e.g. reporting 9 match results back-to-back) a commit
+   can silently miss — the channel auto-scrolls when each ephemeral arrives
+   and a mid-scroll click lands wrong with no error. Confirm the visible
+   effect (e.g. the per-match button turning red) after EVERY commit before
+   starting the next one.
 
 **Verification**
 - Ephemeral messages render only in this session; the list is virtualized —
@@ -177,10 +202,10 @@ clicks on option rows by coordinate are unreliable. Proven keyboard recipe:
 
 ## Teardown
 
-- Channel cleanup when a test created draft channels: run `/delete_draft_channels`
-  in Discord (TEST_MODE-only command; `dry_run` defaults true — review the dry
-  run before re-running with dry_run false), or ask the user before using
-  `scripts/cleanup_test_channels.py --guild-id <id> --yes`.
+- Draft channels created during a test are LEFT IN PLACE — never run
+  `/delete_draft_channels` or `scripts/cleanup_test_channels.py` (developer
+  preference: channel deletion is theirs to do manually, if at all). Just
+  list the channels the test created in the final report.
 - Purge seeded data only if asked (seed scripts' `--purge`).
 - TaskStop the bot background task.
 - Report what was tested, what passed/failed, with the screenshots inline.
