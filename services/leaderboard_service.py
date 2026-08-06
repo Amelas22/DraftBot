@@ -153,7 +153,8 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
         # legacy drafts (no victory_message_id_results_channel). Scope is
         # RATING_SESSION_TYPES via fetch_session_records, same as /stats
         # and /record.
-        from services.ledger_stats import fetch_session_records, match_totals, draft_totals, team_record
+        from stats_core import calculate_win_percentage, calculate_team_draft_win_percentage
+        from services.ledger_stats import fetch_session_records, match_totals, draft_totals, team_record, side_outcome
 
         records = await fetch_session_records(guild_id, since=start_date)
         per_player: dict[str, list] = {}
@@ -185,7 +186,7 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
             matches_played = totals["matches_played"]
             matches_won = totals["matches_won"]
             matches_lost = matches_played - matches_won
-            match_win_percentage = (matches_won / matches_played * 100) if matches_played > 0 else 0
+            match_win_percentage = calculate_win_percentage(matches_won, matches_lost)
 
             drafts_played = draft_totals(player_records)
 
@@ -194,8 +195,11 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
             team_drafts_won = team["won"]
             team_drafts_lost = team["lost"]
             team_drafts_tied = team["tied"]
-            team_draft_counted_drafts = team_drafts_won + team_drafts_lost
-            team_draft_win_percentage = (team_drafts_won / team_draft_counted_drafts * 100) if team_draft_counted_drafts > 0 else 0
+            # Same tie-inclusive denominator policy as /stats and /record
+            # (stats_core owns the formula) -- the old inline formula
+            # silently excluded ties from the denominator.
+            team_draft_win_percentage = calculate_team_draft_win_percentage(
+                team_drafts_won, team_drafts_lost, team_drafts_tied)
 
             players_data[player_id] = {
                 "player_id": player_id,
@@ -231,12 +235,7 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
                 teammates = r["teammates"]
                 if not teammates:
                     continue
-                if r["side_wins"] > r["side_losses"]:
-                    outcome = "won"
-                elif r["side_wins"] < r["side_losses"]:
-                    outcome = "lost"
-                else:
-                    outcome = "tied"
+                outcome = side_outcome(r)
                 for teammate_id in teammates:
                     if teammate_id not in players_data:
                         continue

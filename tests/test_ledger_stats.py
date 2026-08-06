@@ -357,7 +357,10 @@ async def test_get_player_statistics_counts_from_ledger(test_db):
     assert stats["drafts_played"] == 3
     assert stats["trophies_won"] == 1        # only the native 3-0
     assert stats["team_drafts_played"] == 3
-    assert stats["cube_stats"]["TestCube"]["wins"] == 5
+    # cube_stats carries only what the embed reads: draft count + win %
+    cube = stats["cube_stats"]["TestCube"]
+    assert cube["drafts_played"] == 3
+    assert round(cube["win_percentage"], 1) == round(5 / 6 * 100, 1)
 
 
 @pytest.mark.asyncio

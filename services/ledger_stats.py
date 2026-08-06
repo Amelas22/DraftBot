@@ -135,26 +135,14 @@ def _compute_teammates(pid, participants, sides, opponents) -> set:
     return teammates
 
 
-async def fetch_session_records(guild_id: str, player_id: str = None,
-                                since=None) -> list[dict]:
-    """Per-(player, session) aggregates over reported rated matches.
-
-    since filters individual matches by COALESCE(result_submitted_at,
-    draft_start_time); records with no in-window matches are omitted. When
-    since is None (lifetime), that filter doesn't run at all, so matches
-    with a NULL event time are kept -- deliberately the same outcome as
-    passing a since so far in the past it precedes all data, so every
-    lifetime caller (/, h2h, leaderboards) sees the same lifetime set
-    regardless of which of those two spellings it used to pass.
-    Guards mirror helpers.skill.backfill_skill_ratings.
-
-    Selects only the columns below (never full MatchResult/DraftSession
-    entities) -- materializing ORM pairs for a guild's whole rated history
-    measured ~10s on prod-scale data, stalling the event loop on every
-    /stats and leaderboard refresh.
-    """
+async def fetch_guild_rows(guild_id: str) -> list:
+    """One SQL fetch of a guild's whole rated reported history (column
+    tuples, never ORM entities -- materializing entity pairs measured ~10s
+    on prod scale). The query deliberately takes no player/since params:
+    callers that need several views of the same guild (three timeframes of
+    /stats or /record) fetch once and fold repeatedly."""
     async with db_session() as s:
-        rows = (await s.execute(
+        return (await s.execute(
             select(
                 MatchResult.player1_id, MatchResult.player2_id,
                 MatchResult.winner_id, MatchResult.result_submitted_at,
@@ -174,6 +162,28 @@ async def fetch_session_records(guild_id: str, player_id: str = None,
             .order_by(MatchResult.id)
         )).all()
 
+
+async def fetch_session_records(guild_id: str, player_id: str = None,
+                                since=None) -> list[dict]:
+    """fetch_guild_rows + fold_session_records in one call, for callers
+    that need a single view. Multi-timeframe callers should fetch rows once
+    and fold per timeframe instead of calling this repeatedly."""
+    return fold_session_records(await fetch_guild_rows(guild_id),
+                                player_id=player_id, since=since)
+
+
+def fold_session_records(rows, player_id: str = None, since=None) -> list[dict]:
+    """Per-(player, session) aggregates over reported rated matches (pure).
+
+    since filters individual matches by COALESCE(result_submitted_at,
+    draft_start_time); records with no in-window matches are omitted. When
+    since is None (lifetime), that filter doesn't run at all, so matches
+    with a NULL event time are kept -- deliberately the same outcome as
+    passing a since so far in the past it precedes all data, so every
+    lifetime caller (/stats, h2h, leaderboards) sees the same lifetime set
+    regardless of which of those two spellings it used to pass.
+    Guards mirror helpers.skill.backfill_skill_ratings.
+    """
     by_session: dict[str, dict] = {}
     for row in rows:
         match = _MatchRow(row.player1_id, row.player2_id, row.winner_id,
@@ -273,18 +283,23 @@ def trophy_count(records) -> int:
                if r["completed"] and r["wins"] == r["matches"] >= 3)
 
 
+def side_outcome(record) -> str:
+    """'won' | 'lost' | 'tied' for the record-owner's side of one session.
+    THE won/lost/tied policy -- team_record, h2h_totals, and the
+    leaderboard's teammate pass all classify through here."""
+    if record["side_wins"] > record["side_losses"]:
+        return "won"
+    if record["side_wins"] < record["side_losses"]:
+        return "lost"
+    return "tied"
+
+
 def team_record(records) -> dict:
-    won = lost = tied = 0
+    tally = {"won": 0, "lost": 0, "tied": 0}
     for r in records:
-        if not r["completed"]:
-            continue
-        if r["side_wins"] > r["side_losses"]:
-            won += 1
-        elif r["side_wins"] < r["side_losses"]:
-            lost += 1
-        else:
-            tied += 1
-    return {"played": won + lost + tied, "won": won, "lost": lost, "tied": tied}
+        if r["completed"]:
+            tally[side_outcome(r)] += 1
+    return {"played": sum(tally.values()), **tally}
 
 
 def cube_breakdown(records) -> dict:
@@ -345,19 +360,18 @@ def h2h_totals(records, opponent_id: str) -> dict:
             matches_played += pair[0] + pair[1]
         if not r["completed"] or opponent_id not in r["participants"]:
             continue
-        my_win = r["side_wins"] > r["side_losses"]
-        my_tied = r["side_wins"] == r["side_losses"]
+        outcome = side_outcome(r)
         if opponent_id in r["teammates"]:          # same side
             drafts_with += 1
-            if my_win:
+            if outcome == "won":
                 drafts_with_won += 1
-            elif my_tied:
+            elif outcome == "tied":
                 drafts_with_tied += 1
         else:                                      # opposing side
             drafts_against += 1
-            if my_win:
+            if outcome == "won":
                 drafts_against_won += 1
-            elif my_tied:
+            elif outcome == "tied":
                 drafts_against_tied += 1
     return {
         "matches_played": matches_played, "matches_won": matches_won,

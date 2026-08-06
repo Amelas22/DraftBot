@@ -8,7 +8,8 @@ from models.perfect_streak_history import PerfectStreakHistory
 from loguru import logger
 from stats_core import get_timeframe_start_date, calculate_win_percentage, calculate_team_draft_win_percentage
 
-async def get_player_statistics(user_id, time_frame=None, user_display_name=None, guild_id=None):
+async def get_player_statistics(user_id, time_frame=None, user_display_name=None, guild_id=None,
+                                prefetched_rows=None):
     """Get player statistics for a specific user and time frame, filtered by guild_id if provided."""
     try:
         # Calculate the start date based on time frame using shared utility
@@ -138,11 +139,15 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                 # like sign_ups JSON, victory-message ids, or
                 # trophy_drafters name strings.
                 from services.ledger_stats import (
-                    fetch_session_records, match_totals, draft_totals,
-                    trophy_count, team_record, cube_breakdown)
+                    fetch_session_records, fold_session_records, match_totals,
+                    draft_totals, trophy_count, team_record, cube_breakdown)
 
-                records = await fetch_session_records(
-                    guild_id, player_id=user_id, since=start_date)
+                if prefetched_rows is not None:
+                    records = fold_session_records(
+                        prefetched_rows, player_id=user_id, since=start_date)
+                else:
+                    records = await fetch_session_records(
+                        guild_id, player_id=user_id, since=start_date)
                 totals = match_totals(records)
                 matches_played = totals["matches_played"]
                 matches_won = totals["matches_won"]
@@ -158,7 +163,7 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                 match_win_percentage = calculate_win_percentage(matches_won, matches_lost)
 
                 # Calculate team draft win percentage using shared utility
-                team_drafts_lost = team_drafts_played - team_drafts_won - team_drafts_tied
+                team_drafts_lost = team["lost"]
                 team_draft_win_percentage = calculate_team_draft_win_percentage(
                     team_drafts_won, team_drafts_lost, team_drafts_tied)
 
@@ -172,15 +177,12 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                         # cube_breakdown buckets sessions with no cube set here;
                         # the embed only ever displayed named cubes.
                         continue
-                    wins = cube_totals["wins"]
-                    losses = cube_totals["losses"]
+                    # Only what the embed reads: the draft count (for the
+                    # min-5 display threshold) and the win percentage.
                     cube_stats[cube_name] = {
-                        "wins": wins,
-                        "losses": losses,
-                        "matches_played": wins + losses,
-                        "matches_won": wins,
                         "drafts_played": cube_totals["drafts"],
-                        "win_percentage": calculate_win_percentage(wins, losses),
+                        "win_percentage": calculate_win_percentage(
+                            cube_totals["wins"], cube_totals["losses"]),
                     }
 
                 return {
@@ -418,10 +420,9 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
         # rating system already uses) instead of sign_ups JSON, per-draft
         # team_a/team_b queries, and teams_start_time -- scope is
         # RATING_SESSION_TYPES via fetch_session_records, same as /stats.
-        from services.ledger_stats import fetch_session_records, h2h_totals
+        from services.ledger_stats import fetch_guild_rows, fold_session_records, h2h_totals
 
-        def _match_record(records):
-            h = h2h_totals(records, user2_id)
+        def _match_record(h):
             matches_played = h["matches_played"]
             user1_wins = h["matches_won"]
             user2_wins = matches_played - user1_wins
@@ -445,17 +446,20 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
                 "win_percentage": calculate_win_percentage(won, losses, drawn),
             }
 
-        lifetime_records = await fetch_session_records(guild_id, player_id=user1_id)
-        monthly_records = await fetch_session_records(guild_id, player_id=user1_id, since=month_ago)
-        weekly_records = await fetch_session_records(guild_id, player_id=user1_id, since=week_ago)
-
-        lifetime_stats = _match_record(lifetime_records)
-        monthly_stats = _match_record(monthly_records)
-        weekly_stats = _match_record(weekly_records)
+        # One SQL fetch; three pure folds (the query doesn't vary by
+        # timeframe, so refetching per frame just repeated identical I/O).
+        rows = await fetch_guild_rows(guild_id)
+        lifetime_records = fold_session_records(rows, player_id=user1_id)
+        monthly_records = fold_session_records(rows, player_id=user1_id, since=month_ago)
+        weekly_records = fold_session_records(rows, player_id=user1_id, since=week_ago)
 
         h_lifetime = h2h_totals(lifetime_records, user2_id)
         h_monthly = h2h_totals(monthly_records, user2_id)
         h_weekly = h2h_totals(weekly_records, user2_id)
+
+        lifetime_stats = _match_record(h_lifetime)
+        monthly_stats = _match_record(h_monthly)
+        weekly_stats = _match_record(h_weekly)
 
         opposing_lifetime = _draft_record(h_lifetime, "drafts_against", "drafts_against_won", "drafts_against_tied")
         opposing_monthly = _draft_record(h_monthly, "drafts_against", "drafts_against_won", "drafts_against_tied")
