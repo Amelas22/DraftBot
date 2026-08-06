@@ -148,3 +148,46 @@ async def test_substitute_side_inferred_from_opponents(test_db):
     assert (by_pid["7"]["side_wins"], by_pid["7"]["side_losses"]) == (2, 0)
     assert (by_pid["1"]["side_wins"], by_pid["1"]["side_losses"]) == (2, 0)
     assert (by_pid["4"]["side_wins"], by_pid["4"]["side_losses"]) == (0, 2)
+
+
+def _rec(**kw):
+    base = dict(player_id="1", session_id="s", session_type="staked",
+                cube="CubeA", completed=True, started_at=None,
+                wins=0, losses=0, matches=0, opponents={},
+                side_wins=0, side_losses=0, participants=set())
+    base.update(kw)
+    base["matches"] = base["wins"] + base["losses"]
+    return base
+
+
+def test_projections_match_draft_trophy_team():
+    from services.ledger_stats import (
+        match_totals, draft_totals, trophy_count, team_record)
+    records = [
+        _rec(session_id="a", wins=3, losses=0, side_wins=6, side_losses=3),
+        _rec(session_id="b", wins=2, losses=1, side_wins=4, side_losses=5),
+        _rec(session_id="c", wins=2, losses=0, completed=False,
+             side_wins=2, side_losses=0),          # in-progress
+        _rec(session_id="d", wins=1, losses=1, side_wins=4, side_losses=4),
+    ]
+    assert match_totals(records) == {"matches_played": 10, "matches_won": 8}
+    assert draft_totals(records) == 3                 # c not completed
+    assert trophy_count(records) == 1                 # only a (3-0, completed)
+    assert team_record(records) == {"played": 3, "won": 1, "lost": 1, "tied": 1}
+
+
+def test_projection_cube_and_h2h():
+    from services.ledger_stats import cube_breakdown, h2h_totals
+    records = [
+        _rec(session_id="a", cube="X", wins=2, losses=1,
+             opponents={"9": [1, 1], "8": [1, 0]}, participants={"1", "9", "8"}),
+        _rec(session_id="b", cube=None, wins=1, losses=0,
+             opponents={"7": [1, 0]}, participants={"1", "7"}),               # 9 not an opponent here
+    ]
+    cubes = cube_breakdown(records)
+    assert cubes["X"] == {"wins": 2, "losses": 1}
+    assert cubes["Unknown"] == {"wins": 1, "losses": 0}
+    h = h2h_totals(records, "9")
+    assert h["matches_played"] == 2 and h["matches_won"] == 1
+    assert h["drafts_against"] == 1                   # session a: they met
+    assert h["drafts_with"] == 0                      # session b: 9 absent entirely

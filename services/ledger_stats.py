@@ -169,3 +169,70 @@ async def fetch_session_records(guild_id: str, player_id: str = None,
             })
     records.sort(key=lambda r: (r["started_at"] or datetime.min, r["session_id"]))
     return records
+
+
+def match_totals(records) -> dict:
+    """Every reported match counts — same moment ratings move."""
+    return {
+        "matches_played": sum(r["matches"] for r in records),
+        "matches_won": sum(r["wins"] for r in records),
+    }
+
+
+def draft_totals(records) -> int:
+    """Completed sessions only (spec's completion predicate)."""
+    return sum(1 for r in records if r["completed"])
+
+
+def trophy_count(records) -> int:
+    """Undefeated completed drafts with a full 3+ match slate."""
+    return sum(1 for r in records
+               if r["completed"] and r["wins"] == r["matches"] >= 3)
+
+
+def team_record(records) -> dict:
+    won = lost = tied = 0
+    for r in records:
+        if not r["completed"]:
+            continue
+        if r["side_wins"] > r["side_losses"]:
+            won += 1
+        elif r["side_wins"] < r["side_losses"]:
+            lost += 1
+        else:
+            tied += 1
+    return {"played": won + lost + tied, "won": won, "lost": lost, "tied": tied}
+
+
+def cube_breakdown(records) -> dict:
+    cubes: dict[str, dict] = {}
+    for r in records:
+        cube = cubes.setdefault(r["cube"] or "Unknown", {"wins": 0, "losses": 0})
+        cube["wins"] += r["wins"]
+        cube["losses"] += r["losses"]
+    return cubes
+
+
+def h2h_totals(records, opponent_id: str) -> dict:
+    matches_played = matches_won = 0
+    drafts_with = drafts_against = drafts_with_won = drafts_against_won = 0
+    for r in records:
+        pair = r["opponents"].get(opponent_id)
+        if pair:
+            matches_won += pair[0]
+            matches_played += pair[0] + pair[1]
+        if not r["completed"] or opponent_id not in r["participants"]:
+            continue
+        my_win = r["side_wins"] > r["side_losses"]
+        if pair:                       # met across the table -> opposing sides
+            drafts_against += 1
+            drafts_against_won += 1 if my_win else 0
+        else:                          # in the draft but never faced -> teammates
+            drafts_with += 1
+            drafts_with_won += 1 if my_win else 0
+    return {
+        "matches_played": matches_played, "matches_won": matches_won,
+        "drafts_with": drafts_with, "drafts_against": drafts_against,
+        "drafts_with_won": drafts_with_won,
+        "drafts_against_won": drafts_against_won,
+    }
