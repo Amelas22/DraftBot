@@ -1,8 +1,8 @@
-import json
 from datetime import datetime, timedelta
 from loguru import logger
-from sqlalchemy import text, select, bindparam, and_
+from sqlalchemy import select, and_
 from database.db_session import db_session
+from helpers.display_names import get_member_name
 from models.win_streak_history import WinStreakHistory
 from models.perfect_streak_history import PerfectStreakHistory
 from models.draft_streak_history import DraftStreakHistory
@@ -129,180 +129,109 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
     players_data = {}
     
     async with db_session() as session:
-        # Update query to fetch teams_start_time instead of draft_start_time
-        drafts_query_text = """
-            SELECT id, session_id, team_a, team_b, sign_ups, teams_start_time
-            FROM draft_sessions 
-            WHERE session_type IN ('random', 'staked')
-            AND victory_message_id_results_channel IS NOT NULL
-            AND guild_id = :guild_id
-        """
-        
-        # Add timeframe filter if not lifetime
-        params = {"guild_id": guild_id}
-        if start_date:
-            drafts_query_text += " AND teams_start_time >= :start_date"
-            params["start_date"] = start_date
-            
-        drafts_query = text(drafts_query_text)
-        drafts_result = await session.execute(drafts_query, params)
-        all_drafts = drafts_result.fetchall()
-        logger.info(f"Found {len(all_drafts)} completed drafts in guild {guild_id} for timeframe {timeframe}")
-        
-        # Get match results for these drafts
-        if all_drafts:
-            # Extract session IDs
-            session_ids = [draft[1] for draft in all_drafts]  # session_id is at index 1
-            
-            # Use proper parameter binding for IN clause with dynamic placeholders
-            if len(session_ids) > 0:
-                # Create placeholders for the IN clause
-                placeholders = ', '.join([f':id{i}' for i in range(len(session_ids))])
-                match_results_query_text = f"""
-                    SELECT session_id, player1_id, player2_id, winner_id
-                    FROM match_results
-                    WHERE session_id IN ({placeholders})
-                """
-                
-                # Create parameters dictionary
-                params = {f'id{i}': session_id for i, session_id in enumerate(session_ids)}
-                
-                match_results_query = text(match_results_query_text)
-                match_results_result = await session.execute(match_results_query, params)
-                all_matches = match_results_result.fetchall()
-            else:
-                all_matches = []
-        else:
-            all_matches = []
-        
-        # Organize match results by session
-        match_results_by_session = {}
-        for session_id, p1_id, p2_id, winner_id in all_matches:
-            if session_id not in match_results_by_session:
-                match_results_by_session[session_id] = []
-            match_results_by_session[session_id].append((p1_id, p2_id, winner_id))
-        
-        # Process all drafts and build player data
-        for draft_id, session_id, team_a_json, team_b_json, sign_ups_json, teams_start_time in all_drafts:
-            try:
-                # Parse sign_ups
-                sign_ups = json.loads(sign_ups_json) if isinstance(sign_ups_json, str) else sign_ups_json or {}
-                
-                # Parse teams for win/loss calculations
-                team_a = json.loads(team_a_json) if isinstance(team_a_json, str) else team_a_json or []
-                team_b = json.loads(team_b_json) if isinstance(team_b_json, str) else team_b_json or []
-                
-                # Get match results for this session
-                session_matches = match_results_by_session.get(session_id, [])
-                
-                # Calculate team wins for determining draft outcome
-                team_a_wins = sum(1 for _, _, winner_id in session_matches if winner_id in team_a)
-                team_b_wins = sum(1 for _, _, winner_id in session_matches if winner_id in team_b)
-                
-                # Process each player in sign_ups
-                for player_id, display_name in sign_ups.items():
-                    # Initialize player data if not exists
-                    if player_id not in players_data:
-                        players_data[player_id] = {
-                            "player_id": player_id,
-                            "display_name": display_name,
-                            "drafts_played": 0,
-                            "completed_matches": 0,  # Only count matches with a result
-                            "matches_won": 0,
-                            "matches_lost": 0,
-                            "match_win_percentage": 0,
-                            "team_drafts_played": 0,
-                            "team_drafts_won": 0,
-                            "team_drafts_tied": 0,
-                            "team_drafts_lost": 0,
-                            "team_draft_win_percentage": 0,
-                            "teammate_win_rates": {}
-                        }
-                    else:
-                        # Update display name if needed
-                        players_data[player_id]["display_name"] = display_name
-                    
-                    # Update drafts played count
-                    players_data[player_id]["drafts_played"] += 1
-                    
-                    # Update individual matches played/won
-                    for p1_id, p2_id, winner_id in session_matches:
-                        if p1_id == player_id or p2_id == player_id:
-                            # Only count matches that have a determined winner
-                            if winner_id is not None:
-                                players_data[player_id]["completed_matches"] += 1
-                                
-                                if winner_id == player_id:
-                                    players_data[player_id]["matches_won"] += 1
-                                else:
-                                    # Explicitly count losses when the winner is not the player
-                                    players_data[player_id]["matches_lost"] += 1
-                    
-                    # Update team draft stats
-                    if player_id in team_a or player_id in team_b:
-                        player_team = "A" if player_id in team_a else "B"
-                        player_teammates = team_a if player_id in team_a else team_b
-                        
-                        # Determine match outcome
-                        if team_a_wins > team_b_wins:
-                            winner_team = "A"
-                        elif team_b_wins > team_a_wins:
-                            winner_team = "B"
-                        else:
-                            winner_team = "Draw"
-                        
-                        # Update team stats
-                        players_data[player_id]["team_drafts_played"] += 1
-                        
-                        # Determine draft result based on winner_team
-                        if winner_team == "Draw":
-                            players_data[player_id]["team_drafts_tied"] += 1
-                        elif winner_team == player_team:
-                            players_data[player_id]["team_drafts_won"] += 1
-                        else:
-                            players_data[player_id]["team_drafts_lost"] += 1
-                        
-                        # Update teammate stats
-                        for teammate_id in player_teammates:
-                            if teammate_id != player_id and teammate_id in players_data:
-                                # Initialize teammate record if not exists
-                                if teammate_id not in players_data[player_id]["teammate_win_rates"]:
-                                    players_data[player_id]["teammate_win_rates"][teammate_id] = {
-                                        "drafts_played": 0,
-                                        "drafts_won": 0,
-                                        "drafts_lost": 0,
-                                        "drafts_tied": 0,
-                                        "win_percentage": 0,
-                                        "teammate_name": players_data[teammate_id]["display_name"]
-                                    }
-                                
-                                # Update teammate stats based on the match outcome
-                                players_data[player_id]["teammate_win_rates"][teammate_id]["drafts_played"] += 1
-                                
-                                if winner_team == "Draw":
-                                    players_data[player_id]["teammate_win_rates"][teammate_id]["drafts_tied"] += 1
-                                elif winner_team == player_team:
-                                    players_data[player_id]["teammate_win_rates"][teammate_id]["drafts_won"] += 1
-                                else:
-                                    players_data[player_id]["teammate_win_rates"][teammate_id]["drafts_lost"] += 1
-            
-            except Exception as e:
-                logger.error(f"Error processing draft {draft_id}: {e}")
-        
-        # Calculate percentages for each player
-        for player_id, player_data in players_data.items():
-            # Calculate match win percentage
-            if player_data["completed_matches"] > 0:
-                player_data["match_win_percentage"] = (player_data["matches_won"] / player_data["completed_matches"]) * 100
-            
-            # Calculate team draft win percentage (ties in the denominator --
-            # one policy with /stats and /record, via stats_core)
-            player_data["team_draft_win_percentage"] = calculate_team_draft_win_percentage(
-                player_data["team_drafts_won"], player_data["team_drafts_lost"],
-                player_data["team_drafts_tied"])
+        # Count from the match-result ledger (the source of truth the rating
+        # system already uses) instead of the old sign_ups/team_a/team_b
+        # query, which missed premade drafts (wrong session_type filter) and
+        # legacy drafts (no victory_message_id_results_channel). Scope is
+        # RATING_SESSION_TYPES via fetch_session_records, same as /stats
+        # and /record.
+        from services.ledger_stats import fetch_session_records, match_totals, draft_totals, team_record
 
-            # Calculate teammate win rates (same tie policy)
-            for teammate_id, teammate_data in player_data["teammate_win_rates"].items():
+        records = await fetch_session_records(guild_id, since=start_date)
+        per_player: dict[str, list] = {}
+        for r in records:
+            per_player.setdefault(r["player_id"], []).append(r)
+
+        logger.info(f"Found {len(per_player)} players with rated drafts in guild {guild_id} for timeframe {timeframe}")
+
+        # Batch-resolve display names: PlayerStats.display_name first (kept
+        # in sync as players interact with the bot), get_member_name
+        # fallback for players with no PlayerStats row -- never sign_ups
+        # JSON, which legacy sessions don't have.
+        player_ids = list(per_player.keys())
+        name_lookup = {}
+        if player_ids:
+            names_stmt = select(PlayerStats).where(
+                PlayerStats.guild_id == guild_id,
+                PlayerStats.player_id.in_(player_ids)
+            )
+            names_result = await session.execute(names_stmt)
+            for p in names_result.scalars().all():
+                if p.display_name:
+                    name_lookup[p.player_id] = p.display_name
+
+        for player_id, player_records in per_player.items():
+            display_name = name_lookup.get(player_id) or get_member_name(None, player_id)
+
+            totals = match_totals(player_records)
+            matches_played = totals["matches_played"]
+            matches_won = totals["matches_won"]
+            matches_lost = matches_played - matches_won
+            match_win_percentage = (matches_won / matches_played * 100) if matches_played > 0 else 0
+
+            drafts_played = draft_totals(player_records)
+
+            team = team_record(player_records)
+            team_drafts_played = team["played"]
+            team_drafts_won = team["won"]
+            team_drafts_lost = team["lost"]
+            team_drafts_tied = team["tied"]
+            team_draft_counted_drafts = team_drafts_won + team_drafts_lost
+            team_draft_win_percentage = (team_drafts_won / team_draft_counted_drafts * 100) if team_draft_counted_drafts > 0 else 0
+
+            players_data[player_id] = {
+                "player_id": player_id,
+                "display_name": display_name,
+                "drafts_played": drafts_played,
+                "completed_matches": matches_played,  # Every reported match counts
+                "matches_won": matches_won,
+                "matches_lost": matches_lost,
+                "match_win_percentage": match_win_percentage,
+                "team_drafts_played": team_drafts_played,
+                "team_drafts_won": team_drafts_won,
+                "team_drafts_tied": team_drafts_tied,
+                "team_drafts_lost": team_drafts_lost,
+                "team_draft_win_percentage": team_draft_win_percentage,
+                "teammate_win_rates": {}
+            }
+
+        # Second pass: teammate (Vault/Key) stats. A session's teammates are
+        # its other participants who never appear as an opponent; the
+        # session's own side_wins/side_losses (same numbers team_record
+        # uses) determine won/lost/tied for every teammate at once. Deferred
+        # to a second pass so every player's display_name is already
+        # resolved above, regardless of dict iteration order.
+        for player_id, player_records in per_player.items():
+            teammate_stats = players_data[player_id]["teammate_win_rates"]
+            for r in player_records:
+                if not r["completed"]:
+                    continue
+                teammates = r["participants"] - {player_id} - set(r["opponents"].keys())
+                if not teammates:
+                    continue
+                if r["side_wins"] > r["side_losses"]:
+                    outcome = "won"
+                elif r["side_wins"] < r["side_losses"]:
+                    outcome = "lost"
+                else:
+                    outcome = "tied"
+                for teammate_id in teammates:
+                    if teammate_id not in players_data:
+                        continue
+                    entry = teammate_stats.setdefault(teammate_id, {
+                        "drafts_played": 0,
+                        "drafts_won": 0,
+                        "drafts_lost": 0,
+                        "drafts_tied": 0,
+                        "win_percentage": 0,
+                        "teammate_name": players_data[teammate_id]["display_name"]
+                    })
+                    entry["drafts_played"] += 1
+                    entry[f"drafts_{outcome}"] += 1
+
+        # Calculate teammate win rates
+        for player_data in players_data.values():
+            for teammate_data in player_data["teammate_win_rates"].values():
                 teammate_data["win_percentage"] = calculate_team_draft_win_percentage(
                     teammate_data["drafts_won"], teammate_data["drafts_lost"],
                     teammate_data["drafts_tied"])

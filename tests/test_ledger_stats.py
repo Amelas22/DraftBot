@@ -266,3 +266,25 @@ async def test_get_player_statistics_counts_from_ledger(test_db):
     assert stats["trophies_won"] == 1        # only the native 3-0
     assert stats["team_drafts_played"] == 3
     assert stats["cube_stats"]["TestCube"]["wins"] == 5
+
+
+@pytest.mark.asyncio
+async def test_leaderboard_counts_premade_and_legacy(test_db):
+    """Today's query filters session_type IN ('random', 'staked') AND
+    victory_message_id_results_channel IS NOT NULL -- a legacy session (no
+    victory message) and a premade session (wrong type) are both invisible.
+    drafts_played has no minimum-games gate, so it isolates the visibility
+    bug directly; the same player_data entry still carries the match-total
+    fields so we can check those weren't lost either."""
+    from services.leaderboard_service import get_leaderboard_data
+    await _seed(session_id="legacy-2", stage=None, teams=None,
+                matches=[("1", "9", "1", None), ("1", "9", "1", None),
+                         ("1", "9", "1", None)])
+    await _seed(session_id="pm", stype="premade", victory="v",
+                teams=(["1"], ["9"]), matches=[("1", "9", "1", None)])
+    data = await get_leaderboard_data("g", category="drafts_played",
+                                       limit=5, timeframe="lifetime")
+    top = next(p for p in data if p["player_id"] == "1")
+    assert top["drafts_played"] == 2         # legacy-2 + pm
+    assert top["matches_won"] == 4
+    assert top["completed_matches"] == 4
