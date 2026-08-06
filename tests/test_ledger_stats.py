@@ -191,3 +191,26 @@ def test_projection_cube_and_h2h():
     assert h["matches_played"] == 2 and h["matches_won"] == 1
     assert h["drafts_against"] == 1                   # session a: they met
     assert h["drafts_with"] == 0                      # session b: 9 absent entirely
+
+
+@pytest.mark.asyncio
+async def test_get_player_statistics_counts_from_ledger(test_db):
+    from player_stats import get_player_statistics
+    # A completed 3v3 the player 3-0s, plus a legacy session, plus a premade.
+    await _seed(session_id="native", victory="v1",
+                teams=(["1", "2", "3"], ["4", "5", "6"]), matches=[
+        ("1", "4", "1", None), ("2", "5", "5", None), ("3", "6", "3", None),
+        ("1", "5", "1", None), ("2", "6", "2", None), ("3", "4", "3", None),
+        ("1", "6", "1", None), ("2", "4", "4", None), ("3", "5", "3", None)])
+    await _seed(session_id="legacy-1", stage=None, teams=None,
+                matches=[("1", "9", "1", None), ("1", "9", "9", None)])
+    await _seed(session_id="pm", stype="premade", victory="v2",
+                teams=(["1"], ["9"]), matches=[("1", "9", "1", None)])
+
+    stats = await get_player_statistics("1", None, "One", "g")
+    assert stats["matches_played"] == 6      # 3 + 2 + 1
+    assert stats["matches_won"] == 5
+    assert stats["drafts_played"] == 3
+    assert stats["trophies_won"] == 1        # only the native 3-0
+    assert stats["team_drafts_played"] == 3
+    assert stats["cube_stats"]["TestCube"]["wins"] == 5

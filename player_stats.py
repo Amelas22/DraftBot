@@ -100,51 +100,9 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                         if ender_stats:
                             longest_perfect_streak_ender = ender_stats.display_name
 
-                # Define the pattern for JSON searches
+                # Define the pattern for JSON searches (used for display name lookup)
                 pattern = f'%"{user_id}"%'  # Pattern to match user_id in JSON string
-                
-                base_query = """
-                    FROM draft_sessions 
-                    WHERE (
-                        json_extract(sign_ups, '$') LIKE :pattern
-                        OR json_extract(team_a, '$') LIKE :pattern
-                        OR json_extract(team_b, '$') LIKE :pattern
-                    ) 
-                    AND teams_start_time >= :start_date
-                    AND session_type IN ('random', 'staked')
-                    AND victory_message_id_results_channel IS NOT NULL
-                    AND guild_id = :guild_id
-                """
-                
-                # Count completed drafts
-                drafts_query = text(f"SELECT COUNT(*) {base_query}")
-                
-                # Prepare query parameters
-                query_params = {"pattern": pattern, "start_date": start_date, "guild_id": guild_id}               
-                drafts_played_result = await session.execute(drafts_query, query_params)
-                drafts_played = drafts_played_result.scalar() or 0
-                
-                # Get matches won - update to include guild_id filter
-                matches_won_query_text = """
-                    SELECT COUNT(*) 
-                    FROM match_results 
-                    WHERE winner_id = :user_id
-                    AND session_id IN (
-                        SELECT session_id FROM draft_sessions 
-                        WHERE teams_start_time >= :start_date
-                        AND session_type IN ('random', 'staked')
-                        AND victory_message_id_results_channel IS NOT NULL
-                        AND guild_id = :guild_id
-                """
-                
-                matches_won_query_text += ")"
-                matches_won_query = text(matches_won_query_text)
-                
-                # Update parameters for matches won query
-                matches_won_params = {"user_id": user_id, "start_date": start_date, "guild_id": guild_id}               
-                matches_won_result = await session.execute(matches_won_query, matches_won_params)
-                matches_won = matches_won_result.scalar() or 0
-                
+
                 # First, try to get the display name from any sign_ups entries, with guild_id filter
                 name_query_text = """
                     SELECT sign_ups FROM draft_sessions 
@@ -173,301 +131,63 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                             logger.info(f"Found display name '{display_name}' for user {user_id}")
                     except Exception as e:
                         logger.error(f"Error parsing sign_ups JSON: {e}")
-                
-                # Get trophies with guild_id filter
-                trophies_query_text = """
-                    SELECT trophy_drafters FROM draft_sessions 
-                    WHERE trophy_drafters IS NOT NULL
-                    AND teams_start_time >= :start_date
-                    AND session_type IN ('random', 'staked')
-                    AND victory_message_id_results_channel IS NOT NULL
-                    AND guild_id = :guild_id
-                """
-                
-                trophies_query = text(trophies_query_text)
-                
-                trophies_params = {"start_date": start_date, "guild_id": guild_id}               
-                trophies_result = await session.execute(trophies_query, trophies_params)
-                trophies_entries = trophies_result.fetchall()
-                
-                trophies_won = 0
-                for (trophy_drafters_json,) in trophies_entries:
-                    if not trophy_drafters_json:
-                        continue
-                        
-                    try:
-                        # Parse trophy_drafters - could be a string or already JSON
-                        if isinstance(trophy_drafters_json, str):
-                            trophy_drafters = json.loads(trophy_drafters_json)
-                        elif isinstance(trophy_drafters_json, list):
-                            trophy_drafters = trophy_drafters_json
-                        else:
-                            logger.warning(f"Unexpected trophy_drafters format: {type(trophy_drafters_json)}")
-                            continue
-                            
-                        # Check if display name is in the list
-                        if display_name in trophy_drafters:
-                            trophies_won += 1
-                            logger.info(f"Found trophy for '{display_name}' in {trophy_drafters}")
-                    except Exception as e:
-                        logger.error(f"Error processing trophy_drafters: {e}")
-                
-                # Approach 2: Cross-reference with sign_ups to find all display names
-                if trophies_won == 0:
-                    # Get all display names this user has used
-                    names_query = text("""
-                        SELECT sign_ups FROM draft_sessions 
-                        WHERE json_extract(sign_ups, '$') LIKE :pattern
-                    """)
-                    
-                    names_result = await session.execute(names_query, {"pattern": pattern})
-                    all_sign_ups = names_result.fetchall()
-                    
-                    user_names = set()
-                    for (signup_json,) in all_sign_ups:
-                        if not signup_json:
-                            continue
-                            
-                        try:
-                            # Parse sign_ups
-                            if isinstance(signup_json, str):
-                                sign_ups = json.loads(signup_json)
-                            else:
-                                sign_ups = signup_json
-                                
-                            # Add this display name
-                            if user_id in sign_ups:
-                                user_names.add(sign_ups[user_id])
-                        except Exception as e:
-                            logger.error(f"Error processing sign_ups for names: {e}")
-                    
-                    # Now count trophies again with all user names
-                    for (trophy_drafters_json,) in trophies_entries:
-                        if not trophy_drafters_json:
-                            continue
-                            
-                        try:
-                            # Parse trophy_drafters
-                            if isinstance(trophy_drafters_json, str):
-                                trophy_drafters = json.loads(trophy_drafters_json)
-                            elif isinstance(trophy_drafters_json, list):
-                                trophy_drafters = trophy_drafters_json
-                            else:
-                                continue
-                                
-                            # Check if any of the user's names are in trophy_drafters
-                            for name in user_names:
-                                if name in trophy_drafters:
-                                    trophies_won += 1
-                                    logger.info(f"Found trophy for alternate name '{name}' in {trophy_drafters}")
-                                    break  # Count each trophy only once
-                        except Exception as e:
-                            logger.error(f"Error processing trophy_drafters for alternates: {e}")
-                
-                # Get total matches played - Only count matches that have a winner determined.
-                matches_played_query_text = """
-                    SELECT COUNT(*) 
-                    FROM match_results 
-                    WHERE (player1_id = :user_id OR player2_id = :user_id)
-                    AND winner_id IS NOT NULL
-                    AND session_id IN (
-                        SELECT session_id FROM draft_sessions 
-                        WHERE teams_start_time >= :start_date
-                        AND session_type IN ('random', 'staked')
-                        AND victory_message_id_results_channel IS NOT NULL
-                        AND guild_id = :guild_id
-                """
-                matches_played_query_text += ")"
-                matches_played_query = text(matches_played_query_text)
-                
-                matches_played_params = {"user_id": user_id, "start_date": start_date, "guild_id": guild_id}                
-                matches_played_result = await session.execute(matches_played_query, matches_played_params)
-                matches_played = matches_played_result.scalar() or 0
+
+                # Count matches, drafts, trophies, and the team-draft record
+                # from the match-result ledger (the source of truth the
+                # rating system already uses) instead of display artifacts
+                # like sign_ups JSON, victory-message ids, or
+                # trophy_drafters name strings.
+                from services.ledger_stats import (
+                    fetch_session_records, match_totals, draft_totals,
+                    trophy_count, team_record, cube_breakdown)
+
+                records = await fetch_session_records(
+                    guild_id, player_id=user_id, since=start_date)
+                totals = match_totals(records)
+                matches_played = totals["matches_played"]
+                matches_won = totals["matches_won"]
+                drafts_played = draft_totals(records)
+                trophies_won = trophy_count(records)
+                team = team_record(records)
+                team_drafts_played = team["played"]
+                team_drafts_won = team["won"]
+                team_drafts_tied = team["tied"]
 
                 # Calculate match win percentage using shared utility
                 matches_lost = matches_played - matches_won
                 match_win_percentage = calculate_win_percentage(matches_won, matches_lost)
-                
-                # Get all draft sessions with guild_id filter
-                drafts_query_text = """
-                    SELECT id, session_id, team_a, team_b
-                    FROM draft_sessions 
-                    WHERE (
-                        json_extract(sign_ups, '$') LIKE :pattern
-                        OR json_extract(team_a, '$') LIKE :pattern
-                        OR json_extract(team_b, '$') LIKE :pattern
-                    ) 
-                    AND teams_start_time >= :start_date
-                    AND session_type IN ('random', 'staked')
-                    AND victory_message_id_results_channel IS NOT NULL
-                    AND guild_id = :guild_id
-                """
 
-                drafts_query = text(drafts_query_text)
-                
-                drafts_params = {"pattern": pattern, "start_date": start_date, "guild_id": guild_id}                
-                drafts_result = await session.execute(drafts_query, drafts_params)
-                draft_sessions = drafts_result.fetchall()
-                
-                # Initialize counters
-                team_drafts_played = 0
-                team_drafts_won = 0
-                team_drafts_tied = 0
-                
-                # Process each draft
-                for draft_id, session_id, team_a_json, team_b_json in draft_sessions:
-                    # Skip if missing team data
-                    if not team_a_json or not team_b_json:
-                        continue
-                    
-                    # Determine which team the user was on
-                    try:
-                        team_a = team_a_json if isinstance(team_a_json, list) else json.loads(team_a_json) if isinstance(team_a_json, str) else []
-                        team_b = team_b_json if isinstance(team_b_json, list) else json.loads(team_b_json) if isinstance(team_b_json, str) else []
-                        
-                        user_team = None
-                        if user_id in team_a:
-                            user_team = 'A'
-                        elif user_id in team_b:
-                            user_team = 'B'
-                        else:
-                            # User not on either team (shouldn't happen)
-                            continue
-                            
-                        # Pull all match results for this draft
-                        match_results_query = text("""
-                            SELECT 
-                                player1_id, player2_id, 
-                                player1_wins, player2_wins, 
-                                winner_id
-                            FROM match_results 
-                            WHERE session_id = :session_id
-                        """)
-                        
-                        match_results = await session.execute(
-                            match_results_query, 
-                            {"session_id": session_id}
-                        )
-                        
-                        team_a_wins = 0
-                        team_b_wins = 0
-                        
-                        for p1_id, p2_id, p1_wins, p2_wins, winner_id in match_results.fetchall():
-                            # Determine which team won this match
-                            if winner_id:
-                                if winner_id in team_a:
-                                    team_a_wins += 1
-                                elif winner_id in team_b:
-                                    team_b_wins += 1
-                        
-                        # Count this as a played draft
-                        team_drafts_played += 1
-                        
-                        # Determine the draft winner
-                        if team_a_wins > team_b_wins:
-                            # Team A won
-                            if user_team == 'A':
-                                team_drafts_won += 1
-                        elif team_b_wins > team_a_wins:
-                            # Team B won
-                            if user_team == 'B':
-                                team_drafts_won += 1
-                        else:
-                            # It's a tie
-                            team_drafts_tied += 1
-                            
-                    except Exception as e:
-                        logger.error(f"Error processing draft {draft_id}: {e}")
-                
-                # Calculate team draft win percentage
+                # Calculate team draft win percentage using shared utility
                 team_drafts_lost = team_drafts_played - team_drafts_won - team_drafts_tied
-                team_draft_counted_drafts = team_drafts_won + team_drafts_lost
-                team_draft_win_percentage = (team_drafts_won / team_draft_counted_drafts * 100) if team_draft_counted_drafts > 0 else 0
-                
-                # Get stats by cube type with guild_id filter
-                cube_query_text = """
-                    SELECT cube, COUNT(*) as draft_count 
-                    FROM draft_sessions 
-                    WHERE (
-                        json_extract(sign_ups, '$') LIKE :pattern
-                        OR json_extract(team_a, '$') LIKE :pattern
-                        OR json_extract(team_b, '$') LIKE :pattern
-                    ) 
-                    AND teams_start_time >= :start_date
-                    AND cube IS NOT NULL
-                    AND session_type IN ('random', 'staked')
-                    AND victory_message_id_results_channel IS NOT NULL
-                    AND guild_id = :guild_id
-                """
-                
-                cube_query_text += " GROUP BY LOWER(cube) HAVING COUNT(*) >= 5"
-                cube_query = text(cube_query_text)
-                
-                cube_params = {"pattern": pattern, "start_date": start_date, "guild_id": guild_id}                
-                cube_result = await session.execute(cube_query, cube_params)
-                cube_data = cube_result.fetchall()
-                
-                # For each cube, get matches played and won
-                cube_stats = {}
-                for cube_name, draft_count in cube_data:
-                    if not cube_name:  # Skip if cube name is None
+                team_draft_win_percentage = calculate_team_draft_win_percentage(
+                    team_drafts_won, team_drafts_lost, team_drafts_tied)
+
+                # Get stats by cube type. Wins/losses come straight from the
+                # ledger fold; drafts_played (used for sorting/display in the
+                # embed) counts this player's completed sessions per cube.
+                cube_drafts_completed = {}
+                for record in records:
+                    if not record["completed"] or not record["cube"]:
                         continue
-                        
-                    # Normalize cube name
-                    normalized_cube_name = cube_name.lower()
-                    
-                    # Get matches played for this cube - update for only completed random drafts
-                    cube_matches_query = text("""
-                        SELECT COUNT(*) 
-                        FROM match_results 
-                        WHERE (player1_id = :user_id OR player2_id = :user_id)
-                        AND winner_id IS NOT NULL
-                        AND session_id IN (
-                            SELECT session_id FROM draft_sessions 
-                            WHERE LOWER(cube) = :cube_name
-                            AND teams_start_time >= :start_date
-                            AND session_type IN ('random', 'staked')
-                            AND victory_message_id_results_channel IS NOT NULL
-                        )
-                    """)
-                    
-                    cube_matches_result = await session.execute(
-                        cube_matches_query, 
-                        {"user_id": user_id, "cube_name": normalized_cube_name, "start_date": start_date}
-                    )
-                    cube_matches_played = cube_matches_result.scalar() or 0
-                    
-                    # Get matches won for this cube - update for only completed random drafts
-                    cube_wins_query = text("""
-                        SELECT COUNT(*) 
-                        FROM match_results 
-                        WHERE winner_id = :user_id
-                        AND session_id IN (
-                            SELECT session_id FROM draft_sessions 
-                            WHERE LOWER(cube) = :cube_name
-                            AND teams_start_time >= :start_date
-                            AND session_type IN ('random', 'staked')
-                            AND victory_message_id_results_channel IS NOT NULL
-                        )
-                    """)
-                    
-                    cube_wins_result = await session.execute(
-                        cube_wins_query, 
-                        {"user_id": user_id, "cube_name": normalized_cube_name, "start_date": start_date}
-                    )
-                    cube_matches_won = cube_wins_result.scalar() or 0
-                    
-                    # Calculate win percentage
-                    cube_win_percentage = (cube_matches_won / cube_matches_played * 100) if cube_matches_played > 0 else 0
-                    
-                    # Store stats with the original cube name (not normalized)
+                    cube_drafts_completed[record["cube"]] = cube_drafts_completed.get(record["cube"], 0) + 1
+
+                cube_stats = {}
+                for cube_name, cube_totals in cube_breakdown(records).items():
+                    if cube_name == "Unknown":
+                        # cube_breakdown buckets sessions with no cube set here;
+                        # the embed only ever displayed named cubes.
+                        continue
+                    wins = cube_totals["wins"]
+                    losses = cube_totals["losses"]
                     cube_stats[cube_name] = {
-                        "drafts_played": draft_count,
-                        "matches_played": cube_matches_played,
-                        "matches_won": cube_matches_won,
-                        "win_percentage": cube_win_percentage
+                        "wins": wins,
+                        "losses": losses,
+                        "matches_played": wins + losses,
+                        "matches_won": wins,
+                        "drafts_played": cube_drafts_completed.get(cube_name, 0),
+                        "win_percentage": calculate_win_percentage(wins, losses),
                     }
-                
+
                 return {
                     "drafts_played": drafts_played,
                     "matches_played": matches_played,
@@ -632,7 +352,7 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
             inline=False
         )
     
-    embed.set_footer(text="Stats are updated after each draft")
+    embed.set_footer(text="Stats update as match results are reported")
     
     return embed
 
