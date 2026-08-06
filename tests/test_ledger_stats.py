@@ -193,6 +193,41 @@ def test_projection_cube_and_h2h():
     assert h["drafts_with"] == 0                      # session b: 9 absent entirely
 
 
+def test_h2h_totals_teammate_and_opponent_win_counters():
+    from services.ledger_stats import h2h_totals
+    records = [
+        # "9" is in participants but never faced directly (not in
+        # opponents) -> teammates; side_wins > side_losses -> a win.
+        _rec(session_id="a", wins=1, losses=0, opponents={"7": [1, 0]},
+             participants={"1", "9", "7"}, side_wins=5, side_losses=2),
+        # "9" met across the table (present in opponents) with a side win.
+        _rec(session_id="b", wins=1, losses=0, opponents={"9": [1, 0]},
+             participants={"1", "9"}, side_wins=3, side_losses=1),
+    ]
+    h = h2h_totals(records, "9")
+    assert h["drafts_with"] == 1
+    assert h["drafts_with_won"] == 1
+    assert h["drafts_against"] == 1
+    assert h["drafts_against_won"] == 1
+
+
+@pytest.mark.asyncio
+async def test_h2h_from_ledger_scopes_and_counts(test_db):
+    from player_stats import get_head_to_head_stats
+    await _seed(session_id="sw", stype="swiss", matches=[("1", "9", "9", None)])
+    await _seed(session_id="a", victory="v", teams=(["1", "2"], ["9", "8"]),
+                matches=[("1", "9", "1", None), ("2", "8", "8", None),
+                         ("1", "8", "1", None), ("2", "9", "2", None)])
+    h = await get_head_to_head_stats("1", "9", "One", "Nine", "g")
+    # swiss excluded: direct record is 1-0, not 1-1
+    assert h["lifetime"]["matches_played"] == 1
+    assert h["lifetime"]["user1_wins"] == 1
+    assert h["lifetime"]["user2_wins"] == 0
+    # they met across the table in session "a" and user1's side won it
+    assert h["opposing_lifetime"]["wins"] == 1
+    assert h["opposing_lifetime"]["losses"] == 0
+
+
 @pytest.mark.asyncio
 async def test_get_player_statistics_counts_from_ledger(test_db):
     from player_stats import get_player_statistics
