@@ -9,10 +9,11 @@ create accounts, enter credentials, or solve CAPTCHAs.
 1. **Test guild + channel**: the dev needs a private Discord server they own,
    with a dedicated test channel (e.g. `#claude-testing` — private is best).
    To get the guild id: Discord Settings → Advanced → enable Developer Mode,
-   then right-click the server icon → Copy Server ID. Append
-   `TEST_GUILD_ID=<id>` and `TEST_CHANNEL=<channel name>` to `.env` (check the
-   file ends with a newline first — a glued `TEST_MODE=trueTEST_…` line
-   silently disables test mode).
+   then right-click the server icon → Copy Server ID. The DEVELOPER appends
+   `TEST_GUILD_ID=<id>` and `TEST_CHANNEL=<channel name>` to `.env` themselves
+   — `.env` is developer-owned and the harness denies Claude writing it. Tip
+   for them: check the file ends with a newline first — a glued
+   `TEST_MODE=trueTEST_…` line silently disables test mode.
 2. **Bot present**: their test bot application must be in that guild (invite
    via the Developer Portal OAuth2 URL generator, scopes `bot` +
    `applications.commands`). Usually already true if they test manually.

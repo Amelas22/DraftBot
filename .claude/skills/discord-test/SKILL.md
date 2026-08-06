@@ -32,6 +32,9 @@ Different developers have different guilds/channels/accounts.
 - NEVER touch credentials: if a login page, CAPTCHA, rate-limit notice, or any
   Discord warning modal appears — or an unexpected guild shows in the sidebar —
   STOP immediately and ask the user.
+- `.env` (and `.env.*` aliases) are developer-owned: Claude reads specific
+  keys via grep, never the whole file, and never writes them (enforced by
+  permissions.deny + a Bash-write hook). Ask the developer for any change.
 - Session budget: ~40 interactions (a full quiz flow takes ~15-25 including
   verification reads), human-paced — pause a beat between actions. The real
   rule: never rapid-fire retries; two identical failures = stop and
