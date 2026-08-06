@@ -23,6 +23,9 @@ Different developers have different guilds/channels/accounts.
 
 - Act ONLY in the guild whose id is `TEST_GUILD_ID` in `.env`, and only in the
   channel named by `TEST_CHANNEL`. If either is unset, STOP and ask the user.
+  (A PreToolUse hook also denies navigating Discord channel urls outside
+  `TEST_GUILD_ID`, including DMs — the hook enforces, this rail still governs
+  which channel within the guild.)
 - NEVER: send DMs, add friends, join/create servers, click invite links
   (`discord.gg/*`, `discord.com/invite/*` — also denied by a PreToolUse hook),
   change account settings, or post in any other channel/guild.
@@ -49,48 +52,12 @@ Different developers have different guilds/channels/accounts.
   separate ad hoc step first; seed scripts are safe to run while the bot is
   up.
 
-## First-time setup (walk the developer through this)
+## First-time setup
 
-All account/guild steps are USER actions done in their normal client — Claude
-only guides, opens pages, and verifies afterwards. Claude must never create
-accounts, enter credentials, or solve CAPTCHAs.
-
-1. **Test guild + channel**: the dev needs a private Discord server they own,
-   with a dedicated test channel (e.g. `#claude-testing` — private is best).
-   To get the guild id: Discord Settings → Advanced → enable Developer Mode,
-   then right-click the server icon → Copy Server ID. Append
-   `TEST_GUILD_ID=<id>` and `TEST_CHANNEL=<channel name>` to `.env` (check the
-   file ends with a newline first — a glued `TEST_MODE=trueTEST_…` line
-   silently disables test mode).
-2. **Bot present**: their test bot application must be in that guild (invite
-   via the Developer Portal OAuth2 URL generator, scopes `bot` +
-   `applications.commands`). Usually already true if they test manually.
-3. **Throwaway test account**: the dev creates a fresh Discord account (e.g.
-   `draftbot-tester`) themselves at https://discord.com/register — in an
-   incognito/private browser window, so registration doesn't log out or
-   replace their main account's session. Use a spare email. This is the
-   account Claude drives; their main account is never automated.
-4. **Invite it**: from their main account, generate an invite to the test
-   guild (ideally single-use, the `TEST_CHANNEL` channel) and join the test
-   account through it.
-5. **Least-privilege mod gate** (from the main account, which owns the
-   server): server name → Server Settings → Roles → Create Role. Display
-   tab: name it exactly `Bot Manager` (the bot's `[MOD]` check in
-   helpers/permissions.py matches this NAME, so no real permissions are
-   needed). Permissions tab: scroll to the bottom → **Clear Permissions**
-   (every toggle off) → Save Changes. Then Manage Members tab → Add Members
-   → the test account (or right-click the member in the member list → Roles
-   → tick `Bot Manager`). Finally, restrict the account to a single
-   the `TEST_CHANNEL` channel via channel overrides; optionally add slowmode.
-6. **Account hygiene**: on the test account — Settings → Privacy & Safety:
-   disable DMs from server members and friend requests.
-7. **Log in**: Claude opens `https://discord.com/login` in the in-app browser
-   pane and hands off; the dev logs the TEST account in manually. The pane
-   starts logged out each new Claude session, so expect to repeat this step
-   per session.
-8. **Verify** (Claude): the guild appears in the server sidebar, exactly the
-   expected guilds are listed, the `TEST_CHANNEL` channel is visible, and the bot user
-   shows in the member list. Then proceed to testing.
+Once per developer. If any precondition is missing, follow
+`references/first-time-setup.md` (in this skill's directory) to walk the
+developer through it — account/guild steps are theirs to do in their normal
+client; Claude never creates accounts, enters credentials, or solves CAPTCHAs.
 
 ## Bot lifecycle
 

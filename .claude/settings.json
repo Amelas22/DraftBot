@@ -1,0 +1,23 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__Claude_Browser__navigate",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/deny_discord_invites.py\"",
+            "timeout": 10,
+            "statusMessage": "Checking navigation against Discord guardrails"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/confine_to_test_guild.py\"",
+            "timeout": 10,
+            "statusMessage": "Confining Discord navigation to the test guild"
+          }
+        ]
+      }
+    ]
+  }
+}
