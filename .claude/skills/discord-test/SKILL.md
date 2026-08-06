@@ -132,20 +132,25 @@ Stop with TaskStop on the background task when testing is done.
   a session pauses mid-flow, assume open ephemeral controls are dead on
   resume.
 
-**Dropdowns (string selects)** — options are NOT in the accessibility tree;
-clicks on option rows by coordinate are unreliable. Proven keyboard recipe:
+**Dropdowns (string selects)** — options are NOT in the accessibility tree.
+Preferred recipe (proven first-try, twice, where keyboard misfired):
 1. Click the select's ref once (a second click toggles it closed — never
    double-click). Wait ~1s.
-2. One `ArrowDown` key call per step when the target index matters —
-   `repeat: N` has advanced N steps in some selects and only 1 in others, so
-   use it only for walking/scanning a list, never for precise selection. The
-   highlight starts from the CURRENT selection when the select is pre-filled
-   (change mode); on an EMPTY select the landing spot is nondeterministic
-   (one ArrowDown has landed on option 1 in one live run and option 2 in
-   another) — never assume, read the committed value off the screenshot.
-3. `Enter` commits; the select's label shows the chosen value. Screenshot to
-   verify — a wrong-but-valid value is usually fine for flow testing; prefer
-   continuing over fiddly correction loops.
+2. SCREENSHOT with the list open, find the target row, and click it by
+   SCREENSHOT-PIXEL coordinates — the `computer` tool maps those to the
+   viewport itself (this supersedes an older "option rows by coordinate are
+   unreliable" belief; ref-clicks still beat coordinates everywhere refs
+   exist, but option rows have no refs).
+3. The click commits immediately; screenshot to verify the label — a
+   wrong-but-valid value is usually fine for flow testing; prefer continuing
+   over fiddly correction loops.
+
+Keyboard fallback (ArrowDown/ArrowUp + Enter) exists but its anchor is
+erratic: `repeat: N` advances N in some selects and 1 in others; on an EMPTY
+select the first ArrowDown lands on option 1 or 2 nondeterministically; on a
+PRE-FILLED select the anchor follows the checkmarked option, not the shown
+label, and has jumped to the wrong row in live runs. Use it only for
+walking/scanning, and verify every landing off a screenshot.
 4. Do NOT batch several dropdown flows without verifying each: in a rapid
    click-report loop (e.g. reporting 9 match results back-to-back) a commit
    can silently miss — the channel auto-scrolls when each ephemeral arrives
@@ -160,8 +165,17 @@ clicks on option rows by coordinate are unreliable. Proven keyboard recipe:
   "(edited)" tag; verify content via `get_page_text`/screenshot rather than
   assuming.
 - Screenshot after every state transition as the visual record. Screenshots
-  land in the conversation (the user also sees the live pane); they are NOT
-  saved as files — say so when reporting results.
+  land in the conversation (the user also sees the live pane), and the
+  client may COLLAPSE them inside tool-call chips — never tell the user
+  "see the screenshot above" without checking they can.
+- Screenshots CAN be recovered as PNG files when a deliverable needs them
+  (e.g. PR evidence): every capture is stored base64 in the session
+  transcript `~/.claude/projects/<project-slug>/<session-id>.jsonl` under
+  tool_result image blocks. Extract with a small script and deliver via
+  SendUserFile (display: render). Two traps: Read-ing an extracted PNG adds
+  a NEW image to the transcript and shifts indices — identify frames by
+  hash, not by re-reading; and capture the wanted state as the LAST
+  screenshot before extracting so it sits at a known index.
 
 ## Teardown
 
