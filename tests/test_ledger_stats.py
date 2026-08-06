@@ -120,3 +120,31 @@ async def test_since_filters_by_match_event_time(test_db):
     assert [r["session_id"] for r in recent] == ["new"]
     lifetime = await fetch_session_records("g", player_id="1")
     assert len(lifetime) == 2
+
+
+@pytest.mark.asyncio
+async def test_substitute_side_inferred_from_opponents(test_db):
+    """A player absent from team_a/team_b (e.g. subbed in via /add_sub after
+    the team JSON was written) must not be dropped from side accounting."""
+    from services.ledger_stats import _side_map, fetch_session_records
+
+    await _seed(session_id="sub", victory="1", teams=(["1", "2"], ["4", "5"]),
+                matches=[("1", "4", "1", None), ("7", "4", "7", None)])
+
+    class _M:
+        def __init__(self, p1, p2):
+            self.player1_id, self.player2_id = p1, p2
+
+    session_row = await DraftSession.get_by_session_id("sub")
+    sides = _side_map(session_row, [_M("1", "4"), _M("7", "4")])
+    assert sides["7"] == "a"          # inferred: opposite of 4's side ('b')
+
+    records = await fetch_session_records("g")
+    by_pid = {r["player_id"]: r for r in records}
+
+    # team A (1, 2, and inferred substitute 7) won both of the session's
+    # 2 matches -- the substitute's match must count toward the session
+    # side totals, not just their own personal wins/losses.
+    assert (by_pid["7"]["side_wins"], by_pid["7"]["side_losses"]) == (2, 0)
+    assert (by_pid["1"]["side_wins"], by_pid["1"]["side_losses"]) == (2, 0)
+    assert (by_pid["4"]["side_wins"], by_pid["4"]["side_losses"]) == (0, 2)

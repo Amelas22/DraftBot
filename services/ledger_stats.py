@@ -7,7 +7,8 @@ victory-message ids, trophy_drafters name strings), whose absence or
 decoration produced systematic undercounts. Scope is RATING_SESSION_TYPES:
 exactly the drafts TrueSkill rates.
 
-Only stdlib + sqlalchemy (importable anywhere, incl. migrations).
+Depends only on sqlalchemy -- transitively via models/helpers -- so it is
+importable anywhere, including migrations.
 """
 import json
 from datetime import datetime
@@ -33,7 +34,14 @@ def _is_completed(session_row) -> bool:
 
 def _side_map(session_row, matches) -> dict:
     """player_id -> 'a'|'b'. Native sessions use team_a/team_b JSON; legacy
-    sessions (no teams) use match positions: player1s are side 'a'."""
+    sessions (no teams) use match positions: player1s are side 'a'.
+
+    Native sessions can also have participants missing from team_a/team_b --
+    e.g. a substitute added via /add_sub after the team JSON was written. For
+    those, _infer_unlisted_sides fills in a side from who they played (a
+    player who faced a known side takes the opposite side); see its docstring
+    for what happens to the rare participant who cannot be inferred at all.
+    """
     team_a, team_b = session_row.team_a, session_row.team_b
     if isinstance(team_a, str):
         team_a = json.loads(team_a)
@@ -45,11 +53,42 @@ def _side_map(session_row, matches) -> dict:
             sides[p] = "a"
         for p in team_b or []:
             sides[p] = "b"
+        _infer_unlisted_sides(sides, matches)
     else:
         for m in matches:
             sides.setdefault(m.player1_id, "a")
             sides.setdefault(m.player2_id, "b")
     return sides
+
+
+def _infer_unlisted_sides(sides: dict, matches) -> None:
+    """Fixed-point propagation for participants absent from team_a/team_b.
+
+    A player who faced an opponent with a known side takes the opposite side;
+    this repeats over the session's matches (there are at most a dozen or so)
+    until a pass makes no further assignments. A participant who only ever
+    faced other unlisted players can't be inferred at all and is left out of
+    `sides` -- their matches then can't be attributed to either side, so
+    fetch_session_records excludes those specific matches from side_tally
+    (and thus from `total = side_tally['a'] + side_tally['b']`, the base
+    every player's side_losses is computed from) rather than guess. That
+    keeps every OTHER player's side_wins/side_losses accurate. The
+    unresolved participant's own record still gets emitted (their personal
+    wins/losses/opponents are unaffected) but with side_wins=0 and
+    side_losses=total, since they have no side to report a session total for.
+    """
+    changed = True
+    while changed:
+        changed = False
+        for m in matches:
+            p1, p2 = m.player1_id, m.player2_id
+            s1, s2 = sides.get(p1), sides.get(p2)
+            if s1 and not s2:
+                sides[p2] = "a" if s1 == "b" else "b"
+                changed = True
+            elif s2 and not s1:
+                sides[p1] = "a" if s2 == "b" else "b"
+                changed = True
 
 
 async def fetch_session_records(guild_id: str, player_id: str = None,
