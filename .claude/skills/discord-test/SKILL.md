@@ -199,6 +199,5 @@ clicks on option rows by coordinate are unreliable. Proven keyboard recipe:
   `/delete_draft_channels` or `scripts/cleanup_test_channels.py` (developer
   preference: channel deletion is theirs to do manually, if at all). Just
   list the channels the test created in the final report.
-- Purge seeded data only if asked (seed scripts' `--purge`).
 - TaskStop the bot background task.
 - Report what was tested, what passed/failed, with the screenshots inline.
