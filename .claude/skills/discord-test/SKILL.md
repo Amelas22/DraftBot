@@ -46,11 +46,8 @@ Different developers have different guilds/channels/accounts.
 - If any of these are missing, run **First-time setup** below before testing.
 - Test data (seeded drafts/quizzes) is OUT of scope here — if the flow under
   test needs data, run the seed scripts (see CLAUDE.md Testing section) as a
-  separate ad hoc step first. Known signature: `/post_trophy_quiz` replying
-  "No eligible draft could be turned into a trophy quiz" means the seeded pool
-  is exhausted (each posted quiz consumes one seeded draft) — run
-  `scripts/seed_test_trophy_quiz.py --guild-id $TEST_GUILD_ID` again, then
-  re-run the command; the bot can stay up throughout.
+  separate ad hoc step first; seed scripts are safe to run while the bot is
+  up.
 
 ## First-time setup (walk the developer through this)
 
