@@ -13,9 +13,12 @@ idempotent via the session id prefix.
 migrate_guild_history re-guilds the old server's native DraftBot rows (the
 three weeks between the old bot's retirement and the server move) the same
 way, so the full history replays as one stream.
-backfill_missing_display_names names legacy-only players after the fact from
-sources already in the database. (The sign_up_history table is NOT a usable
-source here: it only records events since 2025-08, well after the legacy era.)
+backfill_sign_up_history completes the sign_up_history event table from the
+final-roster sign_ups JSON of sessions that predate live event recording
+(started 2025-08), so the event table is THE one historical signup record.
+backfill_missing_display_names then names legacy-only players from the best
+sources: another guild's player_stats, else their latest sign_up_history
+event.
 
 Only stdlib + sqlalchemy; every function takes a raw SQLAlchemy Connection,
 so the legacyimport0 migration and tests drive it against any engine.
@@ -136,6 +139,46 @@ def migrate_guild_history(connection, old_guild=OLD_GUILD_ID, new_guild=CURRENT_
     return moved
 
 
+def backfill_sign_up_history(connection) -> int:
+    """Synthesize 'join' events from final-roster sign_ups JSON for sessions
+    recorded before live event tracking existed (2025-08).
+
+    Only sessions with a sign_ups roster and ZERO existing history rows are
+    touched, so real event streams are never mixed with synthetic ones and
+    re-runs are no-ops. Synthetic events carry the session's start time --
+    the roster is a snapshot, so per-user join times are unknowable.
+    Returns events created.
+    """
+    import uuid as _uuid
+
+    rows = connection.execute(text(
+        "SELECT d.session_id, d.guild_id, d.draft_start_time, d.sign_ups "
+        "FROM draft_sessions d WHERE d.sign_ups IS NOT NULL AND NOT EXISTS "
+        "(SELECT 1 FROM sign_up_history h WHERE h.session_id = d.session_id)"
+    )).fetchall()
+
+    events = []
+    for session_id, guild_id, started_at, su in rows:
+        try:
+            roster = json.loads(su) if isinstance(su, str) else su
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(roster, dict):
+            continue
+        for pid, name in roster.items():
+            if not isinstance(name, str):
+                name = None
+            events.append({
+                "id": str(_uuid.uuid4()), "sid": session_id, "uid": pid,
+                "n": name, "ts": started_at, "g": guild_id})
+    if events:
+        connection.execute(text(
+            "INSERT INTO sign_up_history (id, session_id, user_id, "
+            "user_display_name, action, timestamp, guild_id) "
+            "VALUES (:id, :sid, :uid, :n, 'join', :ts, :g)"), events)
+    return len(events)
+
+
 def backfill_missing_display_names(connection) -> int:
     """Fill missing player_stats.display_name from the best available source.
 
@@ -170,20 +213,16 @@ def backfill_missing_display_names(connection) -> int:
 
     remaining = targets - set(names)
     if remaining:
-        rows = connection.execute(text(
-            "SELECT sign_ups FROM draft_sessions WHERE sign_ups IS NOT NULL "
-            "ORDER BY draft_start_time")).fetchall()
+        # sign_up_history is complete back to the earliest rosters once
+        # backfill_sign_up_history has run (the migration runs it first);
+        # ascending timestamp means the latest event's name wins.
         signup_names: dict[str, str] = {}
-        for (su,) in rows:  # ascending start time: later sessions overwrite
-            try:
-                d = json.loads(su) if isinstance(su, str) else su
-            except (ValueError, TypeError):
-                continue
-            if not isinstance(d, dict):
-                continue
-            for pid, name in d.items():
-                if pid in remaining and isinstance(name, str) and name:
-                    signup_names[pid] = name
+        for pid, name in connection.execute(text(
+            "SELECT user_id, user_display_name FROM sign_up_history "
+            "WHERE user_display_name IS NOT NULL AND user_display_name != '' "
+            "ORDER BY timestamp")).fetchall():
+            if pid in remaining:
+                signup_names[pid] = name
         names.update(signup_names)
 
     if names:
