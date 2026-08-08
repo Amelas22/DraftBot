@@ -179,8 +179,16 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
                 if p.display_name:
                     name_lookup[p.player_id] = p.display_name
 
+        # Live Discord fallback for players with no stored name anywhere
+        # (legacy-only accounts): resolve through the registered bot when
+        # available -- None outside a running bot (tests, scripts), where
+        # get_member_name degrades to "User <id>" as before.
+        from bot_registry import get_bot
+        _bot = get_bot()
+        discord_guild = _bot.get_guild(int(guild_id)) if _bot else None
+
         for player_id, player_records in per_player.items():
-            display_name = name_lookup.get(player_id) or get_member_name(None, player_id)
+            display_name = name_lookup.get(player_id) or get_member_name(discord_guild, player_id)
 
             totals = match_totals(player_records)
             matches_played = totals["matches_played"]

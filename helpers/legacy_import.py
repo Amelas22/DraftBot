@@ -130,3 +130,59 @@ def migrate_guild_history(connection, old_guild=OLD_GUILD_ID, new_guild=CURRENT_
     connection.execute(text(
         "DELETE FROM player_stats WHERE guild_id=:old"), {"old": old_guild})
     return moved
+
+
+def backfill_missing_display_names(connection) -> int:
+    """Fill missing player_stats.display_name from the best available source.
+
+    Legacy-only players (imported history, never drafted live) have stats
+    rows with no display name, so leaderboards fall back to "User <id>".
+    Two data sources can name many of them, in priority order:
+    1. their display_name in ANY other guild's player_stats row (maintained
+       by the live path, freshest), then
+    2. their most recent appearance in a draft session's sign_ups JSON
+       (the name they signed up under at the time).
+    Players present in neither stay unnamed and resolve at display time via
+    the live Discord member lookup (if still in the server). Idempotent:
+    only rows with NULL/'' names are touched. Returns rows updated.
+    """
+    import json as _json
+
+    nameless = [r[0] for r in connection.execute(text(
+        "SELECT player_id FROM player_stats "
+        "WHERE display_name IS NULL OR display_name = ''")).fetchall()]
+    if not nameless:
+        return 0
+    targets = set(nameless)
+
+    names: dict[str, str] = {}
+    for pid, name in connection.execute(text(
+        "SELECT player_id, display_name FROM player_stats "
+        "WHERE display_name IS NOT NULL AND display_name != ''")).fetchall():
+        if pid in targets and pid not in names:
+            names[pid] = name
+
+    remaining = targets - set(names)
+    if remaining:
+        rows = connection.execute(text(
+            "SELECT sign_ups FROM draft_sessions WHERE sign_ups IS NOT NULL "
+            "ORDER BY draft_start_time")).fetchall()
+        signup_names: dict[str, str] = {}
+        for (su,) in rows:  # ascending start time: later sessions overwrite
+            try:
+                d = _json.loads(su) if isinstance(su, str) else su
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(d, dict):
+                continue
+            for pid, name in d.items():
+                if pid in remaining and isinstance(name, str) and name:
+                    signup_names[pid] = name
+        names.update(signup_names)
+
+    for pid, name in names.items():
+        connection.execute(text(
+            "UPDATE player_stats SET display_name = :n "
+            "WHERE player_id = :p AND (display_name IS NULL OR display_name = '')"),
+            {"n": name, "p": pid})
+    return len(names)
