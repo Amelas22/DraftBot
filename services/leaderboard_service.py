@@ -11,6 +11,7 @@ from models import QuizStats, QuizSubmission, QuizSession
 from models.trophy_quiz_submission import TrophyQuizSubmission
 from models.trophy_quiz_session import TrophyQuizSession
 from stats_core import calculate_win_percentage, calculate_team_draft_win_percentage
+from bot_registry import get_bot
 
 # Win Streak minimum requirements by timeframe
 STREAK_MINIMUMS = {
@@ -183,7 +184,6 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
         # (legacy-only accounts): resolve through the registered bot when
         # available -- None outside a running bot (tests, scripts), where
         # get_member_name degrades to "User <id>" as before.
-        from bot_registry import get_bot
         _bot = get_bot()
         discord_guild = _bot.get_guild(int(guild_id)) if _bot else None
 

@@ -13,11 +13,15 @@ idempotent via the session id prefix.
 migrate_guild_history re-guilds the old server's native DraftBot rows (the
 three weeks between the old bot's retirement and the server move) the same
 way, so the full history replays as one stream.
+backfill_missing_display_names names legacy-only players after the fact from
+sources already in the database. (The sign_up_history table is NOT a usable
+source here: it only records events since 2025-08, well after the legacy era.)
 
 Only stdlib + sqlalchemy; every function takes a raw SQLAlchemy Connection,
 so the legacyimport0 migration and tests drive it against any engine.
 """
 import csv
+import json
 from pathlib import Path
 
 from sqlalchemy import text
@@ -146,19 +150,21 @@ def backfill_missing_display_names(connection) -> int:
     the live Discord member lookup (if still in the server). Idempotent:
     only rows with NULL/'' names are touched. Returns rows updated.
     """
-    import json as _json
-
-    nameless = [r[0] for r in connection.execute(text(
-        "SELECT player_id FROM player_stats "
-        "WHERE display_name IS NULL OR display_name = ''")).fetchall()]
-    if not nameless:
+    # One scan buckets every stats row: rows with empty names are targets,
+    # rows with names feed the cross-guild source for those same targets.
+    targets: set = set()
+    named_rows: list = []
+    for pid, name in connection.execute(text(
+        "SELECT player_id, display_name FROM player_stats")).fetchall():
+        if name:
+            named_rows.append((pid, name))
+        else:
+            targets.add(pid)
+    if not targets:
         return 0
-    targets = set(nameless)
 
     names: dict[str, str] = {}
-    for pid, name in connection.execute(text(
-        "SELECT player_id, display_name FROM player_stats "
-        "WHERE display_name IS NOT NULL AND display_name != ''")).fetchall():
+    for pid, name in named_rows:
         if pid in targets and pid not in names:
             names[pid] = name
 
@@ -170,7 +176,7 @@ def backfill_missing_display_names(connection) -> int:
         signup_names: dict[str, str] = {}
         for (su,) in rows:  # ascending start time: later sessions overwrite
             try:
-                d = _json.loads(su) if isinstance(su, str) else su
+                d = json.loads(su) if isinstance(su, str) else su
             except (ValueError, TypeError):
                 continue
             if not isinstance(d, dict):
@@ -180,9 +186,10 @@ def backfill_missing_display_names(connection) -> int:
                     signup_names[pid] = name
         names.update(signup_names)
 
-    for pid, name in names.items():
+    if names:
+        # List of dicts triggers executemany -- same idiom as the import above.
         connection.execute(text(
             "UPDATE player_stats SET display_name = :n "
             "WHERE player_id = :p AND (display_name IS NULL OR display_name = '')"),
-            {"n": name, "p": pid})
+            [{"n": name, "p": pid} for pid, name in names.items()])
     return len(names)
