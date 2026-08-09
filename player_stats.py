@@ -1,11 +1,14 @@
 import discord
-from datetime import datetime, timedelta
+from datetime import datetime
 from sqlalchemy import select, func
 from session import AsyncSessionLocal, PlayerStats
 from models.win_streak_history import WinStreakHistory
 from models.perfect_streak_history import PerfectStreakHistory
 from loguru import logger
 from helpers.display_names import get_member_name
+from services.ledger_stats import (
+    LedgerSnapshot, match_totals, draft_totals, trophy_count, team_record,
+    cube_breakdown, h2h_totals)
 from stats_core import get_timeframe_start_date, calculate_win_percentage, calculate_team_draft_win_percentage
 
 # Cube-specific stats appear in the /stats embed only at this many
@@ -105,12 +108,8 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                         if ender_stats:
                             longest_perfect_streak_ender = ender_stats.display_name
 
-                # Stored names are complete (dispnamefill0 migration +
-                # scripts/backfill_legacy_display_names.py; the live signup
-                # path keeps them current) -- no live lookup, no sign_ups
-                # JSON scan (a stale display artifact that used to shadow
-                # good stored names). A miss means a deleted account and
-                # degrades to get_member_name's "User <id>" formatting.
+                # Stored names are complete -- see get_member_name's
+                # docstring for why a miss just formats as "User <id>".
                 if display_name == "Unknown":
                     display_name = get_member_name(None, user_id)
 
@@ -119,10 +118,6 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                 # rating system already uses) instead of display artifacts
                 # like sign_ups JSON, victory-message ids, or
                 # trophy_drafters name strings.
-                from services.ledger_stats import (
-                    LedgerSnapshot, match_totals,
-                    draft_totals, trophy_count, team_record, cube_breakdown)
-
                 if snapshot is None:
                     snapshot = await LedgerSnapshot.fetch(guild_id)
                 records = snapshot.fold(player_id=user_id, since=start_date)
@@ -340,11 +335,6 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
 async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, user2_display_name=None, guild_id=None):
     """Get head-to-head match statistics between two players."""
     try:
-        # Calculate time frames
-        now = datetime.now()
-        week_ago = now - timedelta(days=7)
-        month_ago = now - timedelta(days=30)
-        
         # Get display names if not provided
         if not user1_display_name or not user2_display_name:
             async with AsyncSessionLocal() as session:
@@ -366,9 +356,8 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
                         player2_stats = player2_result.scalar_one_or_none()
                         user2_display_name = player2_stats.display_name if player2_stats else "Unknown"
                         
-                    # Stored names are complete (see get_player_statistics)
-                    # -- a miss means a deleted account and degrades to
-                    # get_member_name's "User <id>" formatting.
+                    # Stored names are complete -- see get_member_name's
+                    # docstring for why a miss just formats as "User <id>".
                     if user1_display_name == "Unknown":
                         user1_display_name = get_member_name(None, user1_id)
                     if user2_display_name == "Unknown":
@@ -380,8 +369,6 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
         # team_a/team_b queries, and teams_start_time -- scope is
         # RATING_SESSION_TYPES via the ledger fold (LedgerSnapshot), same
         # as /stats.
-        from services.ledger_stats import LedgerSnapshot, h2h_totals
-
         def _match_record(h):
             matches_played = h["matches_played"]
             user1_wins = h["matches_won"]
@@ -394,56 +381,41 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
                 "user2_win_percentage": calculate_win_percentage(user2_wins, user1_wins),
             }
 
-        def _draft_record(h, played_key, won_key, tied_key):
-            played = h[played_key]
-            won = h[won_key]
-            drawn = h[tied_key]
+        def _draft_record(h, kind):
+            """kind: 'with' (teammate) or 'against' (opposing)."""
+            played = h[f"drafts_{kind}"]
+            won = h[f"drafts_{kind}_won"]
+            drawn = h[f"drafts_{kind}_tied"]
             losses = played - won - drawn
             return {
                 "wins": won,
                 "losses": losses,
                 "draws": drawn,
-                "win_percentage": calculate_win_percentage(won, losses, drawn),
+                # Team-draft outcome: ties count in the denominator
+                # (stats_core owns the formula, same as /stats).
+                "win_percentage": calculate_team_draft_win_percentage(won, losses, drawn),
             }
 
-        # One SQL fetch; three pure folds (the query doesn't vary by
-        # timeframe, so refetching per frame just repeated identical I/O).
+        # One SQL fetch; one pure fold per timeframe (the query doesn't
+        # vary by timeframe, so refetching per frame just repeated
+        # identical I/O). Timeframe policy comes from stats_core, same as
+        # /stats -- lifetime is since=None.
         snapshot = await LedgerSnapshot.fetch(guild_id)
-        lifetime_records = snapshot.fold(player_id=user1_id)
-        monthly_records = snapshot.fold(player_id=user1_id, since=month_ago)
-        weekly_records = snapshot.fold(player_id=user1_id, since=week_ago)
-
-        h_lifetime = h2h_totals(lifetime_records, user2_id)
-        h_monthly = h2h_totals(monthly_records, user2_id)
-        h_weekly = h2h_totals(weekly_records, user2_id)
-
-        lifetime_stats = _match_record(h_lifetime)
-        monthly_stats = _match_record(h_monthly)
-        weekly_stats = _match_record(h_weekly)
-
-        opposing_lifetime = _draft_record(h_lifetime, "drafts_against", "drafts_against_won", "drafts_against_tied")
-        opposing_monthly = _draft_record(h_monthly, "drafts_against", "drafts_against_won", "drafts_against_tied")
-        opposing_weekly = _draft_record(h_weekly, "drafts_against", "drafts_against_won", "drafts_against_tied")
-
-        teammate_lifetime = _draft_record(h_lifetime, "drafts_with", "drafts_with_won", "drafts_with_tied")
-        teammate_monthly = _draft_record(h_monthly, "drafts_with", "drafts_with_won", "drafts_with_tied")
-        teammate_weekly = _draft_record(h_weekly, "drafts_with", "drafts_with_won", "drafts_with_tied")
-
-        return {
+        results = {
             "user1_id": user1_id,
             "user2_id": user2_id,
             "user1_display_name": user1_display_name,
             "user2_display_name": user2_display_name,
-            "weekly": weekly_stats,
-            "monthly": monthly_stats,
-            "lifetime": lifetime_stats,
-            "opposing_weekly": opposing_weekly,
-            "opposing_monthly": opposing_monthly,
-            "opposing_lifetime": opposing_lifetime,
-            "teammate_weekly": teammate_weekly,
-            "teammate_monthly": teammate_monthly,
-            "teammate_lifetime": teammate_lifetime
         }
+        for frame, since in (("lifetime", None),
+                             ("monthly", get_timeframe_start_date("month")),
+                             ("weekly", get_timeframe_start_date("week"))):
+            h = h2h_totals(snapshot.fold(player_id=user1_id, since=since),
+                           user2_id)
+            results[frame] = _match_record(h)
+            results[f"opposing_{frame}"] = _draft_record(h, "against")
+            results[f"teammate_{frame}"] = _draft_record(h, "with")
+        return results
 
     except Exception as e:
         logger.error(f"Error getting head-to-head stats between {user1_id} and {user2_id}: {e}")

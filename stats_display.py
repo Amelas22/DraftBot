@@ -9,6 +9,7 @@ from sqlalchemy import select
 from database.db_session import AsyncSessionLocal
 from models.player import PlayerStats
 from helpers.skill import is_established, skill_rating
+from services.ledger_stats import LedgerSnapshot
 
 
 async def _player_skill_rating(player_id, guild_id):
@@ -69,7 +70,6 @@ async def get_stats_embed_for_player(
         user = MockUser(player_id, display_name)
 
     # Get stats for all 3 timeframes -- one guild-history fetch, three folds
-    from services.ledger_stats import LedgerSnapshot
     snapshot = await LedgerSnapshot.fetch(guild_id)
     stats_weekly = await get_player_statistics(player_id, 'week', display_name, guild_id,
                                                snapshot=snapshot)

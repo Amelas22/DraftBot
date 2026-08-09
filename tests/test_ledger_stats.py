@@ -1,36 +1,15 @@
 """The one ledger fold behind /stats, /record, and leaderboards
 (spec 2026-08-06-ledger-stats-unification-design).
 
-test_db comes from tests/conftest.py."""
+test_db and the _seed session seeder come from tests/conftest.py."""
 from datetime import datetime
 from types import MappingProxyType
 
 import pytest
 
-from database.db_session import AsyncSessionLocal
+from conftest import seed_session as _seed
 from models.draft_session import DraftSession
-from models.match import MatchResult
 from services.ledger_stats import SessionRecord
-
-
-async def _seed(session_id="s1", guild="g", stype="staked", stage="completed",
-                victory=None, teams=None, matches=(), start=None):
-    """teams: (team_a_list, team_b_list) or None (legacy-style).
-    matches: iterable of (p1, p2, winner, submitted_at_or_None)."""
-    async with AsyncSessionLocal() as s:
-        s.add(DraftSession(
-            session_id=session_id, guild_id=guild, session_type=stype,
-            session_stage=stage,
-            victory_message_id_results_channel=victory,
-            team_a=list(teams[0]) if teams else None,
-            team_b=list(teams[1]) if teams else None,
-            draft_start_time=start or datetime(2026, 1, 1),
-            cube="TestCube"))
-        for i, (p1, p2, w, ts) in enumerate(matches):
-            s.add(MatchResult(session_id=session_id, match_number=i + 1,
-                              player1_id=p1, player2_id=p2, winner_id=w,
-                              result_submitted_at=ts))
-        await s.commit()
 
 
 @pytest.mark.asyncio
@@ -117,8 +96,8 @@ async def test_unresolvable_side_record_excluded_from_side_dependent_projections
     known) gets side=None -- see _infer_unlisted_sides/SessionRecord. Their
     matches still count everywhere match/draft facts are side-independent,
     but team_record, h2h_totals' draft split, and the leaderboard teammate
-    pass must all skip the record rather than fabricate a loss out of the
-    side_wins=0/side_losses=total placeholder."""
+    pass must all skip the record (side_wins/side_losses are None -- no
+    fabricated outcome exists to miscount)."""
     from services.ledger_stats import (
         fetch_session_records, match_totals, draft_totals, team_record,
         h2h_totals)
@@ -134,6 +113,7 @@ async def test_unresolvable_side_record_excluded_from_side_dependent_projections
 
     r2 = by_pid["2"]
     assert r2.side is None
+    assert r2.side_wins is None and r2.side_losses is None
     assert (r2.wins, r2.matches) == (1, 1)   # match still counted
 
     # Side-independent projections: count the unresolved-side record like
@@ -273,6 +253,9 @@ def _rec(**kw):
                 side="a", side_wins=0, side_losses=0, participants=set(),
                 teammates=None)
     base.update(kw)
+    if base["side"] is None:
+        # Mirror the fold: no side, no side outcome (None, not zeros).
+        base["side_wins"] = base["side_losses"] = None
     base["matches"] = base["wins"] + base["losses"]
     if base["teammates"] is None:
         base["teammates"] = (
@@ -322,7 +305,9 @@ def test_projection_cube_and_h2h():
     ]
     cubes = cube_breakdown(records)
     assert cubes["X"] == {"wins": 2, "losses": 1, "drafts": 1}
-    assert cubes["Unknown"] == {"wins": 1, "losses": 0, "drafts": 1}
+    # No-cube sessions group under None (a sentinel name could shadow a
+    # real cube); the display layer decides whether to render them.
+    assert cubes[None] == {"wins": 1, "losses": 0, "drafts": 1}
     h = h2h_totals(records, "9")
     assert h["matches_played"] == 2 and h["matches_won"] == 1
     assert h["drafts_against"] == 1                   # session a: they met

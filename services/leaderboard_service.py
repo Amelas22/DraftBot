@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta
 from loguru import logger
 from sqlalchemy import select, and_
@@ -10,6 +11,9 @@ from models.player import PlayerStats
 from models import QuizStats, QuizSubmission, QuizSession
 from models.trophy_quiz_submission import TrophyQuizSubmission
 from models.trophy_quiz_session import TrophyQuizSession
+from services.ledger_stats import (
+    LedgerSnapshot, match_totals, draft_totals, team_record,
+    side_eligible, side_outcome)
 from stats_core import calculate_win_percentage, calculate_team_draft_win_percentage
 
 # Win Streak minimum requirements by timeframe
@@ -119,14 +123,150 @@ def get_minimum_requirements(timeframe):
             "partnership_drafts": 8
         }
 
-async def get_leaderboard_data(guild_id, category="draft_record", limit=20, timeframe="lifetime"):
-    """Get leaderboard data for all players in a guild"""
+def _assemble_players_data(snapshot, start_date) -> dict:
+    """Pure fold + aggregation for one (guild, timeframe) view: per-player
+    match/draft/team tallies plus the teammate (Vault/Key) pass. Runs in a
+    worker thread (see build_players_data) -- no I/O, no shared mutable
+    state. display_name/teammate_name are filled afterward by
+    build_players_data, once, from stored names.
+
+    The teammate pass uses each record's `teammates` set -- real sides,
+    not "never appeared as an opponent" (that heuristic misclassifies an
+    opposing player you simply never got paired against, e.g. in a 4v4
+    where 3 rounds only cover 3 of each player's 4 possible opponents).
+    Side-dependent facts are gated by side_eligible, same as team_record
+    and h2h.
+    """
+    records = snapshot.fold(since=start_date)
+    per_player: dict[str, list] = {}
+    for r in records:
+        per_player.setdefault(r.player_id, []).append(r)
+
+    players_data = {}
+    for player_id, player_records in per_player.items():
+        totals = match_totals(player_records)
+        matches_played = totals["matches_played"]
+        matches_won = totals["matches_won"]
+        matches_lost = matches_played - matches_won
+
+        team = team_record(player_records)
+        players_data[player_id] = {
+            "player_id": player_id,
+            "display_name": None,       # filled by build_players_data
+            "drafts_played": draft_totals(player_records),
+            "completed_matches": matches_played,  # Every reported match counts
+            "matches_won": matches_won,
+            "matches_lost": matches_lost,
+            "match_win_percentage": calculate_win_percentage(matches_won, matches_lost),
+            "team_drafts_played": team["played"],
+            "team_drafts_won": team["won"],
+            "team_drafts_tied": team["tied"],
+            "team_drafts_lost": team["lost"],
+            # Tie-inclusive denominator, same policy as /stats and /record
+            # (stats_core owns the formula).
+            "team_draft_win_percentage": calculate_team_draft_win_percentage(
+                team["won"], team["lost"], team["tied"]),
+            "teammate_win_rates": {}
+        }
+
+    for player_id, player_records in per_player.items():
+        teammate_stats = players_data[player_id]["teammate_win_rates"]
+        for r in player_records:
+            if not side_eligible(r):
+                continue
+            if not r.teammates:
+                continue
+            outcome = side_outcome(r)
+            for teammate_id in r.teammates:
+                if teammate_id not in players_data:
+                    continue
+                entry = teammate_stats.setdefault(teammate_id, {
+                    "drafts_played": 0,
+                    "drafts_won": 0,
+                    "drafts_lost": 0,
+                    "drafts_tied": 0,
+                    "win_percentage": 0,
+                    "teammate_name": None,  # filled by build_players_data
+                })
+                entry["drafts_played"] += 1
+                entry[f"drafts_{outcome}"] += 1
+
+    for player_data in players_data.values():
+        for teammate_data in player_data["teammate_win_rates"].values():
+            teammate_data["win_percentage"] = calculate_team_draft_win_percentage(
+                teammate_data["drafts_won"], teammate_data["drafts_lost"],
+                teammate_data["drafts_tied"])
+    return players_data
+
+
+async def build_players_data(guild_id, timeframe="lifetime") -> dict:
+    """The per-(guild, timeframe) assembly EVERY fold-backed leaderboard
+    category shares -- category only affects the final filter/sort in
+    get_leaderboard_data, so refresh cycles that render several categories
+    (and the crown pass after them) should build this once per timeframe
+    via PlayersDataCache instead of once per category.
+
+    Counts come from the match-result ledger (the source of truth the
+    rating system already uses), never from display artifacts; scope is
+    RATING_SESSION_TYPES via the ledger fold, same as /stats and /record.
+    The fold + aggregation run in a worker thread so a prod-scale build
+    (~1s) doesn't stall the event loop for every other interaction.
+    """
+    start_date = get_timeframe_date(timeframe)
+    snapshot = await LedgerSnapshot.fetch(guild_id)
+    players_data = await asyncio.to_thread(
+        _assemble_players_data, snapshot, start_date)
+    logger.info(f"Assembled {len(players_data)} players with rated drafts "
+                f"in guild {guild_id} for timeframe {timeframe}")
+
+    # Batch-resolve display names from PlayerStats. Stored names are
+    # complete -- see helpers.display_names.get_member_name for why there
+    # is no live-lookup fallback here.
+    name_lookup = {}
+    if players_data:
+        async with db_session() as session:
+            names_result = await session.execute(select(PlayerStats).where(
+                PlayerStats.guild_id == guild_id,
+                PlayerStats.player_id.in_(list(players_data.keys()))))
+            for p in names_result.scalars().all():
+                if p.display_name:
+                    name_lookup[p.player_id] = p.display_name
+    for player_id, data in players_data.items():
+        data["display_name"] = name_lookup.get(player_id) or get_member_name(None, player_id)
+    for data in players_data.values():
+        for teammate_id, entry in data["teammate_win_rates"].items():
+            entry["teammate_name"] = players_data[teammate_id]["display_name"]
+    return players_data
+
+
+class PlayersDataCache:
+    """Shares build_players_data results across the several leaderboard
+    queries of one refresh cycle (per-category embeds + the crown pass),
+    keyed by timeframe. Create one per cycle; never keep one across
+    cycles -- it caches forever by design."""
+
+    def __init__(self, guild_id):
+        self._guild_id = guild_id
+        self._by_timeframe = {}
+
+    async def get(self, timeframe) -> dict:
+        if timeframe not in self._by_timeframe:
+            self._by_timeframe[timeframe] = await build_players_data(
+                self._guild_id, timeframe)
+        return self._by_timeframe[timeframe]
+
+
+async def get_leaderboard_data(guild_id, category="draft_record", limit=20,
+                               timeframe="lifetime", cache=None):
+    """Get leaderboard data for all players in a guild.
+
+    cache: optional PlayersDataCache to share the expensive per-timeframe
+    assembly across several calls in one refresh cycle."""
 
     # Streak/quiz categories are backed by their own dedicated tables
     # (WinStreakHistory, QuizStats, etc) and never touch the match-result
-    # ledger fold below (fetch_session_records) -- dispatch to them FIRST
-    # so they never pay for a fold whose result they'd throw away; the fold
-    # alone measured ~10s on prod-scale data.
+    # ledger fold -- dispatch to them FIRST so they never pay for a fold
+    # whose result they'd throw away.
     dedicated_query_categories = {
         "longest_win_streak": get_win_streak_leaderboard_data,
         "perfect_streak": get_perfect_streak_leaderboard_data,
@@ -140,220 +280,96 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
                 guild_id, timeframe, limit, session)
         return sorted_players[:limit]
 
-    # Get the start date for filtering based on timeframe
-    start_date = get_timeframe_date(timeframe)
+    if cache is not None:
+        players_data = await cache.get(timeframe)
+    else:
+        players_data = await build_players_data(guild_id, timeframe)
 
-    # Store player stats here
-    players_data = {}
+    # Convert to list for sorting
+    players_list = list(players_data.values())
 
-    async with db_session() as session:
-        # Count from the match-result ledger (the source of truth the rating
-        # system already uses) instead of the old sign_ups/team_a/team_b
-        # query, which missed premade drafts (wrong session_type filter) and
-        # legacy drafts (no victory_message_id_results_channel). Scope is
-        # RATING_SESSION_TYPES via fetch_session_records, same as /stats
-        # and /record.
-        from services.ledger_stats import (
-            fetch_session_records, match_totals, draft_totals, team_record,
-            side_eligible, side_outcome)
+    # Get minimum requirements based on timeframe
+    min_requirements = get_minimum_requirements(timeframe)
+    min_drafts = min_requirements["drafts"]
+    min_matches = min_requirements["matches"]
+    min_partnership_drafts = min_requirements["partnership_drafts"]
 
-        records = await fetch_session_records(guild_id, since=start_date)
-        per_player: dict[str, list] = {}
-        for r in records:
-            per_player.setdefault(r.player_id, []).append(r)
+    # Apply category-specific filters and sorting
+    if category == "draft_record":
+        filtered_players = [p for p in players_list if p["drafts_played"] >= min_drafts and p["team_draft_win_percentage"] >= 50]
+        logger.info(f"Found {len(filtered_players)} players with at least {min_drafts} drafts for draft_record")
+        # Sort by team draft win percentage (descending)
+        sorted_players = sorted(filtered_players, key=lambda p: p["team_draft_win_percentage"], reverse=True)
+    
+    elif category == "match_win":
+        filtered_players = [p for p in players_list if p["completed_matches"] >= min_matches and p["match_win_percentage"] >= 50]
+        logger.info(f"Found {len(filtered_players)} players with at least {min_matches} completed matches for match_win")
+        # Sort by match win percentage (descending)
+        sorted_players = sorted(filtered_players, key=lambda p: p["match_win_percentage"], reverse=True)
+    
+    elif category == "drafts_played":
+        # Sort by number of drafts played (descending)
+        sorted_players = sorted(players_list, key=lambda p: p["drafts_played"], reverse=True)
+    
+    elif category == "time_vault_and_key":
+        # Process teammate data to find best partnerships
+        best_partnerships = []
+        total_relationships = 0
+        seen_pairs = set()  # Track unique pairs
 
-        logger.info(f"Found {len(per_player)} players with rated drafts in guild {guild_id} for timeframe {timeframe}")
-
-        # Batch-resolve display names: PlayerStats.display_name first (kept
-        # in sync as players interact with the bot), get_member_name
-        # fallback for players with no PlayerStats row -- never sign_ups
-        # JSON, which legacy sessions don't have.
-        player_ids = list(per_player.keys())
-        name_lookup = {}
-        if player_ids:
-            names_stmt = select(PlayerStats).where(
-                PlayerStats.guild_id == guild_id,
-                PlayerStats.player_id.in_(player_ids)
-            )
-            names_result = await session.execute(names_stmt)
-            for p in names_result.scalars().all():
-                if p.display_name:
-                    name_lookup[p.player_id] = p.display_name
-
-        # Stored names are complete: the dispnamefill0 migration filled
-        # every name derivable from local evidence, and the one-time
-        # scripts/backfill_legacy_display_names.py resolved the legacy-only
-        # remainder through Discord. The live signup path keeps names
-        # current, so there is no live-lookup fallback here (that reach
-        # was issue #388) -- a miss means a deleted account and degrades
-        # to get_member_name's "User <id>" formatting.
-        for player_id, player_records in per_player.items():
-            display_name = name_lookup.get(player_id) or get_member_name(None, player_id)
-
-            totals = match_totals(player_records)
-            matches_played = totals["matches_played"]
-            matches_won = totals["matches_won"]
-            matches_lost = matches_played - matches_won
-            match_win_percentage = calculate_win_percentage(matches_won, matches_lost)
-
-            drafts_played = draft_totals(player_records)
-
-            team = team_record(player_records)
-            team_drafts_played = team["played"]
-            team_drafts_won = team["won"]
-            team_drafts_lost = team["lost"]
-            team_drafts_tied = team["tied"]
-            # Same tie-inclusive denominator policy as /stats and /record
-            # (stats_core owns the formula) -- the old inline formula
-            # silently excluded ties from the denominator.
-            team_draft_win_percentage = calculate_team_draft_win_percentage(
-                team_drafts_won, team_drafts_lost, team_drafts_tied)
-
-            players_data[player_id] = {
-                "player_id": player_id,
-                "display_name": display_name,
-                "drafts_played": drafts_played,
-                "completed_matches": matches_played,  # Every reported match counts
-                "matches_won": matches_won,
-                "matches_lost": matches_lost,
-                "match_win_percentage": match_win_percentage,
-                "team_drafts_played": team_drafts_played,
-                "team_drafts_won": team_drafts_won,
-                "team_drafts_tied": team_drafts_tied,
-                "team_drafts_lost": team_drafts_lost,
-                "team_draft_win_percentage": team_draft_win_percentage,
-                "teammate_win_rates": {}
-            }
-
-        # Second pass: teammate (Vault/Key) stats. A session's teammates come
-        # straight from fetch_session_records' "teammates" set -- same side,
-        # computed from team_a/team_b, not "never appeared as an opponent"
-        # (that heuristic misclassifies an opposing player you simply never
-        # got paired against, e.g. in a 4v4 where 3 rounds only cover 3 of
-        # each player's 4 possible opponents). The session's own
-        # side_wins/side_losses (same numbers team_record uses) determine
-        # won/lost/tied for every teammate at once. Deferred to a second
-        # pass so every player's display_name is already resolved above,
-        # regardless of dict iteration order.
-        #
-        # Side-dependent: gated by side_eligible (same predicate as
-        # team_record and h2h) -- a record whose side couldn't be resolved
-        # is skipped rather than counted as a fabricated teammate loss/tie.
-        for player_id, player_records in per_player.items():
-            teammate_stats = players_data[player_id]["teammate_win_rates"]
-            for r in player_records:
-                if not side_eligible(r):
-                    continue
-                teammates = r.teammates
-                if not teammates:
-                    continue
-                outcome = side_outcome(r)
-                for teammate_id in teammates:
-                    if teammate_id not in players_data:
-                        continue
-                    entry = teammate_stats.setdefault(teammate_id, {
-                        "drafts_played": 0,
-                        "drafts_won": 0,
-                        "drafts_lost": 0,
-                        "drafts_tied": 0,
-                        "win_percentage": 0,
-                        "teammate_name": players_data[teammate_id]["display_name"]
-                    })
-                    entry["drafts_played"] += 1
-                    entry[f"drafts_{outcome}"] += 1
-
-        # Calculate teammate win rates
-        for player_data in players_data.values():
-            for teammate_data in player_data["teammate_win_rates"].values():
-                teammate_data["win_percentage"] = calculate_team_draft_win_percentage(
-                    teammate_data["drafts_won"], teammate_data["drafts_lost"],
-                    teammate_data["drafts_tied"])
-
-        # Convert to list for sorting
-        players_list = list(players_data.values())
-
-        # Get minimum requirements based on timeframe
-        min_requirements = get_minimum_requirements(timeframe)
-        min_drafts = min_requirements["drafts"]
-        min_matches = min_requirements["matches"]
-        min_partnership_drafts = min_requirements["partnership_drafts"]
-        
-        # Apply category-specific filters and sorting
-        if category == "draft_record":
-            filtered_players = [p for p in players_list if p["drafts_played"] >= min_drafts and p["team_draft_win_percentage"] >= 50]
-            logger.info(f"Found {len(filtered_players)} players with at least {min_drafts} drafts for draft_record")
-            # Sort by team draft win percentage (descending)
-            sorted_players = sorted(filtered_players, key=lambda p: p["team_draft_win_percentage"], reverse=True)
-        
-        elif category == "match_win":
-            filtered_players = [p for p in players_list if p["completed_matches"] >= min_matches and p["match_win_percentage"] >= 50]
-            logger.info(f"Found {len(filtered_players)} players with at least {min_matches} completed matches for match_win")
-            # Sort by match win percentage (descending)
-            sorted_players = sorted(filtered_players, key=lambda p: p["match_win_percentage"], reverse=True)
-        
-        elif category == "drafts_played":
-            # Sort by number of drafts played (descending)
-            sorted_players = sorted(players_list, key=lambda p: p["drafts_played"], reverse=True)
-        
-        elif category == "time_vault_and_key":
-            # Process teammate data to find best partnerships
-            best_partnerships = []
-            total_relationships = 0
-            seen_pairs = set()  # Track unique pairs
-
-            for player_id, player_data in players_data.items():
-                total_relationships += len(player_data["teammate_win_rates"])
-                
-                for teammate_id, teammate_data in player_data["teammate_win_rates"].items():
-                    # Create a unique key for the pair (sorted to avoid duplicate direction)
-                    pair_key = tuple(sorted([player_id, teammate_id]))
-                    if pair_key in seen_pairs:
-                        continue  # Skip already processed pair
-                    seen_pairs.add(pair_key)
-
-                    # Ties are drafts played together: they count toward the
-                    # sample-size gate and the denominator (one tie policy,
-                    # already applied where win_percentage was stored above).
-                    if teammate_data["drafts_played"] >= min_partnership_drafts:
-                        win_percentage = teammate_data["win_percentage"]
-                        if win_percentage >= 50:
-                            partnership = {
-                                "player_id": player_id,
-                                "player_name": player_data["display_name"],
-                                "teammate_id": teammate_id,
-                                "teammate_name": teammate_data["teammate_name"],
-                                "drafts_played": teammate_data["drafts_played"],
-                                "drafts_won": teammate_data["drafts_won"],
-                                "drafts_lost": teammate_data["drafts_lost"],
-                                "drafts_tied": teammate_data["drafts_tied"],
-                                "win_percentage": win_percentage
-                            }
-
-                            best_partnerships.append(partnership)
-
-            logger.info(f"Found {total_relationships} total teammate relationships")
-            logger.info(f"Found {len(best_partnerships)} partnerships with at least {min_partnership_drafts} drafts together")
+        for player_id, player_data in players_data.items():
+            total_relationships += len(player_data["teammate_win_rates"])
             
-            # Sort partnerships by win percentage
-            sorted_players = sorted(best_partnerships, key=lambda p: p["win_percentage"], reverse=True)
+            for teammate_id, teammate_data in player_data["teammate_win_rates"].items():
+                # Create a unique key for the pair (sorted to avoid duplicate direction)
+                pair_key = tuple(sorted([player_id, teammate_id]))
+                if pair_key in seen_pairs:
+                    continue  # Skip already processed pair
+                seen_pairs.add(pair_key)
+
+                # Ties are drafts played together: they count toward the
+                # sample-size gate and the denominator (one tie policy,
+                # already applied where win_percentage was stored above).
+                if teammate_data["drafts_played"] >= min_partnership_drafts:
+                    win_percentage = teammate_data["win_percentage"]
+                    if win_percentage >= 50:
+                        partnership = {
+                            "player_id": player_id,
+                            "player_name": player_data["display_name"],
+                            "teammate_id": teammate_id,
+                            "teammate_name": teammate_data["teammate_name"],
+                            "drafts_played": teammate_data["drafts_played"],
+                            "drafts_won": teammate_data["drafts_won"],
+                            "drafts_lost": teammate_data["drafts_lost"],
+                            "drafts_tied": teammate_data["drafts_tied"],
+                            "win_percentage": win_percentage
+                        }
+
+                        best_partnerships.append(partnership)
+
+        logger.info(f"Found {total_relationships} total teammate relationships")
+        logger.info(f"Found {len(best_partnerships)} partnerships with at least {min_partnership_drafts} drafts together")
         
-        elif category == "hot_streak":
-            # For hot streak, we always use the 7-day timeframe regardless of what was passed
-            filtered_players = [p for p in players_list if p["completed_matches"] >= 9 and p["match_win_percentage"] > 50]
-            logger.info(f"Found {len(filtered_players)} players with at least 9 completed matches for hot_streak")
-            # Sort by match win percentage
-            sorted_players = sorted(filtered_players, key=lambda p: p["match_win_percentage"], reverse=True)
+        # Sort partnerships by win percentage
+        sorted_players = sorted(best_partnerships, key=lambda p: p["win_percentage"], reverse=True)
+    
+    elif category == "hot_streak":
+        # For hot streak, we always use the 7-day timeframe regardless of what was passed
+        filtered_players = [p for p in players_list if p["completed_matches"] >= 9 and p["match_win_percentage"] > 50]
+        logger.info(f"Found {len(filtered_players)} players with at least 9 completed matches for hot_streak")
+        # Sort by match win percentage
+        sorted_players = sorted(filtered_players, key=lambda p: p["match_win_percentage"], reverse=True)
 
-        # longest_win_streak / perfect_streak / quiz_points / trophy_quiz_points /
-        # draft_win_streak are handled by the dedicated_query_categories dispatch
-        # above, before the fold ever runs.
+    # longest_win_streak / perfect_streak / quiz_points / trophy_quiz_points /
+    # draft_win_streak are handled by the dedicated_query_categories dispatch
+    # above, before the fold ever runs.
 
-        else:
-            # Default to drafts_played if category not recognized
-            sorted_players = sorted(players_list, key=lambda p: p["drafts_played"], reverse=True)
+    else:
+        # Default to drafts_played if category not recognized
+        sorted_players = sorted(players_list, key=lambda p: p["drafts_played"], reverse=True)
 
-        # Limit to requested number
-        return sorted_players[:limit]
+    # Limit to requested number
+    return sorted_players[:limit]
 
 
 async def _get_ender_players_lookup(guild_id, history_streaks, session):
@@ -894,7 +910,7 @@ async def get_trophy_quiz_points_leaderboard_data(guild_id, timeframe, limit, se
     return leaderboard_data[:limit]
 
 
-async def get_crown_leaders(guild_id: str, categories: list, timeframe: str = "lifetime") -> dict:
+async def get_crown_leaders(guild_id: str, categories: list, timeframe: str = "lifetime", cache=None) -> dict:
     """
     Get the Discord user ID(s) of the #1 player(s) for each specified category.
 
@@ -912,7 +928,8 @@ async def get_crown_leaders(guild_id: str, categories: list, timeframe: str = "l
     leaders = {}
     for category in categories:
         # Reuse existing get_leaderboard_data() with limit=1
-        data = await get_leaderboard_data(guild_id, category=category, limit=1, timeframe=timeframe)
+        data = await get_leaderboard_data(guild_id, category=category, limit=1,
+                                          timeframe=timeframe, cache=cache)
         if data and len(data) > 0:
             first_entry = data[0]
             if category == "time_vault_and_key":

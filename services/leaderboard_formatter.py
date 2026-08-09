@@ -15,8 +15,10 @@ TIMEFRAME_DISPLAY = {
 
 
 
-async def create_leaderboard_embed(guild_id, category="draft_record", limit=20, timeframe="lifetime"):
-    """Create an embed with leaderboard data"""
+async def create_leaderboard_embed(guild_id, category="draft_record", limit=20, timeframe="lifetime", cache=None):
+    """Create an embed with leaderboard data.
+
+    cache: optional PlayersDataCache shared across one refresh cycle."""
     # Ensure category is valid
     if category not in LEADERBOARD_CATEGORIES:
         category = "draft_record"  # Default to draft_record if invalid category
@@ -28,7 +30,8 @@ async def create_leaderboard_embed(guild_id, category="draft_record", limit=20, 
         effective_timeframe = timeframe
     
     # Get the leaderboard data
-    leaderboard_data = await get_leaderboard_data(guild_id, category, limit, effective_timeframe)
+    leaderboard_data = await get_leaderboard_data(
+        guild_id, category, limit, effective_timeframe, cache=cache)
     
     # Get minimum requirements for description
     min_requirements = get_minimum_requirements(effective_timeframe)
