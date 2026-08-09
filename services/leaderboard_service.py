@@ -11,7 +11,6 @@ from models import QuizStats, QuizSubmission, QuizSession
 from models.trophy_quiz_submission import TrophyQuizSubmission
 from models.trophy_quiz_session import TrophyQuizSession
 from stats_core import calculate_win_percentage, calculate_team_draft_win_percentage
-from bot_registry import get_bot
 
 # Win Streak minimum requirements by timeframe
 STREAK_MINIMUMS = {
@@ -181,15 +180,15 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
                 if p.display_name:
                     name_lookup[p.player_id] = p.display_name
 
-        # Live Discord fallback for players with no stored name anywhere
-        # (legacy-only accounts): resolve through the registered bot when
-        # available -- None outside a running bot (tests, scripts), where
-        # get_member_name degrades to "User <id>" as before.
-        _bot = get_bot()
-        discord_guild = _bot.get_guild(int(guild_id)) if _bot else None
-
+        # Stored names are complete: the dispnamefill0 migration filled
+        # every name derivable from local evidence, and the one-time
+        # scripts/backfill_legacy_display_names.py resolved the legacy-only
+        # remainder through Discord. The live signup path keeps names
+        # current, so there is no live-lookup fallback here (that reach
+        # was issue #388) -- a miss means a deleted account and degrades
+        # to get_member_name's "User <id>" formatting.
         for player_id, player_records in per_player.items():
-            display_name = name_lookup.get(player_id) or get_member_name(discord_guild, player_id)
+            display_name = name_lookup.get(player_id) or get_member_name(None, player_id)
 
             totals = match_totals(player_records)
             matches_played = totals["matches_played"]

@@ -1,11 +1,10 @@
 import discord
 from datetime import datetime, timedelta
 from sqlalchemy import select, func
-from session import AsyncSessionLocal, DraftSession, PlayerStats
+from session import AsyncSessionLocal, PlayerStats
 from models.win_streak_history import WinStreakHistory
 from models.perfect_streak_history import PerfectStreakHistory
 from loguru import logger
-from bot_registry import get_bot
 from helpers.display_names import get_member_name
 from stats_core import get_timeframe_start_date, calculate_win_percentage, calculate_team_draft_win_percentage
 
@@ -106,14 +105,14 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                         if ender_stats:
                             longest_perfect_streak_ender = ender_stats.display_name
 
-                # Live Discord fallback for a player with no stored name --
-                # same pattern as the leaderboards, never sign_ups JSON (a
-                # display artifact whose stale entries used to shadow the
-                # kept-in-sync PlayerStats.display_name).
+                # Stored names are complete (dispnamefill0 migration +
+                # scripts/backfill_legacy_display_names.py; the live signup
+                # path keeps them current) -- no live lookup, no sign_ups
+                # JSON scan (a stale display artifact that used to shadow
+                # good stored names). A miss means a deleted account and
+                # degrades to get_member_name's "User <id>" formatting.
                 if display_name == "Unknown":
-                    _bot = get_bot()
-                    discord_guild = _bot.get_guild(int(guild_id)) if _bot and guild_id else None
-                    display_name = get_member_name(discord_guild, user_id)
+                    display_name = get_member_name(None, user_id)
 
                 # Count matches, drafts, trophies, and the team-draft record
                 # from the match-result ledger (the source of truth the
@@ -367,17 +366,13 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
                         player2_stats = player2_result.scalar_one_or_none()
                         user2_display_name = player2_stats.display_name if player2_stats else "Unknown"
                         
-                    # Live Discord fallback for names missing from
-                    # PlayerStats -- same pattern as /stats and the
-                    # leaderboards, never sign_ups JSON (a stale display
-                    # artifact).
-                    if user1_display_name == "Unknown" or user2_display_name == "Unknown":
-                        _bot = get_bot()
-                        discord_guild = _bot.get_guild(int(guild_id)) if _bot and guild_id else None
-                        if user1_display_name == "Unknown":
-                            user1_display_name = get_member_name(discord_guild, user1_id)
-                        if user2_display_name == "Unknown":
-                            user2_display_name = get_member_name(discord_guild, user2_id)
+                    # Stored names are complete (see get_player_statistics)
+                    # -- a miss means a deleted account and degrades to
+                    # get_member_name's "User <id>" formatting.
+                    if user1_display_name == "Unknown":
+                        user1_display_name = get_member_name(None, user1_id)
+                    if user2_display_name == "Unknown":
+                        user2_display_name = get_member_name(None, user2_id)
         
         # Count head-to-head matches and draft-level (teammate/opponent)
         # records from the match-result ledger (the source of truth the
@@ -607,40 +602,14 @@ async def find_discord_id_by_display_name_fuzzy(display_name, guild_id=None):
                 player_result = await session.execute(player_query)
                 players = player_result.scalars().all()
                 
-                # Add all database matches
+                # Add all database matches. PlayerStats display names are
+                # complete (dispnamefill0 migration + one-time legacy
+                # resolution script; the live signup path keeps them
+                # current), so there is no sign_ups-JSON fallback scan --
+                # that display artifact carried stale entries.
                 for player in players:
                     matches.append((player.player_id, player.display_name))
-                
-                # If none found in database, query recent drafts
-                if not matches:
-                    recent_drafts_query = select(DraftSession).order_by(DraftSession.teams_start_time.desc())
-                    
-                    # Add guild_id filter if provided
-                    if guild_id:
-                        recent_drafts_query = recent_drafts_query.where(DraftSession.guild_id == guild_id)
-                        
-                    recent_drafts_query = recent_drafts_query.limit(100)
-                    recent_drafts_result = await session.execute(recent_drafts_query)
-                    recent_drafts = recent_drafts_result.scalars().all()
-                    
-                    # Keep track of all seen display names to avoid duplicates
-                    seen_display_names = set()
-                    
-                    # Search through sign_ups in recent drafts
-                    for draft in recent_drafts:
-                        if not draft.sign_ups:
-                            continue
-                        
-                        # Process sign_ups
-                        sign_ups = draft.sign_ups
-                        
-                        # Search for partial matches in display_names (case-insensitive)
-                        for user_id, user_display_name in sign_ups.items():
-                            if isinstance(user_display_name, str) and display_name.lower() in user_display_name.lower():
-                                if user_display_name not in seen_display_names:
-                                    matches.append((user_id, user_display_name))
-                                    seen_display_names.add(user_display_name)
-                
+
                 # Check for exact match first (prioritize exact matches)
                 for user_id, user_display_name in matches:
                     if user_display_name.lower() == display_name.lower():
