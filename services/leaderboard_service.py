@@ -350,11 +350,10 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
                     seen_pairs.add(pair_key)
 
                     # Ties are drafts played together: they count toward the
-                    # sample-size gate and the denominator (one tie policy).
+                    # sample-size gate and the denominator (one tie policy,
+                    # already applied where win_percentage was stored above).
                     if teammate_data["drafts_played"] >= min_partnership_drafts:
-                        win_percentage = calculate_team_draft_win_percentage(
-                            teammate_data["drafts_won"], teammate_data["drafts_lost"],
-                            teammate_data["drafts_tied"])
+                        win_percentage = teammate_data["win_percentage"]
                         if win_percentage >= 50:
                             partnership = {
                                 "player_id": player_id,
