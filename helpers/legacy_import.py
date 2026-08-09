@@ -13,18 +13,11 @@ idempotent via the session id prefix.
 migrate_guild_history re-guilds the old server's native DraftBot rows (the
 three weeks between the old bot's retirement and the server move) the same
 way, so the full history replays as one stream.
-backfill_sign_up_history completes the sign_up_history event table from the
-final-roster sign_ups JSON of sessions that predate live event recording
-(started 2025-08), so the event table is THE one historical signup record.
-backfill_missing_display_names then names legacy-only players from the best
-sources: another guild's player_stats, else their latest sign_up_history
-event.
 
 Only stdlib + sqlalchemy; every function takes a raw SQLAlchemy Connection,
 so the legacyimport0 migration and tests drive it against any engine.
 """
 import csv
-import json
 from pathlib import Path
 
 from sqlalchemy import text
@@ -137,98 +130,3 @@ def migrate_guild_history(connection, old_guild=OLD_GUILD_ID, new_guild=CURRENT_
     connection.execute(text(
         "DELETE FROM player_stats WHERE guild_id=:old"), {"old": old_guild})
     return moved
-
-
-def backfill_sign_up_history(connection) -> int:
-    """Synthesize 'join' events from final-roster sign_ups JSON for sessions
-    recorded before live event tracking existed (2025-08).
-
-    Only sessions with a sign_ups roster and ZERO existing history rows are
-    touched, so real event streams are never mixed with synthetic ones and
-    re-runs are no-ops. Synthetic events carry the session's start time --
-    the roster is a snapshot, so per-user join times are unknowable.
-    Returns events created.
-    """
-    import uuid as _uuid
-
-    rows = connection.execute(text(
-        "SELECT d.session_id, d.guild_id, d.draft_start_time, d.sign_ups "
-        "FROM draft_sessions d WHERE d.sign_ups IS NOT NULL AND NOT EXISTS "
-        "(SELECT 1 FROM sign_up_history h WHERE h.session_id = d.session_id)"
-    )).fetchall()
-
-    events = []
-    for session_id, guild_id, started_at, su in rows:
-        try:
-            roster = json.loads(su) if isinstance(su, str) else su
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(roster, dict):
-            continue
-        for pid, name in roster.items():
-            if not isinstance(name, str):
-                name = None
-            events.append({
-                "id": str(_uuid.uuid4()), "sid": session_id, "uid": pid,
-                "n": name, "ts": started_at, "g": guild_id})
-    if events:
-        connection.execute(text(
-            "INSERT INTO sign_up_history (id, session_id, user_id, "
-            "user_display_name, action, timestamp, guild_id) "
-            "VALUES (:id, :sid, :uid, :n, 'join', :ts, :g)"), events)
-    return len(events)
-
-
-def backfill_missing_display_names(connection) -> int:
-    """Fill missing player_stats.display_name from the best available source.
-
-    Legacy-only players (imported history, never drafted live) have stats
-    rows with no display name, so leaderboards fall back to "User <id>".
-    Two data sources can name many of them, in priority order:
-    1. their display_name in ANY other guild's player_stats row (maintained
-       by the live path, freshest), then
-    2. their most recent appearance in a draft session's sign_ups JSON
-       (the name they signed up under at the time).
-    Players present in neither stay unnamed and resolve at display time via
-    the live Discord member lookup (if still in the server). Idempotent:
-    only rows with NULL/'' names are touched. Returns rows updated.
-    """
-    # One scan buckets every stats row: rows with empty names are targets,
-    # rows with names feed the cross-guild source for those same targets.
-    targets: set = set()
-    named_rows: list = []
-    for pid, name in connection.execute(text(
-        "SELECT player_id, display_name FROM player_stats")).fetchall():
-        if name:
-            named_rows.append((pid, name))
-        else:
-            targets.add(pid)
-    if not targets:
-        return 0
-
-    names: dict[str, str] = {}
-    for pid, name in named_rows:
-        if pid in targets and pid not in names:
-            names[pid] = name
-
-    remaining = targets - set(names)
-    if remaining:
-        # sign_up_history is complete back to the earliest rosters once
-        # backfill_sign_up_history has run (the migration runs it first);
-        # ascending timestamp means the latest event's name wins.
-        signup_names: dict[str, str] = {}
-        for pid, name in connection.execute(text(
-            "SELECT user_id, user_display_name FROM sign_up_history "
-            "WHERE user_display_name IS NOT NULL AND user_display_name != '' "
-            "ORDER BY timestamp")).fetchall():
-            if pid in remaining:
-                signup_names[pid] = name
-        names.update(signup_names)
-
-    if names:
-        # List of dicts triggers executemany -- same idiom as the import above.
-        connection.execute(text(
-            "UPDATE player_stats SET display_name = :n "
-            "WHERE player_id = :p AND (display_name IS NULL OR display_name = '')"),
-            [{"n": name, "p": pid} for pid, name in names.items()])
-    return len(names)

@@ -36,11 +36,7 @@ DDL = [
         games_won INTEGER, games_lost INTEGER,
         PRIMARY KEY (player_id, guild_id))""",
     """CREATE TABLE draft_sessions (
-        session_id TEXT, guild_id TEXT, session_type TEXT, draft_start_time TEXT,
-        sign_ups TEXT)""",
-    """CREATE TABLE sign_up_history (
-        id TEXT PRIMARY KEY, session_id TEXT, user_id TEXT,
-        user_display_name TEXT, action TEXT, timestamp TEXT, guild_id TEXT)""",
+        session_id TEXT, guild_id TEXT, session_type TEXT, draft_start_time TEXT)""",
     """CREATE TABLE match_results (
         id INTEGER PRIMARY KEY, session_id TEXT, match_number INTEGER,
         player1_id TEXT, player2_id TEXT, winner_id TEXT, guild_id TEXT,
@@ -69,11 +65,11 @@ def test_community_data_present_gates_foreign_deployments():
     conn = _conn()
     assert community_data_present(conn) is False
     conn.execute(text(
-        "INSERT INTO draft_sessions (session_id, guild_id, session_type, draft_start_time) VALUES ('s1', :g, 'staked', '2026-01-01')"),
+        "INSERT INTO draft_sessions VALUES ('s1', :g, 'staked', '2026-01-01')"),
         {"g": "999888777666555444"})
     assert community_data_present(conn) is False   # some OTHER community's data
     conn.execute(text(
-        "INSERT INTO draft_sessions (session_id, guild_id, session_type, draft_start_time) VALUES ('s2', :g, 'staked', '2026-01-01')"),
+        "INSERT INTO draft_sessions VALUES ('s2', :g, 'staked', '2026-01-01')"),
         {"g": NEW})
     assert community_data_present(conn) is True
 
@@ -107,7 +103,7 @@ def test_import_inserts_and_is_idempotent(tmp_path):
 def test_migrate_guild_history_reguilds_sessions_and_matches():
     conn = _conn()
     conn.execute(text(
-        "INSERT INTO draft_sessions (session_id, guild_id, session_type, draft_start_time) VALUES ('native-old', :old, 'staked', '2025-03-15')"),
+        "INSERT INTO draft_sessions VALUES ('native-old', :old, 'staked', '2025-03-15')"),
         {"old": OLD})
     conn.execute(text(
         "INSERT INTO match_results (session_id, player1_id, player2_id, winner_id, guild_id, result_submitted_at) "
@@ -135,14 +131,14 @@ def test_full_history_replays_as_one_stream(tmp_path):
     conn = _conn()
     import_legacy_history(conn, _write_csvs(tmp_path), target_guild=NEW)  # 111 1-1 222
     conn.execute(text(
-        "INSERT INTO draft_sessions (session_id, guild_id, session_type, draft_start_time) VALUES ('native-old', :old, 'staked', '2025-03-15')"),
+        "INSERT INTO draft_sessions VALUES ('native-old', :old, 'staked', '2025-03-15')"),
         {"old": OLD})
     conn.execute(text(
         "INSERT INTO match_results (session_id, player1_id, player2_id, winner_id, guild_id, result_submitted_at) "
         "VALUES ('native-old', '111', '222', '111', :old, '2025-03-15 10:00:00')"), {"old": OLD})
     migrate_guild_history(conn, OLD, NEW)
     conn.execute(text(
-        "INSERT INTO draft_sessions (session_id, guild_id, session_type, draft_start_time) VALUES ('native-new', :new, 'staked', '2026-01-01')"),
+        "INSERT INTO draft_sessions VALUES ('native-new', :new, 'staked', '2026-01-01')"),
         {"new": NEW})
     conn.execute(text(
         "INSERT INTO match_results (session_id, player1_id, player2_id, winner_id, guild_id, result_submitted_at) "
@@ -157,68 +153,3 @@ def test_full_history_replays_as_one_stream(tmp_path):
     assert row[2] > PRIOR_MU
     assert conn.execute(text(
         "SELECT COUNT(*) FROM player_stats WHERE guild_id=:g"), {"g": OLD}).scalar() == 0
-
-
-def test_backfill_sign_up_history_synthesizes_final_rosters():
-    from helpers.legacy_import import backfill_sign_up_history
-    conn = _conn()
-    # session with sign_ups but no events -> synthesized joins
-    conn.execute(text(
-        "INSERT INTO draft_sessions (session_id, guild_id, session_type, draft_start_time, sign_ups) "
-        "VALUES ('s1', :g, 'staked', '2025-01-01', :su)"),
-        {"g": NEW, "su": '{"1": "Alpha", "2": "Beta"}'})
-    # session that already has real events -> untouched
-    conn.execute(text(
-        "INSERT INTO draft_sessions (session_id, guild_id, session_type, draft_start_time, sign_ups) "
-        "VALUES ('s2', :g, 'staked', '2026-01-01', :su)"), {"g": NEW, "su": '{"3": "Gamma"}'})
-    conn.execute(text(
-        "INSERT INTO sign_up_history (id, session_id, user_id, user_display_name, action, timestamp, guild_id) "
-        "VALUES ('e1', 's2', '3', 'RealGamma', 'join', '2026-01-01 10:00:00', :g)"), {"g": NEW})
-
-    created = backfill_sign_up_history(conn)
-    assert created == 2                     # Alpha + Beta only
-    rows = conn.execute(text(
-        "SELECT session_id, user_id, user_display_name, action FROM sign_up_history ORDER BY user_id")).fetchall()
-    assert ("s1", "1", "Alpha", "join") in rows
-    assert ("s1", "2", "Beta", "join") in rows
-    assert len([r for r in rows if r[0] == "s2"]) == 1   # untouched
-    assert backfill_sign_up_history(conn) == 0            # idempotent
-
-
-def test_backfill_missing_display_names_uses_best_source():
-    from helpers.legacy_import import backfill_missing_display_names, backfill_sign_up_history
-    conn = _conn()
-    # nameless in NEW guild; named 'CrossName' in another guild's stats
-    conn.execute(text(
-        "INSERT INTO player_stats (player_id, guild_id, display_name, true_skill_mu, true_skill_sigma, games_won, games_lost) "
-        "VALUES ('1', :new, NULL, 25, 8.3, 1, 0), ('1', 'other', 'CrossName', 25, 8.3, 1, 0)"), {"new": NEW})
-    # nameless; only source is signup events (two sessions, newest event wins)
-    conn.execute(text(
-        "INSERT INTO player_stats (player_id, guild_id, display_name, true_skill_mu, true_skill_sigma, games_won, games_lost) "
-        "VALUES ('2', :new, '', 25, 8.3, 1, 0)"), {"new": NEW})
-    conn.execute(text(
-        "INSERT INTO draft_sessions (session_id, guild_id, session_type, draft_start_time, sign_ups) "
-        "VALUES ('s-old', :new, 'staked', '2025-01-01', :su1), ('s-new', :new, 'staked', '2026-01-01', :su2)"),
-        {"new": NEW, "su1": '{"2": "OldNick"}', "su2": '{"2": "NewNick"}'})
-    # a queue-leaver captured ONLY as a history event (never in final sign_ups)
-    conn.execute(text(
-        "INSERT INTO player_stats (player_id, guild_id, display_name, true_skill_mu, true_skill_sigma, games_won, games_lost) "
-        "VALUES ('4', :new, NULL, 25, 8.3, 1, 0)"), {"new": NEW})
-    conn.execute(text(
-        "INSERT INTO sign_up_history (id, session_id, user_id, user_display_name, action, timestamp, guild_id) "
-        "VALUES ('e2', 's-x', '4', 'Leaver', 'leave', '2026-02-01 10:00:00', :g)"), {"g": NEW})
-    # already-named player must be untouched
-    conn.execute(text(
-        "INSERT INTO player_stats (player_id, guild_id, display_name, true_skill_mu, true_skill_sigma, games_won, games_lost) "
-        "VALUES ('3', :new, 'KeepMe', 25, 8.3, 1, 0)"), {"new": NEW})
-
-    backfill_sign_up_history(conn)          # the migration's step 1
-    filled = backfill_missing_display_names(conn)
-
-    names = dict(conn.execute(text(
-        "SELECT player_id, display_name FROM player_stats WHERE guild_id=:g"), {"g": NEW}).fetchall())
-    assert names["1"] == "CrossName"      # cross-guild stats beat signup events
-    assert names["2"] == "NewNick"        # newest signup event wins
-    assert names["4"] == "Leaver"         # event-only player resolved too
-    assert names["3"] == "KeepMe"
-    assert filled == 3
