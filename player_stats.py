@@ -1,12 +1,17 @@
 import discord
-import json
 from datetime import datetime, timedelta
-from sqlalchemy import select, func, text
-from session import AsyncSessionLocal, DraftSession, MatchResult, PlayerStats
+from sqlalchemy import select, func
+from session import AsyncSessionLocal, DraftSession, PlayerStats
 from models.win_streak_history import WinStreakHistory
 from models.perfect_streak_history import PerfectStreakHistory
 from loguru import logger
+from bot_registry import get_bot
+from helpers.display_names import get_member_name
 from stats_core import get_timeframe_start_date, calculate_win_percentage, calculate_team_draft_win_percentage
+
+# Cube-specific stats appear in the /stats embed only at this many
+# completed drafts of that cube (the field title states the same number).
+MIN_CUBE_DRAFTS_DISPLAY = 5
 
 async def get_player_statistics(user_id, time_frame=None, user_display_name=None, guild_id=None,
                                 snapshot=None):
@@ -101,37 +106,14 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                         if ender_stats:
                             longest_perfect_streak_ender = ender_stats.display_name
 
-                # Define the pattern for JSON searches (used for display name lookup)
-                pattern = f'%"{user_id}"%'  # Pattern to match user_id in JSON string
-
-                # First, try to get the display name from any sign_ups entries, with guild_id filter
-                name_query_text = """
-                    SELECT sign_ups FROM draft_sessions 
-                    WHERE json_extract(sign_ups, '$') LIKE :pattern
-                    AND guild_id = :guild_id
-                """                
-                name_query_text += " ORDER BY teams_start_time DESC LIMIT 1"
-                name_query = text(name_query_text)
-                
-                name_params = {"pattern": pattern, "guild_id": guild_id}              
-                name_result = await session.execute(name_query, name_params)
-                sign_ups_json = name_result.scalar()
-                
-                # Extract display name from sign_ups JSON
-                if sign_ups_json:
-                    try:
-                        # Handle string or dict format
-                        if isinstance(sign_ups_json, str):
-                            sign_ups = json.loads(sign_ups_json)
-                        else:
-                            sign_ups = sign_ups_json
-                            
-                        # Find the user's display name
-                        if user_id in sign_ups:
-                            display_name = sign_ups[user_id]
-                            logger.info(f"Found display name '{display_name}' for user {user_id}")
-                    except Exception as e:
-                        logger.error(f"Error parsing sign_ups JSON: {e}")
+                # Live Discord fallback for a player with no stored name --
+                # same pattern as the leaderboards, never sign_ups JSON (a
+                # display artifact whose stale entries used to shadow the
+                # kept-in-sync PlayerStats.display_name).
+                if display_name == "Unknown":
+                    _bot = get_bot()
+                    discord_guild = _bot.get_guild(int(guild_id)) if _bot and guild_id else None
+                    display_name = get_member_name(discord_guild, user_id)
 
                 # Count matches, drafts, trophies, and the team-draft record
                 # from the match-result ledger (the source of truth the
@@ -166,7 +148,7 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
 
                 # Get stats by cube type. Wins/losses/drafts come straight
                 # from the ledger fold (cube_breakdown); this dict is
-                # unfiltered -- the embed applies the "min 5 drafts" display
+                # unfiltered -- the embed applies the MIN_CUBE_DRAFTS_DISPLAY
                 # threshold itself.
                 cube_stats = {}
                 for cube_name, cube_totals in cube_breakdown(records).items():
@@ -327,11 +309,11 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
         value += "\n*New players start at 1500 · a 100-point gap ≈ 60% match favorite*"
         embed.add_field(name="🎯 Skill Rating", value=value, inline=False)
 
-    # Add cube-specific stats if any are available (min 5 drafts to display,
-    # matching the field's title)
+    # Add cube-specific stats if any are available (the field's title
+    # states the same MIN_CUBE_DRAFTS_DISPLAY threshold)
     displayable_cube_stats = {
         cube_name: stats for cube_name, stats in stats_lifetime['cube_stats'].items()
-        if stats['drafts_played'] >= 5
+        if stats['drafts_played'] >= MIN_CUBE_DRAFTS_DISPLAY
     }
     if displayable_cube_stats:
         # Convert to list and sort by drafts_played in descending order
@@ -346,7 +328,7 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
             cube_stats_text += f"**{cube_name}**: {stats['win_percentage']:.1f}% ({stats['drafts_played']} Drafts)\n"
         
         embed.add_field(
-            name="Cube Win Percentage (min 5 drafts)",
+            name=f"Cube Win Percentage (min {MIN_CUBE_DRAFTS_DISPLAY} drafts)",
             value=cube_stats_text,
             inline=False
         )
@@ -385,38 +367,24 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
                         player2_stats = player2_result.scalar_one_or_none()
                         user2_display_name = player2_stats.display_name if player2_stats else "Unknown"
                         
-                    # If still don't have names, search in sign_ups
+                    # Live Discord fallback for names missing from
+                    # PlayerStats -- same pattern as /stats and the
+                    # leaderboards, never sign_ups JSON (a stale display
+                    # artifact).
                     if user1_display_name == "Unknown" or user2_display_name == "Unknown":
-                        # Find in recent drafts
-                        recent_drafts_query = select(DraftSession).order_by(DraftSession.teams_start_time.desc())
-                        if guild_id:
-                            recent_drafts_query = recent_drafts_query.where(DraftSession.guild_id == guild_id)
-                        recent_drafts_query = recent_drafts_query.limit(50)
-                        recent_drafts_result = await session.execute(recent_drafts_query)
-                        recent_drafts = recent_drafts_result.scalars().all()
-                        
-                        for draft in recent_drafts:
-                            if not draft.sign_ups:
-                                continue
-                            
-                            # Process sign_ups
-                            sign_ups = draft.sign_ups
-                            
-                            if user1_display_name == "Unknown" and user1_id in sign_ups:
-                                user1_display_name = sign_ups[user1_id]
-                            
-                            if user2_display_name == "Unknown" and user2_id in sign_ups:
-                                user2_display_name = sign_ups[user2_id]
-                            
-                            # Break if we have both names
-                            if user1_display_name != "Unknown" and user2_display_name != "Unknown":
-                                break
+                        _bot = get_bot()
+                        discord_guild = _bot.get_guild(int(guild_id)) if _bot and guild_id else None
+                        if user1_display_name == "Unknown":
+                            user1_display_name = get_member_name(discord_guild, user1_id)
+                        if user2_display_name == "Unknown":
+                            user2_display_name = get_member_name(discord_guild, user2_id)
         
         # Count head-to-head matches and draft-level (teammate/opponent)
         # records from the match-result ledger (the source of truth the
         # rating system already uses) instead of sign_ups JSON, per-draft
         # team_a/team_b queries, and teams_start_time -- scope is
-        # RATING_SESSION_TYPES via fetch_session_records, same as /stats.
+        # RATING_SESSION_TYPES via the ledger fold (LedgerSnapshot), same
+        # as /stats.
         from services.ledger_stats import LedgerSnapshot, h2h_totals
 
         def _match_record(h):

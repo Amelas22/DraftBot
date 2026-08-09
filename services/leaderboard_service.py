@@ -154,8 +154,9 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
         # legacy drafts (no victory_message_id_results_channel). Scope is
         # RATING_SESSION_TYPES via fetch_session_records, same as /stats
         # and /record.
-        from stats_core import calculate_win_percentage, calculate_team_draft_win_percentage
-        from services.ledger_stats import fetch_session_records, match_totals, draft_totals, team_record, side_outcome
+        from services.ledger_stats import (
+            fetch_session_records, match_totals, draft_totals, team_record,
+            side_eligible, side_outcome)
 
         records = await fetch_session_records(guild_id, since=start_date)
         per_player: dict[str, list] = {}
@@ -236,13 +237,13 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
         # pass so every player's display_name is already resolved above,
         # regardless of dict iteration order.
         #
-        # Side-dependent: a record whose side couldn't be resolved
-        # (side=None -- see SessionRecord/_infer_unlisted_sides) is skipped
-        # here rather than counted as a fabricated teammate loss/tie.
+        # Side-dependent: gated by side_eligible (same predicate as
+        # team_record and h2h) -- a record whose side couldn't be resolved
+        # is skipped rather than counted as a fabricated teammate loss/tie.
         for player_id, player_records in per_player.items():
             teammate_stats = players_data[player_id]["teammate_win_rates"]
             for r in player_records:
-                if not r.completed or not r.fits_window or r.side is None:
+                if not side_eligible(r):
                     continue
                 teammates = r.teammates
                 if not teammates:

@@ -1,31 +1,16 @@
 """The one ledger fold behind /stats, /record, and leaderboards
-(spec 2026-08-06-ledger-stats-unification-design)."""
-import os
-import tempfile
+(spec 2026-08-06-ledger-stats-unification-design).
+
+test_db comes from tests/conftest.py."""
 from datetime import datetime
+from types import MappingProxyType
 
 import pytest
-import pytest_asyncio
-from sqlalchemy.ext.asyncio import create_async_engine
 
-from database.models_base import Base
 from database.db_session import AsyncSessionLocal
 from models.draft_session import DraftSession
 from models.match import MatchResult
 from services.ledger_stats import SessionRecord
-
-
-@pytest_asyncio.fixture
-async def test_db():
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
-    tmp.close()
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp.name}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    AsyncSessionLocal.configure(bind=engine)
-    yield engine
-    await engine.dispose()
-    os.unlink(tmp.name)
 
 
 async def _seed(session_id="s1", guild="g", stype="staked", stage="completed",
@@ -59,9 +44,9 @@ async def test_records_basic_team_session(test_db):
     records = await fetch_session_records("g", player_id="1")
     assert len(records) == 1
     r = records[0]
-    assert (r.wins, r.losses, r.matches) == (3, 0, 3)
+    assert (r.wins, r.matches) == (3, 3)
     assert r.completed is True
-    assert r.opponents["4"] == (1, 0)
+    assert r.window_opponents["4"] == (1, 0)
     # team A won 7 of 9 session matches (winners: 1,5,3,1,2,3,1,4,3 -> A,B,A,A,A,A,A,B,A)
     assert (r.side_wins, r.side_losses) == (7, 2)
     assert r.side == "a"
@@ -149,7 +134,7 @@ async def test_unresolvable_side_record_excluded_from_side_dependent_projections
 
     r2 = by_pid["2"]
     assert r2.side is None
-    assert (r2.wins, r2.losses, r2.matches) == (1, 0, 1)   # match still counted
+    assert (r2.wins, r2.matches) == (1, 1)   # match still counted
 
     # Side-independent projections: count the unresolved-side record like
     # any other.
@@ -229,7 +214,7 @@ async def test_never_faced_opponent_not_misclassified_as_teammate_4v4(test_db):
     records = await fetch_session_records("g", player_id="1")
     r = records[0]
 
-    assert "8" not in r.opponents              # sanity: they truly never played
+    assert "8" not in r.window_opponents       # sanity: they truly never played
     assert "8" not in r.teammates              # the fix: opposing side, not a teammate
     assert {"2", "3", "4"} <= r.teammates       # real teammates still classified correctly
 
@@ -301,12 +286,12 @@ def _rec(**kw):
         player_id=base["player_id"], session_id=base["session_id"],
         session_type=base["session_type"], cube=base["cube"],
         completed=base["completed"], started_at=base["started_at"],
-        wins=base["wins"], losses=base["losses"], matches=base["matches"],
-        opponents={k: tuple(v) for k, v in base["opponents"].items()},
+        wins=base["wins"], matches=base["matches"],
         side=base["side"], side_wins=base["side_wins"],
         side_losses=base["side_losses"], fits_window=base["fits_window"],
         window_wins=base["window_wins"], window_matches=base["window_matches"],
-        window_opponents={k: tuple(v) for k, v in base["window_opponents"].items()},
+        window_opponents=MappingProxyType(
+            {k: tuple(v) for k, v in base["window_opponents"].items()}),
         participants=frozenset(base["participants"]),
         teammates=frozenset(base["teammates"]))
 

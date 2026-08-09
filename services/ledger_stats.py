@@ -14,15 +14,14 @@ import json
 from collections import namedtuple
 from dataclasses import dataclass
 from datetime import datetime
+from types import MappingProxyType
 
 from sqlalchemy import select
 
 from database.db_session import db_session
-from helpers.skill import RATING_SESSION_TYPES
+from helpers.skill import RATING_SESSION_TYPES, is_valid_match
 from models.draft_session import DraftSession
 from models.match import MatchResult
-
-RATED_TYPES = RATING_SESSION_TYPES
 
 # Lightweight stand-ins for the ORM rows the fold used to materialize.
 # fetch_session_records selects only these columns -- see its docstring --
@@ -43,9 +42,9 @@ class SessionRecord:
     nothing downstream should be able to mutate a shared record out from
     under another consumer.
 
-    `opponents`/`window_opponents` map opp_id -> (wins, losses) tuples
-    (immutable, unlike the mutable [w, l] accumulator lists the fold uses
-    internally). `participants`/`teammates` are frozensets.
+    `window_opponents` is a read-only mapping of opp_id -> (wins, losses)
+    tuples (MappingProxyType over a dict nothing else references).
+    `participants`/`teammates` are frozensets.
 
     `side` is 'a' | 'b' | None. None means the fixed-point side inference
     in _infer_unlisted_sides could not place this player on either side
@@ -65,16 +64,14 @@ class SessionRecord:
     completed: bool
     started_at: datetime | None
     wins: int
-    losses: int
     matches: int
-    opponents: dict
     side: str | None
     side_wins: int
     side_losses: int
     fits_window: bool
     window_wins: int
     window_matches: int
-    window_opponents: dict
+    window_opponents: MappingProxyType
     participants: frozenset
     teammates: frozenset
 
@@ -160,12 +157,12 @@ def _compute_teammates(pid, participants, sides, opponents) -> set:
     `opponents`. Side is the source of truth; `opponents` only breaks ties.
 
     Falls back to the old opponents-absence heuristic (never a recorded
-    opponent => teammate) for any pairing where a side can't be resolved
-    for pid or for the other participant -- i.e. participants left out of
-    `sides` entirely by _infer_unlisted_sides because they only ever faced
-    other side-unresolved players. That's the rare case; for everyone else
-    (the vast majority, including every 4v4 participant with a full
-    team_a/team_b listing) the real side decides it.
+    opponent => teammate) only when pid's OWN side is unresolved -- in
+    which case the record is emitted with side=None and skipped by every
+    side-dependent consumer anyway. When pid's side is known, a
+    participant whose side can't be resolved is never counted as a
+    teammate: there is no evidence for either side, and guessing
+    "teammate" from never-having-faced would misclassify them.
     """
     my_side = sides.get(pid)
     teammates = set()
@@ -173,12 +170,17 @@ def _compute_teammates(pid, participants, sides, opponents) -> set:
         if p == pid:
             continue
         their_side = sides.get(p)
-        if my_side is not None and their_side is not None:
+        if my_side is not None:
             if their_side == my_side:
                 teammates.add(p)
-            # else: resolved opposite side -> opponent, never a teammate,
-            # regardless of whether they ever actually played each other.
+            # else: resolved opposite side OR unresolvable -> never a
+            # teammate. An unresolvable participant can't be classified,
+            # and the old never-faced heuristic would leak them into a
+            # resolved side's teammate set (Codex re-review, finding 7).
         elif p not in opponents:
+            # Owner's own side is unresolved: this record is side=None and
+            # every side-dependent consumer skips it, so this fallback set
+            # is informational only.
             teammates.add(p)
     return teammates
 
@@ -204,7 +206,7 @@ async def fetch_guild_rows(guild_id: str) -> list:
             .join(DraftSession, MatchResult.session_id == DraftSession.session_id)
             .where(
                 DraftSession.guild_id == guild_id,
-                DraftSession.session_type.in_(RATED_TYPES),
+                DraftSession.session_type.in_(RATING_SESSION_TYPES),
                 MatchResult.winner_id.isnot(None),
             )
             .order_by(MatchResult.id)
@@ -213,24 +215,26 @@ async def fetch_guild_rows(guild_id: str) -> list:
 
 class LedgerSnapshot:
     """An opaque, already-fetched view of one guild's whole rated reported
-    history -- the row tuples from fetch_guild_rows, wrapped so callers
-    never see or hold onto the row shape directly. `.fold()` is cheap (pure,
-    in-memory) and can be called repeatedly for different players/windows
-    without re-querying; that's the whole point -- multi-timeframe callers
-    (three timeframes of /stats or /record) should `await
-    LedgerSnapshot.fetch(guild_id)` once and `.fold()` per view instead of
-    re-fetching per view.
+    history, wrapped so callers never see or hold onto the row shape
+    directly. Rows are grouped into per-session buckets ONCE here (the
+    fold-invariant work: validity guard, event times, participants);
+    `.fold()` then skips whole sessions that can't contribute to the
+    requested player/window view before doing any per-session work, so a
+    weekly or single-player fold costs a fraction of a lifetime one.
+    Multi-timeframe callers (three timeframes of /stats or /record) should
+    `await LedgerSnapshot.fetch(guild_id)` once and `.fold()` per view
+    instead of re-fetching per view.
     """
 
     def __init__(self, rows: list):
-        self._rows = rows
+        self._sessions = _group_sessions(rows)
 
     @classmethod
     async def fetch(cls, guild_id: str) -> "LedgerSnapshot":
         return cls(await fetch_guild_rows(guild_id))
 
     def fold(self, player_id: str = None, since=None) -> list[SessionRecord]:
-        return fold_session_records(self._rows, player_id=player_id, since=since)
+        return _fold_grouped(self._sessions, player_id=player_id, since=since)
 
 
 async def fetch_session_records(guild_id: str, player_id: str = None,
@@ -243,43 +247,73 @@ async def fetch_session_records(guild_id: str, player_id: str = None,
 
 
 def fold_session_records(rows, player_id: str = None, since=None) -> list[SessionRecord]:
-    """Per-(player, session) aggregates over reported rated matches (pure).
+    """Per-(player, session) aggregates over reported rated matches (pure):
+    _group_sessions + _fold_grouped in one call. LedgerSnapshot holders
+    skip the grouping step on every fold; this stays as the one-shot API
+    (and the reference implementation the tests exercise)."""
+    return _fold_grouped(_group_sessions(rows), player_id=player_id, since=since)
 
-    since filters individual matches by COALESCE(result_submitted_at,
-    draft_start_time); records with no in-window matches are omitted. When
-    since is None (lifetime), that filter doesn't run at all, so matches
-    with a NULL event time are kept -- deliberately the same outcome as
-    passing a since so far in the past it precedes all data, so every
-    lifetime caller (/stats, h2h, leaderboards) sees the same lifetime set
-    regardless of which of those two spellings it used to pass.
-    Guards mirror helpers.skill.backfill_skill_ratings.
-    """
+
+def _group_sessions(rows) -> dict:
+    """Group raw ledger rows into per-session buckets -- the fold-invariant
+    work (validity guard, event times, participants, max event time), done
+    once per snapshot so every .fold() can reuse it.
+    Guards mirror helpers.skill.backfill_skill_ratings (shared
+    is_valid_match predicate)."""
     by_session: dict[str, dict] = {}
     for row in rows:
-        match = _MatchRow(row.player1_id, row.player2_id, row.winner_id,
-                           row.result_submitted_at, row.id)
-        p1, p2, w = match.player1_id, match.player2_id, match.winner_id
-        if not p1 or not p2 or p1 == p2 or w not in (p1, p2):
+        if not is_valid_match(row.player1_id, row.player2_id, row.winner_id):
             continue
-        # Whole sessions are always folded in full; `since` only annotates
-        # which matches fall inside the window. A match with no placeable
-        # event time can never be inside a bounded window.
+        match = _MatchRow(row.player1_id, row.player2_id, row.winner_id,
+                          row.result_submitted_at, row.id)
+        # A match's window position is judged by COALESCE(result_submitted_at,
+        # draft_start_time); a match with neither can never be inside a
+        # bounded window.
         event_time = match.result_submitted_at or row.draft_start_time
-        in_window = since is None or (event_time is not None and event_time >= since)
         bucket = by_session.setdefault(row.session_id, {
-            "session_row": None, "matches": [], "in_window": []})
+            "session_row": None, "matches": [], "event_times": [],
+            "participants": set(), "max_event": None})
         if bucket["session_row"] is None:
             bucket["session_row"] = _SessionRow(
                 row.session_id, row.session_type, row.session_stage,
                 row.victory_message_id_results_channel, row.team_a,
                 row.team_b, row.cube, row.draft_start_time)
         bucket["matches"].append(match)
-        bucket["in_window"].append(in_window)
+        bucket["event_times"].append(event_time)
+        bucket["participants"].update((match.player1_id, match.player2_id))
+        if event_time is not None and (bucket["max_event"] is None
+                                       or event_time > bucket["max_event"]):
+            bucket["max_event"] = event_time
+    return by_session
 
+
+def _fold_grouped(by_session: dict, player_id: str = None, since=None) -> list[SessionRecord]:
+    """The fold body over pre-grouped session buckets.
+
+    since filters individual matches by their event time; records with no
+    in-window matches are omitted. When since is None (lifetime), that
+    filter doesn't run at all, so matches with a NULL event time are kept
+    -- deliberately the same outcome as passing a since so far in the past
+    it precedes all data, so every lifetime caller (/stats, h2h,
+    leaderboards) sees the same lifetime set regardless of which of those
+    two spellings it used to pass.
+
+    Sessions that can't contribute to the requested view are skipped
+    before any per-session work (side inference, teammate computation):
+    the requested player isn't a participant, or no match event reaches
+    the window (equivalent to every emitted record being dropped by the
+    window_matches==0 filter below, just without paying for it first).
+    """
     records = []
     for session_id, bucket in by_session.items():
+        if player_id is not None and player_id not in bucket["participants"]:
+            continue
+        if since is not None and (bucket["max_event"] is None
+                                  or bucket["max_event"] < since):
+            continue
         session_row, matches = bucket["session_row"], bucket["matches"]
-        window_flags = bucket["in_window"]
+        window_flags = [since is None or (t is not None and t >= since)
+                        for t in bucket["event_times"]]
         # Owner-ruled windowing: whole-session facts are all-or-nothing —
         # the session "fits" only when EVERY match event lies inside the
         # window. Straddlers contribute their in-window matches to match
@@ -327,17 +361,16 @@ def fold_session_records(rows, player_id: str = None, since=None) -> list[Sessio
                 completed=completed,
                 started_at=session_row.draft_start_time,
                 wins=rec["wins"],
-                losses=rec["losses"],
                 matches=rec["wins"] + rec["losses"],
-                opponents={opp: tuple(pair) for opp, pair in rec["opponents"].items()},
                 side=my_side,
                 side_wins=side_wins,
                 side_losses=total - side_wins,
                 fits_window=fits_window,
                 window_wins=rec["window_wins"],
                 window_matches=rec["window_matches"],
-                window_opponents={opp: tuple(pair)
-                                   for opp, pair in rec["window_opponents"].items()},
+                window_opponents=MappingProxyType(
+                    {opp: tuple(pair)
+                     for opp, pair in rec["window_opponents"].items()}),
                 participants=frozenset(participants),
                 teammates=frozenset(_compute_teammates(
                     pid, participants, sides, rec["opponents"])),
@@ -377,6 +410,18 @@ def trophy_count(records) -> int:
                and r.wins == r.matches >= 3)
 
 
+def side_eligible(record) -> bool:
+    """THE gate for whole-session, side-dependent facts (team outcomes,
+    teammate splits, h2h draft splits): the session completed, fits the
+    window entirely, and the record-owner's side resolved. team_record,
+    h2h_totals, and the leaderboard teammate pass all go through here --
+    a side=None record must be skipped, never read through side_outcome
+    (its side_wins/side_losses are unreliable placeholders, see
+    SessionRecord). Deliberately NOT used by the side-independent
+    draft_totals/trophy_count, which count side=None records normally."""
+    return record.completed and record.fits_window and record.side is not None
+
+
 def side_outcome(record) -> str:
     """'won' | 'lost' | 'tied' for the record-owner's side of one session.
     THE won/lost/tied policy -- team_record, h2h_totals, and the
@@ -397,7 +442,7 @@ def team_record(records) -> dict:
     entirely rather than counted as a fabricated loss/tie."""
     tally = {"won": 0, "lost": 0, "tied": 0}
     for r in records:
-        if r.completed and r.fits_window and r.side is not None:
+        if side_eligible(r):
             tally[side_outcome(r)] += 1
     return {"played": sum(tally.values()), **tally}
 
@@ -466,8 +511,7 @@ def h2h_totals(records, opponent_id: str) -> dict:
         if pair:
             matches_won += pair[0]
             matches_played += pair[0] + pair[1]
-        if (not r.completed or not r.fits_window or r.side is None
-                or opponent_id not in r.participants):
+        if not side_eligible(r) or opponent_id not in r.participants:
             continue
         outcome = side_outcome(r)
         if opponent_id in r.teammates:              # same side
