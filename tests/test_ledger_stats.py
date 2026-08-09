@@ -230,6 +230,11 @@ def _rec(**kw):
     if base["teammates"] is None:
         base["teammates"] = (
             base["participants"] - {base["player_id"]} - set(base["opponents"].keys()))
+    # No-window defaults: window aggregates mirror the full session.
+    base.setdefault("fits_window", True)
+    base.setdefault("window_wins", base["wins"])
+    base.setdefault("window_matches", base["matches"])
+    base.setdefault("window_opponents", base["opponents"])
     return base
 
 
@@ -383,3 +388,46 @@ async def test_leaderboard_counts_premade_and_legacy(test_db):
     assert top["drafts_played"] == 2         # legacy-2 + pm
     assert top["matches_won"] == 4
     assert top["completed_matches"] == 4
+
+
+@pytest.mark.asyncio
+async def test_straddling_session_is_all_or_nothing_for_draft_facts(test_db):
+    """Owner ruling on windowing: whole-session facts (drafts, trophies,
+    team outcomes) apply to whole sessions only — a session that doesn't
+    fit entirely inside the window contributes NOTHING at the draft level,
+    while its in-window matches still count as matches."""
+    from services.ledger_stats import (
+        fetch_session_records, match_totals, draft_totals, trophy_count,
+        team_record)
+    # Session finished 5-1 for side A, but only the last two matches (1-1)
+    # fall inside the window: no draft-level contribution, especially not
+    # a fictional "tie".
+    await _seed(session_id="straddle", victory="v",
+                teams=(["1", "2"], ["8", "9"]), matches=[
+        ("1", "8", "1", datetime(2026, 5, 1)),
+        ("2", "9", "2", datetime(2026, 5, 1)),
+        ("1", "9", "1", datetime(2026, 5, 2)),
+        ("2", "8", "2", datetime(2026, 5, 2)),
+        ("1", "8", "1", datetime(2026, 6, 2)),   # in window
+        ("2", "9", "9", datetime(2026, 6, 2)),   # in window
+    ])
+    # Control: a session entirely inside the window, 3-0 trophy.
+    await _seed(session_id="inside", victory="v2",
+                teams=(["1"], ["9"]), matches=[
+        ("1", "9", "1", datetime(2026, 6, 3)),
+        ("1", "9", "1", datetime(2026, 6, 4)),
+        ("1", "9", "1", datetime(2026, 6, 5)),
+    ])
+
+    windowed = await fetch_session_records("g", player_id="1",
+                                           since=datetime(2026, 6, 1))
+    totals = match_totals(windowed)
+    assert totals["matches_played"] == 4      # 1 straddle match + 3 inside
+    assert totals["matches_won"] == 4
+    assert draft_totals(windowed) == 1        # straddler contributes no draft
+    assert trophy_count(windowed) == 1        # the inside 3-0 only
+    assert team_record(windowed) == {"played": 1, "won": 1, "lost": 0, "tied": 0}
+
+    lifetime = await fetch_session_records("g", player_id="1")
+    assert draft_totals(lifetime) == 2        # both count with no window
+    assert team_record(lifetime)["won"] == 2  # straddler's TRUE outcome: won 5-1

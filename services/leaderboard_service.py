@@ -238,7 +238,7 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
         for player_id, player_records in per_player.items():
             teammate_stats = players_data[player_id]["teammate_win_rates"]
             for r in player_records:
-                if not r["completed"]:
+                if not r["completed"] or not r["fits_window"]:
                     continue
                 teammates = r["teammates"]
                 if not teammates:

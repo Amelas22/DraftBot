@@ -191,27 +191,35 @@ def fold_session_records(rows, player_id: str = None, since=None) -> list[dict]:
         p1, p2, w = match.player1_id, match.player2_id, match.winner_id
         if not p1 or not p2 or p1 == p2 or w not in (p1, p2):
             continue
+        # Whole sessions are always folded in full; `since` only annotates
+        # which matches fall inside the window. A match with no placeable
+        # event time can never be inside a bounded window.
         event_time = match.result_submitted_at or row.draft_start_time
-        if since is not None and event_time is not None and event_time < since:
-            continue
-        if since is not None and event_time is None:
-            continue
+        in_window = since is None or (event_time is not None and event_time >= since)
         bucket = by_session.setdefault(row.session_id, {
-            "session_row": None, "matches": []})
+            "session_row": None, "matches": [], "in_window": []})
         if bucket["session_row"] is None:
             bucket["session_row"] = _SessionRow(
                 row.session_id, row.session_type, row.session_stage,
                 row.victory_message_id_results_channel, row.team_a,
                 row.team_b, row.cube, row.draft_start_time)
         bucket["matches"].append(match)
+        bucket["in_window"].append(in_window)
 
     records = []
     for session_id, bucket in by_session.items():
         session_row, matches = bucket["session_row"], bucket["matches"]
+        window_flags = bucket["in_window"]
+        # Owner-ruled windowing: whole-session facts are all-or-nothing —
+        # the session "fits" only when EVERY match event lies inside the
+        # window. Straddlers contribute their in-window matches to match
+        # totals but nothing at the draft level (no partial-session draft
+        # outcomes, e.g. a 5-1 session must never read as a windowed tie).
+        fits_window = all(window_flags)
         sides = _side_map(session_row, matches)
         side_tally = {"a": 0, "b": 0}
         per_player: dict[str, dict] = {}
-        for m in matches:
+        for m, in_window in zip(matches, window_flags):
             winner = m.winner_id
             loser = m.player2_id if winner == m.player1_id else m.player1_id
             winner_side = sides.get(winner)
@@ -219,10 +227,17 @@ def fold_session_records(rows, player_id: str = None, since=None) -> list[dict]:
                 side_tally[winner_side] += 1
             for me, opp, won in ((winner, loser, True), (loser, winner, False)):
                 rec = per_player.setdefault(me, {
-                    "wins": 0, "losses": 0, "opponents": {}})
+                    "wins": 0, "losses": 0, "opponents": {},
+                    "window_wins": 0, "window_matches": 0,
+                    "window_opponents": {}})
                 rec["wins" if won else "losses"] += 1
                 pair = rec["opponents"].setdefault(opp, [0, 0])
                 pair[0 if won else 1] += 1
+                if in_window:
+                    rec["window_matches"] += 1
+                    rec["window_wins"] += 1 if won else 0
+                    wpair = rec["window_opponents"].setdefault(opp, [0, 0])
+                    wpair[0 if won else 1] += 1
 
         total = side_tally["a"] + side_tally["b"]
         completed = _is_completed(session_row)
@@ -230,6 +245,8 @@ def fold_session_records(rows, player_id: str = None, since=None) -> list[dict]:
         for pid, rec in per_player.items():
             if player_id is not None and pid != player_id:
                 continue
+            if rec["window_matches"] == 0 and not fits_window:
+                continue    # nothing of this session touches the window
             my_side = sides.get(pid)
             side_wins = side_tally.get(my_side, 0) if my_side else 0
             records.append({
@@ -245,6 +262,10 @@ def fold_session_records(rows, player_id: str = None, since=None) -> list[dict]:
                 "opponents": rec["opponents"],
                 "side_wins": side_wins,
                 "side_losses": total - side_wins,
+                "fits_window": fits_window,
+                "window_wins": rec["window_wins"],
+                "window_matches": rec["window_matches"],
+                "window_opponents": rec["window_opponents"],
                 "participants": participants,
                 "teammates": _compute_teammates(
                     pid, participants, sides, rec["opponents"]),
@@ -254,33 +275,29 @@ def fold_session_records(rows, player_id: str = None, since=None) -> list[dict]:
 
 
 def match_totals(records) -> dict:
-    """Every reported match counts — same moment ratings move."""
+    """Every reported IN-WINDOW match counts — same moment ratings move.
+    (With no window, window totals equal full-session totals.)"""
     return {
-        "matches_played": sum(r["matches"] for r in records),
-        "matches_won": sum(r["wins"] for r in records),
+        "matches_played": sum(r["window_matches"] for r in records),
+        "matches_won": sum(r["window_wins"] for r in records),
     }
 
 
 def draft_totals(records) -> int:
-    """Completed sessions only (spec's completion predicate)."""
-    return sum(1 for r in records if r["completed"])
+    """Completed sessions that fit the window entirely (owner ruling:
+    whole-session facts are all-or-nothing per window)."""
+    return sum(1 for r in records if r["completed"] and r["fits_window"])
 
 
-# trophy_count and team_record both classify a whole draft (undefeated? which
-# side won?) from records built by fetch_session_records, which itself may
-# have been called with since= -- a window that includes only the matches
-# reported inside it, not the whole session. A session straddling the window
-# boundary (started before `since`, finished after it, or vice versa) is
-# classified here from its in-window matches only, so a draft that reads as
-# a trophy/win in a windowed timeframe can differ from its lifetime
-# classification (built from every match). That's accepted, deliberate
-# per-match-windowing semantics -- the alternative (pulling in out-of-window
-# matches to reclassify a session) would make "last 7 days" no longer mean
-# "what happened in the last 7 days."
+# Whole-session facts (trophies, team outcomes) are all-or-nothing per
+# window (owner ruling): a session contributes them only when it fits the
+# window entirely (fits_window), and always with its FULL record — partial
+# slices of a session never produce draft-level outcomes.
 def trophy_count(records) -> int:
     """Undefeated completed drafts with a full 3+ match slate."""
     return sum(1 for r in records
-               if r["completed"] and r["wins"] == r["matches"] >= 3)
+               if r["completed"] and r["fits_window"]
+               and r["wins"] == r["matches"] >= 3)
 
 
 def side_outcome(record) -> str:
@@ -297,7 +314,7 @@ def side_outcome(record) -> str:
 def team_record(records) -> dict:
     tally = {"won": 0, "lost": 0, "tied": 0}
     for r in records:
-        if r["completed"]:
+        if r["completed"] and r["fits_window"]:
             tally[side_outcome(r)] += 1
     return {"played": sum(tally.values()), **tally}
 
@@ -319,9 +336,9 @@ def cube_breakdown(records) -> dict:
         cube = r["cube"] or "Unknown"
         group = groups.setdefault(cube.lower(), {
             "wins": 0, "losses": 0, "drafts": 0, "spelling_counts": {}})
-        group["wins"] += r["wins"]
-        group["losses"] += r["losses"]
-        if r["completed"]:
+        group["wins"] += r["window_wins"]
+        group["losses"] += r["window_matches"] - r["window_wins"]
+        if r["completed"] and r["fits_window"]:
             group["drafts"] += 1
         group["spelling_counts"][cube] = group["spelling_counts"].get(cube, 0) + 1
         group["last_spelling"] = cube
@@ -354,11 +371,12 @@ def h2h_totals(records, opponent_id: str) -> dict:
     drafts_with = drafts_against = drafts_with_won = drafts_against_won = 0
     drafts_with_tied = drafts_against_tied = 0
     for r in records:
-        pair = r["opponents"].get(opponent_id)
+        pair = r["window_opponents"].get(opponent_id)
         if pair:
             matches_won += pair[0]
             matches_played += pair[0] + pair[1]
-        if not r["completed"] or opponent_id not in r["participants"]:
+        if (not r["completed"] or not r["fits_window"]
+                or opponent_id not in r["participants"]):
             continue
         outcome = side_outcome(r)
         if opponent_id in r["teammates"]:          # same side
