@@ -69,14 +69,14 @@ async def get_stats_embed_for_player(
         user = MockUser(player_id, display_name)
 
     # Get stats for all 3 timeframes -- one guild-history fetch, three folds
-    from services.ledger_stats import fetch_guild_rows
-    rows = await fetch_guild_rows(guild_id)
+    from services.ledger_stats import LedgerSnapshot
+    snapshot = await LedgerSnapshot.fetch(guild_id)
     stats_weekly = await get_player_statistics(player_id, 'week', display_name, guild_id,
-                                               prefetched_rows=rows)
+                                               snapshot=snapshot)
     stats_monthly = await get_player_statistics(player_id, 'month', display_name, guild_id,
-                                                prefetched_rows=rows)
+                                                snapshot=snapshot)
     stats_lifetime = await get_player_statistics(player_id, None, display_name, guild_id,
-                                                 prefetched_rows=rows)
+                                                 snapshot=snapshot)
 
     # Skill rating from stored TrueSkill μ/σ, gated on lifetime rated games.
     rating, provisional = await _player_skill_rating(player_id, guild_id)

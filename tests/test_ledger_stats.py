@@ -12,6 +12,7 @@ from database.models_base import Base
 from database.db_session import AsyncSessionLocal
 from models.draft_session import DraftSession
 from models.match import MatchResult
+from services.ledger_stats import SessionRecord
 
 
 @pytest_asyncio.fixture
@@ -58,14 +59,15 @@ async def test_records_basic_team_session(test_db):
     records = await fetch_session_records("g", player_id="1")
     assert len(records) == 1
     r = records[0]
-    assert (r["wins"], r["losses"], r["matches"]) == (3, 0, 3)
-    assert r["completed"] is True
-    assert r["opponents"]["4"] == [1, 0]
+    assert (r.wins, r.losses, r.matches) == (3, 0, 3)
+    assert r.completed is True
+    assert r.opponents["4"] == (1, 0)
     # team A won 7 of 9 session matches (winners: 1,5,3,1,2,3,1,4,3 -> A,B,A,A,A,A,A,B,A)
-    assert (r["side_wins"], r["side_losses"]) == (7, 2)
-    assert r["cube"] == "TestCube"
-    assert r["session_type"] == "staked"
-    assert r["participants"] == {"1", "2", "3", "4", "5", "6"}
+    assert (r.side_wins, r.side_losses) == (7, 2)
+    assert r.side == "a"
+    assert r.cube == "TestCube"
+    assert r.session_type == "staked"
+    assert r.participants == {"1", "2", "3", "4", "5", "6"}
 
 
 @pytest.mark.asyncio
@@ -77,8 +79,8 @@ async def test_legacy_session_sides_from_match_positions(test_db):
         ("1", "5", "5", None), ("2", "4", "2", None),
     ])
     r = next(r for r in await fetch_session_records("g", player_id="1"))
-    assert r["completed"] is True           # legacy- prefix counts as completed
-    assert (r["side_wins"], r["side_losses"]) == (2, 2)
+    assert r.completed is True           # legacy- prefix counts as completed
+    assert (r.side_wins, r.side_losses) == (2, 2)
 
 
 @pytest.mark.asyncio
@@ -92,8 +94,8 @@ async def test_guards_and_scope(test_db):
         ("1", "4", None, None),       # unreported: skipped
     ])
     records = await fetch_session_records("g", player_id="1")
-    assert [r["session_id"] for r in records] == ["ok"]
-    assert records[0]["matches"] == 1
+    assert [r.session_id for r in records] == ["ok"]
+    assert records[0].matches == 1
 
 
 @pytest.mark.asyncio
@@ -102,8 +104,8 @@ async def test_incomplete_native_session_flagged(test_db):
     await _seed(session_id="mid", stage="pairings", victory=None,
                 teams=(["1"], ["2"]), matches=[("1", "2", "1", None)])
     r = (await fetch_session_records("g", player_id="1"))[0]
-    assert r["completed"] is False
-    assert r["wins"] == 1                   # match still counts as a match
+    assert r.completed is False
+    assert r.wins == 1                   # match still counts as a match
 
 
 @pytest.mark.asyncio
@@ -117,9 +119,59 @@ async def test_since_filters_by_match_event_time(test_db):
                 matches=[("1", "2", "2", datetime(2026, 6, 1, 12))])
     recent = await fetch_session_records("g", player_id="1",
                                          since=datetime(2026, 1, 1))
-    assert [r["session_id"] for r in recent] == ["new"]
+    assert [r.session_id for r in recent] == ["new"]
     lifetime = await fetch_session_records("g", player_id="1")
     assert len(lifetime) == 2
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_side_record_excluded_from_side_dependent_projections(
+        test_db, monkeypatch):
+    """A participant who only ever faces other side-unresolved participants
+    (never listed in team_a/team_b, and never plays anyone whose side IS
+    known) gets side=None -- see _infer_unlisted_sides/SessionRecord. Their
+    matches still count everywhere match/draft facts are side-independent,
+    but team_record, h2h_totals' draft split, and the leaderboard teammate
+    pass must all skip the record rather than fabricate a loss out of the
+    side_wins=0/side_losses=total placeholder."""
+    from services.ledger_stats import (
+        fetch_session_records, match_totals, draft_totals, team_record,
+        h2h_totals)
+    from services import leaderboard_service
+
+    await _seed(session_id="unresolved", victory="v",
+                teams=(["1"], ["4"]), matches=[
+        ("1", "4", "1", None),      # resolves 1 -> a, 4 -> b
+        ("2", "3", "2", None),      # 2 and 3 never touch a resolved side
+    ])
+    records = await fetch_session_records("g")
+    by_pid = {r.player_id: r for r in records}
+
+    r2 = by_pid["2"]
+    assert r2.side is None
+    assert (r2.wins, r2.losses, r2.matches) == (1, 0, 1)   # match still counted
+
+    # Side-independent projections: count the unresolved-side record like
+    # any other.
+    assert match_totals([r2]) == {"matches_played": 1, "matches_won": 1}
+    assert draft_totals([r2]) == 1
+
+    # Side-dependent projections: skip it rather than fabricate an outcome.
+    assert team_record([r2]) == {"played": 0, "won": 0, "lost": 0, "tied": 0}
+
+    h = h2h_totals([r2], "3")
+    assert h["matches_played"] == 1 and h["matches_won"] == 1   # direct match still counts
+    assert h["drafts_with"] == 0
+    assert h["drafts_against"] == 0
+
+    # Leaderboard teammate (Vault/Key) pass: same exclusion.
+    monkeypatch.setattr(
+        leaderboard_service, "get_minimum_requirements",
+        lambda timeframe: {"drafts": 0, "matches": 0, "partnership_drafts": 1})
+    data = await leaderboard_service.get_leaderboard_data(
+        "g", category="time_vault_and_key", timeframe="lifetime")
+    pairs = {frozenset((p["player_id"], p["teammate_id"])) for p in data}
+    assert frozenset(("2", "3")) not in pairs
 
 
 @pytest.mark.asyncio
@@ -140,14 +192,14 @@ async def test_substitute_side_inferred_from_opponents(test_db):
     assert sides["7"] == "a"          # inferred: opposite of 4's side ('b')
 
     records = await fetch_session_records("g")
-    by_pid = {r["player_id"]: r for r in records}
+    by_pid = {r.player_id: r for r in records}
 
     # team A (1, 2, and inferred substitute 7) won both of the session's
     # 2 matches -- the substitute's match must count toward the session
     # side totals, not just their own personal wins/losses.
-    assert (by_pid["7"]["side_wins"], by_pid["7"]["side_losses"]) == (2, 0)
-    assert (by_pid["1"]["side_wins"], by_pid["1"]["side_losses"]) == (2, 0)
-    assert (by_pid["4"]["side_wins"], by_pid["4"]["side_losses"]) == (0, 2)
+    assert (by_pid["7"].side_wins, by_pid["7"].side_losses) == (2, 0)
+    assert (by_pid["1"].side_wins, by_pid["1"].side_losses) == (2, 0)
+    assert (by_pid["4"].side_wins, by_pid["4"].side_losses) == (0, 2)
 
 
 # 4v4, 3 rounds -- NOT a full round-robin (that would take 4 rounds), so
@@ -177,9 +229,9 @@ async def test_never_faced_opponent_not_misclassified_as_teammate_4v4(test_db):
     records = await fetch_session_records("g", player_id="1")
     r = records[0]
 
-    assert "8" not in r["opponents"]           # sanity: they truly never played
-    assert "8" not in r["teammates"]           # the fix: opposing side, not a teammate
-    assert {"2", "3", "4"} <= r["teammates"]   # real teammates still classified correctly
+    assert "8" not in r.opponents              # sanity: they truly never played
+    assert "8" not in r.teammates              # the fix: opposing side, not a teammate
+    assert {"2", "3", "4"} <= r.teammates       # real teammates still classified correctly
 
     h_never_faced = h2h_totals(records, "8")
     assert h_never_faced["drafts_with"] == 0
@@ -217,13 +269,23 @@ async def test_leaderboard_teammate_stats_4v4_never_faced_not_teammate(test_db, 
 
 
 def _rec(**kw):
-    """teammates defaults to the old opponents-absence heuristic (fine for
+    """Builds a SessionRecord with test-friendly defaulting.
+
+    teammates defaults to the old opponents-absence heuristic (fine for
     these side-less synthetic records); pass teammates=... explicitly to
-    model a record where side, not opponents-absence, decides it."""
+    model a record where side, not opponents-absence, decides it.
+
+    side defaults to "a" (resolved) -- side_outcome-driven projections
+    treat these records normally. Pass side=None to model an
+    unresolvable-side record (see SessionRecord/_infer_unlisted_sides):
+    side-dependent projections (team_record, h2h_totals' draft splits, the
+    leaderboard teammate pass) must skip it, while side-independent ones
+    (match_totals, draft_totals, trophy_count, cube_breakdown) still count
+    it."""
     base = dict(player_id="1", session_id="s", session_type="staked",
                 cube="CubeA", completed=True, started_at=None,
-                wins=0, losses=0, matches=0, opponents={},
-                side_wins=0, side_losses=0, participants=set(),
+                wins=0, losses=0, opponents={},
+                side="a", side_wins=0, side_losses=0, participants=set(),
                 teammates=None)
     base.update(kw)
     base["matches"] = base["wins"] + base["losses"]
@@ -235,7 +297,18 @@ def _rec(**kw):
     base.setdefault("window_wins", base["wins"])
     base.setdefault("window_matches", base["matches"])
     base.setdefault("window_opponents", base["opponents"])
-    return base
+    return SessionRecord(
+        player_id=base["player_id"], session_id=base["session_id"],
+        session_type=base["session_type"], cube=base["cube"],
+        completed=base["completed"], started_at=base["started_at"],
+        wins=base["wins"], losses=base["losses"], matches=base["matches"],
+        opponents={k: tuple(v) for k, v in base["opponents"].items()},
+        side=base["side"], side_wins=base["side_wins"],
+        side_losses=base["side_losses"], fits_window=base["fits_window"],
+        window_wins=base["window_wins"], window_matches=base["window_matches"],
+        window_opponents={k: tuple(v) for k, v in base["window_opponents"].items()},
+        participants=frozenset(base["participants"]),
+        teammates=frozenset(base["teammates"]))
 
 
 def test_projections_match_draft_trophy_team():

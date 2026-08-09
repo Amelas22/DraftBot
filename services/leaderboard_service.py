@@ -160,7 +160,7 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
         records = await fetch_session_records(guild_id, since=start_date)
         per_player: dict[str, list] = {}
         for r in records:
-            per_player.setdefault(r["player_id"], []).append(r)
+            per_player.setdefault(r.player_id, []).append(r)
 
         logger.info(f"Found {len(per_player)} players with rated drafts in guild {guild_id} for timeframe {timeframe}")
 
@@ -235,12 +235,16 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
         # won/lost/tied for every teammate at once. Deferred to a second
         # pass so every player's display_name is already resolved above,
         # regardless of dict iteration order.
+        #
+        # Side-dependent: a record whose side couldn't be resolved
+        # (side=None -- see SessionRecord/_infer_unlisted_sides) is skipped
+        # here rather than counted as a fabricated teammate loss/tie.
         for player_id, player_records in per_player.items():
             teammate_stats = players_data[player_id]["teammate_win_rates"]
             for r in player_records:
-                if not r["completed"] or not r["fits_window"]:
+                if not r.completed or not r.fits_window or r.side is None:
                     continue
-                teammates = r["teammates"]
+                teammates = r.teammates
                 if not teammates:
                     continue
                 outcome = side_outcome(r)

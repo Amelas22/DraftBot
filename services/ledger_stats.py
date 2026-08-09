@@ -12,6 +12,7 @@ importable anywhere, including migrations.
 """
 import json
 from collections import namedtuple
+from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import select
@@ -32,6 +33,50 @@ _MatchRow = namedtuple(
 _SessionRow = namedtuple(
     "_SessionRow", "session_id session_type session_stage "
     "victory_message_id_results_channel team_a team_b cube draft_start_time")
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRecord:
+    """One (player, session) aggregate over reported rated matches -- the
+    typed contract fold_session_records emits. Frozen/slots: these are
+    fanned out to every /stats, /record, and leaderboard projection, so
+    nothing downstream should be able to mutate a shared record out from
+    under another consumer.
+
+    `opponents`/`window_opponents` map opp_id -> (wins, losses) tuples
+    (immutable, unlike the mutable [w, l] accumulator lists the fold uses
+    internally). `participants`/`teammates` are frozensets.
+
+    `side` is 'a' | 'b' | None. None means the fixed-point side inference
+    in _infer_unlisted_sides could not place this player on either side
+    (they only ever faced other side-unresolved participants) -- see that
+    function's docstring. side_wins/side_losses are still populated (0 and
+    the session's resolved match total, respectively) for backward
+    completeness, but `side` is the authoritative signal: team_record,
+    h2h_totals' draft splits, and the leaderboard teammate pass all skip
+    side=None records rather than let side_outcome fabricate a loss/tie
+    from those placeholder numbers. Matches/trophies (side-independent)
+    still count these records normally.
+    """
+    player_id: str
+    session_id: str
+    session_type: str
+    cube: str | None
+    completed: bool
+    started_at: datetime | None
+    wins: int
+    losses: int
+    matches: int
+    opponents: dict
+    side: str | None
+    side_wins: int
+    side_losses: int
+    fits_window: bool
+    window_wins: int
+    window_matches: int
+    window_opponents: dict
+    participants: frozenset
+    teammates: frozenset
 
 
 def _is_completed(session_row) -> bool:
@@ -84,9 +129,12 @@ def _infer_unlisted_sides(sides: dict, matches) -> None:
     (and thus from `total = side_tally['a'] + side_tally['b']`, the base
     every player's side_losses is computed from) rather than guess. That
     keeps every OTHER player's side_wins/side_losses accurate. The
-    unresolved participant's own record still gets emitted (their personal
-    wins/losses/opponents are unaffected) but with side_wins=0 and
-    side_losses=total, since they have no side to report a session total for.
+    unresolved participant's own SessionRecord still gets emitted (their
+    personal wins/losses/opponents are unaffected) with side=None and
+    placeholder side_wins=0/side_losses=total -- callers must not read those
+    two numbers as a real outcome for this record; team_record, h2h_totals'
+    draft splits, and the leaderboard teammate pass all key off `side is
+    None` to skip it instead.
     """
     changed = True
     while changed:
@@ -163,16 +211,38 @@ async def fetch_guild_rows(guild_id: str) -> list:
         )).all()
 
 
+class LedgerSnapshot:
+    """An opaque, already-fetched view of one guild's whole rated reported
+    history -- the row tuples from fetch_guild_rows, wrapped so callers
+    never see or hold onto the row shape directly. `.fold()` is cheap (pure,
+    in-memory) and can be called repeatedly for different players/windows
+    without re-querying; that's the whole point -- multi-timeframe callers
+    (three timeframes of /stats or /record) should `await
+    LedgerSnapshot.fetch(guild_id)` once and `.fold()` per view instead of
+    re-fetching per view.
+    """
+
+    def __init__(self, rows: list):
+        self._rows = rows
+
+    @classmethod
+    async def fetch(cls, guild_id: str) -> "LedgerSnapshot":
+        return cls(await fetch_guild_rows(guild_id))
+
+    def fold(self, player_id: str = None, since=None) -> list[SessionRecord]:
+        return fold_session_records(self._rows, player_id=player_id, since=since)
+
+
 async def fetch_session_records(guild_id: str, player_id: str = None,
-                                since=None) -> list[dict]:
-    """fetch_guild_rows + fold_session_records in one call, for callers
-    that need a single view. Multi-timeframe callers should fetch rows once
-    and fold per timeframe instead of calling this repeatedly."""
-    return fold_session_records(await fetch_guild_rows(guild_id),
-                                player_id=player_id, since=since)
+                                since=None) -> list[SessionRecord]:
+    """LedgerSnapshot.fetch + .fold in one call, for callers that need a
+    single view. Multi-timeframe callers should fetch a snapshot once and
+    fold per timeframe instead of calling this repeatedly."""
+    snapshot = await LedgerSnapshot.fetch(guild_id)
+    return snapshot.fold(player_id=player_id, since=since)
 
 
-def fold_session_records(rows, player_id: str = None, since=None) -> list[dict]:
+def fold_session_records(rows, player_id: str = None, since=None) -> list[SessionRecord]:
     """Per-(player, session) aggregates over reported rated matches (pure).
 
     since filters individual matches by COALESCE(result_submitted_at,
@@ -249,44 +319,49 @@ def fold_session_records(rows, player_id: str = None, since=None) -> list[dict]:
                 continue    # nothing of this session touches the window
             my_side = sides.get(pid)
             side_wins = side_tally.get(my_side, 0) if my_side else 0
-            records.append({
-                "player_id": pid,
-                "session_id": session_id,
-                "session_type": session_row.session_type,
-                "cube": session_row.cube,
-                "completed": completed,
-                "started_at": session_row.draft_start_time,
-                "wins": rec["wins"],
-                "losses": rec["losses"],
-                "matches": rec["wins"] + rec["losses"],
-                "opponents": rec["opponents"],
-                "side_wins": side_wins,
-                "side_losses": total - side_wins,
-                "fits_window": fits_window,
-                "window_wins": rec["window_wins"],
-                "window_matches": rec["window_matches"],
-                "window_opponents": rec["window_opponents"],
-                "participants": participants,
-                "teammates": _compute_teammates(
-                    pid, participants, sides, rec["opponents"]),
-            })
-    records.sort(key=lambda r: (r["started_at"] or datetime.min, r["session_id"]))
+            records.append(SessionRecord(
+                player_id=pid,
+                session_id=session_id,
+                session_type=session_row.session_type,
+                cube=session_row.cube,
+                completed=completed,
+                started_at=session_row.draft_start_time,
+                wins=rec["wins"],
+                losses=rec["losses"],
+                matches=rec["wins"] + rec["losses"],
+                opponents={opp: tuple(pair) for opp, pair in rec["opponents"].items()},
+                side=my_side,
+                side_wins=side_wins,
+                side_losses=total - side_wins,
+                fits_window=fits_window,
+                window_wins=rec["window_wins"],
+                window_matches=rec["window_matches"],
+                window_opponents={opp: tuple(pair)
+                                   for opp, pair in rec["window_opponents"].items()},
+                participants=frozenset(participants),
+                teammates=frozenset(_compute_teammates(
+                    pid, participants, sides, rec["opponents"])),
+            ))
+    records.sort(key=lambda r: (r.started_at or datetime.min, r.session_id))
     return records
 
 
 def match_totals(records) -> dict:
     """Every reported IN-WINDOW match counts — same moment ratings move.
-    (With no window, window totals equal full-session totals.)"""
+    (With no window, window totals equal full-session totals.) Side-
+    independent: counts records with an unresolved side (side=None) same
+    as any other."""
     return {
-        "matches_played": sum(r["window_matches"] for r in records),
-        "matches_won": sum(r["window_wins"] for r in records),
+        "matches_played": sum(r.window_matches for r in records),
+        "matches_won": sum(r.window_wins for r in records),
     }
 
 
 def draft_totals(records) -> int:
     """Completed sessions that fit the window entirely (owner ruling:
-    whole-session facts are all-or-nothing per window)."""
-    return sum(1 for r in records if r["completed"] and r["fits_window"])
+    whole-session facts are all-or-nothing per window). Side-independent:
+    counts records with an unresolved side (side=None) same as any other."""
+    return sum(1 for r in records if r.completed and r.fits_window)
 
 
 # Whole-session facts (trophies, team outcomes) are all-or-nothing per
@@ -294,27 +369,35 @@ def draft_totals(records) -> int:
 # window entirely (fits_window), and always with its FULL record — partial
 # slices of a session never produce draft-level outcomes.
 def trophy_count(records) -> int:
-    """Undefeated completed drafts with a full 3+ match slate."""
+    """Undefeated completed drafts with a full 3+ match slate. Side-
+    independent: counts records with an unresolved side (side=None) same
+    as any other."""
     return sum(1 for r in records
-               if r["completed"] and r["fits_window"]
-               and r["wins"] == r["matches"] >= 3)
+               if r.completed and r.fits_window
+               and r.wins == r.matches >= 3)
 
 
 def side_outcome(record) -> str:
     """'won' | 'lost' | 'tied' for the record-owner's side of one session.
     THE won/lost/tied policy -- team_record, h2h_totals, and the
-    leaderboard's teammate pass all classify through here."""
-    if record["side_wins"] > record["side_losses"]:
+    leaderboard's teammate pass all classify through here, but only for
+    records whose side resolved (side is not None); callers must check
+    that themselves before calling in, since side_wins/side_losses on a
+    side=None record are unreliable placeholders (see SessionRecord)."""
+    if record.side_wins > record.side_losses:
         return "won"
-    if record["side_wins"] < record["side_losses"]:
+    if record.side_wins < record.side_losses:
         return "lost"
     return "tied"
 
 
 def team_record(records) -> dict:
+    """Side-dependent: records whose side could not be resolved
+    (side=None, see SessionRecord/_infer_unlisted_sides) are skipped
+    entirely rather than counted as a fabricated loss/tie."""
     tally = {"won": 0, "lost": 0, "tied": 0}
     for r in records:
-        if r["completed"] and r["fits_window"]:
+        if r.completed and r.fits_window and r.side is not None:
             tally[side_outcome(r)] += 1
     return {"played": sum(tally.values()), **tally}
 
@@ -329,16 +412,18 @@ def cube_breakdown(records) -> dict:
 
     drafts counts completed records only, consistent with draft_totals and
     the /stats embed's "min 5 drafts" display threshold -- an in-progress
-    draft shouldn't count toward either.
+    draft shouldn't count toward either. Side-independent (wins/losses and
+    drafts here are match/session facts, not team-side facts): counts
+    records with an unresolved side (side=None) same as any other.
     """
     groups: dict[str, dict] = {}
     for r in records:
-        cube = r["cube"] or "Unknown"
+        cube = r.cube or "Unknown"
         group = groups.setdefault(cube.lower(), {
             "wins": 0, "losses": 0, "drafts": 0, "spelling_counts": {}})
-        group["wins"] += r["window_wins"]
-        group["losses"] += r["window_matches"] - r["window_wins"]
-        if r["completed"] and r["fits_window"]:
+        group["wins"] += r.window_wins
+        group["losses"] += r.window_matches - r.window_wins
+        if r.completed and r.fits_window:
             group["drafts"] += 1
         group["spelling_counts"][cube] = group["spelling_counts"].get(cube, 0) + 1
         group["last_spelling"] = cube
@@ -366,20 +451,26 @@ def h2h_totals(records, opponent_id: str) -> dict:
     opposing player you simply never got paired against in a round would
     be absent from `opponents` despite being on the other side; treating
     that absence as "teammates" (the old heuristic) misclassified them.
+
+    matches_played/matches_won (direct match totals) are side-independent
+    and always counted. The with/against draft split is side-dependent:
+    records whose side could not be resolved (side=None) are skipped there
+    -- the record-owner has no side to classify a shared-session outcome
+    from, so guessing would fabricate a with/against result.
     """
     matches_played = matches_won = 0
     drafts_with = drafts_against = drafts_with_won = drafts_against_won = 0
     drafts_with_tied = drafts_against_tied = 0
     for r in records:
-        pair = r["window_opponents"].get(opponent_id)
+        pair = r.window_opponents.get(opponent_id)
         if pair:
             matches_won += pair[0]
             matches_played += pair[0] + pair[1]
-        if (not r["completed"] or not r["fits_window"]
-                or opponent_id not in r["participants"]):
+        if (not r.completed or not r.fits_window or r.side is None
+                or opponent_id not in r.participants):
             continue
         outcome = side_outcome(r)
-        if opponent_id in r["teammates"]:          # same side
+        if opponent_id in r.teammates:              # same side
             drafts_with += 1
             if outcome == "won":
                 drafts_with_won += 1

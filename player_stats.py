@@ -9,7 +9,7 @@ from loguru import logger
 from stats_core import get_timeframe_start_date, calculate_win_percentage, calculate_team_draft_win_percentage
 
 async def get_player_statistics(user_id, time_frame=None, user_display_name=None, guild_id=None,
-                                prefetched_rows=None):
+                                snapshot=None):
     """Get player statistics for a specific user and time frame, filtered by guild_id if provided."""
     try:
         # Calculate the start date based on time frame using shared utility
@@ -139,15 +139,12 @@ async def get_player_statistics(user_id, time_frame=None, user_display_name=None
                 # like sign_ups JSON, victory-message ids, or
                 # trophy_drafters name strings.
                 from services.ledger_stats import (
-                    fetch_session_records, fold_session_records, match_totals,
+                    LedgerSnapshot, match_totals,
                     draft_totals, trophy_count, team_record, cube_breakdown)
 
-                if prefetched_rows is not None:
-                    records = fold_session_records(
-                        prefetched_rows, player_id=user_id, since=start_date)
-                else:
-                    records = await fetch_session_records(
-                        guild_id, player_id=user_id, since=start_date)
+                if snapshot is None:
+                    snapshot = await LedgerSnapshot.fetch(guild_id)
+                records = snapshot.fold(player_id=user_id, since=start_date)
                 totals = match_totals(records)
                 matches_played = totals["matches_played"]
                 matches_won = totals["matches_won"]
@@ -420,7 +417,7 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
         # rating system already uses) instead of sign_ups JSON, per-draft
         # team_a/team_b queries, and teams_start_time -- scope is
         # RATING_SESSION_TYPES via fetch_session_records, same as /stats.
-        from services.ledger_stats import fetch_guild_rows, fold_session_records, h2h_totals
+        from services.ledger_stats import LedgerSnapshot, h2h_totals
 
         def _match_record(h):
             matches_played = h["matches_played"]
@@ -448,10 +445,10 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
 
         # One SQL fetch; three pure folds (the query doesn't vary by
         # timeframe, so refetching per frame just repeated identical I/O).
-        rows = await fetch_guild_rows(guild_id)
-        lifetime_records = fold_session_records(rows, player_id=user1_id)
-        monthly_records = fold_session_records(rows, player_id=user1_id, since=month_ago)
-        weekly_records = fold_session_records(rows, player_id=user1_id, since=week_ago)
+        snapshot = await LedgerSnapshot.fetch(guild_id)
+        lifetime_records = snapshot.fold(player_id=user1_id)
+        monthly_records = snapshot.fold(player_id=user1_id, since=month_ago)
+        weekly_records = snapshot.fold(player_id=user1_id, since=week_ago)
 
         h_lifetime = h2h_totals(lifetime_records, user2_id)
         h_monthly = h2h_totals(monthly_records, user2_id)
