@@ -10,6 +10,13 @@ from models.player import PlayerStats
 from models import QuizStats, QuizSubmission, QuizSession
 from models.trophy_quiz_submission import TrophyQuizSubmission
 from models.trophy_quiz_session import TrophyQuizSession
+from stats_core import calculate_win_percentage, calculate_team_draft_win_percentage
+
+
+def partnership_win_percentage(won: int, lost: int, tied: int) -> float:
+    """THE partnership (Vault/Key) percentage: ties count in the denominator,
+    same policy as /record's draws and /stats' team percentage (stats_core)."""
+    return calculate_win_percentage(won, lost, tied)
 
 # Win Streak minimum requirements by timeframe
 STREAK_MINIMUMS = {
@@ -294,16 +301,17 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
             if player_data["completed_matches"] > 0:
                 player_data["match_win_percentage"] = (player_data["matches_won"] / player_data["completed_matches"]) * 100
             
-            # Calculate team draft win percentage
-            team_draft_counted_drafts = player_data["team_drafts_won"] + player_data["team_drafts_lost"]
-            if team_draft_counted_drafts > 0:
-                player_data["team_draft_win_percentage"] = (player_data["team_drafts_won"] / team_draft_counted_drafts) * 100
-            
-            # Calculate teammate win rates
+            # Calculate team draft win percentage (ties in the denominator --
+            # one policy with /stats and /record, via stats_core)
+            player_data["team_draft_win_percentage"] = calculate_team_draft_win_percentage(
+                player_data["team_drafts_won"], player_data["team_drafts_lost"],
+                player_data["team_drafts_tied"])
+
+            # Calculate teammate win rates (same tie policy)
             for teammate_id, teammate_data in player_data["teammate_win_rates"].items():
-                counted_drafts = teammate_data["drafts_won"] + teammate_data["drafts_lost"]
-                if counted_drafts > 0:
-                    teammate_data["win_percentage"] = (teammate_data["drafts_won"] / counted_drafts) * 100
+                teammate_data["win_percentage"] = partnership_win_percentage(
+                    teammate_data["drafts_won"], teammate_data["drafts_lost"],
+                    teammate_data["drafts_tied"])
 
         # Convert to list for sorting
         players_list = list(players_data.values())
@@ -347,10 +355,13 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
                         continue  # Skip already processed pair
                     seen_pairs.add(pair_key)
 
-                    counted_drafts = teammate_data["drafts_won"] + teammate_data["drafts_lost"]
-                    if counted_drafts >= min_partnership_drafts:
-                        win_percentage = (teammate_data["drafts_won"] / counted_drafts) * 100
-                        if win_percentage >= 50: 
+                    # Ties are drafts played together: they count toward the
+                    # sample-size gate and the denominator (one tie policy).
+                    if teammate_data["drafts_played"] >= min_partnership_drafts:
+                        win_percentage = partnership_win_percentage(
+                            teammate_data["drafts_won"], teammate_data["drafts_lost"],
+                            teammate_data["drafts_tied"])
+                        if win_percentage >= 50:
                             partnership = {
                                 "player_id": player_id,
                                 "player_name": player_data["display_name"],
