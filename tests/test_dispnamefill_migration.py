@@ -50,20 +50,30 @@ def test_signup_backfill_marks_synthetic_and_is_idempotent():
     conn.execute(text(
         "INSERT INTO draft_sessions (session_id, guild_id, session_type, draft_start_time, sign_ups) "
         "VALUES ('s1', 'g', 'staked', '2025-01-01', '{\"1\": \"Alpha\"}')"))
-    conn.execute(text(  # session with real events: untouched
+    conn.execute(text(  # session with real roster events: untouched
         "INSERT INTO draft_sessions (session_id, guild_id, session_type, draft_start_time, sign_ups) "
         "VALUES ('s2', 'g', 'staked', '2026-01-01', '{\"3\": \"Gamma\"}')"))
     conn.execute(text(
         "INSERT INTO sign_up_history (id, session_id, user_id, user_display_name, action, timestamp, guild_id) "
         "VALUES ('e1', 's2', '3', 'RealGamma', 'join', '2026-01-01 10:00:00', 'g')"))
+    conn.execute(text(  # session with ONLY ready-check events: still synthesized
+        "INSERT INTO draft_sessions (session_id, guild_id, session_type, draft_start_time, sign_ups) "
+        "VALUES ('s3', 'g', 'staked', '2025-06-01', '{\"5\": \"Echo\"}')"))
+    conn.execute(text(
+        "INSERT INTO sign_up_history (id, session_id, user_id, user_display_name, action, timestamp, guild_id) "
+        "VALUES ('e2', 's3', '5', 'Echo', 'ready', '2025-06-01 10:00:00', 'g')"))
 
-    assert dispnamefill0.backfill_sign_up_history(conn) == 1
+    assert dispnamefill0.backfill_sign_up_history(conn) == 2
     row = conn.execute(text(
         "SELECT user_display_name, action FROM sign_up_history WHERE session_id='s1'")).fetchone()
     # Provenance survives: reconstructed roster membership is not a real join.
     assert row == ("Alpha", "synthetic_join")
     assert conn.execute(text(
         "SELECT COUNT(*) FROM sign_up_history WHERE session_id='s2'")).scalar() == 1
+    # Ready-check events are not roster events -- s3 got its synthetic_join.
+    assert conn.execute(text(
+        "SELECT COUNT(*) FROM sign_up_history WHERE session_id='s3' "
+        "AND action='synthetic_join'")).scalar() == 1
     assert dispnamefill0.backfill_sign_up_history(conn) == 0
 
 

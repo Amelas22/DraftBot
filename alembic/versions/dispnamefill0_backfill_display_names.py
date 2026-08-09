@@ -7,8 +7,11 @@ depend on the future behavior of live helpers):
    backward by synthesizing events from the final-roster sign_ups JSON of
    older sessions. Synthetic rows carry action='synthetic_join' so
    reconstructed roster membership is forever distinguishable from an
-   observed queue join; only sessions with ZERO real events are touched,
-   making the run idempotent.
+   observed queue join; only sessions with ZERO roster events (join/
+   leave/synthetic_join) are touched, making the run idempotent.
+   Ready-check events (ready/not_ready/ready_timeout) are a different
+   subsystem and never record roster membership, so they don't block
+   synthesis.
 2. player_stats display names are filled per (guild_id, player_id) —
    names are per-guild nicknames — from deterministic evidence, in order:
    the player's latest sign_up_history event IN THAT GUILD; their
@@ -43,7 +46,8 @@ def backfill_sign_up_history(connection) -> int:
     rows = connection.execute(text(
         "SELECT d.session_id, d.guild_id, d.draft_start_time, d.sign_ups "
         "FROM draft_sessions d WHERE d.sign_ups IS NOT NULL AND NOT EXISTS "
-        "(SELECT 1 FROM sign_up_history h WHERE h.session_id = d.session_id)"
+        "(SELECT 1 FROM sign_up_history h WHERE h.session_id = d.session_id "
+        "AND h.action IN ('join', 'leave', 'synthetic_join'))"
     )).fetchall()
 
     events = []
