@@ -5,30 +5,11 @@ Fixtures are complete sessions (teams, victory message, reported matches)
 so the test holds across both the session-metadata and ledger-fold
 implementations of the leaderboard assembly.
 """
-import os
-import tempfile
-
 import pytest
-import pytest_asyncio
-from sqlalchemy.ext.asyncio import create_async_engine
 
-from database.models_base import Base
 from database.db_session import AsyncSessionLocal
 from models.draft_session import DraftSession
 from models.match import MatchResult
-
-
-@pytest_asyncio.fixture
-async def test_db():
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
-    tmp.close()
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp.name}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    AsyncSessionLocal.configure(bind=engine)
-    yield engine
-    await engine.dispose()
-    os.unlink(tmp.name)
 
 
 async def _team_session(session_id, winners_a, start):
@@ -66,11 +47,8 @@ async def test_leaderboard_percentages_count_ties(test_db):
     assert p1["team_drafts_won"] == 19 and p1["team_drafts_tied"] == 1
     assert round(p1["team_draft_win_percentage"], 1) == 95.0
 
-    vk = await get_leaderboard_data("g", category="time_vault_and_key",
-                                    limit=5, timeframe="lifetime")
-    # partnership entries exist only with teammates; the 1v1 fixture has
-    # none, so assert the policy at the per-player teammate map instead
-    # via draft_record's data (covered above) -- and guard that the
-    # partnership formula uses the same denominator by direct call:
-    from services.leaderboard_service import partnership_win_percentage
-    assert partnership_win_percentage(won=1, lost=0, tied=1) == 50.0
+    # Vault/Key partnerships share stats_core's tie-inclusive formula with
+    # the 95% assertion above (one owner, no separate partnership wrapper);
+    # the 1v1 fixture has no teammates, so this exercises the path only.
+    await get_leaderboard_data("g", category="time_vault_and_key",
+                               limit=5, timeframe="lifetime")

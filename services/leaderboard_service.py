@@ -12,12 +12,6 @@ from models.trophy_quiz_submission import TrophyQuizSubmission
 from models.trophy_quiz_session import TrophyQuizSession
 from stats_core import calculate_win_percentage, calculate_team_draft_win_percentage
 
-
-def partnership_win_percentage(won: int, lost: int, tied: int) -> float:
-    """THE partnership (Vault/Key) percentage: ties count in the denominator,
-    same policy as /record's draws and /stats' team percentage (stats_core)."""
-    return calculate_win_percentage(won, lost, tied)
-
 # Win Streak minimum requirements by timeframe
 STREAK_MINIMUMS = {
     'active': 6,
@@ -309,7 +303,7 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
 
             # Calculate teammate win rates (same tie policy)
             for teammate_id, teammate_data in player_data["teammate_win_rates"].items():
-                teammate_data["win_percentage"] = partnership_win_percentage(
+                teammate_data["win_percentage"] = calculate_team_draft_win_percentage(
                     teammate_data["drafts_won"], teammate_data["drafts_lost"],
                     teammate_data["drafts_tied"])
 
@@ -358,7 +352,7 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20, time
                     # Ties are drafts played together: they count toward the
                     # sample-size gate and the denominator (one tie policy).
                     if teammate_data["drafts_played"] >= min_partnership_drafts:
-                        win_percentage = partnership_win_percentage(
+                        win_percentage = calculate_team_draft_win_percentage(
                             teammate_data["drafts_won"], teammate_data["drafts_lost"],
                             teammate_data["drafts_tied"])
                         if win_percentage >= 50:
