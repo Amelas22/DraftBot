@@ -643,7 +643,9 @@ class QuizGuessView(discord.ui.View):
         label="Submit Guesses",
         style=discord.ButtonStyle.success,
         row=4  # Place in last row (after 4 dropdowns)
-        # Note: custom_id for buttons in ephemeral views doesn't need to be unique per user
+        # No custom_id: ephemeral views NEED per-instance auto ids — a fixed
+        # id would make all live instances share one dispatch slot (see
+        # tests/test_quiz_view_dispatch.py for the mechanism and proof).
     )
     async def submit_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         """Process submission and show results"""

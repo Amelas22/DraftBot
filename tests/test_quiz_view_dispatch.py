@@ -23,14 +23,18 @@ from unittest.mock import patch
 
 import pytest
 
+import discord
 from discord.ui.item import Item
 from discord.ui.view import View, ViewStore
 
+from quiz_views_module.quiz_views import ShareResultView
 from quiz_views_module.trophy_quiz_views import (
     TrophyDecideView, TrophyGuessView, TrophyShareView)
 
-DECKS = [{"slot": "A", "wins": 3, "user_id": "u1"},
-         {"slot": "B", "wins": 0, "user_id": "u2"}]
+# Only "slot" is read by the views under test (dropdown labels/keys).
+DECKS = [{"slot": "A"}, {"slot": "B"}]
+
+BUTTON = discord.ComponentType.button.value
 
 
 def _user(uid):
@@ -38,12 +42,16 @@ def _user(uid):
 
 
 def _ephemeral_views(uid):
-    """One instance of every per-user ephemeral trophy-quiz view."""
+    """One instance of every per-user ephemeral quiz view (both quiz
+    modules) — extend this list when adding a new ephemeral view so the
+    per-instance-id invariant covers it."""
     return [
         TrophyGuessView("qz", DECKS, _user(uid)),
         TrophyDecideView("qz", DECKS, _user(uid), [3, 0]),
         TrophyShareView(user=_user(uid), emoji_line="🟩", total_points=5,
                         quiz_id="qz", display_id=1),
+        ShareResultView(user=_user(uid), emoji_line="🟩", total_points=5,
+                        correct_count=1),
     ]
 
 
@@ -62,7 +70,7 @@ async def test_ephemeral_views_have_per_instance_component_ids():
 
 def _dispatched_to(store, custom_id, message_id, routed):
     routed.clear()
-    store.dispatch(2, custom_id, SimpleNamespace(
+    store.dispatch(BUTTON, custom_id, SimpleNamespace(
         message=SimpleNamespace(id=message_id), data={}))
     return routed[0] if routed else None
 
