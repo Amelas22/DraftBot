@@ -811,19 +811,22 @@ class AdminCommands(commands.Cog):
         result = await db_session.execute(stmt)
         return result.scalar()
 
-    @discord.slash_command(name='cleanup_stale_drafts', description='Complete old stale drafts as draws and clean up channels')
+    @discord.slash_command(name='cleanup_stale_drafts', description='Complete abandoned drafts as draws and clean up their channels')
     @has_bot_manager_role()
     async def cleanup_stale_drafts(
         self,
         ctx,
-        hours_old: discord.Option(int, "Complete drafts older than this many hours (minimum 12)", default=24),
+        hours_old: discord.Option(int, "Complete stale drafts older than this many hours (minimum 12)", default=24),
         dry_run: discord.Option(bool, "Preview without actually completing/deleting", default=True)
     ):
-        """Complete old stale drafts as draws, clean up channels, and remove database records."""
+        """Complete stale (fired-but-abandoned) drafts as draws and delete their
+        channels. Never touches finished drafts and never deletes session rows
+        or match history — "stale" means started but abandoned, not merely old."""
         from config import is_cleanup_exempt
-        from datetime import datetime, timedelta
+        from datetime import datetime
         from session import AsyncSessionLocal
         from models.draft_session import DraftSession
+        from helpers.stale_drafts import LOOKBACK_DAYS, cleanup_window, is_stale_draft
 
         await ctx.defer(ephemeral=True)
 
@@ -847,23 +850,33 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        # Calculate cutoff time
-        cutoff_time = datetime.now() - timedelta(hours=hours_old)
+        # Bounded candidate window: older than hours_old, but within
+        # LOOKBACK_DAYS. Anything older is history, not cleanup — an unbounded
+        # query here once selected a guild's entire draft archive.
+        lookback_floor, cutoff_time = cleanup_window(hours_old)
 
-        # Query for old draft sessions
         async with AsyncSessionLocal() as db_session:
             from sqlalchemy import select
             stmt = select(DraftSession).filter(
                 DraftSession.guild_id == str(ctx.guild.id),
-                DraftSession.draft_start_time < cutoff_time
+                DraftSession.draft_start_time < cutoff_time,
+                DraftSession.draft_start_time >= lookback_floor,
             )
 
             result = await db_session.execute(stmt)
-            old_sessions = result.scalars().all()
+            candidates = result.scalars().all()
+
+            # Single source of truth for staleness (helpers/stale_drafts.py):
+            # teams were created, but no completion marker exists. Finished
+            # drafts commonly sit at session_stage='pairings' forever, so the
+            # victory message is checked too — filtering on stage alone would
+            # sweep up the guild's played history.
+            old_sessions = [s for s in candidates if is_stale_draft(s)]
 
             if not old_sessions:
                 await ctx.followup.send(
-                    f"✅ No drafts found older than {hours_old} hours in this guild.",
+                    f"✅ No stale drafts found (started {hours_old}h–{LOOKBACK_DAYS}d ago, "
+                    "fired but never finished) in this guild.",
                     ephemeral=True
                 )
                 return
@@ -915,12 +928,13 @@ class AdminCommands(commands.Cog):
             # Show preview
             preview_msg = (
                 f"**{'DRY RUN - ' if dry_run else ''}Cleanup Preview**\n\n"
-                f"**Target:** Drafts older than {hours_old} hours\n"
-                f"**Guild:** {ctx.guild.name}\n"
-                f"**Cutoff time:** {cutoff_time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"**Target:** Stale drafts (fired but never finished), started between "
+                f"{lookback_floor.strftime('%Y-%m-%d')} and {cutoff_time.strftime('%Y-%m-%d %H:%M')}\n"
+                f"**Guild:** {ctx.guild.name}\n\n"
                 f"**Will process:**\n"
-                f"• {total_sessions} draft session(s)\n"
+                f"• {total_sessions} stale draft session(s)\n"
                 f"• {total_channels} channel(s) will be deleted\n"
+                f"• Session rows and match history are preserved (never deleted)\n"
             )
 
             incomplete_count = sum(1 for s in sessions_to_complete if not s['is_completed'])
@@ -969,13 +983,12 @@ class AdminCommands(commands.Cog):
 
             # Actual completion and deletion (not dry run)
             await ctx.followup.send(
-                f"⚠️ **Starting completion of {total_sessions} drafts and deletion of {total_channels} channels...**",
+                f"⚠️ **Completing {total_sessions} stale draft(s) and deleting {total_channels} channel(s)...**",
                 ephemeral=True
             )
 
             # Perform completion and cleanup
             deleted_channels = 0
-            deleted_sessions = 0
             completed_drafts = 0
             created_matches = 0
             preserved_matches = 0
@@ -1026,18 +1039,9 @@ class AdminCommands(commands.Cog):
                         except (discord.NotFound, discord.HTTPException):
                             pass  # Message already gone
 
-                    # Step 6: Detach MatchResult records before deleting session
-                    # Set session_id to NULL to preserve match records
-                    from sqlalchemy import update
-                    stmt = update(MatchResult).where(
-                        MatchResult.session_id == session.session_id
-                    ).values(session_id=None)
-                    await db_session.execute(stmt)
-                    await db_session.flush()
-
-                    # Step 7: Delete from database
-                    await db_session.delete(session)
-                    deleted_sessions += 1
+                    # The session row and its MatchResults are deliberately kept:
+                    # they feed leaderboards, trophy history, quizzes, and log
+                    # reconciliation. Cleanup means "close it out", not "erase it".
 
                 except Exception as e:
                     errors.append(f"Error cleaning session {session.session_id}: {e}")
@@ -1050,7 +1054,6 @@ class AdminCommands(commands.Cog):
             summary = (
                 f"✅ **Cleanup Complete**\n\n"
                 f"• Completed {completed_drafts} draft(s) (marked as completed)\n"
-                f"• Deleted {deleted_sessions} draft session(s)\n"
                 f"• Deleted {deleted_channels} channel(s)\n"
             )
 
@@ -1070,7 +1073,7 @@ class AdminCommands(commands.Cog):
             await ctx.followup.send(summary, ephemeral=True)
             logger.info(
                 f"Cleanup complete: {completed_drafts} drafts completed, "
-                f"{deleted_sessions} sessions deleted, {deleted_channels} channels deleted, "
+                f"{deleted_channels} channels deleted, "
                 f"{created_matches} matches created, {preserved_matches} matches preserved as draws"
             )
 

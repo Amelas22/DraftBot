@@ -1,8 +1,6 @@
 """
-Core statistics utilities shared between player_stats and legacy_stats modules.
-
-This module contains pure utility functions with no dependencies on other stats modules,
-breaking the circular dependency between player_stats.py and legacy_stats.py.
+Pure statistics utilities used by player_stats (no dependencies on other
+stats modules).
 """
 from datetime import datetime, timedelta
 
@@ -15,7 +13,13 @@ def get_timeframe_start_date(time_frame):
         time_frame: 'week', 'month', or None (lifetime)
 
     Returns:
-        datetime object representing the start of the time frame
+        datetime object representing the start of the time frame, or None
+        for lifetime. None (not a far-past sentinel like datetime(2000,1,1))
+        so the fold's `since` behaves identically for every lifetime caller:
+        /stats, /record head-to-head, and the leaderboards all pass None for
+        "lifetime" and fetch_session_records treats that uniformly -- a
+        sentinel date used to diverge here (NULL-event-time rows dropped
+        for /stats but kept for h2h/leaderboards, which passed None already).
     """
     now = datetime.now()
 
@@ -24,7 +28,7 @@ def get_timeframe_start_date(time_frame):
     elif time_frame == 'month':
         return now - timedelta(days=30)
     else:  # Lifetime stats
-        return datetime(2000, 1, 1)  # Far in the past
+        return None
 
 
 def calculate_win_percentage(wins, losses, draws=0):

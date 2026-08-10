@@ -13,8 +13,9 @@ import random
 from sqlalchemy import update, select
 
 from session import AsyncSessionLocal, DraftSession, StakeInfo
+from helpers.draft_footer import apply_draft_footer_from_session
 from models.draft_session import DraftSession as DraftSessionModel
-from utils import split_into_teams, generate_seating_order, get_formatted_stake_pairs, check_weekly_limits, add_links_to_embed_safely
+from utils import split_into_teams, generate_seating_order, reorder_sign_ups, get_formatted_stake_pairs, check_weekly_limits, add_links_to_embed_safely
 from services.draft_setup_manager import DraftSetupManager
 from services.state_manager import state_manager
 from services.stake_service import calculate_and_store_stakes
@@ -58,6 +59,26 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                 elif len(session.sign_ups) % 2 != 0:
                     await interaction.followup.send("There must be an even number of players to fire.")
                     return False
+
+                if session.session_type == 'premade':
+                    # Drop team members who left (removed from sign_ups but still in
+                    # team_a/team_b) so a stale id can't KeyError downstream, then
+                    # require the teams to be non-empty and equal — an even total
+                    # alone allows a lopsided split (e.g. 2-vs-0).
+                    team_a = [uid for uid in (session.team_a or []) if uid in session.sign_ups]
+                    team_b = [uid for uid in (session.team_b or []) if uid in session.sign_ups]
+                    if not team_a or not team_b or len(team_a) != len(team_b):
+                        await interaction.followup.send(
+                            "Premade teams must be non-empty and equal size "
+                            f"(currently {len(team_a)} vs {len(team_b)})."
+                        )
+                        return False
+                    if team_a != list(session.team_a or []) or team_b != list(session.team_b or []):
+                        session.team_a = team_a
+                        session.team_b = team_b
+                        await db_session.execute(update(DraftSession)
+                                            .where(DraftSession.session_id == session.session_id)
+                                            .values(team_a=team_a, team_b=team_b))
 
                 # Update session timing and stage
                 session.teams_start_time = datetime.now()
@@ -105,7 +126,7 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                         # decorated display name is only for the embed) — mapping by
                         # name would KeyError on icon-decorated / markdown-escaped names.
                         seating_pairs = await generate_seating_order(bot, session)
-                        new_sign_ups = {user_id: session.sign_ups[user_id] for user_id, _ in seating_pairs}
+                        new_sign_ups = reorder_sign_ups(session.sign_ups, [user_id for user_id, _ in seating_pairs])
                         seating_order = [name for _, name in seating_pairs]
 
                         await db_session.execute(update(DraftSession)
@@ -120,8 +141,8 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                 else:
                     sign_ups_list = list(session.sign_ups.keys())
                     random.shuffle(sign_ups_list)
-                    seating_order = [session.sign_ups[user_id] for user_id in sign_ups_list]
-                    new_sign_ups = {user_id: session.sign_ups[user_id] for user_id in sign_ups_list}
+                    new_sign_ups = reorder_sign_ups(session.sign_ups, sign_ups_list)
+                    seating_order = list(new_sign_ups.values())
                     await db_session.execute(update(DraftSession)
                                         .where(DraftSession.session_id == session.session_id)
                                         .values(sign_ups=new_sign_ups))
@@ -220,7 +241,7 @@ async def _create_teams_embed(session, team_a_names, team_b_names, seating_order
 
     title_prefix = "Winston " if session.session_type == 'winston' else ""
     embed = discord.Embed(
-        title=f"{title_prefix}Draft-{session.draft_id} is Ready!",
+        title=f"{title_prefix}Draft is Ready!",
         description=f"**Chosen Cube: [{session.cube}]"
                     f"(https://cubecobra.com/cube/list/{session.cube})**\n\n"
                     "Host of Draftmancer must manually adjust seating as per below. \n**TURN OFF RANDOM SEATING SETTING IN DRAFTMANCER**"
@@ -250,6 +271,8 @@ async def _create_teams_embed(session, team_a_names, team_b_names, seating_order
     # Add stakes for staked drafts
     if session_type == "staked":
         await _add_stake_info_to_embed(embed, session, stake_info_by_player)
+
+    apply_draft_footer_from_session(embed, session)
 
     return embed
 
@@ -297,6 +320,8 @@ async def _create_channel_announcement_embed(session, seating_order, stake_info_
     # Add stakes for staked drafts
     if session_type == "staked":
         await _add_stake_info_to_embed(channel_embed, session, stake_info_by_player)
+
+    apply_draft_footer_from_session(channel_embed, session)
 
     return channel_embed
 

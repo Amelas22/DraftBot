@@ -13,6 +13,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from database.db_session import db_session
+from helpers.pile_compositor import PileImageBuilder
 from helpers.substitutes import TEAM_A_CHANNEL_PREFIX, TEAM_B_CHANNEL_PREFIX
 from models.draft_session import DraftSession
 
@@ -107,16 +108,51 @@ async def _post_pools_for_team(
         name = (draft_data["users"][dm_user_id].get("userName")
                 or (sign_ups or {}).get(discord_id) or discord_id)
         safe = "".join(c for c in str(name) if c.isalnum() or c in " _-").strip() or str(discord_id)
-        fp = io.BytesIO(pool.encode("utf-8"))
+        files = [discord.File(io.BytesIO(pool.encode("utf-8")), filename=f"{safe}.txt")]
+
+        # Best-effort mana-value pile image (main deck + sideboard) alongside the
+        # .txt. The .txt is the deliverable and post_team_logs is reconciler-driven,
+        # so any image failure (Scryfall exhaustion -> build None, or an exception)
+        # is logged and skipped — never blocking the post or the stamp.
+        try:
+            split = split_decklist(draft_data, dm_user_id)
+            image = await PileImageBuilder().build(
+                split["main"], split["side"], draft_data.get("carddata", {})
+            )
+            if image:
+                files.append(discord.File(io.BytesIO(image.getvalue()), filename=f"{safe}.jpg"))
+        except Exception as e:
+            logger.warning(f"[team-logs] deck image failed for {name} ({dm_user_id}): {e}")
+
         await channel.send(
             content=f"**{name}** — drafted pool ({pool.count(chr(10)) + 1} cards):",
-            file=discord.File(fp, filename=f"{safe}.txt"),
+            files=files,
         )
+
+
+# Sessions with a post_team_logs run currently in flight. The endDraft push
+# path and the 60s reconciler tick can both call within one run's duration
+# (image builds can stretch a run past several ticks), and the
+# team_logs_posted_at stamp is only written at the END of a successful run —
+# so the stamp alone cannot prevent overlapping duplicate runs.
+_POSTS_IN_FLIGHT: set[str] = set()
 
 
 async def post_team_logs(session_id: str, bot) -> bool:
     """Post each team's own members' pools to its private team channel, then
-    stamp team_logs_posted_at. Idempotent; safe to call before unlock_at."""
+    stamp team_logs_posted_at. Idempotent; safe to call before unlock_at.
+    Concurrent calls for the same session are dropped (False) while one runs."""
+    if session_id in _POSTS_IN_FLIGHT:
+        logger.info(f"post_team_logs already in flight for {session_id}; dropping duplicate call")
+        return False
+    _POSTS_IN_FLIGHT.add(session_id)
+    try:
+        return await _post_team_logs_locked(session_id, bot)
+    finally:
+        _POSTS_IN_FLIGHT.discard(session_id)
+
+
+async def _post_team_logs_locked(session_id: str, bot) -> bool:
     async with db_session() as session:
         ds = (await session.execute(
             select(DraftSession).filter(DraftSession.session_id == session_id)

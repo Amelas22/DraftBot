@@ -51,6 +51,17 @@ def _build_pilots_line(decks: list) -> str:
     return f"🔎 Piloted by — {names}"
 
 
+def _build_guess_line(decks: list, guesses: list) -> str:
+    """Restate the player's locked guess. Needed because the flow edits the
+    original guess prompt away (#355), so without this line the player can no
+    longer see what they picked when deciding to keep or change."""
+    parts = ", ".join(
+        f"Deck {deck['slot']}: **{record_label(guess)}**"
+        for deck, guess in zip(decks, guesses)
+    )
+    return f"📝 Your guess — {parts}"
+
+
 def _build_emoji_line(result) -> str:
     """Leak-safe per-deck emoji: 🟩 only when BOTH the overall direction call and
     that deck's exact record were correct, else ⬛. Never reveals which deck or
@@ -127,10 +138,14 @@ class TrophyShareView(discord.ui.View):
             return f"[Trophy Quiz #{self.display_id}]({message_link})"
         return f"Trophy Quiz #{self.display_id}"
 
+    # No custom_id on ephemeral-view buttons: a fixed id makes every live
+    # instance share ONE dispatch slot, misrouting clicks and dead-ending
+    # stopped prompts — see tests/test_quiz_view_dispatch.py for the full
+    # mechanism and proof. Only persistent views (timeout=None,
+    # re-registered on restart) need fixed ids.
     @discord.ui.button(
         label="📤 Share Results Publicly",
         style=discord.ButtonStyle.primary,
-        custom_id="share_trophy_quiz_results",
     )
     async def share_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         """Post results publicly to the channel — score + emoji line only."""
@@ -256,28 +271,45 @@ async def _finalize(quiz_id: str, user_id: str, final_guesses: list, changed: bo
     return True
 
 
-async def _send_final_reveal(interaction, quiz_id: str, decks: list, guesses: list, changed: bool, prefix: str = ""):
-    """Send the full ephemeral result (records + score + optional −2 line) plus a
+async def _respond(interaction, content: str, view, edit: bool):
+    """Deliver a step of the ephemeral quiz flow. edit=True replaces the message
+    the clicked component lives on (in-place transition — the previous prompt and
+    its buttons disappear, so a stale Submit can't be pressed again, #355);
+    edit=False sends a new ephemeral message. The flow helpers default to
+    edit=True — the safe in-flow behavior — so ONLY the entry point from the
+    public quiz message (play_button, which must never edit that shared
+    message into per-user state) passes edit=False explicitly."""
+    if edit:
+        await interaction.response.edit_message(content=content, view=view)
+    else:
+        await interaction.response.send_message(content, view=view, ephemeral=True)
+
+
+def _flow_header(decks: list, guesses: list) -> str:
+    """The pilots + locked-guess header every post-reveal step restates —
+    each edit replaces the message that previously displayed it (#355)."""
+    return f"{_build_pilots_line(decks)}\n{_build_guess_line(decks, guesses)}"
+
+
+async def _send_final_reveal(interaction, quiz_id: str, decks: list, guesses: list, changed: bool, prefix: str = "", edit: bool = True):
+    """Show the full ephemeral result (records + score + optional −2 line) plus a
     Share button, for a finalized submission."""
     result = score_submission(guesses, [deck["wins"] for deck in decks])
     lines = build_reveal_lines(decks, guesses, result, changed=changed)
     emoji_line = _build_emoji_line(result)
     display_id = await _load_display_id(quiz_id)
     total = apply_change_cost(result["total"], changed)
-    await interaction.response.send_message(
-        prefix + "\n".join(lines),
-        ephemeral=True,
-        view=TrophyShareView(
-            user=interaction.user,
-            emoji_line=emoji_line,
-            total_points=total,
-            quiz_id=quiz_id,
-            display_id=display_id,
-        ),
+    view = TrophyShareView(
+        user=interaction.user,
+        emoji_line=emoji_line,
+        total_points=total,
+        quiz_id=quiz_id,
+        display_id=display_id,
     )
+    await _respond(interaction, prefix + "\n".join(lines), view, edit)
 
 
-async def _reveal_if_finalized(interaction, quiz_id: str, decks: list, sub) -> bool:
+async def _reveal_if_finalized(interaction, quiz_id: str, decks: list, sub, edit: bool = True) -> bool:
     """If `sub` is a finalized submission, show its committed result (with the
     "already submitted" prefix) and return True so the caller stops. Returns
     False when there's nothing to show (no submission, or still pending)."""
@@ -285,24 +317,20 @@ async def _reveal_if_finalized(interaction, quiz_id: str, decks: list, sub) -> b
         return False
     await _send_final_reveal(
         interaction, quiz_id, decks, sub.guesses, sub.changed_answer,
-        prefix="*(You already submitted this quiz)*\n",
+        prefix="*(You already submitted this quiz)*\n", edit=edit,
     )
     return True
 
 
-async def _reveal_names_and_decide(interaction, quiz_id: str, decks: list, user, initial_guesses: list):
+async def _reveal_names_and_decide(interaction, quiz_id: str, decks: list, user, initial_guesses: list, edit: bool = True):
     """Reveal ONLY the pilots' names (not records/score) and present the
     Keep / Pay-2-to-change choice on the player's locked initial guess."""
     content = (
-        f"{_build_pilots_line(decks)}\n"
+        f"{_flow_header(decks, initial_guesses)}\n"
         f"Now that you know who piloted each deck, keep your answer or pay "
         f"**{CHANGE_COST} points** to change it."
     )
-    await interaction.response.send_message(
-        content,
-        view=TrophyDecideView(quiz_id, decks, user, initial_guesses),
-        ephemeral=True,
-    )
+    await _respond(interaction, content, TrophyDecideView(quiz_id, decks, user, initial_guesses), edit)
 
 
 class TrophyQuizView(discord.ui.View):
@@ -357,10 +385,14 @@ class TrophyQuizView(discord.ui.View):
         Keep/Change choice (pending submission), or show the result (finalized)."""
         user_id = str(interaction.user.id)
         sub = await _get_submission(self.quiz_id, user_id)
-        if await _reveal_if_finalized(interaction, self.quiz_id, self.decks, sub):
+        # edit=False: this is the one entry point clicked on the PUBLIC quiz
+        # message, which must never be edited into per-user state — every
+        # step answers with a fresh ephemeral from here.
+        if await _reveal_if_finalized(interaction, self.quiz_id, self.decks, sub, edit=False):
             return
         if sub is not None:  # pending: resume on the locked initial guess
-            await _reveal_names_and_decide(interaction, self.quiz_id, self.decks, interaction.user, sub.guesses)
+            await _reveal_names_and_decide(interaction, self.quiz_id, self.decks,
+                                           interaction.user, sub.guesses, edit=False)
             return
         await interaction.response.send_message(
             "Guess each deck's record, then hit **Submit**:",
@@ -391,7 +423,11 @@ class TrophyGuessView(discord.ui.View):
 
     initial_guesses=None -> INITIAL mode: Submit persists the pending row and
     reveals names. initial_guesses set -> CHANGE mode: Submit finalizes with the
-    revised guess, charging CHANGE_COST iff it differs from the initial."""
+    revised guess, charging CHANGE_COST iff it differs from the initial.
+
+    Submit EDITS this view's own message into the next step (then stops the
+    view), so the whole flow lives in one ephemeral message and a lingering
+    Submit prompt can't be pressed again after the reveal (#355)."""
 
     def __init__(self, quiz_id: str, decks: list, user, initial_guesses: list = None):
         super().__init__(timeout=300)
@@ -414,10 +450,10 @@ class TrophyGuessView(discord.ui.View):
                 default_wins=prefill.get(deck["slot"]) if prefill else None,
             ))
 
+    # No custom_id: per-instance auto id (see TrophyShareView.share_button).
     @discord.ui.button(
         label="Submit",
         style=discord.ButtonStyle.success,
-        custom_id="trophy_quiz_guess_submit",
         row=2,
     )
     async def submit_button(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -432,23 +468,29 @@ class TrophyGuessView(discord.ui.View):
                 return
             guesses = [self.selections[slot] for slot in slots]
 
+            # Every response below edits THIS message into the next step of
+            # the flow, so the Submit prompt is consumed by its first click —
+            # pressing Submit again can't spawn duplicate prompts (#355).
+            # Branches never early-return: they all fall through to the ONE
+            # trailing stop(), which an exception skips (leaving the view
+            # alive and the click retryable).
             if self.initial_guesses is None:
                 # INITIAL submit: persist pending + reveal names + decide.
                 created = await _persist_pending(
                     self.quiz_id, user_id, get_display_name(interaction.user), guesses)
                 if not created:
-                    # A submission already exists (concurrent double-submit or a
-                    # resume). Route to the right state rather than duplicate.
+                    # A submission already exists (a double-submit from a second
+                    # Play prompt, or a resume). Route to the right state — on the
+                    # LOCKED stored guess — rather than duplicate.
                     sub = await _get_submission(self.quiz_id, user_id)
-                    if await _reveal_if_finalized(interaction, self.quiz_id, self.decks, sub):
-                        return
-                    initial = sub.guesses if sub is not None else guesses
+                    if not await _reveal_if_finalized(interaction, self.quiz_id, self.decks, sub):
+                        initial = sub.guesses if sub is not None else guesses
+                        await _reveal_names_and_decide(
+                            interaction, self.quiz_id, self.decks, interaction.user, initial)
+                else:
+                    logger.info(f"User {user_id} made an initial trophy guess on {self.quiz_id}")
                     await _reveal_names_and_decide(
-                        interaction, self.quiz_id, self.decks, interaction.user, initial)
-                    return
-                logger.info(f"User {user_id} made an initial trophy guess on {self.quiz_id}")
-                await _reveal_names_and_decide(
-                    interaction, self.quiz_id, self.decks, interaction.user, guesses)
+                        interaction, self.quiz_id, self.decks, interaction.user, guesses)
             else:
                 # CHANGE submit: finalize with the revised guess (charge iff changed).
                 changed = guesses != self.initial_guesses
@@ -462,16 +504,19 @@ class TrophyGuessView(discord.ui.View):
                     await _send_final_reveal(
                         interaction, self.quiz_id, self.decks, final_guesses,
                         final_changed, prefix="*(You already submitted this quiz)*\n")
-                    return
-                logger.info(
-                    f"User {user_id} finalized trophy quiz {self.quiz_id} via change "
-                    f"(changed={changed})")
-                await _send_final_reveal(interaction, self.quiz_id, self.decks, guesses, changed)
+                else:
+                    logger.info(
+                        f"User {user_id} finalized trophy quiz {self.quiz_id} via change "
+                        f"(changed={changed})")
+                    await _send_final_reveal(interaction, self.quiz_id, self.decks, guesses, changed)
+            self.stop()
 
 
 class TrophyDecideView(discord.ui.View):
     """Ephemeral Keep / Pay-2-to-change choice shown after names are revealed.
-    Operates on the player's locked initial guess (persisted as a pending row)."""
+    Operates on the player's locked initial guess (persisted as a pending row).
+    Both buttons edit this message into the next step (result / revise view),
+    so the choice can't be double-clicked into duplicate prompts (#355)."""
 
     def __init__(self, quiz_id: str, decks: list, user, initial_guesses: list):
         super().__init__(timeout=300)
@@ -481,35 +526,47 @@ class TrophyDecideView(discord.ui.View):
         self.initial_guesses = initial_guesses
         self._lock = asyncio.Lock()
 
+    # No custom_id: per-instance auto id (see TrophyShareView.share_button).
     @discord.ui.button(
         label="Keep my answer",
         style=discord.ButtonStyle.success,
-        custom_id="trophy_quiz_keep",
     )
     async def keep_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         async with self._lock:
             user_id = str(interaction.user.id)
             did = await _finalize(self.quiz_id, user_id, self.initial_guesses, False, self.decks)
-            prefix = "" if did else "*(You already submitted this quiz)*\n"
-            sub = await _get_submission(self.quiz_id, user_id)
-            guesses = sub.guesses if sub is not None else self.initial_guesses
-            changed = sub.changed_answer if sub is not None else False
+            if did:
+                # The common path: we just committed exactly these values —
+                # no need to read back what we wrote.
+                prefix, guesses, changed = "", self.initial_guesses, False
+            else:
+                # Finalized elsewhere first — show the committed result.
+                sub = await _get_submission(self.quiz_id, user_id)
+                prefix = "*(You already submitted this quiz)*\n"
+                guesses = sub.guesses if sub is not None else self.initial_guesses
+                changed = sub.changed_answer if sub is not None else False
+            # Edit this prompt into the result so Keep/Change can't be re-clicked (#355).
             await _send_final_reveal(interaction, self.quiz_id, self.decks, guesses, changed, prefix=prefix)
+            self.stop()
 
+    # No custom_id: per-instance auto id (see TrophyShareView.share_button).
     @discord.ui.button(
         label=f"🔎 Pay {CHANGE_COST} to change",
         style=discord.ButtonStyle.secondary,
-        custom_id="trophy_quiz_change",
     )
     async def change_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         async with self._lock:
             user_id = str(interaction.user.id)
             sub = await _get_submission(self.quiz_id, user_id)
-            if await _reveal_if_finalized(interaction, self.quiz_id, self.decks, sub):
-                return
-            await interaction.response.send_message(
-                f"Revise your records, then **Submit** (−{CHANGE_COST} points if you change anything):",
-                view=TrophyGuessView(self.quiz_id, self.decks, interaction.user,
-                                     initial_guesses=self.initial_guesses),
-                ephemeral=True,
-            )
+            if not await _reveal_if_finalized(interaction, self.quiz_id, self.decks, sub):
+                # Edit this prompt into the revise view, restating the flow
+                # header (editing replaces the message that showed it).
+                await _respond(
+                    interaction,
+                    f"{_flow_header(self.decks, self.initial_guesses)}\n"
+                    f"Revise your records, then **Submit** (−{CHANGE_COST} points if you change anything):",
+                    TrophyGuessView(self.quiz_id, self.decks, interaction.user,
+                                    initial_guesses=self.initial_guesses),
+                    edit=True,
+                )
+            self.stop()

@@ -85,10 +85,13 @@ class MagicProtoolsHelper:
                     # Get card name
                     card_name = draft_log['carddata'][card_id]['name']
                     
-                    # Handle split/double-faced cards
+                    # Handle split/double-faced cards. Some card data already
+                    # carries the combined "Front // Back" name, so only append
+                    # the back face when the name isn't already combined.
                     if 'back' in draft_log['carddata'][card_id]:
                         back_name = draft_log['carddata'][card_id]['back']['name']
-                        card_name = f"{card_name} // {back_name}"
+                        if back_name and '//' not in card_name:
+                            card_name = f"{card_name} // {back_name}"
                     
                     # Check if this card was picked
                     if idx in picked_indices:
@@ -216,10 +219,12 @@ class MagicProtoolsHelper:
                     card_id = pick['booster'][first_picked_idx]
                     card_name = draft_data['carddata'][card_id]['name']
                     
-                    # Handle split/double-faced cards
+                    # Handle split/double-faced cards. Skip appending when the
+                    # name is already the combined "Front // Back" form.
                     if 'back' in draft_data['carddata'][card_id]:
                         back_name = draft_data['carddata'][card_id]['back']['name']
-                        card_name = f"{card_name} // {back_name}"
+                        if back_name and '//' not in card_name:
+                            card_name = f"{card_name} // {back_name}"
                     
                     pack_first_picks[str(pack_num)] = card_name
             

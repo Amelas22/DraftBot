@@ -42,13 +42,14 @@ _DECKS = [
 
 class _FakeResponse:
     def __init__(self):
-        self.sent = []
+        self.sent = []      # new ephemeral messages (from the public quiz message)
+        self.edited = []    # in-place edits of the flow's own ephemeral message
 
     async def send_message(self, content=None, **kwargs):
         self.sent.append((content, kwargs))
 
     async def edit_message(self, **kwargs):
-        pass
+        self.edited.append(kwargs)
 
 
 def _interaction(user):
@@ -146,12 +147,16 @@ async def test_initial_submit_persists_pending_and_reveals_names_only(test_db):
     sub = await _submission("q1", "1")
     assert sub is not None and sub.finalized is False        # pending
     assert sub.guesses == [3, 0] and sub.points_earned == 0
-    # names revealed, but NOT records/score
-    content = interaction.response.sent[-1][0]
+    # names revealed IN PLACE — the guess prompt is edited, no new message (#355)
+    assert interaction.response.sent == []
+    edited = interaction.response.edited[-1]
+    content = edited["content"]
     assert "<@u1>" in content and "<@u2>" in content
     assert "went" not in content and "pts" not in content
+    # the locked guess is restated (the prompt that showed it was edited away)
+    assert "Your guess" in content and "3-0" in content and "0-3" in content
     # a Decide view is offered
-    assert isinstance(interaction.response.sent[-1][1].get("view"), TrophyDecideView)
+    assert isinstance(edited.get("view"), TrophyDecideView)
     # participants not incremented yet
     async with AsyncSessionLocal() as s:
         qs = await s.get(TrophyQuizSession, "q1")
@@ -289,6 +294,84 @@ async def test_finalize_idempotent_across_separate_views(test_db):
     assert qs.total_participants == 1                        # atomic finalize → once
     sub = await _submission("q1", "1")
     assert sub.finalized is True and sub.points_earned == 10
+
+
+# ---- single-message flow (no double prompts, #355) -------------------------
+
+@pytest.mark.asyncio
+async def test_second_submit_from_stale_prompt_resumes_locked_guess(test_db):
+    """#355: with two guess prompts open (Play clicked twice), the second Submit
+    must not spawn a duplicate flow — it edits into the Keep/Change step on the
+    FIRST submit's locked guess and never sends an extra message."""
+    await _seed_session()
+    user = SimpleNamespace(id=1, display_name="Alice", name="a")
+    gv1 = TrophyGuessView("q1", _DECKS, user)
+    gv1.selections = {"A": 3, "B": 0}
+    await gv1.submit_button.callback(_interaction(user))
+
+    gv2 = TrophyGuessView("q1", _DECKS, user)   # a second, stale prompt
+    gv2.selections = {"A": 0, "B": 3}           # different picks — must not count
+    interaction = _interaction(user)
+    await gv2.submit_button.callback(interaction)
+
+    assert interaction.response.sent == []       # no duplicate prompt
+    view = interaction.response.edited[-1]["view"]
+    assert isinstance(view, TrophyDecideView)
+    assert view.initial_guesses == [3, 0]        # locked to the first submit
+    sub = await _submission("q1", "1")
+    assert sub.guesses == [3, 0] and sub.finalized is False
+
+
+@pytest.mark.asyncio
+async def test_flow_edits_one_message_through_change_path(test_db):
+    """#355: submit → decide → pay-to-change → submit all EDIT the one ephemeral
+    message; each replaced view is stopped so its prompt can't fire again."""
+    await _seed_session()
+    user = SimpleNamespace(id=1, display_name="Alice", name="a")
+    gv = TrophyGuessView("q1", _DECKS, user)
+    gv.selections = {"A": 0, "B": 3}
+    i1 = _interaction(user)
+    await gv.submit_button.callback(i1)
+    assert i1.response.sent == []
+    decide = i1.response.edited[-1]["view"]
+    assert isinstance(decide, TrophyDecideView)
+    assert gv.is_finished()                      # consumed prompt is dead
+
+    i2 = _interaction(user)
+    await decide.change_button.callback(i2)
+    assert i2.response.sent == []
+    change_view = i2.response.edited[-1]["view"]
+    assert isinstance(change_view, TrophyGuessView)
+    revise_content = i2.response.edited[-1]["content"]
+    assert "<@u1>" in revise_content                      # pilots stay visible
+    assert "Your guess" in revise_content and "0-3" in revise_content  # initial guess restated
+    assert decide.is_finished()
+
+    change_view.selections = {"A": 3, "B": 0}
+    i3 = _interaction(user)
+    await change_view.submit_button.callback(i3)
+    assert i3.response.sent == []
+    assert isinstance(i3.response.edited[-1]["view"], TrophyShareView)
+    assert "pts" in i3.response.edited[-1]["content"]
+    assert change_view.is_finished()
+
+
+@pytest.mark.asyncio
+async def test_keep_edits_decide_prompt_into_result(test_db):
+    await _seed_session()
+    user = SimpleNamespace(id=1, display_name="Alice", name="a")
+    gv = TrophyGuessView("q1", _DECKS, user)
+    gv.selections = {"A": 3, "B": 0}
+    await gv.submit_button.callback(_interaction(user))
+
+    decide = TrophyDecideView("q1", _DECKS, user, [3, 0])
+    interaction = _interaction(user)
+    await decide.keep_button.callback(interaction)
+    assert interaction.response.sent == []
+    edited = interaction.response.edited[-1]
+    assert isinstance(edited["view"], TrophyShareView)
+    assert "pts" in edited["content"]
+    assert decide.is_finished()
 
 
 # ---- share (leak-safe, thread-routed) --------------------------------------

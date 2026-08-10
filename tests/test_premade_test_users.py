@@ -91,3 +91,47 @@ async def test_seating_order_uses_sign_up_names_for_non_members():
     assert "Member111" in names and "Member222" in names
     # test users keep their id even though they're not guild members
     assert "900000000000000001" in ids and "900000000000000002" in ids
+
+
+# ---- generate_seating_order excludes stale team members (Codex #1) ---------------
+
+@pytest.mark.asyncio
+async def test_seating_order_excludes_team_ids_removed_from_sign_ups():
+    """A player removed from sign_ups but still left in team_a/team_b (the leave
+    flow doesn't clean the team lists) must not be seated — otherwise the caller's
+    reorder_sign_ups does sign_ups[stale_id] and KeyErrors at premade fire."""
+    import utils
+
+    draft_session = MagicMock()
+    draft_session.guild_id = "1"
+    draft_session.team_a = ["111", "999"]   # 999 left the draft but stayed in team_a
+    draft_session.team_b = ["222"]
+    draft_session.sign_ups = {"111": "A", "222": "B"}   # 999 is gone
+
+    member = MagicMock()
+    member.display_name = "Ghost"
+    guild = MagicMock()
+    guild.get_member.return_value = member
+    bot = MagicMock()
+    bot.get_guild.return_value = guild
+
+    with patch.object(utils, "get_display_name", lambda m, g: m.display_name):
+        order = await utils.generate_seating_order(bot, draft_session)
+
+    ids = [uid for uid, _ in order]
+    assert "999" not in ids                              # stale id not seated
+    assert set(ids) <= set(draft_session.sign_ups)       # every seated id is in sign_ups
+
+
+def test_next_id_never_leaves_the_synthetic_band():
+    # _is_test_user classifies only [TEST_USER_ID_BASE, TEST_USER_ID_CEILING) as
+    # synthetic, so the allocator must refuse to mint ids past the ceiling —
+    # otherwise classification and allocation drift apart silently (the shape
+    # of the bug that once dropped real players' games).
+    from helpers.test_users import TEST_USER_ID_BASE, TEST_USER_ID_CEILING, plan_premade_test_users
+    full_band = {str(i) for i in range(TEST_USER_ID_BASE, TEST_USER_ID_CEILING)}
+    try:
+        plan_premade_test_users([], [], "A", "B", team_size=1, existing_ids=full_band)
+    except RuntimeError:
+        return
+    raise AssertionError("allocator minted an id outside the synthetic band")

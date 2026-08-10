@@ -220,7 +220,7 @@ class DraftCommands(commands.Cog):
         for channel_id in draft_session.channel_ids:
             channel = ctx.guild.get_channel(int(channel_id))
             if not channel or not is_sub_target_channel(
-                    channel.name, draft_session.draft_id, decision.channel_prefix):
+                    channel.name, draft_session.friendly_id, decision.channel_prefix):
                 continue
             try:
                 # Same overwrites teammates get at channel creation

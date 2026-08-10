@@ -11,6 +11,7 @@ from database.db_session import AsyncSessionLocal
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from stats_display import get_stats_embed_for_player
+from models import QuizStats, TrophyQuizSession, TrophyQuizSubmission
 from models.draft_session import DraftSession
 from models.player import PlayerStats
 from models.debt_ledger import DebtLedger
@@ -226,3 +227,119 @@ class TestGetStatsEmbedForPlayer:
         from stats_display import _player_skill_rating
         rating, provisional = await _player_skill_rating("999", "g")
         assert rating is None and provisional is None
+
+
+def _trophy_quiz_session(quiz_id, guild_id, display_id=1):
+    return TrophyQuizSession(
+        quiz_id=quiz_id, display_id=display_id, guild_id=guild_id, channel_id="c",
+        draft_session_id=f"d-{quiz_id}", posted_by="mod",
+        decks=[{"slot": "A", "drafter_id": "u1", "wins": 3},
+               {"slot": "B", "drafter_id": "u2", "wins": 0}],
+    )
+
+
+def _trophy_submission(quiz_id, player_id, points, direction_correct=True, finalized=True):
+    return TrophyQuizSubmission(
+        quiz_id=quiz_id, player_id=player_id, display_name="P",
+        guesses=[3, 0], direction_correct=direction_correct,
+        exact_points=[3, 3], points_earned=points, finalized=finalized,
+    )
+
+
+class TestPlayerQuizStats:
+    """Tests for _player_quiz_stats and the quiz field on the /stats embed."""
+
+    @pytest.mark.asyncio
+    async def test_none_when_no_quiz_history(self, test_db):
+        from stats_display import _player_quiz_stats
+        pick, trophy = await _player_quiz_stats("123", "g")
+        assert pick is None and trophy is None
+
+    @pytest.mark.asyncio
+    async def test_pick_quiz_reads_aggregated_row_own_guild_only(self, test_db):
+        from stats_display import _player_quiz_stats
+        async with AsyncSessionLocal() as session:
+            session.add(QuizStats(
+                player_id="123", guild_id="g", display_name="P",
+                total_quizzes=12, total_picks_attempted=48, total_picks_correct=23,
+                accuracy_percentage=47.9, total_points=156, highest_quiz_score=20,
+                current_perfect_streak=2, longest_perfect_streak=4))
+            session.add(QuizStats(   # same player, other guild: excluded
+                player_id="123", guild_id="other-guild", display_name="P",
+                total_quizzes=99, accuracy_percentage=99.0, total_points=999,
+                highest_quiz_score=99, current_perfect_streak=0,
+                longest_perfect_streak=0))
+            await session.commit()
+        pick, trophy = await _player_quiz_stats("123", "g")
+        assert pick == {"played": 12, "accuracy": 47.9, "points": 156, "best": 20}
+        assert trophy is None
+
+    @pytest.mark.asyncio
+    async def test_trophy_aggregates_finalized_own_guild_only(self, test_db):
+        from stats_display import _player_quiz_stats
+        async with AsyncSessionLocal() as session:
+            session.add(_trophy_quiz_session("q1", "g", display_id=1))
+            session.add(_trophy_quiz_session("q2", "g", display_id=2))
+            session.add(_trophy_quiz_session("q3", "g", display_id=3))
+            session.add(_trophy_quiz_session("q4", "g", display_id=4))
+            session.add(_trophy_quiz_session("q-other", "other-guild"))
+            session.add(_trophy_submission("q1", "123", points=10, direction_correct=True))
+            session.add(_trophy_submission("q2", "123", points=7, direction_correct=True))
+            session.add(_trophy_submission("q3", "123", points=3, direction_correct=False))
+            session.add(_trophy_submission("q4", "123", points=8, finalized=False))   # pending: excluded
+            session.add(_trophy_submission("q-other", "123", points=10))              # other guild: excluded
+            session.add(_trophy_submission("q1", "456", points=10))                   # other player: excluded
+            await session.commit()
+        pick, trophy = await _player_quiz_stats("123", "g")
+        assert pick is None
+        # direction_pct must derive from a COUNT (2/3), not a boolean coerced
+        # to True — summing the raw Boolean column regresses to True, which
+        # 66.67% catches (True/3 would be 33.3%).
+        assert trophy["played"] == 3 and trophy["points"] == 20
+        assert round(trophy["direction_pct"], 1) == 66.7
+
+    @pytest.mark.asyncio
+    async def test_embed_shows_quiz_field_with_both_types(self, test_db):
+        async with AsyncSessionLocal() as session:
+            session.add(QuizStats(
+                player_id="123456789", guild_id="test_guild", display_name="P",
+                total_quizzes=5, accuracy_percentage=50.0, total_points=40,
+                highest_quiz_score=12, current_perfect_streak=1, longest_perfect_streak=2))
+            session.add(_trophy_quiz_session("q1", "test_guild"))
+            session.add(_trophy_submission("q1", "123456789", points=10))
+            await session.commit()
+
+        mock_bot = AsyncMock()
+        mock_user = MagicMock()
+        mock_user.id = 123456789
+        mock_user.display_name = "TestPlayer"
+        mock_user.avatar = None
+        mock_bot.fetch_user.return_value = mock_user
+
+        embed = await get_stats_embed_for_player(
+            bot=mock_bot, player_id="123456789", guild_id="test_guild",
+            display_name="TestPlayer")
+
+        quiz_fields = [f for f in embed.fields if "Quiz" in f.name]
+        assert len(quiz_fields) == 1
+        value = quiz_fields[0].value
+        assert "Pick Quiz** (5 played)" in value
+        assert "50% of picks guessed right" in value
+        assert "streak" not in value.lower()
+        assert "Trophy Quiz** (1 played)" in value and "10 pts" in value
+        assert "directionally right 100%" in value
+
+    @pytest.mark.asyncio
+    async def test_embed_omits_quiz_field_without_quiz_history(self, test_db):
+        mock_bot = AsyncMock()
+        mock_user = MagicMock()
+        mock_user.id = 123456789
+        mock_user.display_name = "TestPlayer"
+        mock_user.avatar = None
+        mock_bot.fetch_user.return_value = mock_user
+
+        embed = await get_stats_embed_for_player(
+            bot=mock_bot, player_id="123456789", guild_id="test_guild",
+            display_name="TestPlayer")
+
+        assert not any("Quiz" in f.name for f in embed.fields)

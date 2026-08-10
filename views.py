@@ -5,7 +5,7 @@ import pytz
 from datetime import datetime, timedelta
 from discord import SelectOption
 from discord.ui import Button, View, Select, select
-from config import is_test_mode, should_reset_on_signup, get_queue_inactivity_minutes
+from config import is_test_mode, should_reset_on_signup, get_queue_inactivity_minutes, get_debt_warning_threshold
 from notification_service import send_ready_check_dms
 from ready_check import ReadyCheckView, ReadyCheckSession
 from draft_organization.stake_calculator import calculate_stakes_with_strategy
@@ -16,6 +16,9 @@ from sqlalchemy import update, select, and_
 from sqlalchemy.orm import selectinload
 from helpers.utils import get_cube_thumbnail_url
 from helpers.display_names import get_display_name, get_display_name_by_id
+from helpers.debt_warning import format_staked_sign_ups, DEBT_WARNING_AGE_DAYS
+from helpers.draft_footer import apply_draft_footer_from_session
+from helpers.permissions import bot_manager_button
 from utils import (
     calculate_pairings,
     get_formatted_stake_pairs,
@@ -27,7 +30,7 @@ from utils import (
     split_content_for_embed,
     update_draft_summary_message,
     check_and_post_victory_or_draw,
-    update_player_stats_and_elo,
+    apply_result_report,
     check_weekly_limits,
     update_player_stats_for_draft,
     add_links_to_embed_safely,
@@ -46,6 +49,26 @@ from preference_service import get_players_bet_capping_preferences
 # Debounce/timeout constants live in ready_check.py so the ordering invariant
 # between them is asserted in one place; re-exported here for the cooldown logic.
 from ready_check import READY_CHECK_DEBOUNCE_SECONDS
+
+# Synthetic sign-ups minted by the TEST_MODE "Add Test Users" button use
+# TEST_USER_ID_START + i as fake Discord IDs. Real snowflakes passed 9e17
+# around Oct 2021, so a bare `>= TEST_USER_ID_START` check matches real
+# newer accounts — membership must be a tight range gated on test mode.
+TEST_USER_ID_START = 900000000000000000
+TEST_USER_ID_END = TEST_USER_ID_START + 100
+
+
+def is_synthetic_test_user(user_id: str) -> bool:
+    """True only for fake test-mode sign-ups, never for real Discord accounts."""
+    return is_test_mode() and TEST_USER_ID_START <= int(user_id) < TEST_USER_ID_END
+
+
+def is_test_signup(user_id: str, bot_user_id: str) -> bool:
+    """True for any sign-up minted by the TEST_MODE "Add Test Users" button:
+    the synthetic high-ID users, plus the first slot which reuses the bot's own
+    id (so guild.get_member() resolves) and therefore sits below
+    TEST_USER_ID_START."""
+    return is_synthetic_test_user(user_id) or (is_test_mode() and user_id == bot_user_id)
 
 
 class PersistentView(discord.ui.View):
@@ -211,13 +234,9 @@ class PersistentView(discord.ui.View):
     # Maximum number of test users to add
     NUM_TEST_USERS_TO_ADD = 6
     
+    @bot_manager_button
     async def add_test_users_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Add test users to the draft for testing purposes, up to NUM_TEST_USERS_TO_ADD."""
-        # Only allow admins to use this feature
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("Only server administrators can use this test feature.", ephemeral=True)
-            return
-                    
         logger.info(f"Adding test users to draft {self.draft_session_id}")
         
         # Fetch the current draft session to ensure it's up to date
@@ -278,7 +297,7 @@ class PersistentView(discord.ui.View):
             if i == 0:
                 user_id = bot_user_id
             else:
-                user_id = str(900000000000000000 + i)
+                user_id = str(TEST_USER_ID_START + i)
             name = test_names[i]
             fake_users[user_id] = name
             logger.info(f"Generated test user: {name} with ID {user_id}")
@@ -336,12 +355,9 @@ class PersistentView(discord.ui.View):
             await interaction.followup.send(f"No additional test users were added. The draft already has {len(sign_ups)} users (limit is {self.NUM_TEST_USERS_TO_ADD}).", ephemeral=True)
 
 
+    @bot_manager_button
     async def add_test_users_premade_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         """TEST_MODE only: fill both premade teams to 3 players with test users."""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("Only server administrators can use this test feature.", ephemeral=True)
-            return
-
         draft_session = await get_draft_session(self.draft_session_id)
         if not draft_session:
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)
@@ -778,12 +794,11 @@ class PersistentView(discord.ui.View):
 
         # Build the initial ready check state.
         # All players start as no_response; initiator and test users are marked ready immediately.
-        TEST_USER_ID_START = 900000000000000000
-
         rc = ReadyCheckSession(player_ids=session.sign_ups.keys())
         rc.set_status(user_id, 'ready')
+        bot_user_id = str(interaction.client.user.id)
         for uid in session.sign_ups.keys():
-            if uid != user_id and int(uid) >= TEST_USER_ID_START:
+            if uid != user_id and is_test_signup(uid, bot_user_id):
                 rc.set_status(uid, 'ready')
                 logger.debug(f"Auto-marked test user {uid} as ready")
 
@@ -798,7 +813,7 @@ class PersistentView(discord.ui.View):
         # keeping the button live so a stalled check can be re-fired once it lapses.
 
         # Generate the initial embed with personalized links
-        embed = await rc.build_embed(session.sign_ups, guild=interaction.guild)
+        embed = await rc.build_embed(session.sign_ups, guild=interaction.guild, draft_session=session)
         
         # Create the view with the buttons
         view = ReadyCheckView(self.draft_session_id)
@@ -1288,7 +1303,7 @@ class PersistentView(discord.ui.View):
     
 
     async def create_team_channel(self, guild, team_name, team_members, team_a=None, team_b=None):
-        from config import get_config, is_special_guild
+        from config import get_config, get_bots_with_draft_access, is_special_guild
 
         config = get_config(guild.id)
         draft_category = discord.utils.get(guild.categories, name=config["categories"]["draft"])
@@ -1300,7 +1315,7 @@ class PersistentView(discord.ui.View):
         if not session:
             logger.error(f"Draft session not found for session_id={self.draft_session_id} in create_team_channel")
             return
-        channel_name = f"{team_name}-Chat-{session.draft_id}"
+        channel_name = f"{team_name}-Chat-{session.friendly_id}"
 
         logger.info(f"Creating team channel '{channel_name}' for session {self.draft_session_id}, team: {team_name}")
 
@@ -1313,6 +1328,18 @@ class PersistentView(discord.ui.View):
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             guild.me: discord.PermissionOverwrite(read_messages=True, manage_messages=True)
         }
+
+        # Bots with draft access (e.g. the Scryfall card-lookup bot) get read+send in
+        # every draft channel, including team-specific ones and the premade voice
+        # channels created below. Only bot-managed integration roles (the role Discord
+        # creates when a bot is invited) are honored: they cannot be assigned to
+        # humans, so a same-named vanity role can't be used to read private team
+        # channels.
+        wanted_bots = set(get_bots_with_draft_access(guild.id))
+        bot_roles = [r for r in guild.roles if r.name in wanted_bots and r.tags and r.tags.bot_id]
+        for role in bot_roles:
+            overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        logger.info(f"Draft-access bot roles on '{channel_name}': {[r.name for r in bot_roles] or 'none'}")
 
         # Only add admin roles to the Draft chat, not to team-specific channels
         if team_name == "Draft":
@@ -1338,7 +1365,7 @@ class PersistentView(discord.ui.View):
 
         if session.premade_match_id and team_name != "Draft" and session.session_type == "premade":
             # Construct voice channel name
-            voice_channel_name = f"{team_name}-Voice-{session.draft_id}"
+            voice_channel_name = f"{team_name}-Voice-{session.friendly_id}"
             # Create the voice channel with the same permissions as the text channel
             voice_channel = await guild.create_voice_channel(name=voice_channel_name, overwrites=overwrites, category=voice_category)
             # Store the voice channel ID
@@ -1761,9 +1788,10 @@ class MatchResultSelect(Select):
 
                     if match_result:
                         # Update the match result based on the selection
+                        previous_winner_id = match_result.winner_id
                         match_result.player1_wins = player1_wins
                         match_result.player2_wins = player2_wins
-                        if winner_indicator != '0':  
+                        if winner_indicator != '0':
                             winner_id = match_result.player1_id if winner_indicator == '1' else match_result.player2_id
                         match_result.winner_id = winner_id
                         match_result.result_submitted_at = datetime.now()
@@ -1772,28 +1800,32 @@ class MatchResultSelect(Select):
 
                         from helpers.skill import rating_counts_for
                         if draft_session and rating_counts_for(draft_session.session_type):
-                            streak_extensions = await update_player_stats_and_elo(match_result)
+                            # Only a first report applies an incremental rating
+                            # update; re-reports must not double-count and a
+                            # winner correction replays the ledger instead.
+                            action, streak_extensions = await apply_result_report(match_result, previous_winner_id)
 
-                            # Store streak extension info for ring bearer check later
-                            from utils import store_match_streak_extensions
-                            store_match_streak_extensions(
-                                self.session_id,
-                                match_result.player1_id,
-                                match_result.player2_id,
-                                streak_extensions
-                            )
-
-                            # Check for ring bearer transfer if there was a winner
-                            if winner_id:
-                                loser_id = match_result.player2_id if winner_id == match_result.player1_id else match_result.player1_id
-                                from services.ring_bearer_service import check_match_defeat_transfer
-                                await check_match_defeat_transfer(
-                                    bot=self.bot,
-                                    guild_id=str(draft_session.guild_id),
-                                    winner_id=winner_id,
-                                    loser_id=loser_id,
-                                    session_id=self.session_id
+                            if action == "apply":
+                                # Store streak extension info for ring bearer check later
+                                from utils import store_match_streak_extensions
+                                store_match_streak_extensions(
+                                    self.session_id,
+                                    match_result.player1_id,
+                                    match_result.player2_id,
+                                    streak_extensions
                                 )
+
+                                # Check for ring bearer transfer if there was a winner
+                                if winner_id:
+                                    loser_id = match_result.player2_id if winner_id == match_result.player1_id else match_result.player1_id
+                                    from services.ring_bearer_service import check_match_defeat_transfer
+                                    await check_match_defeat_transfer(
+                                        bot=self.bot,
+                                        guild_id=str(draft_session.guild_id),
+                                        winner_id=winner_id,
+                                        loser_id=loser_id,
+                                        session_id=self.session_id
+                                    )
             
             if draft_session:
                 await update_draft_summary_message(self.bot, self.session_id)
@@ -2180,36 +2212,32 @@ async def update_draft_message(bot, session_id):
         guild = channel.guild
 
         if draft_session.session_type == "staked":
-            sign_ups_list = []
-            for user_id, stored_name in draft_session.sign_ups.items():
-                # Get display name with crown icon
-                display_name = get_display_name_by_id(user_id, guild, stored_name)
-                # Default to "Not set" if no stake has been set yet
-                if user_id in stake_info_by_player:
-                    stake_amount = stake_info_by_player[user_id]['amount']
-                    is_capped = stake_info_by_player[user_id]['is_capped']
-                    capped_emoji = "🧢" if is_capped else "🏎️"  # Cap emoji for capped, lightning for uncapped
-                    sign_ups_list.append((user_id, display_name, stake_amount, is_capped, capped_emoji))
-                else:
-                    sign_ups_list.append((user_id, display_name, "Not set", True, "❓"))
-
-            # Sort by stake amount (highest first)
-            # Convert "Not set" to -1 for sorting purposes
-            def sort_key(item):
-                stake = item[2]
-                return -1 if stake == "Not set" else stake
-
-            sign_ups_list.sort(key=sort_key, reverse=True)
-
-            # Format with stakes and capping status
-            formatted_sign_ups = []
-            for user_id, display_name, stake_amount, is_capped, emoji in sign_ups_list:
-                if stake_amount == "Not set":
-                    formatted_sign_ups.append(f"❌ Not set: {display_name}")
-                else:
-                    formatted_sign_ups.append(f"{emoji} {stake_amount} tix: {display_name}")
-
-            sign_ups_str = f"**Players ({sign_up_count}):**\n" + ('\n'.join(formatted_sign_ups) if formatted_sign_ups else 'No players yet.')
+            # Debt warnings: best-effort, render-time only. A lookup failure
+            # renders the plain list — it must never block the embed update.
+            owed_map = {}
+            old_owed_map = {}
+            threshold = get_debt_warning_threshold(draft_session.guild_id)
+            if threshold:
+                try:
+                    from services.debt_service import get_owed_maps
+                    aged_cutoff = datetime.now() - timedelta(days=DEBT_WARNING_AGE_DAYS)
+                    owed_map, old_owed_map = await get_owed_maps(
+                        str(draft_session.guild_id),
+                        list(draft_session.sign_ups.keys()),
+                        aged_cutoff,
+                    )
+                except Exception as e:
+                    logger.warning(f"[debt-warning] lookup failed for {session_id}: {e}; "
+                                   "rendering without markers")
+            sign_ups_str = format_staked_sign_ups(
+                draft_session.sign_ups,
+                stake_info_by_player,
+                owed_map,
+                old_owed_map,
+                threshold,
+                display_name_for=lambda uid, stored: get_display_name_by_id(uid, guild, stored),
+                session_id=session_id,
+            )
         else:
             if draft_session.sign_ups:
                 # Get display names with crown icons
@@ -2284,7 +2312,11 @@ async def update_draft_message(bot, session_id):
         thumbnail_url = get_cube_thumbnail_url(draft_session.cube)
         embed.set_thumbnail(url=thumbnail_url)
         logger.info(f"Updated thumbnail for cube: {draft_session.cube}")
-        
+
+        # Re-stamp the metadata footer: the cube name it carries goes stale
+        # when Update Cube changes the session's cube (#383).
+        apply_draft_footer_from_session(embed, draft_session)
+
         await message.edit(embed=embed)
         logger.info(f"Successfully updated message for session ID: {session_id}")
 

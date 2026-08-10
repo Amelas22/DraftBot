@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 # Team channels are created with these hardcoded prefixes (views.py):
-# team_a -> "Red-Team-Chat-{draft_id}", team_b -> "Blue-Team-Chat-{draft_id}".
+# team_a -> "Red-Team-Chat-{friendly_id}", team_b -> "Blue-Team-Chat-{friendly_id}".
 TEAM_A_CHANNEL_PREFIX = "Red-Team"
 TEAM_B_CHANNEL_PREFIX = "Blue-Team"
 
@@ -64,7 +64,7 @@ def resolve_sub_grant(
     return GrantDecision("B", TEAM_B_CHANNEL_PREFIX, display), None
 
 
-def is_sub_target_channel(channel_name: str, draft_id: str, channel_prefix: Optional[str]) -> bool:
+def is_sub_target_channel(channel_name: str, friendly_id: str, channel_prefix: Optional[str]) -> bool:
     """True if channel_name is one of the channels a sub should be granted.
 
     Case-insensitive: Discord lowercases text channel names on creation,
@@ -73,10 +73,10 @@ def is_sub_target_channel(channel_name: str, draft_id: str, channel_prefix: Opti
     channel_prefix is None for team-less drafts, where only the shared
     draft chat exists.
     """
-    targets = {f"draft-chat-{draft_id}".lower()}
+    targets = {f"draft-chat-{friendly_id}".lower()}
     if channel_prefix:
-        targets.add(f"{channel_prefix}-chat-{draft_id}".lower())
-        targets.add(f"{channel_prefix}-voice-{draft_id}".lower())
+        targets.add(f"{channel_prefix}-chat-{friendly_id}".lower())
+        targets.add(f"{channel_prefix}-voice-{friendly_id}".lower())
     return channel_name.lower() in targets
 
 

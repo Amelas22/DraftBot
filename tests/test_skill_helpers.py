@@ -3,9 +3,11 @@ from helpers.skill import (
     PRIOR_MU,
     PRIOR_SIGMA,
     SKILL_ENV,
+    _is_test_user,
     is_established,
     new_ratings,
     rating_counts_for,
+    rating_update_action,
     skill_rating,
 )
 
@@ -55,6 +57,39 @@ def test_is_established_threshold():
     assert is_established(19) is False
     assert is_established(20) is True
     assert is_established(21) is True
+
+
+def test_is_test_user_flags_only_the_synthetic_allocator_band():
+    # Synthetic ids are allocated sequentially from TEST_USER_ID_BASE
+    # (helpers/test_users.py), so only a narrow band above the base is synthetic.
+    assert _is_test_user("900000000000000000") is True
+    assert _is_test_user("900000000000000005") is True
+    # Real Discord accounts created after ~late 2021 also have ids >= 9e17 and
+    # must never be treated as test users (their games were being dropped).
+    assert _is_test_user("903674293626470420") is False
+    assert _is_test_user("1306388347043971156") is False
+    # Pre-2021 accounts and legacy non-numeric ids are real.
+    assert _is_test_user("491700834850177024") is False
+    assert _is_test_user("legacy-user") is False
+
+
+def test_rating_update_action_first_report_applies():
+    assert rating_update_action(None, "1") == "apply"
+
+
+def test_rating_update_action_no_play_report_does_nothing():
+    assert rating_update_action(None, None) == "none"
+
+
+def test_rating_update_action_same_winner_rereport_does_nothing():
+    # Score-only corrections (2-0 -> 2-1) must not re-apply the rating update.
+    assert rating_update_action("1", "1") == "none"
+
+
+def test_rating_update_action_winner_change_recomputes():
+    assert rating_update_action("1", "2") == "recompute"
+    # Un-reporting (winner -> No Match Played) also invalidates the old update.
+    assert rating_update_action("1", None) == "recompute"
 
 
 def test_new_ratings_moves_winner_up_loser_down_and_shrinks_sigma():

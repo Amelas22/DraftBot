@@ -14,18 +14,21 @@ from discord.commands import SlashCommandGroup, option
 from loguru import logger
 
 from services.debt_service import (
-    get_all_balances_for,
+    TIX_ONLY,
     get_balance_with,
     get_entries_since_last_settlement,
+    get_active_debt_entries,
     create_settlement,
-    get_guild_debt_rows
+    create_card_loan,
+    get_open_card_positions
 )
 from debt_views.settle_views import (
     CounterpartySelectView,
-    AmountInputView,
-    PublicSettleDebtsView
+    PublicSettleDebtsView,
+    SettleEntitySelectView,
+    format_card_positions
 )
-from debt_views.helpers import get_member_name, get_member_name_plain, format_entry_source, build_guild_debt_embed, build_guild_debt_embed_pages
+from debt_views.helpers import get_member_name, get_member_name_plain, format_entry_source, describe_draft_sources
 from database.db_session import db_session
 from models.debt_ledger import DebtLedger
 from models.debt_summary_message import DebtSummaryMessage
@@ -50,12 +53,10 @@ class DebtCommands(commands.Cog):
         user_id = str(ctx.author.id)
         guild_id = str(ctx.guild.id)
 
-        balances = await get_all_balances_for(
-            guild_id=guild_id,
-            player_id=user_id
-        )
+        from debt_views.settle_views import gather_settle_state
+        balances, positions_by_cp = await gather_settle_state(guild_id, user_id)
 
-        if not balances:
+        if not balances and not positions_by_cp:
             await ctx.followup.send("You have no outstanding debts with anyone.")
             return
 
@@ -63,6 +64,16 @@ class DebtCommands(commands.Cog):
             title="Your Debt Summary",
             color=discord.Color.gold()
         )
+        if positions_by_cp:
+            card_lines = []
+            for cp, cp_positions in positions_by_cp.items():
+                header = get_member_name(ctx.guild, cp)
+                card_lines.append(f"**{header}**\n{format_card_positions(cp_positions)}")
+            embed.add_field(
+                name="Open Card Loans",
+                value="\n".join(card_lines)[:1024],
+                inline=False
+            )
 
         you_owe_lines = []
         owed_to_you_lines = []
@@ -160,9 +171,10 @@ class DebtCommands(commands.Cog):
 
         # Breakdown since last settlement
         if entries:
+            draft_labels = await describe_draft_sources(ctx.guild, entries)
             breakdown_lines = []
             for entry in entries[-15:]:  # Last 15 entries
-                source = format_entry_source(entry)
+                source = format_entry_source(entry, draft_labels)
                 date_str = entry.created_at.strftime("%b %d") if entry.created_at else ""
 
                 if entry.amount < 0:
@@ -191,7 +203,8 @@ class DebtCommands(commands.Cog):
 
     @debts.command(name="history", description="View full debt history with a player")
     @option("player", discord.Member, description="The player to check history with")
-    async def debts_history(self, ctx: discord.ApplicationContext, player: discord.Member):
+    @option("active_only", bool, description="Only the entries composing the current outstanding balance", default=False)
+    async def debts_history(self, ctx: discord.ApplicationContext, player: discord.Member, active_only: bool = False):
         """View full audit history with a specific player."""
         await ctx.defer(ephemeral=True)
 
@@ -203,31 +216,44 @@ class DebtCommands(commands.Cog):
             await ctx.followup.send("You can't have debts with yourself!")
             return
 
-        # Get ALL entries (not just since last settlement)
-        async with db_session() as session:
-            query = (
-                select(DebtLedger)
-                .where(
-                    DebtLedger.guild_id == guild_id,
-                    DebtLedger.player_id == user_id,
-                    DebtLedger.counterparty_id == counterparty_id
+        if active_only:
+            title = f"Active Debt with {player.display_name}"
+            entries = await get_active_debt_entries(guild_id, user_id, counterparty_id)
+            # No entries means the pair is settled up: say so rather than show an empty embed
+            if not entries:
+                await ctx.followup.send(
+                    f"No active debt with {player.display_name} — you're all settled up! 🎉"
                 )
-                .order_by(DebtLedger.created_at.desc())
-                .limit(50)
-            )
-            result = await session.execute(query)
-            entries = result.scalars().all()
+                return
+        else:
+            title = f"Debt History with {player.display_name}"
+            # Get ALL entries (not just since last settlement)
+            async with db_session() as session:
+                query = (
+                    select(DebtLedger)
+                    .where(
+                        DebtLedger.guild_id == guild_id,
+                        DebtLedger.player_id == user_id,
+                        DebtLedger.counterparty_id == counterparty_id,
+                        TIX_ONLY,
+                    )
+                    .order_by(DebtLedger.created_at.desc())
+                    .limit(50)
+                )
+                result = await session.execute(query)
+                entries = result.scalars().all()
 
         embed = discord.Embed(
-            title=f"Debt History with {player.display_name}",
+            title=title,
             color=discord.Color.purple()
         )
 
         if entries:
+            draft_labels = await describe_draft_sources(ctx.guild, entries)
             history_lines = []
             for entry in entries:
                 date_str = entry.created_at.strftime("%b %d") if entry.created_at else "?"
-                source = format_entry_source(entry)
+                source = format_entry_source(entry, draft_labels)
 
                 if entry.amount < 0:
                     history_lines.append(f"{date_str}: {source} - You owe {abs(entry.amount)} tix")
@@ -273,7 +299,10 @@ class DebtCommands(commands.Cog):
             counterparty_id=counterparty_id
         )
 
-        if balance == 0:
+        positions = await get_open_card_positions(
+            guild_id, user_id, counterparty_id=counterparty_id)
+
+        if balance == 0 and not positions:
             await ctx.followup.send(f"You have no outstanding debts with {player.display_name}.")
             return
 
@@ -296,7 +325,7 @@ class DebtCommands(commands.Cog):
                 value=f"You owe **{abs(balance)} tix**",
                 inline=False
             )
-        else:
+        elif balance > 0:
             embed.add_field(
                 name="Net Balance",
                 value=f"They owe you **{balance} tix**",
@@ -305,9 +334,10 @@ class DebtCommands(commands.Cog):
 
         # Show breakdown
         if entries:
+            draft_labels = await describe_draft_sources(ctx.guild, entries)
             breakdown_lines = []
             for entry in entries[-10:]:
-                source = format_entry_source(entry)
+                source = format_entry_source(entry, draft_labels)
 
                 if entry.amount < 0:
                     breakdown_lines.append(f"{source}: You owe {abs(entry.amount)} tix")
@@ -323,21 +353,73 @@ class DebtCommands(commands.Cog):
                 inline=False
             )
 
-        embed.set_footer(text="Click 'Enter Amount' to confirm the payment amount")
+        if positions:
+            embed.add_field(
+                name="Cards",
+                value=format_card_positions(positions),
+                inline=False
+            )
+
+        embed.set_footer(text="Pick what you're settling, then enter the quantity")
 
         name_decorated = get_member_name(ctx.guild, counterparty_id)
         name_plain = get_member_name_plain(ctx.guild, counterparty_id)
 
-        view = AmountInputView(
+        view = SettleEntitySelectView(
             user_id=user_id,
             guild_id=guild_id,
             counterparty_id=counterparty_id,
             net_balance=balance,
             counterparty_name_plain=name_plain,
-            counterparty_name_decorated=name_decorated
+            counterparty_name_decorated=name_decorated,
+            positions=positions
         )
 
         await ctx.followup.send(embed=embed, view=view)
+
+    @discord.slash_command(name="lend", description="Record a card loan between you and another player")
+    @option("player", discord.Member, description="The other player")
+    @option("direction", str, description="Which way the cards went",
+            choices=["lent-to-them", "borrowed-from-them"])
+    @option("card", str, description="Card name (free text, e.g. 'Lightning Bolt')")
+    @option("quantity", int, description="Number of copies", default=1, min_value=1)
+    async def lend(self, ctx: discord.ApplicationContext, player: discord.Member,
+                   direction: str, card: str, quantity: int = 1):
+        """Record a card loan in the debt ledger."""
+        await ctx.defer(ephemeral=True)
+
+        user_id = str(ctx.author.id)
+        other_id = str(player.id)
+        guild_id = str(ctx.guild.id)
+
+        if direction == "lent-to-them":
+            lender_id, borrower_id = user_id, other_id
+        else:
+            lender_id, borrower_id = other_id, user_id
+
+        try:
+            lender_row, _ = await create_card_loan(
+                guild_id=guild_id, lender_id=lender_id, borrower_id=borrower_id,
+                card_name=card, quantity=quantity, created_by=user_id)
+        except ValueError as e:
+            await ctx.followup.send(str(e), ephemeral=True)
+            return
+
+        # Update debt summary in background (lending changes the panel too)
+        from utils import fire_debt_summary_refresh
+        fire_debt_summary_refresh(ctx.bot, guild_id, "Lend")
+
+        from debt_views.helpers import format_card_quantity
+        card_label = format_card_quantity(lender_row.card_name, quantity)
+        if direction == "lent-to-them":
+            summary = f"You lent **{card_label}** to {player.display_name}."
+        else:
+            summary = f"You borrowed **{card_label}** from {player.display_name}."
+        embed = discord.Embed(
+            title="Card loan recorded",
+            description=f"{summary}\nUse `/settle` with them to view or return cards.",
+            color=discord.Color.blue())
+        await ctx.followup.send(embed=embed, ephemeral=True)
 
     @discord.slash_command(name="debts-admin", description="[Admin] View all debts in the guild")
     @has_bot_manager_role()
@@ -345,16 +427,8 @@ class DebtCommands(commands.Cog):
         """Admin view of all outstanding debts in the guild."""
         await ctx.defer(ephemeral=True)
 
-        rows = await get_guild_debt_rows(str(ctx.guild.id))
-
-        if not rows:
-            await ctx.followup.send("No outstanding debts in this guild.")
-            return
-
-        from services.debt_service import get_most_outstanding_creditors
-        top_creditors = await get_most_outstanding_creditors(str(ctx.guild.id))
-        pages = build_guild_debt_embed_pages(
-            ctx.guild, rows, include_description=False, top_creditors=top_creditors)
+        from debt_views.helpers import build_debt_summary_pages
+        pages = await build_debt_summary_pages(ctx.guild, include_description=False)
         await ctx.followup.send(embed=pages[0])
 
     @discord.slash_command(name="debts-post", description="[Admin] Post public debt summary with settle button")
@@ -365,8 +439,6 @@ class DebtCommands(commands.Cog):
 
         guild_id = str(ctx.guild.id)
         channel_id = str(ctx.channel.id)
-
-        rows = await get_guild_debt_rows(guild_id)
 
         async with db_session() as session:
             # Check if there's an existing debt summary message for this guild
@@ -390,9 +462,8 @@ class DebtCommands(commands.Cog):
                     logger.warning(f"Could not delete old debt summary message: {e}")
 
             # Build and post the public message
-            from services.debt_service import get_most_outstanding_creditors
-            top_creditors = await get_most_outstanding_creditors(guild_id)
-            pages = build_guild_debt_embed_pages(ctx.guild, rows, top_creditors=top_creditors)
+            from debt_views.helpers import build_debt_summary_pages
+            pages = await build_debt_summary_pages(ctx.guild)
             view = PublicSettleDebtsView(pages=pages)
             public_message = await ctx.channel.send(embed=pages[0], view=view)
 

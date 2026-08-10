@@ -2,6 +2,7 @@
 key
 *.pub
 *.json
+!.claude/settings.json
 *.db
 *.xlsx
 *.csv
@@ -170,3 +171,4 @@ cython_debug/
 #.idea/
 card_analysis_cache/
 drafts.db.backup.*
+analysis_data/

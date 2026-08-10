@@ -96,6 +96,10 @@ pipenv run python -m pytest tests/test_seating_order.py::TestSeatingOrder::test_
 
 **Why `python -m pytest`?** Running pytest as a module (`python -m pytest`) automatically adds the current directory to Python's path, allowing tests to import project modules (`models`, `utils`, etc.) without additional configuration. Using just `pytest` will result in import errors.
 
+#### Discord-in-the-loop testing (Claude-driven)
+
+Claude can drive the test Discord server itself — run slash commands, click bot components, and screenshot the results — via the `discord-test` project skill (`.claude/skills/discord-test/SKILL.md`). Requires `TEST_GUILD_ID` in `.env` and a dedicated logged-in test account in the in-app browser; see the skill for the safety rails.
+
 ## Code Patterns and Conventions
 
 ### Configuration System

@@ -2,7 +2,7 @@ import random
 import discord
 import asyncio
 import pytz
-from sqlalchemy import update, select, func, or_, desc, and_
+from sqlalchemy import update, select, func, or_, desc, and_, create_engine
 from datetime import datetime, timedelta
 from session import AsyncSessionLocal, get_draft_session, StakeInfo, Challenge, PlayerLimit, DraftSession, MatchResult, PlayerStats, Match, Team, WeeklyLimit, StakePairing
 from sqlalchemy.orm import selectinload, joinedload
@@ -14,16 +14,16 @@ from models.draft_streak_history import DraftStreakHistory
 from models import QuizSession, TrophyQuizSession
 from quiz_views_module.quiz_views import QuizPublicView
 from quiz_views_module.trophy_quiz_views import TrophyQuizView
+from helpers.draft_footer import apply_draft_footer_from_session
 from services.draft_analysis import DraftAnalysis
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
-from services.debt_service import create_debt_entries_from_stakes, get_guild_debt_rows, get_balance_with
+from services.debt_service import create_debt_entries_from_stakes, get_balance_with
 from debt_views import SettleDebtsView
 from debt_views.settle_views import PublicSettleDebtsView
-from debt_views.helpers import build_guild_debt_embed_pages
 from models.debt_summary_message import DebtSummaryMessage
 from loguru import logger
-from config import is_cleanup_exempt
+from config import is_cleanup_exempt, is_test_mode
 from leaderboard_config import AUTO_UPDATE_CATEGORIES
 from services.crown_roles import update_crown_roles_for_guild
 
@@ -31,7 +31,16 @@ from services.crown_roles import update_crown_roles_for_guild
 # {session_id: {player_id: {win_streak_increased: bool, perfect_streak_increased: bool}}}
 MATCH_STREAK_EXTENSIONS = {}
 from helpers.display_names import get_display_name, get_display_name_by_id
-from helpers.skill import PRIOR_MU, PRIOR_SIGMA, new_ratings
+from helpers.skill import (
+    PRIOR_MU,
+    PRIOR_SIGMA,
+    apply_upset_decoration,
+    backfill_skill_ratings,
+    new_ratings,
+    rating_counts_for,
+    rating_update_action,
+    winner_probability_from_stats,
+)
 from services.ring_bearer_service import update_ring_bearer_for_guild
 
 # Configuration constants
@@ -217,13 +226,29 @@ async def split_into_teams(bot, draft_session_id):
                 else:
                     print(f"No sign-ups found for session {draft_session_id}")
 
+def reorder_sign_ups(sign_ups, ordered_ids):
+    """Return a new sign_ups dict reordered to `ordered_ids`, keyed by user id
+    with the stored names unchanged.
+
+    Reordering by user id (never by display name) is what keeps decorated or
+    markdown-escaped display names from breaking the mapping — see PR #349. Used
+    by both the premade and swiss seating paths.
+    """
+    return {user_id: sign_ups[user_id] for user_id in ordered_ids}
+
+
 async def generate_seating_order(bot, draft_session, command_type=None):
     guild = bot.get_guild(int(draft_session.guild_id))
 
+    # Only seat team members who are still signed up. A player who leaves is
+    # removed from sign_ups but may remain in team_a/team_b; seating a stale id
+    # would then KeyError in the caller's reorder_sign_ups (sign_ups[stale_id]).
+    sign_ups = draft_session.sign_ups or {}
+
     # Pair each user id with its member object; test users resolve to None and
     # fall back to their sign_ups display name instead of being dropped.
-    team_a_pairs = [(user_id, guild.get_member(int(user_id))) for user_id in draft_session.team_a]
-    team_b_pairs = [(user_id, guild.get_member(int(user_id))) for user_id in draft_session.team_b]
+    team_a_pairs = [(user_id, guild.get_member(int(user_id))) for user_id in draft_session.team_a if user_id in sign_ups]
+    team_b_pairs = [(user_id, guild.get_member(int(user_id))) for user_id in draft_session.team_b if user_id in sign_ups]
 
     random.shuffle(team_a_pairs)
     random.shuffle(team_b_pairs)
@@ -604,7 +629,7 @@ async def generate_draft_summary_embed(bot, draft_session_id):
             else:
                 # Code for Swiss drafts
                 sign_ups_list = list(draft_session.sign_ups.keys())
-                title = f"Swiss Draft - Session {draft_session.draft_id}"
+                title = "Swiss Draft"
                 description = f"Draft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
                 discord_color = discord.Color.dark_magenta()
                 embed = discord.Embed(title=title, description=description, color=discord_color)
@@ -612,6 +637,9 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                 embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
                 bet_embed = None  # Swiss drafts don't have bet outcomes
 
+            # Shared draft metadata footer, on the main embed only — bet_embed
+            # carries its own settled-total footer.
+            apply_draft_footer_from_session(embed, draft_session)
             return embed, bet_embed
         
 
@@ -642,8 +670,26 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
             description = f"Draft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
             discord_color = discord.Color.gold()
 
+        # Upset callout: decorative only — any failure falls through to the
+        # plain victory message. Uses post-draft ratings on purpose (spec).
+        if rating_counts_for(draft_session.session_type):
+            try:
+                loser_team_ids = draft_session.team_b if team_a_wins > team_b_wins else draft_session.team_a
+                stats_map = await _fetch_player_stats_map(
+                    draft_session.guild_id,
+                    list(winner_team_ids) + list(loser_team_ids),
+                )
+                winner_prob = winner_probability_from_stats(
+                    stats_map, winner_team_ids, loser_team_ids
+                )
+                title, description = apply_upset_decoration(title, description, winner_prob)
+            except Exception as e:
+                logger.warning(
+                    f"Upset callout skipped for session {draft_session.session_id}: {e}"
+                )
+
     elif team_a_wins == 0 and team_b_wins == 0:
-        title = f"Draft-{draft_session.draft_id} Standings" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
+        title = "Draft Standings" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
         description = "If a drafter is missing from this channel, they likely can still see the channel but have the Discord invisible setting on."
         discord_color = discord.Color.dark_blue()
     elif team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0:
@@ -651,7 +697,7 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
         description = f"Draft Start: <t:{int(draft_session.draft_start_time.timestamp())}:F>"
         discord_color = discord.Color.light_grey()
     else:
-        title = f"Draft-{draft_session.draft_id} Standings" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
+        title = "Draft Standings" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
         description = "If a drafter is missing from this channel, they likely can still see the channel but have the Discord invisible setting on."
         discord_color = discord.Color.dark_blue()
     return title, description, discord_color
@@ -811,6 +857,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                                             seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
                                             embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
                                             embed.add_field(name="Standings", value=standings, inline=False)
+                                            apply_draft_footer_from_session(embed, draft_session)
 
                                             if draft_chat_channel:
                                                 await post_or_update_victory_message(bot, session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat')
@@ -1048,7 +1095,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                     ))
 
                     # Update debt summary in background (if one exists for this guild)
-                    asyncio.create_task(update_debt_summary_for_guild(bot, draft_session.guild_id))
+                    fire_debt_summary_refresh(bot, draft_session.guild_id, "StakeDebts")
 
 
 async def update_leaderboards_for_guild(bot, guild_id: str, session_id=None, streak_extensions=None):
@@ -1108,11 +1155,20 @@ async def update_leaderboards_for_guild(bot, guild_id: str, session_id=None, str
                     else:
                         timeframes[category] = "lifetime"
 
+            # One PlayersDataCache per refresh cycle: every fold-backed
+            # category (and the crown pass below) shares the same
+            # per-timeframe assembly instead of rebuilding identical data
+            # per category (~9 rebuilds -> one per distinct timeframe).
+            from services.leaderboard_service import PlayersDataCache
+            players_cache = PlayersDataCache(guild_id)
+
             # Process each category
             for category in categories:
                 try:
                     # Create the embed with the saved timeframe
-                    embed = await create_leaderboard_embed(guild_id, category, timeframe=timeframes[category])
+                    embed = await create_leaderboard_embed(
+                        guild_id, category, timeframe=timeframes[category],
+                        cache=players_cache)
 
                     # Get the message ID field name
                     msg_id_field = f"{category}_view_message_id" if category != "hot_streak" else "message_id"
@@ -1147,7 +1203,8 @@ async def update_leaderboards_for_guild(bot, guild_id: str, session_id=None, str
 
             # Update crown roles based on new leaderboard standings
             try:
-                await update_crown_roles_for_guild(bot, guild_id)
+                await update_crown_roles_for_guild(bot, guild_id,
+                                                   cache=players_cache)
             except Exception as e:
                 logger.error(f"Error updating crown roles for guild {guild_id}: {e}")
 
@@ -1159,6 +1216,16 @@ async def update_leaderboards_for_guild(bot, guild_id: str, session_id=None, str
 
     except Exception as e:
         logger.error(f"Error updating leaderboards for guild {guild_id}: {e}")
+
+
+def fire_debt_summary_refresh(client, guild_id: str, context: str):
+    """Fire-and-forget panel refresh after any ledger mutation (tix
+    settlement, transfer, card loan, card return). One helper so no
+    mutation path can forget the try/except + create_task dance."""
+    try:
+        asyncio.create_task(update_debt_summary_for_guild(client, guild_id))
+    except Exception as e:
+        logger.warning(f"[{context}] Failed to trigger debt summary update: {e}")
 
 
 async def update_debt_summary_for_guild(bot, guild_id: str):
@@ -1216,10 +1283,8 @@ async def update_debt_summary_for_guild(bot, guild_id: str):
                         logger.warning(f"Failed to delete legacy debt summary message: {e}")
 
                 # Get all debts and build embed pages
-                from services.debt_service import get_most_outstanding_creditors
-                rows = await get_guild_debt_rows(guild_id)
-                top_creditors = await get_most_outstanding_creditors(guild_id)
-                pages = build_guild_debt_embed_pages(guild, rows, top_creditors=top_creditors)
+                from debt_views.helpers import build_debt_summary_pages
+                pages = await build_debt_summary_pages(guild)
                 view = PublicSettleDebtsView(pages=pages)
 
                 new_message = await channel.send(embed=pages[0], view=view)
@@ -1237,6 +1302,31 @@ async def update_debt_summary_for_guild(bot, guild_id: str):
     except Exception as e:
         logger.error(f"Error updating debt summary for guild {guild_id}: {e}")
 
+
+async def refresh_open_staked_queues(bot, guild_id: str) -> None:
+    """Best-effort re-render of the queue message of every open staked session
+    in a guild (still in signup phase: teams_start_time unset), so debt-warning
+    markers reflect a just-completed settlement/transfer/adjustment without
+    waiting for the next signup event. Never raises: a display refresh must
+    not break the debt flow that triggered it."""
+    try:
+        async with AsyncSessionLocal() as db_session:
+            stmt = select(DraftSession).filter(
+                DraftSession.guild_id == str(guild_id),
+                DraftSession.session_type == "staked",
+                DraftSession.teams_start_time.is_(None),
+            )
+            result = await db_session.execute(stmt)
+            open_sessions = result.scalars().all()
+    except Exception as e:
+        logger.warning(f"[debt-warning] open-queue lookup failed for guild {guild_id}: {e}")
+        return
+    from views import update_draft_message  # lazy: views imports utils
+    for draft_session in open_sessions:
+        try:
+            await update_draft_message(bot, draft_session.session_id)
+        except Exception as e:
+            logger.warning(f"[debt-warning] queue refresh failed for {draft_session.session_id}: {e}")
 
 
 async def remove_lock_after_delay(draft_session_id, delay):
@@ -1513,9 +1603,9 @@ async def cleanup_sessions_task(bot):
                                 msg = await draft_channel.fetch_message(int(session.message_id))
                                 if msg:
                                     # Send cancellation notification
-                                    await draft_channel.send(f"Queue for Draft-{session.draft_id} has been cancelled due to inactivity (no new signups for 180 minutes).")
+                                    await draft_channel.send(f"Queue for `{session.friendly_id}` has been cancelled due to inactivity (no new signups for 180 minutes).")
                                     await msg.delete()
-                                    logger.info(f"Cancelled inactive queue for session {session.session_id} (Draft-{session.draft_id})")
+                                    logger.info(f"Cancelled inactive queue for session {session.session_id} ({session.friendly_id})")
                             except discord.NotFound:
                                 pass
                             except discord.HTTPException as e:
@@ -1846,6 +1936,38 @@ async def check_weekly_limits(interaction, match_id, session_type=None, session_
         pass
 
 
+async def _fetch_player_stats_map(guild_id, player_ids):
+    """{player_id: (mu, sigma, rated_games)} for this guild's PlayerStats rows.
+
+    Players without a row are simply absent — winner_probability_from_stats
+    substitutes the prior for them.
+
+    TEST_MODE only: synthetic test users are pinned to TEST_USER_RATING_FLOOR
+    so a bot team is always a heavy underdog — any bot win exercises the
+    legendary-upset callout end to end.
+    """
+    async with AsyncSessionLocal() as session:
+        stmt = select(PlayerStats).where(
+            PlayerStats.guild_id == guild_id,
+            PlayerStats.player_id.in_(player_ids),
+        )
+        rows = (await session.execute(stmt)).scalars().all()
+        stats_map = {
+            row.player_id: (
+                row.true_skill_mu,
+                row.true_skill_sigma,
+                (row.games_won or 0) + (row.games_lost or 0),
+            )
+            for row in rows
+        }
+    if is_test_mode():
+        from helpers.skill import TEST_USER_RATING_FLOOR, _is_test_user
+        for pid in player_ids:
+            if _is_test_user(pid):
+                stats_map[str(pid)] = TEST_USER_RATING_FLOOR
+    return stats_map
+
+
 def _new_player_stats_row(player_id, guild_id):
     """A fresh PlayerStats row initialised to the TrueSkill priors, for a player
     whose first rated result is a premade match (premade drafts don't create rows
@@ -1872,6 +1994,55 @@ def _new_player_stats_row(player_id, guild_id):
         team_drafts_lost=0,
         team_drafts_tied=0,
     )
+
+
+async def recompute_skill_ratings():
+    """Heal player_stats by replaying the full match_results ledger.
+
+    Used when a reported winner is corrected: the wrong incremental update is
+    already baked into mu/sigma and TrueSkill updates are order-dependent, so
+    the only exact repair is a from-scratch replay. Streaks and
+    drafts_participated are left untouched (same contract as the backfill).
+
+    The replay is tens of thousands of pure-CPU TrueSkill updates, so it runs
+    in a worker thread on its own short-lived sync connection (to the same
+    database AsyncSessionLocal is bound to) instead of stalling the event loop.
+    """
+    url = AsyncSessionLocal.kw["bind"].url.render_as_string(
+        hide_password=False).replace("+aiosqlite", "")
+
+    def _replay():
+        engine = create_engine(url)
+        try:
+            with engine.begin() as conn:
+                backfill_skill_ratings(conn)
+        finally:
+            engine.dispose()
+
+    await asyncio.to_thread(_replay)
+
+
+async def apply_result_report(match_result, previous_winner_id):
+    """Live-path rating bookkeeping for a submitted or re-submitted result.
+
+    previous_winner_id must be the row's winner as it was BEFORE this report
+    was written — capture it before mutating the row, or a first report is
+    indistinguishable from a duplicate. Only the first report of a winner
+    applies an incremental update; re-selecting a result (score corrections,
+    a teammate reporting the same match) must not double-count; a winner
+    change heals by replaying the ledger.
+
+    Returns (action, streak_extensions): the rating_update_action taken, and
+    streak extensions when an incremental update ran (else None). Callers
+    should gate first-report-only side effects (streak storage, ring-bearer
+    transfer) on action == "apply".
+    """
+    action = rating_update_action(previous_winner_id, match_result.winner_id)
+    if action == "apply":
+        return action, await update_player_stats_and_elo(match_result)
+    if action == "recompute":
+        await recompute_skill_ratings()
+    return action, None
 
 
 async def update_player_stats_and_elo(match_result):

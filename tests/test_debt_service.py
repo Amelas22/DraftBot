@@ -5,11 +5,11 @@ import pytest
 import pytest_asyncio
 import tempfile
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from database.models_base import Base
 from database.db_session import AsyncSessionLocal
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from models.debt_ledger import DebtLedger
 from services.debt_service import (
@@ -21,7 +21,11 @@ from services.debt_service import (
     create_debt_entries_from_stakes,
     adjust_debt,
     get_guild_debt_stats,
-    get_debt_history
+    get_debt_history,
+    get_active_debt_entries,
+    get_total_owed_map,
+    get_guild_debt_rows,
+    get_owed_maps
 )
 from models.stake import StakeInfo
 from models.stake_pairing import StakePairing
@@ -1722,3 +1726,211 @@ class TestMostInvolvedPlayers:
         await self._owe("other", "z", "y", 99)    # different guild
         result = await get_most_involved_players(g, limit=1)
         assert result == [("a", 2)]
+
+
+class TestGetTotalOwedMap:
+    """get_total_owed_map: sum of negative pair balances per player, batched."""
+
+    async def _owe(self, guild, debtor, creditor, amount, source_type="draft"):
+        await create_ledger_entries(
+            guild_id=guild, debtor_id=debtor, creditor_id=creditor,
+            amount=amount, source_type=source_type,
+            source_id=f"s-{debtor}-{creditor}-{amount}",
+        )
+
+    @pytest.mark.asyncio
+    async def test_being_owed_does_not_offset_owing(self, test_db):
+        # Alice owes Bob 30; Carol owes Alice 100. Alice's total owed is 30.
+        await self._owe("g1", "alice", "bob", 30)
+        await self._owe("g1", "carol", "alice", 100)
+        owed = await get_total_owed_map("g1", ["alice", "bob", "carol"])
+        assert owed["alice"] == 30
+        assert owed["carol"] == 100
+        assert "bob" not in owed          # owed money, owes nothing
+
+    @pytest.mark.asyncio
+    async def test_multiple_debts_sum_and_settlements_offset(self, test_db):
+        await self._owe("g1", "alice", "bob", 30)
+        await self._owe("g1", "alice", "carol", 40)
+        # Alice pays Bob 10 back (settlement: bob as debtor, alice as creditor)
+        await self._owe("g1", "bob", "alice", 10, source_type="settlement")
+        owed = await get_total_owed_map("g1", ["alice"])
+        assert owed == {"alice": 60}      # (30-10) + 40
+
+    @pytest.mark.asyncio
+    async def test_empty_and_absent_players(self, test_db):
+        assert await get_total_owed_map("g1", []) == {}
+        assert await get_total_owed_map("g1", ["nobody"]) == {}
+
+    @pytest.mark.asyncio
+    async def test_guild_scoped(self, test_db):
+        await self._owe("g1", "alice", "bob", 30)
+        assert await get_total_owed_map("g2", ["alice"]) == {}
+
+
+class TestGetGuildDebtRows:
+    """Regression pin for get_guild_debt_rows after it moved onto the shared
+    negative-pair-balance query."""
+
+    @pytest.mark.asyncio
+    async def test_debtor_perspective_largest_debt_first(self, test_db):
+        await create_ledger_entries(
+            guild_id="g1", debtor_id="alice", creditor_id="bob",
+            amount=30, source_type="draft", source_id="s1",
+        )
+        await create_ledger_entries(
+            guild_id="g1", debtor_id="carol", creditor_id="bob",
+            amount=70, source_type="draft", source_id="s2",
+        )
+        rows = await get_guild_debt_rows("g1")
+        assert [(r.player_id, r.counterparty_id, r.balance) for r in rows] == [
+            ("carol", "bob", -70), ("alice", "bob", -30)]
+
+
+class TestGetOwedMaps:
+    """get_owed_maps: (total, week-old) outstanding debt; old = per-pair
+    min(owed now, owed as of cutoff) — active debt that has aged."""
+
+    CUTOFF_DAYS = 7
+
+    def _cutoff(self):
+        return datetime.now() - timedelta(days=self.CUTOFF_DAYS)
+
+    async def _owe(self, guild, debtor, creditor, amount, source_type="draft",
+                   source_id=None):
+        await create_ledger_entries(
+            guild_id=guild, debtor_id=debtor, creditor_id=creditor,
+            amount=amount, source_type=source_type,
+            source_id=source_id or f"s-{debtor}-{creditor}-{amount}",
+        )
+
+    async def _backdate(self, source_id, days=8):
+        """Age both ledger entries of a source to `days` ago."""
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                await session.execute(
+                    update(DebtLedger)
+                    .where(DebtLedger.source_id == source_id)
+                    .values(created_at=datetime.now() - timedelta(days=days))
+                )
+
+    @pytest.mark.asyncio
+    async def test_untouched_old_debt_counts_in_full(self, test_db):
+        await self._owe("g1", "alice", "bob", 150, source_id="old1")
+        await self._backdate("old1")
+        totals, old = await get_owed_maps("g1", ["alice"], self._cutoff())
+        assert totals == {"alice": 150}
+        assert old == {"alice": 150}
+
+    @pytest.mark.asyncio
+    async def test_settled_old_debt_counts_zero(self, test_db):
+        # Owed 200 for over a week, fully paid yesterday: no debt, no warning.
+        await self._owe("g1", "alice", "bob", 200, source_id="old2")
+        await self._backdate("old2")
+        await self._owe("g1", "bob", "alice", 200, source_type="settlement")
+        totals, old = await get_owed_maps("g1", ["alice"], self._cutoff())
+        assert totals == {}
+        assert old == {}
+
+    @pytest.mark.asyncio
+    async def test_new_debt_gets_grace_week(self, test_db):
+        # Fresh 200 from last night: outstanding, but not old yet.
+        await self._owe("g1", "alice", "bob", 200)
+        totals, old = await get_owed_maps("g1", ["alice"], self._cutoff())
+        assert totals == {"alice": 200}
+        assert old == {}
+
+    @pytest.mark.asyncio
+    async def test_paid_down_old_debt_counts_remainder(self, test_db):
+        # 200 aged, 150 paid this week: 50 outstanding, all of it old.
+        await self._owe("g1", "alice", "bob", 200, source_id="old3")
+        await self._backdate("old3")
+        await self._owe("g1", "bob", "alice", 150, source_type="settlement")
+        totals, old = await get_owed_maps("g1", ["alice"], self._cutoff())
+        assert totals == {"alice": 50}
+        assert old == {"alice": 50}
+
+    @pytest.mark.asyncio
+    async def test_pair_min_fresh_debt_cannot_mask_paid_old_debt(self, test_db):
+        # Old 120 to bob fully paid this week; fresh 120 to carol incurred.
+        # Player-total math would see 120 then and 120 now and call it old;
+        # pair-level min must yield zero old debt.
+        await self._owe("g1", "alice", "bob", 120, source_id="old4")
+        await self._backdate("old4")
+        await self._owe("g1", "bob", "alice", 120, source_type="settlement")
+        await self._owe("g1", "alice", "carol", 120)
+        totals, old = await get_owed_maps("g1", ["alice"], self._cutoff())
+        assert totals == {"alice": 120}
+        assert old == {}
+
+    @pytest.mark.asyncio
+    async def test_old_debt_sums_across_pairs(self, test_db):
+        await self._owe("g1", "alice", "bob", 60, source_id="old5")
+        await self._owe("g1", "alice", "carol", 70, source_id="old6")
+        await self._backdate("old5")
+        await self._backdate("old6")
+        totals, old = await get_owed_maps("g1", ["alice"], self._cutoff())
+        assert totals == {"alice": 130}
+        assert old == {"alice": 130}
+
+    @pytest.mark.asyncio
+    async def test_empty_players_and_guild_scoping(self, test_db):
+        assert await get_owed_maps("g1", [], self._cutoff()) == ({}, {})
+        await self._owe("g1", "alice", "bob", 150, source_id="old7")
+        await self._backdate("old7")
+        assert await get_owed_maps("g2", ["alice"], self._cutoff()) == ({}, {})
+
+
+class TestActiveDebtFilters:
+    """get_active_debt_entries + get_debt_history(active_only=True): 'active'
+    means composing the current nonzero balance — settled-to-zero relationships
+    drop out entirely."""
+
+    async def _entry(self, guild, debtor, creditor, amount, source_type="draft"):
+        await create_ledger_entries(
+            guild_id=guild, debtor_id=debtor, creditor_id=creditor,
+            amount=amount, source_type=source_type,
+            source_id=f"{source_type}-{debtor}-{creditor}-{amount}",
+        )
+
+    @pytest.mark.asyncio
+    async def test_active_entries_empty_when_settled_to_zero(self, test_db):
+        await self._entry("g1", "alice", "bob", 30)
+        await self._entry("g1", "bob", "alice", 30, source_type="settlement")  # pays it off
+        assert await get_active_debt_entries("g1", "alice", "bob") == []
+
+    @pytest.mark.asyncio
+    async def test_active_entries_start_after_last_zero_balance(self, test_db):
+        await self._entry("g1", "alice", "bob", 30)                             # -30
+        await self._entry("g1", "bob", "alice", 30, source_type="settlement")   # 0: tab closed
+        await self._entry("g1", "alice", "bob", 40)                             # -40: new tab
+        await self._entry("g1", "bob", "alice", 15, source_type="settlement")   # -25: partial
+        entries = await get_active_debt_entries("g1", "alice", "bob")
+        assert [e.amount for e in entries] == [15, -40]      # newest first, only the open tab
+
+    @pytest.mark.asyncio
+    async def test_partial_settlement_does_not_close_the_tab(self, test_db):
+        await self._entry("g1", "alice", "bob", 30)
+        await self._entry("g1", "bob", "alice", 10, source_type="settlement")
+        await self._entry("g1", "alice", "bob", 20)
+        entries = await get_active_debt_entries("g1", "alice", "bob")
+        assert len(entries) == 3                             # balance never touched zero
+
+    @pytest.mark.asyncio
+    async def test_history_active_only_excludes_settled_pairs(self, test_db):
+        await self._entry("g1", "alice", "bob", 30)
+        await self._entry("g1", "bob", "alice", 30, source_type="settlement")   # settled pair
+        await self._entry("g1", "alice", "carol", 40)                           # active pair
+        entries = await get_debt_history("g1", active_only=True)
+        assert entries, "active pair's entries must be returned"
+        pairs = {(e.player_id, e.counterparty_id) for e in entries}
+        assert pairs == {("alice", "carol"), ("carol", "alice")}  # both orientations
+        # sanity: without the filter the settled pair is present
+        all_entries = await get_debt_history("g1")
+        assert any({e.player_id, e.counterparty_id} == {"alice", "bob"} for e in all_entries)
+
+    @pytest.mark.asyncio
+    async def test_history_active_only_empty_when_no_debt(self, test_db):
+        await self._entry("g1", "alice", "bob", 30)
+        await self._entry("g1", "bob", "alice", 30, source_type="settlement")
+        assert await get_debt_history("g1", active_only=True) == []
