@@ -28,6 +28,6 @@ CUBE_THUMBNAILS = {
 # Default thumbnail for cubes that don't have a specific image
 DEFAULT_THUMBNAIL = "https://cdn.discordapp.com/attachments/1186757246936424558/1217295353972527176/131.png"
 
-def get_cube_thumbnail_url(cube_name):
+def get_cube_thumbnail_url(cube_name: str | None) -> str:
     """Get the thumbnail URL for a given cube name."""
-    return CUBE_THUMBNAILS.get(cube_name, DEFAULT_THUMBNAIL)
+    return CUBE_THUMBNAILS.get(cube_name or "", DEFAULT_THUMBNAIL)

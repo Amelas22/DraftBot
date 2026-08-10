@@ -9,6 +9,7 @@
 preset = "strict"
 
 project-includes = [
+    "helpers/utils.py",
     "ready_check.py",
 ]
 

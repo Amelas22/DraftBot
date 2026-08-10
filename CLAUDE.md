@@ -182,14 +182,28 @@ The project is migrating to typed Python gradually. `pyrefly.toml` runs at
 else is unchecked for now. The list grows one module at a time so each cleanup
 stays small and reviewable.
 
-**When you create a new `.py` file, add it to `project-includes` in `pyrefly.toml`
-and make sure `pipenv run pyrefly check` still reports 0 errors.** New code should
-be born type-clean; that is what stops the untyped surface from growing while the
-backlog is worked off.
+**When you create a new bot-code `.py` file (cogs, helpers, services, models,
+views — not migrations, one-off scripts, or tests), add it to `project-includes`
+in `pyrefly.toml` and make sure `pipenv run pyrefly check` still reports 0
+errors.** New code should be born type-clean; that is what stops the untyped
+surface from growing while the backlog is worked off. New typed helpers added
+to an existing unlisted file don't force that whole file in — but if the file
+is small, opting it in is the better call.
 
 When touching an existing file that isn't listed yet, you may opt it in too, but
 do it as its own commit — mixing a type cleanup into a behaviour change makes both
 harder to review.
+
+From a **git worktree**, `pipenv run` won't resolve this project's venv — bare
+`pyrefly check` then falls back to system site-packages and reports phantom
+missing-import errors. Use
+`pyrefly check --python-interpreter-path "$(pipenv --py)"` (with `pipenv --py`
+run from the main checkout), or set `VIRTUAL_ENV` to the project venv.
+
+Scope caveat: `replace-imports-with-any` (see `pyrefly.toml`) means SQLAlchemy
+model attributes type as `Any` — strictness covers the checked file's local
+logic, not its model contracts (e.g. a nullable JSON column passed where a
+`dict` is expected won't be caught).
 
 Conventions for the awkward py-cord cases:
 

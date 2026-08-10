@@ -88,7 +88,7 @@ class ReadyCheckSession:
     # --- Discord message operations (instance) ---
 
     async def build_embed(self, sign_ups: dict[str, str], guild: discord.Guild | None = None,
-                          draft_session: "DraftSession | None" = None) -> discord.Embed:
+                          draft_session: DraftSession | None = None) -> discord.Embed:
         """Build a ready check embed from current player state.
 
         `draft_session`, when supplied, stamps the shared draft metadata footer
@@ -129,8 +129,8 @@ class ReadyCheckSession:
             logger.error(f"Error deleting ready check message {self.message_id}: {e}")
 
     async def refresh_embed(self, channel: discord.abc.Messageable, sign_ups: dict[str, str],
-                            guild: discord.Guild | None = None, title: Optional[str] = None,
-                            draft_session: "DraftSession | None" = None) -> bool:
+                            guild: discord.Guild | None = None, title: str | None = None,
+                            draft_session: DraftSession | None = None) -> bool:
         """Rebuild the embed and edit the Discord message in-place.
         Returns True on success. On NotFound, clears message_id and returns False.
         """
@@ -214,14 +214,17 @@ class ReadyCheckSession:
         state_manager.remove_ready_check(session_id)
 
     @classmethod
-    async def cancel(cls, session_id: str, channel: discord.abc.Messageable, cancelled_by: str) -> None:
+    async def cancel(cls, session_id: str, channel: discord.abc.Messageable | None, cancelled_by: str) -> None:
         """Abort the ready check: delete the message, drop the state, and announce it.
 
-        The draft message's Ready Check button is never disabled (the debounce in
-        views.py prevents spam instead), so there is nothing to re-enable here.
+        Tolerates channel=None: cleanup (state removal) must NEVER be skipped —
+        only the announcement is. The draft message's Ready Check button is never
+        disabled (the debounce in views.py prevents spam instead), so there is
+        nothing to re-enable here.
         """
         await cls.cleanup(session_id, channel)
-        await channel.send(f"**{cancelled_by}** cancelled the ready check.")
+        if channel is not None:
+            await channel.send(f"**{cancelled_by}** cancelled the ready check.")
 
     @classmethod
     async def sync_added_player(cls, session_id: str, user_id: str, draft_session: DraftSession,
@@ -265,9 +268,13 @@ class ReadyCheckSession:
             logger.warning(f"Teams already being created for {session_id}")
             return
 
+        # One unwrap for the four sends below; raising here (before the
+        # creating-teams flag is set) beats an AttributeError mid-flight.
+        announce_channel = not_none(interaction.channel)
+
         state_manager.set_creating_teams(session_id, True)
         try:
-            await not_none(interaction.channel).send("✅ **All players ready!** Creating teams now...")
+            await announce_channel.send("✅ **All players ready!** Creating teams now...")
 
             bot = interaction.client
             if not (draft_session and draft_session.message_id and draft_session.draft_channel_id):
@@ -307,12 +314,12 @@ class ReadyCheckSession:
             mock_interaction = _ChannelInteraction(interaction, message)
             success = await create_and_display_teams(bot, session_id, mock_interaction, persistent_view)
             if success:
-                await not_none(interaction.channel).send("✅ Teams created! Check the draft message above for teams and seating order.")
+                await announce_channel.send("✅ Teams created! Check the draft message above for teams and seating order.")
             else:
-                await not_none(interaction.channel).send("❌ Error creating teams. You can try using the Create Teams button manually.")
+                await announce_channel.send("❌ Error creating teams. You can try using the Create Teams button manually.")
         except Exception as e:
             logger.error(f"Error auto-creating teams after ready check: {e}")
-            await not_none(interaction.channel).send(f"❌ Error creating teams: {str(e)}\nYou can try using the Create Teams button manually.")
+            await announce_channel.send(f"❌ Error creating teams: {str(e)}\nYou can try using the Create Teams button manually.")
         finally:
             state_manager.set_creating_teams(session_id, False)
 
@@ -402,17 +409,15 @@ class ReadyCheckCancelConfirmView(discord.ui.View):
 
     @discord.ui.button(label="Yes, Cancel", style=discord.ButtonStyle.danger)
     async def confirm_button(self, button: discord.ui.Button[Any], interaction: discord.Interaction):
-        for child in self.children:
-            cast(discord.ui.Button[Any], child).disabled = True
+        self.disable_all_items()
         await interaction.response.edit_message(view=self)
         await ReadyCheckSession.cancel(
             self.draft_session_id,
-            not_none(interaction.channel),
+            interaction.channel,
             cancelled_by=self.cancelled_by,
         )
 
     @discord.ui.button(label="No, Keep Going", style=discord.ButtonStyle.secondary)
     async def deny_button(self, button: discord.ui.Button[Any], interaction: discord.Interaction):
-        for child in self.children:
-            cast(discord.ui.Button[Any], child).disabled = True
+        self.disable_all_items()
         await interaction.response.edit_message(content="Cancelled.", view=self)
