@@ -117,7 +117,7 @@ def is_established(games):
 # are deliberate (owner's criterion): if the win itself moved the ratings
 # enough to erase the upset, it wasn't much of an upset. See
 # docs/superpowers/specs/2026-07-31-upset-victory-callout-design.md.
-UPSET_THRESHOLD = 0.35
+UPSET_THRESHOLD = 0.40
 LEGENDARY_UPSET_THRESHOLD = 0.25
 
 # TEST_MODE only: pinned (mu, sigma, games) making synthetic test users a
@@ -154,7 +154,7 @@ def winner_probability_from_stats(stats_map, winner_ids, loser_ids):
 
 
 def upset_tier(winner_prob):
-    """'legendary' below 25%, 'upset' below 35%, else None. Strict <."""
+    """'legendary' below 25%, 'upset' below 40%, else None. Strict <."""
     if winner_prob < LEGENDARY_UPSET_THRESHOLD:
         return "legendary"
     if winner_prob < UPSET_THRESHOLD:

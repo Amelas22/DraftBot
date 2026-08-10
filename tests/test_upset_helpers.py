@@ -34,13 +34,13 @@ def test_known_gap_matches_elo_logistic():
 
 
 def test_thresholds_have_expected_values():
-    assert UPSET_THRESHOLD == 0.35
+    assert UPSET_THRESHOLD == 0.40
     assert LEGENDARY_UPSET_THRESHOLD == 0.25
 
 
 def test_upset_tier_boundaries():
-    assert upset_tier(0.349) == "upset"
-    assert upset_tier(0.35) is None
+    assert upset_tier(0.399) == "upset"
+    assert upset_tier(0.40) is None
     assert upset_tier(0.249) == "legendary"
     assert upset_tier(0.25) == "upset"      # strict <, so exactly 0.25 is the lower tier's edge
     assert upset_tier(0.5) is None
@@ -78,7 +78,7 @@ def test_apply_upset_decoration_legendary_tier():
 
 def test_apply_upset_decoration_no_tier_is_passthrough():
     assert apply_upset_decoration("T", "D", 0.60) == ("T", "D")
-    assert apply_upset_decoration("T", "D", 0.35) == ("T", "D")
+    assert apply_upset_decoration("T", "D", 0.40) == ("T", "D")
 
 
 def test_apply_upset_decoration_long_title_skips_prefix_to_respect_discord_limit():
