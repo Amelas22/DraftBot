@@ -2,8 +2,6 @@ from typing import Any, Callable, TypeVar
 
 import discord
 
-_BUTTON_SECONDARY = discord.ButtonStyle.secondary
-
 _T = TypeVar("_T")
 
 
@@ -55,7 +53,7 @@ def ui_button(
     label: "str | None" = None,
     custom_id: "str | None" = None,
     disabled: bool = False,
-    style: "discord.ButtonStyle" = _BUTTON_SECONDARY,
+    style: "discord.ButtonStyle" = discord.ButtonStyle.secondary,
     emoji: "str | discord.Emoji | discord.PartialEmoji | None" = None,
     row: "int | None" = None,
 ) -> "Callable[[Any], discord.ui.Button[Any]]":

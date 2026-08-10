@@ -17,6 +17,9 @@ from database.db_session import AsyncSessionLocal
 from database.models_base import Base
 from models.draft_session import DraftSession
 from models.match import MatchResult
+from services.leaderboard_formatter import TIMEFRAME_DISPLAY
+from services.leaderboard_service import get_timeframe_date
+
 from cogs.server_draft_stats import (
     get_cube_draft_counts,
     rank_cubes,
@@ -31,7 +34,7 @@ from cogs.server_draft_stats import (
     DurationStats,
     DEFAULT_PERIOD,
     HISTOGRAM_BAR_WIDTH,
-    PERIOD_CONFIGS,
+    PERIOD_MIN_DRAFTS,
 )
 
 GUILD = "guild_1"
@@ -132,10 +135,10 @@ class TestGetCubeDraftCounts:
         await _seed("s2", cube="ArenaMax")
         await _seed("s3", cube="Vintage Cube")
 
-        counts, total = await get_cube_draft_counts(GUILD, None)
+        counts = await get_cube_draft_counts(GUILD, None)
 
         assert counts == Counter({"ArenaMax": 2, "Vintage Cube": 1})
-        assert total == 3
+        assert counts.total() == 3
 
     @pytest.mark.asyncio
     async def test_excludes_in_progress_sessions(self, test_db):
@@ -143,10 +146,10 @@ class TestGetCubeDraftCounts:
         await _seed("s1", cube="ArenaMax", completed=True)
         await _seed("s2", cube="ArenaMax", completed=False, session_stage="pairings")
 
-        counts, total = await get_cube_draft_counts(GUILD, None)
+        counts = await get_cube_draft_counts(GUILD, None)
 
         assert counts == Counter({"ArenaMax": 1})
-        assert total == 1
+        assert counts.total() == 1
 
     @pytest.mark.asyncio
     async def test_excludes_abandoned_sessions(self, test_db):
@@ -155,30 +158,30 @@ class TestGetCubeDraftCounts:
         await _seed("s1", cube="ArenaMax", completed=True)
         await _seed("s2", cube="ArenaMax", completed=False, session_stage="abandoned")
 
-        counts, total = await get_cube_draft_counts(GUILD, None)
+        counts = await get_cube_draft_counts(GUILD, None)
 
         assert counts == Counter({"ArenaMax": 1})
-        assert total == 1
+        assert counts.total() == 1
 
     @pytest.mark.asyncio
     async def test_excludes_sessions_without_a_cube(self, test_db):
         await _seed("s1", cube="ArenaMax")
         await _seed("s2", cube=None)
 
-        counts, total = await get_cube_draft_counts(GUILD, None)
+        counts = await get_cube_draft_counts(GUILD, None)
 
         assert counts == Counter({"ArenaMax": 1})
-        assert total == 1
+        assert counts.total() == 1
 
     @pytest.mark.asyncio
     async def test_excludes_other_guilds(self, test_db):
         await _seed("s1", cube="ArenaMax", guild_id=GUILD)
         await _seed("s2", cube="ArenaMax", guild_id="some_other_guild")
 
-        counts, total = await get_cube_draft_counts(GUILD, None)
+        counts = await get_cube_draft_counts(GUILD, None)
 
         assert counts == Counter({"ArenaMax": 1})
-        assert total == 1
+        assert counts.total() == 1
 
     @pytest.mark.asyncio
     async def test_start_date_filters_out_older_drafts(self, test_db):
@@ -186,14 +189,14 @@ class TestGetCubeDraftCounts:
         await _seed("recent", cube="ArenaMax", teams_start_time=now)
         await _seed("old", cube="ArenaMax", teams_start_time=now - timedelta(days=30))
 
-        counts, total = await get_cube_draft_counts(GUILD, now - timedelta(days=7))
+        counts = await get_cube_draft_counts(GUILD, now - timedelta(days=7))
         assert counts == Counter({"ArenaMax": 1})
-        assert total == 1
+        assert counts.total() == 1
 
         # With no start_date (lifetime), both are included.
-        counts, total = await get_cube_draft_counts(GUILD, None)
+        counts = await get_cube_draft_counts(GUILD, None)
         assert counts == Counter({"ArenaMax": 2})
-        assert total == 2
+        assert counts.total() == 2
 
 
 class TestRankCubes:
@@ -573,35 +576,43 @@ class TestFormatHourHistogram:
 
 
 class TestPeriodsAndView:
-    """The view wires one hardcoded button per period, with the style set in
-    __init__ and the disable in on_timeout, so each new period touches three
-    places. These cover the two that fail silently if missed."""
+    """The view wires one hardcoded button per period; styling is derived from
+    each button's custom_id in one __init__ loop and disabling uses
+    disable_all_items, so a new period touches two places (the min-drafts map
+    and its button stub). These cover what would fail silently if missed."""
 
     def test_default_period_is_a_configured_period(self):
         """A typo here would KeyError on the command's primary path."""
-        assert DEFAULT_PERIOD in PERIOD_CONFIGS
+        assert DEFAULT_PERIOD in PERIOD_MIN_DRAFTS
+
+    def test_every_period_resolves_through_the_shared_timeframe_helpers(self):
+        """Dates and labels are reused from the leaderboard machinery (#391);
+        a period key outside that vocabulary would KeyError at display time."""
+        for period in PERIOD_MIN_DRAFTS:
+            assert period in TIMEFRAME_DISPLAY
+            start = get_timeframe_date(period)
+            assert (start is None) == (period == "lifetime")
 
     def test_cutoff_rises_with_period_length(self):
-        lookbacks = [
-            (c.min_drafts, c.lookback.days if c.lookback else float("inf"))
-            for c in PERIOD_CONFIGS.values()
-        ]
-        assert lookbacks == sorted(lookbacks)
+        ordered = ["14d", "30d", "90d", "lifetime"]
+        assert list(PERIOD_MIN_DRAFTS) == ordered
+        mins = [PERIOD_MIN_DRAFTS[p] for p in ordered]
+        assert mins == sorted(mins)
 
     @pytest.mark.asyncio
     async def test_one_button_per_period(self):
         view = DraftStatsView(GUILD, DEFAULT_PERIOD)
 
         labels = {getattr(child, "label", None) for child in view.children}
-        assert labels == {config.label for config in PERIOD_CONFIGS.values()}
+        assert labels == {TIMEFRAME_DISPLAY[p] for p in PERIOD_MIN_DRAFTS}
 
     @pytest.mark.asyncio
     async def test_only_the_current_period_is_highlighted(self):
-        """Catches a new period missing its style line in __init__."""
+        """Catches a button whose custom_id doesn't carry its period."""
         view = DraftStatsView(GUILD, "90d")
 
         highlighted = [c for c in view.children if getattr(c, "style", None) == discord.ButtonStyle.primary]
-        assert [c.label for c in highlighted] == [PERIOD_CONFIGS["90d"].label]
+        assert [c.label for c in highlighted] == [TIMEFRAME_DISPLAY["90d"]]
 
     @pytest.mark.asyncio
     async def test_timeout_disables_every_button(self):
@@ -624,4 +635,3 @@ class TestFormatDurationField:
         assert "Min: 1m 0s" in text
         assert "Avg: 5m 0s" in text
         assert "Max: 1h 0m" in text
-        assert "based on" not in text

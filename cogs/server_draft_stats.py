@@ -1,7 +1,7 @@
 import operator
 from collections import Counter
-from datetime import datetime, timedelta
-from typing import Any, NamedTuple, Optional
+from datetime import datetime
+from typing import NamedTuple, Optional
 from zoneinfo import ZoneInfo
 
 import discord
@@ -13,6 +13,8 @@ from typing_extensions import override
 from database.db_session import db_session
 from helpers.permissions import has_bot_manager_role
 from helpers.utils import ui_button, not_none
+from services.leaderboard_formatter import TIMEFRAME_DISPLAY
+from services.leaderboard_service import get_timeframe_date
 from models.draft_session import DraftSession
 from models.match import MatchResult
 
@@ -30,35 +32,46 @@ DISPLAY_TZ = ZoneInfo("America/Los_Angeles")
 HISTOGRAM_BAR_WIDTH = 18
 
 
-class PeriodConfig(NamedTuple):
-    label: str
-    lookback: Optional[timedelta]
-    min_drafts: int
-
-
 # Minimum completed drafts a cube needs in the period to be displayed, scaled to
 # the period length so a one-off draft doesn't clutter the shorter views.
-PERIOD_CONFIGS: dict[str, PeriodConfig] = {
-    "14d": PeriodConfig("Last 14 Days", timedelta(days=14), 4),
-    "30d": PeriodConfig("Last 30 Days", timedelta(days=30), 6),
-    "90d": PeriodConfig("Last 90 Days", timedelta(days=90), 8),
-    "lifetime": PeriodConfig("Lifetime", None, 10),
+# Keys are the leaderboard timeframe vocabulary — start dates come from
+# services.leaderboard_service.get_timeframe_date and labels from
+# services.leaderboard_formatter.TIMEFRAME_DISPLAY, so this cog adds no new
+# token->date implementation (the existing duplication is tracked in #391).
+PERIOD_MIN_DRAFTS: dict[str, int] = {
+    "14d": 4,
+    "30d": 6,
+    "90d": 8,
+    "lifetime": 10,
 }
 
 
-async def get_cube_draft_counts(guild_id: str, start_date: Optional[datetime]) -> tuple[Counter[str], int]:
+def _completed_draft_conditions(guild_id: str, start_date: Optional[datetime]) -> list[object]:
+    """The one definition of "completed draft in this guild/period".
+
+    victory_message_id_draft_chat is the repo's standard completed-draft
+    filter (bet_analysis, history_cog, stale_drafts, ...). It is
+    intentionally NOT services.ledger_stats._is_completed: that predicate's
+    legacy-import arm would add ~1200 pre-bot rows that lack cube and
+    teams_start_time, which no section of this embed could display.
+    """
+    conditions: list[object] = [
+        DraftSession.guild_id == guild_id,
+        DraftSession.victory_message_id_draft_chat.isnot(None),
+    ]
+    if start_date is not None:
+        conditions.append(DraftSession.teams_start_time >= start_date)
+    return conditions
+
+
+async def get_cube_draft_counts(guild_id: str, start_date: Optional[datetime]) -> Counter[str]:
     """Count completed drafts per cube for a guild, optionally since start_date.
 
     The GROUP BY runs in SQL so the app only ever receives one row per distinct
     cube, not one row per draft session.
     """
-    conditions = [
-        DraftSession.guild_id == guild_id,
-        DraftSession.victory_message_id_draft_chat.isnot(None),
-        DraftSession.cube.isnot(None),
-    ]
-    if start_date is not None:
-        conditions.append(DraftSession.teams_start_time >= start_date)
+    conditions = _completed_draft_conditions(guild_id, start_date)
+    conditions.append(DraftSession.cube.isnot(None))
 
     async with db_session() as session:
         stmt = (
@@ -69,8 +82,7 @@ async def get_cube_draft_counts(guild_id: str, start_date: Optional[datetime]) -
         result = await session.execute(stmt)
         rows = result.all()
 
-    counts = Counter({cube: count for cube, count in rows})
-    return counts, sum(counts.values())
+    return Counter({cube: count for cube, count in rows})
 
 
 def rank_cubes(counts: Counter[str], min_drafts: int) -> list[tuple[str, int]]:
@@ -89,25 +101,20 @@ class DurationStats(NamedTuple):
     count: int
 
 
-async def _get_duration_stats(
-    guild_id: str,
-    start_date: Optional[datetime],
-    start_column: Any,
-    end_column: Any,
-) -> Optional[DurationStats]:
-    """Min/avg/max seconds between two DraftSession datetime columns, for
-    completed drafts in a guild. A single SQL aggregate query does all the
-    work - only the final numbers (never the underlying rows) reach Python.
+async def get_draft_fire_duration_stats(guild_id: str, start_date: Optional[datetime]) -> Optional[DurationStats]:
+    """Min/avg/max seconds from draft_start_time (sign-up posted) to
+    teams_start_time (ready check passed and teams created). A single SQL
+    aggregate query does all the work - only the final numbers (never the
+    underlying rows) reach Python.
     """
-    conditions: list[object] = [
-        DraftSession.guild_id == guild_id,
-        DraftSession.victory_message_id_draft_chat.isnot(None),
+    start_column = DraftSession.draft_start_time
+    end_column = DraftSession.teams_start_time
+    conditions = _completed_draft_conditions(guild_id, start_date)
+    conditions += [
         start_column.isnot(None),
         end_column.isnot(None),
         end_column >= start_column,
     ]
-    if start_date is not None:
-        conditions.append(DraftSession.teams_start_time >= start_date)
 
     # SQLite has no interval type; julianday() converts a datetime to a
     # fractional day count, so the difference * seconds-per-day is the gap
@@ -123,12 +130,6 @@ async def _get_duration_stats(
     if not count:
         return None
     return DurationStats(float(min_seconds), float(avg_seconds), float(max_seconds), count)
-
-
-async def get_draft_fire_duration_stats(guild_id: str, start_date: Optional[datetime]) -> Optional[DurationStats]:
-    """Min/avg/max seconds from draft_start_time (sign-up posted) to
-    teams_start_time (ready check passed and teams created)."""
-    return await _get_duration_stats(guild_id, start_date, DraftSession.draft_start_time, DraftSession.teams_start_time)
 
 
 async def get_draft_completion_duration_stats(guild_id: str, start_date: Optional[datetime]) -> Optional[DurationStats]:
@@ -151,14 +152,11 @@ async def get_draft_completion_duration_stats(guild_id: str, start_date: Optiona
         .subquery()
     )
 
-    conditions: list[object] = [
-        DraftSession.guild_id == guild_id,
-        DraftSession.victory_message_id_draft_chat.isnot(None),
+    conditions = _completed_draft_conditions(guild_id, start_date)
+    conditions += [
         DraftSession.teams_start_time.isnot(None),
         last_match.c.last_result_at >= DraftSession.teams_start_time,
     ]
-    if start_date is not None:
-        conditions.append(DraftSession.teams_start_time >= start_date)
 
     duration_expr = (
         func.julianday(last_match.c.last_result_at) - func.julianday(DraftSession.teams_start_time)
@@ -201,13 +199,8 @@ async def get_draft_start_hour_counts(guild_id: str, start_date: Optional[dateti
     rows on the far side of a DST change. Only one column is selected, so the
     row-per-draft cost stays negligible.
     """
-    conditions = [
-        DraftSession.guild_id == guild_id,
-        DraftSession.victory_message_id_draft_chat.isnot(None),
-        DraftSession.teams_start_time.isnot(None),
-    ]
-    if start_date is not None:
-        conditions.append(DraftSession.teams_start_time >= start_date)
+    conditions = _completed_draft_conditions(guild_id, start_date)
+    conditions.append(DraftSession.teams_start_time.isnot(None))
 
     async with db_session() as session:
         stmt = select(DraftSession.teams_start_time).where(and_(*conditions))
@@ -277,16 +270,17 @@ def display_tz_label() -> str:
 
 async def build_stats_embed(guild_id: str, period: str) -> discord.Embed:
     """Build the guild-draft-stats embed for a single timeframe."""
-    config = PERIOD_CONFIGS[period]
-    start_date = datetime.now() - config.lookback if config.lookback is not None else None
-    counts, total_drafts = await get_cube_draft_counts(guild_id, start_date)
+    start_date = get_timeframe_date(period)
+    min_drafts = PERIOD_MIN_DRAFTS[period]
+    counts = await get_cube_draft_counts(guild_id, start_date)
+    total_drafts = counts.total()
     fire_stats = await get_draft_fire_duration_stats(guild_id, start_date)
     drafting_stats = await get_draft_completion_duration_stats(guild_id, start_date)
     hour_counts = await get_draft_start_hour_counts(guild_id, start_date)
 
     embed = discord.Embed(
         title="Server Draft Stats",
-        description=f"Timeframe: **{config.label}** (min {config.min_drafts} completed drafts to appear)",
+        description=f"Timeframe: **{TIMEFRAME_DISPLAY[period]}** (min {min_drafts} completed drafts to appear)",
         color=discord.Color.blue(),
     )
     embed.add_field(name="Total Completed Drafts", value=str(total_drafts), inline=False)
@@ -294,11 +288,11 @@ async def build_stats_embed(guild_id: str, period: str) -> discord.Embed:
     if total_drafts == 0:
         embed.add_field(name="Drafts per Cube", value="No completed drafts found for this period.", inline=False)
     else:
-        ranked = rank_cubes(counts, config.min_drafts)
+        ranked = rank_cubes(counts, min_drafts)
         if not ranked:
             embed.add_field(
                 name="Drafts per Cube",
-                value=f"No cube reached the minimum of {config.min_drafts} drafts for this period.",
+                value=f"No cube reached the minimum of {min_drafts} drafts for this period.",
                 inline=False,
             )
         else:
@@ -335,10 +329,11 @@ class DraftStatsView(discord.ui.View):
         self.current_period = current_period
         self.message: Optional[discord.Message] = None
 
-        self.fourteen_day_button.style = self._style_for("14d")
-        self.thirty_day_button.style = self._style_for("30d")
-        self.ninety_day_button.style = self._style_for("90d")
-        self.lifetime_button.style = self._style_for("lifetime")
+        # Each button's custom_id carries its period, so one loop styles all
+        # of them — a new period button never needs a matching style line.
+        for child in self.children:
+            if isinstance(child, discord.ui.Button) and child.custom_id:
+                child.style = self._style_for(child.custom_id.removeprefix("server_draft_stats_"))
 
     def _style_for(self, period: str) -> discord.ButtonStyle:
         return discord.ButtonStyle.primary if period == self.current_period else discord.ButtonStyle.secondary
@@ -355,19 +350,19 @@ class DraftStatsView(discord.ui.View):
         new_view.message = self.message
         await interaction.response.edit_message(embed=embed, view=new_view)
 
-    @ui_button(label=PERIOD_CONFIGS["14d"].label, custom_id="server_draft_stats_14d")
+    @ui_button(label=TIMEFRAME_DISPLAY["14d"], custom_id="server_draft_stats_14d")
     async def fourteen_day_button(self, button: "discord.ui.Button[DraftStatsView]", interaction: discord.Interaction) -> None:
         await self._switch(interaction, "14d")
 
-    @ui_button(label=PERIOD_CONFIGS["30d"].label, custom_id="server_draft_stats_30d")
+    @ui_button(label=TIMEFRAME_DISPLAY["30d"], custom_id="server_draft_stats_30d")
     async def thirty_day_button(self, button: "discord.ui.Button[DraftStatsView]", interaction: discord.Interaction) -> None:
         await self._switch(interaction, "30d")
 
-    @ui_button(label=PERIOD_CONFIGS["90d"].label, custom_id="server_draft_stats_90d")
+    @ui_button(label=TIMEFRAME_DISPLAY["90d"], custom_id="server_draft_stats_90d")
     async def ninety_day_button(self, button: "discord.ui.Button[DraftStatsView]", interaction: discord.Interaction) -> None:
         await self._switch(interaction, "90d")
 
-    @ui_button(label=PERIOD_CONFIGS["lifetime"].label, custom_id="server_draft_stats_lifetime")
+    @ui_button(label=TIMEFRAME_DISPLAY["lifetime"], custom_id="server_draft_stats_lifetime")
     async def lifetime_button(self, button: "discord.ui.Button[DraftStatsView]", interaction: discord.Interaction) -> None:
         await self._switch(interaction, "lifetime")
 
