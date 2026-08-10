@@ -1,4 +1,8 @@
-from typing import TypeVar
+from typing import Any, Callable, TypeVar
+
+import discord
+
+_BUTTON_SECONDARY = discord.ButtonStyle.secondary
 
 _T = TypeVar("_T")
 
@@ -12,6 +16,20 @@ def not_none(x: _T | None) -> _T:
     if x is None:
         raise ValueError("Expected non-None value, got None")
     return x
+
+
+def as_messageable(channel: object) -> "discord.abc.Messageable":
+    """Narrow a ``bot.get_channel`` result to something you can send/fetch on.
+
+    ``get_channel`` returns the full channel union; most callers only need
+    Messageable (``send``/``fetch_message`` — satisfied by text channels,
+    threads, and DMs alike). isinstance narrows for the checker AND raises a
+    clear boundary error if the ID points at e.g. a voice channel, instead of
+    an AttributeError deep inside py-cord.
+    """
+    if not isinstance(channel, discord.abc.Messageable):
+        raise TypeError(f"channel is not messageable: {type(channel).__name__}")
+    return channel
 
 
 # Define a mapping of cube names to thumbnail URLs
@@ -31,3 +49,28 @@ DEFAULT_THUMBNAIL = "https://cdn.discordapp.com/attachments/1186757246936424558/
 def get_cube_thumbnail_url(cube_name: str | None) -> str:
     """Get the thumbnail URL for a given cube name."""
     return CUBE_THUMBNAILS.get(cube_name or "", DEFAULT_THUMBNAIL)
+
+def ui_button(
+    *,
+    label: "str | None" = None,
+    custom_id: "str | None" = None,
+    disabled: bool = False,
+    style: "discord.ButtonStyle" = _BUTTON_SECONDARY,
+    emoji: "str | discord.Emoji | discord.PartialEmoji | None" = None,
+    row: "int | None" = None,
+) -> "Callable[[Any], discord.ui.Button[Any]]":
+    """discord.ui.button, typed as what the attribute actually IS.
+
+    py-cord's View.__init__ replaces every decorated method attribute with
+    its Button item, so for the whole life of every instance the attribute's
+    real type is Button — the checker-visible "function" type is true only
+    inside the class body, which nothing observes. Declaring the swap HERE,
+    once, lets `self.my_button.style` / `.disabled` / `.custom_id` typecheck
+    at every use site with no casts. The single static lie (the class-level
+    attribute is the raw function until init) is confined to this wrapper.
+    """
+    # pyrefly: ignore  # bad-return — the deliberate, documented lie above
+    return discord.ui.button(
+        label=label, custom_id=custom_id, disabled=disabled,
+        style=style, emoji=emoji, row=row,
+    )

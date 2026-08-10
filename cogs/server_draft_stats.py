@@ -1,7 +1,7 @@
 import operator
 from collections import Counter
 from datetime import datetime, timedelta
-from typing import Any, NamedTuple, Optional, cast
+from typing import Any, NamedTuple, Optional
 from zoneinfo import ZoneInfo
 
 import discord
@@ -12,7 +12,7 @@ from typing_extensions import override
 
 from database.db_session import db_session
 from helpers.permissions import has_bot_manager_role
-from helpers.utils import not_none
+from helpers.utils import ui_button, not_none
 from models.draft_session import DraftSession
 from models.match import MatchResult
 
@@ -335,13 +335,10 @@ class DraftStatsView(discord.ui.View):
         self.current_period = current_period
         self.message: Optional[discord.Message] = None
 
-        # py-cord's View.__init__ replaces each decorated method attribute
-        # with its Button item, so these assignments hit the ITEM at runtime;
-        # the static type is the function, hence the casts (see CLAUDE.md).
-        cast(discord.ui.Button[Any], self.fourteen_day_button).style = self._style_for("14d")
-        cast(discord.ui.Button[Any], self.thirty_day_button).style = self._style_for("30d")
-        cast(discord.ui.Button[Any], self.ninety_day_button).style = self._style_for("90d")
-        cast(discord.ui.Button[Any], self.lifetime_button).style = self._style_for("lifetime")
+        self.fourteen_day_button.style = self._style_for("14d")
+        self.thirty_day_button.style = self._style_for("30d")
+        self.ninety_day_button.style = self._style_for("90d")
+        self.lifetime_button.style = self._style_for("lifetime")
 
     def _style_for(self, period: str) -> discord.ButtonStyle:
         return discord.ButtonStyle.primary if period == self.current_period else discord.ButtonStyle.secondary
@@ -358,19 +355,19 @@ class DraftStatsView(discord.ui.View):
         new_view.message = self.message
         await interaction.response.edit_message(embed=embed, view=new_view)
 
-    @discord.ui.button(label=PERIOD_CONFIGS["14d"].label, custom_id="server_draft_stats_14d")
+    @ui_button(label=PERIOD_CONFIGS["14d"].label, custom_id="server_draft_stats_14d")
     async def fourteen_day_button(self, button: "discord.ui.Button[DraftStatsView]", interaction: discord.Interaction) -> None:
         await self._switch(interaction, "14d")
 
-    @discord.ui.button(label=PERIOD_CONFIGS["30d"].label, custom_id="server_draft_stats_30d")
+    @ui_button(label=PERIOD_CONFIGS["30d"].label, custom_id="server_draft_stats_30d")
     async def thirty_day_button(self, button: "discord.ui.Button[DraftStatsView]", interaction: discord.Interaction) -> None:
         await self._switch(interaction, "30d")
 
-    @discord.ui.button(label=PERIOD_CONFIGS["90d"].label, custom_id="server_draft_stats_90d")
+    @ui_button(label=PERIOD_CONFIGS["90d"].label, custom_id="server_draft_stats_90d")
     async def ninety_day_button(self, button: "discord.ui.Button[DraftStatsView]", interaction: discord.Interaction) -> None:
         await self._switch(interaction, "90d")
 
-    @discord.ui.button(label=PERIOD_CONFIGS["lifetime"].label, custom_id="server_draft_stats_lifetime")
+    @ui_button(label=PERIOD_CONFIGS["lifetime"].label, custom_id="server_draft_stats_lifetime")
     async def lifetime_button(self, button: "discord.ui.Button[DraftStatsView]", interaction: discord.Interaction) -> None:
         await self._switch(interaction, "lifetime")
 

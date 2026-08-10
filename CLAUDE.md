@@ -205,19 +205,31 @@ model attributes type as `Any` — strictness covers the checked file's local
 logic, not its model contracts (e.g. a nullable JSON column passed where a
 `dict` is expected won't be caught).
 
-Conventions for the awkward py-cord cases:
+Conventions for the awkward py-cord cases, in preference order — the goal is
+that narrowing is declared ONCE at a boundary (or backed by a runtime check),
+never re-asserted per use site:
 
 - `not_none(x)` (in `helpers/utils.py`) asserts a value isn't `None`, raising at
   runtime if the assumption is wrong. Use it for things like
   `not_none(interaction.user).id`, where pycord's types allow `None` but the
   handler can only run when it's present. Use it sparingly — prefer a real
   `is not None` check when the value genuinely can be absent.
-- `cast(...)` for narrowing a union the checker can't infer, e.g.
-  `cast(discord.TextChannel, channel).fetch_message(...)` where `bot.get_channel`
-  returns the full `GuildChannel` union.
+- `@ui_button(...)` (in `helpers/utils.py`) instead of `@discord.ui.button(...)`:
+  py-cord swaps every decorated method attribute for its Button item at View
+  init, so `ui_button` declares the attribute as the `Button` it actually is —
+  `self.my_button.style = ...` then typechecks everywhere with no casts. The
+  one static lie (the class attribute is the raw function until init, which
+  nothing observes) lives inside the wrapper, documented.
+- `as_messageable(x)` (in `helpers/utils.py`) narrows a `bot.get_channel`
+  result to `Messageable` with a real isinstance check — a clear boundary
+  error instead of an AttributeError deep in py-cord, and it tolerates
+  threads/DMs where a `TextChannel` cast would not.
 - `discord.ui.Button[Any]` — `Button` is generic over its parent view, which
   button callbacks don't depend on.
-- `# pyrefly: ignore [error-kind]` as a last resort, on the line above the error.
+- `cast(...)` as a last resort, only for unions no isinstance can express, with
+  a comment justifying each use. (The checked files currently contain none.)
+- `# pyrefly: ignore [error-kind]` as a very last resort, on the line above the
+  error.
 
 ### Security Considerations
 - Never commit secrets or tokens
