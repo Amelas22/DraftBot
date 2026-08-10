@@ -282,10 +282,12 @@ class ShareResultView(discord.ui.View):
         self.quiz_id = quiz_id
         self.bonus_type = bonus_type
 
+    # No custom_id on this ephemeral view's button: a fixed id would make
+    # every live instance share one dispatch slot (see the trophy quiz's
+    # TrophyShareView.share_button for the full explanation).
     @discord.ui.button(
         label="📤 Share Results Publicly",
         style=discord.ButtonStyle.primary,
-        custom_id="share_quiz_results"
     )
     async def share_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         """Post results publicly to the channel."""

@@ -138,10 +138,16 @@ class TrophyShareView(discord.ui.View):
             return f"[Trophy Quiz #{self.display_id}]({message_link})"
         return f"Trophy Quiz #{self.display_id}"
 
+    # No custom_id on ephemeral-view buttons: py-cord registers ephemeral
+    # views with message_id=None, so a fixed id would make every live
+    # instance share ONE dispatch slot (newest evicts the rest -> clicks
+    # misroute, and once that instance stops, the evicted prompt's buttons
+    # dispatch to nothing). Auto-generated per-instance ids keep each
+    # prompt's routing exact. Only persistent views (timeout=None,
+    # re-registered on restart) need fixed ids.
     @discord.ui.button(
         label="📤 Share Results Publicly",
         style=discord.ButtonStyle.primary,
-        custom_id="share_trophy_quiz_results",
     )
     async def share_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         """Post results publicly to the channel — score + emoji line only."""
@@ -435,10 +441,10 @@ class TrophyGuessView(discord.ui.View):
                 default_wins=prefill.get(deck["slot"]) if prefill else None,
             ))
 
+    # No custom_id: per-instance auto id (see TrophyShareView.share_button).
     @discord.ui.button(
         label="Submit",
         style=discord.ButtonStyle.success,
-        custom_id="trophy_quiz_guess_submit",
         row=2,
     )
     async def submit_button(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -510,10 +516,10 @@ class TrophyDecideView(discord.ui.View):
         self.initial_guesses = initial_guesses
         self._lock = asyncio.Lock()
 
+    # No custom_id: per-instance auto id (see TrophyShareView.share_button).
     @discord.ui.button(
         label="Keep my answer",
         style=discord.ButtonStyle.success,
-        custom_id="trophy_quiz_keep",
     )
     async def keep_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         async with self._lock:
@@ -527,10 +533,10 @@ class TrophyDecideView(discord.ui.View):
             await _send_final_reveal(interaction, self.quiz_id, self.decks, guesses, changed, prefix=prefix, edit=True)
             self.stop()
 
+    # No custom_id: per-instance auto id (see TrophyShareView.share_button).
     @discord.ui.button(
         label=f"🔎 Pay {CHANGE_COST} to change",
         style=discord.ButtonStyle.secondary,
-        custom_id="trophy_quiz_change",
     )
     async def change_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         async with self._lock:
