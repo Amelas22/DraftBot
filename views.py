@@ -18,6 +18,7 @@ from helpers.utils import get_cube_thumbnail_url
 from helpers.display_names import get_display_name, get_display_name_by_id
 from helpers.debt_warning import format_staked_sign_ups, DEBT_WARNING_AGE_DAYS
 from helpers.draft_footer import apply_draft_footer_from_session
+from helpers.permissions import bot_manager_button
 from utils import (
     calculate_pairings,
     get_formatted_stake_pairs,
@@ -233,13 +234,9 @@ class PersistentView(discord.ui.View):
     # Maximum number of test users to add
     NUM_TEST_USERS_TO_ADD = 6
     
+    @bot_manager_button
     async def add_test_users_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Add test users to the draft for testing purposes, up to NUM_TEST_USERS_TO_ADD."""
-        # Only allow admins to use this feature
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("Only server administrators can use this test feature.", ephemeral=True)
-            return
-                    
         logger.info(f"Adding test users to draft {self.draft_session_id}")
         
         # Fetch the current draft session to ensure it's up to date
@@ -358,12 +355,9 @@ class PersistentView(discord.ui.View):
             await interaction.followup.send(f"No additional test users were added. The draft already has {len(sign_ups)} users (limit is {self.NUM_TEST_USERS_TO_ADD}).", ephemeral=True)
 
 
+    @bot_manager_button
     async def add_test_users_premade_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         """TEST_MODE only: fill both premade teams to 3 players with test users."""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("Only server administrators can use this test feature.", ephemeral=True)
-            return
-
         draft_session = await get_draft_session(self.draft_session_id)
         if not draft_session:
             await interaction.response.send_message("The draft session could not be found.", ephemeral=True)

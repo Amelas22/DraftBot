@@ -6,14 +6,28 @@ import uuid
 
 
 class SignUpHistory(Base):
-    """Tracks when users join or leave draft sessions."""
+    """Tracks when users join or leave draft sessions.
+
+    Roster membership events are ROSTER_ACTIONS: 'join'/'leave' recorded
+    live, plus 'synthetic_join' rows the dispnamefill0 migration
+    reconstructed from final-roster sign_ups JSON for sessions that
+    predate live recording (distinguishable provenance: a synthetic_join
+    is roster membership, NOT an observed queue join). Ready-check events
+    ('ready', 'not_ready', 'ready_timeout') are a separate subsystem and
+    never indicate roster membership.
+    """
     __tablename__ = 'sign_up_history'
-    
+
+    # Actions that assert roster membership. Any reader counting who was
+    # IN a draft must filter to these; the migration keeps a frozen copy
+    # of this set per the frozen-logic convention.
+    ROSTER_ACTIONS = frozenset({"join", "leave", "synthetic_join"})
+
     id = Column(String(128), primary_key=True)  # Composite of session_id, user_id, and timestamp
     session_id = Column(String(64), ForeignKey('draft_sessions.session_id', ondelete='CASCADE'), nullable=False)
     user_id = Column(String(64), nullable=False)
     user_display_name = Column(String(128))
-    action = Column(String(32), nullable=False)  # join | leave | ready | not_ready | ready_timeout
+    action = Column(String(32), nullable=False)  # ROSTER_ACTIONS | ready | not_ready | ready_timeout
     timestamp = Column(DateTime, default=datetime.now, server_default=text('CURRENT_TIMESTAMP'), nullable=False)
     guild_id = Column(String(64), nullable=False)
     

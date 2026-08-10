@@ -1,0 +1,58 @@
+{
+  "permissions": {
+    "deny": [
+      "Edit(.env)",
+      "Edit(.env.*)",
+      "Edit(.env-*)",
+      "Edit(.env_*)",
+      "Edit(*.env)",
+      "Edit(**/.env)",
+      "Edit(**/.env.*)",
+      "Edit(**/.env-*)",
+      "Edit(**/.env_*)",
+      "Edit(**/*.env)",
+      "Write(.env)",
+      "Write(.env.*)",
+      "Write(.env-*)",
+      "Write(.env_*)",
+      "Write(*.env)",
+      "Write(**/.env)",
+      "Write(**/.env.*)",
+      "Write(**/.env-*)",
+      "Write(**/.env_*)",
+      "Write(**/*.env)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "navigate",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/deny_discord_invites.py\"",
+            "timeout": 10,
+            "statusMessage": "Checking navigation against Discord guardrails"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/confine_to_test_guild.py\"",
+            "timeout": 10,
+            "statusMessage": "Confining Discord navigation to the test guild"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/protect_env_file.py\"",
+            "timeout": 10,
+            "statusMessage": "Guarding .env against writes"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,4 +1,7 @@
 """Shared permission decorators for Discord bot commands."""
+import functools
+
+import discord
 from discord.ext import commands
 from loguru import logger
 
@@ -31,19 +34,55 @@ def get_manager_role_names(guild_id):
     return names
 
 
-async def is_bot_manager(ctx):
-    """True if the invoker is the bot owner, has an accepted manager role, or
-    has the Manage Roles permission in the guild."""
-    if await ctx.bot.is_owner(ctx.author):
+async def _user_is_bot_manager(bot, user, guild):
+    """Single source of truth for "is this user a bot manager": bot owner,
+    accepted manager role, or the Manage Roles permission."""
+    if await bot.is_owner(user):
         return True
-    guild = getattr(ctx, "guild", None)
     if guild is None:
         return False
     allowed = get_manager_role_names(guild.id)
-    if any(role.name in allowed for role in ctx.author.roles):
+    if any(role.name in allowed for role in user.roles):
         return True
-    perms = getattr(ctx.author, "guild_permissions", None)
+    perms = getattr(user, "guild_permissions", None)
     return bool(perms and perms.manage_roles)
+
+
+async def is_bot_manager(ctx):
+    """True if the invoker is the bot owner, has an accepted manager role, or
+    has the Manage Roles permission in the guild."""
+    return await _user_is_bot_manager(ctx.bot, ctx.author, getattr(ctx, "guild", None))
+
+
+async def is_bot_manager_interaction(interaction):
+    """``is_bot_manager`` for raw component interactions (view callbacks get a
+    ``discord.Interaction``, not a ctx)."""
+    return await _user_is_bot_manager(interaction.client, interaction.user, interaction.guild)
+
+
+def bot_manager_button(callback):
+    """Component-callback analog of ``has_bot_manager_role()``: decorate a view
+    callback method to reject non-managers with an ephemeral message before
+    the body runs.
+
+    Argument-order safe by construction: this repo wires button callbacks in
+    BOTH conventions — the manual CallbackButton passes ``(interaction,
+    button)`` while native ``@discord.ui.button`` methods receive ``(button,
+    interaction)`` — so the wrapper locates the Interaction among its
+    arguments instead of assuming a position. Assuming would fail as a
+    swallowed AttributeError inside py-cord's dispatcher, leaving the button
+    silently unguarded-looking ("This interaction failed")."""
+    @functools.wraps(callback)
+    async def wrapper(self, *args, **kwargs):
+        interaction = next(
+            a for a in args if isinstance(a, discord.Interaction))
+        if not await is_bot_manager_interaction(interaction):
+            await interaction.response.send_message(
+                "Only bot managers can use this.", ephemeral=True
+            )
+            return
+        return await callback(self, *args, **kwargs)
+    return wrapper
 
 
 def has_bot_manager_role():

@@ -282,10 +282,12 @@ class ShareResultView(discord.ui.View):
         self.quiz_id = quiz_id
         self.bonus_type = bonus_type
 
+    # No custom_id on this ephemeral view's button: a fixed id would make
+    # every live instance share one dispatch slot (see the trophy quiz's
+    # TrophyShareView.share_button for the full explanation).
     @discord.ui.button(
         label="📤 Share Results Publicly",
         style=discord.ButtonStyle.primary,
-        custom_id="share_quiz_results"
     )
     async def share_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         """Post results publicly to the channel."""
@@ -641,7 +643,9 @@ class QuizGuessView(discord.ui.View):
         label="Submit Guesses",
         style=discord.ButtonStyle.success,
         row=4  # Place in last row (after 4 dropdowns)
-        # Note: custom_id for buttons in ephemeral views doesn't need to be unique per user
+        # No custom_id: ephemeral views NEED per-instance auto ids — a fixed
+        # id would make all live instances share one dispatch slot (see
+        # tests/test_quiz_view_dispatch.py for the mechanism and proof).
     )
     async def submit_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         """Process submission and show results"""

@@ -95,6 +95,16 @@ def get_member_name(guild: discord.Guild, user_id: str) -> str:
     """
     Resolve a user ID to their display name in a guild (with icons).
 
+    Stats surfaces (/stats, /record, leaderboards) call this with
+    guild=None as a pure formatting fallback after a PlayerStats
+    display_name miss. Stored names are complete -- the dispnamefill0
+    migration filled every name derivable from local evidence, the
+    one-time scripts/backfill_legacy_display_names.py resolved the
+    legacy-only remainder through Discord, and the live signup path keeps
+    names current -- so a miss there means a deleted account, and the
+    "User {id}" fallback is the intended rendering (no live lookup;
+    removing that global bot reach was issue #388).
+
     Args:
         guild: The Discord guild to look up the member in
         user_id: The user's ID as a string
