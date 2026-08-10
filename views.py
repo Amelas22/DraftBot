@@ -17,6 +17,7 @@ from sqlalchemy.orm import selectinload
 from helpers.utils import get_cube_thumbnail_url
 from helpers.display_names import get_display_name, get_display_name_by_id
 from helpers.debt_warning import format_staked_sign_ups, DEBT_WARNING_AGE_DAYS
+from helpers.draft_footer import apply_draft_footer_from_session
 from helpers.permissions import bot_manager_button
 from utils import (
     calculate_pairings,
@@ -2311,7 +2312,11 @@ async def update_draft_message(bot, session_id):
         thumbnail_url = get_cube_thumbnail_url(draft_session.cube)
         embed.set_thumbnail(url=thumbnail_url)
         logger.info(f"Updated thumbnail for cube: {draft_session.cube}")
-        
+
+        # Re-stamp the metadata footer: the cube name it carries goes stale
+        # when Update Cube changes the session's cube (#383).
+        apply_draft_footer_from_session(embed, draft_session)
+
         await message.edit(embed=embed)
         logger.info(f"Successfully updated message for session ID: {session_id}")
 

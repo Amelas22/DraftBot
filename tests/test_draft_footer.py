@@ -110,3 +110,47 @@ def test_draft_session_embed_carries_the_footer():
     assert "timestamp" not in payload
     # No icon: the cube art is already the embed thumbnail.
     assert "icon_url" not in payload["footer"]
+
+
+@pytest.mark.asyncio
+async def test_update_draft_message_restamps_footer_after_cube_change():
+    """#383: Update Cube edited the Cube: field and thumbnail but left the
+    footer carrying the old cube name. update_draft_message must re-stamp it."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    import views
+
+    stale = discord.Embed(title="Looking for Players!")
+    stale.add_field(name="Cube:", value="[LSVCube](https://cubecobra.com/cube/list/LSVCube)", inline=True)
+    stale.add_field(name="Sign-Ups:", value="**Players (0):**\nNo players yet.", inline=False)
+    stale.set_footer(text="ID: lightning-bolt-7 • Cube: LSVCube")
+
+    session = SimpleNamespace(
+        session_id="123456789012345678-1753500000",
+        friendly_id="lightning-bolt-7",
+        cube="ArenaChrome",  # the session was updated to a new cube
+        draft_channel_id="111",
+        message_id="222",
+        sign_ups={},
+        session_type="random",
+        packs_per_player=3,
+        cards_per_pack=15,
+    )
+
+    message = MagicMock()
+    message.embeds = [stale]
+    message.edit = AsyncMock()
+    channel = MagicMock()
+    channel.fetch_message = AsyncMock(return_value=message)
+    channel.guild = MagicMock()
+    bot = MagicMock()
+    bot.get_channel.return_value = channel
+
+    with patch.object(views, "get_draft_session", AsyncMock(return_value=session)):
+        await views.update_draft_message(bot, session.session_id)
+
+    message.edit.assert_awaited_once()
+    edited = message.edit.await_args.kwargs["embed"]
+    assert edited.footer.text == "ID: lightning-bolt-7 • Cube: ArenaChrome"
+    cube_field = next(f for f in edited.fields if f.name == "Cube:")
+    assert "ArenaChrome" in cube_field.value
