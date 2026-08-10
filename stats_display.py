@@ -5,8 +5,9 @@ This module formats player_stats data into Discord displays. It sits at the top 
 """
 import discord
 from player_stats import create_stats_embed, get_player_statistics
-from sqlalchemy import select
+from sqlalchemy import Integer, cast, func, select
 from database.db_session import AsyncSessionLocal
+from models import QuizStats, TrophyQuizSession, TrophyQuizSubmission
 from models.player import PlayerStats
 from helpers.skill import is_established, skill_rating
 from services.ledger_stats import LedgerSnapshot
@@ -34,6 +35,58 @@ async def _player_skill_rating(player_id, guild_id):
     mu, sigma, games_won, games_lost = row
     games = (games_won or 0) + (games_lost or 0)
     return skill_rating(mu, sigma, games), not is_established(games)
+
+
+async def _player_quiz_stats(player_id, guild_id):
+    """Lifetime quiz stats for one player, as (pick_quiz, trophy_quiz) dicts —
+    either is None when the player hasn't played that quiz type.
+
+    Pick quiz reads the already-aggregated QuizStats row. Trophy quiz has no
+    aggregate table, so finalized submissions are summed here, guild-scoped via
+    the quiz session (submissions don't carry guild_id) — the same shape the
+    trophy quiz leaderboard aggregates."""
+    async with AsyncSessionLocal() as session:
+        row = await session.get(QuizStats, (str(player_id), str(guild_id)))
+        result = await session.execute(
+            select(
+                func.count(),
+                func.coalesce(func.sum(TrophyQuizSubmission.points_earned), 0),
+                # cast: summing the raw Boolean column makes SQLAlchemy coerce
+                # the aggregate back to a bool (True), not a count
+                func.coalesce(func.sum(cast(TrophyQuizSubmission.direction_correct, Integer)), 0),
+            )
+            .join(TrophyQuizSession,
+                  TrophyQuizSubmission.quiz_id == TrophyQuizSession.quiz_id)
+            .where(
+                TrophyQuizSession.guild_id == str(guild_id),
+                TrophyQuizSubmission.player_id == str(player_id),
+                # Only committed answers count, matching the leaderboard; a
+                # pending row is an initial guess never Kept/Changed.
+                TrophyQuizSubmission.finalized.is_(True),
+            )
+        )
+        played, points, direction_correct = result.one()
+
+    pick = None
+    if row is not None and row.total_quizzes:
+        pick = {
+            "played": row.total_quizzes,
+            # `or 0`: the columns are nullable in the schema; insert-time
+            # defaults make NULLs unlikely, but "None pts" must be impossible.
+            "accuracy": row.accuracy_percentage or 0.0,
+            "points": row.total_points or 0,
+            "best": row.highest_quiz_score or 0,
+        }
+    trophy = None
+    if played:
+        trophy = {
+            "played": played,
+            "points": points,
+            # Pre-computed like pick's `accuracy`: the embed builder
+            # formats, it doesn't do arithmetic.
+            "direction_pct": direction_correct / played * 100,
+        }
+    return pick, trophy
 
 
 async def get_stats_embed_for_player(
@@ -82,6 +135,11 @@ async def get_stats_embed_for_player(
     rating, provisional = await _player_skill_rating(player_id, guild_id)
     stats_lifetime['skill_rating'] = rating
     stats_lifetime['skill_provisional'] = provisional
+
+    # Lifetime quiz stats (pick + trophy), rendered as their own embed field.
+    pick_quiz, trophy_quiz = await _player_quiz_stats(player_id, guild_id)
+    stats_lifetime['pick_quiz_stats'] = pick_quiz
+    stats_lifetime['trophy_quiz_stats'] = trophy_quiz
 
     # Create and return the embed
     embed = await create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime)

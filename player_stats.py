@@ -303,6 +303,28 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
         value += "\n*New players start at 1500 · a 100-point gap ≈ 60% match favorite*"
         embed.add_field(name="🎯 Skill Rating", value=value, inline=False)
 
+    # 🧠 Quiz stats (injected by stats_display.get_stats_embed_for_player);
+    # omitted entirely for players who haven't played either quiz.
+    # "directionally right" = called which of the two decks did better.
+    pick_quiz = stats_lifetime.get('pick_quiz_stats')
+    trophy_quiz = stats_lifetime.get('trophy_quiz_stats')
+    if pick_quiz or trophy_quiz:
+        quiz_lines = []
+        if pick_quiz:
+            quiz_lines.append(
+                f"**Pick Quiz** ({pick_quiz['played']} played): "
+                f"{pick_quiz['points']} pts • "
+                f"{pick_quiz['accuracy']:.0f}% of picks guessed right • "
+                f"best quiz {pick_quiz['best']} pts"
+            )
+        if trophy_quiz:
+            quiz_lines.append(
+                f"**Trophy Quiz** ({trophy_quiz['played']} played): "
+                f"{trophy_quiz['points']} pts • "
+                f"directionally right {trophy_quiz['direction_pct']:.0f}%"
+            )
+        embed.add_field(name="🧠 Quiz Stats (lifetime)", value="\n".join(quiz_lines), inline=False)
+
     # Add cube-specific stats if any are available (the field's title
     # states the same MIN_CUBE_DRAFTS_DISPLAY threshold)
     displayable_cube_stats = {
