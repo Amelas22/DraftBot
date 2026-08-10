@@ -2,6 +2,7 @@
 key
 *.pub
 *.json
+!.claude/settings.json
 *.db
 *.xlsx
 *.csv
