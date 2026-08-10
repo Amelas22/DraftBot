@@ -17,12 +17,17 @@ import sys
 # The lookahead excludes unrelated names like .environment_notes.txt (no
 # separator after "env").
 ENV = r"(?:[\w./~$-]*/)?[\w.-]*\.env(?:[._-][\w.-]*)?(?![\w-])"
+# Redirect targets may be quoted — `> "$CLAUDE_PROJECT_DIR/.env"` is the
+# idiomatic form an agent reaches for first, so the redirect branch must
+# tolerate an opening quote before the path (the other branches' [^|;&]*
+# already swallows quotes mid-command).
+Q = r"[\"']?"
 WRITE_PATTERNS = re.compile("|".join([
-    rf"(?:>>?\s*{ENV})",                     # > .env / >> .env
+    rf"(?:>>?\s*{Q}{ENV})",                  # > .env / >> ".env" / > '$HOME/.env'
     rf"(?:\bsed\b[^|;&]*-i[^|;&]*{ENV})",    # sed -i ... .env
     rf"(?:\btee\b[^|;&]*{ENV})",             # tee [-a] .env
     rf"(?:\b(?:rm|truncate|unlink)\b[^|;&]*{ENV})",
-    rf"(?:\b(?:mv|cp)\b[^|;&]+\s{ENV}\s*(?:$|[|;&]))",  # .env as DEST (last arg)
+    rf"(?:\b(?:mv|cp)\b[^|;&]+\s{Q}{ENV}{Q}\s*(?:$|[|;&]))",  # .env as DEST (last arg)
 ]), re.IGNORECASE)
 
 

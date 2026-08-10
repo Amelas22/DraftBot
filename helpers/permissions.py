@@ -1,6 +1,7 @@
 """Shared permission decorators for Discord bot commands."""
 import functools
 
+import discord
 from discord.ext import commands
 from loguru import logger
 
@@ -61,16 +62,26 @@ async def is_bot_manager_interaction(interaction):
 
 def bot_manager_button(callback):
     """Component-callback analog of ``has_bot_manager_role()``: decorate a view
-    callback method (``async def cb(self, interaction, button)``) to reject
-    non-managers with an ephemeral message before the body runs."""
+    callback method to reject non-managers with an ephemeral message before
+    the body runs.
+
+    Argument-order safe by construction: this repo wires button callbacks in
+    BOTH conventions — the manual CallbackButton passes ``(interaction,
+    button)`` while native ``@discord.ui.button`` methods receive ``(button,
+    interaction)`` — so the wrapper locates the Interaction among its
+    arguments instead of assuming a position. Assuming would fail as a
+    swallowed AttributeError inside py-cord's dispatcher, leaving the button
+    silently unguarded-looking ("This interaction failed")."""
     @functools.wraps(callback)
-    async def wrapper(self, interaction, *args, **kwargs):
+    async def wrapper(self, *args, **kwargs):
+        interaction = next(
+            a for a in args if isinstance(a, discord.Interaction))
         if not await is_bot_manager_interaction(interaction):
             await interaction.response.send_message(
                 "Only bot managers can use this.", ephemeral=True
             )
             return
-        return await callback(self, interaction, *args, **kwargs)
+        return await callback(self, *args, **kwargs)
     return wrapper
 
 

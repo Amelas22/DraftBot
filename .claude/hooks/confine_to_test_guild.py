@@ -8,7 +8,14 @@ Scope is deliberately narrow so non-skill sessions are unaffected: only
 guild can't be validated (unknown guild id, `@me` DMs, or TEST_GUILD_ID
 missing); every other url — including discord.com/login for the setup
 handoff — passes without opinion. Malformed hook input: no opinion (matching
-deny_discord_invites.py)."""
+deny_discord_invites.py).
+
+SCOPE WARNING: this fires only for the tool named by the settings.json
+matcher (the in-app browser's navigate). Other navigation-capable tools —
+in-page clicks, JS evaluation, or a different browser MCP entirely (e.g.
+Playwright's browser_navigate) — do NOT match and would silently bypass
+this rail. If the harness ever moves to another browser tool, the matcher
+must move with it."""
 import json
 import os
 import re

@@ -25,14 +25,15 @@ create accounts, enter credentials, or solve CAPTCHAs.
 4. **Invite it**: from their main account, generate an invite to the test
    guild (ideally single-use, the `TEST_CHANNEL` channel) and join the test
    account through it.
-5. **Least-privilege mod gate** (from the main account, which owns the
-   server): server name → Server Settings → Roles → Create Role. Display
-   tab: name it exactly `Bot Manager` (the bot's `[MOD]` check in
-   helpers/permissions.py matches this NAME, so no real permissions are
-   needed). Permissions tab: scroll to the bottom → **Clear Permissions**
-   (every toggle off) → Save Changes. Then Manage Members tab → Add Members
-   → the test account (or right-click the member in the member list → Roles
-   → tick `Bot Manager`). Finally, restrict the account to the `TEST_CHANNEL`
+5. **Least-privilege mod gate**: with the bot online, run
+   `/setup_bot_manager` then `/add_bot_manager @<test account>` from the
+   main account — the bot creates the `Bot Manager` role with zero Discord
+   permissions and assigns it. (The name must match `ADMIN_ROLE_NAME` in
+   `helpers/permissions.py`: the bot grants manager access by role NAME, so
+   the role needs no real permissions.) Bot-offline fallback, manual:
+   Server Settings → Roles → Create Role named exactly `Bot Manager` →
+   Permissions tab → **Clear Permissions** → Save → assign it to the test
+   account. Either way, finally restrict the account to the `TEST_CHANNEL`
    channel via channel overrides; optionally add slowmode.
 6. **Account hygiene**: on the test account — Settings → Privacy & Safety:
    disable DMs from server members and friend requests.

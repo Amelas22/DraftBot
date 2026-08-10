@@ -240,3 +240,64 @@ async def test_uses_followup_when_already_responded():
         await handle_application_command_error(ctx, commands.CheckFailure("nope"))
     ctx.followup.send.assert_called_once()
     ctx.respond.assert_not_called()
+
+
+# ---- bot_manager_button (component-callback decorator) ----------------------
+
+def _component_interaction(is_owner=False):
+    """A mock discord.Interaction that passes isinstance checks."""
+    import discord
+    interaction = MagicMock(spec=discord.Interaction)
+    interaction.client.is_owner = AsyncMock(return_value=is_owner)
+    interaction.user.roles = []
+    interaction.user.guild_permissions.manage_roles = False
+    interaction.guild.id = 123
+    interaction.response.send_message = AsyncMock()
+    return interaction
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("order", ["interaction_first", "button_first"])
+async def test_bot_manager_button_finds_interaction_in_either_arg_order(order):
+    """The repo wires button callbacks BOTH ways: manual CallbackButton passes
+    (interaction, button); native @discord.ui.button passes (button,
+    interaction). The decorator must locate the Interaction rather than
+    assume a position — assuming would fail as a swallowed AttributeError
+    inside py-cord's dispatcher, leaving the gate silently absent."""
+    from helpers.permissions import bot_manager_button
+
+    ran = []
+
+    class FakeView:
+        @bot_manager_button
+        async def cb(self, *args):
+            ran.append(args)
+
+    interaction = _component_interaction(is_owner=True)
+    button = MagicMock()  # plain mock: NOT a discord.Interaction
+    with patch("helpers.permissions.get_config", return_value={}):
+        if order == "interaction_first":
+            await FakeView().cb(interaction, button)
+        else:
+            await FakeView().cb(button, interaction)
+    assert len(ran) == 1                      # authorized: body ran
+    interaction.response.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bot_manager_button_rejects_non_manager_ephemerally():
+    from helpers.permissions import bot_manager_button
+
+    ran = []
+
+    class FakeView:
+        @bot_manager_button
+        async def cb(self, *args):
+            ran.append(args)
+
+    interaction = _component_interaction(is_owner=False)
+    with patch("helpers.permissions.get_config", return_value={}):
+        await FakeView().cb(interaction, MagicMock())
+    assert not ran                            # body never ran
+    interaction.response.send_message.assert_called_once()
+    assert interaction.response.send_message.call_args.kwargs.get("ephemeral") is True
