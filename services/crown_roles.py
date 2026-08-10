@@ -16,7 +16,7 @@ from leaderboard_config import DEFAULT_CROWN_ROLE_NAMES as _DEFAULT_ROLE_NAMES
 DEFAULT_CROWN_ROLE_NAMES = {int(k): v for k, v in _DEFAULT_ROLE_NAMES.items()}
 
 
-async def update_crown_roles_for_guild(bot, guild_id: str):
+async def update_crown_roles_for_guild(bot, guild_id: str, cache=None):
     """
     Update crown roles for all players in a guild based on current leaderboard standings.
 
@@ -60,8 +60,11 @@ async def update_crown_roles_for_guild(bot, guild_id: str):
 
     logger.info(f"Updating crown roles for guild {guild_id} with categories {eligible_categories}")
 
-    # 1. Get current #1 players for each category
-    leaders = await get_crown_leaders(guild_id, eligible_categories, timeframe)
+    # 1. Get current #1 players for each category (sharing the refresh
+    # cycle's PlayersDataCache when the caller passes one -- the fold-backed
+    # categories would otherwise rebuild identical data per category).
+    leaders = await get_crown_leaders(guild_id, eligible_categories, timeframe,
+                                      cache=cache)
     logger.debug(f"Crown leaders: {leaders}")
 
     # 2. Calculate crown counts per player

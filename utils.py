@@ -1155,11 +1155,20 @@ async def update_leaderboards_for_guild(bot, guild_id: str, session_id=None, str
                     else:
                         timeframes[category] = "lifetime"
 
+            # One PlayersDataCache per refresh cycle: every fold-backed
+            # category (and the crown pass below) shares the same
+            # per-timeframe assembly instead of rebuilding identical data
+            # per category (~9 rebuilds -> one per distinct timeframe).
+            from services.leaderboard_service import PlayersDataCache
+            players_cache = PlayersDataCache(guild_id)
+
             # Process each category
             for category in categories:
                 try:
                     # Create the embed with the saved timeframe
-                    embed = await create_leaderboard_embed(guild_id, category, timeframe=timeframes[category])
+                    embed = await create_leaderboard_embed(
+                        guild_id, category, timeframe=timeframes[category],
+                        cache=players_cache)
 
                     # Get the message ID field name
                     msg_id_field = f"{category}_view_message_id" if category != "hot_streak" else "message_id"
@@ -1194,7 +1203,8 @@ async def update_leaderboards_for_guild(bot, guild_id: str, session_id=None, str
 
             # Update crown roles based on new leaderboard standings
             try:
-                await update_crown_roles_for_guild(bot, guild_id)
+                await update_crown_roles_for_guild(bot, guild_id,
+                                                   cache=players_cache)
             except Exception as e:
                 logger.error(f"Error updating crown roles for guild {guild_id}: {e}")
 

@@ -30,18 +30,18 @@ class TestGetTimeframeStartDate:
         assert abs((result - expected).total_seconds()) < 1
 
     def test_lifetime_timeframe(self):
-        """Test that None/lifetime returns date far in past"""
+        """Test that None/lifetime returns None (no date filter) -- the same
+        spelling of "lifetime" the leaderboard/h2h callers already use, so
+        the ledger fold treats every lifetime caller identically."""
         result = get_timeframe_start_date(None)
-        expected = datetime(2000, 1, 1)
 
-        assert result == expected
+        assert result is None
 
     def test_invalid_timeframe_defaults_to_lifetime(self):
         """Test that invalid timeframe string defaults to lifetime"""
         result = get_timeframe_start_date('invalid')
-        expected = datetime(2000, 1, 1)
 
-        assert result == expected
+        assert result is None
 
 
 class TestCalculateWinPercentage:
@@ -159,5 +159,4 @@ class TestEdgeCases:
         """Test that timeframe matching is case-sensitive"""
         # 'Week' (capital) should default to lifetime, not week
         result = get_timeframe_start_date('Week')
-        expected = datetime(2000, 1, 1)
-        assert result == expected
+        assert result is None

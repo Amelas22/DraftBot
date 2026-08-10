@@ -342,11 +342,19 @@ async def refresh_all_leaderboards(bot):
                             else:
                                 timeframes[category] = "lifetime"
                     
+                    # One PlayersDataCache per guild: fold-backed categories
+                    # share the per-timeframe assembly during this refresh.
+                    from services.leaderboard_service import PlayersDataCache
+                    players_cache = PlayersDataCache(guild_id)
+
                     # Process each category
                     for category in LEADERBOARD_CATEGORIES:
                         try:
                             # Create the embed
-                            embed = await create_leaderboard_embed(guild_id, category, timeframe=timeframes[category])
+                            embed = await create_leaderboard_embed(
+                                guild_id, category,
+                                timeframe=timeframes[category],
+                                cache=players_cache)
                             
                             # Get the message ID field name
                             msg_id_field = f"{category}_view_message_id" if category != "hot_streak" else "message_id"
