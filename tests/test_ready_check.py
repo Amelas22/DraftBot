@@ -207,6 +207,17 @@ class TestCancel:
 
         mock_cleanup.assert_awaited_once_with("sid", channel)
 
+    async def test_none_channel_still_cleans_up(self):
+        """Regression: cancel must remove the ready check from state even when
+        the channel is absent — an assert-before-cancel at a call site once
+        raised BEFORE cleanup, leaving a cancelled check live in state. Only
+        the announcement may be skipped."""
+        with patch.object(ReadyCheckSession, "cleanup", AsyncMock()) as mock_cleanup, \
+             patch("ready_check.state_manager"):
+            await ReadyCheckSession.cancel("sid", None, cancelled_by="Alice")
+
+        mock_cleanup.assert_awaited_once_with("sid", None)
+
 
 # ---------------------------------------------------------------------------
 # ReadyCheckSession.sync_removed_player

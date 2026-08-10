@@ -61,6 +61,9 @@ pipenv run alembic revision --autogenerate   # Generate new migration
 # Running the bot locally
 pipenv run python bot.py
 
+# Type checking (must report 0 errors)
+pipenv run pyrefly check
+
 # Service management (production)
 sudo systemctl restart draftbot.service      # Restart with auto-migration
 sudo journalctl -u draftbot.service -f       # View logs
@@ -170,6 +173,51 @@ Claude can drive the test Discord server itself — run slash commands, click bo
   - [ ] `TEST_MODE=true` is not set in production environment
   - [ ] All commands tested with `pipenv run`
   - [ ] Database migrations tested locally
+  - [ ] `pipenv run pyrefly check` reports 0 errors
+
+### Type Checking
+
+The project is migrating to typed Python gradually. `pyrefly.toml` runs at
+`strict`, but only over the files listed in its `project-includes` — everything
+else is unchecked for now. The list grows one module at a time so each cleanup
+stays small and reviewable.
+
+**When you create a new bot-code `.py` file (cogs, helpers, services, models,
+views — not migrations, one-off scripts, or tests), add it to `project-includes`
+in `pyrefly.toml` and make sure `pipenv run pyrefly check` still reports 0
+errors.** New code should be born type-clean; that is what stops the untyped
+surface from growing while the backlog is worked off. New typed helpers added
+to an existing unlisted file don't force that whole file in — but if the file
+is small, opting it in is the better call.
+
+When touching an existing file that isn't listed yet, you may opt it in too, but
+do it as its own commit — mixing a type cleanup into a behaviour change makes both
+harder to review.
+
+From a **git worktree**, `pipenv run` won't resolve this project's venv — bare
+`pyrefly check` then falls back to system site-packages and reports phantom
+missing-import errors. Use
+`pyrefly check --python-interpreter-path "$(pipenv --py)"` (with `pipenv --py`
+run from the main checkout), or set `VIRTUAL_ENV` to the project venv.
+
+Scope caveat: `replace-imports-with-any` (see `pyrefly.toml`) means SQLAlchemy
+model attributes type as `Any` — strictness covers the checked file's local
+logic, not its model contracts (e.g. a nullable JSON column passed where a
+`dict` is expected won't be caught).
+
+Conventions for the awkward py-cord cases:
+
+- `not_none(x)` (in `helpers/utils.py`) asserts a value isn't `None`, raising at
+  runtime if the assumption is wrong. Use it for things like
+  `not_none(interaction.user).id`, where pycord's types allow `None` but the
+  handler can only run when it's present. Use it sparingly — prefer a real
+  `is not None` check when the value genuinely can be absent.
+- `cast(...)` for narrowing a union the checker can't infer, e.g.
+  `cast(discord.TextChannel, channel).fetch_message(...)` where `bot.get_channel`
+  returns the full `GuildChannel` union.
+- `discord.ui.Button[Any]` — `Button` is generic over its parent view, which
+  button callbacks don't depend on.
+- `# pyrefly: ignore [error-kind]` as a last resort, on the line above the error.
 
 ### Security Considerations
 - Never commit secrets or tokens

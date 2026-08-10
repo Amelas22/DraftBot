@@ -1,3 +1,18 @@
+from typing import TypeVar
+
+_T = TypeVar("_T")
+
+
+def not_none(x: _T | None) -> _T:
+    """Assert a value is not None, raising at runtime if the assumption is wrong.
+
+    Use this sparingly, only when you are certain of something the typechecker
+    cannot infer (pycord types frequently).
+    """
+    if x is None:
+        raise ValueError("Expected non-None value, got None")
+    return x
+
 
 # Define a mapping of cube names to thumbnail URLs
 # This is used for consistent cube thumbnails across the app
@@ -13,6 +28,6 @@ CUBE_THUMBNAILS = {
 # Default thumbnail for cubes that don't have a specific image
 DEFAULT_THUMBNAIL = "https://cdn.discordapp.com/attachments/1186757246936424558/1217295353972527176/131.png"
 
-def get_cube_thumbnail_url(cube_name):
+def get_cube_thumbnail_url(cube_name: str | None) -> str:
     """Get the thumbnail URL for a given cube name."""
-    return CUBE_THUMBNAILS.get(cube_name, DEFAULT_THUMBNAIL)
+    return CUBE_THUMBNAILS.get(cube_name or "", DEFAULT_THUMBNAIL)
