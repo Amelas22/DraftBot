@@ -9,6 +9,7 @@ from sqlalchemy import select
 from database.db_session import AsyncSessionLocal
 from models.player import PlayerStats
 from helpers.skill import is_established, skill_rating
+from services.ledger_stats import LedgerSnapshot
 
 
 async def _player_skill_rating(player_id, guild_id):
@@ -68,10 +69,14 @@ async def get_stats_embed_for_player(
                 self.avatar = None
         user = MockUser(player_id, display_name)
 
-    # Get stats for all 3 timeframes
-    stats_weekly = await get_player_statistics(player_id, 'week', display_name, guild_id)
-    stats_monthly = await get_player_statistics(player_id, 'month', display_name, guild_id)
-    stats_lifetime = await get_player_statistics(player_id, None, display_name, guild_id)
+    # Get stats for all 3 timeframes -- one guild-history fetch, three folds
+    snapshot = await LedgerSnapshot.fetch(guild_id)
+    stats_weekly = await get_player_statistics(player_id, 'week', display_name, guild_id,
+                                               snapshot=snapshot)
+    stats_monthly = await get_player_statistics(player_id, 'month', display_name, guild_id,
+                                                snapshot=snapshot)
+    stats_lifetime = await get_player_statistics(player_id, None, display_name, guild_id,
+                                                 snapshot=snapshot)
 
     # Skill rating from stored TrueSkill μ/σ, gated on lifetime rated games.
     rating, provisional = await _player_skill_rating(player_id, guild_id)

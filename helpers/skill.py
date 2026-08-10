@@ -48,6 +48,15 @@ def rating_counts_for(session_type):
     return session_type in RATING_SESSION_TYPES
 
 
+def is_valid_match(player1_id, player2_id, winner_id):
+    """THE guard for counting a reported result: both players present,
+    no self-matches, winner is one of the two players. Ratings
+    (backfill_skill_ratings) and ledger stats (services.ledger_stats)
+    must agree on which rows count, so both go through here."""
+    return bool(player1_id and player2_id and player1_id != player2_id
+                and winner_id in (player1_id, player2_id))
+
+
 def rating_update_action(previous_winner_id, new_winner_id):
     """What the live path must do when a result is (re)submitted.
 
@@ -228,9 +237,7 @@ def backfill_skill_ratings(connection):
     games_lost = defaultdict(int)
 
     for player1_id, player2_id, winner_id, guild_id in rows:
-        if not player1_id or not player2_id or player1_id == player2_id:
-            continue
-        if winner_id not in (player1_id, player2_id):
+        if not is_valid_match(player1_id, player2_id, winner_id):
             continue
         loser_id = player2_id if winner_id == player1_id else player1_id
         kw = (guild_id, winner_id)
