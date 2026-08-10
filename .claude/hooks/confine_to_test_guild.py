@@ -10,12 +10,14 @@ missing); every other url — including discord.com/login for the setup
 handoff — passes without opinion. Malformed hook input: no opinion (matching
 deny_discord_invites.py).
 
-SCOPE WARNING: this fires only for the tool named by the settings.json
-matcher (the in-app browser's navigate). Other navigation-capable tools —
-in-page clicks, JS evaluation, or a different browser MCP entirely (e.g.
-Playwright's browser_navigate) — do NOT match and would silently bypass
-this rail. If the harness ever moves to another browser tool, the matcher
-must move with it."""
+SCOPE: the settings.json matcher is the unanchored regex "navigate", so
+this fires for ANY tool whose name contains it — the in-app browser's
+navigate, Playwright's browser_navigate, chrome-devtools' navigate_page,
+and future browser MCPs alike (a nav tool without a `url` input, like
+browser_navigate_back, simply gets no opinion). Still not covered:
+in-page clicks and JS evaluation, which never carry a URL to judge —
+those remain the skill rails' job. If a browser tool ever navigates via
+a differently-named input, extend main() alongside the matcher."""
 import json
 import os
 import re

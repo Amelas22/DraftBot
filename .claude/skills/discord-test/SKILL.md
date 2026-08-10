@@ -10,10 +10,13 @@ user account, exercising the locally-running DraftBot and visually verifying the
 results. Discord's API does not let bots trigger another bot's interactions, so
 a browser-driven user session is the only way to click DraftBot's components.
 
-Environment: requires the Claude Code **desktop app on the machine the bot runs
-on** — the browser pane, the bot process, `.env`, and `drafts.db` must be
-co-located. Plain CLI / VS Code extension (no browser pane) and remote/cloud
-sessions (no local bot) can't run this skill as written.
+Environment: the primary target is the Claude Code **desktop app on the
+machine the bot runs on** — the browser pane, the bot process, `.env`, and
+`drafts.db` must be co-located. A **Playwright MCP session** (CLI/WSL with a
+display for the headed login handoff) is a proven alternative — a full run
+validated PR #394 this way; see "Playwright-driven sessions" below for the
+recipe differences. Remote/cloud sessions (no local bot) can't run this
+skill either way.
 
 Per-developer setup lives in `.env`, never in this skill: `TEST_GUILD_ID` (the
 dev's test guild id) and `TEST_CHANNEL` (the designated test channel's name).
@@ -26,9 +29,10 @@ Different developers have different guilds/channels/accounts.
   guild; route through **First-time setup** below.
   (A PreToolUse hook also denies navigating Discord channel urls outside
   `TEST_GUILD_ID`, including DMs — the hook enforces, this rail still governs
-  which channel within the guild. The hooks are keyed to the in-app browser's
-  navigate tool specifically; driving any OTHER browser tool would silently
-  bypass them — one more reason this skill runs only in the in-app pane.)
+  which channel within the guild. The hook matcher covers any tool whose name
+  contains "navigate" — in-app browser and Playwright/chrome-devtools alike —
+  but in-page clicks and JS evaluation carry no URL to judge, so this rail
+  governs those regardless of browser.)
 - NEVER: send DMs, add friends, join/create servers, click invite or
   guild-creation links (all variants denied by a PreToolUse hook — the hook
   owns the pattern list), change account settings, or post in any other
@@ -86,6 +90,10 @@ Stop with TaskStop on the background task when testing is done.
   pane (never the user's real Chrome).
 - If Discord shows a login page instead of the app, hand off to the user to log
   in manually (dedicated test account), then continue.
+- The browser can close or relaunch mid-session (it did in a live run) — a
+  relaunch may keep the login (persistent profile) or lose it. After ANY
+  relaunch, re-verify the guild sidebar before continuing, and expect to
+  repeat the login handoff if the login page reappears.
 - Navigate to the `TEST_CHANNEL` channel via `find` on the channel list; verify the channel
   name in the header before sending anything.
 
@@ -139,7 +147,9 @@ Stop with TaskStop on the background task when testing is done.
   a session pauses mid-flow, assume open ephemeral controls are dead on
   resume.
 
-**Dropdowns (string selects)** — options are NOT in the accessibility tree.
+**Dropdowns (string selects)** — in the IN-APP PANE, options are NOT in the
+accessibility tree (Playwright exposes them with refs — see the Playwright
+section; this recipe is the in-app-pane workaround).
 Preferred recipe (proven first-try, twice, where keyboard misfired):
 1. Click the select's ref once (a second click toggles it closed — never
    double-click). Wait ~1s.
@@ -183,6 +193,28 @@ walking/scanning, and verify every landing off a screenshot.
   hash, not by re-reading; and capture the wanted state as the LAST
   screenshot before extracting so it sits at a known index.
 
+## Playwright-driven sessions (proven alternative to the in-app pane)
+
+A full run over the Playwright MCP (CLI/WSL, headed Chrome via WSLg for the
+login handoff) validated PR #394 end-to-end. The core recipes above hold;
+these are the deltas, learned live:
+
+- **Dropdown options HAVE refs.** Playwright's accessibility tree exposes
+  select options as a `listbox` with `option` refs — ref-click them directly
+  (worked first-try, four for four). Skip the screenshot-pixel recipe
+  entirely; it's an in-app-pane workaround.
+- **Search, don't read whole pages.** `browser_find` (text/regex over the
+  tree) to locate elements, then `browser_snapshot` with `target=<ref>` for
+  just that subtree — a busy Discord channel's full tree is enormous and
+  mostly noise.
+- **Screenshots are plain files.** `browser_take_screenshot` writes a PNG on
+  disk — the transcript-base64 extraction recipe above is in-app-pane-only.
+  Move evidence PNGs out of the repo when done (see Teardown).
+- The guardrail hooks cover Playwright navigation too (the matcher is any
+  tool containing "navigate"), but the browser needs Playwright's branded
+  Chrome installed (`sudo env "PATH=$PATH" npx playwright install chrome` —
+  plain `sudo npx` picks up the system node and fails).
+
 ## Teardown
 
 - Draft channels created during a test are LEFT IN PLACE — never run
@@ -190,4 +222,8 @@ walking/scanning, and verify every landing off a screenshot.
   preference: channel deletion is theirs to do manually, if at all). Just
   list the channels the test created in the final report.
 - TaskStop the bot background task.
+- Local artifacts: `bot_local.log` and Playwright's `.playwright-mcp/`
+  output land in the repo cwd and must never be committed — move evidence
+  screenshots to a location outside the repo and clean or ignore the rest
+  (`.git/info/exclude` is the committed-nothing way to ignore them).
 - Report what was tested, what passed/failed, with the screenshots inline.

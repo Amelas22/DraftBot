@@ -26,7 +26,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "mcp__Claude_Browser__navigate",
+        "matcher": "navigate",
         "hooks": [
           {
             "type": "command",
