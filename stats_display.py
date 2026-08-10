@@ -71,16 +71,20 @@ async def _player_quiz_stats(player_id, guild_id):
     if row is not None and row.total_quizzes:
         pick = {
             "played": row.total_quizzes,
+            # `or 0`: the columns are nullable in the schema; insert-time
+            # defaults make NULLs unlikely, but "None pts" must be impossible.
             "accuracy": row.accuracy_percentage or 0.0,
-            "points": row.total_points,
-            "best": row.highest_quiz_score,
+            "points": row.total_points or 0,
+            "best": row.highest_quiz_score or 0,
         }
     trophy = None
     if played:
         trophy = {
             "played": played,
             "points": points,
-            "direction_correct": direction_correct,
+            # Pre-computed like pick's `accuracy`: the embed builder
+            # formats, it doesn't do arithmetic.
+            "direction_pct": direction_correct / played * 100,
         }
     return pick, trophy
 

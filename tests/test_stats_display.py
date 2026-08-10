@@ -256,7 +256,7 @@ class TestPlayerQuizStats:
         assert pick is None and trophy is None
 
     @pytest.mark.asyncio
-    async def test_pick_quiz_reads_aggregated_row(self, test_db):
+    async def test_pick_quiz_reads_aggregated_row_own_guild_only(self, test_db):
         from stats_display import _player_quiz_stats
         async with AsyncSessionLocal() as session:
             session.add(QuizStats(
@@ -264,6 +264,11 @@ class TestPlayerQuizStats:
                 total_quizzes=12, total_picks_attempted=48, total_picks_correct=23,
                 accuracy_percentage=47.9, total_points=156, highest_quiz_score=20,
                 current_perfect_streak=2, longest_perfect_streak=4))
+            session.add(QuizStats(   # same player, other guild: excluded
+                player_id="123", guild_id="other-guild", display_name="P",
+                total_quizzes=99, accuracy_percentage=99.0, total_points=999,
+                highest_quiz_score=99, current_perfect_streak=0,
+                longest_perfect_streak=0))
             await session.commit()
         pick, trophy = await _player_quiz_stats("123", "g")
         assert pick == {"played": 12, "accuracy": 47.9, "points": 156, "best": 20}
@@ -287,9 +292,11 @@ class TestPlayerQuizStats:
             await session.commit()
         pick, trophy = await _player_quiz_stats("123", "g")
         assert pick is None
-        # direction_correct must be a COUNT (2), not a boolean coerced to True —
-        # summing the raw Boolean column regresses to True and 2 catches it.
-        assert trophy == {"played": 3, "points": 20, "direction_correct": 2}
+        # direction_pct must derive from a COUNT (2/3), not a boolean coerced
+        # to True — summing the raw Boolean column regresses to True, which
+        # 66.67% catches (True/3 would be 33.3%).
+        assert trophy["played"] == 3 and trophy["points"] == 20
+        assert round(trophy["direction_pct"], 1) == 66.7
 
     @pytest.mark.asyncio
     async def test_embed_shows_quiz_field_with_both_types(self, test_db):
