@@ -8,11 +8,10 @@ import discord
 from discord.ext import commands
 from loguru import logger
 from sqlalchemy import and_, func, select
-from typing_extensions import override
 
 from database.db_session import db_session
 from helpers.permissions import has_bot_manager_role
-from helpers.utils import ui_button, not_none
+from helpers.utils import not_none
 from services.leaderboard_formatter import TIMEFRAME_DISPLAY
 from services.leaderboard_service import get_timeframe_date
 from models.draft_session import DraftSession
@@ -320,63 +319,6 @@ async def build_stats_embed(guild_id: str, period: str) -> discord.Embed:
     return embed
 
 
-class DraftStatsView(discord.ui.View):
-    """Timeframe-switching buttons for an already-sent server_draft_stats embed."""
-
-    def __init__(self, guild_id: str, current_period: str) -> None:
-        super().__init__(timeout=180)
-        self.guild_id = guild_id
-        self.current_period = current_period
-        self.message: Optional[discord.Message] = None
-
-        # Each button's custom_id carries its period, so one loop styles all
-        # of them — a new period button never needs a matching style line.
-        for child in self.children:
-            if isinstance(child, discord.ui.Button) and child.custom_id:
-                child.style = self._style_for(child.custom_id.removeprefix("server_draft_stats_"))
-
-    def _style_for(self, period: str) -> discord.ButtonStyle:
-        return discord.ButtonStyle.primary if period == self.current_period else discord.ButtonStyle.secondary
-
-    async def _switch(self, interaction: discord.Interaction, period: str) -> None:
-        try:
-            embed = await build_stats_embed(self.guild_id, period)
-        except Exception as e:
-            logger.error(f"Error refreshing server draft stats: {e}")
-            await interaction.response.send_message(f"An error occurred: {e}", ephemeral=True)
-            return
-
-        new_view = DraftStatsView(self.guild_id, period)
-        new_view.message = self.message
-        await interaction.response.edit_message(embed=embed, view=new_view)
-
-    @ui_button(label=TIMEFRAME_DISPLAY["14d"], custom_id="server_draft_stats_14d")
-    async def fourteen_day_button(self, button: "discord.ui.Button[DraftStatsView]", interaction: discord.Interaction) -> None:
-        await self._switch(interaction, "14d")
-
-    @ui_button(label=TIMEFRAME_DISPLAY["30d"], custom_id="server_draft_stats_30d")
-    async def thirty_day_button(self, button: "discord.ui.Button[DraftStatsView]", interaction: discord.Interaction) -> None:
-        await self._switch(interaction, "30d")
-
-    @ui_button(label=TIMEFRAME_DISPLAY["90d"], custom_id="server_draft_stats_90d")
-    async def ninety_day_button(self, button: "discord.ui.Button[DraftStatsView]", interaction: discord.Interaction) -> None:
-        await self._switch(interaction, "90d")
-
-    @ui_button(label=TIMEFRAME_DISPLAY["lifetime"], custom_id="server_draft_stats_lifetime")
-    async def lifetime_button(self, button: "discord.ui.Button[DraftStatsView]", interaction: discord.Interaction) -> None:
-        await self._switch(interaction, "lifetime")
-
-    @override
-    async def on_timeout(self) -> None:
-        if self.message is None:
-            return
-        self.disable_all_items()
-        try:
-            await self.message.edit(view=self)
-        except Exception:
-            pass
-
-
 class ServerDraftStatsCog(commands.Cog):
     """Cog exposing server-wide draft activity stats (completed drafts per cube)."""
 
@@ -389,22 +331,34 @@ class ServerDraftStatsCog(commands.Cog):
         description="[Admin] View completed drafts per cube for this server",
     )
     @has_bot_manager_role()
-    async def server_draft_stats(self, ctx: discord.ApplicationContext) -> None:
-        """Show how many completed drafts each cube has had, with buttons to switch timeframe."""
+    @discord.option(
+        "timeframe",
+        str,
+        description="Stats window",
+        choices=[discord.OptionChoice(name=TIMEFRAME_DISPLAY[p], value=p) for p in PERIOD_MIN_DRAFTS],
+        default=DEFAULT_PERIOD,
+        required=False,
+    )
+    async def server_draft_stats(self, ctx: discord.ApplicationContext, timeframe: str) -> None:
+        """Show how many completed drafts each cube has had in the chosen timeframe.
+
+        Timeframe is a command option rather than buttons on the reply: the
+        reply is ephemeral, and a view's buttons outlive both its timeout and
+        py-cord's ability to edit the message (the webhook handle is clobbered
+        on first dispatch), leaving clickable buttons that silently fail.
+        """
         await ctx.defer(ephemeral=True)
 
         guild_id = str(not_none(ctx.guild).id)
 
         try:
-            embed = await build_stats_embed(guild_id, DEFAULT_PERIOD)
+            embed = await build_stats_embed(guild_id, timeframe)
         except Exception as e:
             logger.error(f"Error fetching server draft stats: {e}")
             await ctx.followup.send(f"An error occurred: {e}", ephemeral=True)
             return
 
-        view = DraftStatsView(guild_id, DEFAULT_PERIOD)
-        message = await ctx.followup.send(embed=embed, view=view, ephemeral=True)
-        view.message = message
+        await ctx.followup.send(embed=embed, ephemeral=True)
 
 
 def setup(bot: commands.Bot) -> None:

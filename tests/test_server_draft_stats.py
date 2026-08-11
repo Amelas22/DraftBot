@@ -6,9 +6,7 @@ import tempfile
 import time
 from collections import Counter
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock
 
-import discord
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -30,7 +28,7 @@ from cogs.server_draft_stats import (
     format_duration_field,
     format_hour_histogram,
     to_display_hour,
-    DraftStatsView,
+    ServerDraftStatsCog,
     DurationStats,
     DEFAULT_PERIOD,
     HISTOGRAM_BAR_WIDTH,
@@ -575,11 +573,12 @@ class TestFormatHourHistogram:
         assert len(text) <= 1024
 
 
-class TestPeriodsAndView:
-    """The view wires one hardcoded button per period; styling is derived from
-    each button's custom_id in one __init__ loop and disabling uses
-    disable_all_items, so a new period touches two places (the min-drafts map
-    and its button stub). These cover what would fail silently if missed."""
+class TestPeriodsAndCommand:
+    """Timeframe selection lives on the slash command as a choices option (an
+    earlier button-based view was dropped: its 180s timeout left dead-looking
+    buttons on the ephemeral message once py-cord clobbered the webhook message
+    handle). The option's choices are derived from PERIOD_MIN_DRAFTS, so these
+    pin the wiring that would fail silently if a period were added halfway."""
 
     def test_default_period_is_a_configured_period(self):
         """A typo here would KeyError on the command's primary path."""
@@ -599,30 +598,20 @@ class TestPeriodsAndView:
         mins = [PERIOD_MIN_DRAFTS[p] for p in ordered]
         assert mins == sorted(mins)
 
-    @pytest.mark.asyncio
-    async def test_one_button_per_period(self):
-        view = DraftStatsView(GUILD, DEFAULT_PERIOD)
+    def _timeframe_option(self):
+        options = ServerDraftStatsCog.server_draft_stats.options
+        return next(o for o in options if o.name == "timeframe")
 
-        labels = {getattr(child, "label", None) for child in view.children}
-        assert labels == {TIMEFRAME_DISPLAY[p] for p in PERIOD_MIN_DRAFTS}
+    def test_timeframe_option_offers_every_period(self):
+        """One choice per configured period, labelled with its display name."""
+        choices = self._timeframe_option().choices
+        assert {c.value for c in choices} == set(PERIOD_MIN_DRAFTS)
+        assert {c.name for c in choices} == {TIMEFRAME_DISPLAY[p] for p in PERIOD_MIN_DRAFTS}
 
-    @pytest.mark.asyncio
-    async def test_only_the_current_period_is_highlighted(self):
-        """Catches a button whose custom_id doesn't carry its period."""
-        view = DraftStatsView(GUILD, "90d")
-
-        highlighted = [c for c in view.children if getattr(c, "style", None) == discord.ButtonStyle.primary]
-        assert [c.label for c in highlighted] == [TIMEFRAME_DISPLAY["90d"]]
-
-    @pytest.mark.asyncio
-    async def test_timeout_disables_every_button(self):
-        """Catches a new period missing its disable line in on_timeout."""
-        view = DraftStatsView(GUILD, DEFAULT_PERIOD)
-        view.message = AsyncMock()
-
-        await view.on_timeout()
-
-        assert all(child.disabled for child in view.children)
+    def test_timeframe_option_defaults_to_the_default_period(self):
+        option = self._timeframe_option()
+        assert option.default == DEFAULT_PERIOD
+        assert option.required is False
 
 
 class TestFormatDurationField:
