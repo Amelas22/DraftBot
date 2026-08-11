@@ -174,3 +174,6 @@ drafts.db.backup.*
 analysis_data/
 *.db-shm
 *.db-wal
+
+# Local analysis scratch (scripts + caches live outside version control)
+analysis/
