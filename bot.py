@@ -93,6 +93,10 @@ async def main():
         await re_register_tournament_views(bot)
         from tournament_nudge import re_register_premade_nudges
         await re_register_premade_nudges(bot)
+        # Resume polling any MTGO serve jobs (deposits/withdraws) that were still
+        # pending at the last shutdown, so completed trades always get booked.
+        from services.mtgo_resolution_service import resume_pending_jobs
+        await resume_pending_jobs()
         logger.info("Re-registered team finder")
 
     @bot.event

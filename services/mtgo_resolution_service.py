@@ -19,11 +19,14 @@ background task within Discord's interaction window.
 """
 import asyncio
 import uuid
+from datetime import datetime
+
 from loguru import logger
 from sqlalchemy import select, func
 
 from database.db_session import db_session
 from database.retry import with_db_retry
+from models.mtgo_job import MtgoJob
 from models.wallet_tx import WalletTx
 from models.debt_ledger import DebtLedger
 from services.mtgo_tradebot_client import get_client
@@ -65,10 +68,51 @@ async def _poll_job(job_id: str, timeout_s: float):
 
 
 # ---------------------------------------------------------------------------
+# durable job records — every started serve job is persisted so a startup
+# resumer can finish booking trades that outlive their in-memory poller
+# ---------------------------------------------------------------------------
+async def _record_job(job_id: str, kind: str, guild_id: str, player_id: str, mtgo_user: str,
+                      amount: int, *, reserve_tx_id: int = None, context: str = None):
+    async def _do():
+        async with db_session() as session:
+            if await session.get(MtgoJob, job_id):
+                return
+            session.add(MtgoJob(
+                job_id=job_id, kind=kind, guild_id=guild_id, player_id=player_id,
+                mtgo_user=mtgo_user, amount=amount, reserve_tx_id=reserve_tx_id,
+                context=context, status="pending"))
+    await with_db_retry(_do)
+
+
+async def _resolve_job(job_id: str, status: str):
+    async def _do():
+        async with db_session() as session:
+            job = await session.get(MtgoJob, job_id)
+            if job is not None and job.status == "pending":
+                job.status = status
+                job.resolved_at = datetime.now()
+    await with_db_retry(_do)
+
+
+async def _recover_lost_job(job_type: str, mtgo_user: str, n: int):
+    """After an ambiguous POST failure, look for the job on the serve (the POST may have
+    landed even though we never saw the 202). One retry covers a brief flap."""
+    client = get_client()
+    job = await client.find_recent_job(job_type, mtgo_user, n)
+    if job is None:
+        await asyncio.sleep(2)
+        job = await client.find_recent_job(job_type, mtgo_user, n)
+    return job
+
+
+# ---------------------------------------------------------------------------
 # deposit (bot receives tix) — credit only on 'done'
 # ---------------------------------------------------------------------------
-async def start_deposit(mtgo_user: str, n: int, *, commit: bool = True, wait_minutes: int = 0) -> dict:
-    """Enqueue a deposit (bot receives ``n`` tix from ``mtgo_user``). No ledger effect yet."""
+async def start_deposit(guild_id: str, player_id: str, mtgo_user: str, n: int, *,
+                        commit: bool = True, wait_minutes: int = 0, context: str = None) -> dict:
+    """Enqueue a deposit (bot receives ``n`` tix from ``mtgo_user``). No wallet effect yet,
+    but the job is durably recorded so it can't be stranded by a restart. ``context`` tags
+    what to do beyond crediting when the trade lands (see resume_pending_jobs)."""
     if n <= 0:
         return {"ok": False, "error": "amount must be positive"}
     client = get_client()
@@ -76,7 +120,13 @@ async def start_deposit(mtgo_user: str, n: int, *, commit: bool = True, wait_min
         return {"ok": False, "error": "MTGO TradeBot integration is disabled"}
     resp = await client.deposit_tix(mtgo_user, n, commit=commit, wait_minutes=wait_minutes)
     if not resp or not resp.get("id"):
-        return {"ok": False, "error": "serve did not accept the deposit (unreachable or rejected)"}
+        # Ambiguous: the POST may have reached the serve and only the response was lost —
+        # in that case the trade can still fire, so adopt the job rather than orphan it.
+        resp = await _recover_lost_job("deposit", mtgo_user, n)
+        if not resp or not resp.get("id"):
+            return {"ok": False, "error": "serve did not accept the deposit (unreachable or rejected)"}
+        logger.warning(f"start_deposit: adopted job {resp['id']} after lost POST response")
+    await _record_job(resp["id"], "deposit", guild_id, player_id, mtgo_user, n, context=context)
     return {"ok": True, "job_id": resp["id"], "job": resp}
 
 
@@ -88,8 +138,10 @@ async def finish_deposit(job_id: str, guild_id: str, player_id: str, n: int, mtg
         tx = await wallet_service.credit_done(
             guild_id, player_id, n, kind="deposit",
             job_id=job_id, counterparty_id=mtgo_user, source="serve", notes=f"deposit {n} tix")
+        await _resolve_job(job_id, "done")
         return {"ok": True, "outcome": "done", "credited": n, "tx_id": tx.id, "job": job}
     if outcome == "failed":
+        await _resolve_job(job_id, "failed")
         return {"ok": False, "outcome": "failed", "error": job.get("detail") or "trade failed", "job": job}
     return {"ok": False, "outcome": "pending", "job_id": job_id, "job": job}
 
@@ -100,7 +152,9 @@ async def finish_deposit(job_id: str, guild_id: str, player_id: str, n: int, mtg
 async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, *,
                          commit: bool = True, wait_minutes: int = 0) -> dict:
     """Reserve ``n`` tix in the player's wallet (atomic funds check), then enqueue the give.
-    If the serve rejects it, the reservation is released."""
+    The reservation is released ONLY when we're sure the serve never created the job —
+    an ambiguous POST failure keeps the hold (the trade may still fire) and adopts the
+    job from the serve's list when it can."""
     if n <= 0:
         return {"ok": False, "error": "amount must be positive"}
     client = get_client()
@@ -115,24 +169,74 @@ async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, 
 
     resp = await client.withdraw_tix(mtgo_user, n, commit=commit, wait_minutes=wait_minutes)
     if not resp or not resp.get("id"):
-        await wallet_service.cancel_reserve(reserve.id)  # release the hold
-        return {"ok": False, "error": "serve did not accept the withdraw (unreachable or rejected)"}
+        resp = await _recover_lost_job("request", mtgo_user, n)
+        if not resp or not resp.get("id"):
+            # The serve's job list shows no such job (or the serve is entirely down, in
+            # which case no trade can have been opened either) — safe to release the hold.
+            await wallet_service.cancel_reserve(reserve.id)
+            return {"ok": False, "error": "serve did not accept the withdraw (unreachable or rejected)"}
+        logger.warning(f"start_withdraw: adopted job {resp['id']} after lost POST response")
     await wallet_service.attach_job(reserve.id, resp["id"])
+    await _record_job(resp["id"], "withdraw", guild_id, player_id, mtgo_user, n,
+                      reserve_tx_id=reserve.id)
     return {"ok": True, "job_id": resp["id"], "reserve_tx_id": reserve.id, "job": resp}
 
 
 async def finish_withdraw(reserve_tx_id: int, job_id: str,
                           timeout_s: float = _DEFAULT_POLL_TIMEOUT_S) -> dict:
     """Poll the withdraw job; confirm the reservation on 'done', release it on 'failed'.
-    On timeout the reservation stays in place (funds remain held) — resolvable later."""
+    On timeout the reservation stays in place (funds remain held) — the startup resumer
+    or a later poll resolves it."""
     outcome, job = await _poll_job(job_id, timeout_s)
     if outcome == "done":
         await wallet_service.settle_reserve(reserve_tx_id)
+        await _resolve_job(job_id, "done")
         return {"ok": True, "outcome": "done", "job": job}
     if outcome == "failed":
         await wallet_service.cancel_reserve(reserve_tx_id)
+        await _resolve_job(job_id, "failed")
         return {"ok": False, "outcome": "failed", "error": job.get("detail") or "trade failed", "job": job}
     return {"ok": False, "outcome": "pending", "job_id": job_id, "reserve_tx_id": reserve_tx_id, "job": job}
+
+
+# ---------------------------------------------------------------------------
+# startup resumer — finish booking any job whose poller died (timeout/restart)
+# ---------------------------------------------------------------------------
+async def resume_pending_jobs() -> int:
+    """Re-poll every 'pending' MtgoJob to a terminal state and book its ledger side.
+    Booking is idempotent (job_id unique index), so racing a still-live poller is safe.
+    Returns the number of jobs picked up; the polls run as background tasks."""
+    from helpers.money_gate import spawn_followup
+
+    async with db_session() as session:
+        pending = (await session.execute(
+            select(MtgoJob).where(MtgoJob.status == "pending"))).scalars().all()
+    if not pending:
+        return 0
+
+    async def _resume_deposit(job: MtgoJob):
+        res = await finish_deposit(job.job_id, job.guild_id, job.player_id,
+                                   job.amount, job.mtgo_user)
+        if res.get("ok") and job.context and job.context.startswith("tourney:"):
+            # deposit was for a tournament entry — re-secure the escrow now the funds landed
+            from services import tournament_escrow_service as escrow
+            from models.tournament import Tournament, TournamentParticipant
+            _, tid, pid = job.context.split(":")
+            async with db_session() as session:
+                t = await session.get(Tournament, int(tid))
+                p = await session.get(TournamentParticipant, int(pid))
+            if t and p and p.status != "paid" and (t.entry_fee or 0) > 0:
+                await escrow.secure_from_wallet(
+                    job.guild_id, job.player_id, p.id, t.id, t.entry_fee, p.team_name)
+
+    for job in pending:
+        if job.kind == "deposit":
+            spawn_followup(f"resume deposit {job.job_id}", _resume_deposit(job))
+        elif job.kind == "withdraw" and job.reserve_tx_id:
+            spawn_followup(f"resume withdraw {job.job_id}",
+                           finish_withdraw(job.reserve_tx_id, job.job_id))
+    logger.info(f"resume_pending_jobs: picked up {len(pending)} unresolved MTGO job(s)")
+    return len(pending)
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +315,8 @@ async def settle_debt_from_wallet(guild_id: str, payer_id: str, creditor_id: str
             logger.info(f"settle_debt_from_wallet: {payer_id} -> {creditor_id} {amount} tix (link {link_id})")
             return {"ok": True, "amount": amount, "payer": payer_id, "creditor": creditor_id, "id": link_id}
 
-    return await with_db_retry(_do)
+    async with wallet_service.MONEY_LOCK:
+        return await with_db_retry(_do)
 
 
 async def auto_draw(guild_id: str, player_id: str) -> list[dict]:

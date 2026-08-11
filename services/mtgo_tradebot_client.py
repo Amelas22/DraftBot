@@ -80,6 +80,42 @@ class MtgoTradeBotClient:
         """{available, custodian, tix, distinct, top[]} — used to reconcile physical == Σ wallets."""
         return await self._call("GET", "/vault")
 
+    async def find_recent_job(self, job_type: str, mtgo_user: str, qty: int,
+                              max_age_s: float = 120.0):
+        """Recover a job whose POST response was lost: scan GET /jobs for the newest
+        non-failed job of this type/user/qty created within ``max_age_s``. A POST that
+        actually reached the serve created a job even if we never saw the 202 — adopting
+        it here keeps the ledger attached to a trade that may still complete. Returns the
+        job dict or None."""
+        listing = await self._call("GET", "/jobs")
+        if not listing:
+            return None
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        for job in listing.get("jobs", []):  # serve lists newest first
+            if job.get("type") != job_type or job.get("state") == "failed":
+                continue
+            if (job.get("user") or "").lower() != mtgo_user.lower():
+                continue
+            items = job.get("receive") if job_type == "deposit" else job.get("give")
+            if not items or items[0].get("name") != EVENT_TICKET or items[0].get("qty") != qty:
+                continue
+            created = job.get("createdAt") or ""
+            try:
+                # serve timestamps: ISO-8601 UTC with 7-digit fractions, e.g.
+                # 2026-08-11T09:00:10.2460618Z — trim to microseconds for fromisoformat
+                trimmed = created.rstrip("Z")
+                if "." in trimmed:
+                    head, frac = trimmed.split(".", 1)
+                    trimmed = f"{head}.{frac[:6]}"
+                ts = datetime.fromisoformat(trimmed).replace(tzinfo=timezone.utc)
+                if now - ts > timedelta(seconds=max_age_s):
+                    continue
+            except ValueError:
+                pass  # unparseable timestamp: still adopt (better than stranding a live trade)
+            return job
+        return None
+
     async def get_job(self, job_id: str):
         """One job's projection incl. its terminal ``state`` (queued|running|done|failed) + ``detail``."""
         return await self._call("GET", f"/jobs/{job_id}")

@@ -22,16 +22,26 @@ Write rules (from the plan):
 Reconciliation: ``reconcile()`` asserts bot's physical vault tix == SUM of all 'done'
 amounts (the audit that the claim ledger never invents value).
 """
+import asyncio
 import uuid
 from dataclasses import dataclass
 from loguru import logger
 from sqlalchemy import select, func, case
+from sqlalchemy.exc import IntegrityError
 
 from database.db_session import db_session
 from database.retry import with_db_retry
 from models.wallet_tx import WalletTx
 
 VALID_KINDS = {"deposit", "withdraw", "pay", "receive", "adjust", "escrow"}
+
+# Serializes every DEBIT (check-available-then-spend) across the process. The bot is the
+# database's only writer, so this lock is sufficient to prevent two concurrent debits from
+# both reading the same balance and both spending it. Held only around short transactions;
+# credits don't need it (they can't overdraw, and double-booking is blocked by the
+# uq_wallet_tx_* unique indexes). NOT reentrant — acquire only at service entry points,
+# never from code already running under it.
+MONEY_LOCK = asyncio.Lock()
 
 
 @dataclass
@@ -150,7 +160,19 @@ async def credit_done(
             logger.info(f"credit_done: {player_id} +{amount} ({kind}) job={job_id} -> tx {tx.id}")
             return tx
 
-    return await with_db_retry(_do)
+    try:
+        return await with_db_retry(_do)
+    except IntegrityError:
+        # uq_wallet_tx_job_kind: a concurrent handler booked this job between our
+        # check and insert — fetch and return its row (idempotent).
+        if not job_id:
+            raise
+        async with db_session() as session:
+            row = (await session.execute(
+                select(WalletTx).where(WalletTx.job_id == job_id, WalletTx.kind == kind)
+            )).scalars().first()
+            logger.info(f"credit_done: job {job_id} booked concurrently, returning existing")
+            return row
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +213,8 @@ async def reserve_debit(
             logger.info(f"reserve_debit: {player_id} reserved {amount} ({kind}) -> tx {tx.id}")
             return tx
 
-    return await with_db_retry(_do)
+    async with MONEY_LOCK:
+        return await with_db_retry(_do)
 
 
 async def attach_job(tx_id: int, job_id: str) -> WalletTx:
@@ -297,7 +320,19 @@ async def pay(
             logger.info(f"pay: {from_player} -> {to_player} {amount} tix (source {source})")
             return debit, credit
 
-    return await with_db_retry(_do)
+    try:
+        async with MONEY_LOCK:
+            return await with_db_retry(_do)
+    except IntegrityError:
+        # uq_wallet_tx_transfer_legs: this source was settled concurrently — return its legs.
+        async with db_session() as session:
+            rows = (await session.execute(
+                select(WalletTx).where(
+                    WalletTx.source == source, WalletTx.kind.in_(["pay", "receive"])
+                ).order_by(WalletTx.id)
+            )).scalars().all()
+            logger.info(f"pay: source {source} settled concurrently, returning existing")
+            return rows[0], rows[1]
 
 
 async def adjust(guild_id: str, player_id: str, amount: int, notes: str, created_by: str) -> WalletTx:

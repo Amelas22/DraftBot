@@ -92,7 +92,7 @@ class WalletCommands(commands.Cog):
         guild_id = str(ctx.guild.id)
         player_id = str(ctx.author.id)
         started = await resolution.start_deposit(
-            username, amount, commit=True, wait_minutes=DEFAULT_WAIT_MINUTES)
+            guild_id, player_id, username, amount, commit=True, wait_minutes=DEFAULT_WAIT_MINUTES)
         if not started.get("ok"):
             return await ctx.followup.send(
                 f"Couldn't start the deposit: {started.get('error')}", ephemeral=True)

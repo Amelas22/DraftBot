@@ -32,6 +32,7 @@ from services.tournament_service import (
 from services.mtgo_tradebot_client import EVENT_TICKET
 from services import mtgo_resolution_service as resolution
 from services import tournament_escrow_service as escrow
+from services import wallet_service
 
 
 def tournament_enabled(guild_id):
@@ -435,9 +436,12 @@ class TournamentCog(commands.Cog):
             return
 
         # Wallet short — deposit the difference, then hold the full fee (in the background).
+        # The context tag lets the startup resumer re-secure this escrow if the bot
+        # restarts while the trade is still open.
         deficit = res["deficit"]
         started = await resolution.start_deposit(
-            captain_user, deficit, commit=True, wait_minutes=ESCROW_WAIT_MINUTES)
+            guild_id, captain_id, captain_user, deficit, commit=True,
+            wait_minutes=ESCROW_WAIT_MINUTES, context=f"tourney:{t_id}:{p_id}")
         if not started.get("ok"):
             await ctx.followup.send(
                 f"⚠️ **{p_name}** is registered (pending) but I couldn't start your deposit: "
@@ -497,14 +501,13 @@ class TournamentCog(commands.Cog):
                     await ctx.followup.send("There is no tournament accepting registrations right now.", ephemeral=True)
                     return
                 participant, created = await register_team(session, tournament.id, team, captain.id)
-                comped = participant.status != "paid"
+                # Admin add is a comp: paid with no escrow, so it's seed-eligible even in a
+                # paid tournament. Same transaction as the registration, so a crash can't
+                # leave the team registered-but-pending. The captain isn't billed.
+                comped = escrow.comp(participant)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
             return
-        if comped:
-            # Admin add is a comp: paid with no escrow, so it's seed-eligible even in a
-            # paid tournament. The captain isn't billed (and the pot stays smaller).
-            await escrow.comp(participant.id)
         verb = "registered" if created else "already registered"
         note = " (entry fee comped)" if comped else ""
         await ctx.followup.send(
@@ -573,21 +576,29 @@ class TournamentCog(commands.Cog):
             return
         await ctx.defer()
         try:
-            async with db_session() as session:
-                tournament = await get_active_tournament(session, ctx.guild.id)
-                if tournament is None:
-                    await ctx.followup.send("There is no tournament to start.", ephemeral=True)
-                    return
-                tournament_id = tournament.id
-                tournament_name = tournament.name
-                fee = tournament.entry_fee or 0
-                await start_tournament(session, tournament.id, random.Random())
-                # Reallocate held escrow into the prize wallet in the SAME transaction, so
-                # seeding and the pot move commit together (or neither does).
-                pot = 0
-                if fee > 0:
-                    pot = (await escrow.reallocate_to_prize(
-                        session, str(ctx.guild.id), tournament_id))["moved"]
+            # MONEY_LOCK serializes concurrent starts: without it, two racing /tournament
+            # start calls could both reallocate escrow into the prize wallet (the unique
+            # transfer-leg index would catch the money, but the lock stops the race cold).
+            async with wallet_service.MONEY_LOCK:
+                async with db_session() as session:
+                    tournament = await get_active_tournament(session, ctx.guild.id)
+                    if tournament is None:
+                        await ctx.followup.send("There is no tournament to start.", ephemeral=True)
+                        return
+                    if tournament.status != "registration":
+                        await ctx.followup.send(
+                            f"**{tournament.name}** has already started.", ephemeral=True)
+                        return
+                    tournament_id = tournament.id
+                    tournament_name = tournament.name
+                    fee = tournament.entry_fee or 0
+                    await start_tournament(session, tournament.id, random.Random())
+                    # Reallocate held escrow into the prize wallet in the SAME transaction,
+                    # so seeding and the pot move commit together (or neither does).
+                    pot = 0
+                    if fee > 0:
+                        pot = (await escrow.reallocate_to_prize(
+                            session, str(ctx.guild.id), tournament_id))["moved"]
             logger.info(f"Tournament {tournament_id} started in guild {ctx.guild.id} by {ctx.author.id}")
             pot_line = f" 🏦 Prize pool: **{pot} tix**." if fee > 0 else ""
             await ctx.followup.send(f"🏆 **{tournament_name}** has started!{pot_line}")

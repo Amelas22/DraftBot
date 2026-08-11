@@ -21,6 +21,7 @@ from datetime import datetime
 
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from database.db_session import db_session
 from database.retry import with_db_retry
@@ -89,21 +90,16 @@ def _mark_paid(p: TournamentParticipant, reserve_tx_id: int | None):
     p.paid_at = datetime.now()
 
 
-async def comp(participant_id: int) -> bool:
+def comp(participant: TournamentParticipant) -> bool:
     """Admin comp: mark a participant paid with NO escrow (seed-eligible, captain unbilled).
-    Stamps paid_at so a comped row is distinguishable from a pre-escrow legacy one; the
-    NULL escrow_tx_id records that no tix back this entry (it dilutes the pot on purpose)."""
-    async with db_session() as session:
-        p = await session.get(TournamentParticipant, participant_id)
-        if p is None:
-            logger.warning(f"escrow comp: participant {participant_id} not found")
-            return False
-        if p.status == "paid":
-            return True
-        _mark_paid(p, None)
-        await session.flush()
-        logger.info(f"escrow: participant {participant_id} comped (no escrow)")
-        return True
+    Runs inside the CALLER's session so registration + comp commit atomically. Stamps
+    paid_at so a comped row is distinguishable from a pre-escrow legacy one; the NULL
+    escrow_tx_id records that no tix back this entry (it dilutes the pot on purpose)."""
+    if participant.status == "paid":
+        return False
+    _mark_paid(participant, None)
+    logger.info(f"escrow: participant {participant.id} comped (no escrow)")
+    return True
 
 
 async def secure_from_wallet(guild_id: str, captain_id: str, participant_id: int,
@@ -154,7 +150,14 @@ async def secure_from_wallet(guild_id: str, captain_id: str, participant_id: int
             logger.info(f"escrow: participant {participant_id} paid (reserve tx {reserve.id})")
             return {"ok": True, "done": True, "reserved": fee}
 
-    return await with_db_retry(_do)
+    try:
+        async with wallet_service.MONEY_LOCK:
+            return await with_db_retry(_do)
+    except IntegrityError:
+        # uq_wallet_tx_live_escrow: a concurrent register reserved this entry first —
+        # rerun (unlocked read path finds and reuses the existing hold).
+        logger.info(f"secure_from_wallet: concurrent reserve for {source}, reusing")
+        return await _do()
 
 
 async def drop_with_refund(tournament_id: int, team_name: str) -> dict:
@@ -267,27 +270,37 @@ async def execute_payout(guild_id: str, tournament_id: int, allocations: list) -
     Idempotent by source ``payout:<tid>:<place>`` — a re-run books nothing. Refuses to pay
     more than the pool holds. Returns {ok, already_paid?, paid, total, pool} or {ok:False,error}."""
     prize_id = prize_wallet_id(tournament_id)
-    async with db_session() as session:
-        if await _already_paid(session, tournament_id):
-            return {"ok": True, "already_paid": True}
 
-        pool = await _pool(session, guild_id, tournament_id)
-        total = sum(amount for _, _, _, amount in allocations)
-        if total > pool:
-            return {"ok": False, "error": f"allocations ({total}) exceed the prize pool ({pool})"}
+    async def _do():
+        async with db_session() as session:
+            if await _already_paid(session, tournament_id):
+                return {"ok": True, "already_paid": True}
 
-        for place, captain_id, team_name, amount in allocations:
-            if amount <= 0:
-                continue
-            source = f"payout:{tournament_id}:{place}"
-            note = f"tournament prize (place {place}): {team_name}"
-            session.add(WalletTx(
-                guild_id=guild_id, player_id=prize_id, kind="pay", amount=-amount, status="done",
-                counterparty_id=captain_id, source=source, notes=note))
-            session.add(WalletTx(
-                guild_id=guild_id, player_id=captain_id, kind="receive", amount=amount, status="done",
-                counterparty_id=prize_id, source=source, notes=note))
-        await session.flush()
-        logger.info(f"payout: tournament {tournament_id} distributed {total} tix to "
-                    f"{len(allocations)} team(s)")
-        return {"ok": True, "paid": allocations, "total": total, "pool": pool}
+            pool = await _pool(session, guild_id, tournament_id)
+            total = sum(amount for _, _, _, amount in allocations)
+            if total > pool:
+                return {"ok": False, "error": f"allocations ({total}) exceed the prize pool ({pool})"}
+
+            for place, captain_id, team_name, amount in allocations:
+                if amount <= 0:
+                    continue
+                source = f"payout:{tournament_id}:{place}"
+                note = f"tournament prize (place {place}): {team_name}"
+                session.add(WalletTx(
+                    guild_id=guild_id, player_id=prize_id, kind="pay", amount=-amount, status="done",
+                    counterparty_id=captain_id, source=source, notes=note))
+                session.add(WalletTx(
+                    guild_id=guild_id, player_id=captain_id, kind="receive", amount=amount, status="done",
+                    counterparty_id=prize_id, source=source, notes=note))
+            await session.flush()
+            logger.info(f"payout: tournament {tournament_id} distributed {total} tix to "
+                        f"{len(allocations)} team(s)")
+            return {"ok": True, "paid": allocations, "total": total, "pool": pool}
+
+    try:
+        async with wallet_service.MONEY_LOCK:
+            return await with_db_retry(_do)
+    except IntegrityError:
+        # uq_wallet_tx_transfer_legs: a concurrent payout booked first — idempotent no-op.
+        logger.info(f"execute_payout: tournament {tournament_id} paid out concurrently")
+        return {"ok": True, "already_paid": True}
