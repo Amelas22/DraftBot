@@ -12,13 +12,11 @@ method returns ``None`` — unless *both* are set, so nothing breaks on servers 
 
 Mirrors the aiohttp idiom in helpers/magicprotools_helper.py, plus a Bearer header + a timeout.
 """
-import logging
 import os
-from typing import List, Optional
+from typing import Optional
 
 import aiohttp
-
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 # On MTGO, event tickets are the currency. Depositing/withdrawing tix is just trading this "card".
 EVENT_TICKET = "Event Ticket"
@@ -32,10 +30,23 @@ class MtgoTradeBotClient:
         self.url = (url or os.getenv("MTGO_TRADEBOT_URL") or "").rstrip("/")
         self.token = token or os.getenv("MTGO_TRADEBOT_TOKEN") or ""
         self.timeout = aiohttp.ClientTimeout(total=timeout)
+        self._session: Optional[aiohttp.ClientSession] = None
 
     @property
     def enabled(self) -> bool:
         return bool(self.url and self.token)
+
+    def _get_session(self) -> aiohttp.ClientSession:
+        """One shared session for connection reuse — job polling hits the serve every few
+        seconds for minutes at a time, so per-call sessions would pay a fresh TCP handshake
+        each poll. Lives for the process; aiohttp reclaims idle connections itself."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(timeout=self.timeout)
+        return self._session
+
+    async def close(self):
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
 
     async def _call(self, method: str, path: str, *, json=None, params=None):
         if not self.enabled:
@@ -44,20 +55,20 @@ class MtgoTradeBotClient:
         headers = {"Authorization": f"Bearer {self.token}"}
         full = f"{self.url}{path}"
         try:
-            async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                async with session.request(method, full, headers=headers, json=json, params=params) as resp:
-                    text = await resp.text()
-                    if resp.status < 200 or resp.status >= 300:
-                        logger.warning("TradeBot %s %s -> HTTP %s: %s", method, path, resp.status, text[:200])
-                        return None
-                    if not text:
-                        return {}
-                    try:
-                        return await resp.json()
-                    except Exception:
-                        return {"raw": text}
+            session = self._get_session()
+            async with session.request(method, full, headers=headers, json=json, params=params) as resp:
+                text = await resp.text()
+                if resp.status < 200 or resp.status >= 300:
+                    logger.warning(f"TradeBot {method} {path} -> HTTP {resp.status}: {text[:200]}")
+                    return None
+                if not text:
+                    return {}
+                try:
+                    return await resp.json()
+                except Exception:
+                    return {"raw": text}
         except Exception as e:  # network / timeout / dns
-            logger.error("TradeBot %s %s failed: %s", method, path, e)
+            logger.error(f"TradeBot {method} {path} failed: {e}")
             return None
 
     # ---- reads ----
@@ -68,10 +79,6 @@ class MtgoTradeBotClient:
     async def vault(self):
         """{available, custodian, tix, distinct, top[]} — used to reconcile physical == Σ wallets."""
         return await self._call("GET", "/vault")
-
-    async def holdings(self):
-        """{holdings[]} — the custody accounting (card, owner, borrower, status)."""
-        return await self._call("GET", "/holdings")
 
     async def get_job(self, job_id: str):
         """One job's projection incl. its terminal ``state`` (queued|running|done|failed) + ``detail``."""
@@ -87,13 +94,6 @@ class MtgoTradeBotClient:
         """Bot GIVES qty of a card TO the user (a withdrawal, or a lend)."""
         return await self._call("POST", "/request", json={
             "user": user, "cards": [card], "qty": qty, "commit": commit, "waitMinutes": wait_minutes})
-
-    async def trade(self, partner: str, give: Optional[List[dict]] = None, receive: Optional[List[dict]] = None,
-                    commit: bool = True, wait_minutes: int = 0):
-        """General trade. ``give``/``receive`` are lists of {name, qty, catId?} (catId pins the printing)."""
-        return await self._call("POST", "/trade", json={
-            "partner": partner, "give": give or [], "receive": receive or [],
-            "commit": commit, "waitMinutes": wait_minutes})
 
     # ---- tix convenience (currency == Event Ticket) ----
     async def deposit_tix(self, user: str, n: int, commit: bool = True, wait_minutes: int = 0):

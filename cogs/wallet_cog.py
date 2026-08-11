@@ -17,23 +17,20 @@ with in-client instructions, then a background task polls the job to a terminal 
 posts the outcome — the ledger is only ever written on a completed trade. The serve's own
 --commit arm state remains the master safety switch for whether a trade actually fires.
 """
-import asyncio
-
 import discord
 from discord.ext import commands
 from discord.commands import SlashCommandGroup, option
 from loguru import logger
 
-from config import is_money_server
 from models.mtgo_account import MtgoAccount
 from services import wallet_service
 from services import mtgo_resolution_service as resolution
-from services.mtgo_tradebot_client import get_client, EVENT_TICKET
+from services.mtgo_tradebot_client import EVENT_TICKET
+from helpers.money_gate import (
+    DEFAULT_WAIT_MINUTES, custodian_name, gate_read, gate_serve, linked_username,
+    spawn_followup,
+)
 from helpers.permissions import has_bot_manager_role
-
-# Serve-side readiness wait (minutes) for a deposit/withdraw trade before the job fails and
-# any reservation is released. Bounds how long a player has to accept the in-client trade.
-DEFAULT_WAIT_MINUTES = 10
 
 
 class WalletCommands(commands.Cog):
@@ -43,42 +40,12 @@ class WalletCommands(commands.Cog):
 
     wallet = SlashCommandGroup("wallet", "Manage your MTGO tix wallet")
 
-    # ----- gating helpers -----
-    def _serve_enabled(self) -> bool:
-        return get_client().enabled
-
-    def _gate_read(self, ctx) -> str | None:
-        """Wallet must be a money server. Returns an error string, or None if allowed."""
-        if not ctx.guild:
-            return "Wallet commands can only be used in a server."
-        if not is_money_server(str(ctx.guild.id)):
-            return "The tix wallet is only available on money-enabled servers."
-        return None
-
-    def _gate_serve(self, ctx) -> str | None:
-        """Read gate + the TradeBot integration must be configured."""
-        err = self._gate_read(ctx)
-        if err:
-            return err
-        if not self._serve_enabled():
-            return ("The MTGO TradeBot integration isn't configured on this bot "
-                    "(set MTGO_TRADEBOT_URL and MTGO_TRADEBOT_TOKEN).")
-        return None
-
-    async def _linked_username(self, discord_id) -> str | None:
-        acct = await MtgoAccount.get_for_discord(discord_id)
-        return acct.mtgo_username if acct else None
-
-    async def _custodian(self) -> str:
-        health = await get_client().health()
-        return (health or {}).get("custodian") or "the custodian bot"
-
     # ----- /wallet [player] -----
     @wallet.command(name="show", description="Show a tix wallet balance and recent activity")
     @option("player", discord.Member, description="Whose wallet to show (defaults to you)", required=False)
     async def wallet_show(self, ctx: discord.ApplicationContext, player: discord.Member = None):
         await ctx.defer(ephemeral=True)
-        err = self._gate_read(ctx)
+        err = gate_read(ctx)
         if err:
             return await ctx.followup.send(err, ephemeral=True)
 
@@ -114,10 +81,10 @@ class WalletCommands(commands.Cog):
     @option("amount", int, description="How many tix to deposit", min_value=1)
     async def wallet_deposit(self, ctx: discord.ApplicationContext, amount: int):
         await ctx.defer(ephemeral=True)
-        err = self._gate_serve(ctx)
+        err = gate_serve(ctx)
         if err:
             return await ctx.followup.send(err, ephemeral=True)
-        username = await self._linked_username(ctx.author.id)
+        username = await linked_username(ctx.author.id)
         if not username:
             return await ctx.followup.send(
                 "Link your MTGO account first with `/link_mtgo <username>`.", ephemeral=True)
@@ -131,42 +98,42 @@ class WalletCommands(commands.Cog):
                 f"Couldn't start the deposit: {started.get('error')}", ephemeral=True)
 
         job_id = started["job_id"]
-        custodian = await self._custodian()
+        custodian = await custodian_name()
         await ctx.followup.send(
             f"**Deposit started.** In MTGO, trade **{amount} {EVENT_TICKET}(s)** to "
             f"`{custodian}` and accept when the trade window pops. I'll confirm here once it "
             f"lands.\n_Job `{job_id}` — you have ~{DEFAULT_WAIT_MINUTES} min._", ephemeral=True)
 
-        async def _finish():
-            try:
-                res = await resolution.finish_deposit(job_id, guild_id, player_id, amount, username)
-                if res.get("ok"):
-                    bal = await wallet_service.get_balance(guild_id, player_id)
-                    drawn = await resolution.auto_draw(guild_id, player_id)
-                    msg = f"✅ Deposit confirmed: **+{amount} tix**. Balance: **{bal} tix**."
-                    if drawn:
-                        total = sum(d.get("amount", 0) for d in drawn)
-                        msg += f" Auto-applied **{total} tix** to {len(drawn)} debt(s)."
-                elif res.get("outcome") == "pending":
-                    msg = (f"⏳ Deposit `{job_id}` is still pending — it'll credit automatically "
-                           f"once the trade completes.")
-                else:
-                    msg = f"❌ Deposit `{job_id}` failed: {res.get('error')}"
-                await ctx.followup.send(msg, ephemeral=True)
-            except Exception as e:
-                logger.warning(f"wallet deposit follow-up failed: {e}")
+        # capture only what the poller needs (not ctx) — this task can live for ~14 min
+        followup = ctx.followup
 
-        asyncio.create_task(_finish())
+        async def _finish():
+            res = await resolution.finish_deposit(job_id, guild_id, player_id, amount, username)
+            if res.get("ok"):
+                bal = await wallet_service.get_balance(guild_id, player_id)
+                drawn = await resolution.auto_draw(guild_id, player_id)
+                msg = f"✅ Deposit confirmed: **+{amount} tix**. Balance: **{bal} tix**."
+                if drawn:
+                    total = sum(d.get("amount", 0) for d in drawn)
+                    msg += f" Auto-applied **{total} tix** to {len(drawn)} debt(s)."
+            elif res.get("outcome") == "pending":
+                msg = (f"⏳ Deposit `{job_id}` is still pending — it'll credit automatically "
+                       f"once the trade completes.")
+            else:
+                msg = f"❌ Deposit `{job_id}` failed: {res.get('error')}"
+            await followup.send(msg, ephemeral=True)
+
+        spawn_followup("wallet deposit", _finish())
 
     # ----- /wallet withdraw <n> -----
     @wallet.command(name="withdraw", description="Withdraw tix from your wallet (the custodian trades them to you)")
     @option("amount", int, description="How many tix to withdraw", min_value=1)
     async def wallet_withdraw(self, ctx: discord.ApplicationContext, amount: int):
         await ctx.defer(ephemeral=True)
-        err = self._gate_serve(ctx)
+        err = gate_serve(ctx)
         if err:
             return await ctx.followup.send(err, ephemeral=True)
-        username = await self._linked_username(ctx.author.id)
+        username = await linked_username(ctx.author.id)
         if not username:
             return await ctx.followup.send(
                 "Link your MTGO account first with `/link_mtgo <username>`.", ephemeral=True)
@@ -182,29 +149,28 @@ class WalletCommands(commands.Cog):
 
         job_id = started["job_id"]
         reserve_tx_id = started["reserve_tx_id"]
-        custodian = await self._custodian()
+        custodian = await custodian_name()
         await ctx.followup.send(
             f"**Withdraw started** — {amount} tix reserved. In MTGO, accept the trade from "
             f"`{custodian}` when it pops. I'll confirm here once it completes.\n"
             f"_Job `{job_id}` — you have ~{DEFAULT_WAIT_MINUTES} min._", ephemeral=True)
 
-        async def _finish():
-            try:
-                res = await resolution.finish_withdraw(reserve_tx_id, job_id)
-                if res.get("ok"):
-                    bal = await wallet_service.get_balance(guild_id, player_id)
-                    msg = f"✅ Withdraw confirmed: **−{amount} tix**. Balance: **{bal} tix**."
-                elif res.get("outcome") == "pending":
-                    msg = (f"⏳ Withdraw `{job_id}` is still running; your {amount} tix stay "
-                           f"reserved until it resolves.")
-                else:
-                    msg = (f"❌ Withdraw `{job_id}` failed: {res.get('error')}. "
-                           f"Your {amount} tix have been released.")
-                await ctx.followup.send(msg, ephemeral=True)
-            except Exception as e:
-                logger.warning(f"wallet withdraw follow-up failed: {e}")
+        followup = ctx.followup
 
-        asyncio.create_task(_finish())
+        async def _finish():
+            res = await resolution.finish_withdraw(reserve_tx_id, job_id)
+            if res.get("ok"):
+                bal = await wallet_service.get_balance(guild_id, player_id)
+                msg = f"✅ Withdraw confirmed: **−{amount} tix**. Balance: **{bal} tix**."
+            elif res.get("outcome") == "pending":
+                msg = (f"⏳ Withdraw `{job_id}` is still running; your {amount} tix stay "
+                       f"reserved until it resolves.")
+            else:
+                msg = (f"❌ Withdraw `{job_id}` failed: {res.get('error')}. "
+                       f"Your {amount} tix have been released.")
+            await followup.send(msg, ephemeral=True)
+
+        spawn_followup("wallet withdraw", _finish())
 
     # ----- /wallet pay @player <n> -----
     @wallet.command(name="pay", description="Send tix from your wallet to another player (no MTGO trade)")
@@ -212,16 +178,17 @@ class WalletCommands(commands.Cog):
     @option("amount", int, description="How many tix to send", min_value=1)
     async def wallet_pay(self, ctx: discord.ApplicationContext, player: discord.Member, amount: int):
         await ctx.defer(ephemeral=True)
-        err = self._gate_read(ctx)
+        err = gate_read(ctx)
         if err:
             return await ctx.followup.send(err, ephemeral=True)
         if player.id == ctx.author.id:
             return await ctx.followup.send("You can't pay yourself.", ephemeral=True)
-        # both parties linked so the recipient can actually use the tix later
-        if not await self._linked_username(ctx.author.id):
+        # both parties linked so the recipient can actually use the tix later (one batch query)
+        linked = await MtgoAccount.usernames_for_discord_ids([ctx.author.id, player.id])
+        if str(ctx.author.id) not in linked:
             return await ctx.followup.send(
                 "Link your MTGO account first with `/link_mtgo`.", ephemeral=True)
-        if not await self._linked_username(player.id):
+        if str(player.id) not in linked:
             return await ctx.followup.send(
                 f"{player.display_name} hasn't linked an MTGO account yet, so they can't "
                 f"receive tix. Ask them to run `/link_mtgo` first.", ephemeral=True)
@@ -243,12 +210,12 @@ class WalletCommands(commands.Cog):
     @has_bot_manager_role()
     async def wallet_reconcile(self, ctx: discord.ApplicationContext):
         await ctx.defer(ephemeral=True)
-        err = self._gate_serve(ctx)
+        err = gate_serve(ctx)
         if err:
             return await ctx.followup.send(err, ephemeral=True)
 
         res = await resolution.reconcile()  # global: one vault across guilds
-        if "error" in res and not res.get("ok"):
+        if res.get("error"):
             return await ctx.followup.send(f"Couldn't reconcile: {res['error']}", ephemeral=True)
 
         color = discord.Color.green() if res["ok"] else discord.Color.red()

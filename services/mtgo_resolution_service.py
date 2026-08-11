@@ -21,16 +21,20 @@ import asyncio
 import uuid
 from loguru import logger
 from sqlalchemy import select, func
-from sqlalchemy.exc import OperationalError
 
 from database.db_session import db_session
+from database.retry import with_db_retry
 from models.wallet_tx import WalletTx
 from models.debt_ledger import DebtLedger
 from services.mtgo_tradebot_client import get_client
 from services import wallet_service
 from services import debt_service
 
+# Poll fast at first (a serve rejection surfaces in seconds), then back off — the human
+# step (accepting an MTGO trade) takes minutes, so terminal-detection latency is cheap.
 _POLL_INTERVAL_S = 3.0
+_POLL_INTERVAL_MAX_S = 15.0
+_POLL_BACKOFF = 1.5
 # Keep the inline poll inside Discord's 15-minute interaction/followup window.
 _DEFAULT_POLL_TIMEOUT_S = 14 * 60
 
@@ -43,6 +47,7 @@ async def _poll_job(job_id: str, timeout_s: float):
     'done' | 'failed' | 'pending' ('pending' = still running when the timeout hit)."""
     client = get_client()
     waited = 0.0
+    interval = _POLL_INTERVAL_S
     last = None
     while waited < timeout_s:
         job = await client.get_job(job_id)
@@ -53,8 +58,9 @@ async def _poll_job(job_id: str, timeout_s: float):
                 return "done", job
             if state == "failed":
                 return "failed", job
-        await asyncio.sleep(_POLL_INTERVAL_S)
-        waited += _POLL_INTERVAL_S
+        await asyncio.sleep(interval)
+        waited += interval
+        interval = min(interval * _POLL_BACKOFF, _POLL_INTERVAL_MAX_S)
     return "pending", (last or {"id": job_id, "state": "pending"})
 
 
@@ -144,25 +150,6 @@ async def pay(guild_id: str, from_player: str, to_player: str, amount: int, *, n
 # ---------------------------------------------------------------------------
 # debt settlement from wallet — wallet move + debt clear in ONE transaction
 # ---------------------------------------------------------------------------
-async def _with_retry(thunk):
-    delay = 1.0
-    for attempt in range(3):
-        try:
-            return await thunk()
-        except OperationalError as e:
-            if "database is locked" in str(e) and attempt < 2:
-                logger.warning(f"resolution DB locked (attempt {attempt + 1}/3), retrying in {delay}s...")
-                await asyncio.sleep(delay)
-                delay *= 2
-            else:
-                raise
-
-
-async def _sum(session, column, *conditions) -> int:
-    result = await session.execute(select(func.coalesce(func.sum(column), 0)).where(*conditions))
-    return int(result.scalar() or 0)
-
-
 async def settle_debt_from_wallet(guild_id: str, payer_id: str, creditor_id: str, amount: int,
                                   *, link_id: str = None) -> dict:
     """Settle a tix debt from the payer's wallet: move the claim (payer −N, creditor +N)
@@ -187,22 +174,20 @@ async def settle_debt_from_wallet(guild_id: str, payer_id: str, creditor_id: str
             if seen.scalar():
                 return {"ok": True, "amount": amount, "id": link_id, "idempotent": True}
 
-            # payer must have the funds (settled minus reserved)
-            done = await _sum(session, WalletTx.amount,
-                              WalletTx.guild_id == guild_id, WalletTx.player_id == payer_id,
-                              WalletTx.status == "done")
-            pending = await _sum(session, WalletTx.amount,
-                                 WalletTx.guild_id == guild_id, WalletTx.player_id == payer_id,
-                                 WalletTx.status == "pending")
-            available = done + pending  # pending debits are negative
+            # payer must have the funds (settled minus reserved) — the same availability
+            # formula every wallet op uses
+            balance, reserved = await wallet_service._balances(session, guild_id, payer_id)
+            available = balance - reserved
             if amount > available:
                 return {"ok": False, "error": f"insufficient wallet funds (available {available})"}
 
             # payer must actually owe the creditor at least this much
-            debt_balance = await _sum(session, DebtLedger.amount,
-                                      DebtLedger.guild_id == guild_id,
-                                      DebtLedger.player_id == payer_id,
-                                      DebtLedger.counterparty_id == creditor_id)
+            debt_balance = int((await session.execute(
+                select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
+                    DebtLedger.guild_id == guild_id,
+                    DebtLedger.player_id == payer_id,
+                    DebtLedger.counterparty_id == creditor_id,
+                ))).scalar() or 0)
             if debt_balance >= 0:
                 return {"ok": False, "error": "no outstanding debt to this creditor"}
             owed = -debt_balance
@@ -226,7 +211,7 @@ async def settle_debt_from_wallet(guild_id: str, payer_id: str, creditor_id: str
             logger.info(f"settle_debt_from_wallet: {payer_id} -> {creditor_id} {amount} tix (link {link_id})")
             return {"ok": True, "amount": amount, "payer": payer_id, "creditor": creditor_id, "id": link_id}
 
-    return await _with_retry(_do)
+    return await with_db_retry(_do)
 
 
 async def auto_draw(guild_id: str, player_id: str) -> list[dict]:
@@ -244,12 +229,15 @@ async def auto_draw(guild_id: str, player_id: str) -> list[dict]:
     if not owed:
         return []
 
-    # order creditors by the age of the oldest still-active debt entry (oldest first)
-    ordered = []
-    for cp in owed:
-        entries = await debt_service.get_active_debt_entries(guild_id, player_id, cp)
-        oldest_ts = entries[-1].created_at if entries else None  # entries are newest-first
-        ordered.append((oldest_ts, cp))
+    # order creditors by the age of the oldest still-active debt entry (oldest first);
+    # the per-creditor lookups are independent reads, so run them concurrently
+    creditors = list(owed)
+    entry_lists = await asyncio.gather(*(
+        debt_service.get_active_debt_entries(guild_id, player_id, cp) for cp in creditors))
+    ordered = [
+        (entries[-1].created_at if entries else None, cp)  # entries are newest-first
+        for cp, entries in zip(creditors, entry_lists)
+    ]
     ordered.sort(key=lambda t: (t[0] is None, t[0]))
 
     settlements = []
@@ -273,10 +261,10 @@ async def auto_draw(guild_id: str, player_id: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # reconciliation passthrough (physical vault tix == SUM settled wallets)
 # ---------------------------------------------------------------------------
-async def reconcile(guild_id: str = None) -> dict:
+async def reconcile() -> dict:
     """Pull the vault's live tix from the serve and compare to the wallet claim total."""
     client = get_client()
     bot_tix = await client.bot_tix()
     if bot_tix is None:
         return {"ok": False, "error": "could not read vault tix from serve"}
-    return await wallet_service.reconcile(bot_tix, guild_id)
+    return await wallet_service.reconcile(bot_tix)

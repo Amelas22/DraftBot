@@ -20,12 +20,14 @@ it's counted by the reconciliation audit and can later ``pay`` out to winners li
 from datetime import datetime
 
 from loguru import logger
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from database.db_session import db_session
-from models.tournament import Tournament, TournamentParticipant
+from database.retry import with_db_retry
+from models.tournament import TournamentParticipant
 from models.wallet_tx import WalletTx
 from services import wallet_service
+from services.tournament_service import remove_team
 
 
 def escrow_source(tournament_id, participant_id) -> str:
@@ -80,55 +82,79 @@ def compute_allocations(pool: int, structure: str, ranked: list) -> list:
     return out
 
 
-async def mark_paid(participant_id: int, reserve_tx_id: int) -> bool:
-    """Flip a participant to 'paid', recording the reserve that backs its escrow."""
+def _mark_paid(p: TournamentParticipant, reserve_tx_id: int | None):
+    """Stamp a participant paid inside the caller's session."""
+    p.status = "paid"
+    p.escrow_tx_id = reserve_tx_id
+    p.paid_at = datetime.now()
+
+
+async def comp(participant_id: int) -> bool:
+    """Admin comp: mark a participant paid with NO escrow (seed-eligible, captain unbilled).
+    Stamps paid_at so a comped row is distinguishable from a pre-escrow legacy one; the
+    NULL escrow_tx_id records that no tix back this entry (it dilutes the pot on purpose)."""
     async with db_session() as session:
         p = await session.get(TournamentParticipant, participant_id)
         if p is None:
-            logger.warning(f"escrow mark_paid: participant {participant_id} not found")
+            logger.warning(f"escrow comp: participant {participant_id} not found")
             return False
-        p.status = "paid"
-        p.escrow_tx_id = reserve_tx_id
-        p.paid_at = datetime.now()
+        if p.status == "paid":
+            return True
+        _mark_paid(p, None)
         await session.flush()
-        logger.info(f"escrow: participant {participant_id} paid (reserve tx {reserve_tx_id})")
+        logger.info(f"escrow: participant {participant_id} comped (no escrow)")
         return True
 
 
 async def secure_from_wallet(guild_id: str, captain_id: str, participant_id: int,
                              tournament_id: int, fee: int, team_name: str) -> dict:
-    """Try to hold ``fee`` tix in the captain's wallet for this participant.
+    """Try to hold ``fee`` tix in the captain's wallet for this participant — reserve and
+    participant flip commit atomically in ONE transaction (a crash can't leave a paid team
+    with no hold, or a hold on a pending team).
 
     Returns one of:
       {ok: True, done: True, reserved: n}    — escrow held, participant now paid.
       {ok: True, done: False, deficit: n}    — wallet short by ``deficit``; caller must
                                                deposit that much, then call again.
-      {ok: False, error: str}                — the reserve failed (e.g. a race lost the funds).
+      {ok: False, error: str}                — participant vanished mid-flight.
     Idempotent: an existing reserve for this participant is reused, not stacked."""
     if fee <= 0:
-        # Free / nothing to hold — treat as already complete.
-        await mark_paid(participant_id, None)
-        return {"ok": True, "done": True, "reserved": 0}
+        raise ValueError("secure_from_wallet needs a positive fee (free entries never escrow)")
 
     source = escrow_source(tournament_id, participant_id)
-    existing = await wallet_service.get_pending_reserve(guild_id, captain_id, source)
-    if existing:
-        await mark_paid(participant_id, existing.id)
-        return {"ok": True, "done": True, "reserved": -existing.amount, "reused": True}
 
-    available = await wallet_service.get_available(guild_id, captain_id)
-    if available < fee:
-        return {"ok": True, "done": False, "deficit": fee - available, "available": available}
+    async def _do():
+        async with db_session() as session:
+            p = await session.get(TournamentParticipant, participant_id)
+            if p is None:
+                return {"ok": False, "error": "team no longer registered"}
 
-    try:
-        reserve = await wallet_service.reserve_debit(
-            guild_id, captain_id, fee, kind="escrow", source=source,
-            notes=f"tournament entry: {team_name}")
-    except ValueError as e:  # lost a race for the funds since the check above
-        return {"ok": False, "error": str(e)}
+            existing = (await session.execute(
+                select(WalletTx).where(
+                    WalletTx.guild_id == guild_id,
+                    WalletTx.player_id == captain_id,
+                    WalletTx.source == source,
+                    WalletTx.status == "pending",
+                ).order_by(WalletTx.id).limit(1))).scalars().first()
+            if existing:
+                _mark_paid(p, existing.id)
+                return {"ok": True, "done": True, "reserved": -existing.amount, "reused": True}
 
-    await mark_paid(participant_id, reserve.id)
-    return {"ok": True, "done": True, "reserved": fee}
+            balance, reserved = await wallet_service._balances(session, guild_id, captain_id)
+            available = balance - reserved
+            if available < fee:
+                return {"ok": True, "done": False, "deficit": fee - available, "available": available}
+
+            reserve = WalletTx(
+                guild_id=guild_id, player_id=captain_id, kind="escrow", amount=-fee,
+                status="pending", source=source, notes=f"tournament entry: {team_name}")
+            session.add(reserve)
+            await session.flush()
+            _mark_paid(p, reserve.id)
+            logger.info(f"escrow: participant {participant_id} paid (reserve tx {reserve.id})")
+            return {"ok": True, "done": True, "reserved": fee}
+
+    return await with_db_retry(_do)
 
 
 async def drop_with_refund(tournament_id: int, team_name: str) -> dict:
@@ -136,55 +162,33 @@ async def drop_with_refund(tournament_id: int, team_name: str) -> dict:
     participant delete and the reserve cancel can never half-apply — a team can't end up
     seeded-but-unpaid, nor deleted-but-still-holding tix). Registration phase only.
 
-    Returns {team_name, refunded}. Raises ValueError like tournament_service.remove_team."""
+    Returns {team_name, refunded}. Raises ValueError like tournament_service.remove_team
+    (which owns the removal rules; this only adds the refund)."""
     async with db_session() as session:
-        tournament = await session.get(Tournament, tournament_id)
-        if tournament is None:
-            raise ValueError("Tournament not found.")
-        if tournament.status != "registration":
-            raise ValueError(f"Teams cannot be removed once '{tournament.name}' has started.")
-        stmt = select(TournamentParticipant).where(
-            TournamentParticipant.tournament_id == tournament_id,
-            func.lower(TournamentParticipant.team_name) == team_name.strip().lower(),
-        )
-        p = (await session.execute(stmt)).scalars().first()
-        if p is None:
-            raise ValueError(f"'{team_name}' is not registered for this tournament.")
+        p = await remove_team(session, tournament_id, team_name)
         refunded = 0
         if p.escrow_tx_id:
             tx = await session.get(WalletTx, p.escrow_tx_id)
             if tx is not None and tx.status == "pending":
                 tx.status = "cancelled"
                 refunded = -tx.amount
-        name = p.team_name
-        await session.delete(p)
         await session.flush()
-        logger.info(f"escrow: dropped '{name}' from tournament {tournament_id} (refunded {refunded})")
-        return {"team_name": name, "refunded": refunded}
-
-
-async def refund_reserve(escrow_tx_id: int) -> bool:
-    """Release a held escrow (drop before start). Idempotent — a non-pending reserve is a
-    no-op. Returns False when there's nothing to refund."""
-    if not escrow_tx_id:
-        return False
-    await wallet_service.cancel_reserve(escrow_tx_id)
-    logger.info(f"escrow: refunded reserve tx {escrow_tx_id}")
-    return True
+        logger.info(f"escrow: dropped '{p.team_name}' from tournament {tournament_id} "
+                    f"(refunded {refunded})")
+        return {"team_name": p.team_name, "refunded": refunded}
 
 
 async def total_escrowed(guild_id: str, tournament_id: int) -> int:
     """Total tix currently held across a tournament's participants (the pot so far)."""
     prefix = escrow_source(tournament_id, "")  # 'tourney:<id>:'
     async with db_session() as session:
-        result = await session.execute(
-            select(func.coalesce(func.sum(WalletTx.amount), 0)).where(
-                WalletTx.guild_id == guild_id,
-                WalletTx.status == "pending",
-                WalletTx.source.like(prefix + "%"),
-            )
+        held = await wallet_service._sum_amount(
+            session,
+            WalletTx.guild_id == guild_id,
+            WalletTx.status == "pending",
+            WalletTx.source.like(prefix + "%"),
         )
-        return int(-(result.scalar() or 0))  # reserves are negative; report positive held
+        return -held  # reserves are negative; report positive held
 
 
 async def reallocate_to_prize(session, guild_id: str, tournament_id: int) -> dict:
@@ -225,28 +229,34 @@ async def reallocate_to_prize(session, guild_id: str, tournament_id: int) -> dic
     return {"moved": moved, "count": count, "prize_id": prize_id}
 
 
+async def _pool(session, guild_id: str, tournament_id: int) -> int:
+    """Prize wallet balance inside an existing session (the one 'what counts as the pool'
+    predicate — the preview and the payout cap must agree)."""
+    return await wallet_service._sum_amount(
+        session,
+        WalletTx.guild_id == guild_id,
+        WalletTx.player_id == prize_wallet_id(tournament_id),
+        WalletTx.status == "done",
+    )
+
+
+async def _already_paid(session, tournament_id: int) -> bool:
+    r = await session.execute(
+        select(WalletTx.id).where(
+            WalletTx.source.like(f"payout:{tournament_id}:%")).limit(1))
+    return r.scalar() is not None
+
+
 async def prize_pool(guild_id: str, tournament_id: int) -> int:
     """The tournament's prize wallet balance (settled tix available to pay out)."""
     async with db_session() as session:
-        result = await session.execute(
-            select(func.coalesce(func.sum(WalletTx.amount), 0)).where(
-                WalletTx.guild_id == guild_id,
-                WalletTx.player_id == prize_wallet_id(tournament_id),
-                WalletTx.status == "done",
-            ))
-        return int(result.scalar() or 0)
-
-
-def _payout_like(tournament_id) -> str:
-    return f"payout:{tournament_id}:%"
+        return await _pool(session, guild_id, tournament_id)
 
 
 async def is_paid_out(tournament_id: int) -> bool:
     """True once any payout has been booked for this tournament (idempotency guard)."""
     async with db_session() as session:
-        r = await session.execute(
-            select(WalletTx.id).where(WalletTx.source.like(_payout_like(tournament_id))).limit(1))
-        return r.scalar() is not None
+        return await _already_paid(session, tournament_id)
 
 
 async def execute_payout(guild_id: str, tournament_id: int, allocations: list) -> dict:
@@ -258,15 +268,10 @@ async def execute_payout(guild_id: str, tournament_id: int, allocations: list) -
     more than the pool holds. Returns {ok, already_paid?, paid, total, pool} or {ok:False,error}."""
     prize_id = prize_wallet_id(tournament_id)
     async with db_session() as session:
-        already = await session.execute(
-            select(WalletTx.id).where(WalletTx.source.like(_payout_like(tournament_id))).limit(1))
-        if already.scalar():
+        if await _already_paid(session, tournament_id):
             return {"ok": True, "already_paid": True}
 
-        pool = int((await session.execute(
-            select(func.coalesce(func.sum(WalletTx.amount), 0)).where(
-                WalletTx.guild_id == guild_id, WalletTx.player_id == prize_id,
-                WalletTx.status == "done"))).scalar() or 0)
+        pool = await _pool(session, guild_id, tournament_id)
         total = sum(amount for _, _, _, amount in allocations)
         if total > pool:
             return {"ok": False, "error": f"allocations ({total}) exceed the prize pool ({pool})"}

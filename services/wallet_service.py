@@ -22,14 +22,13 @@ Write rules (from the plan):
 Reconciliation: ``reconcile()`` asserts bot's physical vault tix == SUM of all 'done'
 amounts (the audit that the claim ledger never invents value).
 """
-import asyncio
 import uuid
 from dataclasses import dataclass
 from loguru import logger
-from sqlalchemy import select, func
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import select, func, case
 
 from database.db_session import db_session
+from database.retry import with_db_retry
 from models.wallet_tx import WalletTx
 
 VALID_KINDS = {"deposit", "withdraw", "pay", "receive", "adjust", "escrow"}
@@ -44,28 +43,6 @@ class Wallet:
     available: int    # balance - reserved
 
 
-# ---------------------------------------------------------------------------
-# retry helper (transient SQLite write-lock backoff, matching debt_service)
-# ---------------------------------------------------------------------------
-async def _with_retry(thunk):
-    """Run an async thunk, retrying on transient 'database is locked' with backoff."""
-    max_retries = 3
-    retry_delay = 1.0
-    for attempt in range(max_retries):
-        try:
-            return await thunk()
-        except OperationalError as e:
-            if "database is locked" in str(e) and attempt < max_retries - 1:
-                logger.warning(
-                    f"Wallet DB locked on attempt {attempt + 1}/{max_retries}, "
-                    f"retrying in {retry_delay}s..."
-                )
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2
-            else:
-                raise
-
-
 async def _sum_amount(session, *conditions) -> int:
     q = select(func.coalesce(func.sum(WalletTx.amount), 0)).where(*conditions)
     result = await session.execute(q)
@@ -73,20 +50,17 @@ async def _sum_amount(session, *conditions) -> int:
 
 
 async def _balances(session, guild_id: str, player_id: str) -> tuple[int, int]:
-    """(balance, reserved) inside an existing session/transaction."""
-    balance = await _sum_amount(
-        session,
+    """(balance, reserved) inside an existing session/transaction — one grouped query."""
+    q = select(
+        func.coalesce(func.sum(case((WalletTx.status == "done", WalletTx.amount), else_=0)), 0),
+        func.coalesce(func.sum(case((WalletTx.status == "pending", WalletTx.amount), else_=0)), 0),
+    ).where(
         WalletTx.guild_id == guild_id,
         WalletTx.player_id == player_id,
-        WalletTx.status == "done",
+        WalletTx.status.in_(("done", "pending")),
     )
-    pending = await _sum_amount(
-        session,
-        WalletTx.guild_id == guild_id,
-        WalletTx.player_id == player_id,
-        WalletTx.status == "pending",
-    )
-    return balance, -pending  # pending debits are negative -> reserved is positive
+    balance, pending = (await session.execute(q)).one()
+    return int(balance), -int(pending)  # pending debits are negative -> reserved is positive
 
 
 # ---------------------------------------------------------------------------
@@ -110,58 +84,24 @@ async def get_wallet(guild_id: str, player_id: str) -> Wallet:
         return Wallet(guild_id, player_id, balance, reserved, balance - reserved)
 
 
-async def get_all_balances(guild_id: str) -> dict[str, int]:
-    """Non-zero settled balances for every player in the guild (for the audit board)."""
-    async with db_session() as session:
-        query = (
-            select(WalletTx.player_id, func.sum(WalletTx.amount).label("balance"))
-            .where(WalletTx.guild_id == guild_id, WalletTx.status == "done")
-            .group_by(WalletTx.player_id)
-            .having(func.sum(WalletTx.amount) != 0)
-        )
-        result = await session.execute(query)
-        return {row.player_id: int(row.balance) for row in result.all()}
-
-
-async def total_wallets(guild_id: str = None) -> int:
+async def total_wallets() -> int:
     """SUM of all settled balances — the claim side of the reconciliation invariant.
-
-    The physical vault (one MTGO custodian) is shared across guilds, so the audit total
-    is global by default; pass ``guild_id`` only for a per-guild subtotal.
-    """
+    Global on purpose: the physical vault (one MTGO custodian) is shared across guilds."""
     async with db_session() as session:
-        conditions = [WalletTx.status == "done"]
-        if guild_id is not None:
-            conditions.append(WalletTx.guild_id == guild_id)
-        return await _sum_amount(session, *conditions)
+        return await _sum_amount(session, WalletTx.status == "done")
 
 
-async def get_history(guild_id: str, player_id: str = None, limit: int = 25) -> list[WalletTx]:
+async def get_history(guild_id: str, player_id: str, limit: int = 25) -> list[WalletTx]:
     limit = min(limit, 100)
     async with db_session() as session:
-        query = select(WalletTx).where(WalletTx.guild_id == guild_id)
-        if player_id:
-            query = query.where(WalletTx.player_id == player_id)
-        query = query.order_by(WalletTx.created_at.desc(), WalletTx.id.desc()).limit(limit)
+        query = (
+            select(WalletTx)
+            .where(WalletTx.guild_id == guild_id, WalletTx.player_id == player_id)
+            .order_by(WalletTx.created_at.desc(), WalletTx.id.desc())
+            .limit(limit)
+        )
         result = await session.execute(query)
         return list(result.scalars().all())
-
-
-async def get_pending_reserve(guild_id: str, player_id: str, source: str) -> WalletTx | None:
-    """The player's outstanding ('pending') reserve carrying this exact ``source`` tag, or
-    None. Lets a reservation be made idempotent: re-securing the same tournament entry can
-    reuse the existing hold instead of stacking a second one (e.g. after a crash between
-    reserving and marking the participant paid)."""
-    async with db_session() as session:
-        result = await session.execute(
-            select(WalletTx).where(
-                WalletTx.guild_id == guild_id,
-                WalletTx.player_id == player_id,
-                WalletTx.source == source,
-                WalletTx.status == "pending",
-            ).order_by(WalletTx.id).limit(1)
-        )
-        return result.scalars().first()
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +150,7 @@ async def credit_done(
             logger.info(f"credit_done: {player_id} +{amount} ({kind}) job={job_id} -> tx {tx.id}")
             return tx
 
-    return await _with_retry(_do)
+    return await with_db_retry(_do)
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +191,7 @@ async def reserve_debit(
             logger.info(f"reserve_debit: {player_id} reserved {amount} ({kind}) -> tx {tx.id}")
             return tx
 
-    return await _with_retry(_do)
+    return await with_db_retry(_do)
 
 
 async def attach_job(tx_id: int, job_id: str) -> WalletTx:
@@ -267,7 +207,7 @@ async def attach_job(tx_id: int, job_id: str) -> WalletTx:
             await session.refresh(tx)
             return tx
 
-    return await _with_retry(_do)
+    return await with_db_retry(_do)
 
 
 async def _resolve_reserve(tx_id: int, new_status: str) -> WalletTx:
@@ -286,7 +226,7 @@ async def _resolve_reserve(tx_id: int, new_status: str) -> WalletTx:
                 logger.info(f"reserve tx {tx_id} already {tx.status} (idempotent no-op)")
             return tx
 
-    return await _with_retry(_do)
+    return await with_db_retry(_do)
 
 
 async def settle_reserve(tx_id: int) -> WalletTx:
@@ -357,7 +297,7 @@ async def pay(
             logger.info(f"pay: {from_player} -> {to_player} {amount} tix (source {source})")
             return debit, credit
 
-    return await _with_retry(_do)
+    return await with_db_retry(_do)
 
 
 async def adjust(guild_id: str, player_id: str, amount: int, notes: str, created_by: str) -> WalletTx:
@@ -378,18 +318,18 @@ async def adjust(guild_id: str, player_id: str, amount: int, notes: str, created
             logger.info(f"adjust: {player_id} {amount:+d} by {created_by}")
             return tx
 
-    return await _with_retry(_do)
+    return await with_db_retry(_do)
 
 
 # ---------------------------------------------------------------------------
 # reconciliation audit: physical vault tix == SUM(settled wallets)
 # ---------------------------------------------------------------------------
-async def reconcile(bot_tix: int, guild_id: str = None) -> dict:
+async def reconcile(bot_tix: int) -> dict:
     """Compare the physical vault tix (from the serve ``/vault``) to the claim total.
 
-    ``bot_tix`` is global (one custodian), so by default the claim side is summed across
-    all guilds. Returns {ok, wallet_total, bot_tix, diff}; ok when they match exactly."""
-    wallet_total = await total_wallets(guild_id)
+    Both sides are global (one custodian, one claim ledger). Returns
+    {ok, wallet_total, bot_tix, diff}; ok when they match exactly."""
+    wallet_total = await total_wallets()
     diff = bot_tix - wallet_total
     ok = diff == 0
     if not ok:

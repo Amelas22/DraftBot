@@ -24,6 +24,22 @@ class MtgoLinkCommands(commands.Cog):
         self.bot = bot
         logger.info("MTGO link commands cog loaded")
 
+    @staticmethod
+    async def _send_link_result(ctx, status, detail, subject: str, conflict_extra: str = ""):
+        """One response ladder for both the self-serve and admin link paths —
+        ``subject`` is who got linked ('your Discord account' / a mention)."""
+        if status == "empty":
+            await ctx.followup.send("Please provide an MTGO username.", ephemeral=True)
+        elif status == "conflict":
+            await ctx.followup.send(
+                f"That MTGO username is already linked to <@{detail}>.{conflict_extra}",
+                ephemeral=True,
+            )
+        else:
+            await ctx.followup.send(
+                f"Linked {subject} to MTGO username **{detail}**.", ephemeral=True
+            )
+
     @discord.slash_command(
         name="link_mtgo",
         description="Link your MTGO username so your draft match results can be auto-recorded",
@@ -32,18 +48,9 @@ class MtgoLinkCommands(commands.Cog):
         await ctx.defer(ephemeral=True)
         guild_id = ctx.guild.id if ctx.guild else None
         status, detail = await MtgoAccount.link(ctx.author.id, username, guild_id)
-        if status == "empty":
-            await ctx.followup.send("Please provide your MTGO username.", ephemeral=True)
-        elif status == "conflict":
-            await ctx.followup.send(
-                f"That MTGO username is already linked to <@{detail}>. "
-                f"If it's really yours, ask an admin to reassign it with `/link_mtgo_for`.",
-                ephemeral=True,
-            )
-        else:
-            await ctx.followup.send(
-                f"Linked your Discord account to MTGO username **{detail}**.", ephemeral=True
-            )
+        await self._send_link_result(
+            ctx, status, detail, "your Discord account",
+            conflict_extra=" If it's really yours, ask an admin to reassign it with `/link_mtgo_for`.")
 
     @discord.slash_command(
         name="mtgo_whoami",
@@ -83,16 +90,7 @@ class MtgoLinkCommands(commands.Cog):
         await ctx.defer(ephemeral=True)
         guild_id = ctx.guild.id if ctx.guild else None
         status, detail = await MtgoAccount.link(player.id, username, guild_id)
-        if status == "empty":
-            await ctx.followup.send("Please provide an MTGO username.", ephemeral=True)
-        elif status == "conflict":
-            await ctx.followup.send(
-                f"That MTGO username is already linked to <@{detail}>.", ephemeral=True
-            )
-        else:
-            await ctx.followup.send(
-                f"Linked <@{player.id}> to MTGO username **{detail}**.", ephemeral=True
-            )
+        await self._send_link_result(ctx, status, detail, f"<@{player.id}>")
 
 
 def setup(bot):
