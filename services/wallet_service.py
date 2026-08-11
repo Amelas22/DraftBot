@@ -59,6 +59,21 @@ async def _sum_amount(session, *conditions) -> int:
     return int(result.scalar() or 0)
 
 
+async def _pending_reserve(session, guild_id: str, player_id: str, source: str) -> WalletTx | None:
+    """The player's live ('pending') reserve carrying this exact ``source`` tag, or None —
+    the one definition of 'a live reserve' (kept next to _balances so every WalletTx
+    predicate lives here; the uq_wallet_tx_live_escrow index enforces the same shape)."""
+    result = await session.execute(
+        select(WalletTx).where(
+            WalletTx.guild_id == guild_id,
+            WalletTx.player_id == player_id,
+            WalletTx.source == source,
+            WalletTx.status == "pending",
+        ).order_by(WalletTx.id).limit(1)
+    )
+    return result.scalars().first()
+
+
 async def _balances(session, guild_id: str, player_id: str) -> tuple[int, int]:
     """(balance, reserved) inside an existing session/transaction — one grouped query."""
     q = select(
@@ -163,16 +178,10 @@ async def credit_done(
     try:
         return await with_db_retry(_do)
     except IntegrityError:
-        # uq_wallet_tx_job_kind: a concurrent handler booked this job between our
-        # check and insert — fetch and return its row (idempotent).
-        if not job_id:
-            raise
-        async with db_session() as session:
-            row = (await session.execute(
-                select(WalletTx).where(WalletTx.job_id == job_id, WalletTx.kind == kind)
-            )).scalars().first()
-            logger.info(f"credit_done: job {job_id} booked concurrently, returning existing")
-            return row
+        # uq_wallet_tx_job_kind: a concurrent handler booked this job between our check
+        # and insert — re-run; _do's own idempotency branch returns the existing row.
+        logger.info(f"credit_done: job {job_id} booked concurrently, refetching")
+        return await _do()
 
 
 # ---------------------------------------------------------------------------
@@ -324,15 +333,10 @@ async def pay(
         async with MONEY_LOCK:
             return await with_db_retry(_do)
     except IntegrityError:
-        # uq_wallet_tx_transfer_legs: this source was settled concurrently — return its legs.
-        async with db_session() as session:
-            rows = (await session.execute(
-                select(WalletTx).where(
-                    WalletTx.source == source, WalletTx.kind.in_(["pay", "receive"])
-                ).order_by(WalletTx.id)
-            )).scalars().all()
-            logger.info(f"pay: source {source} settled concurrently, returning existing")
-            return rows[0], rows[1]
+        # uq_wallet_tx_transfer_legs: this source was settled concurrently — re-run;
+        # _do's own idempotency branch returns the existing legs.
+        logger.info(f"pay: source {source} settled concurrently, refetching")
+        return await _do()
 
 
 async def adjust(guild_id: str, player_id: str, amount: int, notes: str, created_by: str) -> WalletTx:

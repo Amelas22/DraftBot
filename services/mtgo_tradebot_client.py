@@ -13,6 +13,7 @@ method returns ``None`` — unless *both* are set, so nothing breaks on servers 
 Mirrors the aiohttp idiom in helpers/magicprotools_helper.py, plus a Bearer header + a timeout.
 """
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import aiohttp
@@ -48,7 +49,15 @@ class MtgoTradeBotClient:
         if self._session is not None and not self._session.closed:
             await self._session.close()
 
-    async def _call(self, method: str, path: str, *, json=None, params=None):
+    async def _call(self, method: str, path: str, *, json=None, params=None,
+                    mark_ambiguous: bool = False):
+        """One HTTP call. Returns the parsed body, or None on any DEFINITE failure
+        (disabled, HTTP error status, connection never established).
+
+        ``mark_ambiguous``: for POSTs whose delivery matters (they create serve jobs) —
+        a timeout/reset AFTER the connection was made may mean the request landed and
+        only the response was lost, so those return ``{"_ambiguous": True}`` instead of
+        None, letting the caller run job-adoption recovery only when it's warranted."""
         if not self.enabled:
             logger.warning("MtgoTradeBotClient disabled (MTGO_TRADEBOT_URL / MTGO_TRADEBOT_TOKEN not set)")
             return None
@@ -67,9 +76,12 @@ class MtgoTradeBotClient:
                     return await resp.json()
                 except Exception:
                     return {"raw": text}
-        except Exception as e:  # network / timeout / dns
-            logger.error(f"TradeBot {method} {path} failed: {e}")
+        except aiohttp.ClientConnectorError as e:  # connection refused / DNS — never delivered
+            logger.error(f"TradeBot {method} {path} unreachable: {e}")
             return None
+        except Exception as e:  # timeout / reset mid-flight — delivery unknown
+            logger.error(f"TradeBot {method} {path} failed ambiguously: {e}")
+            return {"_ambiguous": True} if mark_ambiguous else None
 
     # ---- reads ----
     async def health(self):
@@ -90,7 +102,6 @@ class MtgoTradeBotClient:
         listing = await self._call("GET", "/jobs")
         if not listing:
             return None
-        from datetime import datetime, timedelta, timezone
         now = datetime.now(timezone.utc)
         for job in listing.get("jobs", []):  # serve lists newest first
             if job.get("type") != job_type or job.get("state") == "failed":
@@ -100,15 +111,8 @@ class MtgoTradeBotClient:
             items = job.get("receive") if job_type == "deposit" else job.get("give")
             if not items or items[0].get("name") != EVENT_TICKET or items[0].get("qty") != qty:
                 continue
-            created = job.get("createdAt") or ""
             try:
-                # serve timestamps: ISO-8601 UTC with 7-digit fractions, e.g.
-                # 2026-08-11T09:00:10.2460618Z — trim to microseconds for fromisoformat
-                trimmed = created.rstrip("Z")
-                if "." in trimmed:
-                    head, frac = trimmed.split(".", 1)
-                    trimmed = f"{head}.{frac[:6]}"
-                ts = datetime.fromisoformat(trimmed).replace(tzinfo=timezone.utc)
+                ts = datetime.fromisoformat(job.get("createdAt") or "")
                 if now - ts > timedelta(seconds=max_age_s):
                     continue
             except ValueError:
@@ -124,12 +128,14 @@ class MtgoTradeBotClient:
     async def deposit(self, user: str, card: str, qty: int = 1, commit: bool = True, wait_minutes: int = 0):
         """Bot RECEIVES qty of a card FROM the user (a deposit into custody)."""
         return await self._call("POST", "/deposit", json={
-            "user": user, "cards": [card], "qty": qty, "commit": commit, "waitMinutes": wait_minutes})
+            "user": user, "cards": [card], "qty": qty, "commit": commit, "waitMinutes": wait_minutes},
+            mark_ambiguous=True)
 
     async def give(self, user: str, card: str, qty: int = 1, commit: bool = True, wait_minutes: int = 0):
         """Bot GIVES qty of a card TO the user (a withdrawal, or a lend)."""
         return await self._call("POST", "/request", json={
-            "user": user, "cards": [card], "qty": qty, "commit": commit, "waitMinutes": wait_minutes})
+            "user": user, "cards": [card], "qty": qty, "commit": commit, "waitMinutes": wait_minutes},
+            mark_ambiguous=True)
 
     # ---- tix convenience (currency == Event Ticket) ----
     async def deposit_tix(self, user: str, n: int, commit: bool = True, wait_minutes: int = 0):

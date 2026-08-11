@@ -25,15 +25,28 @@ from sqlalchemy.exc import IntegrityError
 
 from database.db_session import db_session
 from database.retry import with_db_retry
-from models.tournament import TournamentParticipant
+from models.tournament import Tournament, TournamentParticipant
 from models.wallet_tx import WalletTx
 from services import wallet_service
-from services.tournament_service import remove_team
+from services.tournament_service import get_active_tournament, remove_team, start_tournament
 
 
 def escrow_source(tournament_id, participant_id) -> str:
-    """Stable per-participant tag on the reserve (idempotency + refund handle + pot sum)."""
+    """Stable per-participant tag on the reserve (idempotency + refund handle + pot sum).
+    Also used as the MtgoJob deposit ``context`` for entry-fee deposits — this module is
+    the single owner of the format (parse with parse_escrow_source)."""
     return f"tourney:{tournament_id}:{participant_id}"
+
+
+def parse_escrow_source(source: str):
+    """Inverse of escrow_source: (tournament_id, participant_id), or None if not ours."""
+    if not source or not source.startswith("tourney:"):
+        return None
+    try:
+        _, tid, pid = source.split(":")
+        return int(tid), int(pid)
+    except ValueError:
+        return None
 
 
 def prize_wallet_id(tournament_id) -> str:
@@ -125,13 +138,7 @@ async def secure_from_wallet(guild_id: str, captain_id: str, participant_id: int
             if p is None:
                 return {"ok": False, "error": "team no longer registered"}
 
-            existing = (await session.execute(
-                select(WalletTx).where(
-                    WalletTx.guild_id == guild_id,
-                    WalletTx.player_id == captain_id,
-                    WalletTx.source == source,
-                    WalletTx.status == "pending",
-                ).order_by(WalletTx.id).limit(1))).scalars().first()
+            existing = await wallet_service._pending_reserve(session, guild_id, captain_id, source)
             if existing:
                 _mark_paid(p, existing.id)
                 return {"ok": True, "done": True, "reserved": -existing.amount, "reused": True}
@@ -158,6 +165,57 @@ async def secure_from_wallet(guild_id: str, captain_id: str, participant_id: int
         # rerun (unlocked read path finds and reuses the existing hold).
         logger.info(f"secure_from_wallet: concurrent reserve for {source}, reusing")
         return await _do()
+
+
+async def complete_entry_after_deposit(guild_id: str, captain_id: str,
+                                       tournament_id: int, participant_id: int) -> dict:
+    """The 'entry-fee deposit landed → secure the escrow' continuation, shared by the
+    register command's background follow-up and the pending-jobs resumer (one copy of
+    the guards, one behavior). Returns secure_from_wallet's dict plus team/tournament
+    names for messaging, or {ok: False, skipped: True} when there's nothing to do
+    (team gone, already paid, or fee dropped to zero)."""
+    async with db_session() as session:
+        t = await session.get(Tournament, tournament_id)
+        p = await session.get(TournamentParticipant, participant_id)
+    if not t or not p or p.status == "paid" or (t.entry_fee or 0) <= 0:
+        return {"ok": False, "skipped": True}
+    res = await secure_from_wallet(guild_id, captain_id, p.id, t.id, t.entry_fee, p.team_name)
+    res.update({"team_name": p.team_name, "tournament_name": t.name, "fee": t.entry_fee})
+    return res
+
+
+async def resume_entry_from_context(guild_id: str, captain_id: str, context: str):
+    """Resumer hook: if ``context`` is one of ours (escrow_source format), finish the
+    entry. Unknown contexts are ignored — this module owns the format."""
+    parsed = parse_escrow_source(context)
+    if parsed is None:
+        return
+    tournament_id, participant_id = parsed
+    res = await complete_entry_after_deposit(guild_id, captain_id, tournament_id, participant_id)
+    if res.get("done"):
+        logger.info(f"resumed escrow: participant {participant_id} paid after recovered deposit")
+
+
+async def start_and_fund(guild_id, rng) -> dict:
+    """Close registration, seed the schedule, and move held escrow into the prize wallet —
+    one transaction under MONEY_LOCK, so concurrent /tournament start calls serialize and
+    seeding + the pot move commit together (or neither does). Owns the lock so no cog
+    touches MONEY_LOCK directly. Returns {tournament_id, name, fee, pot}; raises
+    ValueError with a user-facing message when there's nothing to start."""
+    async with wallet_service.MONEY_LOCK:
+        async with db_session() as session:
+            tournament = await get_active_tournament(session, guild_id)
+            if tournament is None:
+                raise ValueError("There is no tournament to start.")
+            if tournament.status != "registration":
+                raise ValueError(f"**{tournament.name}** has already started.")
+            fee = tournament.entry_fee or 0
+            await start_tournament(session, tournament.id, rng)
+            pot = 0
+            if fee > 0:
+                pot = (await reallocate_to_prize(session, str(guild_id), tournament.id))["moved"]
+            return {"tournament_id": tournament.id, "name": tournament.name,
+                    "fee": fee, "pot": pot}
 
 
 async def drop_with_refund(tournament_id: int, team_name: str) -> dict:
@@ -301,6 +359,7 @@ async def execute_payout(guild_id: str, tournament_id: int, allocations: list) -
         async with wallet_service.MONEY_LOCK:
             return await with_db_retry(_do)
     except IntegrityError:
-        # uq_wallet_tx_transfer_legs: a concurrent payout booked first — idempotent no-op.
+        # uq_wallet_tx_transfer_legs: a concurrent payout booked first — re-run;
+        # _do's _already_paid branch reports it.
         logger.info(f"execute_payout: tournament {tournament_id} paid out concurrently")
-        return {"ok": True, "already_paid": True}
+        return await _do()

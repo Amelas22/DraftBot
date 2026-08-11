@@ -27,12 +27,10 @@ from services.tournament_service import (
     list_participants,
     register_team,
     set_result,
-    start_tournament,
 )
 from services.mtgo_tradebot_client import EVENT_TICKET
 from services import mtgo_resolution_service as resolution
 from services import tournament_escrow_service as escrow
-from services import wallet_service
 
 
 def tournament_enabled(guild_id):
@@ -441,7 +439,7 @@ class TournamentCog(commands.Cog):
         deficit = res["deficit"]
         started = await resolution.start_deposit(
             guild_id, captain_id, captain_user, deficit, commit=True,
-            wait_minutes=ESCROW_WAIT_MINUTES, context=f"tourney:{t_id}:{p_id}")
+            wait_minutes=ESCROW_WAIT_MINUTES, context=escrow.escrow_source(t_id, p_id))
         if not started.get("ok"):
             await ctx.followup.send(
                 f"⚠️ **{p_name}** is registered (pending) but I couldn't start your deposit: "
@@ -471,10 +469,14 @@ class TournamentCog(commands.Cog):
                            f"not completed — run `/tournament register` to retry.")
                 await followup.send(msg, ephemeral=True)
                 return
-            res2 = await escrow.secure_from_wallet(guild_id, captain_id, p_id, t_id, fee, p_name)
+            res2 = await escrow.complete_entry_after_deposit(guild_id, captain_id, t_id, p_id)
             if res2.get("done"):
                 await followup.send(
                     f"✅ Escrow received — **{p_name}** is fully registered for **{t_name}**. You're in.")
+            elif res2.get("skipped"):
+                await followup.send(
+                    f"✅ Deposit received. **{p_name}** needed no further escrow action "
+                    f"(already paid, or the entry changed).", ephemeral=True)
             else:
                 await followup.send(
                     f"⚠️ Your deposit landed but the escrow couldn't be held "
@@ -576,32 +578,12 @@ class TournamentCog(commands.Cog):
             return
         await ctx.defer()
         try:
-            # MONEY_LOCK serializes concurrent starts: without it, two racing /tournament
-            # start calls could both reallocate escrow into the prize wallet (the unique
-            # transfer-leg index would catch the money, but the lock stops the race cold).
-            async with wallet_service.MONEY_LOCK:
-                async with db_session() as session:
-                    tournament = await get_active_tournament(session, ctx.guild.id)
-                    if tournament is None:
-                        await ctx.followup.send("There is no tournament to start.", ephemeral=True)
-                        return
-                    if tournament.status != "registration":
-                        await ctx.followup.send(
-                            f"**{tournament.name}** has already started.", ephemeral=True)
-                        return
-                    tournament_id = tournament.id
-                    tournament_name = tournament.name
-                    fee = tournament.entry_fee or 0
-                    await start_tournament(session, tournament.id, random.Random())
-                    # Reallocate held escrow into the prize wallet in the SAME transaction,
-                    # so seeding and the pot move commit together (or neither does).
-                    pot = 0
-                    if fee > 0:
-                        pot = (await escrow.reallocate_to_prize(
-                            session, str(ctx.guild.id), tournament_id))["moved"]
+            # start_and_fund owns the money lock + atomic seed-and-reallocate.
+            res = await escrow.start_and_fund(ctx.guild.id, random.Random())
+            tournament_id = res["tournament_id"]
             logger.info(f"Tournament {tournament_id} started in guild {ctx.guild.id} by {ctx.author.id}")
-            pot_line = f" 🏦 Prize pool: **{pot} tix**." if fee > 0 else ""
-            await ctx.followup.send(f"🏆 **{tournament_name}** has started!{pot_line}")
+            pot_line = f" 🏦 Prize pool: **{res['pot']} tix**." if res["fee"] > 0 else ""
+            await ctx.followup.send(f"🏆 **{res['name']}** has started!{pot_line}")
             await self._post_schedule(ctx, tournament_id)
             await self._post_standings(ctx, tournament_id)
         except ValueError as e:

@@ -94,9 +94,13 @@ async def _resolve_job(job_id: str, status: str):
     await with_db_retry(_do)
 
 
-async def _recover_lost_job(job_type: str, mtgo_user: str, n: int):
-    """After an ambiguous POST failure, look for the job on the serve (the POST may have
-    landed even though we never saw the 202). One retry covers a brief flap."""
+async def _recover_lost_job(resp, job_type: str, mtgo_user: str, n: int):
+    """Recovery for a failed job POST. Runs the /jobs adoption scan ONLY when the client
+    flagged the failure as ambiguous (delivered-but-response-lost is possible); a definite
+    rejection or never-connected error returns None immediately — no job can exist, and
+    the caller may fail fast. One retry covers a brief flap."""
+    if not (resp and resp.get("_ambiguous")):
+        return None
     client = get_client()
     job = await client.find_recent_job(job_type, mtgo_user, n)
     if job is None:
@@ -120,9 +124,10 @@ async def start_deposit(guild_id: str, player_id: str, mtgo_user: str, n: int, *
         return {"ok": False, "error": "MTGO TradeBot integration is disabled"}
     resp = await client.deposit_tix(mtgo_user, n, commit=commit, wait_minutes=wait_minutes)
     if not resp or not resp.get("id"):
-        # Ambiguous: the POST may have reached the serve and only the response was lost —
-        # in that case the trade can still fire, so adopt the job rather than orphan it.
-        resp = await _recover_lost_job("deposit", mtgo_user, n)
+        # If the POST may have reached the serve with only the response lost, the trade
+        # can still fire — adopt the job rather than orphan it. Definite failures skip
+        # the scan and fail fast.
+        resp = await _recover_lost_job(resp, "deposit", mtgo_user, n)
         if not resp or not resp.get("id"):
             return {"ok": False, "error": "serve did not accept the deposit (unreachable or rejected)"}
         logger.warning(f"start_deposit: adopted job {resp['id']} after lost POST response")
@@ -169,10 +174,10 @@ async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, 
 
     resp = await client.withdraw_tix(mtgo_user, n, commit=commit, wait_minutes=wait_minutes)
     if not resp or not resp.get("id"):
-        resp = await _recover_lost_job("request", mtgo_user, n)
+        resp = await _recover_lost_job(resp, "request", mtgo_user, n)
         if not resp or not resp.get("id"):
-            # The serve's job list shows no such job (or the serve is entirely down, in
-            # which case no trade can have been opened either) — safe to release the hold.
+            # Definite rejection, or an ambiguous failure whose job-list scan shows no
+            # job — either way no trade can have been opened; safe to release the hold.
             await wallet_service.cancel_reserve(reserve.id)
             return {"ok": False, "error": "serve did not accept the withdraw (unreachable or rejected)"}
         logger.warning(f"start_withdraw: adopted job {resp['id']} after lost POST response")
@@ -200,46 +205,48 @@ async def finish_withdraw(reserve_tx_id: int, job_id: str,
 
 
 # ---------------------------------------------------------------------------
-# startup resumer — finish booking any job whose poller died (timeout/restart)
+# pending-jobs watchdog — finish booking any job whose poller died
+# (poll timeout / bot restart / gateway reconnect)
 # ---------------------------------------------------------------------------
-async def resume_pending_jobs() -> int:
-    """Re-poll every 'pending' MtgoJob to a terminal state and book its ledger side.
-    Booking is idempotent (job_id unique index), so racing a still-live poller is safe.
-    Returns the number of jobs picked up; the polls run as background tasks."""
-    from helpers.money_gate import spawn_followup
+_RESCAN_INTERVAL_S = 10 * 60
+_watchdog_running = False   # on_ready refires on gateway reconnects; start one loop only
+_polling_jobs: set = set()  # job_ids with a live resumed poller — rescans skip them
 
+
+async def resume_pending_jobs() -> int:
+    """Spawn a poller for every 'pending' MtgoJob that doesn't already have one, booking
+    its ledger side when the job reaches a terminal state. Booking is idempotent
+    (job_id unique index), so racing a still-live command poller is safe. Returns the
+    number of jobs picked up."""
     async with db_session() as session:
         pending = (await session.execute(
             select(MtgoJob).where(MtgoJob.status == "pending"))).scalars().all()
+    pending = [j for j in pending if j.job_id not in _polling_jobs]
     if not pending:
         return 0
 
-    async def _resume_deposit(job: MtgoJob):
-        res = await finish_deposit(job.job_id, job.guild_id, job.player_id,
-                                   job.amount, job.mtgo_user)
-        if res.get("ok") and job.context and job.context.startswith("tourney:"):
-            # deposit was for a tournament entry — re-secure the escrow now the funds landed
-            from services import tournament_escrow_service as escrow
-            from models.tournament import Tournament, TournamentParticipant
-            _, tid, pid = job.context.split(":")
-            async with db_session() as session:
-                t = await session.get(Tournament, int(tid))
-                p = await session.get(TournamentParticipant, int(pid))
-            if t and p and p.status != "paid" and (t.entry_fee or 0) > 0:
-                await escrow.secure_from_wallet(
-                    job.guild_id, job.player_id, p.id, t.id, t.entry_fee, p.team_name)
+    async def _resume(job: MtgoJob):
+        try:
+            if job.kind == "deposit":
+                res = await finish_deposit(job.job_id, job.guild_id, job.player_id,
+                                           job.amount, job.mtgo_user)
+                if res.get("ok") and job.context:
+                    # the deposit had a continuation (e.g. a tournament entry) — the
+                    # escrow service owns the context format and what to do with it
+                    from services import tournament_escrow_service as escrow
+                    await escrow.resume_entry_from_context(
+                        job.guild_id, job.player_id, job.context)
+            elif job.kind == "withdraw" and job.reserve_tx_id:
+                await finish_withdraw(job.reserve_tx_id, job.job_id)
+        finally:
+            _polling_jobs.discard(job.job_id)
 
+    from helpers.money_gate import spawn_followup
     for job in pending:
-        if job.kind == "deposit":
-            spawn_followup(f"resume deposit {job.job_id}", _resume_deposit(job))
-        elif job.kind == "withdraw" and job.reserve_tx_id:
-            spawn_followup(f"resume withdraw {job.job_id}",
-                           finish_withdraw(job.reserve_tx_id, job.job_id))
+        _polling_jobs.add(job.job_id)
+        spawn_followup(f"resume {job.kind} {job.job_id}", _resume(job))
     logger.info(f"resume_pending_jobs: picked up {len(pending)} unresolved MTGO job(s)")
     return len(pending)
-
-
-_RESCAN_INTERVAL_S = 10 * 60
 
 
 async def pending_jobs_watchdog():
@@ -247,9 +254,14 @@ async def pending_jobs_watchdog():
 
     A single startup pass isn't enough: each poll gives up after ~14 minutes
     ('pending' outcome), but a serve job can complete later than that (a stalled
-    serve that recovers, live case: 28 minutes). The rescan keeps re-polling
-    every still-pending job until it reaches a terminal state — booking stays
-    idempotent by job_id, so overlapping pollers are harmless."""
+    serve that recovers, live case: 28 minutes). The rescan re-polls every
+    still-pending job — skipping ones whose poller is still live — until it
+    reaches a terminal state. Guarded so on_ready refiring on gateway reconnects
+    can't stack duplicate loops (same pattern as run_log_reconciler)."""
+    global _watchdog_running
+    if _watchdog_running:
+        return
+    _watchdog_running = True
     while True:
         try:
             await resume_pending_jobs()
