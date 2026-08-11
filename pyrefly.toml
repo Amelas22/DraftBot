@@ -9,6 +9,7 @@
 preset = "strict"
 
 project-includes = [
+    "cogs/server_draft_stats.py",
     "helpers/utils.py",
     "ready_check.py",
 ]

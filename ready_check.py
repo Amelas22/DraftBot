@@ -2,11 +2,11 @@ import asyncio
 
 import discord
 from loguru import logger
-from typing import Any, Dict, Iterable, List, Literal, Optional, cast
+from typing import Any, Dict, Iterable, List, Literal, Optional
 
 from helpers.display_names import get_display_name_by_id
 from helpers.draft_footer import apply_draft_footer_from_session
-from helpers.utils import not_none
+from helpers.utils import as_messageable, not_none, ui_button
 from models import SignUpHistory
 from services.state_manager import state_manager
 from services.team_creator import create_and_display_teams
@@ -284,7 +284,7 @@ class ReadyCheckSession:
             if not channel:
                 return
 
-            message = await cast(discord.TextChannel, channel).fetch_message(int(draft_session.message_id))
+            message = await as_messageable(channel).fetch_message(int(draft_session.message_id))
 
             # Deferred to avoid circular import: views -> ready_check -> views
             from views import PersistentView
@@ -328,23 +328,19 @@ class ReadyCheckView(discord.ui.View):
     def __init__(self, draft_session_id: str):
         super().__init__(timeout=None)
         self.draft_session_id = draft_session_id
-        # py-cord's View.__init__ replaces each @discord.ui.button-decorated
-        # method attribute with its Button item, so these assignments hit the
-        # ITEM at runtime; the static type is still the decorated function,
-        # hence the casts (same py-cord typing gap as elsewhere in this file).
-        cast(discord.ui.Button[Any], self.ready_button).custom_id = f"ready_check_ready_{self.draft_session_id}"
-        cast(discord.ui.Button[Any], self.not_ready_button).custom_id = f"ready_check_not_ready_{self.draft_session_id}"
-        cast(discord.ui.Button[Any], self.cancel_button).custom_id = f"ready_check_cancel_{self.draft_session_id}"
+        self.ready_button.custom_id = f"ready_check_ready_{self.draft_session_id}"
+        self.not_ready_button.custom_id = f"ready_check_not_ready_{self.draft_session_id}"
+        self.cancel_button.custom_id = f"ready_check_cancel_{self.draft_session_id}"
 
-    @discord.ui.button(label="Ready", style=discord.ButtonStyle.green, custom_id="placeholder_ready")
+    @ui_button(label="Ready", style=discord.ButtonStyle.green, custom_id="placeholder_ready")
     async def ready_button(self, button: discord.ui.Button[Any], interaction: discord.Interaction):
         await self._handle_status(interaction, "ready")
 
-    @discord.ui.button(label="Not Ready", style=discord.ButtonStyle.red, custom_id="placeholder_not_ready")
+    @ui_button(label="Not Ready", style=discord.ButtonStyle.red, custom_id="placeholder_not_ready")
     async def not_ready_button(self, button: discord.ui.Button[Any], interaction: discord.Interaction):
         await self._handle_status(interaction, "not_ready")
 
-    @discord.ui.button(label="Cancel Check", style=discord.ButtonStyle.grey, custom_id="placeholder_cancel_rc")
+    @ui_button(label="Cancel Check", style=discord.ButtonStyle.grey, custom_id="placeholder_cancel_rc")
     async def cancel_button(self, button: discord.ui.Button[Any], interaction: discord.Interaction):
         await interaction.response.send_message(
             "Are you sure you want to cancel the ready check?",
