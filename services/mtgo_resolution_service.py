@@ -239,6 +239,25 @@ async def resume_pending_jobs() -> int:
     return len(pending)
 
 
+_RESCAN_INTERVAL_S = 10 * 60
+
+
+async def pending_jobs_watchdog():
+    """Run resume_pending_jobs forever, every ``_RESCAN_INTERVAL_S``.
+
+    A single startup pass isn't enough: each poll gives up after ~14 minutes
+    ('pending' outcome), but a serve job can complete later than that (a stalled
+    serve that recovers, live case: 28 minutes). The rescan keeps re-polling
+    every still-pending job until it reaches a terminal state — booking stays
+    idempotent by job_id, so overlapping pollers are harmless."""
+    while True:
+        try:
+            await resume_pending_jobs()
+        except Exception as e:
+            logger.warning(f"pending_jobs_watchdog: rescan failed: {e}")
+        await asyncio.sleep(_RESCAN_INTERVAL_S)
+
+
 # ---------------------------------------------------------------------------
 # internal pay (no trade)
 # ---------------------------------------------------------------------------
