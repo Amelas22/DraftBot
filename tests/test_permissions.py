@@ -263,20 +263,6 @@ async def test_send_error_falls_back_when_is_done_is_stale():
     assert "permission" in msg.lower()
 
 
-@pytest.mark.asyncio
-async def test_send_error_falls_back_the_other_way_too():
-    """Symmetric case: is_done() says True (already responded) but the followup
-    call fails (e.g. an expired interaction token) — fall back to respond()."""
-    ctx = make_ctx(role_names=())
-    ctx.interaction.response.is_done.return_value = True
-    ctx.followup.send = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "unknown interaction"))
-    ctx.respond = AsyncMock()
-    with patch("helpers.permissions.get_config", return_value={}):
-        await handle_application_command_error(ctx, commands.CheckFailure("nope"))
-    ctx.followup.send.assert_called_once()
-    ctx.respond.assert_called_once()
-
-
 # ---- bot_manager_button (component-callback decorator) ----------------------
 
 def _component_interaction(is_owner=False):

@@ -73,7 +73,30 @@ def create_registration_embed(tournament, participants, pot=0, deficits=None,
         label = f"Teams ({paid_n}/{len(participants)} paid)"
     else:
         label = f"Teams ({len(participants)})"
-    embed.add_field(name=label, value="\n".join(lines), inline=False)
+
+    # Discord caps a single embed field's value at 1024 characters. A paid roster's
+    # deficit lines push this well past that at ~10+ pending teams, and Discord then
+    # rejects the whole edit (the board freezes on a stale roster). Pack lines into
+    # as many fields as needed, each under the cap.
+    _FIELD_LIMIT = 1024
+    chunks = []
+    current = []
+    current_len = 0
+    for line in lines:
+        added_len = len(line) + (1 if current else 0)  # + newline joiner
+        if current and current_len + added_len > _FIELD_LIMIT:
+            chunks.append(current)
+            current = [line]
+            current_len = len(line)
+        else:
+            current.append(line)
+            current_len += added_len
+    if current:
+        chunks.append(current)
+
+    for i, chunk in enumerate(chunks):
+        name = label if i == 0 else "Teams (cont.)"
+        embed.add_field(name=name, value="\n".join(chunk), inline=False)
     return embed
 
 

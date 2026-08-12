@@ -115,3 +115,45 @@ async def test_create_posts_the_board_even_if_the_confirmation_reply_fails(test_
         ).scalar_one()
         assert tournament.board_channel_id == "777"
         assert tournament.board_message_id == "999"
+
+
+@pytest.mark.asyncio
+async def test_refresh_board_swallows_a_discord_failure():
+    """The board is a view, never a source of truth: a Discord failure while
+    refreshing it must log and return, not propagate and abort the command that
+    changed the roster (a registration, a fee transfer, a tournament start)."""
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    with patch(
+        "cogs.tournament_commands.update_registration_board",
+        AsyncMock(side_effect=RuntimeError("discord boom")),
+    ):
+        await cog._refresh_board(1)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_start_freezes_the_board():
+    """/tournament start closes registration, so the board refresh it triggers
+    must be told closed=True — otherwise the board keeps inviting registrations
+    after the schedule has already been seeded."""
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    cog._refresh_board = AsyncMock()
+    cog._post_schedule = AsyncMock()
+    cog._post_standings = AsyncMock()
+
+    ctx = MagicMock()
+    ctx.guild.id = 123
+    ctx.author.id = 456
+    ctx.defer = AsyncMock()
+    ctx.followup.send = AsyncMock()
+
+    res = {"tournament_id": 1, "name": "Cup", "pot": 0, "fee": 0}
+    with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
+         patch("cogs.tournament_commands.escrow.close_registration_and_seed",
+               AsyncMock(return_value=res)):
+        await TournamentCog.start.callback(cog, ctx)
+
+    cog._refresh_board.assert_awaited_once_with(1, closed=True)

@@ -102,12 +102,12 @@ async def _send_error(ctx, message):
     on top of whatever failed originally, so fall back to the other path
     before giving up.
     """
-    primary, fallback = (
-        (ctx.followup.send, ctx.respond)
-        if ctx.interaction.response.is_done()
-        else (ctx.respond, ctx.followup.send)
-    )
     try:
+        primary, fallback = (
+            (ctx.followup.send, ctx.respond)
+            if ctx.interaction.response.is_done()
+            else (ctx.respond, ctx.followup.send)
+        )
         await primary(message, ephemeral=True)
     except Exception:
         try:

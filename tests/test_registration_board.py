@@ -61,6 +61,30 @@ def test_empty_board_invites_registration():
     assert "/tournament register" in _text(create_registration_embed(_tournament(), []))
 
 
+def test_large_roster_splits_across_fields_under_the_discord_cap():
+    """Discord caps a single embed field's value at 1024 characters. Roster lines
+    are ~52 chars and deficit lines ~43, so a paid tournament breaks at roughly 10
+    pending teams — the board must split the roster across multiple fields instead
+    of overflowing one, and every team must still be listed somewhere."""
+    teams = []
+    deficits = {}
+    for i in range(1, 26):
+        status = "paid" if i % 2 == 0 else "pending"
+        teams.append(_team(i, f"Team Number Twenty-Five Roster Entry {i:02d}", str(1000 + i), status))
+        if status == "pending":
+            deficits[i] = 3
+
+    embed = create_registration_embed(_tournament(), teams, pot=10, deficits=deficits)
+
+    assert len(embed.fields) > 1, "a 25-team paid roster should overflow a single field"
+    for f in embed.fields:
+        assert len(f.value) < 1024, f"field {f.name!r} is {len(f.value)} chars"
+
+    full_text = "".join(f.value for f in embed.fields)
+    for t in teams:
+        assert t.team_name in full_text
+
+
 from unittest.mock import AsyncMock, MagicMock
 
 import discord

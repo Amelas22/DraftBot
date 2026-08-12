@@ -422,10 +422,10 @@ class TournamentCog(commands.Cog):
         if fee == 0:
             if created:
                 logger.info(f"Team '{p_name}' registered for tournament {t_id} by {ctx.author.id}")
+                await self._refresh_board(t_id)
                 await ctx.followup.send(
                     f"✅ **{p_name}** is registered for **{t_name}** with "
                     f"{ctx.author.mention} as captain.", ephemeral=True)
-                await self._refresh_board(t_id)
             else:
                 await ctx.followup.send(
                     f"**{p_name}** is already registered for **{t_name}** "
@@ -448,12 +448,17 @@ class TournamentCog(commands.Cog):
         # Try to hold the fee from the captain's wallet right away.
         res = await escrow.secure_from_wallet(guild_id, captain_id, p_id, t_id, fee, p_name)
         if res.get("done"):
+            await self._refresh_board(t_id)
             await ctx.followup.send(
                 f"✅ **{p_name}** is registered for **{t_name}** — **{fee} "
                 f"{EVENT_TICKET}(s)** paid into the prize pool. You're in.", ephemeral=True)
-            await self._refresh_board(t_id)
             return
         if not res.get("ok"):
+            # register_team already committed a pending participant above, so the board
+            # must still reflect it even though the escrow hold itself failed — otherwise
+            # this stuck-pending team never appears (the watchdog only refreshes boards
+            # for entries it COMPLETES).
+            await self._refresh_board(t_id)
             await ctx.followup.send(
                 f"⚠️ **{p_name}** is registered but I couldn't hold the escrow: {res.get('error')}. "
                 f"Try `/tournament register` again.", ephemeral=True)
@@ -464,12 +469,12 @@ class TournamentCog(commands.Cog):
         # the escrow sweep completes this registration the moment the funds cover the fee.
         deficit = res["deficit"]
         have = res.get("available", 0)
+        await self._refresh_board(t_id)
         await ctx.followup.send(
             f"**{p_name}** is registered (pending) for **{t_name}** — your spot is held.\n"
             f"To finish, run `/wallet deposit {deficit}` whenever you're ready (you have "
             f"{have} tix; the fee is {fee}). Registration completes automatically once the "
             f"tix land — no need to re-register.", ephemeral=True)
-        await self._refresh_board(t_id)
 
     @tournament.command(name="add_team", description="Admin: register a team on a captain's behalf")
     @has_bot_manager_role()
