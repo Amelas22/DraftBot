@@ -14,7 +14,7 @@ from services.tournament_formatter import (
     create_registration_embed,
     create_standings_embed,
     post_registration_board,
-    update_registration_board,
+    refresh_boards,
     update_standings_message,
 )
 from services.tournament_service import (
@@ -287,10 +287,7 @@ class TournamentCog(commands.Cog):
     async def _refresh_board(self, tournament_id, closed=False):
         """Refresh a tournament's registration board. The board is a view — never let a
         Discord failure break the command that changed the roster."""
-        try:
-            await update_registration_board(self.bot, tournament_id, closed=closed)
-        except Exception as e:
-            logger.warning(f"Registration board refresh failed for {tournament_id}: {e}")
+        await refresh_boards(self.bot, [tournament_id], closed=closed)
 
     @tournament.command(name="enable", description="Admin: enable tournament commands on this server")
     @has_bot_manager_role()

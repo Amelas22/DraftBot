@@ -139,17 +139,6 @@ async def test_ledger_nets_to_zero_across_entry_and_refund(test_db):  # noqa: F8
 
 
 # --- board freshness while an entry is still short -----------------------------
-# A partial deposit (or an auto-draw that spends one) moves the "needs N more tix"
-# figure without completing anything, so the sweep's completed-ids alone leave the
-# board stale. open_boards_for_captain is what the deposit follow-up refreshes on.
-
-@pytest.mark.asyncio
-async def test_open_boards_lists_a_captains_unpaid_entries(test_db):  # noqa: F811
-    t_id, _ = await _paid_tournament(fee=2, team="Short Squad")
-
-    assert await escrow.open_boards_for_captain(CAPTAIN) == [t_id]
-    assert await escrow.open_boards_for_captain("someone-else") == []
-
 
 @pytest.mark.asyncio
 async def test_a_partial_deposit_leaves_the_board_listed_but_completes_nothing(test_db):  # noqa: F811
@@ -159,6 +148,7 @@ async def test_a_partial_deposit_leaves_the_board_listed_but_completes_nothing(t
 
     assert await escrow.sweep_pending_entries(CAPTAIN) == []      # nothing completed
     assert await escrow.open_boards_for_captain(CAPTAIN) == [t_id]  # ...but still needs a refresh
+    assert await escrow.open_boards_for_captain("someone-else") == []  # scoped to the captain
     assert await _status(p_id) == "pending"
     assert await wallet_service.get_balance(GUILD, CAPTAIN) == 1   # partial stays liquid
 
@@ -170,3 +160,24 @@ async def test_a_paid_entry_drops_off_the_open_boards_list(test_db):  # noqa: F8
 
     assert await escrow.sweep_pending_entries(CAPTAIN) == [t_id]
     assert await escrow.open_boards_for_captain(CAPTAIN) == []
+
+
+@pytest.mark.asyncio
+async def test_open_registration_boards_is_the_watchdog_backstop(test_db):  # noqa: F811
+    """The watchdog re-renders these every tick, which is what keeps a board honest
+    after balance changes no refresh call site covers (/wallet pay, a withdraw, a debt
+    settlement) — so it must list open tournaments regardless of fee or paid state."""
+    open_paid, _ = await _paid_tournament(fee=2, team="Still Open")
+    async with db_session() as session:
+        free = Tournament(guild_id=GUILD, name="Free Cup", total_rounds=0, format="manual",
+                          status="registration", entry_fee=0)
+        started = Tournament(guild_id=GUILD, name="Started Cup", total_rounds=0,
+                             format="manual", status="active", entry_fee=2)
+        session.add_all([free, started])
+        await session.flush()
+        free_id, started_id = free.id, started.id
+
+    boards = await escrow.open_registration_boards()
+
+    assert open_paid in boards and free_id in boards   # every open board gets re-rendered
+    assert started_id not in boards                    # a started tournament is frozen

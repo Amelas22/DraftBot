@@ -61,6 +61,39 @@ def test_empty_board_invites_registration():
     assert "/tournament register" in _text(create_registration_embed(_tournament(), []))
 
 
+def test_join_instructions_stay_visible_once_teams_have_registered():
+    """They used to show only on an empty board, so they vanished exactly when
+    newcomers start reading it."""
+    teams = [_team(1, "Alpha", "10", "paid")]
+    text = _text(create_registration_embed(_tournament(), teams, pot=1))
+
+    assert "How to join" in text
+    assert "/tournament register" in text
+
+
+def test_paid_join_instructions_name_the_link_and_deposit_steps():
+    """Paying an entry isn't one step: the fee comes from the captain's wallet, so a
+    newcomer needs the MTGO link and the deposit amount, not just the register command."""
+    text = _text(create_registration_embed(_tournament(fee=3), [], pot=0))
+
+    assert "/link_mtgo" in text
+    assert "/wallet deposit 3" in text
+
+
+def test_free_join_instructions_are_just_the_one_command():
+    text = _text(create_registration_embed(_tournament(fee=0), []))
+
+    assert "/tournament register" in text
+    assert "/link_mtgo" not in text and "/wallet deposit" not in text
+
+
+def test_a_closed_board_drops_the_join_instructions():
+    teams = [_team(1, "Alpha", "10", "paid")]
+    text = _text(create_registration_embed(_tournament(), teams, pot=1, closed=True))
+
+    assert "How to join" not in text
+
+
 def test_large_roster_splits_across_fields_under_the_discord_cap():
     """Discord caps a single embed field's value at 1024 characters. Roster lines
     are ~52 chars and deficit lines ~43, so a paid tournament breaks at roughly 10

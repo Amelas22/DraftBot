@@ -39,6 +39,27 @@ def create_standings_embed(tournament, participants):
     return embed
 
 
+def _add_how_to_join(embed, fee, closed):
+    """Spell out how to sign up, for as long as sign-ups are open.
+
+    This used to appear only on an empty board, so it vanished the moment the first
+    team registered — exactly when newcomers start reading the board. A paid entry
+    also isn't one step: the fee is paid from the captain's wallet, so someone who has
+    never deposited needs the MTGO link and the deposit named too, not just the
+    register command."""
+    if closed:
+        return
+    if fee > 0:
+        value = (
+            f"1. `/link_mtgo <your MTGO username>` — once, so the bot can trade with you\n"
+            f"2. `/tournament register <team name>` — holds your spot\n"
+            f"3. `/wallet deposit {fee}` — your spot completes when the tix land"
+        )
+    else:
+        value = "`/tournament register <team name>`"
+    embed.add_field(name="How to join", value=value, inline=False)
+
+
 def create_registration_embed(tournament, participants, pot=0, deficits=None,
                               closed=False):
     """Build the registration board (pure): who is in, and for a paid tournament who
@@ -55,9 +76,8 @@ def create_registration_embed(tournament, participants, pot=0, deficits=None,
                           color=discord.Color.gold())
 
     if not participants:
-        embed.add_field(name="Teams (0)",
-                        value="No teams yet — register with `/tournament register`.",
-                        inline=False)
+        embed.add_field(name="Teams (0)", value="No teams yet.", inline=False)
+        _add_how_to_join(embed, fee, closed)
         return embed
 
     lines = []
@@ -97,6 +117,7 @@ def create_registration_embed(tournament, participants, pot=0, deficits=None,
     for i, chunk in enumerate(chunks):
         name = label if i == 0 else "Teams (cont.)"
         embed.add_field(name=name, value="\n".join(chunk), inline=False)
+    _add_how_to_join(embed, fee, closed)
     return embed
 
 
@@ -141,6 +162,17 @@ async def _board_state(session, tournament):
         guild_id, [p.captain_user_id for p in pending])
     deficits = {p.id: max(fee - balances.get(p.captain_user_id, 0), 0) for p in pending}
     return participants, pot, deficits
+
+
+async def refresh_boards(bot, tournament_ids, closed=False):
+    """Refresh several boards, guarded. The board is a view: a Discord failure on one
+    logs and the rest still update. Every caller that reacts to a change goes through
+    here rather than hand-rolling the try/except."""
+    for t_id in set(tournament_ids):
+        try:
+            await update_registration_board(bot, t_id, closed=closed)
+        except Exception as e:
+            logger.warning(f"board refresh failed for {t_id}: {e}")
 
 
 async def update_registration_board(bot, tournament_id, closed=False):
