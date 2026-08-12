@@ -61,7 +61,6 @@ class TournamentParticipant(Base):
     # The captain's WalletTx reserve holding the fee — cancelled to refund (drop before
     # start), or settled into the tournament's prize wallet when it starts. Null for
     # free / grandfathered / comped participants.
-    escrow_tx_id = Column(Integer, nullable=True)
     paid_at = Column(DateTime, nullable=True)
 
     # This tournament's standings (never written onto the global Team record)

@@ -43,14 +43,16 @@ def upgrade():
             sa.Column('player_id', sa.String(64), nullable=False),
             sa.Column('mtgo_user', sa.String(128), nullable=False),
             sa.Column('amount', sa.Integer(), nullable=False),
-            sa.Column('reserve_tx_id', sa.Integer(), nullable=True),
+            sa.Column('in_flight_source', sa.String(80), nullable=True),
             sa.Column('status', sa.String(16), nullable=False, server_default='pending'),
             sa.Column('created_at', sa.DateTime(), nullable=True),
             sa.Column('resolved_at', sa.DateTime(), nullable=True),
         )
         op.create_index('ix_mtgo_jobs_status', 'mtgo_jobs', ['status'])
 
-    # Partial unique indexes (SQLite supports WHERE on CREATE INDEX).
+    # Partial unique indexes (SQLite supports WHERE on CREATE INDEX). Two shapes of row,
+    # two keys: a boundary crossing is unique per (job_id, kind); a transfer's legs are
+    # unique per (source, kind) — one 'pay' and one 'receive' per source, no more.
     op.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_wallet_tx_job_kind "
         "ON wallet_tx (job_id, kind) WHERE job_id IS NOT NULL"
@@ -60,14 +62,9 @@ def upgrade():
         "ON wallet_tx (source, kind) "
         "WHERE kind IN ('pay', 'receive') AND source IS NOT NULL"
     )
-    op.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS uq_wallet_tx_live_escrow "
-        "ON wallet_tx (source) WHERE kind = 'escrow' AND status = 'pending'"
-    )
 
 
 def downgrade():
-    op.execute("DROP INDEX IF EXISTS uq_wallet_tx_live_escrow")
     op.execute("DROP INDEX IF EXISTS uq_wallet_tx_transfer_legs")
     op.execute("DROP INDEX IF EXISTS uq_wallet_tx_job_kind")
     if _has_table('mtgo_jobs'):

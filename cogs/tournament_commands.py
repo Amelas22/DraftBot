@@ -880,7 +880,7 @@ class TournamentCog(commands.Cog):
 
         fee = tournament.entry_fee or 0
         if tournament.status == "registration":
-            held = await escrow.total_escrowed(str(ctx.guild.id), tournament.id) if fee > 0 else 0
+            held = await escrow.prize_pool(str(ctx.guild.id), tournament.id) if fee > 0 else 0
             embed = self._registration_embed(tournament, participants, held)
         else:
             embed = create_standings_embed(tournament, participants)
@@ -893,7 +893,7 @@ class TournamentCog(commands.Cog):
         fee = tournament.entry_fee or 0
         desc = f"**Status:** {tournament.status.title()}"
         if fee > 0:
-            desc += f"\n**Entry fee:** {fee} tix/team · **Escrow held:** {held} tix"
+            desc += f"\n**Entry fee:** {fee} tix/team · **Prize pool:** {held} tix"
             desc += f"\n**Payout:** {escrow.describe_structure(tournament.payout_structure or 'winner_take_all')}"
         embed = discord.Embed(title=f"🏆 {tournament.name}", description=desc, color=discord.Color.gold())
         if participants:

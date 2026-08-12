@@ -5,13 +5,16 @@ Resolution engine — the bridge between the two ledgers.
   * Claim ledger    = wallet_service / WalletTx (who is owed what).
 
 A trade fires ONLY when value crosses the vault boundary:
-  - deposit  (bot receives tix)  -> credit the wallet once the job is 'done'.
-  - withdraw (bot gives tix)     -> reserve the wallet, then settle/cancel on the job.
-Everything internal (pay, debt settlement, auto-draw) is a claim move with NO trade.
+  - deposit  (bot receives tix)  -> credit the player once the job is 'done'.
+  - withdraw (bot gives tix)     -> transfer the tix to ``system:in-flight`` up front,
+                                    then on 'done' book the boundary debit against that
+                                    holder, or on 'failed' transfer them back.
+Everything internal (pay, entry fees, debt settlement, auto-draw) is a claim transfer
+between holders with NO trade and no change to the system total.
 
 Job discipline (matches the plan): each serve op is an async job with a lowercase
 ``state`` ∈ queued|running|done|failed. The ``start_*`` calls enqueue and return fast
-(the reserve is the only immediate ledger effect, for withdraws); the ``finish_*`` calls
+(the in-flight commit is the only immediate ledger effect, for withdraws); ``finish_*``
 poll to a terminal state and write the ledger — credits are booked ONLY on 'done', never
 on enqueue, and idempotently by ``job_id`` so a re-poll can't double-book. Split this way
 so a cog can enqueue synchronously, defer the interaction, and run ``finish_*`` as a
@@ -72,14 +75,14 @@ async def _poll_job(job_id: str, timeout_s: float):
 # resumer can finish booking trades that outlive their in-memory poller
 # ---------------------------------------------------------------------------
 async def _record_job(job_id: str, kind: str, guild_id: str, player_id: str, mtgo_user: str,
-                      amount: int, *, reserve_tx_id: int = None):
+                      amount: int, *, in_flight_source: str = None):
     async def _do():
         async with db_session() as session:
             if await session.get(MtgoJob, job_id):
                 return
             session.add(MtgoJob(
                 job_id=job_id, kind=kind, guild_id=guild_id, player_id=player_id,
-                mtgo_user=mtgo_user, amount=amount, reserve_tx_id=reserve_tx_id,
+                mtgo_user=mtgo_user, amount=amount, in_flight_source=in_flight_source,
                 status="pending"))
     await with_db_retry(_do)
 
@@ -151,56 +154,78 @@ async def finish_deposit(job_id: str, guild_id: str, player_id: str, n: int, mtg
 
 
 # ---------------------------------------------------------------------------
-# withdraw (bot gives tix) — reserve up front, settle/cancel on terminal
+# withdraw (bot gives tix) — commit to in-flight, then cross the boundary or return
 # ---------------------------------------------------------------------------
+def _in_flight_source(guild_id: str, player_id: str, n: int) -> str:
+    """Idempotency tag for the commit transfer. Uniquified per attempt so a player can
+    have two withdraws open; the uuid is only needed to distinguish concurrent ones."""
+    return f"wd:{guild_id}:{player_id}:{uuid.uuid4().hex[:8]}:{n}"
+
+
 async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, *,
                          commit: bool = True, wait_minutes: int = 0) -> dict:
-    """Reserve ``n`` tix in the player's wallet (atomic funds check), then enqueue the give.
-    The reservation is released ONLY when we're sure the serve never created the job —
-    an ambiguous POST failure keeps the hold (the trade may still fire) and adopts the
-    job from the serve's list when it can."""
+    """Transfer ``n`` tix from the player to ``system:in-flight`` (atomic funds check),
+    then enqueue the give. While the trade is open those tix belong to in-flight, so
+    they're unspendable — no status, no special-casing in any balance query.
+
+    The commitment is returned to the player ONLY when we're sure the serve never created
+    the job — an ambiguous POST failure keeps it committed (the trade may still fire) and
+    adopts the job from the serve's list when it can."""
     if n <= 0:
         return {"ok": False, "error": "amount must be positive"}
     client = get_client()
     if not client.enabled:
         return {"ok": False, "error": "MTGO TradeBot integration is disabled"}
+
+    source = _in_flight_source(guild_id, player_id, n)
     try:
-        reserve = await wallet_service.reserve_debit(
-            guild_id, player_id, n, counterparty_id=mtgo_user, source="serve",
-            notes=f"withdraw {n} tix")
+        await wallet_service.pay(
+            guild_id, player_id, wallet_service.SYSTEM_IN_FLIGHT, n,
+            source=source, notes=f"withdraw {n} tix to {mtgo_user}")
     except ValueError as e:
         return {"ok": False, "error": str(e)}
+
+    async def _return_to_player():
+        await wallet_service.pay(
+            guild_id, wallet_service.SYSTEM_IN_FLIGHT, player_id, n,
+            source=f"return:{source}", notes=f"withdraw {n} tix returned")
 
     resp = await client.withdraw_tix(mtgo_user, n, commit=commit, wait_minutes=wait_minutes)
     if not resp or not resp.get("id"):
         resp = await _recover_lost_job(resp, "request", mtgo_user, n)
         if not resp or not resp.get("id"):
             # Definite rejection, or an ambiguous failure whose job-list scan shows no
-            # job — either way no trade can have been opened; safe to release the hold.
-            await wallet_service.cancel_reserve(reserve.id)
+            # job — either way no trade can have been opened; give the tix back.
+            await _return_to_player()
             return {"ok": False, "error": "serve did not accept the withdraw (unreachable or rejected)"}
         logger.warning(f"start_withdraw: adopted job {resp['id']} after lost POST response")
-    await wallet_service.attach_job(reserve.id, resp["id"])
     await _record_job(resp["id"], "withdraw", guild_id, player_id, mtgo_user, n,
-                      reserve_tx_id=reserve.id)
-    return {"ok": True, "job_id": resp["id"], "reserve_tx_id": reserve.id, "job": resp}
+                      in_flight_source=source)
+    return {"ok": True, "job_id": resp["id"], "in_flight_source": source, "job": resp}
 
 
-async def finish_withdraw(reserve_tx_id: int, job_id: str,
+async def finish_withdraw(in_flight_source: str, job_id: str, guild_id: str, player_id: str,
+                          n: int, mtgo_user: str = None,
                           timeout_s: float = _DEFAULT_POLL_TIMEOUT_S) -> dict:
-    """Poll the withdraw job; confirm the reservation on 'done', release it on 'failed'.
-    On timeout the reservation stays in place (funds remain held) — the startup resumer
-    or a later poll resolves it."""
+    """Poll the withdraw job. On 'done' the tix physically left the vault, so book the
+    boundary debit against in-flight (idempotent by job_id). On 'failed' transfer them
+    back to the player. On timeout they stay committed to in-flight — the watchdog
+    resolves it later."""
     outcome, job = await _poll_job(job_id, timeout_s)
     if outcome == "done":
-        await wallet_service.settle_reserve(reserve_tx_id)
+        await wallet_service.debit_done(
+            guild_id, wallet_service.SYSTEM_IN_FLIGHT, n, job_id=job_id,
+            counterparty_id=mtgo_user, source=in_flight_source,
+            notes=f"withdraw {n} tix delivered to {mtgo_user}")
         await _resolve_job(job_id, "done")
         return {"ok": True, "outcome": "done", "job": job}
     if outcome == "failed":
-        await wallet_service.cancel_reserve(reserve_tx_id)
+        await wallet_service.pay(
+            guild_id, wallet_service.SYSTEM_IN_FLIGHT, player_id, n,
+            source=f"return:{in_flight_source}", notes=f"withdraw {n} tix returned")
         await _resolve_job(job_id, "failed")
         return {"ok": False, "outcome": "failed", "error": job.get("detail") or "trade failed", "job": job}
-    return {"ok": False, "outcome": "pending", "job_id": job_id, "reserve_tx_id": reserve_tx_id, "job": job}
+    return {"ok": False, "outcome": "pending", "job_id": job_id, "job": job}
 
 
 # ---------------------------------------------------------------------------
@@ -232,8 +257,9 @@ async def resume_pending_jobs() -> int:
                 # on the same watchdog tick.
                 await finish_deposit(job.job_id, job.guild_id, job.player_id,
                                      job.amount, job.mtgo_user)
-            elif job.kind == "withdraw" and job.reserve_tx_id:
-                await finish_withdraw(job.reserve_tx_id, job.job_id)
+            elif job.kind == "withdraw" and job.in_flight_source:
+                await finish_withdraw(job.in_flight_source, job.job_id, job.guild_id,
+                                      job.player_id, job.amount, job.mtgo_user)
         finally:
             _polling_jobs.discard(job.job_id)
 
@@ -311,8 +337,7 @@ async def settle_debt_from_wallet(guild_id: str, payer_id: str, creditor_id: str
 
             # payer must have the funds (settled minus reserved) — the same availability
             # formula every wallet op uses
-            balance, reserved = await wallet_service._balances(session, guild_id, payer_id)
-            available = balance - reserved
+            available = await wallet_service.balance_in(session, guild_id, payer_id)
             if amount > available:
                 return {"ok": False, "error": f"insufficient wallet funds (available {available})"}
 
@@ -357,7 +382,7 @@ async def auto_draw(guild_id: str, player_id: str) -> list[dict]:
     Called after a deposit (fresh funds) or after a debt is booked (funds already there).
     Each settlement is atomic and re-checks the live debt, so a concurrent or repeated run
     simply draws against whatever remains — it converges, never over-pays."""
-    available = await wallet_service.get_available(guild_id, player_id)
+    available = await wallet_service.get_balance(guild_id, player_id)
     if available <= 0:
         return []
     balances = await debt_service.get_all_balances_for(guild_id, player_id)

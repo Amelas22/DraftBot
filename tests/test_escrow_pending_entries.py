@@ -1,27 +1,31 @@
-"""A pending entry-fee registration survives a failed trade window and completes
-whenever the tix arrive — by any route (retried deposit, plain /wallet deposit,
-a teammate's /wallet pay). See tournament_escrow_service.sweep_pending_entries.
+"""Entry fees as pure transfers into the tournament's prize wallet.
+
+A pending registration survives a failed/absent trade window and completes whenever the
+tix arrive by any route; the fee then lives in the prize wallet (not a hold on the
+captain), and dropping the team transfers it back.
 """
 import pytest
+from sqlalchemy import select
 
 from conftest import test_db  # noqa: F401  (fixture)
 from database.db_session import db_session
 from models.tournament import Tournament, TournamentParticipant
+from models.wallet_tx import WalletTx
 from services import tournament_escrow_service as escrow
 from services import wallet_service
 
 GUILD = "g1"
 CAPTAIN = "cap1"
+CREDITOR = "cred1"
 
 
-async def _paid_tournament(fee=2, status="registration"):
-    """A tournament with an entry fee plus one team pending escrow."""
+async def _paid_tournament(fee=2, status="registration", team="Pending Squad"):
     async with db_session() as session:
         t = Tournament(guild_id=GUILD, name="Fee Cup", total_rounds=0, format="manual",
                        status=status, entry_fee=fee)
         session.add(t)
         await session.flush()
-        p = TournamentParticipant(tournament_id=t.id, team_id=1, team_name="Pending Squad",
+        p = TournamentParticipant(tournament_id=t.id, team_id=1, team_name=team,
                                   captain_user_id=CAPTAIN, status="pending")
         session.add(p)
         await session.flush()
@@ -30,55 +34,105 @@ async def _paid_tournament(fee=2, status="registration"):
 
 async def _status(participant_id):
     async with db_session() as session:
-        return (await session.get(TournamentParticipant, participant_id)).status
+        p = await session.get(TournamentParticipant, participant_id)
+        return p.status if p else None
 
 
 @pytest.mark.asyncio
 async def test_sweep_leaves_entry_pending_while_wallet_is_short(test_db):  # noqa: F811
-    _, p_id = await _paid_tournament(fee=2)
-    await wallet_service.credit_done(GUILD, CAPTAIN, 1, kind="deposit", job_id="j-short")
+    t_id, p_id = await _paid_tournament(fee=2)
+    await wallet_service.credit_done(GUILD, CAPTAIN, 1, job_id="j-short")
 
     assert await escrow.sweep_pending_entries() == 0
     assert await _status(p_id) == "pending"
-    # the short balance is untouched — nothing was half-reserved
-    assert await wallet_service.get_available(GUILD, CAPTAIN) == 1
+    # nothing moved: the tix are wholly the captain's, the pot is empty
+    assert await wallet_service.get_balance(GUILD, CAPTAIN) == 1
+    assert await escrow.prize_pool(GUILD, t_id) == 0
 
 
 @pytest.mark.asyncio
-async def test_sweep_completes_entry_once_funds_arrive(test_db):  # noqa: F811
-    _, p_id = await _paid_tournament(fee=2)
-    # first trade window failed: nothing credited, spot still pending
-    assert await escrow.sweep_pending_entries() == 0
-    assert await _status(p_id) == "pending"
+async def test_fee_transfers_into_the_prize_wallet_when_funds_arrive(test_db):  # noqa: F811
+    t_id, p_id = await _paid_tournament(fee=2)
+    assert await escrow.sweep_pending_entries() == 0  # no funds yet, spot held
 
-    # tix arrive later by any route
-    await wallet_service.credit_done(GUILD, CAPTAIN, 2, kind="deposit", job_id="j-late")
-
+    await wallet_service.credit_done(GUILD, CAPTAIN, 3, job_id="j-late")
     assert await escrow.sweep_pending_entries() == 1
     assert await _status(p_id) == "paid"
-    # the fee is held (reserved), not spent
+
+    # the fee LEFT the captain and now belongs to the pot — no hold, no status
+    assert await wallet_service.get_balance(GUILD, CAPTAIN) == 1
+    assert await escrow.prize_pool(GUILD, t_id) == 2
+    async with db_session() as session:
+        rows = (await session.execute(
+            select(WalletTx).where(WalletTx.source == escrow.escrow_source(t_id, p_id))
+        )).scalars().all()
+    assert sorted(r.amount for r in rows) == [-2, 2]  # one transfer pair, nets to zero
+
+
+@pytest.mark.asyncio
+async def test_sweep_is_idempotent_and_charges_once(test_db):  # noqa: F811
+    t_id, p_id = await _paid_tournament(fee=2)
+    await wallet_service.credit_done(GUILD, CAPTAIN, 4, job_id="j-plenty")
+
+    assert await escrow.sweep_pending_entries() == 1
+    assert await escrow.sweep_pending_entries() == 0
+    # re-securing an already-paid entry must not charge a second fee
+    res = await escrow.secure_from_wallet(GUILD, CAPTAIN, p_id, t_id, 2, "Pending Squad")
+    assert res["done"] and res.get("reused")
     assert await wallet_service.get_balance(GUILD, CAPTAIN) == 2
-    assert await wallet_service.get_available(GUILD, CAPTAIN) == 0
+    assert await escrow.prize_pool(GUILD, t_id) == 2
 
 
 @pytest.mark.asyncio
-async def test_sweep_is_idempotent_and_holds_the_fee_once(test_db):  # noqa: F811
-    _, p_id = await _paid_tournament(fee=2)
-    await wallet_service.credit_done(GUILD, CAPTAIN, 4, kind="deposit", job_id="j-plenty")
+async def test_committed_fee_cannot_be_spent_on_a_debt_or_pay(test_db):  # noqa: F811
+    """The fee is gone from the captain's balance, so ordinary spending simply can't reach it."""
+    t_id, p_id = await _paid_tournament(fee=2)
+    await wallet_service.credit_done(GUILD, CAPTAIN, 2, job_id="j-exact")
+    await escrow.sweep_pending_entries()
 
-    assert await escrow.sweep_pending_entries() == 1
-    assert await escrow.sweep_pending_entries() == 0  # already paid: nothing to do
-    assert await _status(p_id) == "paid"
-    assert await wallet_service.get_available(GUILD, CAPTAIN) == 2  # exactly one 2-tix hold
+    assert await wallet_service.get_balance(GUILD, CAPTAIN) == 0
+    with pytest.raises(ValueError):
+        await wallet_service.pay(GUILD, CAPTAIN, CREDITOR, 1, source="nope")
+    assert await escrow.prize_pool(GUILD, t_id) == 2
+
+
+@pytest.mark.asyncio
+async def test_dropping_a_team_refunds_the_fee_out_of_the_pot(test_db):  # noqa: F811
+    t_id, p_id = await _paid_tournament(fee=2, team="Droppers")
+    await wallet_service.credit_done(GUILD, CAPTAIN, 2, job_id="j-drop")
+    await escrow.sweep_pending_entries()
+    assert await escrow.prize_pool(GUILD, t_id) == 2
+
+    res = await escrow.drop_with_refund(t_id, "Droppers")
+    assert res["refunded"] == 2
+    assert await wallet_service.get_balance(GUILD, CAPTAIN) == 2  # whole again
+    assert await escrow.prize_pool(GUILD, t_id) == 0
+    assert await _status(p_id) is None  # participant removed
 
 
 @pytest.mark.asyncio
 async def test_sweep_ignores_tournaments_past_registration(test_db):  # noqa: F811
     """Once a tournament starts, a still-unpaid team is out — the sweep must not
     quietly seat (and charge) it afterwards."""
-    _, p_id = await _paid_tournament(fee=2, status="active")
-    await wallet_service.credit_done(GUILD, CAPTAIN, 5, kind="deposit", job_id="j-late2")
+    t_id, p_id = await _paid_tournament(fee=2, status="active")
+    await wallet_service.credit_done(GUILD, CAPTAIN, 5, job_id="j-late2")
 
     assert await escrow.sweep_pending_entries() == 0
     assert await _status(p_id) == "pending"
-    assert await wallet_service.get_available(GUILD, CAPTAIN) == 5  # not charged
+    assert await wallet_service.get_balance(GUILD, CAPTAIN) == 5  # not charged
+    assert await escrow.prize_pool(GUILD, t_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_ledger_nets_to_zero_across_entry_and_refund(test_db):  # noqa: F811
+    """Transfers never change the system total — the reconciliation invariant by
+    construction. Only the boundary credit (the deposit) moves it."""
+    t_id, _ = await _paid_tournament(fee=2, team="Netters")
+    await wallet_service.credit_done(GUILD, CAPTAIN, 2, job_id="j-net")
+    assert await wallet_service.total_wallets() == 2
+
+    await escrow.sweep_pending_entries()
+    assert await wallet_service.total_wallets() == 2  # fee moved, total unchanged
+
+    await escrow.drop_with_refund(t_id, "Netters")
+    assert await wallet_service.total_wallets() == 2  # refund moved it back

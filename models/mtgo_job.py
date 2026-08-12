@@ -26,7 +26,7 @@ class MtgoJob(Base):
     player_id = Column(String(64), nullable=False)
     mtgo_user = Column(String(128), nullable=False)
     amount = Column(Integer, nullable=False)
-    reserve_tx_id = Column(Integer, nullable=True)         # withdraws: the pending WalletTx hold
+    in_flight_source = Column(String(80), nullable=True)   # withdraws: the commit transfer's source tag
     status = Column(String(16), nullable=False, default='pending')  # pending | done | failed
     created_at = Column(DateTime, default=datetime.now)
     resolved_at = Column(DateTime, nullable=True)
