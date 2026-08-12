@@ -37,6 +37,58 @@ async def _player_skill_rating(player_id, guild_id):
     return skill_rating(mu, sigma, games), not is_established(games)
 
 
+# Deepest rank the stats page will show. Past this the number stops being a
+# brag and starts being noise ("#84 of 185"), so the field renders as it always
+# did — the rating alone.
+SERVER_RANK_LIMIT = 20
+
+
+async def _player_server_rank(player_id, guild_id):
+    """Return (rank, pool_size) for a player among this guild's established
+    players by skill rating, or (None, None) when there's no rank worth showing.
+
+    Ranking is over established players only: the display rating shrinks a short
+    record toward 1500, but a hot enough one could still outrank a proven player,
+    and a top-20 slot shouldn't turn over on three games. That also makes the
+    pool the same population the "(provisional)" label already distinguishes.
+
+    Ties share the better rank (competition ranking), and a rank past
+    SERVER_RANK_LIMIT is reported as no rank at all.
+    """
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(
+                PlayerStats.player_id,
+                PlayerStats.true_skill_mu,
+                PlayerStats.true_skill_sigma,
+                PlayerStats.games_won,
+                PlayerStats.games_lost,
+            ).where(
+                PlayerStats.guild_id == str(guild_id),
+                PlayerStats.true_skill_mu.isnot(None),
+                PlayerStats.true_skill_sigma.isnot(None),
+            )
+        )
+        rows = result.all()
+
+    # The rating is computed in Python (shrinkage), so ranking can't be a SQL
+    # ORDER BY; guild rosters are small enough that folding the rows here is cheap.
+    ratings = {}
+    for pid, mu, sigma, games_won, games_lost in rows:
+        games = (games_won or 0) + (games_lost or 0)
+        if is_established(games):
+            ratings[pid] = skill_rating(mu, sigma, games)
+
+    mine = ratings.get(str(player_id))
+    if mine is None:
+        return None, None
+
+    rank = sum(1 for rating in ratings.values() if rating > mine) + 1
+    if rank > SERVER_RANK_LIMIT:
+        return None, None
+    return rank, len(ratings)
+
+
 async def _player_quiz_stats(player_id, guild_id):
     """Lifetime quiz stats for one player, as (pick_quiz, trophy_quiz) dicts —
     either is None when the player hasn't played that quiz type.
@@ -135,6 +187,12 @@ async def get_stats_embed_for_player(
     rating, provisional = await _player_skill_rating(player_id, guild_id)
     stats_lifetime['skill_rating'] = rating
     stats_lifetime['skill_provisional'] = provisional
+
+    # Standing among the guild's established players — present only for the
+    # top SERVER_RANK_LIMIT, so the field stays silent for everyone else.
+    server_rank, rank_pool = await _player_server_rank(player_id, guild_id)
+    stats_lifetime['server_rank'] = server_rank
+    stats_lifetime['server_rank_pool'] = rank_pool
 
     # Lifetime quiz stats (pick + trophy), rendered as their own embed field.
     pick_quiz, trophy_quiz = await _player_quiz_stats(player_id, guild_id)

@@ -300,6 +300,11 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
     skill = stats_lifetime.get('skill_rating')
     if skill is not None:
         value = f"{skill} (provisional)" if stats_lifetime.get('skill_provisional') else str(skill)
+        # Server standing rides along only for the top few (see
+        # stats_display.SERVER_RANK_LIMIT); absent for everyone else.
+        rank = stats_lifetime.get('server_rank')
+        if rank is not None:
+            value += f" · **#{rank}** of {stats_lifetime['server_rank_pool']} ranked players"
         value += "\n*New players start at 1500 · a 100-point gap ≈ 60% match favorite*"
         embed.add_field(name="🎯 Skill Rating", value=value, inline=False)
 
