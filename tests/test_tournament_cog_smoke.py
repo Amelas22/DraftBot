@@ -44,3 +44,27 @@ def test_recorded_result_line_formats_score():
 
     line = _recorded_result_line("Latecomers", "Strixhaven Dropouts", 5, 4)
     assert line == "✅ Result recorded: **Latecomers** 5–4 **Strixhaven Dropouts**"
+
+
+def test_register_replies_are_all_ephemeral():
+    """The board is the public record; a captain's confirmations are private, so no
+    reply in register may omit ephemeral=True (a public reply could contradict the
+    board later — e.g. a '✅ registered' message left in scrollback after a drop)."""
+    import ast
+    import inspect
+    import textwrap
+
+    from cogs.tournament_commands import TournamentCog
+
+    src = textwrap.dedent(inspect.getsource(TournamentCog.register.callback))
+    tree = ast.parse(src)
+    sends = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("send", "defer", "respond")
+    ]
+    assert sends, "expected register to reply to the user"
+    for call in sends:
+        assert any(kw.arg == "ephemeral" and kw.value.value is True
+                   for kw in call.keywords), f"non-ephemeral reply at line {call.lineno}"
