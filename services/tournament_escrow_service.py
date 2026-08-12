@@ -160,7 +160,7 @@ async def refund_entry(session, guild_id: str, tournament_id: int,
     return leg.amount
 
 
-async def sweep_pending_entries(captain_id: str = None) -> int:
+async def sweep_pending_entries(captain_id: str = None) -> list[int]:
     """Complete every pending entry whose captain's wallet can now cover the fee.
 
     A registration is only complete once the tix are actually in the vault — but it must
@@ -172,7 +172,7 @@ async def sweep_pending_entries(captain_id: str = None) -> int:
     so a sweep over an underfunded entry costs one balance read and changes nothing.
 
     Pass ``captain_id`` to scope it to one person (after their deposit lands, only their
-    entries can have become payable). Returns the number of entries completed."""
+    entries can have become payable). Returns the tournament ids whose entries completed."""
     conditions = [
         Tournament.status == "registration",
         Tournament.entry_fee > 0,
@@ -185,7 +185,7 @@ async def sweep_pending_entries(captain_id: str = None) -> int:
             select(TournamentParticipant, Tournament)
             .join(Tournament, TournamentParticipant.tournament_id == Tournament.id)
             .where(*conditions))).all()
-    completed = 0
+    completed = []
     for participant, tournament in rows:
         try:
             res = await secure_from_wallet(
@@ -195,7 +195,7 @@ async def sweep_pending_entries(captain_id: str = None) -> int:
             logger.warning(f"sweep_pending_entries: {participant.team_name} failed: {e}")
             continue
         if res.get("done"):
-            completed += 1
+            completed.append(tournament.id)
             logger.info(f"sweep: '{participant.team_name}' completed registration for "
                         f"'{tournament.name}' (funds arrived)")
     return completed

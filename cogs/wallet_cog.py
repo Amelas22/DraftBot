@@ -27,6 +27,7 @@ from services import wallet_service
 from services import mtgo_resolution_service as resolution
 from services import tournament_escrow_service as escrow
 from services.mtgo_tradebot_client import EVENT_TICKET
+from services.tournament_formatter import update_registration_board
 from helpers.money_gate import (
     DEFAULT_WAIT_MINUTES, custodian_name, explain_trade_failure, gate_read, gate_serve,
     linked_username, spawn_followup,
@@ -104,6 +105,7 @@ class WalletCommands(commands.Cog):
 
         # capture only what the poller needs (not ctx) — this task can live for ~14 min
         followup = ctx.followup
+        bot = self.bot
 
         async def _finish():
             res = await resolution.finish_deposit(job_id, guild_id, player_id, amount, username)
@@ -111,12 +113,17 @@ class WalletCommands(commands.Cog):
                 # Complete any pending tournament entry BEFORE auto-draw: the player
                 # just committed to that entry, so its fee shouldn't be siphoned to a
                 # creditor on the way in.
-                entries = await escrow.sweep_pending_entries(player_id)
+                completed = await escrow.sweep_pending_entries(player_id)
                 bal = await wallet_service.get_balance(guild_id, player_id)
                 drawn = await resolution.auto_draw(guild_id, player_id)
                 msg = f"✅ Deposit confirmed: **+{amount} tix**. Balance: **{bal} tix**."
-                if entries:
-                    msg += f" Completed **{entries}** pending tournament registration(s)."
+                if completed:
+                    msg += f" Completed **{len(completed)}** pending tournament registration(s)."
+                    for t_id in set(completed):
+                        try:
+                            await update_registration_board(bot, t_id)
+                        except Exception as e:
+                            logger.warning(f"board refresh failed for {t_id}: {e}")
                 if drawn:
                     total = sum(d.get("amount", 0) for d in drawn)
                     msg += f" Auto-applied **{total} tix** to {len(drawn)} debt(s)."
