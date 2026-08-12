@@ -136,3 +136,37 @@ async def test_ledger_nets_to_zero_across_entry_and_refund(test_db):  # noqa: F8
 
     await escrow.drop_with_refund(t_id, "Netters")
     assert await wallet_service.total_wallets() == 2  # refund moved it back
+
+
+# --- board freshness while an entry is still short -----------------------------
+# A partial deposit (or an auto-draw that spends one) moves the "needs N more tix"
+# figure without completing anything, so the sweep's completed-ids alone leave the
+# board stale. open_boards_for_captain is what the deposit follow-up refreshes on.
+
+@pytest.mark.asyncio
+async def test_open_boards_lists_a_captains_unpaid_entries(test_db):  # noqa: F811
+    t_id, _ = await _paid_tournament(fee=2, team="Short Squad")
+
+    assert await escrow.open_boards_for_captain(CAPTAIN) == [t_id]
+    assert await escrow.open_boards_for_captain("someone-else") == []
+
+
+@pytest.mark.asyncio
+async def test_a_partial_deposit_leaves_the_board_listed_but_completes_nothing(test_db):  # noqa: F811
+    """The exact case that showed a stale deficit: 1 tix toward a 2 tix fee."""
+    t_id, p_id = await _paid_tournament(fee=2, team="Short Squad")
+    await wallet_service.credit_done(GUILD, CAPTAIN, 1, job_id="j-partial")
+
+    assert await escrow.sweep_pending_entries(CAPTAIN) == []      # nothing completed
+    assert await escrow.open_boards_for_captain(CAPTAIN) == [t_id]  # ...but still needs a refresh
+    assert await _status(p_id) == "pending"
+    assert await wallet_service.get_balance(GUILD, CAPTAIN) == 1   # partial stays liquid
+
+
+@pytest.mark.asyncio
+async def test_a_paid_entry_drops_off_the_open_boards_list(test_db):  # noqa: F811
+    t_id, _ = await _paid_tournament(fee=2, team="Payers")
+    await wallet_service.credit_done(GUILD, CAPTAIN, 2, job_id="j-full")
+
+    assert await escrow.sweep_pending_entries(CAPTAIN) == [t_id]
+    assert await escrow.open_boards_for_captain(CAPTAIN) == []

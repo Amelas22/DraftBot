@@ -114,16 +114,20 @@ class WalletCommands(commands.Cog):
                 # just committed to that entry, so its fee shouldn't be siphoned to a
                 # creditor on the way in.
                 completed = await escrow.sweep_pending_entries(player_id)
-                bal = await wallet_service.get_balance(guild_id, player_id)
                 drawn = await resolution.auto_draw(guild_id, player_id)
+                bal = await wallet_service.get_balance(guild_id, player_id)
+                # Refresh after BOTH: a deposit that only part-covers a fee, and an
+                # auto-draw that spends one, each move the "needs N more tix" figure
+                # without completing anything — so the completed ids alone aren't enough.
+                stale = set(completed) | set(await escrow.open_boards_for_captain(player_id))
+                for t_id in stale:
+                    try:
+                        await update_registration_board(bot, t_id)
+                    except Exception as e:
+                        logger.warning(f"board refresh failed for {t_id}: {e}")
                 msg = f"✅ Deposit confirmed: **+{amount} tix**. Balance: **{bal} tix**."
                 if completed:
                     msg += f" Completed **{len(completed)}** pending tournament registration(s)."
-                    for t_id in set(completed):
-                        try:
-                            await update_registration_board(bot, t_id)
-                        except Exception as e:
-                            logger.warning(f"board refresh failed for {t_id}: {e}")
                 if drawn:
                     total = sum(d.get("amount", 0) for d in drawn)
                     msg += f" Auto-applied **{total} tix** to {len(drawn)} debt(s)."
