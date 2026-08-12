@@ -1,7 +1,7 @@
 """add mtgo_accounts and wallet_tx tables
 
 Revision ID: mtgowallet01
-Revises: trophreguess0
+Revises: dispnamefill0
 Create Date: 2026-08-03
 
 Adds the two tables backing the MTGO escrow/wallet feature:
@@ -22,7 +22,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'mtgowallet01'
-down_revision: Union[str, Sequence[str], None] = 'trophreguess0'
+down_revision: Union[str, Sequence[str], None] = 'dispnamefill0'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
