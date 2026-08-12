@@ -1,5 +1,7 @@
 """Smoke tests for cogs/tournament_commands.py (Slice 1)."""
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from helpers.permissions import is_bot_manager
 
@@ -44,3 +46,114 @@ def test_recorded_result_line_formats_score():
 
     line = _recorded_result_line("Latecomers", "Strixhaven Dropouts", 5, 4)
     assert line == "✅ Result recorded: **Latecomers** 5–4 **Strixhaven Dropouts**"
+
+
+def test_register_replies_are_all_ephemeral():
+    """The board is the public record; a captain's confirmations are private, so no
+    reply in register may omit ephemeral=True (a public reply could contradict the
+    board later — e.g. a '✅ registered' message left in scrollback after a drop)."""
+    import ast
+    import inspect
+    import textwrap
+
+    from cogs.tournament_commands import TournamentCog
+
+    src = textwrap.dedent(inspect.getsource(TournamentCog.register.callback))
+    tree = ast.parse(src)
+    sends = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("send", "defer", "respond")
+    ]
+    assert sends, "expected register to reply to the user"
+    for call in sends:
+        assert any(kw.arg == "ephemeral" and kw.value.value is True
+                   for kw in call.keywords), f"non-ephemeral reply at line {call.lineno}"
+
+
+@pytest.mark.asyncio
+async def test_create_posts_the_board_even_if_the_confirmation_reply_fails(test_db):  # noqa: F811
+    """Regression: live testing found the board never posted and board_channel_id/
+    board_message_id stayed NULL, with no "Could not post registration board"
+    warning in the log. Root cause: the ephemeral confirmation's ctx.followup.send()
+    and the post_registration_board() call were sequenced in one unguarded flow —
+    a flaky/expired interaction token during the confirmation raised past the
+    try/except that was supposed to guard the board post, skipping it entirely and
+    escaping create() as an unhandled exception. The board goes to ctx.channel, not
+    the interaction, so it must post (and the command must not raise) regardless of
+    whether the confirmation reply succeeds."""
+    from cogs.tournament_commands import TournamentCog
+    from database.db_session import db_session
+    from models.tournament import Tournament
+    from sqlalchemy import select
+
+    cog = TournamentCog(MagicMock())
+    ctx = MagicMock()
+    ctx.guild.id = 123
+    ctx.author.id = 456
+    ctx.defer = AsyncMock()
+    # Simulates the observed HTTPException(40060)/NotFound(10062): the confirmation
+    # reply itself fails.
+    ctx.followup.send = AsyncMock(side_effect=RuntimeError("interaction already acknowledged"))
+
+    posted_message = MagicMock()
+    posted_message.id = 999
+    posted_message.channel.id = 777
+    ctx.channel = MagicMock()
+    ctx.channel.send = AsyncMock(return_value=posted_message)
+
+    with patch("cogs.tournament_commands.tournament_enabled", return_value=True):
+        await TournamentCog.create.callback(
+            cog, ctx, name="Cup", format="swiss", rounds=3, entry_fee=0, payout="winner_take_all",
+        )
+
+    ctx.channel.send.assert_awaited_once()
+    async with db_session() as session:
+        tournament = (
+            await session.execute(select(Tournament).where(Tournament.name == "Cup"))
+        ).scalar_one()
+        assert tournament.board_channel_id == "777"
+        assert tournament.board_message_id == "999"
+
+
+@pytest.mark.asyncio
+async def test_refresh_board_swallows_a_discord_failure():
+    """The board is a view, never a source of truth: a Discord failure while
+    refreshing it must log and return, not propagate and abort the command that
+    changed the roster (a registration, a fee transfer, a tournament start)."""
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    with patch(
+        "cogs.tournament_commands.update_registration_board",
+        AsyncMock(side_effect=RuntimeError("discord boom")),
+    ):
+        await cog._refresh_board(1)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_start_freezes_the_board():
+    """/tournament start closes registration, so the board refresh it triggers
+    must be told closed=True — otherwise the board keeps inviting registrations
+    after the schedule has already been seeded."""
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    cog._refresh_board = AsyncMock()
+    cog._post_schedule = AsyncMock()
+    cog._post_standings = AsyncMock()
+
+    ctx = MagicMock()
+    ctx.guild.id = 123
+    ctx.author.id = 456
+    ctx.defer = AsyncMock()
+    ctx.followup.send = AsyncMock()
+
+    res = {"tournament_id": 1, "name": "Cup", "pot": 0, "fee": 0}
+    with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
+         patch("cogs.tournament_commands.escrow.close_registration_and_seed",
+               AsyncMock(return_value=res)):
+        await TournamentCog.start.callback(cog, ctx)
+
+    cog._refresh_board.assert_awaited_once_with(1, closed=True)

@@ -39,6 +39,10 @@ class Tournament(Base):
     # Where the auto-updating standings message lives (edited in place on every result)
     standings_channel_id = Column(String(64), nullable=True)
     standings_message_id = Column(String(64), nullable=True)
+    # The live registration board (roster + who has paid), posted at creation and
+    # edited in place until the tournament starts. Same shape as standings_*.
+    board_channel_id = Column(String(64), nullable=True)
+    board_message_id = Column(String(64), nullable=True)
 
     def __repr__(self):
         return f"<Tournament(id={self.id}, name={self.name!r}, status={self.status})>"

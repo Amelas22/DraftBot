@@ -43,7 +43,7 @@ async def test_sweep_leaves_entry_pending_while_wallet_is_short(test_db):  # noq
     t_id, p_id = await _paid_tournament(fee=2)
     await wallet_service.credit_done(GUILD, CAPTAIN, 1, job_id="j-short")
 
-    assert await escrow.sweep_pending_entries() == 0
+    assert await escrow.sweep_pending_entries() == []
     assert await _status(p_id) == "pending"
     # nothing moved: the tix are wholly the captain's, the pot is empty
     assert await wallet_service.get_balance(GUILD, CAPTAIN) == 1
@@ -53,10 +53,10 @@ async def test_sweep_leaves_entry_pending_while_wallet_is_short(test_db):  # noq
 @pytest.mark.asyncio
 async def test_fee_transfers_into_the_prize_wallet_when_funds_arrive(test_db):  # noqa: F811
     t_id, p_id = await _paid_tournament(fee=2)
-    assert await escrow.sweep_pending_entries() == 0  # no funds yet, spot held
+    assert await escrow.sweep_pending_entries() == []  # no funds yet, spot held
 
     await wallet_service.credit_done(GUILD, CAPTAIN, 3, job_id="j-late")
-    assert await escrow.sweep_pending_entries() == 1
+    assert await escrow.sweep_pending_entries() == [t_id]
     assert await _status(p_id) == "paid"
 
     # the fee LEFT the captain and now belongs to the pot — no hold, no status
@@ -74,8 +74,8 @@ async def test_sweep_is_idempotent_and_charges_once(test_db):  # noqa: F811
     t_id, p_id = await _paid_tournament(fee=2)
     await wallet_service.credit_done(GUILD, CAPTAIN, 4, job_id="j-plenty")
 
-    assert await escrow.sweep_pending_entries() == 1
-    assert await escrow.sweep_pending_entries() == 0
+    assert await escrow.sweep_pending_entries() == [t_id]
+    assert await escrow.sweep_pending_entries() == []
     # re-securing an already-paid entry must not charge a second fee
     res = await escrow.secure_from_wallet(GUILD, CAPTAIN, p_id, t_id, 2, "Pending Squad")
     assert res["done"] and res.get("reused")
@@ -117,7 +117,7 @@ async def test_sweep_ignores_tournaments_past_registration(test_db):  # noqa: F8
     t_id, p_id = await _paid_tournament(fee=2, status="active")
     await wallet_service.credit_done(GUILD, CAPTAIN, 5, job_id="j-late2")
 
-    assert await escrow.sweep_pending_entries() == 0
+    assert await escrow.sweep_pending_entries() == []
     assert await _status(p_id) == "pending"
     assert await wallet_service.get_balance(GUILD, CAPTAIN) == 5  # not charged
     assert await escrow.prize_pool(GUILD, t_id) == 0

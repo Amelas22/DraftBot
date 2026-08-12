@@ -1,3 +1,4 @@
+import discord
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from discord.ext import commands
@@ -240,6 +241,26 @@ async def test_uses_followup_when_already_responded():
         await handle_application_command_error(ctx, commands.CheckFailure("nope"))
     ctx.followup.send.assert_called_once()
     ctx.respond.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_send_error_falls_back_when_is_done_is_stale():
+    """Regression: is_done() reflects local state only. If a deferred response
+    actually landed on Discord (real ack) but the client-side call raised before
+    recording it, is_done() reports False even though the interaction is really
+    already acknowledged — so ctx.respond() 400s with "already acknowledged".
+    _send_error must recover by falling back to followup.send() instead of
+    swallowing the user-facing message entirely."""
+    ctx = make_ctx(role_names=())
+    ctx.interaction.response.is_done.return_value = False
+    ctx.respond = AsyncMock(side_effect=discord.HTTPException(MagicMock(status=400), "already acknowledged"))
+    ctx.followup.send = AsyncMock()
+    with patch("helpers.permissions.get_config", return_value={}):
+        await handle_application_command_error(ctx, commands.CheckFailure("nope"))
+    ctx.respond.assert_called_once()
+    ctx.followup.send.assert_called_once()
+    msg = ctx.followup.send.call_args.args[0]
+    assert "permission" in msg.lower()
 
 
 # ---- bot_manager_button (component-callback decorator) ----------------------

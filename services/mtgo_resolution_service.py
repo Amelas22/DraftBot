@@ -271,7 +271,7 @@ async def resume_pending_jobs() -> int:
     return len(pending)
 
 
-async def pending_jobs_watchdog():
+async def pending_jobs_watchdog(bot=None):
     """Run resume_pending_jobs forever, every ``_RESCAN_INTERVAL_S``.
 
     A single startup pass isn't enough: each poll gives up after ~14 minutes
@@ -290,7 +290,14 @@ async def pending_jobs_watchdog():
             # Funds can also land outside a tracked job (a plain /wallet deposit, a
             # teammate's /wallet pay), so finish any entry the wallet can now cover.
             from services import tournament_escrow_service as escrow
-            await escrow.sweep_pending_entries()
+            completed = await escrow.sweep_pending_entries()
+            if bot is not None:
+                from services.tournament_formatter import update_registration_board
+                for t_id in set(completed):
+                    try:
+                        await update_registration_board(bot, t_id)
+                    except Exception as e:
+                        logger.warning(f"board refresh failed for {t_id}: {e}")
         except Exception as e:
             logger.warning(f"pending_jobs_watchdog: rescan failed: {e}")
         await asyncio.sleep(_RESCAN_INTERVAL_S)

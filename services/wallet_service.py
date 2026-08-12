@@ -88,6 +88,22 @@ async def balance_in(session, guild_id: str, player_id: str) -> int:
         session, WalletTx.guild_id == guild_id, WalletTx.player_id == player_id)
 
 
+async def balances_for(guild_id: str, player_ids) -> dict[str, int]:
+    """Balance per holder in one grouped query — rendering N pending teams costs one
+    read, not N. Holders with no rows come back as 0 so callers needn't re-check."""
+    ids = [str(p) for p in (player_ids or [])]
+    if not ids:
+        return {}
+    async with db_session() as session:
+        rows = (await session.execute(
+            select(WalletTx.player_id, func.coalesce(func.sum(WalletTx.amount), 0))
+            .where(WalletTx.guild_id == guild_id, WalletTx.player_id.in_(ids))
+            .group_by(WalletTx.player_id)
+        )).all()
+    found = {pid: int(total) for pid, total in rows}
+    return {pid: found.get(pid, 0) for pid in ids}
+
+
 # ---------------------------------------------------------------------------
 # reads
 # ---------------------------------------------------------------------------

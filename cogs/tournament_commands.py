@@ -10,7 +10,13 @@ from helpers.money_gate import gate_serve, linked_username
 from helpers.permissions import has_bot_manager_role
 from models.tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
 from sqlalchemy import or_, select
-from services.tournament_formatter import create_standings_embed, update_standings_message
+from services.tournament_formatter import (
+    create_registration_embed,
+    create_standings_embed,
+    post_registration_board,
+    update_registration_board,
+    update_standings_message,
+)
 from services.tournament_service import (
     advance_round,
     add_match,
@@ -27,6 +33,7 @@ from services.tournament_service import (
 )
 from services.mtgo_tradebot_client import EVENT_TICKET
 from services import tournament_escrow_service as escrow
+from services import wallet_service
 
 
 def tournament_enabled(guild_id):
@@ -277,6 +284,14 @@ class TournamentCog(commands.Cog):
         await ctx.respond("Tournaments are not enabled on this server.", ephemeral=True)
         return False
 
+    async def _refresh_board(self, tournament_id, closed=False):
+        """Refresh a tournament's registration board. The board is a view — never let a
+        Discord failure break the command that changed the roster."""
+        try:
+            await update_registration_board(self.bot, tournament_id, closed=closed)
+        except Exception as e:
+            logger.warning(f"Registration board refresh failed for {tournament_id}: {e}")
+
     @tournament.command(name="enable", description="Admin: enable tournament commands on this server")
     @has_bot_manager_role()
     async def enable(self, ctx):
@@ -332,20 +347,32 @@ class TournamentCog(commands.Cog):
                     session, ctx.guild.id, name, total_rounds, format=format,
                     entry_fee=entry_fee, payout_structure=payout
                 )
-            logger.info(f"Tournament '{name}' ({format}) created in guild {ctx.guild.id} by {ctx.author.id}")
-            detail = f"{tournament.total_rounds} rounds" if format == "swiss" else format.replace("_", "-")
-            fee_line = (
-                f" Entry fee: **{entry_fee} {EVENT_TICKET}(s)** per team — a team is registered "
-                f"once its captain's escrow is received. Payout: **{escrow.describe_structure(payout)}**."
-                if entry_fee > 0 else ""
-            )
+        except ValueError as e:
+            await ctx.followup.send(f"❌ {e}", ephemeral=True)
+            return
+        logger.info(f"Tournament '{name}' ({format}) created in guild {ctx.guild.id} by {ctx.author.id}")
+        detail = f"{tournament.total_rounds} rounds" if format == "swiss" else format.replace("_", "-")
+        fee_line = (
+            f" Entry fee: **{entry_fee} {EVENT_TICKET}(s)** per team — a team is registered "
+            f"once its captain's escrow is received. Payout: **{escrow.describe_structure(payout)}**."
+            if entry_fee > 0 else ""
+        )
+        # The ephemeral confirmation rides the interaction token, which can be flaky
+        # (ack races, expiry) independently of everything else here — a failure to
+        # notify the invoker must never prevent the registration board (the actual
+        # source of truth for onlookers) from posting to the channel below.
+        try:
             await ctx.followup.send(
                 f"✅ Tournament **{tournament.name}** created ({detail}). "
                 f"Registration is open — captains can join with `/tournament register`.{fee_line}",
                 ephemeral=True,
             )
-        except ValueError as e:
-            await ctx.followup.send(f"❌ {e}", ephemeral=True)
+        except Exception as e:
+            logger.warning(f"Could not send tournament-create confirmation for {tournament.id}: {e}")
+        try:
+            await post_registration_board(ctx.channel, tournament.id)
+        except Exception as e:
+            logger.warning(f"Could not post registration board: {e}")
 
     @tournament.command(name="register", description="Register your team for the open tournament")
     async def register(
@@ -355,7 +382,7 @@ class TournamentCog(commands.Cog):
     ):
         if not await self._check_enabled(ctx):
             return
-        await ctx.defer()
+        await ctx.defer(ephemeral=True)
 
         async with db_session() as session:
             tournament = await get_active_tournament(session, ctx.guild.id)
@@ -395,8 +422,10 @@ class TournamentCog(commands.Cog):
         if fee == 0:
             if created:
                 logger.info(f"Team '{p_name}' registered for tournament {t_id} by {ctx.author.id}")
+                await self._refresh_board(t_id)
                 await ctx.followup.send(
-                    f"✅ **{p_name}** is registered for **{t_name}** with {ctx.author.mention} as captain.")
+                    f"✅ **{p_name}** is registered for **{t_name}** with "
+                    f"{ctx.author.mention} as captain.", ephemeral=True)
             else:
                 await ctx.followup.send(
                     f"**{p_name}** is already registered for **{t_name}** "
@@ -419,11 +448,17 @@ class TournamentCog(commands.Cog):
         # Try to hold the fee from the captain's wallet right away.
         res = await escrow.secure_from_wallet(guild_id, captain_id, p_id, t_id, fee, p_name)
         if res.get("done"):
+            await self._refresh_board(t_id)
             await ctx.followup.send(
-                f"✅ **{p_name}** is registered for **{t_name}** — **{fee} {EVENT_TICKET}(s)** held "
-                f"from your wallet. You're in.")
+                f"✅ **{p_name}** is registered for **{t_name}** — **{fee} "
+                f"{EVENT_TICKET}(s)** paid into the prize pool. You're in.", ephemeral=True)
             return
         if not res.get("ok"):
+            # register_team already committed a pending participant above, so the board
+            # must still reflect it even though the escrow hold itself failed — otherwise
+            # this stuck-pending team never appears (the watchdog only refreshes boards
+            # for entries it COMPLETES).
+            await self._refresh_board(t_id)
             await ctx.followup.send(
                 f"⚠️ **{p_name}** is registered but I couldn't hold the escrow: {res.get('error')}. "
                 f"Try `/tournament register` again.", ephemeral=True)
@@ -434,6 +469,7 @@ class TournamentCog(commands.Cog):
         # the escrow sweep completes this registration the moment the funds cover the fee.
         deficit = res["deficit"]
         have = res.get("available", 0)
+        await self._refresh_board(t_id)
         await ctx.followup.send(
             f"**{p_name}** is registered (pending) for **{t_name}** — your spot is held.\n"
             f"To finish, run `/wallet deposit {deficit}` whenever you're ready (you have "
@@ -467,6 +503,7 @@ class TournamentCog(commands.Cog):
             return
         verb = "registered" if created else "already registered"
         note = " (entry fee comped)" if comped else ""
+        await self._refresh_board(tournament.id)
         await ctx.followup.send(
             f"✅ **{participant.team_name}** {verb} with {captain.mention} as captain{note}.",
             ephemeral=True,
@@ -496,6 +533,7 @@ class TournamentCog(commands.Cog):
             return
         refunded = res.get("refunded", 0)
         note = f" Entry fee ({refunded} tix) refunded to the captain's wallet." if refunded else ""
+        await self._refresh_board(t_id)
         await ctx.followup.send(f"✅ **{res['team_name']}** removed.{note}", ephemeral=True)
 
     @tournament.command(name="add_match", description="Admin: author a match for a manual-format tournament")
@@ -536,6 +574,7 @@ class TournamentCog(commands.Cog):
             res = await escrow.close_registration_and_seed(ctx.guild.id, random.Random())
             tournament_id = res["tournament_id"]
             logger.info(f"Tournament {tournament_id} started in guild {ctx.guild.id} by {ctx.author.id}")
+            await self._refresh_board(tournament_id, closed=True)
             pot_line = f" 🏦 Prize pool: **{res['pot']} tix**." if res["fee"] > 0 else ""
             await ctx.followup.send(f"🏆 **{res['name']}** has started!{pot_line}")
             await self._post_schedule(ctx, tournament_id)
@@ -880,40 +919,20 @@ class TournamentCog(commands.Cog):
         fee = tournament.entry_fee or 0
         if tournament.status == "registration":
             held = await escrow.prize_pool(str(ctx.guild.id), tournament.id) if fee > 0 else 0
-            embed = self._registration_embed(tournament, participants, held)
+            deficits = {}
+            if fee > 0:
+                pending = [p for p in participants if p.status != "paid"]
+                balances = await wallet_service.balances_for(
+                    str(ctx.guild.id), [p.captain_user_id for p in pending])
+                deficits = {p.id: max(fee - balances.get(p.captain_user_id, 0), 0)
+                            for p in pending}
+            embed = create_registration_embed(tournament, participants, held, deficits)
         else:
             embed = create_standings_embed(tournament, participants)
             if fee > 0:
                 pool = await escrow.prize_pool(str(ctx.guild.id), tournament.id)
                 embed.add_field(name="🏦 Prize pool", value=f"{pool} tix", inline=False)
         await ctx.followup.send(embed=embed)
-
-    def _registration_embed(self, tournament, participants, held=0):
-        fee = tournament.entry_fee or 0
-        desc = f"**Status:** {tournament.status.title()}"
-        if fee > 0:
-            desc += f"\n**Entry fee:** {fee} tix/team · **Prize pool:** {held} tix"
-            desc += f"\n**Payout:** {escrow.describe_structure(tournament.payout_structure or 'winner_take_all')}"
-        embed = discord.Embed(title=f"🏆 {tournament.name}", description=desc, color=discord.Color.gold())
-        if participants:
-            teams = "\n".join(
-                f"{i}. {'✅' if p.status == 'paid' else '⏳'} **{p.team_name}** — captain <@{p.captain_user_id}>"
-                + ("" if p.status == "paid" else " *(entry fee pending)*")
-                for i, p in enumerate(participants, start=1)
-            )
-            if fee > 0:
-                paid_n = sum(1 for p in participants if p.status == "paid")
-                label = f"Teams ({paid_n}/{len(participants)} paid)"
-            else:
-                label = f"Teams ({len(participants)})"
-            embed.add_field(name=label, value=teams, inline=False)
-        else:
-            embed.add_field(
-                name="Teams (0)",
-                value="No teams yet — register with `/tournament register`.",
-                inline=False,
-            )
-        return embed
 
 
 def setup(bot):
