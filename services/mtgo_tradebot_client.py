@@ -92,6 +92,17 @@ class MtgoTradeBotClient:
         """{available, custodian, tix, distinct, top[]} — used to reconcile physical == Σ wallets."""
         return await self._call("GET", "/vault")
 
+    async def active_jobs(self) -> Optional[list]:
+        """Jobs the serve is actually working (queued or running), newest first, or None
+        if the listing can't be read. NOT derived from /health's ``jobs`` field — that is
+        a lifetime count that includes terminal jobs, so it stays >0 forever after the
+        first trade."""
+        listing = await self._call("GET", "/jobs")
+        if not listing:
+            return None
+        return [j for j in listing.get("jobs", [])
+                if (j.get("state") or "").lower() in ("queued", "running")]
+
     async def find_recent_job(self, job_type: str, mtgo_user: str, qty: int,
                               max_age_s: float = 120.0):
         """Recover a job whose POST response was lost: scan GET /jobs for the newest

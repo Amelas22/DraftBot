@@ -28,8 +28,8 @@ from services import mtgo_resolution_service as resolution
 from services import tournament_escrow_service as escrow
 from services.mtgo_tradebot_client import EVENT_TICKET
 from helpers.money_gate import (
-    DEFAULT_WAIT_MINUTES, custodian_name, gate_read, gate_serve, linked_username,
-    serve_busy_reason, spawn_followup,
+    DEFAULT_WAIT_MINUTES, custodian_name, explain_trade_failure, gate_read, gate_serve,
+    linked_username, serve_busy_reason, spawn_followup,
 )
 from helpers.permissions import has_bot_manager_role
 
@@ -128,7 +128,7 @@ class WalletCommands(commands.Cog):
                 msg = (f"⏳ Deposit `{job_id}` is still pending — it'll credit automatically "
                        f"once the trade completes.")
             else:
-                msg = f"❌ Deposit `{job_id}` failed: {res.get('error')}"
+                msg = f"❌ Deposit `{job_id}` failed: {explain_trade_failure(res.get('error'))}"
             await followup.send(msg, ephemeral=True)
 
         spawn_followup("wallet deposit", _finish())
@@ -175,8 +175,8 @@ class WalletCommands(commands.Cog):
                 msg = (f"⏳ Withdraw `{job_id}` is still running; your {amount} tix stay "
                        f"committed to it until it resolves.")
             else:
-                msg = (f"❌ Withdraw `{job_id}` failed: {res.get('error')}. "
-                       f"Your {amount} tix have been released.")
+                msg = (f"❌ Withdraw `{job_id}` failed: {explain_trade_failure(res.get('error'))}\n"
+                       f"Your {amount} tix have been returned to your wallet.")
             await followup.send(msg, ephemeral=True)
 
         spawn_followup("wallet withdraw", _finish())

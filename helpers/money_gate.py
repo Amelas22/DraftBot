@@ -62,19 +62,43 @@ async def serve_busy_reason() -> str | None:
 
     The custodian works ONE trade at a time, so enqueuing behind an in-flight job just
     leaves the player staring at a trade window that won't open for minutes. Better to
-    say so and let them come back."""
-    health = await get_client().health()
+    say so and let them come back.
+
+    Busy-ness comes from the job LIST (states queued/running), never from /health's
+    ``jobs`` field: that counter includes terminal jobs, so a single past failure would
+    otherwise wedge every future deposit behind a permanent "busy".
+    """
+    client = get_client()
+    health = await client.health()
     if not health or not health.get("ok"):
         return ("The MTGO custodian isn't reachable right now. Try again in a few "
                 "minutes — nothing has been charged.")
     if health.get("reconnecting"):
         return ("The MTGO custodian is reconnecting to the client. Try again in a few "
                 "minutes.")
-    busy = (health.get("jobs") or 0) + (health.get("queued") or 0)
-    if busy:
-        return (f"The MTGO custodian is busy with {busy} other trade(s) — it can only "
-                f"trade with one person at a time. Try again in a few minutes.")
+    active = await client.active_jobs()
+    if active:
+        return (f"The MTGO custodian is busy with {len(active)} other trade(s) — it can "
+                f"only trade with one person at a time. Try again in a few minutes.")
     return None
+
+
+def explain_trade_failure(detail: str) -> str:
+    """Add an actionable hint to a serve failure the player can fix themselves.
+
+    The serve reports raw causes ("could not resolve 'basic3' as an MTGO user"); on its
+    own that reads like a bot fault, when in fact the linked username is wrong or the
+    tix were never put in the trade window."""
+    text = (detail or "trade failed").strip()
+    low = text.lower()
+    if "resolve" in low and "mtgo user" in low:
+        return (f"{text}\nThat's the MTGO username linked to your Discord account — check "
+                f"it with `/mtgo_whoami` and fix it with `/link_mtgo <username>` "
+                f"(spelling must match your MTGO login exactly), then try again.")
+    if "not presented" in low or "cards not presented" in low:
+        return (f"{text}\nThe trade window opened but the tix weren't added to it. Accept "
+                f"the trade, put the tix in, and confirm — then try again.")
+    return text
 
 
 async def custodian_name() -> str:
