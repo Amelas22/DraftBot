@@ -29,7 +29,7 @@ from services import tournament_escrow_service as escrow
 from services.mtgo_tradebot_client import EVENT_TICKET
 from helpers.money_gate import (
     DEFAULT_WAIT_MINUTES, custodian_name, explain_trade_failure, gate_read, gate_serve,
-    linked_username, serve_busy_reason, spawn_followup,
+    linked_username, spawn_followup,
 )
 from helpers.permissions import has_bot_manager_role
 
@@ -63,9 +63,10 @@ class WalletCommands(commands.Cog):
             lines = []
             for tx in history:
                 sign = "+" if tx.amount >= 0 else "−"
-                # counterparty is a Discord id (all-digits) for player transfers; an MTGO
-                # username or a synthetic holder otherwise — only mention the former.
-                who = f" ↔ <@{tx.counterparty_id}>" if tx.counterparty_id and tx.counterparty_id.isdigit() else ""
+                # only @-mention a real person: the counterparty may be an MTGO
+                # username or a synthetic holder (in-flight, a prize pool)
+                cp = tx.counterparty_id
+                who = "" if not cp or wallet_service.is_system_account(cp) else f" ↔ <@{cp}>"
                 lines.append(f"`{sign}{abs(tx.amount)}` {tx.kind}{who}")
             embed.add_field(name="Recent activity", value="\n".join(lines), inline=False)
         else:
@@ -86,18 +87,13 @@ class WalletCommands(commands.Cog):
             return await ctx.followup.send(
                 "Link your MTGO account first with `/link_mtgo <username>`.", ephemeral=True)
 
-        # One trade at a time: say so rather than queue behind someone else's job.
-        busy = await serve_busy_reason()
-        if busy:
-            return await ctx.followup.send(f"⏳ {busy}", ephemeral=True)
-
         guild_id = str(ctx.guild.id)
         player_id = str(ctx.author.id)
         started = await resolution.start_deposit(
             guild_id, player_id, username, amount, commit=True, wait_minutes=DEFAULT_WAIT_MINUTES)
         if not started.get("ok"):
-            return await ctx.followup.send(
-                f"Couldn't start the deposit: {started.get('error')}", ephemeral=True)
+            prefix = "⏳" if started.get("busy") else "Couldn't start the deposit:"
+            return await ctx.followup.send(f"{prefix} {started.get('error')}", ephemeral=True)
 
         job_id = started["job_id"]
         custodian = await custodian_name()
@@ -115,7 +111,7 @@ class WalletCommands(commands.Cog):
                 # Complete any pending tournament entry BEFORE auto-draw: the player
                 # just committed to that entry, so its fee shouldn't be siphoned to a
                 # creditor on the way in.
-                entries = await escrow.sweep_pending_entries()
+                entries = await escrow.sweep_pending_entries(player_id)
                 bal = await wallet_service.get_balance(guild_id, player_id)
                 drawn = await resolution.auto_draw(guild_id, player_id)
                 msg = f"✅ Deposit confirmed: **+{amount} tix**. Balance: **{bal} tix**."
@@ -151,12 +147,11 @@ class WalletCommands(commands.Cog):
         started = await resolution.start_withdraw(
             guild_id, player_id, username, amount, commit=True, wait_minutes=DEFAULT_WAIT_MINUTES)
         if not started.get("ok"):
-            # covers insufficient funds and a serve that wouldn't accept the job
-            return await ctx.followup.send(
-                f"Couldn't start the withdraw: {started.get('error')}", ephemeral=True)
+            # covers a busy custodian, insufficient funds, and a rejected job
+            prefix = "⏳" if started.get("busy") else "Couldn't start the withdraw:"
+            return await ctx.followup.send(f"{prefix} {started.get('error')}", ephemeral=True)
 
         job_id = started["job_id"]
-        in_flight_source = started["in_flight_source"]
         custodian = await custodian_name()
         await ctx.followup.send(
             f"**Withdraw started** — {amount} tix committed. In MTGO, accept the trade from "
@@ -167,7 +162,7 @@ class WalletCommands(commands.Cog):
 
         async def _finish():
             res = await resolution.finish_withdraw(
-                in_flight_source, job_id, guild_id, player_id, amount, username)
+                job_id, guild_id, player_id, amount, username)
             if res.get("ok"):
                 bal = await wallet_service.get_balance(guild_id, player_id)
                 msg = f"✅ Withdraw confirmed: **−{amount} tix**. Balance: **{bal} tix**."

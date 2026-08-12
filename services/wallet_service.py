@@ -40,18 +40,23 @@ from database.db_session import db_session
 from database.retry import with_db_retry
 from models.wallet_tx import WalletTx
 
-VALID_KINDS = {"deposit", "withdraw", "pay", "receive", "adjust"}
-
 # Synthetic holders. Not people: they own claims the same way a player does, which is
-# what keeps every movement a plain transfer. is_system_account() exists so anything
-# iterating "players with wallets" can exclude them in one place.
+# what keeps every movement a plain transfer.
+# Per-guild in practice: every row carries guild_id and both the commit and its
+# resolution take the guild from the same MtgoJob, so a cross-guild withdraw can't arise.
 SYSTEM_IN_FLIGHT = "system:in-flight"   # tix committed to an open MTGO withdraw trade
-SYSTEM_PREFIXES = ("system:", "prize:")
+
+
+def prize_wallet_id(tournament_id) -> str:
+    """The holder that owns a tournament's pot."""
+    return f"prize:tourney:{tournament_id}"
 
 
 def is_system_account(player_id: str) -> bool:
-    """True for synthetic wallet holders (in-flight, tournament prize pools)."""
-    return bool(player_id) and player_id.startswith(SYSTEM_PREFIXES)
+    """True for synthetic holders. Real holders are Discord snowflakes, so anything
+    non-numeric is ours (in-flight, prize pools) — used wherever holders are rendered
+    or iterated as people."""
+    return not (player_id or "").isdigit()
 
 
 # Serializes every DEBIT (check-balance-then-spend) across the process. The bot is the
@@ -119,33 +124,20 @@ async def get_history(guild_id: str, player_id: str, limit: int = 25) -> list[Wa
 # ---------------------------------------------------------------------------
 # boundary crossings — the only entries that change the system total
 # ---------------------------------------------------------------------------
-async def credit_done(
-    guild_id: str,
-    player_id: str,
-    amount: int,
-    kind: str = "deposit",
-    *,
-    job_id: str = None,
-    counterparty_id: str = None,
-    source: str = None,
-    notes: str = None,
-) -> WalletTx:
-    """Book a completed deposit (+amount): value entered the vault. Idempotent by
-    ``job_id`` when provided — a replayed job poll returns the existing row."""
-    if amount <= 0:
-        raise ValueError("Credit amount must be positive")
-    if kind not in VALID_KINDS:
-        raise ValueError(f"Invalid kind: {kind}")
-
+async def _book_boundary(guild_id: str, player_id: str, amount: int, kind: str,
+                         *, job_id: str, counterparty_id: str = None,
+                         source: str = None, notes: str = None) -> WalletTx:
+    """Write the lone row for a completed MTGO trade. Idempotent by ``job_id``: a replayed
+    poll returns the existing row, and uq_wallet_tx_job_kind makes a concurrent duplicate
+    impossible (these run lock-free, unlike transfers)."""
     async def _do():
         async with db_session() as session:
-            if job_id:
-                row = (await session.execute(
-                    select(WalletTx).where(WalletTx.job_id == job_id, WalletTx.kind == kind)
-                )).scalars().first()
-                if row:
-                    logger.info(f"credit_done: job {job_id} already booked (idempotent)")
-                    return row
+            row = (await session.execute(
+                select(WalletTx).where(WalletTx.job_id == job_id, WalletTx.kind == kind)
+            )).scalars().first()
+            if row:
+                logger.info(f"{kind}: job {job_id} already booked (idempotent)")
+                return row
             tx = WalletTx(
                 guild_id=guild_id, player_id=player_id, kind=kind, amount=amount,
                 counterparty_id=counterparty_id, job_id=job_id, source=source, notes=notes,
@@ -153,89 +145,73 @@ async def credit_done(
             session.add(tx)
             await session.flush()
             await session.refresh(tx)
-            logger.info(f"credit_done: {player_id} +{amount} ({kind}) job={job_id} -> tx {tx.id}")
+            logger.info(f"{kind}: {player_id} {amount:+d} job={job_id} -> tx {tx.id}")
             return tx
 
     try:
         return await with_db_retry(_do)
     except IntegrityError:
-        logger.info(f"credit_done: job {job_id} booked concurrently, refetching")
+        logger.info(f"{kind}: job {job_id} booked concurrently, refetching")
         return await _do()
 
 
-async def debit_done(
-    guild_id: str,
-    player_id: str,
-    amount: int,
-    *,
-    job_id: str = None,
-    counterparty_id: str = None,
-    source: str = None,
-    notes: str = None,
-) -> WalletTx:
+async def credit_done(guild_id: str, player_id: str, amount: int, *, job_id: str,
+                      counterparty_id: str = None, source: str = None,
+                      notes: str = None) -> WalletTx:
+    """Book a completed deposit (+amount): value entered the vault."""
+    if amount <= 0:
+        raise ValueError("Credit amount must be positive")
+    return await _book_boundary(guild_id, player_id, amount, "deposit", job_id=job_id,
+                                counterparty_id=counterparty_id, source=source, notes=notes)
+
+
+async def debit_done(guild_id: str, player_id: str, amount: int, *, job_id: str,
+                     counterparty_id: str = None, source: str = None,
+                     notes: str = None) -> WalletTx:
     """Book a completed withdraw (-amount): value left the vault. The holder is normally
-    SYSTEM_IN_FLIGHT (the tix were transferred there when the trade opened), so this
-    consumes that committed claim rather than a player's balance. Idempotent by ``job_id``."""
+    SYSTEM_IN_FLIGHT — the tix were transferred there when the trade opened, so this
+    consumes that committed claim rather than a player's balance."""
     if amount <= 0:
         raise ValueError("Debit amount must be positive")
-
-    async def _do():
-        async with db_session() as session:
-            if job_id:
-                row = (await session.execute(
-                    select(WalletTx).where(
-                        WalletTx.job_id == job_id, WalletTx.kind == "withdraw")
-                )).scalars().first()
-                if row:
-                    logger.info(f"debit_done: job {job_id} already booked (idempotent)")
-                    return row
-            tx = WalletTx(
-                guild_id=guild_id, player_id=player_id, kind="withdraw", amount=-amount,
-                counterparty_id=counterparty_id, job_id=job_id, source=source, notes=notes,
-            )
-            session.add(tx)
-            await session.flush()
-            await session.refresh(tx)
-            logger.info(f"debit_done: {player_id} -{amount} (withdraw) job={job_id} -> tx {tx.id}")
-            return tx
-
-    try:
-        return await with_db_retry(_do)
-    except IntegrityError:
-        logger.info(f"debit_done: job {job_id} booked concurrently, refetching")
-        return await _do()
+    return await _book_boundary(guild_id, player_id, -amount, "withdraw", job_id=job_id,
+                                counterparty_id=counterparty_id, source=source, notes=notes)
 
 
 # ---------------------------------------------------------------------------
 # transfers — 2 rows, net 0, idempotent by source
 # ---------------------------------------------------------------------------
-def transfer_rows(guild_id: str, from_player: str, to_player: str, amount: int,
-                  source: str, notes: str = None) -> tuple[WalletTx, WalletTx]:
-    """The (debit, credit) pair for one transfer — unsaved, so a caller can add them to
-    its own transaction (escrow, payout, debt settlement all compose this way)."""
-    return (
-        WalletTx(guild_id=guild_id, player_id=from_player, kind="pay", amount=-amount,
-                 counterparty_id=to_player, source=source, notes=notes),
-        WalletTx(guild_id=guild_id, player_id=to_player, kind="receive", amount=amount,
-                 counterparty_id=from_player, source=source, notes=notes),
-    )
+async def transfer_legs(session, source: str) -> list[WalletTx]:
+    """The rows of the transfer booked under ``source`` (empty if never booked) — the one
+    'has this already happened?' probe for transfers. Constrains ``kind`` so the partial
+    uq_wallet_tx_transfer_legs index serves it."""
+    return list((await session.execute(
+        select(WalletTx).where(
+            WalletTx.source == source, WalletTx.kind.in_(("pay", "receive"))
+        ).order_by(WalletTx.id))).scalars().all())
+
+
+async def transfer_credit(session, source: str) -> WalletTx | None:
+    """The credit ('receive') leg of a booked transfer, or None — what a reversal needs
+    to know the amount that moved."""
+    return (await session.execute(
+        select(WalletTx).where(
+            WalletTx.source == source, WalletTx.kind == "receive").limit(1)
+    )).scalars().first()
 
 
 async def transfer_in(session, guild_id: str, from_player: str, to_player: str,
-                      amount: int, source: str, notes: str = None,
-                      *, check_funds: bool = True):
-    """Write a transfer inside the CALLER's session/transaction. Raises ValueError if the
-    payer can't cover it (pass check_funds=False for a refund out of a system holder that
-    is being unwound). Caller must hold MONEY_LOCK when check_funds is True."""
+                      amount: int, source: str, notes: str = None):
+    """Write a transfer inside the CALLER's session/transaction — a pure writer: the
+    caller owns the funds check (under MONEY_LOCK) because only it knows whether this
+    is a spend or the unwinding of a holder it just funded."""
     if amount <= 0:
         raise ValueError("Transfer amount must be positive")
     if from_player == to_player:
         raise ValueError("Cannot transfer to the same holder")
-    if check_funds:
-        available = await balance_in(session, guild_id, from_player)
-        if amount > available:
-            raise ValueError(f"Insufficient funds: {from_player} needs {amount}, has {available}")
-    debit, credit = transfer_rows(guild_id, from_player, to_player, amount, source, notes)
+    debit = WalletTx(guild_id=guild_id, player_id=from_player, kind="pay", amount=-amount,
+                     counterparty_id=to_player, source=source, notes=notes)
+    credit = WalletTx(guild_id=guild_id, player_id=to_player, kind="receive", amount=amount,
+                      counterparty_id=from_player, source=source, notes=notes)
     session.add(debit)
     session.add(credit)
     await session.flush()
@@ -252,30 +228,28 @@ async def pay(
     notes: str = None,
 ) -> tuple[WalletTx, WalletTx]:
     """Move ``amount`` tix between two holders — no MTGO trade, no change to the system
-    total. Idempotent by ``source`` (a uuid is generated when none is given)."""
+    total. Checks the payer's funds. Idempotent by ``source`` (a uuid is generated when
+    none is given)."""
     if source is None:
         source = str(uuid.uuid4())
 
     async def _do():
         async with db_session() as session:
-            existing = (await session.execute(
-                select(WalletTx).where(
-                    WalletTx.source == source, WalletTx.kind.in_(["pay", "receive"])
-                ).order_by(WalletTx.id))).scalars().all()
-            if len(existing) >= 2:
+            existing = await transfer_legs(session, source)
+            if existing:
                 logger.info(f"pay: source {source} already settled (idempotent)")
                 return existing[0], existing[1]
+            balance = await balance_in(session, guild_id, from_player)
+            if amount > balance:
+                raise ValueError(
+                    f"Insufficient funds: {from_player} needs {amount}, has {balance}")
             rows = await transfer_in(session, guild_id, from_player, to_player,
                                      amount, source, notes)
             logger.info(f"pay: {from_player} -> {to_player} {amount} tix (source {source})")
             return rows
 
-    try:
-        async with MONEY_LOCK:
-            return await with_db_retry(_do)
-    except IntegrityError:
-        logger.info(f"pay: source {source} settled concurrently, refetching")
-        return await _do()
+    async with MONEY_LOCK:
+        return await with_db_retry(_do)
 
 
 async def adjust(guild_id: str, player_id: str, amount: int, notes: str, created_by: str) -> WalletTx:

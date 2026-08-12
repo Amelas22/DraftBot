@@ -66,17 +66,11 @@ def upgrade() -> None:
         with op.batch_alter_table('wallet_tx', schema=None) as batch_op:
             batch_op.create_index(
                 'ix_wallet_tx_balance_lookup', ['guild_id', 'player_id'], unique=False)
-            batch_op.create_index(batch_op.f('ix_wallet_tx_guild_id'), ['guild_id'], unique=False)
-            batch_op.create_index(batch_op.f('ix_wallet_tx_job_id'), ['job_id'], unique=False)
-            batch_op.create_index(batch_op.f('ix_wallet_tx_player_id'), ['player_id'], unique=False)
 
 
 def downgrade() -> None:
     if _has_table('wallet_tx'):
         with op.batch_alter_table('wallet_tx', schema=None) as batch_op:
-            batch_op.drop_index(batch_op.f('ix_wallet_tx_player_id'))
-            batch_op.drop_index(batch_op.f('ix_wallet_tx_job_id'))
-            batch_op.drop_index(batch_op.f('ix_wallet_tx_guild_id'))
             batch_op.drop_index('ix_wallet_tx_balance_lookup')
         op.drop_table('wallet_tx')
 

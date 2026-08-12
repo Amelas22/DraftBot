@@ -32,6 +32,7 @@ from database.retry import with_db_retry
 from models.mtgo_job import MtgoJob
 from models.wallet_tx import WalletTx
 from models.debt_ledger import DebtLedger
+from helpers.money_gate import serve_busy_reason, spawn_followup
 from services.mtgo_tradebot_client import get_client
 from services import wallet_service
 from services import debt_service
@@ -75,15 +76,14 @@ async def _poll_job(job_id: str, timeout_s: float):
 # resumer can finish booking trades that outlive their in-memory poller
 # ---------------------------------------------------------------------------
 async def _record_job(job_id: str, kind: str, guild_id: str, player_id: str, mtgo_user: str,
-                      amount: int, *, in_flight_source: str = None):
+                      amount: int):
     async def _do():
         async with db_session() as session:
             if await session.get(MtgoJob, job_id):
                 return
             session.add(MtgoJob(
                 job_id=job_id, kind=kind, guild_id=guild_id, player_id=player_id,
-                mtgo_user=mtgo_user, amount=amount, in_flight_source=in_flight_source,
-                status="pending"))
+                mtgo_user=mtgo_user, amount=amount, status="pending"))
     await with_db_retry(_do)
 
 
@@ -124,6 +124,9 @@ async def start_deposit(guild_id: str, player_id: str, mtgo_user: str, n: int, *
     client = get_client()
     if not client.enabled:
         return {"ok": False, "error": "MTGO TradeBot integration is disabled"}
+    busy = await serve_busy_reason()   # one trade at a time; don't queue behind another
+    if busy:
+        return {"ok": False, "error": busy, "busy": True}
     resp = await client.deposit_tix(mtgo_user, n, commit=commit, wait_minutes=wait_minutes)
     if not resp or not resp.get("id"):
         # If the POST may have reached the serve with only the response lost, the trade
@@ -134,7 +137,7 @@ async def start_deposit(guild_id: str, player_id: str, mtgo_user: str, n: int, *
             return {"ok": False, "error": "serve did not accept the deposit (unreachable or rejected)"}
         logger.warning(f"start_deposit: adopted job {resp['id']} after lost POST response")
     await _record_job(resp["id"], "deposit", guild_id, player_id, mtgo_user, n)
-    return {"ok": True, "job_id": resp["id"], "job": resp}
+    return {"ok": True, "job_id": resp["id"]}
 
 
 async def finish_deposit(job_id: str, guild_id: str, player_id: str, n: int, mtgo_user: str,
@@ -142,24 +145,27 @@ async def finish_deposit(job_id: str, guild_id: str, player_id: str, n: int, mtg
     """Poll the deposit job; on 'done' credit the wallet (idempotent by job_id)."""
     outcome, job = await _poll_job(job_id, timeout_s)
     if outcome == "done":
-        tx = await wallet_service.credit_done(
-            guild_id, player_id, n, kind="deposit",
+        await wallet_service.credit_done(
+            guild_id, player_id, n,
             job_id=job_id, counterparty_id=mtgo_user, source="serve", notes=f"deposit {n} tix")
         await _resolve_job(job_id, "done")
-        return {"ok": True, "outcome": "done", "credited": n, "tx_id": tx.id, "job": job}
+        return {"ok": True, "outcome": "done", "credited": n}
     if outcome == "failed":
         await _resolve_job(job_id, "failed")
-        return {"ok": False, "outcome": "failed", "error": job.get("detail") or "trade failed", "job": job}
-    return {"ok": False, "outcome": "pending", "job_id": job_id, "job": job}
+        return {"ok": False, "outcome": "failed", "error": job.get("detail") or "trade failed"}
+    return {"ok": False, "outcome": "pending"}
 
 
 # ---------------------------------------------------------------------------
 # withdraw (bot gives tix) — commit to in-flight, then cross the boundary or return
 # ---------------------------------------------------------------------------
-def _in_flight_source(guild_id: str, player_id: str, n: int) -> str:
-    """Idempotency tag for the commit transfer. Uniquified per attempt so a player can
-    have two withdraws open; the uuid is only needed to distinguish concurrent ones."""
-    return f"wd:{guild_id}:{player_id}:{uuid.uuid4().hex[:8]}:{n}"
+async def _return_in_flight(guild_id: str, player_id: str, n: int, key: str):
+    """Give a committed-but-undelivered withdraw back to the player. Idempotent by
+    ``key`` — the one place that names the reversal, so the abort path and the
+    failed-job path can't drift into two different (and therefore replayable) keys."""
+    await wallet_service.pay(
+        guild_id, wallet_service.SYSTEM_IN_FLIGHT, player_id, n,
+        source=f"return:{key}", notes=f"withdraw {n} tix returned")
 
 
 async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, *,
@@ -176,19 +182,18 @@ async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, 
     client = get_client()
     if not client.enabled:
         return {"ok": False, "error": "MTGO TradeBot integration is disabled"}
+    busy = await serve_busy_reason()   # matters more here: this path commits tix first
+    if busy:
+        return {"ok": False, "error": busy, "busy": True}
 
-    source = _in_flight_source(guild_id, player_id, n)
+    # unique per attempt so a player can open a second withdraw later
+    commit_key = uuid.uuid4().hex
     try:
         await wallet_service.pay(
             guild_id, player_id, wallet_service.SYSTEM_IN_FLIGHT, n,
-            source=source, notes=f"withdraw {n} tix to {mtgo_user}")
+            source=f"wd:{commit_key}", notes=f"withdraw {n} tix to {mtgo_user}")
     except ValueError as e:
         return {"ok": False, "error": str(e)}
-
-    async def _return_to_player():
-        await wallet_service.pay(
-            guild_id, wallet_service.SYSTEM_IN_FLIGHT, player_id, n,
-            source=f"return:{source}", notes=f"withdraw {n} tix returned")
 
     resp = await client.withdraw_tix(mtgo_user, n, commit=commit, wait_minutes=wait_minutes)
     if not resp or not resp.get("id"):
@@ -196,36 +201,32 @@ async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, 
         if not resp or not resp.get("id"):
             # Definite rejection, or an ambiguous failure whose job-list scan shows no
             # job — either way no trade can have been opened; give the tix back.
-            await _return_to_player()
+            await _return_in_flight(guild_id, player_id, n, f"wd:{commit_key}")
             return {"ok": False, "error": "serve did not accept the withdraw (unreachable or rejected)"}
         logger.warning(f"start_withdraw: adopted job {resp['id']} after lost POST response")
-    await _record_job(resp["id"], "withdraw", guild_id, player_id, mtgo_user, n,
-                      in_flight_source=source)
-    return {"ok": True, "job_id": resp["id"], "in_flight_source": source, "job": resp}
+    await _record_job(resp["id"], "withdraw", guild_id, player_id, mtgo_user, n)
+    return {"ok": True, "job_id": resp["id"]}
 
 
-async def finish_withdraw(in_flight_source: str, job_id: str, guild_id: str, player_id: str,
-                          n: int, mtgo_user: str = None,
+async def finish_withdraw(job_id: str, guild_id: str, player_id: str, n: int,
+                          mtgo_user: str = None,
                           timeout_s: float = _DEFAULT_POLL_TIMEOUT_S) -> dict:
     """Poll the withdraw job. On 'done' the tix physically left the vault, so book the
     boundary debit against in-flight (idempotent by job_id). On 'failed' transfer them
-    back to the player. On timeout they stay committed to in-flight — the watchdog
-    resolves it later."""
+    back to the player (idempotent by job_id too). On timeout they stay committed to
+    in-flight — the watchdog resolves it later."""
     outcome, job = await _poll_job(job_id, timeout_s)
     if outcome == "done":
         await wallet_service.debit_done(
             guild_id, wallet_service.SYSTEM_IN_FLIGHT, n, job_id=job_id,
-            counterparty_id=mtgo_user, source=in_flight_source,
-            notes=f"withdraw {n} tix delivered to {mtgo_user}")
+            counterparty_id=mtgo_user, notes=f"withdraw {n} tix delivered to {mtgo_user}")
         await _resolve_job(job_id, "done")
-        return {"ok": True, "outcome": "done", "job": job}
+        return {"ok": True, "outcome": "done"}
     if outcome == "failed":
-        await wallet_service.pay(
-            guild_id, wallet_service.SYSTEM_IN_FLIGHT, player_id, n,
-            source=f"return:{in_flight_source}", notes=f"withdraw {n} tix returned")
+        await _return_in_flight(guild_id, player_id, n, job_id)
         await _resolve_job(job_id, "failed")
-        return {"ok": False, "outcome": "failed", "error": job.get("detail") or "trade failed", "job": job}
-    return {"ok": False, "outcome": "pending", "job_id": job_id, "job": job}
+        return {"ok": False, "outcome": "failed", "error": job.get("detail") or "trade failed"}
+    return {"ok": False, "outcome": "pending"}
 
 
 # ---------------------------------------------------------------------------
@@ -257,13 +258,12 @@ async def resume_pending_jobs() -> int:
                 # on the same watchdog tick.
                 await finish_deposit(job.job_id, job.guild_id, job.player_id,
                                      job.amount, job.mtgo_user)
-            elif job.kind == "withdraw" and job.in_flight_source:
-                await finish_withdraw(job.in_flight_source, job.job_id, job.guild_id,
-                                      job.player_id, job.amount, job.mtgo_user)
+            elif job.kind == "withdraw":
+                await finish_withdraw(job.job_id, job.guild_id, job.player_id,
+                                      job.amount, job.mtgo_user)
         finally:
             _polling_jobs.discard(job.job_id)
 
-    from helpers.money_gate import spawn_followup
     for job in pending:
         _polling_jobs.add(job.job_id)
         spawn_followup(f"resume {job.kind} {job.job_id}", _resume(job))
@@ -355,11 +355,10 @@ async def settle_debt_from_wallet(guild_id: str, payer_id: str, creditor_id: str
                 return {"ok": False, "error": f"amount ({amount}) exceeds debt ({owed})"}
 
             note = f"Wallet debt settlement: {amount} tix"
-            # 1) wallet claim move (payer -> creditor)
-            session.add(WalletTx(guild_id=guild_id, player_id=payer_id, kind="pay", amount=-amount,
-                                 status="done", counterparty_id=creditor_id, source=wallet_source, notes=note))
-            session.add(WalletTx(guild_id=guild_id, player_id=creditor_id, kind="receive", amount=amount,
-                                 status="done", counterparty_id=payer_id, source=wallet_source, notes=note))
+            # 1) wallet claim move (payer -> creditor); funds checked above
+            await wallet_service.transfer_in(
+                session, guild_id, payer_id, creditor_id, amount, wallet_source,
+                notes=note)
             # 2) debt ledger settlement (payer +amount reduces debt; creditor -amount reduces credit)
             session.add(DebtLedger(guild_id=guild_id, player_id=payer_id, counterparty_id=creditor_id,
                                    amount=amount, source_type="settlement", source_id=link_id,

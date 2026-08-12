@@ -92,16 +92,18 @@ class MtgoTradeBotClient:
         """{available, custodian, tix, distinct, top[]} — used to reconcile physical == Σ wallets."""
         return await self._call("GET", "/vault")
 
-    async def active_jobs(self) -> Optional[list]:
-        """Jobs the serve is actually working (queued or running), newest first, or None
-        if the listing can't be read. NOT derived from /health's ``jobs`` field — that is
-        a lifetime count that includes terminal jobs, so it stays >0 forever after the
-        first trade."""
+    async def _list_jobs(self) -> Optional[list]:
+        """The serve's job listing, newest first, or None if it can't be read."""
         listing = await self._call("GET", "/jobs")
-        if not listing:
-            return None
-        return [j for j in listing.get("jobs", [])
-                if (j.get("state") or "").lower() in ("queued", "running")]
+        return None if not listing else listing.get("jobs", [])
+
+    async def active_jobs(self) -> Optional[list]:
+        """Jobs the serve is actually working (queued or running). NOT derived from
+        /health's ``jobs`` field — that is a lifetime count including terminal jobs, so
+        it stays >0 forever after the first trade."""
+        jobs = await self._list_jobs()
+        return None if jobs is None else [
+            j for j in jobs if (j.get("state") or "").lower() in ("queued", "running")]
 
     async def find_recent_job(self, job_type: str, mtgo_user: str, qty: int,
                               max_age_s: float = 120.0):
@@ -110,11 +112,11 @@ class MtgoTradeBotClient:
         actually reached the serve created a job even if we never saw the 202 — adopting
         it here keeps the ledger attached to a trade that may still complete. Returns the
         job dict or None."""
-        listing = await self._call("GET", "/jobs")
-        if not listing:
+        jobs = await self._list_jobs()
+        if not jobs:
             return None
         now = datetime.now(timezone.utc)
-        for job in listing.get("jobs", []):  # serve lists newest first
+        for job in jobs:  # serve lists newest first
             if job.get("type") != job_type or job.get("state") == "failed":
                 continue
             if (job.get("user") or "").lower() != mtgo_user.lower():

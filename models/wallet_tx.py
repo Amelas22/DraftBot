@@ -37,14 +37,14 @@ class WalletTx(Base):
     __tablename__ = 'wallet_tx'
 
     id = Column(Integer, primary_key=True, nullable=False, autoincrement=True)
-    guild_id = Column(String(64), nullable=False, index=True)
-    player_id = Column(String(64), nullable=False, index=True)  # holder (may be synthetic)
+    guild_id = Column(String(64), nullable=False)
+    player_id = Column(String(64), nullable=False)  # holder (may be synthetic)
 
     kind = Column(String(32), nullable=False)   # deposit | withdraw | pay | receive | adjust
     amount = Column(Integer, nullable=False)     # + credit, - debit (holder's perspective)
 
     counterparty_id = Column(String(64), nullable=True)  # other holder (transfers); MTGO user (boundary)
-    job_id = Column(String(64), nullable=True, index=True)  # serve job id; idempotency key
+    job_id = Column(String(64), nullable=True)   # serve job id; idempotency key (uq index)
     source = Column(String(64), nullable=True)   # transfer idempotency key ('tourney:…', 'payout:…', uuid)
     notes = Column(String(256), nullable=True)
 

@@ -23,9 +23,8 @@ from config import is_money_server
 from models.mtgo_account import MtgoAccount
 from services.mtgo_tradebot_client import get_client
 
-# Serve-side readiness wait (minutes) for a deposit/withdraw trade before the job
-# fails and any reservation is released. Bounds how long a player has to accept
-# the in-client trade.
+# Serve-side readiness wait (minutes) before the job fails. Bounds how long a player
+# has to accept the in-client trade.
 DEFAULT_WAIT_MINUTES = 10
 
 _custodian_cache: str | None = None
@@ -68,8 +67,11 @@ async def serve_busy_reason() -> str | None:
     ``jobs`` field: that counter includes terminal jobs, so a single past failure would
     otherwise wedge every future deposit behind a permanent "busy".
     """
+    global _custodian_cache
     client = get_client()
     health = await client.health()
+    if health and not _custodian_cache and isinstance(health.get("custodian"), str):
+        _custodian_cache = health["custodian"]  # saves custodian_name() its own /health
     if not health or not health.get("ok"):
         return ("The MTGO custodian isn't reachable right now. Try again in a few "
                 "minutes — nothing has been charged.")

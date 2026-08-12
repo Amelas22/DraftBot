@@ -27,29 +27,14 @@ from database.retry import with_db_retry
 from models.tournament import Tournament, TournamentParticipant
 from models.wallet_tx import WalletTx
 from services import wallet_service
+from services.wallet_service import prize_wallet_id
 from services.tournament_service import get_active_tournament, remove_team, start_tournament
 
 
 def escrow_source(tournament_id, participant_id) -> str:
     """Stable per-participant tag on the entry transfer — its idempotency key and the
-    handle a refund reverses. This module owns the format (parse_escrow_source inverts it)."""
+    handle a refund reverses."""
     return f"tourney:{tournament_id}:{participant_id}"
-
-
-def parse_escrow_source(source: str):
-    """Inverse of escrow_source: (tournament_id, participant_id), or None if not ours."""
-    if not source or not source.startswith("tourney:"):
-        return None
-    try:
-        _, tid, pid = source.split(":")
-        return int(tid), int(pid)
-    except ValueError:
-        return None
-
-
-def prize_wallet_id(tournament_id) -> str:
-    """Synthetic wallet holder for a tournament's prize pool (an ordinary WalletTx player_id)."""
-    return f"prize:tourney:{tournament_id}"
 
 
 # Prize-pool split presets (top-heavy, per MTG convention). Ratios need not sum to 100 —
@@ -112,16 +97,6 @@ def comp(participant: TournamentParticipant) -> bool:
     return True
 
 
-async def _paid_entry_exists(session, tournament_id: int, participant_id: int) -> bool:
-    """Has this entry's fee already been transferred into the pot?"""
-    r = await session.execute(
-        select(WalletTx.id).where(
-            WalletTx.source == escrow_source(tournament_id, participant_id),
-            WalletTx.kind == "receive",
-        ).limit(1))
-    return r.scalar() is not None
-
-
 async def secure_from_wallet(guild_id: str, captain_id: str, participant_id: int,
                              tournament_id: int, fee: int, team_name: str) -> dict:
     """Transfer ``fee`` tix from the captain into the tournament's prize wallet and mark
@@ -146,7 +121,7 @@ async def secure_from_wallet(guild_id: str, captain_id: str, participant_id: int
             if p is None:
                 return {"ok": False, "error": "team no longer registered"}
 
-            if await _paid_entry_exists(session, tournament_id, participant_id):
+            if await wallet_service.transfer_credit(session, source):
                 _mark_paid(p)
                 return {"ok": True, "done": True, "paid": fee, "reused": True}
 
@@ -156,19 +131,13 @@ async def secure_from_wallet(guild_id: str, captain_id: str, participant_id: int
 
             await wallet_service.transfer_in(
                 session, guild_id, captain_id, prize_id, fee, source,
-                notes=f"tournament entry: {team_name}")
+                notes=f"tournament entry: {team_name}")  # funds checked just above
             _mark_paid(p)
             logger.info(f"escrow: participant {participant_id} paid {fee} into {prize_id}")
             return {"ok": True, "done": True, "paid": fee}
 
-    try:
-        async with wallet_service.MONEY_LOCK:
-            return await with_db_retry(_do)
-    except IntegrityError:
-        # uq_wallet_tx_transfer_legs: a concurrent register booked this entry first —
-        # re-run; the idempotency branch finds it and just stamps the participant.
-        logger.info(f"secure_from_wallet: {source} booked concurrently, reusing")
-        return await _do()
+    async with wallet_service.MONEY_LOCK:
+        return await with_db_retry(_do)
 
 
 async def refund_entry(session, guild_id: str, tournament_id: int,
@@ -177,27 +146,21 @@ async def refund_entry(session, guild_id: str, tournament_id: int,
     Idempotent by the ``refund:`` source; returns the amount refunded (0 if the entry was
     never paid, e.g. a comp, or was already refunded)."""
     source = escrow_source(tournament_id, participant.id)
-    leg = (await session.execute(
-        select(WalletTx).where(WalletTx.source == source, WalletTx.kind == "receive")
-    )).scalars().first()
+    leg = await wallet_service.transfer_credit(session, source)
     if leg is None:
         return 0  # comped or never funded
     refund_source = f"refund:{source}"
-    already = (await session.execute(
-        select(WalletTx.id).where(WalletTx.source == refund_source).limit(1))).scalar()
-    if already:
-        return 0
-    # check_funds=False: unwinding a pot the entry itself funded — the claim is the
-    # captain's by right, and a concurrent payout can't have run (payout is post-finish,
-    # refunds are registration-only).
+    if await wallet_service.transfer_legs(session, refund_source):
+        return 0  # already refunded
+    # No funds check: this unwinds a pot the entry itself funded, so the claim is the
+    # captain's by right (payout is post-finish; refunds are registration-only).
     await wallet_service.transfer_in(
         session, guild_id, prize_wallet_id(tournament_id), participant.captain_user_id,
-        leg.amount, refund_source, notes=f"entry refund: {participant.team_name}",
-        check_funds=False)
+        leg.amount, refund_source, notes=f"entry refund: {participant.team_name}")
     return leg.amount
 
 
-async def sweep_pending_entries() -> int:
+async def sweep_pending_entries(captain_id: str = None) -> int:
     """Complete every pending entry whose captain's wallet can now cover the fee.
 
     A registration is only complete once the tix are actually in the vault — but it must
@@ -208,16 +171,20 @@ async def sweep_pending_entries() -> int:
     teammate's /wallet pay. secure_from_wallet is a no-op when the wallet is still short,
     so a sweep over an underfunded entry costs one balance read and changes nothing.
 
-    Returns the number of entries completed."""
+    Pass ``captain_id`` to scope it to one person (after their deposit lands, only their
+    entries can have become payable). Returns the number of entries completed."""
+    conditions = [
+        Tournament.status == "registration",
+        Tournament.entry_fee > 0,
+        TournamentParticipant.status != "paid",
+    ]
+    if captain_id:
+        conditions.append(TournamentParticipant.captain_user_id == captain_id)
     async with db_session() as session:
         rows = (await session.execute(
             select(TournamentParticipant, Tournament)
             .join(Tournament, TournamentParticipant.tournament_id == Tournament.id)
-            .where(
-                Tournament.status == "registration",
-                Tournament.entry_fee > 0,
-                TournamentParticipant.status != "paid",
-            ))).all()
+            .where(*conditions))).all()
     completed = 0
     for participant, tournament in rows:
         try:
@@ -234,12 +201,11 @@ async def sweep_pending_entries() -> int:
     return completed
 
 
-async def start_and_fund(guild_id, rng) -> dict:
-    """Close registration and seed the schedule. There is no pot to move: entry fees were
-    transferred into the prize wallet as each team completed registration, so starting is
-    just the seeding. Still takes MONEY_LOCK so a racing second /tournament start can't
-    slip past the status check. Returns {tournament_id, name, fee, pot}; raises ValueError
-    with a user-facing message when there's nothing to start."""
+async def close_registration_and_seed(guild_id, rng) -> dict:
+    """Close registration and seed the schedule; the pot was funded as teams registered,
+    so nothing moves here. MONEY_LOCK serializes a racing second /tournament start past
+    the status check. Returns {tournament_id, name, fee, pot}; raises ValueError with a
+    user-facing message when there's nothing to start."""
     async with wallet_service.MONEY_LOCK:
         async with db_session() as session:
             tournament = await get_active_tournament(session, guild_id)
@@ -264,9 +230,8 @@ async def drop_with_refund(tournament_id: int, team_name: str) -> dict:
     async with wallet_service.MONEY_LOCK:
         async with db_session() as session:
             p = await remove_team(session, tournament_id, team_name)
-            guild_id = str((await session.get(Tournament, tournament_id)).guild_id)
-            refunded = await refund_entry(session, guild_id, tournament_id, p)
-            await session.flush()
+            tournament = await session.get(Tournament, tournament_id)
+            refunded = await refund_entry(session, str(tournament.guild_id), tournament_id, p)
             logger.info(f"escrow: dropped '{p.team_name}' from tournament {tournament_id} "
                         f"(refunded {refunded})")
             return {"team_name": p.team_name, "refunded": refunded}
@@ -320,23 +285,15 @@ async def execute_payout(guild_id: str, tournament_id: int, allocations: list) -
             for place, captain_id, team_name, amount in allocations:
                 if amount <= 0:
                     continue
-                # check_funds is covered by the pool cap above, and every leg must land
-                # in this one transaction
+                # no per-leg funds check: the pool cap above covers the whole payout
                 await wallet_service.transfer_in(
                     session, guild_id, prize_id, captain_id, amount,
                     f"payout:{tournament_id}:{place}",
-                    notes=f"tournament prize (place {place}): {team_name}",
-                    check_funds=False)
+                    notes=f"tournament prize (place {place}): {team_name}")
             await session.flush()
             logger.info(f"payout: tournament {tournament_id} distributed {total} tix to "
                         f"{len(allocations)} team(s)")
             return {"ok": True, "paid": allocations, "total": total, "pool": pool}
 
-    try:
-        async with wallet_service.MONEY_LOCK:
-            return await with_db_retry(_do)
-    except IntegrityError:
-        # uq_wallet_tx_transfer_legs: a concurrent payout booked first — re-run;
-        # _do's _already_paid branch reports it.
-        logger.info(f"execute_payout: tournament {tournament_id} paid out concurrently")
-        return await _do()
+    async with wallet_service.MONEY_LOCK:
+        return await with_db_retry(_do)

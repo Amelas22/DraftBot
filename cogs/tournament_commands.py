@@ -533,8 +533,7 @@ class TournamentCog(commands.Cog):
             return
         await ctx.defer()
         try:
-            # start_and_fund owns the money lock + atomic seed-and-reallocate.
-            res = await escrow.start_and_fund(ctx.guild.id, random.Random())
+            res = await escrow.close_registration_and_seed(ctx.guild.id, random.Random())
             tournament_id = res["tournament_id"]
             logger.info(f"Tournament {tournament_id} started in guild {ctx.guild.id} by {ctx.author.id}")
             pot_line = f" 🏦 Prize pool: **{res['pot']} tix**." if res["fee"] > 0 else ""
@@ -899,7 +898,7 @@ class TournamentCog(commands.Cog):
         if participants:
             teams = "\n".join(
                 f"{i}. {'✅' if p.status == 'paid' else '⏳'} **{p.team_name}** — captain <@{p.captain_user_id}>"
-                + ("" if p.status == "paid" else " *(pending escrow)*")
+                + ("" if p.status == "paid" else " *(entry fee pending)*")
                 for i, p in enumerate(participants, start=1)
             )
             if fee > 0:
