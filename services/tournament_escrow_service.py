@@ -182,6 +182,26 @@ async def refund_entry(session, guild_id: str, tournament_id: int,
     return leg.amount
 
 
+async def open_boards_for_captain(captain_id: str) -> list[int]:
+    """Tournament ids in registration where ``captain_id`` still has an unpaid entry.
+
+    Their boards render "needs N more tix", derived from this captain's balance — a
+    partial deposit (or an auto-draw that spends one) moves N without completing
+    anything, so the sweep's completed-ids alone would leave those boards stale."""
+    async with db_session() as session:
+        rows = (await session.execute(
+            select(Tournament.id)
+            .join(TournamentParticipant,
+                  TournamentParticipant.tournament_id == Tournament.id)
+            .where(
+                Tournament.status == "registration",
+                Tournament.entry_fee > 0,
+                TournamentParticipant.status != "paid",
+                TournamentParticipant.captain_user_id == captain_id,
+            ))).scalars().all()
+    return list(dict.fromkeys(rows))
+
+
 async def sweep_pending_entries(captain_id: str = None) -> list[int]:
     """Complete every pending entry whose captain's wallet can now cover the fee.
 
