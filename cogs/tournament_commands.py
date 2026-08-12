@@ -347,24 +347,32 @@ class TournamentCog(commands.Cog):
                     session, ctx.guild.id, name, total_rounds, format=format,
                     entry_fee=entry_fee, payout_structure=payout
                 )
-            logger.info(f"Tournament '{name}' ({format}) created in guild {ctx.guild.id} by {ctx.author.id}")
-            detail = f"{tournament.total_rounds} rounds" if format == "swiss" else format.replace("_", "-")
-            fee_line = (
-                f" Entry fee: **{entry_fee} {EVENT_TICKET}(s)** per team — a team is registered "
-                f"once its captain's escrow is received. Payout: **{escrow.describe_structure(payout)}**."
-                if entry_fee > 0 else ""
-            )
+        except ValueError as e:
+            await ctx.followup.send(f"❌ {e}", ephemeral=True)
+            return
+        logger.info(f"Tournament '{name}' ({format}) created in guild {ctx.guild.id} by {ctx.author.id}")
+        detail = f"{tournament.total_rounds} rounds" if format == "swiss" else format.replace("_", "-")
+        fee_line = (
+            f" Entry fee: **{entry_fee} {EVENT_TICKET}(s)** per team — a team is registered "
+            f"once its captain's escrow is received. Payout: **{escrow.describe_structure(payout)}**."
+            if entry_fee > 0 else ""
+        )
+        # The ephemeral confirmation rides the interaction token, which can be flaky
+        # (ack races, expiry) independently of everything else here — a failure to
+        # notify the invoker must never prevent the registration board (the actual
+        # source of truth for onlookers) from posting to the channel below.
+        try:
             await ctx.followup.send(
                 f"✅ Tournament **{tournament.name}** created ({detail}). "
                 f"Registration is open — captains can join with `/tournament register`.{fee_line}",
                 ephemeral=True,
             )
-            try:
-                await post_registration_board(ctx.channel, tournament.id)
-            except Exception as e:
-                logger.warning(f"Could not post registration board: {e}")
-        except ValueError as e:
-            await ctx.followup.send(f"❌ {e}", ephemeral=True)
+        except Exception as e:
+            logger.warning(f"Could not send tournament-create confirmation for {tournament.id}: {e}")
+        try:
+            await post_registration_board(ctx.channel, tournament.id)
+        except Exception as e:
+            logger.warning(f"Could not post registration board: {e}")
 
     @tournament.command(name="register", description="Register your team for the open tournament")
     async def register(

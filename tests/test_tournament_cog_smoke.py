@@ -1,5 +1,7 @@
 """Smoke tests for cogs/tournament_commands.py (Slice 1)."""
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from helpers.permissions import is_bot_manager
 
@@ -68,3 +70,48 @@ def test_register_replies_are_all_ephemeral():
     for call in sends:
         assert any(kw.arg == "ephemeral" and kw.value.value is True
                    for kw in call.keywords), f"non-ephemeral reply at line {call.lineno}"
+
+
+@pytest.mark.asyncio
+async def test_create_posts_the_board_even_if_the_confirmation_reply_fails(test_db):  # noqa: F811
+    """Regression: live testing found the board never posted and board_channel_id/
+    board_message_id stayed NULL, with no "Could not post registration board"
+    warning in the log. Root cause: the ephemeral confirmation's ctx.followup.send()
+    and the post_registration_board() call were sequenced in one unguarded flow —
+    a flaky/expired interaction token during the confirmation raised past the
+    try/except that was supposed to guard the board post, skipping it entirely and
+    escaping create() as an unhandled exception. The board goes to ctx.channel, not
+    the interaction, so it must post (and the command must not raise) regardless of
+    whether the confirmation reply succeeds."""
+    from cogs.tournament_commands import TournamentCog
+    from database.db_session import db_session
+    from models.tournament import Tournament
+    from sqlalchemy import select
+
+    cog = TournamentCog(MagicMock())
+    ctx = MagicMock()
+    ctx.guild.id = 123
+    ctx.author.id = 456
+    ctx.defer = AsyncMock()
+    # Simulates the observed HTTPException(40060)/NotFound(10062): the confirmation
+    # reply itself fails.
+    ctx.followup.send = AsyncMock(side_effect=RuntimeError("interaction already acknowledged"))
+
+    posted_message = MagicMock()
+    posted_message.id = 999
+    posted_message.channel.id = 777
+    ctx.channel = MagicMock()
+    ctx.channel.send = AsyncMock(return_value=posted_message)
+
+    with patch("cogs.tournament_commands.tournament_enabled", return_value=True):
+        await TournamentCog.create.callback(
+            cog, ctx, name="Cup", format="swiss", rounds=3, entry_fee=0, payout="winner_take_all",
+        )
+
+    ctx.channel.send.assert_awaited_once()
+    async with db_session() as session:
+        tournament = (
+            await session.execute(select(Tournament).where(Tournament.name == "Cup"))
+        ).scalar_one()
+        assert tournament.board_channel_id == "777"
+        assert tournament.board_message_id == "999"
