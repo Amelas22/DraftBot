@@ -125,8 +125,10 @@ async def test_refresh_board_swallows_a_discord_failure():
     from cogs.tournament_commands import TournamentCog
 
     cog = TournamentCog(MagicMock())
+    # patched where the failure originates: the cog delegates to refresh_boards, which
+    # owns the guard for every caller (cog, wallet deposit, watchdog)
     with patch(
-        "cogs.tournament_commands.update_registration_board",
+        "services.tournament_formatter.update_registration_board",
         AsyncMock(side_effect=RuntimeError("discord boom")),
     ):
         await cog._refresh_board(1)  # must not raise

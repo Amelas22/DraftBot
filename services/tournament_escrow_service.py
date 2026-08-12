@@ -182,24 +182,44 @@ async def refund_entry(session, guild_id: str, tournament_id: int,
     return leg.amount
 
 
-async def open_boards_for_captain(captain_id: str) -> list[int]:
-    """Tournament ids in registration where ``captain_id`` still has an unpaid entry.
+def _unpaid_entry_conditions(captain_id: str = None) -> list:
+    """What counts as a still-open entry: a fee-charging tournament still taking
+    registrations, with a team that hasn't paid. One definition, used by both the sweep
+    that completes such entries and the lookup of boards whose figures they drive."""
+    conditions = [
+        Tournament.status == "registration",
+        Tournament.entry_fee > 0,
+        TournamentParticipant.status != "paid",
+    ]
+    if captain_id:
+        conditions.append(TournamentParticipant.captain_user_id == captain_id)
+    return conditions
 
-    Their boards render "needs N more tix", derived from this captain's balance — a
-    partial deposit (or an auto-draw that spends one) moves N without completing
-    anything, so the sweep's completed-ids alone would leave those boards stale."""
+
+async def open_boards_for_captain(captain_id: str) -> list[int]:
+    """Tournament ids where ``captain_id`` still has an unpaid entry.
+
+    Those boards render "needs N more tix" from this captain's balance, so a partial
+    deposit (or an auto-draw that spends one) moves N without completing anything —
+    the sweep's completed-ids alone would leave them stale."""
     async with db_session() as session:
-        rows = (await session.execute(
+        return list((await session.execute(
             select(Tournament.id)
             .join(TournamentParticipant,
                   TournamentParticipant.tournament_id == Tournament.id)
-            .where(
-                Tournament.status == "registration",
-                Tournament.entry_fee > 0,
-                TournamentParticipant.status != "paid",
-                TournamentParticipant.captain_user_id == captain_id,
-            ))).scalars().all()
-    return list(dict.fromkeys(rows))
+            .where(*_unpaid_entry_conditions(captain_id))
+            .distinct())).scalars().all())
+
+
+async def open_registration_boards() -> list[int]:
+    """Every tournament still taking registrations. The watchdog re-renders all of them
+    each tick: balances move by routes no board-refresh call site covers (a teammate's
+    /wallet pay, a withdraw, a debt settlement), so a periodic re-render is what keeps
+    'needs N more tix' honest without chasing each money path."""
+    async with db_session() as session:
+        return list((await session.execute(
+            select(Tournament.id).where(Tournament.status == "registration")
+        )).scalars().all())
 
 
 async def sweep_pending_entries(captain_id: str = None) -> list[int]:
@@ -215,13 +235,7 @@ async def sweep_pending_entries(captain_id: str = None) -> list[int]:
 
     Pass ``captain_id`` to scope it to one person (after their deposit lands, only their
     entries can have become payable). Returns the tournament ids whose entries completed."""
-    conditions = [
-        Tournament.status == "registration",
-        Tournament.entry_fee > 0,
-        TournamentParticipant.status != "paid",
-    ]
-    if captain_id:
-        conditions.append(TournamentParticipant.captain_user_id == captain_id)
+    conditions = _unpaid_entry_conditions(captain_id)
     async with db_session() as session:
         rows = (await session.execute(
             select(TournamentParticipant, Tournament)
