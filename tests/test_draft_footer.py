@@ -8,6 +8,7 @@ from helpers.draft_footer import (
     apply_draft_footer,
     apply_draft_footer_from_session,
     draft_footer_text,
+    draft_reference,
 )
 from ready_check import ReadyCheckSession
 from sessions.random_session import RandomSession
@@ -42,6 +43,32 @@ def test_missing_pieces_drop_their_labels_too():
     assert draft_footer_text("A7K2M9QZ", None) == "ID: A7K2M9QZ"
     assert draft_footer_text(None, "LSVCube") == "Cube: LSVCube"
     assert draft_footer_text(None, None) == ""
+
+
+def test_draft_reference_code_spans_the_friendly_id():
+    # Inline references are real message content, so markdown applies here even
+    # though it can't in the footer.
+    assert draft_reference(SimpleNamespace(friendly_id="lightning-bolt-7")) == "`lightning-bolt-7`"
+
+
+@pytest.mark.parametrize("session", [
+    SimpleNamespace(friendly_id=None),
+    SimpleNamespace(friendly_id=""),
+    SimpleNamespace(),  # attribute absent entirely
+])
+def test_draft_reference_is_empty_without_a_usable_friendly_id(session):
+    # Callers fall back to unqualified wording; announcing "`None`" would be
+    # worse than the unlabelled message this replaces.
+    assert draft_reference(session) == ""
+
+
+def test_draft_reference_matches_the_id_shown_in_the_footer():
+    # The reference is only useful if it's the same string users already see on
+    # the signup embed.
+    draft_session = SimpleNamespace(friendly_id="lightning-bolt-7", cube="LSVCube")
+    assert draft_reference(draft_session).strip("`") in draft_footer_text(
+        draft_session.friendly_id, draft_session.cube
+    )
 
 
 def test_no_footer_is_set_when_there_is_nothing_to_show():
