@@ -63,14 +63,36 @@ PAYOUT_STRUCTURES = {
     "top4": [40, 30, 20, 10],
 }
 
+# top25pct — the league-page structure — pays 25% of the field (rounded down,
+# minimum one place) rather than a fixed place count, so its share list is
+# derived per-field in _structure_ratios instead of living in the dict above.
+# Stepped ladder: 5/3/2/2 for the first four places, 2 shares for places 5-6,
+# and 1 share for every place beyond — so first place's cut scales up as a
+# larger field adds low tail places instead of being diluted by them.
+TOP25_SHARES = [5, 3, 2, 2, 2, 2]
+TOP25_EXTENSION_SHARE = 1
+
+# Everything a create/payout command may name: static presets plus the dynamic one.
+PAYOUT_CHOICES = list(PAYOUT_STRUCTURES) + ["top25pct"]
+
 
 def describe_structure(name: str) -> str:
+    if name == "top25pct":
+        return "top 25% of teams (5/3/2/2 shares)"
     ratios = PAYOUT_STRUCTURES.get(name)
     if not ratios:
         return name
     if name == "winner_take_all":
         return "winner-take-all"
     return f"top {len(ratios)} ({'/'.join(str(r) for r in ratios)})"
+
+
+def _structure_ratios(structure: str, field_size: int) -> list:
+    """The share list a structure pays over a field of ``field_size`` teams."""
+    if structure == "top25pct":
+        places = max(1, field_size // 4)
+        return (TOP25_SHARES + [TOP25_EXTENSION_SHARE] * (places - len(TOP25_SHARES)))[:places]
+    return PAYOUT_STRUCTURES.get(structure) or PAYOUT_STRUCTURES["winner_take_all"]
 
 
 def compute_allocations(pool: int, structure: str, ranked: list) -> list:
@@ -80,7 +102,7 @@ def compute_allocations(pool: int, structure: str, ranked: list) -> list:
     [(place, captain_id, team_name, amount)] for amounts > 0. Integer tix; the whole pool is
     always distributed — normalized to the places actually paid (so fewer teams than the
     structure names just concentrates the split), with the rounding remainder going to 1st."""
-    ratios = PAYOUT_STRUCTURES.get(structure) or PAYOUT_STRUCTURES["winner_take_all"]
+    ratios = _structure_ratios(structure, len(ranked))
     n = min(len(ratios), len(ranked))
     if n == 0 or pool <= 0:
         return []

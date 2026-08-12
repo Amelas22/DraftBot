@@ -314,7 +314,7 @@ class TournamentCog(commands.Cog):
         ),
         payout: discord.Option(
             str, "Prize-pool split for entry-fee tournaments",
-            choices=list(escrow.PAYOUT_STRUCTURES), default="winner_take_all"
+            choices=list(escrow.PAYOUT_CHOICES), default="winner_take_all"
         ),
     ):
         if not await self._check_enabled(ctx):
@@ -674,7 +674,7 @@ class TournamentCog(commands.Cog):
         ),
         structure: discord.Option(
             str, "Override the declared payout split",
-            choices=list(escrow.PAYOUT_STRUCTURES), required=False, default=None
+            choices=list(escrow.PAYOUT_CHOICES), required=False, default=None
         ),
     ):
         if not await self._check_enabled(ctx):
