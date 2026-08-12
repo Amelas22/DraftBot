@@ -66,3 +66,32 @@ async def seed_session(session_id="s1", guild="g", stype="staked",
                               player1_id=p1, player2_id=p2, winner_id=w,
                               result_submitted_at=ts))
         await s.commit()
+
+
+# --- create_stats_embed fixtures ------------------------------------------
+# The /stats embed builder takes three fully-populated timeframe dicts; these
+# give tests one shape to override rather than a per-file copy.
+
+def stats_dict(**overrides):
+    """A complete timeframe dict for player_stats.create_stats_embed."""
+    base = {
+        "display_name": "P", "drafts_played": 12, "matches_won": 5, "matches_played": 9,
+        "match_win_percentage": 55.0, "trophies_won": 1,
+        "team_drafts_played": 4, "team_drafts_won": 2, "team_drafts_tied": 0,
+        "team_draft_win_percentage": 50.0,
+        "current_win_streak": 0, "longest_win_streak": 3,
+        "current_perfect_streak": 0, "longest_perfect_streak": 1,
+        "cube_stats": {},
+    }
+    base.update(overrides)
+    return base
+
+
+class StubUser:
+    """Stands in for the discord.User create_stats_embed reads a name off."""
+    display_name = "P"
+
+
+def embed_field(embed, name):
+    """The named field of an embed, or None when it wasn't rendered."""
+    return next((f for f in embed.fields if f.name == name), None)

@@ -13,28 +13,58 @@ from helpers.skill import is_established, skill_rating
 from services.ledger_stats import LedgerSnapshot
 
 
-async def _player_skill_rating(player_id, guild_id):
-    """Return (scaled_rating, provisional) for a player, or (None, None) if the
-    player has no stored rating. Provisional until they have enough rated games
-    (random+staked+premade), read from the same row as mu/sigma."""
+async def _player_skill_standing(player_id, guild_id):
+    """Return (rating, provisional, rank, pool_size) for one player.
+
+    rating/provisional are (None, None) when the player has no stored rating;
+    provisional means fewer than enough rated games (random+staked+premade),
+    read from the same row as mu/sigma.
+
+    rank is the player's place among this guild's *established* players by
+    rating, and pool_size how many of those there are — (None, None) for a
+    provisional or unrated player. Ranking excludes short records because the
+    display rating shrinks them toward 1500 but not always far enough to keep a
+    three-game streak out of the top spots; that also makes the ranked pool the
+    same population the "(provisional)" label already distinguishes. Ties share
+    the better rank (competition ranking).
+
+    One guild-wide read serves both halves: the rating is computed in Python
+    (shrinkage), so ranking can't be a SQL ORDER BY, and once every row is in
+    hand a second single-row query for the caller would be re-reading what we
+    already have. Guild rosters are small enough that folding here is cheap.
+    """
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(
+                PlayerStats.player_id,
                 PlayerStats.true_skill_mu,
                 PlayerStats.true_skill_sigma,
                 PlayerStats.games_won,
                 PlayerStats.games_lost,
             ).where(
-                PlayerStats.player_id == str(player_id),
                 PlayerStats.guild_id == str(guild_id),
+                PlayerStats.true_skill_mu.isnot(None),
+                PlayerStats.true_skill_sigma.isnot(None),
             )
         )
-        row = result.first()
-    if row is None or row[0] is None or row[1] is None:
-        return None, None
-    mu, sigma, games_won, games_lost = row
-    games = (games_won or 0) + (games_lost or 0)
-    return skill_rating(mu, sigma, games), not is_established(games)
+        rows = result.all()
+
+    wanted = str(player_id)
+    rating = provisional = None
+    established = []
+    for pid, mu, sigma, games_won, games_lost in rows:
+        games = (games_won or 0) + (games_lost or 0)
+        player_rating = skill_rating(mu, sigma, games)
+        if is_established(games):
+            established.append(player_rating)
+        if pid == wanted:
+            rating, provisional = player_rating, not is_established(games)
+
+    if rating is None or provisional:
+        return rating, provisional, None, None
+
+    rank = sum(1 for other in established if other > rating) + 1
+    return rating, provisional, rank, len(established)
 
 
 async def _player_quiz_stats(player_id, guild_id):
@@ -132,9 +162,13 @@ async def get_stats_embed_for_player(
                                                  snapshot=snapshot)
 
     # Skill rating from stored TrueSkill μ/σ, gated on lifetime rated games.
-    rating, provisional = await _player_skill_rating(player_id, guild_id)
+    rating, provisional, server_rank, rank_pool = await _player_skill_standing(player_id, guild_id)
     stats_lifetime['skill_rating'] = rating
     stats_lifetime['skill_provisional'] = provisional
+    # Standing among the guild's established players; create_stats_embed decides
+    # how deep a rank is still worth printing.
+    stats_lifetime['server_rank'] = server_rank
+    stats_lifetime['server_rank_pool'] = rank_pool
 
     # Lifetime quiz stats (pick + trophy), rendered as their own embed field.
     pick_quiz, trophy_quiz = await _player_quiz_stats(player_id, guild_id)
