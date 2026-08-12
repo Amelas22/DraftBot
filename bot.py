@@ -97,7 +97,7 @@ async def main():
         # pending — at startup and every 10 min — so a trade that completes after a
         # poll timeout or across a restart always gets booked eventually.
         from services.mtgo_resolution_service import pending_jobs_watchdog
-        bot.loop.create_task(pending_jobs_watchdog())
+        bot.loop.create_task(pending_jobs_watchdog(bot))
         logger.info("Re-registered team finder")
 
     @bot.event

@@ -9,7 +9,6 @@ Adds escrow support to tournaments:
   * tournament_participants.status   — 'paid' | 'pending' (server_default 'paid' so every
                                        existing participant and every free tournament is
                                        already complete; new paid registrations set 'pending').
-  * tournament_participants.escrow_tx_id — the captain's WalletTx reserve holding the fee.
   * tournament_participants.paid_at  — when escrow was secured.
 
 Unlike the wallet tables, these are COLUMNS on existing tables, which the bot's init_db
@@ -43,9 +42,6 @@ def upgrade() -> None:
     if 'status' not in participant_cols:
         op.add_column('tournament_participants', sa.Column(
             'status', sa.String(length=16), nullable=False, server_default=sa.text("'paid'")))
-    if 'escrow_tx_id' not in participant_cols:
-        op.add_column('tournament_participants', sa.Column(
-            'escrow_tx_id', sa.Integer(), nullable=True))
     if 'paid_at' not in participant_cols:
         op.add_column('tournament_participants', sa.Column(
             'paid_at', sa.DateTime(), nullable=True))
@@ -53,7 +49,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     participant_cols = _columns('tournament_participants')
-    drop_participant = [c for c in ('paid_at', 'escrow_tx_id', 'status') if c in participant_cols]
+    drop_participant = [c for c in ('paid_at', 'status') if c in participant_cols]
     if drop_participant:
         with op.batch_alter_table('tournament_participants', schema=None) as batch_op:
             for col in drop_participant:

@@ -39,6 +39,10 @@ class Tournament(Base):
     # Where the auto-updating standings message lives (edited in place on every result)
     standings_channel_id = Column(String(64), nullable=True)
     standings_message_id = Column(String(64), nullable=True)
+    # The live registration board (roster + who has paid), posted at creation and
+    # edited in place until the tournament starts. Same shape as standings_*.
+    board_channel_id = Column(String(64), nullable=True)
+    board_message_id = Column(String(64), nullable=True)
 
     def __repr__(self):
         return f"<Tournament(id={self.id}, name={self.name!r}, status={self.status})>"
@@ -61,7 +65,6 @@ class TournamentParticipant(Base):
     # The captain's WalletTx reserve holding the fee — cancelled to refund (drop before
     # start), or settled into the tournament's prize wallet when it starts. Null for
     # free / grandfathered / comped participants.
-    escrow_tx_id = Column(Integer, nullable=True)
     paid_at = Column(DateTime, nullable=True)
 
     # This tournament's standings (never written onto the global Team record)

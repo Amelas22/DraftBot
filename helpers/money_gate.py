@@ -23,9 +23,8 @@ from config import is_money_server
 from models.mtgo_account import MtgoAccount
 from services.mtgo_tradebot_client import get_client
 
-# Serve-side readiness wait (minutes) for a deposit/withdraw trade before the job
-# fails and any reservation is released. Bounds how long a player has to accept
-# the in-client trade.
+# Serve-side readiness wait (minutes) before the job fails. Bounds how long a player
+# has to accept the in-client trade.
 DEFAULT_WAIT_MINUTES = 10
 
 _custodian_cache: str | None = None
@@ -57,6 +56,53 @@ async def linked_username(discord_id) -> str | None:
     return acct.mtgo_username if acct else None
 
 
+async def serve_busy_reason() -> str | None:
+    """Why the custodian can't take a trade right now, or None if it's free.
+
+    The custodian works ONE trade at a time, so enqueuing behind an in-flight job just
+    leaves the player staring at a trade window that won't open for minutes. Better to
+    say so and let them come back.
+
+    Busy-ness comes from the job LIST (states queued/running), never from /health's
+    ``jobs`` field: that counter includes terminal jobs, so a single past failure would
+    otherwise wedge every future deposit behind a permanent "busy".
+    """
+    global _custodian_cache
+    client = get_client()
+    health = await client.health()
+    if health and not _custodian_cache and isinstance(health.get("custodian"), str):
+        _custodian_cache = health["custodian"]  # saves custodian_name() its own /health
+    if not health or not health.get("ok"):
+        return ("The MTGO custodian isn't reachable right now. Try again in a few "
+                "minutes — nothing has been charged.")
+    if health.get("reconnecting"):
+        return ("The MTGO custodian is reconnecting to the client. Try again in a few "
+                "minutes.")
+    active = await client.active_jobs()
+    if active:
+        return (f"The MTGO custodian is busy with {len(active)} other trade(s) — it can "
+                f"only trade with one person at a time. Try again in a few minutes.")
+    return None
+
+
+def explain_trade_failure(detail: str) -> str:
+    """Add an actionable hint to a serve failure the player can fix themselves.
+
+    The serve reports raw causes ("could not resolve 'basic3' as an MTGO user"); on its
+    own that reads like a bot fault, when in fact the linked username is wrong or the
+    tix were never put in the trade window."""
+    text = (detail or "trade failed").strip()
+    low = text.lower()
+    if "resolve" in low and "mtgo user" in low:
+        return (f"{text}\nThat's the MTGO username linked to your Discord account — check "
+                f"it with `/mtgo_whoami` and fix it with `/link_mtgo <username>` "
+                f"(spelling must match your MTGO login exactly), then try again.")
+    if "not presented" in low or "cards not presented" in low:
+        return (f"{text}\nThe trade window opened but the tix weren't added to it. Accept "
+                f"the trade, put the tix in, and confirm — then try again.")
+    return text
+
+
 async def custodian_name() -> str:
     """The vault account's display name, from the serve's /health (cached on success)."""
     global _custodian_cache
@@ -64,7 +110,7 @@ async def custodian_name() -> str:
         return _custodian_cache
     health = await get_client().health()
     name = (health or {}).get("custodian")
-    if name:
+    if isinstance(name, str) and name:
         _custodian_cache = name
         return name
     return "the custodian bot"

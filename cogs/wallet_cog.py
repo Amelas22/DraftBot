@@ -2,7 +2,7 @@
 Tix wallet slash commands — the player-facing face of the MTGO escrow/wallet system.
 
 Commands (all under /wallet):
-- /wallet [player]        show a wallet: balance / reserved / available + recent activity
+- /wallet [player]        show a wallet: balance + recent activity
 - /wallet deposit <n>     hand tix to the custodian (an MTGO trade) -> wallet +n
 - /wallet withdraw <n>    take tix out of the custodian (an MTGO trade) -> wallet -n
 - /wallet pay @player <n> send tix to another player's wallet (internal, no trade)
@@ -25,10 +25,12 @@ from loguru import logger
 from models.mtgo_account import MtgoAccount
 from services import wallet_service
 from services import mtgo_resolution_service as resolution
+from services import tournament_escrow_service as escrow
 from services.mtgo_tradebot_client import EVENT_TICKET
+from services.tournament_formatter import update_registration_board
 from helpers.money_gate import (
-    DEFAULT_WAIT_MINUTES, custodian_name, gate_read, gate_serve, linked_username,
-    spawn_followup,
+    DEFAULT_WAIT_MINUTES, custodian_name, explain_trade_failure, gate_read, gate_serve,
+    linked_username, spawn_followup,
 )
 from helpers.permissions import has_bot_manager_role
 
@@ -57,19 +59,16 @@ class WalletCommands(commands.Cog):
         embed = discord.Embed(
             title=f"{target.display_name}'s Tix Wallet", color=discord.Color.gold())
         embed.add_field(name="Balance", value=f"**{w.balance}** tix", inline=True)
-        if w.reserved:
-            embed.add_field(name="Reserved", value=f"{w.reserved} tix (withdraw in flight)", inline=True)
-            embed.add_field(name="Available", value=f"**{w.available}** tix", inline=True)
 
         if history:
             lines = []
             for tx in history:
                 sign = "+" if tx.amount >= 0 else "−"
-                tag = f" ({tx.status})" if tx.status != "done" else ""
-                # counterparty is a Discord id (all-digits) for internal pay/receive; an MTGO
-                # username for deposit/withdraw — only mention the former.
-                who = f" ↔ <@{tx.counterparty_id}>" if tx.counterparty_id and tx.counterparty_id.isdigit() else ""
-                lines.append(f"`{sign}{abs(tx.amount)}` {tx.kind}{tag}{who}")
+                # only @-mention a real person: the counterparty may be an MTGO
+                # username or a synthetic holder (in-flight, a prize pool)
+                cp = tx.counterparty_id
+                who = "" if not cp or wallet_service.is_system_account(cp) else f" ↔ <@{cp}>"
+                lines.append(f"`{sign}{abs(tx.amount)}` {tx.kind}{who}")
             embed.add_field(name="Recent activity", value="\n".join(lines), inline=False)
         else:
             embed.set_footer(text="No wallet activity yet.")
@@ -94,8 +93,8 @@ class WalletCommands(commands.Cog):
         started = await resolution.start_deposit(
             guild_id, player_id, username, amount, commit=True, wait_minutes=DEFAULT_WAIT_MINUTES)
         if not started.get("ok"):
-            return await ctx.followup.send(
-                f"Couldn't start the deposit: {started.get('error')}", ephemeral=True)
+            prefix = "⏳" if started.get("busy") else "Couldn't start the deposit:"
+            return await ctx.followup.send(f"{prefix} {started.get('error')}", ephemeral=True)
 
         job_id = started["job_id"]
         custodian = await custodian_name()
@@ -106,13 +105,25 @@ class WalletCommands(commands.Cog):
 
         # capture only what the poller needs (not ctx) — this task can live for ~14 min
         followup = ctx.followup
+        bot = self.bot
 
         async def _finish():
             res = await resolution.finish_deposit(job_id, guild_id, player_id, amount, username)
             if res.get("ok"):
+                # Complete any pending tournament entry BEFORE auto-draw: the player
+                # just committed to that entry, so its fee shouldn't be siphoned to a
+                # creditor on the way in.
+                completed = await escrow.sweep_pending_entries(player_id)
                 bal = await wallet_service.get_balance(guild_id, player_id)
                 drawn = await resolution.auto_draw(guild_id, player_id)
                 msg = f"✅ Deposit confirmed: **+{amount} tix**. Balance: **{bal} tix**."
+                if completed:
+                    msg += f" Completed **{len(completed)}** pending tournament registration(s)."
+                    for t_id in set(completed):
+                        try:
+                            await update_registration_board(bot, t_id)
+                        except Exception as e:
+                            logger.warning(f"board refresh failed for {t_id}: {e}")
                 if drawn:
                     total = sum(d.get("amount", 0) for d in drawn)
                     msg += f" Auto-applied **{total} tix** to {len(drawn)} debt(s)."
@@ -120,7 +131,7 @@ class WalletCommands(commands.Cog):
                 msg = (f"⏳ Deposit `{job_id}` is still pending — it'll credit automatically "
                        f"once the trade completes.")
             else:
-                msg = f"❌ Deposit `{job_id}` failed: {res.get('error')}"
+                msg = f"❌ Deposit `{job_id}` failed: {explain_trade_failure(res.get('error'))}"
             await followup.send(msg, ephemeral=True)
 
         spawn_followup("wallet deposit", _finish())
@@ -143,31 +154,31 @@ class WalletCommands(commands.Cog):
         started = await resolution.start_withdraw(
             guild_id, player_id, username, amount, commit=True, wait_minutes=DEFAULT_WAIT_MINUTES)
         if not started.get("ok"):
-            # covers insufficient funds and a serve that wouldn't accept the job
-            return await ctx.followup.send(
-                f"Couldn't start the withdraw: {started.get('error')}", ephemeral=True)
+            # covers a busy custodian, insufficient funds, and a rejected job
+            prefix = "⏳" if started.get("busy") else "Couldn't start the withdraw:"
+            return await ctx.followup.send(f"{prefix} {started.get('error')}", ephemeral=True)
 
         job_id = started["job_id"]
-        reserve_tx_id = started["reserve_tx_id"]
         custodian = await custodian_name()
         await ctx.followup.send(
-            f"**Withdraw started** — {amount} tix reserved. In MTGO, accept the trade from "
+            f"**Withdraw started** — {amount} tix committed. In MTGO, accept the trade from "
             f"`{custodian}` when it pops. I'll confirm here once it completes.\n"
             f"_Job `{job_id}` — you have ~{DEFAULT_WAIT_MINUTES} min._", ephemeral=True)
 
         followup = ctx.followup
 
         async def _finish():
-            res = await resolution.finish_withdraw(reserve_tx_id, job_id)
+            res = await resolution.finish_withdraw(
+                job_id, guild_id, player_id, amount, username)
             if res.get("ok"):
                 bal = await wallet_service.get_balance(guild_id, player_id)
                 msg = f"✅ Withdraw confirmed: **−{amount} tix**. Balance: **{bal} tix**."
             elif res.get("outcome") == "pending":
                 msg = (f"⏳ Withdraw `{job_id}` is still running; your {amount} tix stay "
-                       f"reserved until it resolves.")
+                       f"committed to it until it resolves.")
             else:
-                msg = (f"❌ Withdraw `{job_id}` failed: {res.get('error')}. "
-                       f"Your {amount} tix have been released.")
+                msg = (f"❌ Withdraw `{job_id}` failed: {explain_trade_failure(res.get('error'))}\n"
+                       f"Your {amount} tix have been returned to your wallet.")
             await followup.send(msg, ephemeral=True)
 
         spawn_followup("wallet withdraw", _finish())

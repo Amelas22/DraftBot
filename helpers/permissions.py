@@ -92,14 +92,28 @@ def has_bot_manager_role():
 
 async def _send_error(ctx, message):
     """Send an ephemeral message to the user, whether or not the interaction
-    has already been acknowledged."""
+    has already been acknowledged.
+
+    ``ctx.interaction.response.is_done()`` reflects local state only: a
+    deferred/response call that Discord received and processed but which
+    raised client-side (timeout, dropped connection) leaves it ``False``
+    even though the interaction really is already acknowledged. Trusting it
+    blindly can pick the wrong path and raise a second, more confusing error
+    on top of whatever failed originally, so fall back to the other path
+    before giving up.
+    """
     try:
-        if ctx.interaction.response.is_done():
-            await ctx.followup.send(message, ephemeral=True)
-        else:
-            await ctx.respond(message, ephemeral=True)
+        primary, fallback = (
+            (ctx.followup.send, ctx.respond)
+            if ctx.interaction.response.is_done()
+            else (ctx.respond, ctx.followup.send)
+        )
+        await primary(message, ephemeral=True)
     except Exception:
-        logger.exception("Failed to send command error message to user")
+        try:
+            await fallback(message, ephemeral=True)
+        except Exception:
+            logger.exception("Failed to send command error message to user")
 
 
 async def handle_application_command_error(ctx, error):
