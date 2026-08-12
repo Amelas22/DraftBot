@@ -17,7 +17,7 @@ from sqlalchemy.orm import selectinload
 from helpers.utils import get_cube_thumbnail_url
 from helpers.display_names import get_display_name, get_display_name_by_id
 from helpers.debt_warning import format_staked_sign_ups, DEBT_WARNING_AGE_DAYS
-from helpers.draft_footer import apply_draft_footer_from_session, draft_reference
+from helpers.draft_footer import apply_draft_footer_from_session
 from helpers.permissions import bot_manager_button
 from utils import (
     calculate_pairings,
@@ -71,16 +71,13 @@ def is_test_signup(user_id: str, bot_user_id: str) -> bool:
     return is_synthetic_test_user(user_id) or (is_test_mode() and user_id == bot_user_id)
 
 
-def queue_ping_text(player_count: int, draft_session: object, role_mention: str) -> str:
+def queue_ping_text(player_count: int, cube: str, role_mention: str) -> str:
     """The @drafter ping announcing a queue is filling up.
 
     Shared by the two sites that raise it (plain sign-up and stake selection).
-    Names the draft because the ping lands in a channel hosting several queues
-    at once; drops the reference for rows without a friendly_id.
+    Names the cube so readers can tell which of the channel's queues is filling.
     """
-    reference = draft_reference(draft_session)
-    queued_for = f" for draft {reference}" if reference else ""
-    return f"{player_count} Players in queue{queued_for}! {role_mention}"
+    return f"{player_count} Players in queue to play {cube}! {role_mention}"
 
 
 class PersistentView(discord.ui.View):
@@ -565,7 +562,7 @@ class PersistentView(discord.ui.View):
                     channel = await interaction.client.fetch_channel(draft_session_updated.draft_channel_id)
                     if channel:
                         await channel.send(queue_ping_text(
-                            len(sign_ups), draft_session_updated, drafter_role.mention
+                            len(sign_ups), draft_session_updated.cube, drafter_role.mention
                         ))
 
             # Update the draft message to reflect the new list of sign-ups
@@ -2362,9 +2359,9 @@ class CancelConfirmationView(discord.ui.View):
         # First, announce the cancellation in the channel
         channel = self.bot.get_channel(int(session.draft_channel_id))
         if channel:
-            reference = draft_reference(session)
-            names_it = f" {reference}" if reference else ""
-            await channel.send(f"User **{self.user_display_name}** has cancelled the draft{names_it}.")
+            await channel.send(
+                f"User **{self.user_display_name}** has cancelled the draft `{session.friendly_id}`."
+            )
         
         # Check if there's an active draft manager for this session
         manager = DraftSetupManager.get_active_manager(self.draft_session_id)
@@ -2581,7 +2578,7 @@ class StakeOptionsSelect(discord.ui.Select):
                     channel = await interaction.client.fetch_channel(draft_session_updated.draft_channel_id)
                     if channel:
                         await channel.send(queue_ping_text(
-                            len(sign_ups), draft_session_updated, drafter_role.mention
+                            len(sign_ups), draft_session_updated.cube, drafter_role.mention
                         ))
 
         # Confirm stake and provide draft link
