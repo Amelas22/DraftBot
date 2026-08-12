@@ -93,6 +93,11 @@ async def main():
         await re_register_tournament_views(bot)
         from tournament_nudge import re_register_premade_nudges
         await re_register_premade_nudges(bot)
+        # Watchdog for MTGO serve jobs (deposits/withdraws): re-polls anything still
+        # pending — at startup and every 10 min — so a trade that completes after a
+        # poll timeout or across a restart always gets booked eventually.
+        from services.mtgo_resolution_service import pending_jobs_watchdog
+        bot.loop.create_task(pending_jobs_watchdog())
         logger.info("Re-registered team finder")
 
     @bot.event

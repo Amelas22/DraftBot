@@ -46,13 +46,27 @@ async def _participant_by_name(session, tournament_id, team_name):
     return (await session.execute(stmt)).scalars().first()
 
 
-async def create_tournament(session, guild_id, name, total_rounds, format="swiss"):
+async def get_latest_completed_tournament(session, guild_id):
+    """The guild's most recently completed tournament, or None. Used by payout, since
+    get_active_tournament only returns registration/active ones."""
+    stmt = (
+        select(Tournament)
+        .where(Tournament.guild_id == str(guild_id), Tournament.status == "completed")
+        .order_by(Tournament.id.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalars().first()
+
+
+async def create_tournament(session, guild_id, name, total_rounds, format="swiss", entry_fee=0,
+                            payout_structure="winner_take_all"):
     """Create a tournament in registration status.
 
     ``format`` is 'swiss', 'round_robin', or 'manual'. For the all-open formats
     total_rounds is set at start (derived from the schedule), so callers may
-    pass 0. Raises ValueError if the guild already has a registration/active
-    tournament (one active per guild keeps other commands argument-free).
+    pass 0. ``entry_fee`` is the per-team escrow in tix (0 = free); ``payout_structure``
+    is how the pool splits at payout. Raises ValueError if the guild already has a
+    registration/active tournament (one active per guild keeps other commands argument-free).
     """
     if format not in ("swiss",) + ALL_OPEN_FORMATS:
         raise ValueError(f"Unknown tournament format: {format}")
@@ -63,7 +77,8 @@ async def create_tournament(session, guild_id, name, total_rounds, format="swiss
             "Finish it before creating a new tournament."
         )
     tournament = Tournament(
-        guild_id=str(guild_id), name=name, total_rounds=total_rounds, format=format
+        guild_id=str(guild_id), name=name, total_rounds=total_rounds, format=format,
+        entry_fee=max(0, int(entry_fee or 0)), payout_structure=payout_structure,
     )
     session.add(tournament)
     await session.flush()
@@ -109,6 +124,9 @@ async def register_team(session, tournament_id, team_name, captain_user_id):
         team_id=team.TeamID,
         team_name=team.TeamName,
         captain_user_id=str(captain_user_id),
+        # A paid tournament starts a new team as 'pending' until escrow is secured;
+        # a free tournament (entry_fee 0) leaves it 'paid' (the column default).
+        status="pending" if (tournament.entry_fee or 0) > 0 else "paid",
     )
     session.add(participant)
     await session.flush()
@@ -225,17 +243,22 @@ async def start_tournament(session, tournament_id, rng):
     if tournament.status != "registration":
         raise ValueError(f"'{tournament.name}' is already {tournament.status}.")
     participants = await list_participants(session, tournament_id)
-    if len(participants) < 2:
-        raise ValueError("At least 2 teams must be registered to start.")
+    # Only teams that completed registration (escrow paid) are seeded. Free
+    # tournaments mark everyone 'paid', so this is a no-op there.
+    paid = [p for p in participants if p.status == "paid"]
+    if len(paid) < 2:
+        raise ValueError(
+            "At least 2 teams must have completed registration (entry fee paid) to start."
+        )
 
     tournament.status = "active"
     if tournament.format == "round_robin":
-        return await _build_round_robin(session, tournament, participants, rng)
+        return await _build_round_robin(session, tournament, paid, rng)
     if tournament.format == "manual":
         return await _open_manual_schedule(session, tournament)
 
     _, matches = await _create_round_with_pairings(
-        session, tournament, participants, set(), rng
+        session, tournament, paid, set(), rng
     )
     return matches
 
@@ -262,6 +285,11 @@ async def add_match(session, tournament_id, team_a_name, team_b_name):
         raise ValueError(f"'{missing}' is not registered for this tournament.")
     if a.id == b.id:
         raise ValueError("A team can't be scheduled against itself.")
+    unpaid = [p.team_name for p in (a, b) if p.status != "paid"]
+    if unpaid:
+        raise ValueError(
+            f"{' and '.join(unpaid)} hasn't completed registration (entry fee unpaid)."
+        )
 
     rounds = (await session.execute(
         select(TournamentRound)
@@ -494,6 +522,25 @@ async def get_standings_data(session, tournament_id):
         .where(TournamentRound.tournament_id == tournament_id)
     )).scalars().all()
     return rank_standings(participants, matches)
+
+
+async def count_unreported_matches(session, tournament_id):
+    """Non-bye matches in this tournament with no result yet (team_a_wins IS NULL).
+
+    A tournament can be finished (status='completed') with matches still unreported — those
+    count as 0-0, so standings aren't truly final. Payout surfaces this before disbursing.
+    """
+    stmt = (
+        select(func.count())
+        .select_from(TournamentMatch)
+        .join(TournamentRound, TournamentMatch.round_id == TournamentRound.id)
+        .where(
+            TournamentRound.tournament_id == tournament_id,
+            TournamentMatch.is_bye.is_(False),
+            TournamentMatch.team_a_wins.is_(None),
+        )
+    )
+    return int((await session.execute(stmt)).scalar_one())
 
 
 async def tournament_match_is_unfinished(session, match_id):

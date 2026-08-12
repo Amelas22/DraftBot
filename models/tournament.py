@@ -27,6 +27,14 @@ class Tournament(Base):
     # 'swiss' (re-pair each round) | 'round_robin' | 'manual' (schedule fixed upfront)
     format = Column(String(16), nullable=False, default='swiss',
                     server_default=text("'swiss'"))
+    # Escrow entry fee in tix (0 = free, the default = today's behavior). When > 0, a
+    # registering captain must have the fee held in their wallet before the team counts
+    # as registered (see services/tournament_escrow_service.py).
+    entry_fee = Column(Integer, nullable=False, default=0, server_default=text('0'))
+    # How the prize pool is split at payout, declared up front so entrants know it before
+    # they pay: 'winner_take_all' | 'top2' | 'top3' | 'top4' (see PAYOUT_STRUCTURES).
+    payout_structure = Column(String(32), nullable=False, default='winner_take_all',
+                              server_default=text("'winner_take_all'"))
     created_at = Column(DateTime, default=datetime.now)
     # Where the auto-updating standings message lives (edited in place on every result)
     standings_channel_id = Column(String(64), nullable=True)
@@ -45,6 +53,16 @@ class TournamentParticipant(Base):
     team_id = Column(Integer, nullable=False)
     team_name = Column(String(128), nullable=False)
     captain_user_id = Column(String(64), nullable=False)
+
+    # Escrow gate. 'paid' = entry fee is held (or it's a free tournament, or a row that
+    # predates escrow — server_default grandfathers those); 'pending' = registered but the
+    # escrow isn't secured yet. Only 'paid' participants are seeded when the tournament starts.
+    status = Column(String(16), nullable=False, default='paid', server_default=text("'paid'"))
+    # The captain's WalletTx reserve holding the fee — cancelled to refund (drop before
+    # start), or settled into the tournament's prize wallet when it starts. Null for
+    # free / grandfathered / comped participants.
+    escrow_tx_id = Column(Integer, nullable=True)
+    paid_at = Column(DateTime, nullable=True)
 
     # This tournament's standings (never written onto the global Team record)
     match_wins = Column(Integer, nullable=False, default=0, server_default=text('0'))

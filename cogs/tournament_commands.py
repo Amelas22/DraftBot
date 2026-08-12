@@ -6,6 +6,10 @@ from loguru import logger
 
 from config import get_config, update_setting
 from database.db_session import db_session
+from helpers.money_gate import (
+    DEFAULT_WAIT_MINUTES as ESCROW_WAIT_MINUTES,
+    custodian_name, gate_serve, linked_username, spawn_followup,
+)
 from helpers.permissions import has_bot_manager_role
 from models.tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
 from sqlalchemy import or_, select
@@ -13,17 +17,20 @@ from services.tournament_formatter import create_standings_embed, update_standin
 from services.tournament_service import (
     advance_round,
     add_match,
+    count_unreported_matches,
     create_tournament,
     finish_tournament,
     find_current_match,
     get_active_tournament,
+    get_latest_completed_tournament,
     get_standings_data,
     list_participants,
     register_team,
-    remove_team,
     set_result,
-    start_tournament,
 )
+from services.mtgo_tradebot_client import EVENT_TICKET
+from services import mtgo_resolution_service as resolution
+from services import tournament_escrow_service as escrow
 
 
 def tournament_enabled(guild_id):
@@ -159,6 +166,108 @@ async def re_register_tournament_views(bot):
     logger.info(f"Re-registered {len(matches)} tournament play buttons")
 
 
+_PLACE_MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
+
+
+def _format_payout_lines(allocations):
+    """Render [(place, captain_id, team_name, amount)] as medal-prefixed payout lines."""
+    return "\n".join(
+        f"{_PLACE_MEDALS.get(place, f'{place}.')} <@{cap}> (**{name}**) — **{amt} tix**"
+        for place, cap, name, amt in allocations
+    )
+
+
+class PayoutConfirmView(discord.ui.View):
+    """Final confirmation before disbursing a prize pool. Mirrors SettlementConfirmView:
+    invoker-only, 120s timeout, double-click guarded. Disburses only on Confirm; the actual
+    transfer (escrow.execute_payout) is idempotent, so a race can't double-pay."""
+
+    def __init__(self, guild_id, tournament_id, t_name, pool, struct, allocations, author_id):
+        super().__init__(timeout=120)
+        self.guild_id = guild_id
+        self.tournament_id = tournament_id
+        self.t_name = t_name
+        self.pool = pool
+        self.struct = struct
+        self.allocations = allocations
+        self.author_id = str(author_id)
+        self.message = None
+        self._processing = False
+
+    async def interaction_check(self, interaction):
+        if str(interaction.user.id) != self.author_id:
+            await interaction.response.send_message(
+                "Only the admin who started this payout can confirm it.", ephemeral=True)
+            return False
+        return True
+
+    def _set_buttons(self, disabled: bool):
+        for item in self.children:
+            item.disabled = disabled
+
+    async def _fail(self, interaction, msg: str):
+        """Re-arm the view and surface the error so the admin can retry."""
+        self._processing = False
+        self._set_buttons(False)
+        try:
+            await interaction.edit_original_response(content=msg, view=self)
+        except Exception:
+            pass
+
+    @discord.ui.button(label="Confirm payout", style=discord.ButtonStyle.success, emoji="🏦")
+    async def confirm(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if self._processing:
+            await interaction.response.send_message("Payout is already processing…", ephemeral=True)
+            return
+        self._processing = True
+        await interaction.response.defer()
+        self._set_buttons(True)
+        try:
+            res = await escrow.execute_payout(self.guild_id, self.tournament_id, self.allocations)
+        except Exception as e:
+            logger.error(f"[PayoutConfirm] execute failed: {e}")
+            await self._fail(interaction, f"❌ Payout error: {e}")
+            return
+        if not res.get("ok"):
+            await self._fail(interaction, f"❌ Payout failed: {res.get('error')}")
+            return
+        if res.get("already_paid"):
+            await interaction.edit_original_response(
+                content=f"**{self.t_name}** was already paid out.", embed=None, view=None)
+            self.stop()
+            return
+        await interaction.edit_original_response(
+            content=f"✅ Paid out **{res['total']} tix** for **{self.t_name}**.", embed=None, view=None)
+        announcement = (
+            f"🏦 **{self.t_name}** — prize pool of **{self.pool} tix** paid out "
+            f"(*{escrow.describe_structure(self.struct)}*):\n{_format_payout_lines(self.allocations)}\n"
+            f"Winners can `/wallet withdraw` to MTGO or `/wallet pay` teammates."
+        )
+        try:
+            await interaction.channel.send(announcement)
+        except Exception as e:
+            logger.warning(f"[PayoutConfirm] public announcement failed: {e}")
+        logger.info(f"Tournament {self.tournament_id} paid out {res['total']} tix by {interaction.user.id}")
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if self._processing:
+            await interaction.response.send_message("Payout is processing, can't cancel now.", ephemeral=True)
+            return
+        await interaction.response.edit_message(content="Payout cancelled.", embed=None, view=None)
+        self.stop()
+
+    async def on_timeout(self):
+        self._set_buttons(True)
+        if self.message is not None:
+            try:
+                await self.message.edit(content="Payout confirmation expired — run `/tournament payout` again.",
+                                        embed=None, view=None)
+            except Exception:
+                pass
+
+
 class TournamentCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -200,6 +309,13 @@ class TournamentCog(commands.Cog):
             int, "Number of Swiss rounds (Swiss only)", min_value=1, max_value=20,
             required=False, default=None,
         ),
+        entry_fee: discord.Option(
+            int, "Per-team entry fee in tix (0 = free)", min_value=0, default=0
+        ),
+        payout: discord.Option(
+            str, "Prize-pool split for entry-fee tournaments",
+            choices=list(escrow.PAYOUT_STRUCTURES), default="winner_take_all"
+        ),
     ):
         if not await self._check_enabled(ctx):
             return
@@ -207,18 +323,29 @@ class TournamentCog(commands.Cog):
         if format == "swiss" and rounds is None:
             await ctx.followup.send("❌ Swiss tournaments need a `rounds` count.", ephemeral=True)
             return
+        if entry_fee > 0:
+            gate = gate_serve(ctx)
+            if gate:
+                await ctx.followup.send(f"❌ Can't charge an entry fee here: {gate}", ephemeral=True)
+                return
         # Round-robin/manual derive their round count from the schedule at start.
         total_rounds = rounds if format == "swiss" else 0
         try:
             async with db_session() as session:
                 tournament = await create_tournament(
-                    session, ctx.guild.id, name, total_rounds, format=format
+                    session, ctx.guild.id, name, total_rounds, format=format,
+                    entry_fee=entry_fee, payout_structure=payout
                 )
             logger.info(f"Tournament '{name}' ({format}) created in guild {ctx.guild.id} by {ctx.author.id}")
             detail = f"{tournament.total_rounds} rounds" if format == "swiss" else format.replace("_", "-")
+            fee_line = (
+                f" Entry fee: **{entry_fee} {EVENT_TICKET}(s)** per team — a team is registered "
+                f"once its captain's escrow is received. Payout: **{escrow.describe_structure(payout)}**."
+                if entry_fee > 0 else ""
+            )
             await ctx.followup.send(
                 f"✅ Tournament **{tournament.name}** created ({detail}). "
-                f"Registration is open — captains can join with `/tournament register`.",
+                f"Registration is open — captains can join with `/tournament register`.{fee_line}",
                 ephemeral=True,
             )
         except ValueError as e:
@@ -233,32 +360,130 @@ class TournamentCog(commands.Cog):
         if not await self._check_enabled(ctx):
             return
         await ctx.defer()
+
+        async with db_session() as session:
+            tournament = await get_active_tournament(session, ctx.guild.id)
+        if tournament is None:
+            await ctx.followup.send("There is no tournament accepting registrations right now.", ephemeral=True)
+            return
+        t_id, t_name, fee = tournament.id, tournament.name, (tournament.entry_fee or 0)
+
+        guild_id = str(ctx.guild.id)
+        captain_id = str(ctx.author.id)
+
+        # A paid tournament needs the money stack + the captain's MTGO link BEFORE we create
+        # anything, so we never leave a pending row that can't be paid.
+        captain_user = None
+        if fee > 0:
+            gate = gate_serve(ctx)
+            if gate:
+                await ctx.followup.send(f"❌ {gate}", ephemeral=True)
+                return
+            captain_user = await linked_username(ctx.author.id)
+            if not captain_user:
+                await ctx.followup.send(
+                    "Link your MTGO account first with `/link_mtgo <username>`, then register.",
+                    ephemeral=True)
+                return
+
+        # Create (or find) the participant.
         try:
             async with db_session() as session:
-                tournament = await get_active_tournament(session, ctx.guild.id)
-                if tournament is None:
-                    await ctx.followup.send("There is no tournament accepting registrations right now.", ephemeral=True)
-                    return
-                participant, created = await register_team(
-                    session, tournament.id, team, ctx.author.id
-                )
-            if created:
-                logger.info(
-                    f"Team '{participant.team_name}' registered for tournament {tournament.id} "
-                    f"by {ctx.author.id} in guild {ctx.guild.id}"
-                )
-                await ctx.followup.send(
-                    f"✅ **{participant.team_name}** is registered for **{tournament.name}** "
-                    f"with {ctx.author.mention} as captain."
-                )
-            else:
-                await ctx.followup.send(
-                    f"**{participant.team_name}** is already registered for **{tournament.name}** "
-                    f"(captain: <@{participant.captain_user_id}>).",
-                    ephemeral=True,
-                )
+                participant, created = await register_team(session, t_id, team, ctx.author.id)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
+            return
+        p_id, p_name = participant.id, participant.team_name
+
+        # Free tournament: registration is complete on creation (existing behavior).
+        if fee == 0:
+            if created:
+                logger.info(f"Team '{p_name}' registered for tournament {t_id} by {ctx.author.id}")
+                await ctx.followup.send(
+                    f"✅ **{p_name}** is registered for **{t_name}** with {ctx.author.mention} as captain.")
+            else:
+                await ctx.followup.send(
+                    f"**{p_name}** is already registered for **{t_name}** "
+                    f"(captain: <@{participant.captain_user_id}>).", ephemeral=True)
+            return
+
+        # Paid tournament.
+        if participant.status == "paid":
+            await ctx.followup.send(
+                f"**{p_name}** is already registered and paid for **{t_name}**.", ephemeral=True)
+            return
+        # Escrow is paid from the captain's wallet, so only the captain can complete it.
+        if captain_id != participant.captain_user_id:
+            await ctx.followup.send(
+                f"**{p_name}** is registered (pending). Only its captain "
+                f"<@{participant.captain_user_id}> can complete the **{fee}-tix** escrow.",
+                ephemeral=True)
+            return
+
+        # Try to hold the fee from the captain's wallet right away.
+        res = await escrow.secure_from_wallet(guild_id, captain_id, p_id, t_id, fee, p_name)
+        if res.get("done"):
+            await ctx.followup.send(
+                f"✅ **{p_name}** is registered for **{t_name}** — **{fee} {EVENT_TICKET}(s)** held "
+                f"from your wallet. You're in.")
+            return
+        if not res.get("ok"):
+            await ctx.followup.send(
+                f"⚠️ **{p_name}** is registered but I couldn't hold the escrow: {res.get('error')}. "
+                f"Try `/tournament register` again.", ephemeral=True)
+            return
+
+        # Wallet short — deposit the difference, then hold the full fee (in the background).
+        # The context tag lets the startup resumer re-secure this escrow if the bot
+        # restarts while the trade is still open.
+        deficit = res["deficit"]
+        started = await resolution.start_deposit(
+            guild_id, captain_id, captain_user, deficit, commit=True,
+            wait_minutes=ESCROW_WAIT_MINUTES, context=escrow.escrow_source(t_id, p_id))
+        if not started.get("ok"):
+            await ctx.followup.send(
+                f"⚠️ **{p_name}** is registered (pending) but I couldn't start your deposit: "
+                f"{started.get('error')}. Try again once the vault is reachable.", ephemeral=True)
+            return
+
+        job_id = started["job_id"]
+        custodian = await custodian_name()
+        have = res.get("available", 0)
+        await ctx.followup.send(
+            f"**{p_name}** is registered (pending). To finish, deposit **{deficit} "
+            f"{EVENT_TICKET}(s)** to `{custodian}` in MTGO and accept the trade. "
+            f"(You have {have} in your wallet; the fee is {fee}.) I'll confirm here.\n"
+            f"_Job `{job_id}` — you have ~{ESCROW_WAIT_MINUTES} min._", ephemeral=True)
+
+        # capture only what the poller needs (not ctx) — this task can live for ~14 min
+        followup = ctx.followup
+
+        async def _finish():
+            dep = await resolution.finish_deposit(job_id, guild_id, captain_id, deficit, captain_user)
+            if not dep.get("ok"):
+                if dep.get("outcome") == "pending":
+                    msg = (f"⏳ Your deposit for **{p_name}** is still pending; registration will "
+                           f"complete once it lands.")
+                else:
+                    msg = (f"❌ Deposit for **{p_name}** failed: {dep.get('error')}. Registration "
+                           f"not completed — run `/tournament register` to retry.")
+                await followup.send(msg, ephemeral=True)
+                return
+            res2 = await escrow.complete_entry_after_deposit(guild_id, captain_id, t_id, p_id)
+            if res2.get("done"):
+                await followup.send(
+                    f"✅ Escrow received — **{p_name}** is fully registered for **{t_name}**. You're in.")
+            elif res2.get("skipped"):
+                await followup.send(
+                    f"✅ Deposit received. **{p_name}** needed no further escrow action "
+                    f"(already paid, or the entry changed).", ephemeral=True)
+            else:
+                await followup.send(
+                    f"⚠️ Your deposit landed but the escrow couldn't be held "
+                    f"({res2.get('error') or 'insufficient funds'}). Run `/tournament register` again.",
+                    ephemeral=True)
+
+        spawn_followup("tournament escrow", _finish())
 
     @tournament.command(name="add_team", description="Admin: register a team on a captain's behalf")
     @has_bot_manager_role()
@@ -278,13 +503,19 @@ class TournamentCog(commands.Cog):
                     await ctx.followup.send("There is no tournament accepting registrations right now.", ephemeral=True)
                     return
                 participant, created = await register_team(session, tournament.id, team, captain.id)
-            verb = "registered" if created else "already registered"
-            await ctx.followup.send(
-                f"✅ **{participant.team_name}** {verb} with {captain.mention} as captain.",
-                ephemeral=True,
-            )
+                # Admin add is a comp: paid with no escrow, so it's seed-eligible even in a
+                # paid tournament. Same transaction as the registration, so a crash can't
+                # leave the team registered-but-pending. The captain isn't billed.
+                comped = escrow.comp(participant)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
+            return
+        verb = "registered" if created else "already registered"
+        note = " (entry fee comped)" if comped else ""
+        await ctx.followup.send(
+            f"✅ **{participant.team_name}** {verb} with {captain.mention} as captain{note}.",
+            ephemeral=True,
+        )
 
     @tournament.command(name="remove_team", description="Admin: remove a team during registration")
     @has_bot_manager_role()
@@ -296,16 +527,21 @@ class TournamentCog(commands.Cog):
         if not await self._check_enabled(ctx):
             return
         await ctx.defer(ephemeral=True)
+        async with db_session() as session:
+            tournament = await get_active_tournament(session, ctx.guild.id)
+            if tournament is None:
+                await ctx.followup.send("There is no active tournament.", ephemeral=True)
+                return
+            t_id = tournament.id
         try:
-            async with db_session() as session:
-                tournament = await get_active_tournament(session, ctx.guild.id)
-                if tournament is None:
-                    await ctx.followup.send("There is no active tournament.", ephemeral=True)
-                    return
-                participant = await remove_team(session, tournament.id, team)
-            await ctx.followup.send(f"✅ **{participant.team_name}** removed.", ephemeral=True)
+            # Atomic: delete the participant and release its escrow hold together.
+            res = await escrow.drop_with_refund(t_id, team)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
+            return
+        refunded = res.get("refunded", 0)
+        note = f" Entry fee ({refunded} tix) refunded to the captain's wallet." if refunded else ""
+        await ctx.followup.send(f"✅ **{res['team_name']}** removed.{note}", ephemeral=True)
 
     @tournament.command(name="add_match", description="Admin: author a match for a manual-format tournament")
     @has_bot_manager_role()
@@ -342,16 +578,12 @@ class TournamentCog(commands.Cog):
             return
         await ctx.defer()
         try:
-            async with db_session() as session:
-                tournament = await get_active_tournament(session, ctx.guild.id)
-                if tournament is None:
-                    await ctx.followup.send("There is no tournament to start.", ephemeral=True)
-                    return
-                tournament_id = tournament.id
-                tournament_name = tournament.name
-                await start_tournament(session, tournament.id, random.Random())
+            # start_and_fund owns the money lock + atomic seed-and-reallocate.
+            res = await escrow.start_and_fund(ctx.guild.id, random.Random())
+            tournament_id = res["tournament_id"]
             logger.info(f"Tournament {tournament_id} started in guild {ctx.guild.id} by {ctx.author.id}")
-            await ctx.followup.send(f"🏆 **{tournament_name}** has started!")
+            pot_line = f" 🏦 Prize pool: **{res['pot']} tix**." if res["fee"] > 0 else ""
+            await ctx.followup.send(f"🏆 **{res['name']}** has started!{pot_line}")
             await self._post_schedule(ctx, tournament_id)
             await self._post_standings(ctx, tournament_id)
         except ValueError as e:
@@ -416,13 +648,98 @@ class TournamentCog(commands.Cog):
                     return
                 tournament_id = tournament.id
                 tournament_name = tournament.name
+                fee = tournament.entry_fee or 0
                 champion = await finish_tournament(session, tournament.id)
             champ_text = f"Champion: **{champion.team_name}** 🏆" if champion else "No teams competed."
             logger.info(f"Tournament {tournament_id} finished in guild {ctx.guild.id} by {ctx.author.id}")
-            await ctx.followup.send(f"🏁 **{tournament_name}** is complete! {champ_text}")
+            payout_hint = ""
+            if fee > 0:
+                pool = await escrow.prize_pool(str(ctx.guild.id), tournament_id)
+                if pool > 0 and not await escrow.is_paid_out(tournament_id):
+                    payout_hint = (f"\n🏦 Prize pool: **{pool} tix** — run `/tournament payout` "
+                                   f"(this tournament is #{tournament_id}) to distribute it.")
+            await ctx.followup.send(f"🏁 **{tournament_name}** (#{tournament_id}) is complete! {champ_text}{payout_hint}")
             await update_standings_message(self.bot, tournament_id)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
+
+    @tournament.command(name="payout", description="Admin: distribute a tournament's prize pool to the winners")
+    @has_bot_manager_role()
+    async def payout(
+        self,
+        ctx,
+        tournament_id: discord.Option(
+            int, "Which tournament to pay out (defaults to the most recently finished)",
+            required=False, default=None
+        ),
+        structure: discord.Option(
+            str, "Override the declared payout split",
+            choices=list(escrow.PAYOUT_STRUCTURES), required=False, default=None
+        ),
+    ):
+        if not await self._check_enabled(ctx):
+            return
+        await ctx.defer(ephemeral=True)
+        async with db_session() as session:
+            if tournament_id is not None:
+                tournament = await session.get(Tournament, tournament_id)
+                if tournament is None or str(tournament.guild_id) != str(ctx.guild.id):
+                    await ctx.followup.send(f"No tournament #{tournament_id} in this server.", ephemeral=True)
+                    return
+                if tournament.status != "completed":
+                    await ctx.followup.send(
+                        f"**{tournament.name}** is {tournament.status}, not completed — only a "
+                        f"finished tournament can be paid out.", ephemeral=True)
+                    return
+            else:
+                tournament = await get_latest_completed_tournament(session, ctx.guild.id)
+                if tournament is None:
+                    await ctx.followup.send(
+                        "There is no completed tournament to pay out. Pass a `tournament_id` to target one.",
+                        ephemeral=True)
+                    return
+            t_id, t_name = tournament.id, tournament.name
+            fee = tournament.entry_fee or 0
+            struct = structure or tournament.payout_structure or "winner_take_all"
+            standings = await get_standings_data(session, tournament.id)
+            # Only teams that actually completed registration can win the pot.
+            ranked = [(p.captain_user_id, p.team_name) for p in standings if p.status == "paid"]
+            # A tournament can be finished early with results still missing — warn before paying.
+            unreported = await count_unreported_matches(session, tournament.id)
+
+        if fee <= 0:
+            await ctx.followup.send(f"**{t_name}** had no entry fee — nothing to pay out.", ephemeral=True)
+            return
+        if await escrow.is_paid_out(t_id):
+            await ctx.followup.send(f"**{t_name}** (#{t_id}) has already been paid out.", ephemeral=True)
+            return
+        pool = await escrow.prize_pool(str(ctx.guild.id), t_id)
+        if pool <= 0:
+            await ctx.followup.send(f"**{t_name}** has no prize pool to distribute.", ephemeral=True)
+            return
+        allocations = escrow.compute_allocations(pool, struct, ranked)
+        if not allocations:
+            await ctx.followup.send("No eligible (paid) winners to pay.", ephemeral=True)
+            return
+
+        # Preview + require confirmation before disbursing real value.
+        warning = ""
+        if unreported > 0:
+            warning = (f"\n\n⚠️ **{unreported} match(es) still unreported** — these count as 0–0, so "
+                       f"standings may not be final. Report the results first unless you're finishing "
+                       f"intentionally.")
+        embed = discord.Embed(
+            title=f"Confirm payout — {t_name} (#{t_id})",
+            description=(
+                f"Prize pool: **{pool} tix** · Split: **{escrow.describe_structure(struct)}**\n\n"
+                f"{_format_payout_lines(allocations)}"
+                f"{warning}\n\n"
+                f"This credits real tix to the winners' wallets and can't be undone."),
+            color=discord.Color.orange() if unreported > 0 else discord.Color.gold(),
+        )
+        view = PayoutConfirmView(
+            str(ctx.guild.id), t_id, t_name, pool, struct, allocations, ctx.author.id)
+        view.message = await ctx.followup.send(embed=embed, view=view, ephemeral=True)
 
     @tournament.command(name="next_round", description="Admin: pair the next Swiss round (all results must be in)")
     @has_bot_manager_role()
@@ -595,6 +912,7 @@ class TournamentCog(commands.Cog):
         if not await self._check_enabled(ctx):
             return
         await ctx.defer()
+        # expire_on_commit=False lets the ORM objects be read after the session closes.
         async with db_session() as session:
             tournament = await get_active_tournament(session, ctx.guild.id)
             if tournament is None:
@@ -602,24 +920,39 @@ class TournamentCog(commands.Cog):
                 return
             if tournament.status == "registration":
                 participants = await list_participants(session, tournament.id)
-                embed = self._registration_embed(tournament, participants)
             else:
                 participants = await get_standings_data(session, tournament.id)
-                embed = create_standings_embed(tournament, participants)
+
+        fee = tournament.entry_fee or 0
+        if tournament.status == "registration":
+            held = await escrow.total_escrowed(str(ctx.guild.id), tournament.id) if fee > 0 else 0
+            embed = self._registration_embed(tournament, participants, held)
+        else:
+            embed = create_standings_embed(tournament, participants)
+            if fee > 0:
+                pool = await escrow.prize_pool(str(ctx.guild.id), tournament.id)
+                embed.add_field(name="🏦 Prize pool", value=f"{pool} tix", inline=False)
         await ctx.followup.send(embed=embed)
 
-    def _registration_embed(self, tournament, participants):
-        embed = discord.Embed(
-            title=f"🏆 {tournament.name}",
-            description=f"**Status:** {tournament.status.title()}",
-            color=discord.Color.gold(),
-        )
+    def _registration_embed(self, tournament, participants, held=0):
+        fee = tournament.entry_fee or 0
+        desc = f"**Status:** {tournament.status.title()}"
+        if fee > 0:
+            desc += f"\n**Entry fee:** {fee} tix/team · **Escrow held:** {held} tix"
+            desc += f"\n**Payout:** {escrow.describe_structure(tournament.payout_structure or 'winner_take_all')}"
+        embed = discord.Embed(title=f"🏆 {tournament.name}", description=desc, color=discord.Color.gold())
         if participants:
             teams = "\n".join(
-                f"{i}. **{p.team_name}** — captain <@{p.captain_user_id}>"
+                f"{i}. {'✅' if p.status == 'paid' else '⏳'} **{p.team_name}** — captain <@{p.captain_user_id}>"
+                + ("" if p.status == "paid" else " *(pending escrow)*")
                 for i, p in enumerate(participants, start=1)
             )
-            embed.add_field(name=f"Teams ({len(participants)})", value=teams, inline=False)
+            if fee > 0:
+                paid_n = sum(1 for p in participants if p.status == "paid")
+                label = f"Teams ({paid_n}/{len(participants)} paid)"
+            else:
+                label = f"Teams ({len(participants)})"
+            embed.add_field(name=label, value=teams, inline=False)
         else:
             embed.add_field(
                 name="Teams (0)",
