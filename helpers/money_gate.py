@@ -28,6 +28,14 @@ from services.mtgo_tradebot_client import get_client
 # the in-client trade.
 DEFAULT_WAIT_MINUTES = 10
 
+# Entry-fee deposits get a longer window: the custodian works one trade at a time,
+# so a captain registering while the bot is mid-trade may wait out someone else's
+# job before theirs even starts. Observed live: a busy serve took ~28 minutes to
+# work a queued deposit. The registration itself never expires on this — a pending
+# team stays registrable until the tournament starts (see sweep_pending_entries) —
+# this only sets how long the bot keeps one trade window open.
+ESCROW_WAIT_MINUTES = 45
+
 _custodian_cache: str | None = None
 _background_tasks: set = set()
 
@@ -64,7 +72,7 @@ async def custodian_name() -> str:
         return _custodian_cache
     health = await get_client().health()
     name = (health or {}).get("custodian")
-    if name:
+    if isinstance(name, str) and name:
         _custodian_cache = name
         return name
     return "the custodian bot"

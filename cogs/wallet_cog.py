@@ -25,6 +25,7 @@ from loguru import logger
 from models.mtgo_account import MtgoAccount
 from services import wallet_service
 from services import mtgo_resolution_service as resolution
+from services import tournament_escrow_service as escrow
 from services.mtgo_tradebot_client import EVENT_TICKET
 from helpers.money_gate import (
     DEFAULT_WAIT_MINUTES, custodian_name, gate_read, gate_serve, linked_username,
@@ -110,9 +111,16 @@ class WalletCommands(commands.Cog):
         async def _finish():
             res = await resolution.finish_deposit(job_id, guild_id, player_id, amount, username)
             if res.get("ok"):
+                # Settle any pending tournament entry BEFORE auto-draw: the player just
+                # committed to that entry, so its fee shouldn't be siphoned to a creditor
+                # on the way in (the escrow only reserves their own tix; auto_draw hands
+                # them to someone else).
+                entries = await escrow.sweep_pending_entries()
                 bal = await wallet_service.get_balance(guild_id, player_id)
                 drawn = await resolution.auto_draw(guild_id, player_id)
                 msg = f"✅ Deposit confirmed: **+{amount} tix**. Balance: **{bal} tix**."
+                if entries:
+                    msg += f" Completed **{entries}** pending tournament registration(s)."
                 if drawn:
                     total = sum(d.get("amount", 0) for d in drawn)
                     msg += f" Auto-applied **{total} tix** to {len(drawn)} debt(s)."

@@ -265,6 +265,10 @@ async def pending_jobs_watchdog():
     while True:
         try:
             await resume_pending_jobs()
+            # Funds can also land outside a tracked job (a plain /wallet deposit, a
+            # teammate's /wallet pay), so finish any entry the wallet can now cover.
+            from services import tournament_escrow_service as escrow
+            await escrow.sweep_pending_entries()
         except Exception as e:
             logger.warning(f"pending_jobs_watchdog: rescan failed: {e}")
         await asyncio.sleep(_RESCAN_INTERVAL_S)

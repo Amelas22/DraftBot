@@ -184,6 +184,43 @@ async def complete_entry_after_deposit(guild_id: str, captain_id: str,
     return res
 
 
+async def sweep_pending_entries() -> int:
+    """Complete every pending entry whose captain's wallet can now cover the fee.
+
+    A registration is only complete once the tix are actually in the vault — but it must
+    not die just because one trade window closed while the custodian was busy with someone
+    else's job. So the pending team is durable: it stays registrable until the tournament
+    starts, and this sweep (run on the watchdog tick) finishes it as soon as the funds are
+    there, no matter how they arrived — the retried deposit, a plain /wallet deposit, or a
+    teammate's /wallet pay. secure_from_wallet is a no-op when the wallet is still short,
+    so a sweep over an underfunded entry costs one balance read and changes nothing.
+
+    Returns the number of entries completed."""
+    async with db_session() as session:
+        rows = (await session.execute(
+            select(TournamentParticipant, Tournament)
+            .join(Tournament, TournamentParticipant.tournament_id == Tournament.id)
+            .where(
+                Tournament.status == "registration",
+                Tournament.entry_fee > 0,
+                TournamentParticipant.status != "paid",
+            ))).all()
+    completed = 0
+    for participant, tournament in rows:
+        try:
+            res = await secure_from_wallet(
+                str(tournament.guild_id), participant.captain_user_id, participant.id,
+                tournament.id, tournament.entry_fee, participant.team_name)
+        except Exception as e:
+            logger.warning(f"sweep_pending_entries: {participant.team_name} failed: {e}")
+            continue
+        if res.get("done"):
+            completed += 1
+            logger.info(f"sweep: '{participant.team_name}' completed registration for "
+                        f"'{tournament.name}' (funds arrived)")
+    return completed
+
+
 async def resume_entry_from_context(guild_id: str, captain_id: str, context: str):
     """Resumer hook: if ``context`` is one of ours (escrow_source format), finish the
     entry. Unknown contexts are ignored — this module owns the format."""

@@ -7,8 +7,7 @@ from loguru import logger
 from config import get_config, update_setting
 from database.db_session import db_session
 from helpers.money_gate import (
-    DEFAULT_WAIT_MINUTES as ESCROW_WAIT_MINUTES,
-    custodian_name, gate_serve, linked_username, spawn_followup,
+    ESCROW_WAIT_MINUTES, custodian_name, gate_serve, linked_username, spawn_followup,
 )
 from helpers.permissions import has_bot_manager_role
 from models.tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
@@ -443,7 +442,8 @@ class TournamentCog(commands.Cog):
         if not started.get("ok"):
             await ctx.followup.send(
                 f"⚠️ **{p_name}** is registered (pending) but I couldn't start your deposit: "
-                f"{started.get('error')}. Try again once the vault is reachable.", ephemeral=True)
+                f"{started.get('error')}. Your spot is held — run `/tournament register` again "
+                f"once the vault is reachable.", ephemeral=True)
             return
 
         job_id = started["job_id"]
@@ -453,7 +453,9 @@ class TournamentCog(commands.Cog):
             f"**{p_name}** is registered (pending). To finish, deposit **{deficit} "
             f"{EVENT_TICKET}(s)** to `{custodian}` in MTGO and accept the trade. "
             f"(You have {have} in your wallet; the fee is {fee}.) I'll confirm here.\n"
-            f"_Job `{job_id}` — you have ~{ESCROW_WAIT_MINUTES} min._", ephemeral=True)
+            f"_Job `{job_id}` — the trade window is open ~{ESCROW_WAIT_MINUTES} min. Your spot "
+            f"is held until the tournament starts: whenever the tix land, registration "
+            f"completes automatically._", ephemeral=True)
 
         # capture only what the poller needs (not ctx) — this task can live for ~14 min
         followup = ctx.followup
@@ -462,11 +464,15 @@ class TournamentCog(commands.Cog):
             dep = await resolution.finish_deposit(job_id, guild_id, captain_id, deficit, captain_user)
             if not dep.get("ok"):
                 if dep.get("outcome") == "pending":
-                    msg = (f"⏳ Your deposit for **{p_name}** is still pending; registration will "
+                    msg = (f"⏳ Your deposit for **{p_name}** is still working; registration will "
                            f"complete once it lands.")
                 else:
-                    msg = (f"❌ Deposit for **{p_name}** failed: {dep.get('error')}. Registration "
-                           f"not completed — run `/tournament register` to retry.")
+                    # The trade window closed (often just a busy custodian), but the spot
+                    # isn't lost — the sweep finishes it as soon as the tix are there.
+                    msg = (f"⚠️ The trade for **{p_name}** didn't complete: {dep.get('error')}. "
+                           f"**Your spot is still held** — run `/tournament register` for a new "
+                           f"trade window, or `/wallet deposit {deficit}` and registration will "
+                           f"complete on its own.")
                 await followup.send(msg, ephemeral=True)
                 return
             res2 = await escrow.complete_entry_after_deposit(guild_id, captain_id, t_id, p_id)
