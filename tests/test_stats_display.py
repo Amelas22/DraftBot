@@ -198,34 +198,34 @@ class TestGetStatsEmbedForPlayer:
 
     @pytest.mark.asyncio
     async def test_player_skill_rating_established(self, test_db):
-        from stats_display import _player_skill_rating
+        from stats_display import _player_skill_standing
         async with AsyncSessionLocal() as session:
             session.add(PlayerStats(
                 player_id="555", guild_id="g", display_name="P",
                 true_skill_mu=30.0, true_skill_sigma=1.0,
                 games_won=15, games_lost=10))          # 25 >= 20 -> established
             await session.commit()
-        rating, provisional = await _player_skill_rating("555", "g")
+        rating, provisional, _, _ = await _player_skill_standing("555", "g")
         assert rating == 1716    # 1500 + (30-25) * (25/55) * 95
         assert provisional is False
 
     @pytest.mark.asyncio
     async def test_player_skill_rating_provisional(self, test_db):
-        from stats_display import _player_skill_rating
+        from stats_display import _player_skill_standing
         async with AsyncSessionLocal() as session:
             session.add(PlayerStats(
                 player_id="556", guild_id="g", display_name="P",
                 true_skill_mu=30.0, true_skill_sigma=1.0,
                 games_won=3, games_lost=2))            # 5 < 20 -> provisional
             await session.commit()
-        rating, provisional = await _player_skill_rating("556", "g")
+        rating, provisional, _, _ = await _player_skill_standing("556", "g")
         assert rating == 1568    # 1500 + (30-25) * (5/35) * 95
         assert provisional is True
 
     @pytest.mark.asyncio
     async def test_player_skill_rating_none_when_no_row(self, test_db):
-        from stats_display import _player_skill_rating
-        rating, provisional = await _player_skill_rating("999", "g")
+        from stats_display import _player_skill_standing
+        rating, provisional, _, _ = await _player_skill_standing("999", "g")
         assert rating is None and provisional is None
 
 

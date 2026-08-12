@@ -15,6 +15,11 @@ from stats_core import get_timeframe_start_date, calculate_win_percentage, calcu
 # completed drafts of that cube (the field title states the same number).
 MIN_CUBE_DRAFTS_DISPLAY = 5
 
+# Server rank rides along with the skill rating only this deep. Past it the
+# number stops being a brag and starts being noise ("#84 of 185"), so the field
+# renders as it always did — the rating alone.
+MAX_SERVER_RANK_DISPLAY = 20
+
 async def get_player_statistics(user_id, time_frame=None, user_display_name=None, guild_id=None,
                                 snapshot=None):
     """Get player statistics for a specific user and time frame, filtered by guild_id if provided."""
@@ -300,10 +305,8 @@ async def create_stats_embed(user, stats_weekly, stats_monthly, stats_lifetime):
     skill = stats_lifetime.get('skill_rating')
     if skill is not None:
         value = f"{skill} (provisional)" if stats_lifetime.get('skill_provisional') else str(skill)
-        # Server standing rides along only for the top few (see
-        # stats_display.SERVER_RANK_LIMIT); absent for everyone else.
         rank = stats_lifetime.get('server_rank')
-        if rank is not None:
+        if rank is not None and rank <= MAX_SERVER_RANK_DISPLAY:
             value += f" · **#{rank}** of {stats_lifetime['server_rank_pool']} ranked players"
         value += "\n*New players start at 1500 · a 100-point gap ≈ 60% match favorite*"
         embed.add_field(name="🎯 Skill Rating", value=value, inline=False)
