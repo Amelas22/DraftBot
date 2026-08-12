@@ -101,6 +101,77 @@ async def update_standings_message(bot, tournament_id):
         logger.error(f"Failed to update standings message for tournament {tournament_id}: {e}")
 
 
+async def _board_state(session, tournament):
+    """(participants, pot, deficits) for a tournament's board."""
+    from services import wallet_service
+    from services.tournament_service import list_participants
+
+    participants = await list_participants(session, tournament.id)
+    fee = tournament.entry_fee or 0
+    if fee <= 0:
+        return participants, 0, {}
+    guild_id = str(tournament.guild_id)
+    pot = await wallet_service.balance_in(
+        session, guild_id, wallet_service.prize_wallet_id(tournament.id))
+    pending = [p for p in participants if p.status != "paid"]
+    balances = await wallet_service.balances_for(
+        guild_id, [p.captain_user_id for p in pending])
+    deficits = {p.id: max(fee - balances.get(p.captain_user_id, 0), 0) for p in pending}
+    return participants, pot, deficits
+
+
+async def update_registration_board(bot, tournament_id, closed=False):
+    """Edit the registration board in place. No-op if it was never posted; a board that
+    has been deleted clears its ids so it stops being retried."""
+    async with db_session() as session:
+        tournament = await session.get(Tournament, tournament_id)
+        if tournament is None or not tournament.board_message_id:
+            return
+        participants, pot, deficits = await _board_state(session, tournament)
+        embed = create_registration_embed(tournament, participants, pot, deficits, closed)
+        channel_id = int(tournament.board_channel_id)
+        message_id = int(tournament.board_message_id)
+
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        logger.warning(f"Board channel {channel_id} not found for tournament {tournament_id}")
+        return
+    try:
+        message = await channel.fetch_message(message_id)
+        await message.edit(embed=embed)
+    except discord.NotFound:
+        logger.warning(f"Board message gone for tournament {tournament_id}; clearing ids")
+        async with db_session() as session:
+            t = await session.get(Tournament, tournament_id)
+            if t is not None:
+                t.board_channel_id = None
+                t.board_message_id = None
+    except discord.HTTPException as e:
+        logger.warning(f"Board edit failed for tournament {tournament_id}: {e}")
+
+
+async def post_registration_board(channel, tournament_id):
+    """Post the board for a freshly created tournament and remember it. Returns the
+    message, or None if posting failed (the tournament is unaffected either way)."""
+    async with db_session() as session:
+        tournament = await session.get(Tournament, tournament_id)
+        if tournament is None:
+            return None
+        participants, pot, deficits = await _board_state(session, tournament)
+        embed = create_registration_embed(tournament, participants, pot, deficits)
+    try:
+        message = await channel.send(embed=embed)
+    except discord.HTTPException as e:
+        logger.warning(f"Could not post registration board for {tournament_id}: {e}")
+        return None
+    async with db_session() as session:
+        t = await session.get(Tournament, tournament_id)
+        if t is not None:
+            t.board_channel_id = str(message.channel.id)
+            t.board_message_id = str(message.id)
+    return message
+
+
 async def update_standings_message_for_match(bot, match_id):
     """Refresh the standings message for whichever tournament owns this match."""
     async with db_session() as session:
