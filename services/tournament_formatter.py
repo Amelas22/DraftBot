@@ -10,6 +10,7 @@ from loguru import logger
 
 from database.db_session import db_session
 from models.tournament import Tournament
+from services.tournament_escrow_service import describe_structure
 from services.tournament_service import (
     get_standings_data,
     get_tournament_id_for_match,
@@ -35,6 +36,44 @@ def create_standings_embed(tournament, participants):
         embed.add_field(name="Standings", value=rows, inline=False)
     else:
         embed.add_field(name="Standings", value="No teams registered yet.", inline=False)
+    return embed
+
+
+def create_registration_embed(tournament, participants, pot=0, deficits=None,
+                              closed=False):
+    """Build the registration board (pure): who is in, and for a paid tournament who
+    has actually paid. ``deficits`` maps participant id -> tix still needed."""
+    deficits = deficits or {}
+    fee = tournament.entry_fee or 0
+    phase = "Registration closed" if closed else "Registration open"
+    title = f"🏆 {tournament.name} — {phase}"
+    desc = ""
+    if fee > 0:
+        desc = f"**Entry fee:** {fee} tix/team · **Prize pool:** {pot} tix\n"
+        desc += f"**Payout:** {describe_structure(tournament.payout_structure or 'winner_take_all')}"
+    embed = discord.Embed(title=title, description=desc,
+                          color=discord.Color.gold())
+
+    if not participants:
+        embed.add_field(name="Teams (0)",
+                        value="No teams yet — register with `/tournament register`.",
+                        inline=False)
+        return embed
+
+    lines = []
+    for i, p in enumerate(participants, start=1):
+        paid = p.status == "paid"
+        mark = "✅" if paid or fee == 0 else "⏳"
+        lines.append(f"{i}. {mark} **{p.team_name}** — captain <@{p.captain_user_id}>")
+        short = deficits.get(p.id, 0)
+        if fee > 0 and not paid and not closed and short > 0:
+            lines.append(f"     needs {short} more tix — `/wallet deposit {short}`")
+    if fee > 0:
+        paid_n = sum(1 for p in participants if p.status == "paid")
+        label = f"Teams ({paid_n}/{len(participants)} paid)"
+    else:
+        label = f"Teams ({len(participants)})"
+    embed.add_field(name=label, value="\n".join(lines), inline=False)
     return embed
 
 
