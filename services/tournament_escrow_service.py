@@ -167,23 +167,6 @@ async def secure_from_wallet(guild_id: str, captain_id: str, participant_id: int
         return await _do()
 
 
-async def complete_entry_after_deposit(guild_id: str, captain_id: str,
-                                       tournament_id: int, participant_id: int) -> dict:
-    """The 'entry-fee deposit landed → secure the escrow' continuation, shared by the
-    register command's background follow-up and the pending-jobs resumer (one copy of
-    the guards, one behavior). Returns secure_from_wallet's dict plus team/tournament
-    names for messaging, or {ok: False, skipped: True} when there's nothing to do
-    (team gone, already paid, or fee dropped to zero)."""
-    async with db_session() as session:
-        t = await session.get(Tournament, tournament_id)
-        p = await session.get(TournamentParticipant, participant_id)
-    if not t or not p or p.status == "paid" or (t.entry_fee or 0) <= 0:
-        return {"ok": False, "skipped": True}
-    res = await secure_from_wallet(guild_id, captain_id, p.id, t.id, t.entry_fee, p.team_name)
-    res.update({"team_name": p.team_name, "tournament_name": t.name, "fee": t.entry_fee})
-    return res
-
-
 async def sweep_pending_entries() -> int:
     """Complete every pending entry whose captain's wallet can now cover the fee.
 
@@ -219,18 +202,6 @@ async def sweep_pending_entries() -> int:
             logger.info(f"sweep: '{participant.team_name}' completed registration for "
                         f"'{tournament.name}' (funds arrived)")
     return completed
-
-
-async def resume_entry_from_context(guild_id: str, captain_id: str, context: str):
-    """Resumer hook: if ``context`` is one of ours (escrow_source format), finish the
-    entry. Unknown contexts are ignored — this module owns the format."""
-    parsed = parse_escrow_source(context)
-    if parsed is None:
-        return
-    tournament_id, participant_id = parsed
-    res = await complete_entry_after_deposit(guild_id, captain_id, tournament_id, participant_id)
-    if res.get("done"):
-        logger.info(f"resumed escrow: participant {participant_id} paid after recovered deposit")
 
 
 async def start_and_fund(guild_id, rng) -> dict:

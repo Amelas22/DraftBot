@@ -44,7 +44,6 @@ def upgrade():
             sa.Column('mtgo_user', sa.String(128), nullable=False),
             sa.Column('amount', sa.Integer(), nullable=False),
             sa.Column('reserve_tx_id', sa.Integer(), nullable=True),
-            sa.Column('context', sa.String(64), nullable=True),
             sa.Column('status', sa.String(16), nullable=False, server_default='pending'),
             sa.Column('created_at', sa.DateTime(), nullable=True),
             sa.Column('resolved_at', sa.DateTime(), nullable=True),

@@ -72,7 +72,7 @@ async def _poll_job(job_id: str, timeout_s: float):
 # resumer can finish booking trades that outlive their in-memory poller
 # ---------------------------------------------------------------------------
 async def _record_job(job_id: str, kind: str, guild_id: str, player_id: str, mtgo_user: str,
-                      amount: int, *, reserve_tx_id: int = None, context: str = None):
+                      amount: int, *, reserve_tx_id: int = None):
     async def _do():
         async with db_session() as session:
             if await session.get(MtgoJob, job_id):
@@ -80,7 +80,7 @@ async def _record_job(job_id: str, kind: str, guild_id: str, player_id: str, mtg
             session.add(MtgoJob(
                 job_id=job_id, kind=kind, guild_id=guild_id, player_id=player_id,
                 mtgo_user=mtgo_user, amount=amount, reserve_tx_id=reserve_tx_id,
-                context=context, status="pending"))
+                status="pending"))
     await with_db_retry(_do)
 
 
@@ -113,10 +113,9 @@ async def _recover_lost_job(resp, job_type: str, mtgo_user: str, n: int):
 # deposit (bot receives tix) — credit only on 'done'
 # ---------------------------------------------------------------------------
 async def start_deposit(guild_id: str, player_id: str, mtgo_user: str, n: int, *,
-                        commit: bool = True, wait_minutes: int = 0, context: str = None) -> dict:
+                        commit: bool = True, wait_minutes: int = 0) -> dict:
     """Enqueue a deposit (bot receives ``n`` tix from ``mtgo_user``). No wallet effect yet,
-    but the job is durably recorded so it can't be stranded by a restart. ``context`` tags
-    what to do beyond crediting when the trade lands (see resume_pending_jobs)."""
+    but the job is durably recorded so it can't be stranded by a restart."""
     if n <= 0:
         return {"ok": False, "error": "amount must be positive"}
     client = get_client()
@@ -131,7 +130,7 @@ async def start_deposit(guild_id: str, player_id: str, mtgo_user: str, n: int, *
         if not resp or not resp.get("id"):
             return {"ok": False, "error": "serve did not accept the deposit (unreachable or rejected)"}
         logger.warning(f"start_deposit: adopted job {resp['id']} after lost POST response")
-    await _record_job(resp["id"], "deposit", guild_id, player_id, mtgo_user, n, context=context)
+    await _record_job(resp["id"], "deposit", guild_id, player_id, mtgo_user, n)
     return {"ok": True, "job_id": resp["id"], "job": resp}
 
 
@@ -228,14 +227,11 @@ async def resume_pending_jobs() -> int:
     async def _resume(job: MtgoJob):
         try:
             if job.kind == "deposit":
-                res = await finish_deposit(job.job_id, job.guild_id, job.player_id,
-                                           job.amount, job.mtgo_user)
-                if res.get("ok") and job.context:
-                    # the deposit had a continuation (e.g. a tournament entry) — the
-                    # escrow service owns the context format and what to do with it
-                    from services import tournament_escrow_service as escrow
-                    await escrow.resume_entry_from_context(
-                        job.guild_id, job.player_id, job.context)
+                # Booking the credit is all that's needed: anything waiting on those
+                # funds (a pending tournament entry) is completed by the escrow sweep
+                # on the same watchdog tick.
+                await finish_deposit(job.job_id, job.guild_id, job.player_id,
+                                     job.amount, job.mtgo_user)
             elif job.kind == "withdraw" and job.reserve_tx_id:
                 await finish_withdraw(job.reserve_tx_id, job.job_id)
         finally:

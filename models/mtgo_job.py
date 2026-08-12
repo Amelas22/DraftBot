@@ -9,9 +9,6 @@ resumer (mtgo_resolution_service.resume_pending_jobs) pick up whatever is still
 'pending' and poll it to a terminal state, so a completed trade is always booked
 eventually. Booking itself stays idempotent by job_id, so a resumed poll racing
 a still-alive original poller cannot double-credit.
-
-``context`` carries what to do after a deposit lands beyond crediting the wallet
-(currently 'tourney:<tid>:<pid>' -> re-secure that tournament escrow).
 """
 from datetime import datetime
 
@@ -30,7 +27,6 @@ class MtgoJob(Base):
     mtgo_user = Column(String(128), nullable=False)
     amount = Column(Integer, nullable=False)
     reserve_tx_id = Column(Integer, nullable=True)         # withdraws: the pending WalletTx hold
-    context = Column(String(64), nullable=True)            # post-completion hook tag
     status = Column(String(16), nullable=False, default='pending')  # pending | done | failed
     created_at = Column(DateTime, default=datetime.now)
     resolved_at = Column(DateTime, nullable=True)

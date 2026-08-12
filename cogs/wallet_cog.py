@@ -29,7 +29,7 @@ from services import tournament_escrow_service as escrow
 from services.mtgo_tradebot_client import EVENT_TICKET
 from helpers.money_gate import (
     DEFAULT_WAIT_MINUTES, custodian_name, gate_read, gate_serve, linked_username,
-    spawn_followup,
+    serve_busy_reason, spawn_followup,
 )
 from helpers.permissions import has_bot_manager_role
 
@@ -89,6 +89,11 @@ class WalletCommands(commands.Cog):
         if not username:
             return await ctx.followup.send(
                 "Link your MTGO account first with `/link_mtgo <username>`.", ephemeral=True)
+
+        # One trade at a time: say so rather than queue behind someone else's job.
+        busy = await serve_busy_reason()
+        if busy:
+            return await ctx.followup.send(f"⏳ {busy}", ephemeral=True)
 
         guild_id = str(ctx.guild.id)
         player_id = str(ctx.author.id)

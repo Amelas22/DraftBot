@@ -28,14 +28,6 @@ from services.mtgo_tradebot_client import get_client
 # the in-client trade.
 DEFAULT_WAIT_MINUTES = 10
 
-# Entry-fee deposits get a longer window: the custodian works one trade at a time,
-# so a captain registering while the bot is mid-trade may wait out someone else's
-# job before theirs even starts. Observed live: a busy serve took ~28 minutes to
-# work a queued deposit. The registration itself never expires on this — a pending
-# team stays registrable until the tournament starts (see sweep_pending_entries) —
-# this only sets how long the bot keeps one trade window open.
-ESCROW_WAIT_MINUTES = 45
-
 _custodian_cache: str | None = None
 _background_tasks: set = set()
 
@@ -63,6 +55,26 @@ def gate_serve(ctx) -> str | None:
 async def linked_username(discord_id) -> str | None:
     acct = await MtgoAccount.get_for_discord(discord_id)
     return acct.mtgo_username if acct else None
+
+
+async def serve_busy_reason() -> str | None:
+    """Why the custodian can't take a trade right now, or None if it's free.
+
+    The custodian works ONE trade at a time, so enqueuing behind an in-flight job just
+    leaves the player staring at a trade window that won't open for minutes. Better to
+    say so and let them come back."""
+    health = await get_client().health()
+    if not health or not health.get("ok"):
+        return ("The MTGO custodian isn't reachable right now. Try again in a few "
+                "minutes — nothing has been charged.")
+    if health.get("reconnecting"):
+        return ("The MTGO custodian is reconnecting to the client. Try again in a few "
+                "minutes.")
+    busy = (health.get("jobs") or 0) + (health.get("queued") or 0)
+    if busy:
+        return (f"The MTGO custodian is busy with {busy} other trade(s) — it can only "
+                f"trade with one person at a time. Try again in a few minutes.")
+    return None
 
 
 async def custodian_name() -> str:
