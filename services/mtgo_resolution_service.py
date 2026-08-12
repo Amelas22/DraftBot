@@ -290,14 +290,14 @@ async def pending_jobs_watchdog(bot=None):
             # Funds can also land outside a tracked job (a plain /wallet deposit, a
             # teammate's /wallet pay), so finish any entry the wallet can now cover.
             from services import tournament_escrow_service as escrow
-            completed = await escrow.sweep_pending_entries()
+            await escrow.sweep_pending_entries()
             if bot is not None:
-                from services.tournament_formatter import update_registration_board
-                for t_id in set(completed):
-                    try:
-                        await update_registration_board(bot, t_id)
-                    except Exception as e:
-                        logger.warning(f"board refresh failed for {t_id}: {e}")
+                # Re-render every open board, not just ones whose entries completed:
+                # /wallet pay, a withdraw and a debt settlement all move a captain's
+                # balance — and so the "needs N more tix" figure — by routes no
+                # refresh call site covers. This tick is the backstop for all of them.
+                from services.tournament_formatter import refresh_boards
+                await refresh_boards(bot, await escrow.open_registration_boards())
         except Exception as e:
             logger.warning(f"pending_jobs_watchdog: rescan failed: {e}")
         await asyncio.sleep(_RESCAN_INTERVAL_S)
