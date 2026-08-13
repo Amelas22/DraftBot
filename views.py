@@ -71,6 +71,15 @@ def is_test_signup(user_id: str, bot_user_id: str) -> bool:
     return is_synthetic_test_user(user_id) or (is_test_mode() and user_id == bot_user_id)
 
 
+def queue_ping_text(player_count: int, cube: str, role_mention: str) -> str:
+    """The @drafter ping announcing a queue is filling up.
+
+    Shared by the two sites that raise it (plain sign-up and stake selection).
+    Names the cube so readers can tell which of the channel's queues is filling.
+    """
+    return f"{player_count} Players in queue to play {cube}! {role_mention}"
+
+
 class PersistentView(discord.ui.View):
 
     # AUTO_PAIRINGS_TASKS = {}  # session_id -> task
@@ -552,8 +561,9 @@ class PersistentView(discord.ui.View):
                     # Get the channel where the draft message is
                     channel = await interaction.client.fetch_channel(draft_session_updated.draft_channel_id)
                     if channel:
-                        player_count = len(sign_ups)
-                        await channel.send(f"{player_count} Players in queue! {drafter_role.mention}")
+                        await channel.send(queue_ping_text(
+                            len(sign_ups), draft_session_updated.cube, drafter_role.mention
+                        ))
 
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
@@ -2349,7 +2359,9 @@ class CancelConfirmationView(discord.ui.View):
         # First, announce the cancellation in the channel
         channel = self.bot.get_channel(int(session.draft_channel_id))
         if channel:
-            await channel.send(f"User **{self.user_display_name}** has cancelled the draft.")
+            await channel.send(
+                f"User **{self.user_display_name}** has cancelled the draft `{session.friendly_id}`."
+            )
         
         # Check if there's an active draft manager for this session
         manager = DraftSetupManager.get_active_manager(self.draft_session_id)
@@ -2565,9 +2577,10 @@ class StakeOptionsSelect(discord.ui.Select):
                     # Get the channel where the draft message is
                     channel = await interaction.client.fetch_channel(draft_session_updated.draft_channel_id)
                     if channel:
-                        player_count = len(sign_ups)
-                        await channel.send(f"{player_count} Players in queue! {drafter_role.mention}")
-        
+                        await channel.send(queue_ping_text(
+                            len(sign_ups), draft_session_updated.cube, drafter_role.mention
+                        ))
+
         # Confirm stake and provide draft link
         cap_status = "capped at the highest opponent bet" if is_capped else "NOT capped (full action)"
         signup_message = f"You've set your maximum stake to {stake_amount} tix."
