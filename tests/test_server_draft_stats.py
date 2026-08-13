@@ -108,7 +108,7 @@ def eastern_host():
 _match_counter = 0
 
 
-async def _seed_match_result(session_id: str, result_submitted_at: datetime | None, guild_id: str = GUILD) -> None:
+async def _seed_match_result(session_id: str, result_submitted_at: datetime | None) -> None:
     """Insert a MatchResult row for a session. result_submitted_at=None models
     an unreported match still in progress."""
     global _match_counter
@@ -122,7 +122,6 @@ async def _seed_match_result(session_id: str, result_submitted_at: datetime | No
                 player2_id="p2",
                 winner_id="p1" if result_submitted_at else None,
                 result_submitted_at=result_submitted_at,
-                guild_id=guild_id,
             ))
 
 
