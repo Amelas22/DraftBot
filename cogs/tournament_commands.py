@@ -419,9 +419,11 @@ class TournamentCog(commands.Cog):
         except Exception as e:
             logger.warning(f"Could not send tournament-create confirmation for {tournament.id}: {e}")
         try:
-            # The board is the third message edited in place all season, so it
-            # wants a fixed home too — the play channel, since it's interactive.
-            await post_registration_board(self._destination(ctx, PLAY_CHANNEL_SETTING), tournament.id)
+            # Deliberately NOT routed through _destination: the board belongs
+            # wherever registration is being announced, which is why the
+            # organizer ran /tournament create there. Only standings (buried by
+            # its own updates) and pairings get fixed homes.
+            await post_registration_board(ctx.channel, tournament.id)
         except Exception as e:
             logger.warning(f"Could not post registration board: {e}")
 
