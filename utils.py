@@ -1139,7 +1139,13 @@ async def update_leaderboards_for_guild(bot, guild_id: str, session_id=None, str
                 logger.warning(f"Missing permissions in leaderboard channel {channel.name}")
                 return
 
-            # All categories to display (imported from central config)
+            # All categories to display (imported from central config).
+            # Flat, not grouped: this path only ever EDITS boards that already
+            # exist, so it can't leave one stranded without its group header.
+            # Headers are posted by /leaderboard and /rebuild_leaderboards and
+            # carry static text, so there's nothing here for them to refresh --
+            # editing a group's title/blurb in leaderboard_config needs one of
+            # those commands to show up.
             categories = AUTO_UPDATE_CATEGORIES
 
             # Get timeframes for each category from database or defaults

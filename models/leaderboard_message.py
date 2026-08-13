@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime
+from sqlalchemy import JSON, Column, DateTime, Integer, String
 from database.models_base import Base
 from datetime import datetime
 
@@ -10,6 +10,10 @@ class LeaderboardMessage(Base):
     channel_id = Column(String(64), nullable=False)
     message_id = Column(String(64), nullable=False)
     last_updated = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    # {group key: message id} for the section headers above each cluster.
+    # A JSON map rather than a column per group: this table already pays
+    # two columns per category, and a fourth group shouldn't need a migration.
+    group_header_message_ids = Column(JSON, default=dict)
     draft_record_view_message_id = Column(String(64))
     match_win_view_message_id = Column(String(64))
     drafts_played_view_message_id = Column(String(64))

@@ -4,9 +4,10 @@ This is the SINGLE SOURCE OF TRUTH for category definitions.
 
 When adding a new leaderboard category:
 1. Add to CATEGORY_CONFIGS dict below
-2. Add query logic to services/leaderboard_service.py
-3. Add database columns to models/leaderboard_message.py (2 per category)
-4. Run migration
+2. Add it to a group in LEADERBOARD_GROUPS (this sets where it appears)
+3. Add query logic to services/leaderboard_service.py
+4. Add database columns to models/leaderboard_message.py (2 per category)
+5. Run migration
 
 The category will automatically propagate to:
 - /leaderboard command (cogs/leaderboard.py)
@@ -116,8 +117,37 @@ CATEGORY_CONFIGS = {
     }
 }
 
-# Derived list for iteration (guaranteed to match dict keys)
-ALL_CATEGORIES = list(CATEGORY_CONFIGS.keys())
+# How the boards cluster in the channel. Each group gets a header message and
+# its boards are posted beneath it, in this order — so this list, not the
+# CATEGORY_CONFIGS dict, decides what the channel looks like.
+#
+# A new category must be added to a group: ALL_CATEGORIES is derived from here,
+# and test_leaderboard_groups asserts the two stay in sync, so an ungrouped
+# category fails the suite rather than silently vanishing from the channel.
+LEADERBOARD_GROUPS = [
+    {
+        "key": "performance",
+        "title": "🏆 Performance",
+        "blurb": "Who's winning — win rates, partnerships, and volume.",
+        "categories": ["draft_record", "match_win", "time_vault_and_key", "drafts_played"],
+    },
+    {
+        "key": "streaks",
+        "title": "🔥 Streaks",
+        "blurb": "Runs in progress and the best ever set.",
+        "categories": ["hot_streak", "draft_win_streak", "longest_win_streak", "perfect_streak"],
+    },
+    {
+        "key": "quizzes",
+        "title": "🧠 Quizzes",
+        "blurb": "Reading the table without playing it.",
+        "categories": ["quiz_points", "trophy_quiz_points"],
+    },
+]
+
+# Derived list for iteration, in the order the groups declare (guaranteed by
+# test to cover exactly the CATEGORY_CONFIGS keys).
+ALL_CATEGORIES = [c for group in LEADERBOARD_GROUPS for c in group["categories"]]
 
 # Categories that should auto-update after draft completion
 AUTO_UPDATE_CATEGORIES = ALL_CATEGORIES  # All categories by default
