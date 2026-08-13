@@ -5,7 +5,7 @@ from discord.ext import commands
 from loguru import logger
 
 from config import get_config, update_setting
-from cogs.tournament_channels import (
+from helpers.tournament_channels import (
     PLAY_CHANNEL_SETTING,
     STANDINGS_CHANNEL_SETTING,
     ensure_standings_channel,
@@ -14,6 +14,7 @@ from cogs.tournament_channels import (
 from database.db_session import db_session
 from helpers.money_gate import gate_serve, linked_username
 from helpers.permissions import has_bot_manager_role
+from helpers.pin_helpers import safe_pin
 from models.tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
 from sqlalchemy import or_, select
 from services.tournament_formatter import (
@@ -418,7 +419,9 @@ class TournamentCog(commands.Cog):
         except Exception as e:
             logger.warning(f"Could not send tournament-create confirmation for {tournament.id}: {e}")
         try:
-            await post_registration_board(ctx.channel, tournament.id)
+            # The board is the third message edited in place all season, so it
+            # wants a fixed home too — the play channel, since it's interactive.
+            await post_registration_board(self._destination(ctx, PLAY_CHANNEL_SETTING), tournament.id)
         except Exception as e:
             logger.warning(f"Could not post registration board: {e}")
 
@@ -890,11 +893,7 @@ class TournamentCog(commands.Cog):
             participants = await get_standings_data(session, tournament_id)
             embed = create_standings_embed(tournament, participants)
         message = await channel.send(embed=embed)
-        try:
-            await message.pin()
-        except discord.HTTPException as e:
-            # Pin limit or a missing permission — the standings still work.
-            logger.warning(f"Could not pin standings message for tournament {tournament_id}: {e}")
+        await safe_pin(message)
         async with db_session() as session:
             tournament = await session.get(Tournament, tournament_id)
             tournament.standings_channel_id = str(message.channel.id)

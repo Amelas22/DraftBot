@@ -13,9 +13,12 @@ orphan the live standings message).
 import discord
 from loguru import logger
 
-# Config keys under the guild config's "tournament" section.
-STANDINGS_CHANNEL_SETTING = "standings_channel_id"
-PLAY_CHANNEL_SETTING = "play_channel_id"
+# Config keys under the guild config's "tournament" section. "default_" keeps
+# them distinct from Tournament.standings_channel_id, which is a different fact:
+# the column records where one event's message actually landed, these say where
+# the next one should go.
+STANDINGS_CHANNEL_SETTING = "default_standings_channel_id"
+PLAY_CHANNEL_SETTING = "default_play_channel_id"
 
 # Name used when the bot has to create the standings channel itself.
 STANDINGS_CHANNEL_NAME = "tournament-standings"
@@ -38,6 +41,21 @@ def resolve_channel(guild, config, setting):
     return channel
 
 
+def _draft_category(guild, config):
+    """The guild's draft category, or None.
+
+    Two shapes are live in this repo: every real configs/*.json (and config.py's
+    defaults) put the category *name* in categories.draft, while the /setup
+    wizard writes categories.draft as a bool plus the name in
+    categories.draft_name. Read both rather than picking a side here.
+    """
+    categories = config.get("categories", {})
+    name = categories.get("draft_name") or categories.get("draft")
+    if not isinstance(name, str):
+        return None
+    return discord.utils.get(guild.categories, name=name)
+
+
 def _standings_overwrites(guild):
     """Players read the standings; only the bot writes them."""
     return {
@@ -58,10 +76,11 @@ async def ensure_standings_channel(guild, config, chosen):
     the bot cannot post in is worse than not having one, and the same drift
     check guards the live-drafts channel (livedrafts.py).
     """
-    channel = chosen or resolve_channel(guild, config, STANDINGS_CHANNEL_SETTING)
-    if channel is None:
-        channel = discord.utils.get(guild.text_channels, name=STANDINGS_CHANNEL_NAME)
-
+    channel = (
+        chosen
+        or resolve_channel(guild, config, STANDINGS_CHANNEL_SETTING)
+        or discord.utils.get(guild.text_channels, name=STANDINGS_CHANNEL_NAME)
+    )
     if channel is not None:
         perms = channel.overwrites_for(guild.me)
         if not perms.send_messages or not perms.embed_links:
@@ -70,8 +89,7 @@ async def ensure_standings_channel(guild, config, chosen):
             logger.info(f"Repaired bot permissions on standings channel {channel.id}")
         return channel, False
 
-    category_name = config.get("categories", {}).get("draft_name")
-    category = discord.utils.get(guild.categories, name=category_name) if category_name else None
+    category = _draft_category(guild, config)
     channel = await guild.create_text_channel(
         name=STANDINGS_CHANNEL_NAME,
         category=category,
