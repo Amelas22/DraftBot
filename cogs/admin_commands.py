@@ -784,7 +784,6 @@ class AdminCommands(commands.Cog):
                     player1_wins=0,
                     player2_wins=0,
                     winner_id=None,
-                    guild_id=draft_session.guild_id
                 )
                 db_session.add(match_result)
                 created_count += 1

@@ -104,7 +104,6 @@ async def create_test_match_history(session, player_id, guild_id, match_pattern)
             player1_id=player_id,
             player2_id="999",
             winner_id=winner_id,
-            guild_id=guild_id
         )
         session.add(match)
 

@@ -42,7 +42,9 @@ class MatchResult(Base):
     player2_wins = Column(Integer, default=0)
     winner_id = Column(String(64), nullable=True)
     pairing_message_id = Column(String(64))
-    guild_id = Column(String(64))
+    # No guild_id: a match belongs to whatever guild its draft_session does.
+    # The column that used to sit here was a copy nothing wrote (dropguild01),
+    # so it read NULL for 75% of rows; scope matches by joining DraftSession.
     result_submitted_at = Column(DateTime, nullable=True)
     
     # Relationship with DraftSession
