@@ -47,10 +47,6 @@ PAIRINGS = ChannelSpec(
     read_only=False,
 )
 
-# Back-compat aliases for callers that name the settings directly.
-STANDINGS_CHANNEL_SETTING = STANDINGS.setting
-PLAY_CHANNEL_SETTING = PAIRINGS.setting
-
 
 def resolve_channel(guild, config, setting):
     """The configured channel for ``setting``, or None.
@@ -68,9 +64,13 @@ def resolve_channel(guild, config, setting):
 
 
 def _overwrites(guild, spec):
-    """Read-only channels let only the bot post; the rest keep guild defaults."""
+    """Read-only channels let only the bot post; the rest keep guild defaults.
+
+    Empty dict, never None: create_text_channel validates the argument with
+    ``isinstance(overwrites, dict)`` and rejects None outright.
+    """
     if not spec.read_only:
-        return None
+        return {}
     return {
         guild.default_role: discord.PermissionOverwrite(send_messages=False, read_messages=True),
         guild.me: discord.PermissionOverwrite(send_messages=True, read_messages=True, embed_links=True),

@@ -7,9 +7,7 @@ from loguru import logger
 from config import get_config, update_setting
 from helpers.tournament_channels import (
     PAIRINGS,
-    PLAY_CHANNEL_SETTING,
     STANDINGS,
-    STANDINGS_CHANNEL_SETTING,
     ensure_channel,
     resolve_channel,
 )
@@ -343,17 +341,20 @@ class TournamentCog(commands.Cog):
                 "or pass existing `standings:` and `play:` channels.", ephemeral=True)
             return
 
-        update_setting(ctx.guild.id, f"tournament.{STANDINGS_CHANNEL_SETTING}", str(standings_channel.id))
-        update_setting(ctx.guild.id, f"tournament.{PLAY_CHANNEL_SETTING}", str(play_channel.id))
+        update_setting(ctx.guild.id, f"tournament.{STANDINGS.setting}", str(standings_channel.id))
+        update_setting(ctx.guild.id, f"tournament.{PAIRINGS.setting}", str(play_channel.id))
         logger.info(
             f"Tournament channels set in guild {ctx.guild.id} by {ctx.author.id}: "
             f"standings={standings_channel.id} (created={standings_new}) "
             f"play={play_channel.id} (created={play_new}) category={category.id if category else None}")
 
+        def clause(channel, created):
+            return f"{'🆕 created' if created else '📌 using'} {channel.mention}"
+
         where = f" in **{category.name}**" if category else ""
         await ctx.followup.send(
-            f"{'🆕 Created' if standings_new else '📌 Using'} {standings_channel.mention} for standings and "
-            f"{'🆕 created' if play_new else 'using'} {play_channel.mention} for pairings{where}.\n"
+            f"Tournament channels{where}: {clause(standings_channel, standings_new)} for "
+            f"standings and {clause(play_channel, play_new)} for pairings.\n"
             f"Existing standings messages stay where they are — this takes effect from the next "
             f"`/tournament start`.", ephemeral=True)
 
@@ -637,8 +638,8 @@ class TournamentCog(commands.Cog):
             logger.info(f"Tournament {tournament_id} started in guild {ctx.guild.id} by {ctx.author.id}")
             await self._refresh_board(tournament_id, closed=True)
             pot_line = f" 🏦 Prize pool: **{res['pot']} tix**." if res["fee"] > 0 else ""
-            play = self._destination(ctx, PLAY_CHANNEL_SETTING)
-            standings = self._destination(ctx, STANDINGS_CHANNEL_SETTING)
+            play = self._destination(ctx, PAIRINGS.setting)
+            standings = self._destination(ctx, STANDINGS.setting)
             where = "" if play == standings == ctx.channel else (
                 f" Pairings in {play.mention}, standings in {standings.mention}.")
             await ctx.followup.send(f"🏆 **{res['name']}** has started!{pot_line}{where}")
@@ -825,7 +826,7 @@ class TournamentCog(commands.Cog):
                     return
                 new_round_id = new_round.id
                 new_round_number = new_round.round_number
-            play = self._destination(ctx, PLAY_CHANNEL_SETTING)
+            play = self._destination(ctx, PAIRINGS.setting)
             await self._post_round_messages(play, new_round_id, new_round_number)
             if play != ctx.channel:
                 await ctx.followup.send(f"✅ Week {new_round_number} pairings posted in {play.mention}.")
@@ -925,7 +926,7 @@ class TournamentCog(commands.Cog):
         if has_message:
             await update_standings_message(self.bot, tournament_id)
         else:
-            await self._post_standings(self._destination(ctx, STANDINGS_CHANNEL_SETTING), tournament_id)
+            await self._post_standings(self._destination(ctx, STANDINGS.setting), tournament_id)
         logger.info(f"Standings message refreshed for tournament {tournament_id} by {ctx.author.id}")
         await ctx.followup.send("✅ Standings refreshed.", ephemeral=True)
 
