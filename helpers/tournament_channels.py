@@ -5,25 +5,51 @@ place all season, so it belongs somewhere quiet and findable, while pairings are
 a fresh burst of clickable messages every round. Posting both wherever the
 command happened to be typed buries the former under the latter.
 
-Both channels are stored as ids under the guild config's ``tournament`` section
-rather than by name, so renaming a channel is a non-event (the name-lookup
-convention used elsewhere in this repo would silently create a duplicate and
-orphan the live standings message).
+Both channels are created in the category of the channel /tournament
+setup_channels was run from — a league or tournament category is where an
+organiser already keeps this stuff, so the invocation site says where the season
+lives without another setting to configure.
+
+Both are stored as ids under the guild config's ``tournament`` section rather
+than by name, so renaming a channel is a non-event (the name-lookup convention
+used elsewhere in this repo would silently create a duplicate and orphan the
+live standings message).
 """
+from typing import NamedTuple
+
 import discord
 from loguru import logger
 
-# Config keys under the guild config's "tournament" section. "default_" keeps
-# them distinct from Tournament.standings_channel_id, which is a different fact:
-# the column records where one event's message actually landed, these say where
-# the next one should go.
-STANDINGS_CHANNEL_SETTING = "default_standings_channel_id"
-PLAY_CHANNEL_SETTING = "default_play_channel_id"
 
-# Name used when the bot has to create the standings channel itself.
-STANDINGS_CHANNEL_NAME = "tournament-standings"
+class ChannelSpec(NamedTuple):
+    """One kind of tournament channel: what to call it, and who may talk in it."""
 
-STANDINGS_CHANNEL_TOPIC = "Live tournament standings — updated automatically after every reported match."
+    setting: str      # config key under the guild config's "tournament" section
+    name: str         # name used when the bot creates it
+    topic: str
+    read_only: bool   # True: only the bot posts (standings)
+
+
+# "default_" keeps these distinct from Tournament.standings_channel_id, which is
+# a different fact: the column records where one event's message actually
+# landed, these say where the next one should go.
+STANDINGS = ChannelSpec(
+    setting="default_standings_channel_id",
+    name="tournament-standings",
+    topic="Live tournament standings — updated automatically after every reported match.",
+    read_only=True,
+)
+PAIRINGS = ChannelSpec(
+    setting="default_play_channel_id",
+    name="tournament-pairings",
+    topic="Weekly pairings — hit Play on your match to start the draft.",
+    # Players click Play here and talk in the match threads that hang off it.
+    read_only=False,
+)
+
+# Back-compat aliases for callers that name the settings directly.
+STANDINGS_CHANNEL_SETTING = STANDINGS.setting
+PLAY_CHANNEL_SETTING = PAIRINGS.setting
 
 
 def resolve_channel(guild, config, setting):
@@ -41,60 +67,48 @@ def resolve_channel(guild, config, setting):
     return channel
 
 
-def _draft_category(guild, config):
-    """The guild's draft category, or None.
-
-    Two shapes are live in this repo: every real configs/*.json (and config.py's
-    defaults) put the category *name* in categories.draft, while the /setup
-    wizard writes categories.draft as a bool plus the name in
-    categories.draft_name. Read both rather than picking a side here.
-    """
-    categories = config.get("categories", {})
-    name = categories.get("draft_name") or categories.get("draft")
-    if not isinstance(name, str):
+def _overwrites(guild, spec):
+    """Read-only channels let only the bot post; the rest keep guild defaults."""
+    if not spec.read_only:
         return None
-    return discord.utils.get(guild.categories, name=name)
-
-
-def _standings_overwrites(guild):
-    """Players read the standings; only the bot writes them."""
     return {
         guild.default_role: discord.PermissionOverwrite(send_messages=False, read_messages=True),
         guild.me: discord.PermissionOverwrite(send_messages=True, read_messages=True, embed_links=True),
     }
 
 
-async def ensure_standings_channel(guild, config, chosen):
-    """Return (channel, created) for the standings channel.
+async def ensure_channel(guild, config, spec, category, chosen=None):
+    """Return (channel, created) for one kind of tournament channel.
 
     Preference order: an explicitly chosen channel, the configured one, an
-    existing channel already carrying the default name, and only then a new
-    read-only channel in the draft category. Adopting a same-named channel
-    before creating keeps a re-run from producing #tournament-standings-2.
+    existing channel already carrying the default name, and only then a new one
+    in ``category``. Adopting a same-named channel before creating keeps a
+    re-run from producing #tournament-standings-2.
 
-    An existing channel gets its bot permissions repaired — a standings channel
-    the bot cannot post in is worse than not having one, and the same drift
-    check guards the live-drafts channel (livedrafts.py).
+    An adopted channel gets its bot permissions repaired — a channel the bot
+    cannot post in is worse than not having one, and the same drift check
+    guards the live-drafts channel (livedrafts.py).
     """
     channel = (
         chosen
-        or resolve_channel(guild, config, STANDINGS_CHANNEL_SETTING)
-        or discord.utils.get(guild.text_channels, name=STANDINGS_CHANNEL_NAME)
+        or resolve_channel(guild, config, spec.setting)
+        or discord.utils.get(guild.text_channels, name=spec.name)
     )
     if channel is not None:
         perms = channel.overwrites_for(guild.me)
         if not perms.send_messages or not perms.embed_links:
             await channel.set_permissions(
                 guild.me, send_messages=True, read_messages=True, embed_links=True)
-            logger.info(f"Repaired bot permissions on standings channel {channel.id}")
+            logger.info(f"Repaired bot permissions on {spec.name} channel {channel.id}")
         return channel, False
 
-    category = _draft_category(guild, config)
     channel = await guild.create_text_channel(
-        name=STANDINGS_CHANNEL_NAME,
+        name=spec.name,
         category=category,
-        topic=STANDINGS_CHANNEL_TOPIC,
-        overwrites=_standings_overwrites(guild),
+        topic=spec.topic,
+        overwrites=_overwrites(guild, spec),
     )
-    logger.info(f"Created standings channel {channel.id} in guild {guild.id}")
+    logger.info(
+        f"Created {spec.name} channel {channel.id} in guild {guild.id} "
+        f"(category {category.id if category else 'none'})")
     return channel, True

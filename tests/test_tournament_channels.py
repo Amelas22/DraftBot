@@ -1,17 +1,20 @@
-"""Fixed homes for tournament messages: a standings channel the bot owns and a
-play channel it merely adopts, both resolved by stored id with a fallback."""
+"""Fixed homes for tournament messages: standings and pairings channels the bot
+creates in the invoking category, both resolved by stored id with a fallback."""
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
 
 from helpers.tournament_channels import (
+    PAIRINGS,
     PLAY_CHANNEL_SETTING,
-    STANDINGS_CHANNEL_NAME,
+    STANDINGS,
     STANDINGS_CHANNEL_SETTING,
-    ensure_standings_channel,
+    ensure_channel,
     resolve_channel,
 )
+
+STANDINGS_CHANNEL_NAME = STANDINGS.name
 
 GUILD = 1355718878298116096
 
@@ -65,7 +68,7 @@ class TestEnsureStandingsChannel:
     async def test_adopts_an_explicitly_named_channel_without_creating(self):
         chosen = channel_stub(222, "league-standings")
         guild = guild_stub(channels=[chosen])
-        channel, created = await ensure_standings_channel(guild, {}, chosen)
+        channel, created = await ensure_channel(guild, {}, STANDINGS, None, chosen)
         assert (channel, created) == (chosen, False)
         guild.create_text_channel.assert_not_called()
 
@@ -74,7 +77,7 @@ class TestEnsureStandingsChannel:
         existing = channel_stub(111, STANDINGS_CHANNEL_NAME)
         guild = guild_stub(channels=[existing])
         config = {"tournament": {STANDINGS_CHANNEL_SETTING: "111"}}
-        channel, created = await ensure_standings_channel(guild, config, None)
+        channel, created = await ensure_channel(guild, config, STANDINGS, None)
         assert (channel, created) == (existing, False)
         guild.create_text_channel.assert_not_called()
 
@@ -82,7 +85,7 @@ class TestEnsureStandingsChannel:
     async def test_adopts_a_same_named_channel_before_creating_a_duplicate(self):
         existing = channel_stub(111, STANDINGS_CHANNEL_NAME)
         guild = guild_stub(channels=[existing])
-        channel, created = await ensure_standings_channel(guild, {}, None)
+        channel, created = await ensure_channel(guild, {}, STANDINGS, None)
         assert (channel, created) == (existing, False)
         guild.create_text_channel.assert_not_called()
 
@@ -90,7 +93,7 @@ class TestEnsureStandingsChannel:
     async def test_creates_a_read_only_channel_when_there_is_none(self):
         made = channel_stub(333, STANDINGS_CHANNEL_NAME)
         guild = guild_stub(created=made)
-        channel, created = await ensure_standings_channel(guild, {}, None)
+        channel, created = await ensure_channel(guild, {}, STANDINGS, None)
         assert (channel, created) == (made, True)
         kwargs = guild.create_text_channel.call_args.kwargs
         assert kwargs["name"] == STANDINGS_CHANNEL_NAME
@@ -102,26 +105,15 @@ class TestEnsureStandingsChannel:
         assert overwrites[guild.me].embed_links is True
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("categories", [
-        # The shape every real configs/*.json and config.py's defaults use...
-        {"draft": "Draft Channels"},
-        # ...and the one the /setup wizard writes (bool flag + separate name).
-        {"draft": True, "draft_name": "Draft Channels"},
-    ])
-    async def test_new_channel_lands_in_the_configured_draft_category(self, categories):
+    async def test_new_channel_lands_in_the_category_it_was_given(self):
+        """The caller passes the invoking channel's category, so a league's
+        channels are created wherever the organiser ran the command."""
         category = MagicMock()
-        category.name = "Draft Channels"
-        made = channel_stub(333, STANDINGS_CHANNEL_NAME)
-        guild = guild_stub(categories=[category], created=made)
-        await ensure_standings_channel(guild, {"categories": categories}, None)
-        assert guild.create_text_channel.call_args.kwargs["category"] is category
-
-    @pytest.mark.asyncio
-    async def test_no_category_configured_creates_at_the_top_level(self):
+        category.name = "Lotus League 2026"
         made = channel_stub(333, STANDINGS_CHANNEL_NAME)
         guild = guild_stub(created=made)
-        await ensure_standings_channel(guild, {}, None)
-        assert guild.create_text_channel.call_args.kwargs["category"] is None
+        await ensure_channel(guild, {}, STANDINGS, category)
+        assert guild.create_text_channel.call_args.kwargs["category"] is category
 
     @pytest.mark.asyncio
     async def test_repairs_the_bots_write_permission_on_an_existing_channel(self):
@@ -130,10 +122,48 @@ class TestEnsureStandingsChannel:
         existing.overwrites_for.return_value = MagicMock(send_messages=False, embed_links=False)
         guild = guild_stub(channels=[existing])
         config = {"tournament": {STANDINGS_CHANNEL_SETTING: "111"}}
-        await ensure_standings_channel(guild, config, None)
+        await ensure_channel(guild, config, STANDINGS, None)
         existing.set_permissions.assert_awaited_once()
         assert existing.set_permissions.await_args.kwargs["send_messages"] is True
 
+    @pytest.mark.asyncio
+    async def test_no_category_creates_at_the_top_level(self):
+        """Running from an uncategorised channel is allowed, not an error."""
+        made = channel_stub(333, STANDINGS_CHANNEL_NAME)
+        guild = guild_stub(created=made)
+        await ensure_channel(guild, {}, STANDINGS, None)
+        assert guild.create_text_channel.call_args.kwargs["category"] is None
+
+
+class TestEnsurePairingsChannel:
+    """Pairings is created like standings but stays writable: players click
+    Play there and talk in the match threads hanging off it."""
+
+    @pytest.mark.asyncio
+    async def test_creates_a_writable_channel(self):
+        made = channel_stub(444, PAIRINGS.name)
+        guild = guild_stub(created=made)
+        channel, created = await ensure_channel(guild, {}, PAIRINGS, None)
+        assert (channel, created) == (made, True)
+        kwargs = guild.create_text_channel.call_args.kwargs
+        assert kwargs["name"] == PAIRINGS.name
+        # No overwrites at all -- the channel keeps the guild's defaults.
+        assert kwargs["overwrites"] is None
+
+    @pytest.mark.asyncio
+    async def test_adopts_an_explicitly_chosen_channel(self):
+        chosen = channel_stub(555, "league-chat")
+        guild = guild_stub(channels=[chosen])
+        channel, created = await ensure_channel(guild, {}, PAIRINGS, None, chosen)
+        assert (channel, created) == (chosen, False)
+        guild.create_text_channel.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_standings_and_pairings_do_not_collide(self):
+        """Distinct names and settings, so one never adopts the other."""
+        assert STANDINGS.name != PAIRINGS.name
+        assert STANDINGS.setting != PAIRINGS.setting
+        assert STANDINGS.read_only and not PAIRINGS.read_only
 
 class TestCogWiring:
     """The cog resolves a destination per message kind, falling back to the

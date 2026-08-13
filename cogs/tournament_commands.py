@@ -6,9 +6,11 @@ from loguru import logger
 
 from config import get_config, update_setting
 from helpers.tournament_channels import (
+    PAIRINGS,
     PLAY_CHANNEL_SETTING,
+    STANDINGS,
     STANDINGS_CHANNEL_SETTING,
-    ensure_standings_channel,
+    ensure_channel,
     resolve_channel,
 )
 from database.db_session import db_session
@@ -310,42 +312,48 @@ class TournamentCog(commands.Cog):
         self,
         ctx,
         standings: discord.Option(
-            discord.TextChannel, "Where standings live (created if omitted and none exists)",
+            discord.TextChannel, "Use this channel for standings instead of making one",
             required=False, default=None),
         play: discord.Option(
-            discord.TextChannel, "Where pairings are posted (defaults to this channel)",
+            discord.TextChannel, "Use this channel for pairings instead of making one",
             required=False, default=None),
     ):
-        """Pin down where tournament messages go.
+        """Give this season's messages a home.
 
-        The standings channel is the bot's to own — it will adopt or create a
-        read-only one, since standings are a single message edited all season
-        and want somewhere quiet. The play channel is only ever adopted: it
-        needs to stay writable and servers usually already have the right room.
+        Both channels are created in the category of the channel you run this
+        from — put yourself in your league/tournament category and the season
+        lands there. Pass a channel to either option to adopt an existing one
+        instead. Standings is created read-only (one message, edited all
+        season); pairings stays writable, since players click Play in it.
         """
         if not await self._check_enabled(ctx):
             return
         await ctx.defer(ephemeral=True)
 
         config = get_config(ctx.guild.id)
+        category = getattr(ctx.channel, "category", None)
         try:
-            standings_channel, created = await ensure_standings_channel(ctx.guild, config, standings)
+            standings_channel, standings_new = await ensure_channel(
+                ctx.guild, config, STANDINGS, category, standings)
+            play_channel, play_new = await ensure_channel(
+                ctx.guild, config, PAIRINGS, category, play)
         except discord.Forbidden:
             await ctx.followup.send(
-                "❌ I need **Manage Channels** to create the standings channel — "
-                "grant it, or pass an existing `standings:` channel.", ephemeral=True)
+                "❌ I need **Manage Channels** to create tournament channels — grant it, "
+                "or pass existing `standings:` and `play:` channels.", ephemeral=True)
             return
-        play_channel = play or resolve_channel(ctx.guild, config, PLAY_CHANNEL_SETTING) or ctx.channel
 
         update_setting(ctx.guild.id, f"tournament.{STANDINGS_CHANNEL_SETTING}", str(standings_channel.id))
         update_setting(ctx.guild.id, f"tournament.{PLAY_CHANNEL_SETTING}", str(play_channel.id))
         logger.info(
             f"Tournament channels set in guild {ctx.guild.id} by {ctx.author.id}: "
-            f"standings={standings_channel.id} (created={created}) play={play_channel.id}")
+            f"standings={standings_channel.id} (created={standings_new}) "
+            f"play={play_channel.id} (created={play_new}) category={category.id if category else None}")
 
+        where = f" in **{category.name}**" if category else ""
         await ctx.followup.send(
-            f"{'🆕 Created' if created else '📌 Using'} {standings_channel.mention} for standings "
-            f"and {play_channel.mention} for pairings.\n"
+            f"{'🆕 Created' if standings_new else '📌 Using'} {standings_channel.mention} for standings and "
+            f"{'🆕 created' if play_new else 'using'} {play_channel.mention} for pairings{where}.\n"
             f"Existing standings messages stay where they are — this takes effect from the next "
             f"`/tournament start`.", ephemeral=True)
 
