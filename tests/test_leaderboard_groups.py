@@ -137,6 +137,14 @@ class TestRebuild:
         record = _record(message_id="")
         assert _cog()._tracked_message_ids(record) == []
 
+    def test_tracked_ids_skip_the_placeholder_sentinel(self):
+        """message_id is the literal "placeholder" on a record that has never
+        posted, or one just repointed at a new channel. int() would raise
+        ValueError right past _clear_posted_messages' Discord-error handling
+        and take the whole rebuild down with it."""
+        record = _record(message_id="placeholder")
+        assert _cog()._tracked_message_ids(record) == []
+
 
 class _FakeSession:
     """Stands in for db_session(): merge returns the record unchanged."""

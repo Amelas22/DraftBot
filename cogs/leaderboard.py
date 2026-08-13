@@ -263,11 +263,19 @@ class LeaderboardCog(commands.Cog):
             await session.commit()
     
     def _tracked_message_ids(self, leaderboard_record):
-        """Every message id this record owns: group headers, then boards."""
+        """Every real message id this record owns: group headers, then boards.
+
+        Only digit strings survive: message_id carries the literal
+        "placeholder" on a record that has never posted (see
+        _create_leaderboard_record) or has just been repointed at a new channel
+        (_update_leaderboard_channel), and int("placeholder") would raise
+        ValueError past the Discord-error handling in _clear_posted_messages.
+        """
         headers = (leaderboard_record.group_header_message_ids or {}).values()
         boards = [getattr(leaderboard_record, f"{c}_view_message_id", None)
                   for c in LEADERBOARD_CATEGORIES]
-        return [mid for mid in [*headers, *boards, leaderboard_record.message_id] if mid]
+        candidates = [*headers, *boards, leaderboard_record.message_id]
+        return [mid for mid in candidates if mid and str(mid).isdigit()]
 
     async def _clear_posted_messages(self, channel, leaderboard_record):
         """Delete the tracked messages and forget their ids, so the next pass
