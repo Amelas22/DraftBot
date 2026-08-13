@@ -8,8 +8,10 @@ from models.leaderboard_message import LeaderboardMessage
 from services.leaderboard_service import get_timeframe_date
 from services.leaderboard_formatter import create_leaderboard_embed
 from loguru import logger
+from helpers.permissions import has_bot_manager_role
 from leaderboard_config import (
     ALL_CATEGORIES as LEADERBOARD_CATEGORIES,
+    LEADERBOARD_GROUPS,
     STANDARD_TIMEFRAMES,
     STREAK_TIMEFRAMES,
     STREAK_CATEGORIES
@@ -83,8 +85,41 @@ class LeaderboardCog(commands.Cog):
     
     @discord.slash_command(name="leaderboard", description="Show all player leaderboards for drafts")
     async def leaderboard(self, ctx):
-        """Display all leaderboards of player statistics"""
+        """Display all leaderboards of player statistics.
+
+        Boards post in clusters (see LEADERBOARD_GROUPS) under a header per
+        group. This path only ever edits existing messages in place, so it
+        never disturbs a channel; /rebuild_leaderboards is what reposts them
+        in group order.
+        """
         await ctx.defer()
+        await self._post_all(ctx, rebuild=False)
+
+    @discord.slash_command(
+        name="rebuild_leaderboards",
+        description="Admin: delete and repost every leaderboard so the grouping order applies",
+    )
+    @has_bot_manager_role()
+    async def rebuild_leaderboards(self, ctx):
+        """Repost the boards grouped.
+
+        Discord orders a channel by post time and the normal update path edits
+        in place, so boards posted before the grouping keep their old order.
+        This deletes the tracked messages and posts them back grouped — the
+        only path that destroys messages, hence admin-gated and separate from
+        /leaderboard rather than a flag on it.
+
+        Deliberately no confirmation step, unlike /tournament payout's
+        PayoutConfirmView: what's destroyed is regenerated from the database in
+        the same call, so the worst case is a channel that looks briefly empty,
+        not a loss. Add one if boards ever carry state that isn't rederivable.
+        """
+        await ctx.defer(ephemeral=True)
+        logger.info(f"Leaderboard rebuild requested in guild {ctx.guild.id} by {ctx.author.id}")
+        await self._post_all(ctx, rebuild=True)
+
+    async def _post_all(self, ctx, rebuild):
+        """Shared body of /leaderboard and /rebuild_leaderboards."""
         
         # Get the guild ID
         guild_id = str(ctx.guild.id)
@@ -96,18 +131,23 @@ class LeaderboardCog(commands.Cog):
             leaderboard_record, timeframes, channel = await self._get_leaderboard_setup(ctx, guild_id)
             if not channel:
                 # If we couldn't get the channel, there's a deeper issue
-                await ctx.respond("Error: Couldn't access any channels to post leaderboards.")
+                await ctx.followup.send("Error: Couldn't access any channels to post leaderboards.")
                 return
             
-            # Process each category
-            for category in LEADERBOARD_CATEGORIES:
-                await self._update_category_leaderboard(
-                    category=category,
-                    guild_id=guild_id,
-                    channel=channel,
-                    leaderboard_record=leaderboard_record,
-                    timeframe=timeframes.get(category, 'lifetime')
-                )
+            if rebuild:
+                leaderboard_record = await self._clear_posted_messages(channel, leaderboard_record)
+
+            # Post group by group: a header, then that group's boards beneath it
+            for group in LEADERBOARD_GROUPS:
+                await self._update_group_header(channel, leaderboard_record, group)
+                for category in group["categories"]:
+                    await self._update_category_leaderboard(
+                        category=category,
+                        guild_id=guild_id,
+                        channel=channel,
+                        leaderboard_record=leaderboard_record,
+                        timeframe=timeframes.get(category, 'lifetime')
+                    )
             
             # Update last_updated timestamp
             async with db_session() as session:
@@ -115,12 +155,14 @@ class LeaderboardCog(commands.Cog):
                 leaderboard_record.last_updated = datetime.now()
                 await session.commit()
             
-            # Complete the interaction
-            await ctx.respond("✅")
+            where = f" in {channel.mention}"
+            await ctx.followup.send(
+                f"{'♻️ Rebuilt' if rebuild else '✅ Updated'} all leaderboards{where}.",
+                ephemeral=rebuild)
             
         except Exception as e:
             logger.error(f"Error processing leaderboards: {e}", exc_info=True)
-            await ctx.respond(f"Error creating leaderboards: {str(e)}")
+            await ctx.followup.send(f"Error creating leaderboards: {str(e)}")
 
     async def _get_leaderboard_setup(self, ctx, guild_id):
         """Get or create leaderboard record, timeframes, and channel for posting"""
@@ -220,6 +262,70 @@ class LeaderboardCog(commands.Cog):
             leaderboard_record.time_vault_and_key_view_message_id = None
             await session.commit()
     
+    def _tracked_message_ids(self, leaderboard_record):
+        """Every message id this record owns: group headers, then boards."""
+        headers = (leaderboard_record.group_header_message_ids or {}).values()
+        boards = [getattr(leaderboard_record, f"{c}_view_message_id", None)
+                  for c in LEADERBOARD_CATEGORIES]
+        return [mid for mid in [*headers, *boards, leaderboard_record.message_id] if mid]
+
+    async def _clear_posted_messages(self, channel, leaderboard_record):
+        """Delete the tracked messages and forget their ids, so the next pass
+        reposts everything in group order.
+
+        Ordering in a channel is post order, and the normal path edits messages
+        in place — so a board that predates the grouping stays where it was
+        posted. This is the escape hatch, and it is opt-in (rebuild:true)
+        precisely because it destroys the existing messages.
+        """
+        for message_id in self._tracked_message_ids(leaderboard_record):
+            try:
+                message = await channel.fetch_message(int(message_id))
+                await message.delete()
+            except discord.NotFound:
+                pass          # already gone; nothing to clean up
+            except discord.HTTPException as e:
+                logger.warning(f"Could not delete leaderboard message {message_id}: {e}")
+
+        async with db_session() as session:
+            leaderboard_record = await session.merge(leaderboard_record)
+            leaderboard_record.group_header_message_ids = {}
+            for category in LEADERBOARD_CATEGORIES:
+                if hasattr(leaderboard_record, f"{category}_view_message_id"):
+                    setattr(leaderboard_record, f"{category}_view_message_id", None)
+            leaderboard_record.message_id = ""
+            await session.commit()
+        logger.info("Cleared posted leaderboard messages for rebuild")
+        return leaderboard_record
+
+    async def _update_group_header(self, channel, leaderboard_record, group):
+        """Post (or edit) the header message that opens one group's boards."""
+        content = f"# {group['title']}\n{group['blurb']}"
+        headers = dict(leaderboard_record.group_header_message_ids or {})
+        message_id = headers.get(group["key"])
+
+        if message_id:
+            try:
+                existing = await channel.fetch_message(int(message_id))
+                await existing.edit(content=content)
+                return
+            except discord.NotFound:
+                logger.warning(f"Header message for {group['key']} missing, reposting")
+            except discord.HTTPException as e:
+                logger.error(f"Error updating {group['key']} header: {e}")
+                return
+
+        new_message = await channel.send(content)
+        headers[group["key"]] = str(new_message.id)
+        # Reassign rather than mutate: SQLAlchemy doesn't track in-place edits
+        # to a plain JSON dict, so a mutation would never persist. Set it before
+        # the merge so the merged copy carries it (as _update_category_leaderboard
+        # does), rather than writing the same dict onto two handles.
+        leaderboard_record.group_header_message_ids = headers
+        async with db_session() as session:
+            await session.merge(leaderboard_record)
+            await session.commit()
+
     async def _update_category_leaderboard(self, category, guild_id, channel, leaderboard_record, timeframe):
         """Update or create a leaderboard for a specific category"""
         logger.info(f"Processing {category} leaderboard")
