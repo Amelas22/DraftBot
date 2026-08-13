@@ -5,9 +5,16 @@ from discord.ext import commands
 from loguru import logger
 
 from config import get_config, update_setting
+from helpers.tournament_channels import (
+    PAIRINGS,
+    STANDINGS,
+    ensure_channel,
+    resolve_channel,
+)
 from database.db_session import db_session
 from helpers.money_gate import gate_serve, linked_username
 from helpers.permissions import has_bot_manager_role
+from helpers.pin_helpers import safe_pin
 from models.tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
 from sqlalchemy import or_, select
 from services.tournament_formatter import (
@@ -297,6 +304,60 @@ class TournamentCog(commands.Cog):
         logger.info(f"Tournament feature enabled in guild {ctx.guild.id} by {ctx.author.id}")
         await ctx.respond("✅ Tournament commands are now **enabled** on this server.", ephemeral=True)
 
+    @tournament.command(name="setup_channels", description="Admin: set fixed homes for standings and pairings")
+    @has_bot_manager_role()
+    async def setup_channels(
+        self,
+        ctx,
+        standings: discord.Option(
+            discord.TextChannel, "Use this channel for standings instead of making one",
+            required=False, default=None),
+        play: discord.Option(
+            discord.TextChannel, "Use this channel for pairings instead of making one",
+            required=False, default=None),
+    ):
+        """Give this season's messages a home.
+
+        Both channels are created in the category of the channel you run this
+        from — put yourself in your league/tournament category and the season
+        lands there. Pass a channel to either option to adopt an existing one
+        instead. Standings is created read-only (one message, edited all
+        season); pairings stays writable, since players click Play in it.
+        """
+        if not await self._check_enabled(ctx):
+            return
+        await ctx.defer(ephemeral=True)
+
+        config = get_config(ctx.guild.id)
+        category = getattr(ctx.channel, "category", None)
+        try:
+            standings_channel, standings_new = await ensure_channel(
+                ctx.guild, config, STANDINGS, category, standings)
+            play_channel, play_new = await ensure_channel(
+                ctx.guild, config, PAIRINGS, category, play)
+        except discord.Forbidden:
+            await ctx.followup.send(
+                "❌ I need **Manage Channels** to create tournament channels — grant it, "
+                "or pass existing `standings:` and `play:` channels.", ephemeral=True)
+            return
+
+        update_setting(ctx.guild.id, f"tournament.{STANDINGS.setting}", str(standings_channel.id))
+        update_setting(ctx.guild.id, f"tournament.{PAIRINGS.setting}", str(play_channel.id))
+        logger.info(
+            f"Tournament channels set in guild {ctx.guild.id} by {ctx.author.id}: "
+            f"standings={standings_channel.id} (created={standings_new}) "
+            f"play={play_channel.id} (created={play_new}) category={category.id if category else None}")
+
+        def clause(channel, created):
+            return f"{'🆕 created' if created else '📌 using'} {channel.mention}"
+
+        where = f" in **{category.name}**" if category else ""
+        await ctx.followup.send(
+            f"Tournament channels{where}: {clause(standings_channel, standings_new)} for "
+            f"standings and {clause(play_channel, play_new)} for pairings.\n"
+            f"Existing standings messages stay where they are — this takes effect from the next "
+            f"`/tournament start`.", ephemeral=True)
+
     @tournament.command(name="disable", description="Admin: disable tournament commands on this server")
     @has_bot_manager_role()
     async def disable(self, ctx):
@@ -367,6 +428,10 @@ class TournamentCog(commands.Cog):
         except Exception as e:
             logger.warning(f"Could not send tournament-create confirmation for {tournament.id}: {e}")
         try:
+            # Deliberately NOT routed through _destination: the board belongs
+            # wherever registration is being announced, which is why the
+            # organizer ran /tournament create there. Only standings (buried by
+            # its own updates) and pairings get fixed homes.
             await post_registration_board(ctx.channel, tournament.id)
         except Exception as e:
             logger.warning(f"Could not post registration board: {e}")
@@ -573,9 +638,13 @@ class TournamentCog(commands.Cog):
             logger.info(f"Tournament {tournament_id} started in guild {ctx.guild.id} by {ctx.author.id}")
             await self._refresh_board(tournament_id, closed=True)
             pot_line = f" 🏦 Prize pool: **{res['pot']} tix**." if res["fee"] > 0 else ""
-            await ctx.followup.send(f"🏆 **{res['name']}** has started!{pot_line}")
-            await self._post_schedule(ctx, tournament_id)
-            await self._post_standings(ctx, tournament_id)
+            play = self._destination(ctx, PAIRINGS.setting)
+            standings = self._destination(ctx, STANDINGS.setting)
+            where = "" if play == standings == ctx.channel else (
+                f" Pairings in {play.mention}, standings in {standings.mention}.")
+            await ctx.followup.send(f"🏆 **{res['name']}** has started!{pot_line}{where}")
+            await self._post_schedule(play, tournament_id)
+            await self._post_standings(standings, tournament_id)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
 
@@ -757,12 +826,23 @@ class TournamentCog(commands.Cog):
                     return
                 new_round_id = new_round.id
                 new_round_number = new_round.round_number
-            await self._post_round_messages(ctx, new_round_id, new_round_number)
+            play = self._destination(ctx, PAIRINGS.setting)
+            await self._post_round_messages(play, new_round_id, new_round_number)
+            if play != ctx.channel:
+                await ctx.followup.send(f"✅ Week {new_round_number} pairings posted in {play.mention}.")
             await update_standings_message(self.bot, tournament_id)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
 
-    async def _post_schedule(self, ctx, tournament_id):
+    def _destination(self, ctx, setting):
+        """Where a tournament message goes: the configured channel, else here.
+
+        Falling back to the invoking channel keeps every guild that never ran
+        /tournament setup_channels working exactly as it did before.
+        """
+        return resolve_channel(ctx.guild, get_config(ctx.guild.id), setting) or ctx.channel
+
+    async def _post_schedule(self, channel, tournament_id):
         """Post the whole schedule, one message per match. Swiss has one round;
         all-open formats reveal every round at once."""
         async with db_session() as session:
@@ -773,13 +853,18 @@ class TournamentCog(commands.Cog):
             )).scalars().all()
             round_meta = [(r.id, r.round_number) for r in rounds]
         for round_id, round_number in round_meta:
-            await self._post_round_messages(ctx, round_id, round_number)
+            await self._post_round_messages(channel, round_id, round_number)
 
-    async def _post_round_messages(self, ctx, round_id, round_number):
+    async def _post_round_messages(self, channel, round_id, round_number):
         """Post a week header, then one message per match. Each playable match
         gets its own Play button (its thread is created off this message); byes
-        and already-reported matches show as text with no button."""
-        await ctx.followup.send(f"**Week {round_number} pairings:**")
+        and already-reported matches show as text with no button.
+
+        Takes a channel rather than the interaction: followup.send can only
+        answer in the channel the command was typed in, and pairings may be
+        destined for the play channel instead.
+        """
+        await channel.send(f"**Week {round_number} pairings:**")
         async with db_session() as session:
             matches = (await session.execute(
                 select(TournamentMatch).where(TournamentMatch.round_id == round_id)
@@ -800,21 +885,26 @@ class TournamentCog(commands.Cog):
 
         for match_id, text, label, playable in rows:
             if not playable:
-                await ctx.followup.send(text)
+                await channel.send(text)
                 continue
-            message = await ctx.followup.send(text, view=PlayMatchView(match_id, label))
+            message = await channel.send(text, view=PlayMatchView(match_id, label))
             async with db_session() as session:
                 m = await session.get(TournamentMatch, match_id)
                 m.pairings_channel_id = str(message.channel.id)
                 m.pairings_message_id = str(message.id)
 
-    async def _post_standings(self, ctx, tournament_id):
-        """Post the standings message and remember it for in-place updates."""
+    async def _post_standings(self, channel, tournament_id):
+        """Post the standings message and remember it for in-place updates.
+
+        Pinned on the way out: the message is edited all season and never
+        reposted, so pinning is what keeps it reachable as the channel fills.
+        """
         async with db_session() as session:
             tournament = await session.get(Tournament, tournament_id)
             participants = await get_standings_data(session, tournament_id)
             embed = create_standings_embed(tournament, participants)
-        message = await ctx.followup.send(embed=embed)
+        message = await channel.send(embed=embed)
+        await safe_pin(message)
         async with db_session() as session:
             tournament = await session.get(Tournament, tournament_id)
             tournament.standings_channel_id = str(message.channel.id)
@@ -836,7 +926,7 @@ class TournamentCog(commands.Cog):
         if has_message:
             await update_standings_message(self.bot, tournament_id)
         else:
-            await self._post_standings(ctx, tournament_id)
+            await self._post_standings(self._destination(ctx, STANDINGS.setting), tournament_id)
         logger.info(f"Standings message refreshed for tournament {tournament_id} by {ctx.author.id}")
         await ctx.followup.send("✅ Standings refreshed.", ephemeral=True)
 
