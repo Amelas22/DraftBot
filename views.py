@@ -15,6 +15,7 @@ from models import SignUpHistory
 from sqlalchemy import update, select, and_
 from sqlalchemy.orm import selectinload
 from helpers.utils import get_cube_thumbnail_url
+from helpers.money_gate import wallet_howto
 from helpers.display_names import get_display_name, get_display_name_by_id
 from helpers.debt_warning import format_staked_sign_ups, DEBT_WARNING_AGE_DAYS
 from helpers.draft_footer import apply_draft_footer_from_session
@@ -478,8 +479,14 @@ class PersistentView(discord.ui.View):
                     min_stake=draft_session.min_stake,
                     has_draftmancer_role=has_draftmancer_role  
                 )
+                # Say how a bet is actually paid BEFORE it is placed, not only after
+                # it is lost.
+                howto = wallet_howto(draft_session.guild_id, brief=True)
+                prompt = f"Min Bet for queue is {draft_session.min_stake}. Select your max bet:"
+                if howto:
+                    prompt += f"\n-# {howto}"
                 await interaction.response.send_message(
-                    f"Min Bet for queue is {draft_session.min_stake}. Select your max bet:",
+                    prompt,
                     view=stake_options_view,
                     ephemeral=True
                 )

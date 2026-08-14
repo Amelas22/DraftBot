@@ -60,3 +60,59 @@ def test_field_on_every_page():
     assert len(pages) == 2
     assert pages[0].fields[0].name == "🏆 Most Outstanding"
     assert pages[1].fields[0].name == "🏆 Most Outstanding"
+
+
+# ---- the wallet how-to block on the debt panels ---------------------------------
+
+def _money_server(value=True):
+    """Patch the real gate, not the helper under test: patching add_wallet_howto would
+    make the silent-on-free-servers test assert that a stubbed no-op does nothing."""
+    return patch("helpers.money_gate.is_money_server", return_value=value)
+
+
+def test_guild_summary_carries_the_wallet_howto_once_on_the_last_page():
+    """Identical on every page, so repeating it through a long list would push the
+    debts themselves off screen."""
+    rows = [_row(f"p{i}", "alice", -10) for i in range(25)]
+    with _patch_names(), _money_server():
+        pages = build_guild_debt_embed_pages(_guild(), rows, per_page=10)
+
+    assert len(pages) > 1
+    carrying = [i for i, p in enumerate(pages)
+                if any("wallet deposit" in f.value for f in p.fields)]
+    assert carrying == [len(pages) - 1]
+
+
+def test_debt_panels_stay_silent_where_there_is_no_wallet():
+    """Card loans book debts on free servers too, and /wallet is refused there."""
+    from debt_views.helpers import build_user_balance_embed
+
+    rows = [_row("bob", "alice", -10)]
+    with _patch_names(), _money_server(False):
+        pages = build_guild_debt_embed_pages(_guild(), rows)
+        balances = build_user_balance_embed(_guild(), {"alice": -10})
+
+    for embed in (*pages, balances):
+        assert not any("wallet" in f.value.lower() for f in embed.fields)
+
+
+def test_personal_balances_panel_carries_the_wallet_howto():
+    from debt_views.helpers import build_user_balance_embed
+
+    with _patch_names(), _money_server():
+        embed = build_user_balance_embed(_guild(), {"alice": -10})
+
+    assert any("wallet deposit" in f.value for f in embed.fields)
+
+
+def test_a_player_who_is_only_owed_money_is_not_told_how_to_pay():
+    """The block explains settling a debt. Someone with nothing to settle doesn't
+    need it taking up their panel."""
+    from debt_views.helpers import build_user_balance_embed
+
+    with _patch_names(), _money_server():
+        owes = build_user_balance_embed(_guild(), {"alice": -10})
+        owed = build_user_balance_embed(_guild(), {"alice": 10})
+
+    assert any("wallet deposit" in f.value for f in owes.fields)
+    assert not any("wallet deposit" in f.value for f in owed.fields)

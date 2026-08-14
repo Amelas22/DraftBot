@@ -24,6 +24,7 @@ from debt_views.settle_views import PublicSettleDebtsView
 from models.debt_summary_message import DebtSummaryMessage
 from loguru import logger
 from config import is_cleanup_exempt, is_test_mode
+from helpers.money_gate import add_wallet_howto
 from leaderboard_config import AUTO_UPDATE_CATEGORIES
 from services.crown_roles import update_crown_roles_for_guild
 
@@ -615,6 +616,9 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                                 color=discord_color  # Match main embed color
                             )
                             bet_embed.set_footer(text=f"Total bets settled: {outcome_total} tix")
+                            # These outcomes become debt ledger entries just below, so
+                            # this is where a loser first learns they owe someone.
+                            add_wallet_howto(bet_embed, draft_session.guild_id)
 
                             # Create debt ledger entries for stake outcomes
                             try:

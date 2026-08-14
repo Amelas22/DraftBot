@@ -5,6 +5,8 @@ This module contains shared utilities to reduce code duplication
 across debt_commands.py and settle_views.py.
 """
 import discord
+
+from helpers.money_gate import add_wallet_howto
 import aiohttp
 from sqlalchemy import select
 
@@ -231,6 +233,13 @@ def build_guild_debt_embed_pages(guild: discord.Guild, rows: list, per_page: int
 
         pages.append(embed)
 
+    # Last page only: the block is identical on every page, and repeating it through a
+    # long paginated list pushes the debts themselves off the screen.
+    # Only when tix are actually owed: build_debt_pair_lines also emits card-only
+    # pairs, which contribute lines but no tix, and the wallet does not settle those.
+    if total:
+        add_wallet_howto(pages[-1], guild.id)
+
     return pages
 
 
@@ -294,5 +303,10 @@ def build_user_balance_embed(guild: discord.Guild, balances: dict,
             value="\n".join(owed_to_you_lines),
             inline=False
         )
+
+    # Only when they actually owe: the block explains settling a debt, which is noise
+    # for a player who is purely owed money.
+    if you_owe_lines:
+        add_wallet_howto(embed, guild.id)
 
     return embed
