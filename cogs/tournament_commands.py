@@ -34,12 +34,13 @@ from services.tournament_service import (
     finish_tournament,
     find_current_match,
     find_participant_by_name,
-    find_participant_for_captain,
+    find_participants_for_captain,
     get_active_tournament,
     get_latest_completed_tournament,
     get_rosters,
     get_standings_data,
     list_participants,
+    other_teams_for_user,
     register_team,
     remove_teammate,
     set_result,
@@ -556,31 +557,44 @@ class TournamentCog(commands.Cog):
     async def _roster_target(self, ctx, session, tournament, team):
         """The participant whose roster this command edits, or None if it can't.
 
-        With no ``team`` a captain edits their own roster, which is the ordinary
-        path. Naming a team is the bot-manager route: it is how a mis-added player
-        gets fixed, and the only way to give a roster to the imported teams that
-        carry no real captain (captain_user_id "0"). Returns None only after
-        replying, so callers just return.
+        Naming a ``team`` you captain is allowed and is how a captain of several
+        teams picks one; naming someone else's needs the bot-manager role, which is
+        also how a mis-added player gets fixed and how the imported teams with no
+        real captain (captain_user_id "0") get a roster at all.
+
+        Returns None only after replying, so callers just return.
         """
         if team:
-            if not await is_bot_manager(ctx):
-                await ctx.followup.send(
-                    "Only bot managers can edit another team's roster — leave `team` "
-                    "empty to edit your own.", ephemeral=True)
-                return None
             participant = await find_participant_by_name(session, tournament.id, team)
             if participant is None:
                 await ctx.followup.send(
                     f"❌ '{team}' is not registered for **{tournament.name}**.",
                     ephemeral=True)
+                return None
+            if (participant.captain_user_id != str(ctx.author.id)
+                    and not await is_bot_manager(ctx)):
+                await ctx.followup.send(
+                    f"**{participant.team_name}** isn't your team — only its captain "
+                    f"<@{participant.captain_user_id}> or a bot manager can edit its "
+                    f"roster.", ephemeral=True)
+                return None
             return participant
 
-        participant = await find_participant_for_captain(session, tournament.id, ctx.author.id)
-        if participant is None:
+        owned = await find_participants_for_captain(session, tournament.id, ctx.author.id)
+        if not owned:
             await ctx.followup.send(
                 f"You don't captain a team in **{tournament.name}**. Register one with "
                 f"`/tournament register <team name>` first.", ephemeral=True)
-        return participant
+            return None
+        if len(owned) > 1:
+            # Silently editing the first would be the worst outcome: nothing would
+            # tell them the change landed on the other team.
+            names = ", ".join(f"**{p.team_name}**" for p in owned)
+            await ctx.followup.send(
+                f"You captain {names} in **{tournament.name}** — say which one with "
+                f"the `team` option.", ephemeral=True)
+            return None
+        return owned[0]
 
     @tournament.command(name="add_teammate",
                         description="Add a player to your team's roster")
@@ -616,19 +630,26 @@ class TournamentCog(commands.Cog):
                 await ctx.followup.send(f"❌ {e}", ephemeral=True)
                 return
             p_name = participant.team_name
+            # Sharing a player between teams is allowed, but it should never happen
+            # unnoticed — say so on the reply instead of blocking the add.
+            others = await other_teams_for_user(
+                session, t_id, player.id, participant.id)
+            also_on = ", ".join(f"**{p.team_name}**" for p in others)
 
         # Outside the session: the board reads the roster back in its own session,
         # so refreshing before this one commits would render the pre-change state.
         await self._refresh_board(t_id)
+        shared = f"\nAlso on {also_on} in this tournament." if also_on else ""
         if created:
             logger.info(f"{player.id} added to team '{p_name}' in tournament {t_id} "
                         f"by {ctx.author.id}")
             await ctx.followup.send(
-                f"✅ {player.mention} is on **{p_name}**'s roster for **{t_name}**.",
+                f"✅ {player.mention} is on **{p_name}**'s roster for **{t_name}**.{shared}",
                 ephemeral=True)
         else:
             await ctx.followup.send(
-                f"{player.mention} is already on **{p_name}**'s roster.", ephemeral=True)
+                f"{player.mention} is already on **{p_name}**'s roster.{shared}",
+                ephemeral=True)
 
     @tournament.command(name="remove_teammate",
                         description="Take a player off your team's roster")

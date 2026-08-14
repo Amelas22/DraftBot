@@ -6,7 +6,7 @@ standings.
 All functions take an AsyncSession so callers control the transaction and tests
 can point them at a temp database (mirrors the leaderboard_service convention).
 """
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 
 from database.db_session import db_session
 from draft_organization.swiss import pair_round, rank_standings, round_robin_schedule
@@ -176,41 +176,50 @@ async def remove_team(session, tournament_id, team_name):
 
 # ---- team rosters ---------------------------------------------------------------
 
-async def find_participant_for_captain(session, tournament_id, captain_user_id):
-    """The team this user captains in the tournament, or None."""
-    stmt = select(TournamentParticipant).where(
-        TournamentParticipant.tournament_id == tournament_id,
-        TournamentParticipant.captain_user_id == str(captain_user_id),
-    )
-    return (await session.execute(stmt)).scalars().first()
+async def find_participants_for_captain(session, tournament_id, captain_user_id):
+    """Every team this user captains in the tournament, in registration order.
 
-
-async def _team_already_holding(session, tournament_id, user_id, exclude_participant_id):
-    """The other team in this tournament that already has this player, or None.
-
-    Checks captaincy as well as the roster: someone who captains Bravo is on Bravo
-    even though no roster row says so.
+    A list rather than one row because nothing stops a user registering several
+    teams -- register_team keys uniqueness on the team, never the captain. Taking
+    .first() here sent roster edits to whichever row the database happened to
+    return and left the captain's other teams unreachable, with no error to say so.
     """
-    user_id = str(user_id)
-    captains = select(TournamentParticipant).where(
-        TournamentParticipant.tournament_id == tournament_id,
-        TournamentParticipant.captain_user_id == user_id,
-        TournamentParticipant.id != exclude_participant_id,
-    )
-    found = (await session.execute(captains)).scalars().first()
-    if found is not None:
-        return found
-    rostered = (
+    stmt = (
         select(TournamentParticipant)
-        .join(TournamentTeamMember,
-              TournamentTeamMember.participant_id == TournamentParticipant.id)
         .where(
             TournamentParticipant.tournament_id == tournament_id,
-            TournamentTeamMember.user_id == user_id,
-            TournamentParticipant.id != exclude_participant_id,
+            TournamentParticipant.captain_user_id == str(captain_user_id),
         )
+        .order_by(TournamentParticipant.id)
     )
-    return (await session.execute(rostered)).scalars().first()
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def other_teams_for_user(session, tournament_id, user_id, exclude_participant_id):
+    """The tournament's other teams this player already belongs to.
+
+    Players may be shared between teams, so this no longer blocks anything -- it
+    feeds the note on the reply, which is how the overlap stays visible. Counts
+    captaincy as well as roster rows: someone who captains Bravo is on Bravo even
+    though no roster row says so.
+    """
+    user_id = str(user_id)
+    stmt = (
+        select(TournamentParticipant)
+        .outerjoin(TournamentTeamMember,
+                   TournamentTeamMember.participant_id == TournamentParticipant.id)
+        .where(
+            TournamentParticipant.tournament_id == tournament_id,
+            TournamentParticipant.id != exclude_participant_id,
+            or_(
+                TournamentParticipant.captain_user_id == user_id,
+                TournamentTeamMember.user_id == user_id,
+            ),
+        )
+        .order_by(TournamentParticipant.id)
+        .distinct()
+    )
+    return list((await session.execute(stmt)).scalars().all())
 
 
 async def _assert_roster_editable(session, participant):
@@ -229,8 +238,10 @@ async def add_teammate(session, participant, user_id, display_name):
     Returns (member, created). Idempotent, like register_team: adding someone who
     is already on the roster returns the existing row with created=False and leaves
     their stored display name alone. Raises ValueError if the tournament is
-    completed, if the player is the team's own captain, or if they already belong
-    to another team in the same tournament.
+    completed or if the player is this team's own captain.
+
+    Belonging to another team in the same tournament is allowed -- players get
+    shared, and callers surface that with other_teams_for_user rather than blocking.
     """
     await _assert_roster_editable(session, participant)
     user_id = str(user_id)
@@ -247,13 +258,6 @@ async def add_teammate(session, participant, user_id, display_name):
     existing = (await session.execute(stmt)).scalars().first()
     if existing is not None:
         return existing, False
-
-    clash = await _team_already_holding(session, participant.tournament_id, user_id,
-                                        participant.id)
-    if clash is not None:
-        raise ValueError(
-            f"<@{user_id}> is already on **{clash.team_name}** in this tournament."
-        )
 
     member = TournamentTeamMember(
         participant_id=participant.id,
