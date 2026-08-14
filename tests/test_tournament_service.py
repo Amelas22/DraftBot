@@ -946,3 +946,39 @@ async def test_remove_teammate_rejects_a_completed_tournament(test_db):
 
         with pytest.raises(ValueError, match="completed"):
             await remove_teammate(session, participant, "7")
+
+
+@pytest.mark.asyncio
+async def test_add_teammate_survives_losing_the_insert_race(test_db):
+    """Two adds of the same player to the same team can interleave: both read an
+    empty roster, then one insert wins and the other violates uq_participant_member.
+    The loser must report the uncontended-duplicate result, not raise at the user.
+
+    The stale read is simulated by inserting the row behind add_teammate's lookup.
+    """
+    async with test_db() as session:
+        _, participant = await _tournament_with_team(session)
+
+        real_execute = session.execute
+        state = {"raced": False}
+
+        async def execute_then_race(stmt, *a, **kw):
+            result = await real_execute(stmt, *a, **kw)
+            if not state["raced"]:
+                # after add_teammate's "is he already on it?" lookup comes back empty,
+                # a concurrent add lands the row
+                state["raced"] = True
+                session.execute = real_execute
+                session.add(TournamentTeamMember(
+                    participant_id=participant.id, user_id="7", display_name="Winner"))
+                await session.flush()
+            return result
+
+        session.execute = execute_then_race
+        member, created = await add_teammate(session, participant, "7", "Loser")
+        await session.commit()
+
+        assert created is False
+        assert member.display_name == "Winner"  # the row that actually won
+        rows = (await session.execute(select(TournamentTeamMember))).scalars().all()
+        assert len(rows) == 1

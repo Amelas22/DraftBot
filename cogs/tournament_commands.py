@@ -305,10 +305,11 @@ class TournamentCog(commands.Cog):
         await ctx.respond("Tournaments are not enabled on this server.", ephemeral=True)
         return False
 
-    async def _refresh_board(self, tournament_id, closed=False):
+    async def _refresh_board(self, tournament_id):
         """Refresh a tournament's registration board. The board is a view — never let a
-        Discord failure break the command that changed the roster."""
-        await refresh_boards(self.bot, [tournament_id], closed=closed)
+        Discord failure break the command that changed the roster. Open vs closed is
+        derived from the tournament's own status inside the refresh."""
+        await refresh_boards(self.bot, [tournament_id])
 
     @tournament.command(name="enable", description="Admin: enable tournament commands on this server")
     @has_bot_manager_role()
@@ -789,7 +790,7 @@ class TournamentCog(commands.Cog):
             res = await escrow.close_registration_and_seed(ctx.guild.id, random.Random())
             tournament_id = res["tournament_id"]
             logger.info(f"Tournament {tournament_id} started in guild {ctx.guild.id} by {ctx.author.id}")
-            await self._refresh_board(tournament_id, closed=True)
+            await self._refresh_board(tournament_id)
             pot_line = f" 🏦 Prize pool: **{res['pot']} tix**." if res["fee"] > 0 else ""
             play = self._destination(ctx, PAIRINGS.setting)
             standings = self._destination(ctx, STANDINGS.setting)

@@ -136,9 +136,14 @@ async def test_refresh_board_swallows_a_discord_failure():
 
 @pytest.mark.asyncio
 async def test_start_freezes_the_board():
-    """/tournament start closes registration, so the board refresh it triggers
-    must be told closed=True — otherwise the board keeps inviting registrations
-    after the schedule has already been seeded."""
+    """/tournament start must refresh the board, so it stops inviting registrations
+    once the schedule is seeded.
+
+    It no longer passes a closed flag: the board derives open-vs-closed from the
+    tournament's own status, which start has already moved off "registration".
+    That is what keeps a later roster edit -- which also refreshes the board --
+    from flipping it back to open. The rendering half is covered by
+    test_board_of_a_started_tournament_refreshes_as_closed."""
     from cogs.tournament_commands import TournamentCog
 
     cog = TournamentCog(MagicMock())
@@ -158,7 +163,7 @@ async def test_start_freezes_the_board():
                AsyncMock(return_value=res)):
         await TournamentCog.start.callback(cog, ctx)
 
-    cog._refresh_board.assert_awaited_once_with(1, closed=True)
+    cog._refresh_board.assert_awaited_once_with(1)
 
 
 def test_roster_commands_are_registered():

@@ -66,6 +66,13 @@ def _add_how_to_join(embed, fee, closed):
 
 CAPTAIN_MARK = "👑"
 
+# A mention renders as ~24 characters with its separator, and every member of a team
+# shares one line. The field chunker below splits BETWEEN lines, so it cannot rescue a
+# single line that is itself over Discord's 1024-char cap -- past that, Discord rejects
+# the whole edit and the board freezes on a stale roster. Cap the names shown so one
+# line stays well inside the limit even beside a 128-char team name.
+MAX_MEMBERS_SHOWN = 20
+
 
 def _team_line(index, participant, fee, members):
     """One roster row: rank, paid mark, team, then the full team inline.
@@ -77,7 +84,10 @@ def _team_line(index, participant, fee, members):
     paid = participant.status == "paid"
     mark = "✅" if paid or fee == 0 else "⏳"
     roster = [f"{CAPTAIN_MARK} <@{participant.captain_user_id}>"]
-    roster += [f"<@{m.user_id}>" for m in members]
+    roster += [f"<@{m.user_id}>" for m in members[:MAX_MEMBERS_SHOWN]]
+    overflow = len(members) - MAX_MEMBERS_SHOWN
+    if overflow > 0:
+        roster.append(f"+{overflow} more")
     return f"{index}. {mark} **{participant.team_name}** — {' · '.join(roster)}"
 
 
@@ -187,24 +197,31 @@ async def _board_state(session, tournament):
     return participants, pot, deficits, rosters
 
 
-async def refresh_boards(bot, tournament_ids, closed=False):
+async def refresh_boards(bot, tournament_ids):
     """Refresh several boards, guarded. The board is a view: a Discord failure on one
     logs and the rest still update. Every caller that reacts to a change goes through
     here rather than hand-rolling the try/except."""
     for t_id in set(tournament_ids):
         try:
-            await update_registration_board(bot, t_id, closed=closed)
+            await update_registration_board(bot, t_id)
         except Exception as e:
             logger.warning(f"board refresh failed for {t_id}: {e}")
 
 
-async def update_registration_board(bot, tournament_id, closed=False):
+async def update_registration_board(bot, tournament_id):
     """Edit the registration board in place. No-op if it was never posted; a board that
-    has been deleted clears its ids so it stops being retried."""
+    has been deleted clears its ids so it stops being retried.
+
+    Whether the board reads as open or closed is derived from the tournament, not
+    passed in by the caller. Rosters stay editable after a tournament starts, and
+    every roster edit refreshes the board -- with a caller-supplied flag, the first
+    such edit flipped a started tournament back to "Registration open" and
+    re-advertised the join steps."""
     async with db_session() as session:
         tournament = await session.get(Tournament, tournament_id)
         if tournament is None or not tournament.board_message_id:
             return
+        closed = tournament.status != "registration"
         participants, pot, deficits, rosters = await _board_state(session, tournament)
         embed = create_registration_embed(tournament, participants, pot, deficits, closed,
                                           rosters)

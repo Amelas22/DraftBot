@@ -1,6 +1,7 @@
 """The registration board: renders roster + payment state, and edits in place."""
 import pytest
 
+from conftest import test_db  # noqa: F401  (fixture)
 from models.tournament import (
     Tournament,
     TournamentParticipant,
@@ -247,3 +248,68 @@ def test_large_roster_with_members_still_splits_under_the_cap():
     full_text = "".join(f.value for f in embed.fields)
     for t in teams:
         assert t.team_name in full_text
+
+
+# ---- the board's phase follows the tournament, not the caller ------------------
+
+async def _refresh_and_capture(status):
+    """Run update_registration_board against a tournament in `status`, return the embed."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from database.db_session import db_session
+    from services.tournament_formatter import update_registration_board
+    from services.tournament_service import create_tournament, register_team
+
+    async with db_session() as session:
+        t = await create_tournament(session, "g1", "Spring", 3)
+        await session.commit()
+        await register_team(session, t.id, "Alpha", "42")
+        t.status = status
+        t.board_channel_id = "111"
+        t.board_message_id = "222"
+        await session.commit()
+        t_id = t.id
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+    channel = MagicMock()
+    channel.fetch_message = AsyncMock(return_value=message)
+    bot = MagicMock()
+    bot.get_channel = MagicMock(return_value=channel)
+
+    await update_registration_board(bot, t_id)
+    return message.edit.call_args.kwargs["embed"]
+
+
+@pytest.mark.asyncio
+async def test_board_of_a_started_tournament_refreshes_as_closed(test_db):  # noqa: F811
+    """Rosters stay editable after the start, and every roster edit refreshes the
+    board. If the phase came from the caller's flag it would flip a started
+    tournament back to 'Registration open' and re-advertise the join steps."""
+    embed = await _refresh_and_capture("active")
+
+    assert "Registration closed" in embed.title
+    assert "How to join" not in "".join(f.name for f in embed.fields)
+
+
+@pytest.mark.asyncio
+async def test_board_still_open_while_registration_is(test_db):  # noqa: F811
+    embed = await _refresh_and_capture("registration")
+
+    assert "Registration open" in embed.title
+    assert "How to join" in "".join(f.name for f in embed.fields)
+
+
+def test_one_huge_roster_cannot_overflow_its_field():
+    """The chunker splits BETWEEN lines, so it cannot rescue a single line that is
+    itself over Discord's 1024-char field cap. A team's members all share one line,
+    so an unbounded roster would freeze the board on a rejected edit."""
+    teams = [_team(1, "Alpha", "10", "paid")]
+    rosters = {1: [_member(str(100000000000000000 + i)) for i in range(60)]}
+
+    embed = create_registration_embed(_tournament(), teams, pot=1, rosters=rosters)
+
+    for f in embed.fields:
+        assert len(f.value) < 1024, f"field {f.name!r} is {len(f.value)} chars"
+    text = "".join(f.value for f in embed.fields)
+    assert "more" in text, "the dropped members should be accounted for, not silently lost"

@@ -7,6 +7,7 @@ All functions take an AsyncSession so callers control the transaction and tests
 can point them at a temp database (mirrors the leaderboard_service convention).
 """
 from sqlalchemy import delete, func, or_, select
+from sqlalchemy.exc import IntegrityError
 
 from database.db_session import db_session
 from draft_organization.swiss import pair_round, rank_standings, round_robin_schedule
@@ -264,8 +265,16 @@ async def add_teammate(session, participant, user_id, display_name):
         user_id=user_id,
         display_name=display_name,
     )
-    session.add(member)
-    await session.flush()
+    try:
+        # SAVEPOINT so losing the race below doesn't poison the caller's transaction.
+        async with session.begin_nested():
+            session.add(member)
+            await session.flush()
+    except IntegrityError:
+        # Another add committed this same player between our lookup above and this
+        # insert. uq_participant_member held, so the roster is right -- report it the
+        # way the uncontended duplicate is reported rather than raising at the user.
+        return (await session.execute(stmt)).scalars().first(), False
     return member, True
 
 
