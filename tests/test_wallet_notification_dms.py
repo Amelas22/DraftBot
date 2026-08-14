@@ -115,15 +115,15 @@ async def test_names_survive_a_bot_with_no_guild():
 @pytest.mark.asyncio
 async def test_notify_wallet_is_a_no_op_without_a_registered_bot():
     """Tests, migrations and CLI runs have no bot; the money path must not care."""
-    from services.mtgo_resolution_service import _notify_wallet
+    from notification_service import notify_wallet
     with patch("bot_registry.get_bot", return_value=None):
-        await _notify_wallet("notify_payment_received", GUILD_ID, CREDITOR_ID, PAYER_ID, 25)
+        await notify_wallet("notify_payment_received", GUILD_ID, CREDITOR_ID, PAYER_ID, 25)
 
 
 @pytest.mark.asyncio
 async def test_notify_wallet_swallows_a_broken_notifier():
-    from services.mtgo_resolution_service import _notify_wallet
+    from notification_service import notify_wallet
     with patch("bot_registry.get_bot", return_value=MagicMock()), \
          patch.object(notification_service, "notify_payment_received",
                       new=AsyncMock(side_effect=RuntimeError("boom"))):
-        await _notify_wallet("notify_payment_received", GUILD_ID, CREDITOR_ID, PAYER_ID, 25)
+        await notify_wallet("notify_payment_received", GUILD_ID, CREDITOR_ID, PAYER_ID, 25)

@@ -313,7 +313,8 @@ async def pay(guild_id: str, from_player: str, to_player: str, amount: int, *, n
     except ValueError as e:
         return {"ok": False, "error": str(e)}
     # Receiving money is the case you are least likely to be watching for.
-    await _notify_wallet("notify_payment_received", guild_id, to_player, from_player, amount,
+    from notification_service import notify_wallet
+    await notify_wallet("notify_payment_received", guild_id, to_player, from_player, amount,
                          note=notes)
     return {"ok": True, "amount": amount, "tx_ids": [debit.id, credit.id]}
 
@@ -384,28 +385,6 @@ async def settle_debt_from_wallet(guild_id: str, payer_id: str, creditor_id: str
         return await with_db_retry(_do)
 
 
-async def _notify_wallet(fn_name: str, *args, **kwargs) -> None:
-    """Fire a wallet DM from a service, best-effort.
-
-    Services have no bot, so it comes from bot_registry the way draft_setup_manager
-    does. Imports are deferred: notification_service pulls in discord and a chain of
-    helpers, and these services are imported by tests and by alembic's env at
-    migration time, where a missing bot must not matter.
-
-    NOTHING here may raise. The money has already moved by the time we are called —
-    a DM failure must never turn a completed transfer into an error, and must never
-    abort the loop that is still settling other creditors."""
-    try:
-        from bot_registry import get_bot
-        bot = get_bot()
-        if bot is None:   # no bot registered (tests, migrations, CLI) — nothing to do
-            return
-        import notification_service
-        await getattr(notification_service, fn_name)(bot, *args, **kwargs)
-    except Exception as e:  # noqa: BLE001 - notification must never break the money path
-        logger.warning(f"_notify_wallet: {fn_name} failed: {e}")
-
-
 async def auto_draw(guild_id: str, player_id: str) -> list[dict]:
     """Apply a player's wallet balance to their outstanding debts, oldest debt first,
     until the wallet is exhausted or the debts are cleared. Returns the settlements made.
@@ -445,7 +424,8 @@ async def auto_draw(guild_id: str, player_id: str) -> list[dict]:
             settlements.append(res)
             # Neither party asked for this — it fired off a deposit — so tell both.
             # Reports what is STILL owed after this leg, not the original debt.
-            await _notify_wallet(
+            from notification_service import notify_wallet
+            await notify_wallet(
                 "notify_auto_settlement", guild_id, player_id, cp, pay_amt,
                 remaining=max(0, owed[cp] - pay_amt))
         else:

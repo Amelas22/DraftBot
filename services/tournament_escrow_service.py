@@ -297,8 +297,8 @@ async def drop_with_refund(tournament_id: int, team_name: str) -> dict:
 
     # AFTER the lock (see execute_payout).
     if refunded:
-        from services.mtgo_resolution_service import _notify_wallet
-        await _notify_wallet("notify_entry_refund", guild_id, captain_id, refunded,
+        from notification_service import notify_wallet
+        await notify_wallet("notify_entry_refund", guild_id, captain_id, refunded,
                              team_name=dropped_name)
     return result
 
@@ -376,9 +376,9 @@ async def execute_payout(guild_id: str, tournament_id: int, allocations: list) -
     # AFTER the lock: DMs are network I/O and have no business holding the money lock.
     # Skipped on the already_paid short-circuit, so a re-run cannot re-announce prizes.
     if result.get("ok") and not result.get("already_paid"):
-        from services.mtgo_resolution_service import _notify_wallet
+        from notification_service import notify_wallet
         for place, captain_id, team_name, amount in allocations:
             if amount > 0:
-                await _notify_wallet("notify_tournament_payout", guild_id, captain_id,
+                await notify_wallet("notify_tournament_payout", guild_id, captain_id,
                                      amount, place=place, tournament_name=team_name)
     return result

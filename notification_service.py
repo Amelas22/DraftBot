@@ -3,6 +3,8 @@ Notification service for sending DMs and other notifications to users.
 """
 
 import asyncio
+import functools
+
 import discord
 from loguru import logger
 from helpers.display_names import get_member_name_plain
@@ -220,9 +222,45 @@ async def send_settlement_notification_dm(
 #
 # Every one of these is best-effort: the money has already moved by the time we
 # are called, so a failed DM must never turn a completed transfer into an error.
-# send_dm already swallows Discord errors; the broad guards below cover the name
-# and guild lookups too.
+# send_dm already swallows Discord errors; @_best_effort covers the name and guild
+# lookups too, so each notifier below reads as its message and nothing else.
 # ---------------------------------------------------------------------------
+
+def _best_effort(fn):
+    """Swallow and log anything a wallet notifier raises.
+
+    The guard belongs here rather than only at the dispatcher, because these are
+    called directly too (notify_wallet is not the only entry point -- tests and any
+    caller holding a bot can call them). One decorator rather than a hand-copied
+    try/except per notifier, which is how one of them ends up subtly different."""
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await fn(*args, **kwargs)
+        except Exception as e:  # noqa: BLE001 - a DM must never break the money path
+            logger.warning(f"{fn.__name__} failed: {e}")
+    return wrapper
+
+
+async def notify_wallet(fn_name: str, *args, **kwargs) -> None:
+    """Fire a wallet DM from a service that has no bot of its own, best-effort.
+
+    The bot comes from bot_registry the way draft_setup_manager does. Lives here, with
+    the notifiers it dispatches to, rather than inside one of the services that calls
+    it -- tournament_escrow_service and mtgo_resolution_service both need it, and a
+    sibling service reaching into another's private name is how that drifts.
+
+    Callers import this lazily: notification_service pulls in discord and a chain of
+    helpers, while the services are imported by tests and by alembic's env at
+    migration time, where a missing bot must not matter."""
+    try:
+        from bot_registry import get_bot
+        bot = get_bot()
+        if bot is None:   # no bot registered (tests, migrations, CLI) — nothing to do
+            return
+        await globals()[fn_name](bot, *args, **kwargs)
+    except Exception as e:  # noqa: BLE001 - notification must never break the money path
+        logger.warning(f"notify_wallet: {fn_name} failed: {e}")
 
 def _wallet_name(bot, guild_id: str, user_id: str) -> str:
     """Display name for a wallet party, falling back to "User <id>" when the guild
@@ -236,71 +274,63 @@ def _wallet_name(bot, guild_id: str, user_id: str) -> str:
     return f"User {user_id}"
 
 
+@_best_effort
 async def notify_payment_received(bot, guild_id: str, recipient_id: str, sender_id: str,
                                   amount: int, note: str = None):
     """Someone's tix landed in your wallet."""
-    try:
-        sender = _wallet_name(bot, guild_id, sender_id)
-        msg = f"💸 You received **{amount} tix** from {sender}."
-        if note:
-            msg += f" ({note})"
-        await send_dm(bot, recipient_id, msg, label=f"payment to {recipient_id}")
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"notify_payment_received failed for {recipient_id}: {e}")
+    sender = _wallet_name(bot, guild_id, sender_id)
+    msg = f"💸 You received **{amount} tix** from {sender}."
+    if note:
+        msg += f" ({note})"
+    await send_dm(bot, recipient_id, msg, label=f"payment to {recipient_id}")
 
 
+@_best_effort
 async def notify_auto_settlement(bot, guild_id: str, payer_id: str, creditor_id: str,
                                  amount: int, remaining: int = None):
     """A debt was settled automatically out of the payer's wallet. BOTH sides are told,
     because neither of them initiated it — that is the whole point of auto-draw."""
-    try:
-        payer = _wallet_name(bot, guild_id, payer_id)
-        creditor = _wallet_name(bot, guild_id, creditor_id)
+    payer = _wallet_name(bot, guild_id, payer_id)
+    creditor = _wallet_name(bot, guild_id, creditor_id)
 
-        owed = ""
-        if remaining is not None:
-            owed = (f" You still owe them **{remaining} tix**."
-                    if remaining > 0 else " That clears your debt with them.")
-        await send_dm(bot, payer_id,
-                      f"🤝 **{amount} tix** from your wallet went to {creditor} to settle "
-                      f"what you owed.{owed}",
-                      label=f"auto-settle payer {payer_id}")
+    owed = ""
+    if remaining is not None:
+        owed = (f" You still owe them **{remaining} tix**."
+                if remaining > 0 else " That clears your debt with them.")
+    await send_dm(bot, payer_id,
+                  f"🤝 **{amount} tix** from your wallet went to {creditor} to settle "
+                  f"what you owed.{owed}",
+                  label=f"auto-settle payer {payer_id}")
 
-        owed_c = ""
-        if remaining is not None:
-            owed_c = (f" They still owe you **{remaining} tix**."
-                      if remaining > 0 else " You are now fully settled.")
-        await send_dm(bot, creditor_id,
-                      f"🤝 You received **{amount} tix** from {payer} — automatically "
-                      f"applied from their wallet against what they owed you.{owed_c}",
-                      label=f"auto-settle creditor {creditor_id}")
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"notify_auto_settlement failed for {payer_id}->{creditor_id}: {e}")
+    owed_c = ""
+    if remaining is not None:
+        owed_c = (f" They still owe you **{remaining} tix**."
+                  if remaining > 0 else " You are now fully settled.")
+    await send_dm(bot, creditor_id,
+                  f"🤝 You received **{amount} tix** from {payer} — automatically "
+                  f"applied from their wallet against what they owed you.{owed_c}",
+                  label=f"auto-settle creditor {creditor_id}")
 
 
+@_best_effort
 async def notify_tournament_payout(bot, guild_id: str, captain_id: str, amount: int,
                                    place=None, tournament_name: str = None):
     """A prize landed in a captain's wallet."""
-    try:
-        where = f" for place {place}" if place is not None else ""
-        which = f" in **{tournament_name}**" if tournament_name else ""
-        await send_dm(bot, captain_id,
-                      f"🏆 You received **{amount} tix**{where}{which}.",
-                      label=f"payout {captain_id}")
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"notify_tournament_payout failed for {captain_id}: {e}")
+    where = f" for place {place}" if place is not None else ""
+    which = f" in **{tournament_name}**" if tournament_name else ""
+    await send_dm(bot, captain_id,
+                  f"🏆 You received **{amount} tix**{where}{which}.",
+                  label=f"payout {captain_id}")
 
 
+@_best_effort
 async def notify_entry_refund(bot, guild_id: str, captain_id: str, amount: int,
                               team_name: str = None):
     """An entry fee came back out of the prize pool."""
-    try:
-        which = f" for **{team_name}**" if team_name else ""
-        await send_dm(bot, captain_id,
-                      f"↩️ Your tournament entry fee of **{amount} tix**{which} has been refunded.",
-                      label=f"refund {captain_id}")
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"notify_entry_refund failed for {captain_id}: {e}")
+    which = f" for **{team_name}**" if team_name else ""
+    await send_dm(bot, captain_id,
+                  f"↩️ Your tournament entry fee of **{amount} tix**{which} has been refunded.",
+                  label=f"refund {captain_id}")
 
 
 async def send_ready_check_dms(bot_or_client, draft_session, guild_id, channel_id, channel_name, guild_name):
