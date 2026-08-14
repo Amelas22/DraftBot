@@ -15,7 +15,7 @@ class Team(Base):
     # Add relationships
     weekly_limits = relationship("WeeklyLimit", back_populates="team")
 
-# TeamRegistration lived here until the `rosters01` migration. It was the old
+# TeamRegistration lived here until the `dropteamreg01` migration. It was the old
 # league's roster table (league.py, deleted in 81318df "league cleanup"), keyed
 # 1:1 to a globally-unique Team name. Tournament rosters replaced it — see
 # models/tournament.py TournamentTeamMember, which scopes a roster to one

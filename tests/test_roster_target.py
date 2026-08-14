@@ -4,29 +4,13 @@ The no-`team` path used to take .first() on the captain lookup, so a captain who
 owned two teams had their edit land on whichever row came back first, with no
 error saying so. These tests pin the resolution rules down.
 """
-import os
-import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
 
-from database.models_base import Base
+from conftest import test_db  # noqa: F401  (fixture)
+from database.db_session import db_session
 from services.tournament_service import create_tournament, register_team
-
-
-@pytest_asyncio.fixture
-async def test_db():
-    temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
-    temp_db.close()
-    engine = create_async_engine(f"sqlite+aiosqlite:///{temp_db.name}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
-    await engine.dispose()
-    os.unlink(temp_db.name)
 
 
 def _ctx(author_id):
@@ -52,8 +36,8 @@ def _reply(ctx):
 
 
 @pytest.mark.asyncio
-async def test_captain_of_one_team_needs_no_team_argument(test_db):
-    async with test_db() as session:
+async def test_captain_of_one_team_needs_no_team_argument(test_db):  # noqa: F811
+    async with db_session() as session:
         t = await create_tournament(session, "g1", "Spring", 3)
         await session.commit()
         alpha, _ = await register_team(session, t.id, "Alpha", "42")
@@ -65,9 +49,9 @@ async def test_captain_of_one_team_needs_no_team_argument(test_db):
 
 
 @pytest.mark.asyncio
-async def test_captain_of_two_teams_is_asked_which_one(test_db):
+async def test_captain_of_two_teams_is_asked_which_one(test_db):  # noqa: F811
     """The bug: this used to silently pick Alpha and edit the wrong roster."""
-    async with test_db() as session:
+    async with db_session() as session:
         t = await create_tournament(session, "g1", "Spring", 3)
         await session.commit()
         await register_team(session, t.id, "Alpha", "42")
@@ -82,8 +66,8 @@ async def test_captain_of_two_teams_is_asked_which_one(test_db):
 
 
 @pytest.mark.asyncio
-async def test_captain_of_nothing_is_told_to_register(test_db):
-    async with test_db() as session:
+async def test_captain_of_nothing_is_told_to_register(test_db):  # noqa: F811
+    async with db_session() as session:
         t = await create_tournament(session, "g1", "Spring", 3)
         await session.commit()
 
@@ -93,10 +77,10 @@ async def test_captain_of_nothing_is_told_to_register(test_db):
 
 
 @pytest.mark.asyncio
-async def test_captain_may_name_their_own_team(test_db):
+async def test_captain_may_name_their_own_team(test_db):  # noqa: F811
     """Naming a team you own is how a multi-team captain picks one, so it must not
     require the bot-manager role."""
-    async with test_db() as session:
+    async with db_session() as session:
         t = await create_tournament(session, "g1", "Spring", 3)
         await session.commit()
         await register_team(session, t.id, "Alpha", "42")
@@ -110,8 +94,8 @@ async def test_captain_may_name_their_own_team(test_db):
 
 
 @pytest.mark.asyncio
-async def test_non_manager_cannot_name_someone_elses_team(test_db):
-    async with test_db() as session:
+async def test_non_manager_cannot_name_someone_elses_team(test_db):  # noqa: F811
+    async with db_session() as session:
         t = await create_tournament(session, "g1", "Spring", 3)
         await session.commit()
         await register_team(session, t.id, "Alpha", "99")
@@ -123,8 +107,8 @@ async def test_non_manager_cannot_name_someone_elses_team(test_db):
 
 
 @pytest.mark.asyncio
-async def test_manager_may_name_any_team(test_db):
-    async with test_db() as session:
+async def test_manager_may_name_any_team(test_db):  # noqa: F811
+    async with db_session() as session:
         t = await create_tournament(session, "g1", "Spring", 3)
         await session.commit()
         alpha, _ = await register_team(session, t.id, "Alpha", "99")
@@ -136,8 +120,8 @@ async def test_manager_may_name_any_team(test_db):
 
 
 @pytest.mark.asyncio
-async def test_unknown_team_name_is_reported(test_db):
-    async with test_db() as session:
+async def test_unknown_team_name_is_reported(test_db):  # noqa: F811
+    async with db_session() as session:
         t = await create_tournament(session, "g1", "Spring", 3)
         await session.commit()
 
