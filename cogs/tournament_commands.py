@@ -602,7 +602,7 @@ class TournamentCog(commands.Cog):
         self,
         ctx,
         player: discord.Option(discord.Member, "The teammate to add"),
-        team: discord.Option(str, "Bot managers only: which team's roster to edit",
+        team: discord.Option(str, "Which team (needed if you captain more than one)",
                              required=False, default=None),
     ):
         if not await self._check_enabled(ctx):
@@ -657,7 +657,7 @@ class TournamentCog(commands.Cog):
         self,
         ctx,
         player: discord.Option(discord.Member, "The teammate to remove"),
-        team: discord.Option(str, "Bot managers only: which team's roster to edit",
+        team: discord.Option(str, "Which team (needed if you captain more than one)",
                              required=False, default=None),
     ):
         if not await self._check_enabled(ctx):
