@@ -166,6 +166,8 @@ async def _return_in_flight(guild_id: str, player_id: str, n: int, key: str):
     await wallet_service.pay(
         guild_id, wallet_service.SYSTEM_IN_FLIGHT, player_id, n,
         source=f"return:{key}", notes=f"withdraw {n} tix returned")
+    # Funds are back with the player — an inflow like any other.
+    await settle_inflow(guild_id, player_id)
 
 
 async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, *,
@@ -316,7 +318,10 @@ async def pay(guild_id: str, from_player: str, to_player: str, amount: int, *, n
     from notification_service import notify_wallet, notify_payment_received
     await notify_wallet(notify_payment_received, guild_id, to_player, from_player, amount,
                         note=notes)
-    return {"ok": True, "amount": amount, "tx_ids": [debit.id, credit.id]}
+    # Then apply it to anything they owe. Settling AFTER the notification above keeps the
+    # two DMs in the order the money actually moved: received, then auto-applied.
+    drawn = await settle_inflow(guild_id, to_player)
+    return {"ok": True, "amount": amount, "tx_ids": [debit.id, credit.id], "settled": drawn}
 
 
 # ---------------------------------------------------------------------------
@@ -385,13 +390,49 @@ async def settle_debt_from_wallet(guild_id: str, payer_id: str, creditor_id: str
         return await with_db_retry(_do)
 
 
+async def settle_inflow(guild_id: str, player_id: str) -> list[dict]:
+    """Run ``auto_draw`` for a holder who has just RECEIVED tix. Call this from every
+    inflow path, not just deposits.
+
+    Deposits alone are not enough: a payout, a refund, a player-to-player payment or a
+    returned withdraw all credit a wallet without going near the deposit path, so a debtor
+    could be paid a tournament prize and withdraw it straight back out while their creditor
+    was still owed. Settlement on the way IN is what makes the debt collectable.
+
+    TWO RULES, both load-bearing:
+
+    * **Never call this while holding ``MONEY_LOCK``.** It reaches ``settle_debt_from_wallet``,
+      which takes that lock, and the lock is not reentrant — see the note on its definition.
+      So call it AFTER the ``async with wallet_service.MONEY_LOCK:`` block that moved the
+      money, never inside one.
+    * **Never let it break the inflow.** The transfer has already committed by the time we
+      get here; failing to settle afterwards must not turn a successful payout into an
+      error. Failures are logged and swallowed.
+
+    Synthetic holders (prize wallets, in-flight) are skipped — they hold claims but have no
+    debts, and drawing against them is meaningless."""
+    if wallet_service.is_system_account(player_id):
+        return []
+    try:
+        return await auto_draw(guild_id, player_id)
+    except Exception as e:  # noqa: BLE001 - settlement must never fail the inflow itself
+        logger.error(f"settle_inflow: auto_draw failed for {player_id} after an inflow: {e}")
+        return []
+
+
 async def auto_draw(guild_id: str, player_id: str) -> list[dict]:
     """Apply a player's wallet balance to their outstanding debts, oldest debt first,
     until the wallet is exhausted or the debts are cleared. Returns the settlements made.
 
-    Called after a deposit (fresh funds) or after a debt is booked (funds already there).
+    Prefer ``settle_inflow`` from inflow paths — it adds the system-account guard and the
+    never-break-the-caller contract. Call this directly only where those do not apply.
+
     Each settlement is atomic and re-checks the live debt, so a concurrent or repeated run
-    simply draws against whatever remains — it converges, never over-pays."""
+    simply draws against whatever remains — it converges, never over-pays.
+
+    NOTE it deliberately does NOT cascade: paying a creditor may leave THEM able to settle
+    their own debts, but chaining that here would recurse through an unbounded number of
+    parties inside one command. Each creditor settles on their own next inflow instead."""
     available = await wallet_service.get_balance(guild_id, player_id)
     if available <= 0:
         return []
