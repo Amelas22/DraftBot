@@ -110,11 +110,12 @@ class WalletCommands(commands.Cog):
         async def _finish():
             res = await resolution.finish_deposit(job_id, guild_id, player_id, amount, username)
             if res.get("ok"):
-                # Complete any pending tournament entry BEFORE auto-draw: the player
-                # just committed to that entry, so its fee shouldn't be siphoned to a
-                # creditor on the way in.
-                completed = await escrow.sweep_pending_entries(player_id)
-                drawn = await resolution.auto_draw(guild_id, player_id)
+                # Entry before debts, and never raising past this point: both rules
+                # live in settle_deposit_inflow, which the watchdog's late-job path
+                # uses too. A raise here would abort _finish before the followup
+                # below, leaving a player whose deposit landed with no confirmation.
+                completed, drawn = await resolution.settle_deposit_inflow(
+                    guild_id, player_id)
                 bal = await wallet_service.get_balance(guild_id, player_id)
                 # Completed entries AND ones this captain is still short on — see
                 # escrow.open_boards_for_captain.

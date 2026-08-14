@@ -166,6 +166,54 @@ async def _return_in_flight(guild_id: str, player_id: str, n: int, key: str):
     await wallet_service.pay(
         guild_id, wallet_service.SYSTEM_IN_FLIGHT, player_id, n,
         source=f"return:{key}", notes=f"withdraw {n} tix returned")
+    # An inflow like any other; no DM, the withdrawing player is watching their own
+    # command's reply.
+    await on_inflow(guild_id, player_id)
+
+
+async def on_inflow(guild_id: str, player_id: str, notifier=None, *args, **kwargs) -> list:
+    """Call this from every path that puts tix into somebody's wallet. The only thing
+    such a path should have to know.
+
+    It owns the whole concept: tell the recipient, then apply the money to what they
+    owe. That order is not incidental -- it is what makes their two DMs read in the
+    order the money actually moved ("you received 5", then "3 went to your creditor").
+    Skipping system holders and never raising come with it, from settle_inflow.
+
+    ``notifier`` is a notification_service notify_* function, called as
+    ``notifier(bot, guild_id, player_id, *args, **kwargs)`` -- the shape every wallet
+    notifier already has. Omit it where the recipient already sees the outcome
+    synchronously (a returned withdraw, a deposit's own confirmation message).
+
+    WHY THIS IS A CALL AND NOT A HOOK on wallet_service's writers, which would remove
+    the need to remember it entirely: a debt settlement is itself a credit to the
+    creditor, written by transfer_in from INSIDE the caller's MONEY_LOCK. Firing this
+    there would re-enter a non-reentrant lock, and would turn every settlement into a
+    cascade down the creditor chain that auto_draw deliberately refuses to do. So the
+    inflow paths call it, and this docstring is the reason a new one should too.
+    """
+    if notifier is not None:
+        from notification_service import notify_wallet
+        await notify_wallet(notifier, guild_id, player_id, *args, **kwargs)
+    return await settle_inflow(guild_id, player_id)
+
+
+async def settle_deposit_inflow(guild_id: str, player_id: str):
+    """Apply a landed deposit, in the order the player intended.
+
+    Their own pending tournament entry has first claim: they committed to it, so the fee
+    shouldn't be siphoned to a creditor on the way in. Whatever is left then settles
+    against what they owe. Returns (completed_entries, settlements).
+
+    Both deposit completion paths go through here — the live /wallet deposit followup and
+    the watchdog's resume of a job that finished late. The resume path used to book the
+    credit and stop, so a deposit that completed slowly was never drawn against debts at
+    all; keeping the order in one function is what stops the two paths disagreeing again.
+    """
+    from services import tournament_escrow_service as escrow
+    completed = await escrow.sweep_pending_entries(player_id)
+    drawn = await on_inflow(guild_id, player_id)
+    return completed, drawn
 
 
 async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, *,
@@ -253,11 +301,14 @@ async def resume_pending_jobs() -> int:
     async def _resume(job: MtgoJob):
         try:
             if job.kind == "deposit":
-                # Booking the credit is all that's needed: anything waiting on those
-                # funds (a pending tournament entry) is completed by the escrow sweep
-                # on the same watchdog tick.
-                await finish_deposit(job.job_id, job.guild_id, job.player_id,
-                                     job.amount, job.mtgo_user)
+                res = await finish_deposit(job.job_id, job.guild_id, job.player_id,
+                                           job.amount, job.mtgo_user)
+                if res.get("ok"):
+                    # A job that finished late lands here instead of in the command's
+                    # own followup, so it has to apply the deposit the same way — the
+                    # watchdog's own escrow sweep runs before these pollers finish, so
+                    # it cannot be relied on to catch this player's entry.
+                    await settle_deposit_inflow(job.guild_id, job.player_id)
             elif job.kind == "withdraw":
                 await finish_withdraw(job.job_id, job.guild_id, job.player_id,
                                       job.amount, job.mtgo_user)
@@ -313,10 +364,10 @@ async def pay(guild_id: str, from_player: str, to_player: str, amount: int, *, n
     except ValueError as e:
         return {"ok": False, "error": str(e)}
     # Receiving money is the case you are least likely to be watching for.
-    from notification_service import notify_wallet, notify_payment_received
-    await notify_wallet(notify_payment_received, guild_id, to_player, from_player, amount,
-                        note=notes)
-    return {"ok": True, "amount": amount, "tx_ids": [debit.id, credit.id]}
+    from notification_service import notify_payment_received
+    drawn = await on_inflow(guild_id, to_player, notify_payment_received,
+                            from_player, amount, note=notes)
+    return {"ok": True, "amount": amount, "tx_ids": [debit.id, credit.id], "settled": drawn}
 
 
 # ---------------------------------------------------------------------------
@@ -385,13 +436,49 @@ async def settle_debt_from_wallet(guild_id: str, payer_id: str, creditor_id: str
         return await with_db_retry(_do)
 
 
+async def settle_inflow(guild_id: str, player_id: str) -> list[dict]:
+    """Run ``auto_draw`` for a holder who has just RECEIVED tix. Call this from every
+    inflow path, not just deposits.
+
+    Deposits alone are not enough: a payout, a refund, a player-to-player payment or a
+    returned withdraw all credit a wallet without going near the deposit path, so a debtor
+    could be paid a tournament prize and withdraw it straight back out while their creditor
+    was still owed. Settlement on the way IN is what makes the debt collectable.
+
+    TWO RULES, both load-bearing:
+
+    * **Never call this while holding ``MONEY_LOCK``.** It reaches ``settle_debt_from_wallet``,
+      which takes that lock, and the lock is not reentrant — see the note on its definition.
+      So call it AFTER the ``async with wallet_service.MONEY_LOCK:`` block that moved the
+      money, never inside one.
+    * **Never let it break the inflow.** The transfer has already committed by the time we
+      get here; failing to settle afterwards must not turn a successful payout into an
+      error. Failures are logged and swallowed.
+
+    Synthetic holders (prize wallets, in-flight) are skipped — they hold claims but have no
+    debts, and drawing against them is meaningless."""
+    if wallet_service.is_system_account(player_id):
+        return []
+    try:
+        return await auto_draw(guild_id, player_id)
+    except Exception as e:  # noqa: BLE001 - settlement must never fail the inflow itself
+        logger.error(f"settle_inflow: auto_draw failed for {player_id} after an inflow: {e}")
+        return []
+
+
 async def auto_draw(guild_id: str, player_id: str) -> list[dict]:
     """Apply a player's wallet balance to their outstanding debts, oldest debt first,
     until the wallet is exhausted or the debts are cleared. Returns the settlements made.
 
-    Called after a deposit (fresh funds) or after a debt is booked (funds already there).
+    Prefer ``settle_inflow`` from inflow paths — it adds the system-account guard and the
+    never-break-the-caller contract. Call this directly only where those do not apply.
+
     Each settlement is atomic and re-checks the live debt, so a concurrent or repeated run
-    simply draws against whatever remains — it converges, never over-pays."""
+    simply draws against whatever remains — it converges, never over-pays.
+
+    NOTE it deliberately does NOT cascade: paying a creditor may leave THEM able to settle
+    their own debts, but chaining that here would recurse through an unbounded number of
+    parties inside one command. Each creditor settles on their own next inflow instead."""
     available = await wallet_service.get_balance(guild_id, player_id)
     if available <= 0:
         return []

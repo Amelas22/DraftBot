@@ -88,3 +88,137 @@ async def test_auto_draw_is_a_no_op_without_funds_or_debts(test_db):  # noqa: F8
     await ws.credit_done(GUILD, PAYER, 4, job_id="j5")
     assert await resolution.auto_draw(GUILD, PAYER) == []      # funds, no debts
     assert await ws.get_balance(GUILD, PAYER) == 4
+
+
+# ---- settling on every inflow, not just deposits --------------------------------
+
+@pytest.mark.asyncio
+async def test_a_payment_settles_the_recipients_debt_on_the_way_in(test_db):  # noqa: F811
+    """The point of the change: a debtor paid by another player has that money applied
+    to what they owe, instead of it landing spendable and the creditor staying unpaid."""
+    await ws.credit_done(GUILD, CRED2, 5, job_id="j1")
+    await _owe(PAYER, CRED, 3, "d1")
+
+    res = await resolution.pay(GUILD, CRED2, PAYER, 5)
+
+    assert res["ok"]
+    assert [d["amount"] for d in res["settled"]] == [3]
+    assert await ws.get_balance(GUILD, PAYER) == 2   # 5 in, 3 straight out to the creditor
+    assert await ws.get_balance(GUILD, CRED) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_returned_withdraw_settles_on_the_way_back(test_db):  # noqa: F811
+    """Tix coming back from a failed withdraw are an inflow like any other."""
+    await ws.credit_done(GUILD, PAYER, 5, job_id="j1")
+    await ws.pay(GUILD, PAYER, ws.SYSTEM_IN_FLIGHT, 5, source="wd:test", notes="withdraw")
+    await _owe(PAYER, CRED, 3, "d1")
+    assert await ws.get_balance(GUILD, PAYER) == 0   # nothing to draw against yet
+
+    await resolution._return_in_flight(GUILD, PAYER, 5, "test")
+
+    assert await ws.get_balance(GUILD, CRED) == 3
+    assert await ws.get_balance(GUILD, PAYER) == 2
+
+
+@pytest.mark.asyncio
+async def test_settle_inflow_skips_system_accounts(test_db):  # noqa: F811
+    """Prize wallets and in-flight hold claims but owe nothing; drawing against them
+    is meaningless, and would let a synthetic holder be treated as a debtor."""
+    await ws.credit_done(GUILD, PAYER, 5, job_id="j1")
+    await ws.pay(GUILD, PAYER, ws.SYSTEM_IN_FLIGHT, 5, source="wd:test", notes="withdraw")
+
+    assert await resolution.settle_inflow(GUILD, ws.SYSTEM_IN_FLIGHT) == []
+
+
+@pytest.mark.asyncio
+async def test_settle_inflow_never_breaks_the_inflow(test_db, monkeypatch):  # noqa: F811
+    """The money has already moved by the time this runs. A settlement failure must not
+    turn a completed transfer into an error -- which is also why the deposit path calls
+    settle_inflow: a raise there would abort before the user's confirmation is sent."""
+    async def boom(*a, **kw):
+        raise RuntimeError("ledger unavailable")
+
+    monkeypatch.setattr(resolution, "auto_draw", boom)
+
+    assert await resolution.settle_inflow(GUILD, PAYER) == []
+
+
+@pytest.mark.asyncio
+async def test_a_deposit_pays_the_players_own_entry_before_their_creditors(test_db):  # noqa: F811
+    """Order matters, and the amounts here make the two orders disagree: owing 5 with a
+    2-tix entry pending and 5 arriving, entry-first completes the entry and pays the
+    creditor 3, while debt-first hands the creditor all 5 and strands the entry.
+
+    The player committed to that entry, so it has first claim on funds they just put in.
+    """
+    from models.tournament import Tournament, TournamentParticipant
+    from database.db_session import db_session as _db
+
+    async with _db() as session:
+        t = Tournament(guild_id=GUILD, name="Fee Cup", total_rounds=0, format="manual",
+                       status="registration", entry_fee=2)
+        session.add(t)
+        await session.flush()
+        session.add(TournamentParticipant(tournament_id=t.id, team_id=1, team_name="Alpha",
+                                          captain_user_id=PAYER, status="pending"))
+    await _owe(PAYER, CRED, 5, "d1")
+    await ws.credit_done(GUILD, PAYER, 5, job_id="j-dep")
+
+    completed, drawn = await resolution.settle_deposit_inflow(GUILD, PAYER)
+
+    assert completed, "the pending entry should have been completed first"
+    assert await ws.get_balance(GUILD, CRED) == 3      # creditor got only what was left
+    assert await ws.get_balance(GUILD, PAYER) == 0
+    assert sum(d["amount"] for d in drawn) == 3
+
+
+# ---- on_inflow: the one call every inflow path makes ----------------------------
+
+@pytest.mark.asyncio
+async def test_on_inflow_announces_then_settles(test_db):  # noqa: F811
+    """One function owns the whole concept, so a new inflow path cannot half-implement
+    it: the recipient is told, THEN the money is applied to their debts — that order is
+    what makes their two DMs read as "received", then "auto-applied"."""
+    import notification_service
+    from unittest.mock import AsyncMock, patch
+
+    await ws.credit_done(GUILD, PAYER, 5, job_id="j1")
+    await _owe(PAYER, CRED, 3, "d1")
+    order = []
+
+    async def fake_send(*a, **kw):
+        order.append("announced")
+        return True
+
+    real_settle = resolution.settle_inflow
+
+    async def watched_settle(*a, **kw):
+        order.append("settled")
+        return await real_settle(*a, **kw)
+
+    with patch.object(notification_service, "send_dm", new=AsyncMock(side_effect=fake_send)), \
+         patch("bot_registry.get_bot", return_value=object()), \
+         patch.object(resolution, "settle_inflow", new=watched_settle):
+        drawn = await resolution.on_inflow(
+            GUILD, PAYER, notification_service.notify_payment_received,
+            CRED2, 5, note="test")
+
+    # settling fires its own DMs (the auto-settlement pair), so "announced" recurs
+    # after "settled" -- what matters is that the inflow was announced FIRST.
+    assert order[0] == "announced"
+    assert order.index("settled") == 1
+    assert sum(d["amount"] for d in drawn) == 3
+    assert await ws.get_balance(GUILD, CRED) == 3
+
+
+@pytest.mark.asyncio
+async def test_on_inflow_without_an_announcement_still_settles(test_db):  # noqa: F811
+    """Paths where the recipient already sees the outcome (a returned withdraw, a
+    deposit's own confirmation) pass no notifier and must still settle."""
+    await ws.credit_done(GUILD, PAYER, 5, job_id="j1")
+    await _owe(PAYER, CRED, 3, "d1")
+
+    drawn = await resolution.on_inflow(GUILD, PAYER)
+
+    assert sum(d["amount"] for d in drawn) == 3
