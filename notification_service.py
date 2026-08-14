@@ -208,6 +208,101 @@ async def send_settlement_notification_dm(
     await send_dm(bot, other_id, msg, label=f"settlement notify {other_id}")
 
 
+# ---------------------------------------------------------------------------
+# Wallet movements
+#
+# These follow send_settlement_notification_dm rather than _send_notification_dms:
+# they deliberately do NOT consult the DM notification preference. That preference
+# defaults to OFF and exists to damp draft-flow chatter (ready checks, teams
+# created); a movement of someone's tix is consequential and is usually something
+# they did NOT initiate, so it is reported regardless. If that judgement is wrong
+# it is a policy call to reverse here, not an oversight.
+#
+# Every one of these is best-effort: the money has already moved by the time we
+# are called, so a failed DM must never turn a completed transfer into an error.
+# send_dm already swallows Discord errors; the broad guards below cover the name
+# and guild lookups too.
+# ---------------------------------------------------------------------------
+
+def _wallet_name(bot, guild_id: str, user_id: str) -> str:
+    """Display name for a wallet party, falling back to "User <id>" when the guild
+    or member is not in cache (services run outside any guild context)."""
+    try:
+        guild = bot.get_guild(int(guild_id))
+        if guild is not None:
+            return get_member_name_plain(guild, user_id)
+    except Exception:  # noqa: BLE001 - naming must never break a notification
+        pass
+    return f"User {user_id}"
+
+
+async def notify_payment_received(bot, guild_id: str, recipient_id: str, sender_id: str,
+                                  amount: int, note: str = None):
+    """Someone's tix landed in your wallet."""
+    try:
+        sender = _wallet_name(bot, guild_id, sender_id)
+        msg = f"💸 You received **{amount} tix** from {sender}."
+        if note:
+            msg += f" ({note})"
+        await send_dm(bot, recipient_id, msg, label=f"payment to {recipient_id}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"notify_payment_received failed for {recipient_id}: {e}")
+
+
+async def notify_auto_settlement(bot, guild_id: str, payer_id: str, creditor_id: str,
+                                 amount: int, remaining: int = None):
+    """A debt was settled automatically out of the payer's wallet. BOTH sides are told,
+    because neither of them initiated it — that is the whole point of auto-draw."""
+    try:
+        payer = _wallet_name(bot, guild_id, payer_id)
+        creditor = _wallet_name(bot, guild_id, creditor_id)
+
+        owed = ""
+        if remaining is not None:
+            owed = (f" You still owe them **{remaining} tix**."
+                    if remaining > 0 else " That clears your debt with them.")
+        await send_dm(bot, payer_id,
+                      f"🤝 **{amount} tix** from your wallet went to {creditor} to settle "
+                      f"what you owed.{owed}",
+                      label=f"auto-settle payer {payer_id}")
+
+        owed_c = ""
+        if remaining is not None:
+            owed_c = (f" They still owe you **{remaining} tix**."
+                      if remaining > 0 else " You are now fully settled.")
+        await send_dm(bot, creditor_id,
+                      f"🤝 You received **{amount} tix** from {payer} — automatically "
+                      f"applied from their wallet against what they owed you.{owed_c}",
+                      label=f"auto-settle creditor {creditor_id}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"notify_auto_settlement failed for {payer_id}->{creditor_id}: {e}")
+
+
+async def notify_tournament_payout(bot, guild_id: str, captain_id: str, amount: int,
+                                   place=None, tournament_name: str = None):
+    """A prize landed in a captain's wallet."""
+    try:
+        where = f" for place {place}" if place is not None else ""
+        which = f" in **{tournament_name}**" if tournament_name else ""
+        await send_dm(bot, captain_id,
+                      f"🏆 You received **{amount} tix**{where}{which}.",
+                      label=f"payout {captain_id}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"notify_tournament_payout failed for {captain_id}: {e}")
+
+
+async def notify_entry_refund(bot, guild_id: str, captain_id: str, amount: int,
+                              team_name: str = None):
+    """An entry fee came back out of the prize pool."""
+    try:
+        which = f" for **{team_name}**" if team_name else ""
+        await send_dm(bot, captain_id,
+                      f"↩️ Your tournament entry fee of **{amount} tix**{which} has been refunded.",
+                      label=f"refund {captain_id}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"notify_entry_refund failed for {captain_id}: {e}")
+
+
 async def send_ready_check_dms(bot_or_client, draft_session, guild_id, channel_id, channel_name, guild_name):
     """
     Send DM notifications to users who have DM notifications enabled for a ready check.
