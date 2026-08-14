@@ -171,3 +171,54 @@ async def test_a_deposit_pays_the_players_own_entry_before_their_creditors(test_
     assert await ws.get_balance(GUILD, CRED) == 3      # creditor got only what was left
     assert await ws.get_balance(GUILD, PAYER) == 0
     assert sum(d["amount"] for d in drawn) == 3
+
+
+# ---- on_inflow: the one call every inflow path makes ----------------------------
+
+@pytest.mark.asyncio
+async def test_on_inflow_announces_then_settles(test_db):  # noqa: F811
+    """One function owns the whole concept, so a new inflow path cannot half-implement
+    it: the recipient is told, THEN the money is applied to their debts — that order is
+    what makes their two DMs read as "received", then "auto-applied"."""
+    import notification_service
+    from unittest.mock import AsyncMock, patch
+
+    await ws.credit_done(GUILD, PAYER, 5, job_id="j1")
+    await _owe(PAYER, CRED, 3, "d1")
+    order = []
+
+    async def fake_send(*a, **kw):
+        order.append("announced")
+        return True
+
+    real_settle = resolution.settle_inflow
+
+    async def watched_settle(*a, **kw):
+        order.append("settled")
+        return await real_settle(*a, **kw)
+
+    with patch.object(notification_service, "send_dm", new=AsyncMock(side_effect=fake_send)), \
+         patch("bot_registry.get_bot", return_value=object()), \
+         patch.object(resolution, "settle_inflow", new=watched_settle):
+        drawn = await resolution.on_inflow(
+            GUILD, PAYER, notification_service.notify_payment_received,
+            CRED2, 5, note="test")
+
+    # settling fires its own DMs (the auto-settlement pair), so "announced" recurs
+    # after "settled" -- what matters is that the inflow was announced FIRST.
+    assert order[0] == "announced"
+    assert order.index("settled") == 1
+    assert sum(d["amount"] for d in drawn) == 3
+    assert await ws.get_balance(GUILD, CRED) == 3
+
+
+@pytest.mark.asyncio
+async def test_on_inflow_without_an_announcement_still_settles(test_db):  # noqa: F811
+    """Paths where the recipient already sees the outcome (a returned withdraw, a
+    deposit's own confirmation) pass no notifier and must still settle."""
+    await ws.credit_done(GUILD, PAYER, 5, job_id="j1")
+    await _owe(PAYER, CRED, 3, "d1")
+
+    drawn = await resolution.on_inflow(GUILD, PAYER)
+
+    assert sum(d["amount"] for d in drawn) == 3

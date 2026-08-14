@@ -299,13 +299,10 @@ async def drop_with_refund(tournament_id: int, team_name: str) -> dict:
     # takes MONEY_LOCK and it is not reentrant, and DMs are network I/O. Neither belongs
     # inside the lock.
     if refunded:
-        from notification_service import notify_wallet, notify_entry_refund
+        from notification_service import notify_entry_refund
         from services import mtgo_resolution_service as resolution
-        await notify_wallet(notify_entry_refund, guild_id, captain_id, refunded,
-                            team_name=dropped_name)
-        # A refund is an inflow, so it settles like any other — after the DM above, so
-        # the two read in the order the money moved.
-        await resolution.settle_inflow(guild_id, captain_id)
+        await resolution.on_inflow(guild_id, captain_id, notify_entry_refund,
+                                   refunded, team_name=dropped_name)
     return result
 
 
@@ -387,12 +384,12 @@ async def execute_payout(guild_id: str, tournament_id: int, allocations: list) -
     # same deferred way (see its sweep at resume time), so both directions stay lazy.
     # Skipped on the already_paid short-circuit, so a re-run cannot re-announce prizes.
     if result.get("ok") and not result.get("already_paid"):
-        from notification_service import notify_wallet, notify_tournament_payout
+        from notification_service import notify_tournament_payout
         from services import mtgo_resolution_service as resolution
         for place, captain_id, team_name, amount in allocations:
             if amount > 0:
-                await notify_wallet(notify_tournament_payout, guild_id, captain_id,
-                                    amount, place=place, team_name=team_name,
-                                    tournament_name=result.get("tournament_name"))
-                await resolution.settle_inflow(guild_id, captain_id)
+                await resolution.on_inflow(
+                    guild_id, captain_id, notify_tournament_payout, amount,
+                    place=place, team_name=team_name,
+                    tournament_name=result.get("tournament_name"))
     return result

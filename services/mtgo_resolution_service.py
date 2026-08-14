@@ -166,8 +166,36 @@ async def _return_in_flight(guild_id: str, player_id: str, n: int, key: str):
     await wallet_service.pay(
         guild_id, wallet_service.SYSTEM_IN_FLIGHT, player_id, n,
         source=f"return:{key}", notes=f"withdraw {n} tix returned")
-    # Funds are back with the player — an inflow like any other.
-    await settle_inflow(guild_id, player_id)
+    # An inflow like any other; no DM, the withdrawing player is watching their own
+    # command's reply.
+    await on_inflow(guild_id, player_id)
+
+
+async def on_inflow(guild_id: str, player_id: str, notifier=None, *args, **kwargs) -> list:
+    """Call this from every path that puts tix into somebody's wallet. The only thing
+    such a path should have to know.
+
+    It owns the whole concept: tell the recipient, then apply the money to what they
+    owe. That order is not incidental -- it is what makes their two DMs read in the
+    order the money actually moved ("you received 5", then "3 went to your creditor").
+    Skipping system holders and never raising come with it, from settle_inflow.
+
+    ``notifier`` is a notification_service notify_* function, called as
+    ``notifier(bot, guild_id, player_id, *args, **kwargs)`` -- the shape every wallet
+    notifier already has. Omit it where the recipient already sees the outcome
+    synchronously (a returned withdraw, a deposit's own confirmation message).
+
+    WHY THIS IS A CALL AND NOT A HOOK on wallet_service's writers, which would remove
+    the need to remember it entirely: a debt settlement is itself a credit to the
+    creditor, written by transfer_in from INSIDE the caller's MONEY_LOCK. Firing this
+    there would re-enter a non-reentrant lock, and would turn every settlement into a
+    cascade down the creditor chain that auto_draw deliberately refuses to do. So the
+    inflow paths call it, and this docstring is the reason a new one should too.
+    """
+    if notifier is not None:
+        from notification_service import notify_wallet
+        await notify_wallet(notifier, guild_id, player_id, *args, **kwargs)
+    return await settle_inflow(guild_id, player_id)
 
 
 async def settle_deposit_inflow(guild_id: str, player_id: str):
@@ -184,7 +212,7 @@ async def settle_deposit_inflow(guild_id: str, player_id: str):
     """
     from services import tournament_escrow_service as escrow
     completed = await escrow.sweep_pending_entries(player_id)
-    drawn = await settle_inflow(guild_id, player_id)
+    drawn = await on_inflow(guild_id, player_id)
     return completed, drawn
 
 
@@ -336,12 +364,9 @@ async def pay(guild_id: str, from_player: str, to_player: str, amount: int, *, n
     except ValueError as e:
         return {"ok": False, "error": str(e)}
     # Receiving money is the case you are least likely to be watching for.
-    from notification_service import notify_wallet, notify_payment_received
-    await notify_wallet(notify_payment_received, guild_id, to_player, from_player, amount,
-                        note=notes)
-    # Then apply it to anything they owe. Settling AFTER the notification above keeps the
-    # two DMs in the order the money actually moved: received, then auto-applied.
-    drawn = await settle_inflow(guild_id, to_player)
+    from notification_service import notify_payment_received
+    drawn = await on_inflow(guild_id, to_player, notify_payment_received,
+                            from_player, amount, note=notes)
     return {"ok": True, "amount": amount, "tx_ids": [debit.id, credit.id], "settled": drawn}
 
 
