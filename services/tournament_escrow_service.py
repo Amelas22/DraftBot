@@ -325,7 +325,13 @@ async def execute_payout(guild_id: str, tournament_id: int, allocations: list) -
     ``allocations`` is [(place, captain_id, team_name, amount)]. For each, debits the prize
     wallet and credits the captain (an internal transfer, so vault==SUM(wallets) holds).
     Idempotent by source ``payout:<tid>:<place>`` — a re-run books nothing. Refuses to pay
-    more than the pool holds. Returns {ok, already_paid?, paid, total, pool} or {ok:False,error}."""
+    more than the pool holds. Returns {ok, already_paid?, paid, total, pool, tournament_name}
+    or {ok:False,error}.
+
+    ``tournament_name`` is reporting only, never money: it is what lets a caller tell a
+    human WHICH event paid. The id alone is enough to move the tix and no longer enough
+    once the result reaches a log line or a player. It is None if the tournament row is
+    gone — a missing name must not fail a payout."""
     prize_id = prize_wallet_id(tournament_id)
 
     async def _do():
@@ -333,6 +339,8 @@ async def execute_payout(guild_id: str, tournament_id: int, allocations: list) -
             if await _already_paid(session, tournament_id):
                 return {"ok": True, "already_paid": True}
 
+            tournament = await session.get(Tournament, tournament_id)
+            t_name = tournament.name if tournament is not None else None
             pool = await _pool(session, guild_id, tournament_id)
             total = sum(amount for _, _, _, amount in allocations)
             if total > pool:
@@ -347,9 +355,10 @@ async def execute_payout(guild_id: str, tournament_id: int, allocations: list) -
                     f"payout:{tournament_id}:{place}",
                     notes=f"tournament prize (place {place}): {team_name}")
             await session.flush()
-            logger.info(f"payout: tournament {tournament_id} distributed {total} tix to "
+            logger.info(f"payout: '{t_name}' ({tournament_id}) distributed {total} tix to "
                         f"{len(allocations)} team(s)")
-            return {"ok": True, "paid": allocations, "total": total, "pool": pool}
+            return {"ok": True, "paid": allocations, "total": total, "pool": pool,
+                    "tournament_name": t_name}
 
     async with wallet_service.MONEY_LOCK:
         return await with_db_retry(_do)

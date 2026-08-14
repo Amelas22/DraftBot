@@ -181,3 +181,39 @@ async def test_open_registration_boards_is_the_watchdog_backstop(test_db):  # no
 
     assert open_paid in boards and free_id in boards   # every open board gets re-rendered
     assert started_id not in boards                    # a started tournament is frozen
+
+
+# ---- payout identifies the tournament by name, not just id ----------------------
+
+@pytest.mark.asyncio
+async def test_payout_reports_the_tournament_name(test_db):  # noqa: F811
+    """execute_payout knew the tournament only as an integer id, so its log line and its
+    result could not say which event paid. Callers that report a payout to a human — the
+    operator reading logs, and a prize DM — need the name."""
+    t_id, _ = await _paid_tournament(fee=2, status="active", team="Roto Chaff")
+    await wallet_service.credit_done(GUILD, CAPTAIN, 2, job_id="j-pool")
+    await escrow.secure_from_wallet(GUILD, CAPTAIN, 1, t_id, 2, "Roto Chaff")
+
+    res = await escrow.execute_payout(GUILD, t_id, [(1, CAPTAIN, "Roto Chaff", 2)])
+
+    assert res["ok"]
+    assert res["tournament_name"] == "Fee Cup"
+
+
+@pytest.mark.asyncio
+async def test_payout_name_is_absent_when_the_row_cannot_be_read(test_db):  # noqa: F811
+    """The name is reporting, not money: if the row can't be read the payout still pays.
+
+    Nothing deletes a Tournament today, so this reaches the None branch the only way it
+    can be reached — by removing the row, which the test database permits because FK
+    enforcement is off. It pins the defensive behaviour, not a race that happens."""
+    t_id, _ = await _paid_tournament(fee=2, status="active")
+    await wallet_service.credit_done(GUILD, CAPTAIN, 2, job_id="j-pool2")
+    await escrow.secure_from_wallet(GUILD, CAPTAIN, 1, t_id, 2, "Pending Squad")
+    async with db_session() as session:
+        await session.delete(await session.get(Tournament, t_id))
+
+    res = await escrow.execute_payout(GUILD, t_id, [(1, CAPTAIN, "Pending Squad", 2)])
+
+    assert res["ok"]
+    assert res["tournament_name"] is None
