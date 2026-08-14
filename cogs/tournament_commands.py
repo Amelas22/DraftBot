@@ -13,7 +13,8 @@ from helpers.tournament_channels import (
 )
 from database.db_session import db_session
 from helpers.money_gate import gate_serve, linked_username
-from helpers.permissions import has_bot_manager_role
+from helpers.display_names import get_display_name
+from helpers.permissions import has_bot_manager_role, is_bot_manager
 from helpers.pin_helpers import safe_pin
 from models.tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
 from sqlalchemy import or_, select
@@ -27,20 +28,33 @@ from services.tournament_formatter import (
 from services.tournament_service import (
     advance_round,
     add_match,
+    add_teammate,
     count_unreported_matches,
     create_tournament,
     finish_tournament,
     find_current_match,
+    find_participant_by_name,
+    find_participants_for_captain,
     get_active_tournament,
     get_latest_completed_tournament,
+    get_rosters,
     get_standings_data,
     list_participants,
+    other_teams_for_user,
     register_team,
+    remove_teammate,
     set_result,
 )
 from services.mtgo_tradebot_client import EVENT_TICKET
 from services import tournament_escrow_service as escrow
 from services import wallet_service
+
+
+# Registering records only the captain, so every successful registration has to say
+# how the rest of the team gets on the board -- otherwise the roster silently stays
+# a team of one.
+ROSTER_PROMPT = ("Now add your teammates with `/tournament add_teammate @player` "
+                 "— one command per player.")
 
 
 def tournament_enabled(guild_id):
@@ -291,10 +305,11 @@ class TournamentCog(commands.Cog):
         await ctx.respond("Tournaments are not enabled on this server.", ephemeral=True)
         return False
 
-    async def _refresh_board(self, tournament_id, closed=False):
+    async def _refresh_board(self, tournament_id):
         """Refresh a tournament's registration board. The board is a view — never let a
-        Discord failure break the command that changed the roster."""
-        await refresh_boards(self.bot, [tournament_id], closed=closed)
+        Discord failure break the command that changed the roster. Open vs closed is
+        derived from the tournament's own status inside the refresh."""
+        await refresh_boards(self.bot, [tournament_id])
 
     @tournament.command(name="enable", description="Admin: enable tournament commands on this server")
     @has_bot_manager_role()
@@ -487,7 +502,8 @@ class TournamentCog(commands.Cog):
                 await self._refresh_board(t_id)
                 await ctx.followup.send(
                     f"✅ **{p_name}** is registered for **{t_name}** with "
-                    f"{ctx.author.mention} as captain.", ephemeral=True)
+                    f"{ctx.author.mention} as captain.\n"
+                    f"{ROSTER_PROMPT}", ephemeral=True)
             else:
                 await ctx.followup.send(
                     f"**{p_name}** is already registered for **{t_name}** "
@@ -513,7 +529,8 @@ class TournamentCog(commands.Cog):
             await self._refresh_board(t_id)
             await ctx.followup.send(
                 f"✅ **{p_name}** is registered for **{t_name}** — **{fee} "
-                f"{EVENT_TICKET}(s)** paid into the prize pool. You're in.", ephemeral=True)
+                f"{EVENT_TICKET}(s)** paid into the prize pool. You're in.\n"
+                f"{ROSTER_PROMPT}", ephemeral=True)
             return
         if not res.get("ok"):
             # register_team already committed a pending participant above, so the board
@@ -537,6 +554,143 @@ class TournamentCog(commands.Cog):
             f"To finish, run `/wallet deposit {deficit}` whenever you're ready (you have "
             f"{have} tix; the fee is {fee}). Registration completes automatically once the "
             f"tix land — no need to re-register.", ephemeral=True)
+
+    async def _roster_target(self, ctx, session, tournament, team):
+        """The participant whose roster this command edits, or None if it can't.
+
+        Naming a ``team`` you captain is allowed and is how a captain of several
+        teams picks one; naming someone else's needs the bot-manager role, which is
+        also how a mis-added player gets fixed and how the imported teams with no
+        real captain (captain_user_id "0") get a roster at all.
+
+        Returns None only after replying, so callers just return.
+        """
+        if team:
+            participant = await find_participant_by_name(session, tournament.id, team)
+            if participant is None:
+                await ctx.followup.send(
+                    f"❌ '{team}' is not registered for **{tournament.name}**.",
+                    ephemeral=True)
+                return None
+            if (participant.captain_user_id != str(ctx.author.id)
+                    and not await is_bot_manager(ctx)):
+                await ctx.followup.send(
+                    f"**{participant.team_name}** isn't your team — only its captain "
+                    f"<@{participant.captain_user_id}> or a bot manager can edit its "
+                    f"roster.", ephemeral=True)
+                return None
+            return participant
+
+        owned = await find_participants_for_captain(session, tournament.id, ctx.author.id)
+        if not owned:
+            await ctx.followup.send(
+                f"You don't captain a team in **{tournament.name}**. Register one with "
+                f"`/tournament register <team name>` first.", ephemeral=True)
+            return None
+        if len(owned) > 1:
+            # Silently editing the first would be the worst outcome: nothing would
+            # tell them the change landed on the other team.
+            names = ", ".join(f"**{p.team_name}**" for p in owned)
+            await ctx.followup.send(
+                f"You captain {names} in **{tournament.name}** — say which one with "
+                f"the `team` option.", ephemeral=True)
+            return None
+        return owned[0]
+
+    @tournament.command(name="add_teammate",
+                        description="Add a player to your team's roster")
+    async def add_teammate_cmd(
+        self,
+        ctx,
+        player: discord.Option(discord.Member, "The teammate to add"),
+        team: discord.Option(str, "Which team (needed if you captain more than one)",
+                             required=False, default=None),
+    ):
+        if not await self._check_enabled(ctx):
+            return
+        await ctx.defer(ephemeral=True)
+        if player.bot:
+            await ctx.followup.send("Bots can't be on a team's roster.", ephemeral=True)
+            return
+
+        async with db_session() as session:
+            tournament = await get_active_tournament(session, ctx.guild.id)
+            if tournament is None:
+                await ctx.followup.send("There is no tournament running right now.",
+                                        ephemeral=True)
+                return
+            t_id, t_name = tournament.id, tournament.name
+            participant = await self._roster_target(ctx, session, tournament, team)
+            if participant is None:
+                return
+            try:
+                _, created = await add_teammate(
+                    session, participant, player.id,
+                    get_display_name(player, ctx.guild))
+            except ValueError as e:
+                await ctx.followup.send(f"❌ {e}", ephemeral=True)
+                return
+            p_name = participant.team_name
+            # Sharing a player between teams is allowed, but it should never happen
+            # unnoticed — say so on the reply instead of blocking the add.
+            others = await other_teams_for_user(
+                session, t_id, player.id, participant.id)
+            also_on = ", ".join(f"**{p.team_name}**" for p in others)
+
+        # Outside the session: the board reads the roster back in its own session,
+        # so refreshing before this one commits would render the pre-change state.
+        await self._refresh_board(t_id)
+        shared = f"\nAlso on {also_on} in this tournament." if also_on else ""
+        if created:
+            logger.info(f"{player.id} added to team '{p_name}' in tournament {t_id} "
+                        f"by {ctx.author.id}")
+            await ctx.followup.send(
+                f"✅ {player.mention} is on **{p_name}**'s roster for **{t_name}**.{shared}",
+                ephemeral=True)
+        else:
+            await ctx.followup.send(
+                f"{player.mention} is already on **{p_name}**'s roster.{shared}",
+                ephemeral=True)
+
+    @tournament.command(name="remove_teammate",
+                        description="Take a player off your team's roster")
+    async def remove_teammate_cmd(
+        self,
+        ctx,
+        player: discord.Option(discord.Member, "The teammate to remove"),
+        team: discord.Option(str, "Which team (needed if you captain more than one)",
+                             required=False, default=None),
+    ):
+        if not await self._check_enabled(ctx):
+            return
+        await ctx.defer(ephemeral=True)
+
+        async with db_session() as session:
+            tournament = await get_active_tournament(session, ctx.guild.id)
+            if tournament is None:
+                await ctx.followup.send("There is no tournament running right now.",
+                                        ephemeral=True)
+                return
+            t_id = tournament.id
+            participant = await self._roster_target(ctx, session, tournament, team)
+            if participant is None:
+                return
+            try:
+                removed = await remove_teammate(session, participant, player.id)
+            except ValueError as e:
+                await ctx.followup.send(f"❌ {e}", ephemeral=True)
+                return
+            p_name = participant.team_name
+
+        if not removed:
+            await ctx.followup.send(
+                f"{player.mention} isn't on **{p_name}**'s roster.", ephemeral=True)
+            return
+        await self._refresh_board(t_id)
+        logger.info(f"{player.id} removed from team '{p_name}' in tournament {t_id} "
+                    f"by {ctx.author.id}")
+        await ctx.followup.send(
+            f"✅ {player.mention} is off **{p_name}**'s roster.", ephemeral=True)
 
     @tournament.command(name="add_team", description="Admin: register a team on a captain's behalf")
     @has_bot_manager_role()
@@ -636,7 +790,7 @@ class TournamentCog(commands.Cog):
             res = await escrow.close_registration_and_seed(ctx.guild.id, random.Random())
             tournament_id = res["tournament_id"]
             logger.info(f"Tournament {tournament_id} started in guild {ctx.guild.id} by {ctx.author.id}")
-            await self._refresh_board(tournament_id, closed=True)
+            await self._refresh_board(tournament_id)
             pot_line = f" 🏦 Prize pool: **{res['pot']} tix**." if res["fee"] > 0 else ""
             play = self._destination(ctx, PAIRINGS.setting)
             standings = self._destination(ctx, STANDINGS.setting)
@@ -998,8 +1152,10 @@ class TournamentCog(commands.Cog):
             if tournament is None:
                 await ctx.followup.send("There is no active tournament in this server.", ephemeral=True)
                 return
+            rosters = {}
             if tournament.status == "registration":
                 participants = await list_participants(session, tournament.id)
+                rosters = await get_rosters(session, tournament.id)
             else:
                 participants = await get_standings_data(session, tournament.id)
 
@@ -1013,7 +1169,8 @@ class TournamentCog(commands.Cog):
                     str(ctx.guild.id), [p.captain_user_id for p in pending])
                 deficits = {p.id: max(fee - balances.get(p.captain_user_id, 0), 0)
                             for p in pending}
-            embed = create_registration_embed(tournament, participants, held, deficits)
+            embed = create_registration_embed(tournament, participants, held, deficits,
+                                              rosters=rosters)
         else:
             embed = create_standings_embed(tournament, participants)
             if fee > 0:
