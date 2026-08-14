@@ -310,9 +310,13 @@ async def pay(guild_id: str, from_player: str, to_player: str, amount: int, *, n
     """Move tix between two wallets with no MTGO trade (a plain claim transfer)."""
     try:
         debit, credit = await wallet_service.pay(guild_id, from_player, to_player, amount, notes=notes)
-        return {"ok": True, "amount": amount, "tx_ids": [debit.id, credit.id]}
     except ValueError as e:
         return {"ok": False, "error": str(e)}
+    # Receiving money is the case you are least likely to be watching for.
+    from notification_service import notify_wallet, notify_payment_received
+    await notify_wallet(notify_payment_received, guild_id, to_player, from_player, amount,
+                        note=notes)
+    return {"ok": True, "amount": amount, "tx_ids": [debit.id, credit.id]}
 
 
 # ---------------------------------------------------------------------------
@@ -418,6 +422,17 @@ async def auto_draw(guild_id: str, player_id: str) -> list[dict]:
         if res.get("ok"):
             available -= pay_amt
             settlements.append(res)
+            # Neither party asked for this — it fired off a deposit — so tell both.
+            # Reports what is STILL owed after this leg, not the original debt.
+            # Not on an idempotent replay: that moved no money, and announcing it would
+            # tell two people they were paid again. Mirrors execute_payout's
+            # already_paid guard. Unreachable while auto_draw passes no link_id, which
+            # is exactly when a guard is cheap to add.
+            if not res.get("idempotent"):
+                from notification_service import notify_wallet, notify_auto_settlement
+                await notify_wallet(
+                    notify_auto_settlement, guild_id, player_id, cp, pay_amt,
+                    remaining=max(0, owed[cp] - pay_amt))
         else:
             logger.warning(f"auto_draw: settle {player_id}->{cp} {pay_amt} skipped: {res.get('error')}")
     if settlements:

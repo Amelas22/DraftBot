@@ -287,10 +287,20 @@ async def drop_with_refund(tournament_id: int, team_name: str) -> dict:
         async with db_session() as session:
             p = await remove_team(session, tournament_id, team_name)
             tournament = await session.get(Tournament, tournament_id)
-            refunded = await refund_entry(session, str(tournament.guild_id), tournament_id, p)
-            logger.info(f"escrow: dropped '{p.team_name}' from tournament {tournament_id} "
+            guild_id = str(tournament.guild_id)
+            captain_id = str(p.captain_user_id)
+            dropped_name = p.team_name
+            refunded = await refund_entry(session, guild_id, tournament_id, p)
+            logger.info(f"escrow: dropped '{dropped_name}' from tournament {tournament_id} "
                         f"(refunded {refunded})")
-            return {"team_name": p.team_name, "refunded": refunded}
+            result = {"team_name": dropped_name, "refunded": refunded}
+
+    # AFTER the lock (see execute_payout).
+    if refunded:
+        from notification_service import notify_wallet, notify_entry_refund
+        await notify_wallet(notify_entry_refund, guild_id, captain_id, refunded,
+                            team_name=dropped_name)
+    return result
 
 
 async def _pool(session, guild_id: str, tournament_id: int) -> int:
@@ -361,4 +371,15 @@ async def execute_payout(guild_id: str, tournament_id: int, allocations: list) -
                     "tournament_name": t_name}
 
     async with wallet_service.MONEY_LOCK:
-        return await with_db_retry(_do)
+        result = await with_db_retry(_do)
+
+    # AFTER the lock: DMs are network I/O and have no business holding the money lock.
+    # Skipped on the already_paid short-circuit, so a re-run cannot re-announce prizes.
+    if result.get("ok") and not result.get("already_paid"):
+        from notification_service import notify_wallet, notify_tournament_payout
+        for place, captain_id, team_name, amount in allocations:
+            if amount > 0:
+                await notify_wallet(notify_tournament_payout, guild_id, captain_id,
+                                    amount, place=place, team_name=team_name,
+                                    tournament_name=result.get("tournament_name"))
+    return result
