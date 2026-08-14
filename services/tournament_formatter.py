@@ -53,18 +53,41 @@ def _add_how_to_join(embed, fee, closed):
         value = (
             f"1. `/link_mtgo <your MTGO username>` — once, so the bot can trade with you\n"
             f"2. `/tournament register <team name>` — holds your spot\n"
-            f"3. `/wallet deposit {fee}` — your spot completes when the tix land"
+            f"3. `/wallet deposit {fee}` — your spot completes when the tix land\n"
+            f"4. `/tournament add_teammate @player` — once per teammate"
         )
     else:
-        value = "`/tournament register <team name>`"
+        value = (
+            "1. `/tournament register <team name>`\n"
+            "2. `/tournament add_teammate @player` — once per teammate"
+        )
     embed.add_field(name="How to join", value=value, inline=False)
 
 
+CAPTAIN_MARK = "👑"
+
+
+def _team_line(index, participant, fee, members):
+    """One roster row: rank, paid mark, team, then the full team inline.
+
+    Members share the team's line rather than getting one each: at 25 teams a line
+    per player would quadruple the row count and push the board through Discord's
+    embed limits, and the roster reads as a team either way.
+    """
+    paid = participant.status == "paid"
+    mark = "✅" if paid or fee == 0 else "⏳"
+    roster = [f"{CAPTAIN_MARK} <@{participant.captain_user_id}>"]
+    roster += [f"<@{m.user_id}>" for m in members]
+    return f"{index}. {mark} **{participant.team_name}** — {' · '.join(roster)}"
+
+
 def create_registration_embed(tournament, participants, pot=0, deficits=None,
-                              closed=False):
+                              closed=False, rosters=None):
     """Build the registration board (pure): who is in, and for a paid tournament who
-    has actually paid. ``deficits`` maps participant id -> tix still needed."""
+    has actually paid. ``deficits`` maps participant id -> tix still needed;
+    ``rosters`` maps participant id -> that team's TournamentTeamMember rows."""
     deficits = deficits or {}
+    rosters = rosters or {}
     fee = tournament.entry_fee or 0
     phase = "Registration closed" if closed else "Registration open"
     title = f"🏆 {tournament.name} — {phase}"
@@ -82,11 +105,9 @@ def create_registration_embed(tournament, participants, pot=0, deficits=None,
 
     lines = []
     for i, p in enumerate(participants, start=1):
-        paid = p.status == "paid"
-        mark = "✅" if paid or fee == 0 else "⏳"
-        lines.append(f"{i}. {mark} **{p.team_name}** — captain <@{p.captain_user_id}>")
+        lines.append(_team_line(i, p, fee, rosters.get(p.id, [])))
         short = deficits.get(p.id, 0)
-        if fee > 0 and not paid and not closed and short > 0:
+        if fee > 0 and p.status != "paid" and not closed and short > 0:
             lines.append(f"     needs {short} more tix — `/wallet deposit {short}`")
     if fee > 0:
         paid_n = sum(1 for p in participants if p.status == "paid")
@@ -117,6 +138,7 @@ def create_registration_embed(tournament, participants, pot=0, deficits=None,
     for i, chunk in enumerate(chunks):
         name = label if i == 0 else "Teams (cont.)"
         embed.add_field(name=name, value="\n".join(chunk), inline=False)
+    embed.set_footer(text=f"{CAPTAIN_MARK} team captain")
     _add_how_to_join(embed, fee, closed)
     return embed
 
@@ -146,14 +168,15 @@ async def update_standings_message(bot, tournament_id):
 
 
 async def _board_state(session, tournament):
-    """(participants, pot, deficits) for a tournament's board."""
+    """(participants, pot, deficits, rosters) for a tournament's board."""
     from services import wallet_service
-    from services.tournament_service import list_participants
+    from services.tournament_service import get_rosters, list_participants
 
     participants = await list_participants(session, tournament.id)
+    rosters = await get_rosters(session, tournament.id)
     fee = tournament.entry_fee or 0
     if fee <= 0:
-        return participants, 0, {}
+        return participants, 0, {}, rosters
     guild_id = str(tournament.guild_id)
     pot = await wallet_service.balance_in(
         session, guild_id, wallet_service.prize_wallet_id(tournament.id))
@@ -161,7 +184,7 @@ async def _board_state(session, tournament):
     balances = await wallet_service.balances_for(
         guild_id, [p.captain_user_id for p in pending])
     deficits = {p.id: max(fee - balances.get(p.captain_user_id, 0), 0) for p in pending}
-    return participants, pot, deficits
+    return participants, pot, deficits, rosters
 
 
 async def refresh_boards(bot, tournament_ids, closed=False):
@@ -182,8 +205,9 @@ async def update_registration_board(bot, tournament_id, closed=False):
         tournament = await session.get(Tournament, tournament_id)
         if tournament is None or not tournament.board_message_id:
             return
-        participants, pot, deficits = await _board_state(session, tournament)
-        embed = create_registration_embed(tournament, participants, pot, deficits, closed)
+        participants, pot, deficits, rosters = await _board_state(session, tournament)
+        embed = create_registration_embed(tournament, participants, pot, deficits, closed,
+                                          rosters)
         channel_id = int(tournament.board_channel_id)
         message_id = int(tournament.board_message_id)
 
@@ -212,8 +236,9 @@ async def post_registration_board(channel, tournament_id):
         tournament = await session.get(Tournament, tournament_id)
         if tournament is None:
             return None
-        participants, pot, deficits = await _board_state(session, tournament)
-        embed = create_registration_embed(tournament, participants, pot, deficits)
+        participants, pot, deficits, rosters = await _board_state(session, tournament)
+        embed = create_registration_embed(tournament, participants, pot, deficits,
+                                          rosters=rosters)
     try:
         message = await channel.send(embed=embed)
     except discord.HTTPException as e:

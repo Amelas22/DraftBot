@@ -1,7 +1,11 @@
 """The registration board: renders roster + payment state, and edits in place."""
 import pytest
 
-from models.tournament import Tournament, TournamentParticipant
+from models.tournament import (
+    Tournament,
+    TournamentParticipant,
+    TournamentTeamMember,
+)
 from services.tournament_formatter import create_registration_embed
 
 
@@ -178,3 +182,68 @@ async def test_a_deleted_board_clears_its_ids_so_it_stops_retrying(test_db):  # 
     async with db_session() as session:
         t = await session.get(Tournament, t_id)
         assert t.board_message_id is None and t.board_channel_id is None
+
+
+def _member(user_id, name="Player"):
+    return TournamentTeamMember(participant_id=1, user_id=user_id, display_name=name)
+
+
+def test_board_lists_the_full_team_not_just_the_captain():
+    teams = [_team(1, "Alpha", "10", "paid")]
+    rosters = {1: [_member("11", "Bob"), _member("12", "Cara")]}
+    text = _text(create_registration_embed(_tournament(), teams, pot=1, rosters=rosters))
+
+    assert "👑 <@10>" in text
+    assert "<@11>" in text and "<@12>" in text
+
+
+def test_board_explains_the_crown():
+    """The crown is only legible if something says what it means."""
+    teams = [_team(1, "Alpha", "10", "paid")]
+    embed = create_registration_embed(_tournament(), teams, pot=1,
+                                      rosters={1: [_member("11")]})
+
+    assert embed.footer.text and "captain" in embed.footer.text.lower()
+
+
+def test_board_renders_a_team_with_no_teammates_yet():
+    """A captain who hasn't added anyone must not leave a dangling separator."""
+    teams = [_team(1, "Alpha", "10", "paid")]
+    text = _text(create_registration_embed(_tournament(), teams, pot=1, rosters={}))
+
+    assert "👑 <@10>" in text
+    assert "👑 <@10> ·" not in text
+
+
+def test_board_keeps_each_teams_members_on_its_own_line():
+    teams = [_team(1, "Alpha", "10", "paid"), _team(2, "Beta", "20", "paid")]
+    rosters = {1: [_member("11")], 2: [_member("21")]}
+    text = _text(create_registration_embed(_tournament(), teams, pot=2, rosters=rosters))
+
+    alpha_line = next(ln for ln in text.split("\n") if "Alpha" in ln)
+    assert "<@11>" in alpha_line and "<@21>" not in alpha_line
+
+
+def test_join_instructions_name_the_add_teammate_step():
+    """Registering only records the captain, so the roster step has to be told."""
+    text = _text(create_registration_embed(_tournament(fee=0), []))
+
+    assert "/tournament add_teammate" in text
+
+
+def test_large_roster_with_members_still_splits_under_the_cap():
+    """Members make each line ~3x longer, so the field-splitting has to hold."""
+    teams = []
+    rosters = {}
+    for i in range(1, 26):
+        teams.append(_team(i, f"Team Number Twenty-Five Roster Entry {i:02d}", str(1000 + i), "paid"))
+        rosters[i] = [_member(str(2000 + i)), _member(str(3000 + i)), _member(str(4000 + i))]
+
+    embed = create_registration_embed(_tournament(), teams, pot=10, rosters=rosters)
+
+    assert len(embed.fields) > 1
+    for f in embed.fields:
+        assert len(f.value) < 1024, f"field {f.name!r} is {len(f.value)} chars"
+    full_text = "".join(f.value for f in embed.fields)
+    for t in teams:
+        assert t.team_name in full_text

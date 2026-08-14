@@ -159,3 +159,19 @@ async def test_start_freezes_the_board():
         await TournamentCog.start.callback(cog, ctx)
 
     cog._refresh_board.assert_awaited_once_with(1, closed=True)
+
+
+def test_roster_commands_are_registered():
+    from cogs.tournament_commands import TournamentCog
+
+    subcommands = {cmd.name for cmd in TournamentCog.tournament.subcommands}
+    assert {"add_teammate", "remove_teammate"} <= subcommands
+
+
+def test_roster_commands_are_open_to_captains():
+    """Captains manage their own roster; the bot-manager gate lives on the optional
+    `team` argument instead, so the command itself must not carry the check."""
+    from cogs.tournament_commands import TournamentCog
+
+    assert is_bot_manager not in TournamentCog.add_teammate_cmd.checks
+    assert is_bot_manager not in TournamentCog.remove_teammate_cmd.checks
