@@ -299,7 +299,7 @@ async def drop_with_refund(tournament_id: int, team_name: str) -> dict:
     if refunded:
         from notification_service import notify_wallet, notify_entry_refund
         await notify_wallet(notify_entry_refund, guild_id, captain_id, refunded,
-                             team_name=dropped_name)
+                            team_name=dropped_name)
     return result
 
 
