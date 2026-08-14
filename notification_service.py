@@ -242,8 +242,13 @@ def _best_effort(fn):
     return wrapper
 
 
-async def notify_wallet(fn_name: str, *args, **kwargs) -> None:
-    """Fire a wallet DM from a service that has no bot of its own, best-effort.
+async def notify_wallet(notifier, *args, **kwargs) -> None:
+    """Supply the bot a notifier needs, from a service that has none. Best-effort.
+
+    Takes the notifier itself, not its name: the call sites already import this module
+    to reach notify_wallet, so importing the notifier alongside it costs nothing extra,
+    and a real reference is one that grep and rename can see and that fails at import
+    rather than becoming a swallowed KeyError at the moment of paying someone.
 
     The bot comes from bot_registry the way draft_setup_manager does. Lives here, with
     the notifiers it dispatches to, rather than inside one of the services that calls
@@ -252,15 +257,18 @@ async def notify_wallet(fn_name: str, *args, **kwargs) -> None:
 
     Callers import this lazily: notification_service pulls in discord and a chain of
     helpers, while the services are imported by tests and by alembic's env at
-    migration time, where a missing bot must not matter."""
+    migration time, where a missing bot must not matter.
+
+    The guard below is narrower than it looks: every notifier is already @_best_effort,
+    so what it actually covers is the bot lookup."""
     try:
         from bot_registry import get_bot
         bot = get_bot()
         if bot is None:   # no bot registered (tests, migrations, CLI) — nothing to do
             return
-        await globals()[fn_name](bot, *args, **kwargs)
+        await notifier(bot, *args, **kwargs)
     except Exception as e:  # noqa: BLE001 - notification must never break the money path
-        logger.warning(f"notify_wallet: {fn_name} failed: {e}")
+        logger.warning(f"notify_wallet: {getattr(notifier, '__name__', notifier)} failed: {e}")
 
 def _wallet_name(bot, guild_id: str, user_id: str) -> str:
     """Display name for a wallet party, falling back to "User <id>" when the guild
@@ -285,6 +293,17 @@ async def notify_payment_received(bot, guild_id: str, recipient_id: str, sender_
     await send_dm(bot, recipient_id, msg, label=f"payment to {recipient_id}")
 
 
+def _owed_clause(remaining, owes_phrase: str, settled_phrase: str) -> str:
+    """The "and here is where you stand now" tail of a settlement DM.
+
+    Both sides say the same thing from opposite ends, so the shape lives here once
+    rather than mirrored twice a few lines apart, where a later wording change would
+    have to be made in both and kept in step by eye."""
+    if remaining is None:
+        return ""
+    return f" {owes_phrase} **{remaining} tix**." if remaining > 0 else f" {settled_phrase}"
+
+
 @_best_effort
 async def notify_auto_settlement(bot, guild_id: str, payer_id: str, creditor_id: str,
                                  amount: int, remaining: int = None):
@@ -293,19 +312,13 @@ async def notify_auto_settlement(bot, guild_id: str, payer_id: str, creditor_id:
     payer = _wallet_name(bot, guild_id, payer_id)
     creditor = _wallet_name(bot, guild_id, creditor_id)
 
-    owed = ""
-    if remaining is not None:
-        owed = (f" You still owe them **{remaining} tix**."
-                if remaining > 0 else " That clears your debt with them.")
+    owed = _owed_clause(remaining, "You still owe them", "That clears your debt with them.")
     await send_dm(bot, payer_id,
                   f"🤝 **{amount} tix** from your wallet went to {creditor} to settle "
                   f"what you owed.{owed}",
                   label=f"auto-settle payer {payer_id}")
 
-    owed_c = ""
-    if remaining is not None:
-        owed_c = (f" They still owe you **{remaining} tix**."
-                  if remaining > 0 else " You are now fully settled.")
+    owed_c = _owed_clause(remaining, "They still owe you", "You are now fully settled.")
     await send_dm(bot, creditor_id,
                   f"🤝 You received **{amount} tix** from {payer} — automatically "
                   f"applied from their wallet against what they owed you.{owed_c}",

@@ -313,8 +313,8 @@ async def pay(guild_id: str, from_player: str, to_player: str, amount: int, *, n
     except ValueError as e:
         return {"ok": False, "error": str(e)}
     # Receiving money is the case you are least likely to be watching for.
-    from notification_service import notify_wallet
-    await notify_wallet("notify_payment_received", guild_id, to_player, from_player, amount,
+    from notification_service import notify_wallet, notify_payment_received
+    await notify_wallet(notify_payment_received, guild_id, to_player, from_player, amount,
                          note=notes)
     return {"ok": True, "amount": amount, "tx_ids": [debit.id, credit.id]}
 
@@ -424,9 +424,9 @@ async def auto_draw(guild_id: str, player_id: str) -> list[dict]:
             settlements.append(res)
             # Neither party asked for this — it fired off a deposit — so tell both.
             # Reports what is STILL owed after this leg, not the original debt.
-            from notification_service import notify_wallet
+            from notification_service import notify_wallet, notify_auto_settlement
             await notify_wallet(
-                "notify_auto_settlement", guild_id, player_id, cp, pay_amt,
+                notify_auto_settlement, guild_id, player_id, cp, pay_amt,
                 remaining=max(0, owed[cp] - pay_amt))
         else:
             logger.warning(f"auto_draw: settle {player_id}->{cp} {pay_amt} skipped: {res.get('error')}")
