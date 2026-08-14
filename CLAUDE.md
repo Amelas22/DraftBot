@@ -43,7 +43,10 @@ DraftBot is a sophisticated Discord bot designed to automate and enhance Magic: 
 2. **Import Models**: Ensure new models are imported in `models/__init__.py`
 3. **Generate Migration**: `pipenv run alembic revision --autogenerate -m "description"`
 4. **Test Migration**: `pipenv run alembic upgrade head`
-5. **Deploy**: Migration runs automatically on production restart
+5. **Back up production first if the migration destroys data** — production runs
+   migrations unguarded, so a `DROP`/`DELETE` is irreversible there. See
+   "Migrations run unguarded" under Production Environment.
+6. **Deploy**: Migration runs automatically on production restart
 
 ### Common Commands
 **IMPORTANT: Always use `pipenv run` for all Python commands to ensure proper virtual environment.**
@@ -65,7 +68,7 @@ pipenv run python bot.py
 pipenv run pyrefly check
 
 # Service management (production)
-sudo systemctl restart draftbot.service      # Restart with auto-migration
+sudo systemctl restart draftbot.service      # Restart with auto-migration (UNGUARDED - back up first if it drops data)
 sudo journalctl -u draftbot.service -f       # View logs
 ```
 
@@ -250,7 +253,23 @@ never re-asserted per use site:
 ### Monitoring
 - Service status: `sudo systemctl status draftbot.service`
 - Real-time logs: `sudo journalctl -u draftbot.service -f`
-- Database backups: Automatic timestamped backups before migrations
+- Database backups: **none are automatic.** See "Migrations run unguarded" below.
+
+### Migrations run unguarded
+
+`draftbot.service` runs `ExecStartPre=... alembic upgrade head` with no backup
+step in front of it, and `alembic/env.py` has no hook of its own. Nothing copies
+the production database before a migration touches it.
+
+**Back up the production database yourself before deploying a migration that
+destroys data** — any `DROP TABLE`, `DROP COLUMN`, or bulk `DELETE`/`UPDATE`.
+Once the service restarts, the old rows are gone and there is nothing to roll
+back to; a migration's `downgrade()` restores the schema, never the data.
+
+Do not confuse this with `scripts/fetch_prod_db.sh`. Its timestamped
+`drafts.db.backup.<stamp>` copy protects your **local** database from being
+overwritten by the fetch. It runs on your machine, on demand, in the opposite
+direction, and never touches the server.
 
 ### Configuration Management
 - Environment variables in `.env` file
