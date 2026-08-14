@@ -80,13 +80,33 @@ async def test_auto_settlement_reports_a_cleared_debt():
 
 
 @pytest.mark.asyncio
-async def test_payout_and_refund_messages():
+async def test_payout_names_both_the_tournament_and_the_team():
+    """A captain can be in more than one tournament, and the prize is won BY a team --
+    naming only one of the two leaves the DM ambiguous about which event paid."""
     with patch.object(notification_service, "send_dm", new=AsyncMock(return_value=True)) as send:
         await notify_tournament_payout(_make_bot(), GUILD_ID, PAYER_ID, 100, place=1,
-                                       tournament_name="Team Rocket")
+                                       tournament_name="Lotus League 2026",
+                                       team_name="Roto Chaff")
+    payout = _sent(send)[0][1]
+    assert "100 tix" in payout and "place 1" in payout
+    assert "Lotus League 2026" in payout and "Roto Chaff" in payout
+
+
+@pytest.mark.asyncio
+async def test_payout_message_survives_a_missing_name():
+    """execute_payout yields tournament_name=None if the row is gone; the DM still sends."""
+    with patch.object(notification_service, "send_dm", new=AsyncMock(return_value=True)) as send:
+        await notify_tournament_payout(_make_bot(), GUILD_ID, PAYER_ID, 100, place=1,
+                                       tournament_name=None, team_name="Roto Chaff")
+    payout = _sent(send)[0][1]
+    assert "100 tix" in payout and "Roto Chaff" in payout and "None" not in payout
+
+
+@pytest.mark.asyncio
+async def test_refund_message():
+    with patch.object(notification_service, "send_dm", new=AsyncMock(return_value=True)) as send:
         await notify_entry_refund(_make_bot(), GUILD_ID, PAYER_ID, 20, team_name="Team Rocket")
-    payout, refund = [m for _, m in _sent(send)]
-    assert "100 tix" in payout and "place 1" in payout and "Team Rocket" in payout
+    refund = _sent(send)[0][1]
     assert "20 tix" in refund and "refunded" in refund
 
 

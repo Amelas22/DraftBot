@@ -314,12 +314,20 @@ async def notify_auto_settlement(bot, guild_id: str, payer_id: str, creditor_id:
 
 @_best_effort
 async def notify_tournament_payout(bot, guild_id: str, captain_id: str, amount: int,
-                                   place=None, tournament_name: str = None):
-    """A prize landed in a captain's wallet."""
+                                   place=None, tournament_name: str = None,
+                                   team_name: str = None):
+    """A prize landed in a captain's wallet.
+
+    Names the tournament AND the team. A captain can be entered in more than one event,
+    and the prize was won by a particular team of theirs, so either name alone leaves
+    them guessing which. Both are optional and each clause simply drops when its name is
+    missing -- execute_payout yields no tournament name if the row has been deleted, and
+    the DM should not read "in **None**"."""
     where = f" for place {place}" if place is not None else ""
+    with_team = f" with **{team_name}**" if team_name else ""
     which = f" in **{tournament_name}**" if tournament_name else ""
     await send_dm(bot, captain_id,
-                  f"🏆 You received **{amount} tix**{where}{which}.",
+                  f"🏆 You received **{amount} tix**{where}{with_team}{which}.",
                   label=f"payout {captain_id}")
 
 

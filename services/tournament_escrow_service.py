@@ -380,5 +380,6 @@ async def execute_payout(guild_id: str, tournament_id: int, allocations: list) -
         for place, captain_id, team_name, amount in allocations:
             if amount > 0:
                 await notify_wallet("notify_tournament_payout", guild_id, captain_id,
-                                     amount, place=place, tournament_name=team_name)
+                                    amount, place=place, team_name=team_name,
+                                    tournament_name=result.get("tournament_name"))
     return result
