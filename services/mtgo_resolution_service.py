@@ -170,6 +170,24 @@ async def _return_in_flight(guild_id: str, player_id: str, n: int, key: str):
     await settle_inflow(guild_id, player_id)
 
 
+async def settle_deposit_inflow(guild_id: str, player_id: str):
+    """Apply a landed deposit, in the order the player intended.
+
+    Their own pending tournament entry has first claim: they committed to it, so the fee
+    shouldn't be siphoned to a creditor on the way in. Whatever is left then settles
+    against what they owe. Returns (completed_entries, settlements).
+
+    Both deposit completion paths go through here — the live /wallet deposit followup and
+    the watchdog's resume of a job that finished late. The resume path used to book the
+    credit and stop, so a deposit that completed slowly was never drawn against debts at
+    all; keeping the order in one function is what stops the two paths disagreeing again.
+    """
+    from services import tournament_escrow_service as escrow
+    completed = await escrow.sweep_pending_entries(player_id)
+    drawn = await settle_inflow(guild_id, player_id)
+    return completed, drawn
+
+
 async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, *,
                          commit: bool = True, wait_minutes: int = 0) -> dict:
     """Transfer ``n`` tix from the player to ``system:in-flight`` (atomic funds check),
@@ -255,11 +273,14 @@ async def resume_pending_jobs() -> int:
     async def _resume(job: MtgoJob):
         try:
             if job.kind == "deposit":
-                # Booking the credit is all that's needed: anything waiting on those
-                # funds (a pending tournament entry) is completed by the escrow sweep
-                # on the same watchdog tick.
-                await finish_deposit(job.job_id, job.guild_id, job.player_id,
-                                     job.amount, job.mtgo_user)
+                res = await finish_deposit(job.job_id, job.guild_id, job.player_id,
+                                           job.amount, job.mtgo_user)
+                if res.get("ok"):
+                    # A job that finished late lands here instead of in the command's
+                    # own followup, so it has to apply the deposit the same way — the
+                    # watchdog's own escrow sweep runs before these pollers finish, so
+                    # it cannot be relied on to catch this player's entry.
+                    await settle_deposit_inflow(job.guild_id, job.player_id)
             elif job.kind == "withdraw":
                 await finish_withdraw(job.job_id, job.guild_id, job.player_id,
                                       job.amount, job.mtgo_user)

@@ -142,3 +142,32 @@ async def test_settle_inflow_never_breaks_the_inflow(test_db, monkeypatch):  # n
     monkeypatch.setattr(resolution, "auto_draw", boom)
 
     assert await resolution.settle_inflow(GUILD, PAYER) == []
+
+
+@pytest.mark.asyncio
+async def test_a_deposit_pays_the_players_own_entry_before_their_creditors(test_db):  # noqa: F811
+    """Order matters, and the amounts here make the two orders disagree: owing 5 with a
+    2-tix entry pending and 5 arriving, entry-first completes the entry and pays the
+    creditor 3, while debt-first hands the creditor all 5 and strands the entry.
+
+    The player committed to that entry, so it has first claim on funds they just put in.
+    """
+    from models.tournament import Tournament, TournamentParticipant
+    from database.db_session import db_session as _db
+
+    async with _db() as session:
+        t = Tournament(guild_id=GUILD, name="Fee Cup", total_rounds=0, format="manual",
+                       status="registration", entry_fee=2)
+        session.add(t)
+        await session.flush()
+        session.add(TournamentParticipant(tournament_id=t.id, team_id=1, team_name="Alpha",
+                                          captain_user_id=PAYER, status="pending"))
+    await _owe(PAYER, CRED, 5, "d1")
+    await ws.credit_done(GUILD, PAYER, 5, job_id="j-dep")
+
+    completed, drawn = await resolution.settle_deposit_inflow(GUILD, PAYER)
+
+    assert completed, "the pending entry should have been completed first"
+    assert await ws.get_balance(GUILD, CRED) == 3      # creditor got only what was left
+    assert await ws.get_balance(GUILD, PAYER) == 0
+    assert sum(d["amount"] for d in drawn) == 3
