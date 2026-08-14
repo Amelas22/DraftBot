@@ -84,6 +84,42 @@ class TournamentParticipant(Base):
         return f"<TournamentParticipant(tournament_id={self.tournament_id}, team={self.team_name!r})>"
 
 
+class TournamentTeamMember(Base):
+    """A player on a team's roster, for one tournament.
+
+    Scoped to the participant rather than to the global Team identity on purpose:
+    teams.TeamName is unique across the whole database with no guild column, so a
+    roster hung off the Team row would merge two servers that happen to pick the
+    same team name, and would rewrite a finished tournament's roster whenever the
+    team re-entered a later one.
+
+    The captain is NOT stored here. tournament_participants.captain_user_id stays
+    the single authority for who owns the team (it is who escrow charges and who
+    payouts go to); duplicating them into the roster would give money-bearing state
+    two places to disagree.
+    """
+
+    __tablename__ = 'tournament_team_members'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    participant_id = Column(Integer, ForeignKey('tournament_participants.id'),
+                            nullable=False, index=True)
+    user_id = Column(String(64), nullable=False, index=True)
+    # Snapshot of the name at the time they were added. Boards render <@user_id> so
+    # Discord always resolves the current name; this is the fallback for members who
+    # have since left the guild, and the readable record in logs and exports.
+    display_name = Column(String(128), nullable=False)
+    added_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint('participant_id', 'user_id', name='uq_participant_member'),
+    )
+
+    def __repr__(self):
+        return (f"<TournamentTeamMember(participant_id={self.participant_id}, "
+                f"user_id={self.user_id})>")
+
+
 class TournamentRound(Base):
     __tablename__ = 'tournament_rounds'
 

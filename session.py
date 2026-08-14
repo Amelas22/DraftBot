@@ -8,7 +8,6 @@ from models import (
     PlayerStats,
     PlayerLimit,
     Team,
-    TeamRegistration,
     WeeklyLimit,
     Challenge,
     SwissChallenge,

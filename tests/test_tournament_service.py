@@ -16,18 +16,23 @@ from models.tournament import (
     TournamentMatch,
     TournamentParticipant,
     TournamentRound,
+    TournamentTeamMember,
 )
 from services.tournament_service import (
     add_match,
+    add_teammate,
     advance_round,
     create_tournament,
     finish_tournament,
     find_current_match,
+    find_participant_for_captain,
     get_active_tournament,
+    get_rosters,
     get_standings_data,
     list_participants,
     register_team,
     remove_team,
+    remove_teammate,
     set_result,
     start_tournament,
 )
@@ -688,3 +693,211 @@ async def test_list_participants_in_registration_order(test_db):
 
         participants = await list_participants(session, tournament.id)
         assert [p.team_name for p in participants] == ["Bravo", "Alpha", "Charlie"]
+
+
+# ---- team rosters ---------------------------------------------------------------
+
+async def _tournament_with_team(session, team="Alpha", captain="42"):
+    """A registration-open tournament with one registered team."""
+    tournament = await create_tournament(session, "g1", "Spring", 3)
+    await session.commit()
+    participant, _ = await register_team(session, tournament.id, team, captain)
+    await session.commit()
+    return tournament, participant
+
+
+@pytest.mark.asyncio
+async def test_add_teammate_puts_the_player_on_the_roster(test_db):
+    async with test_db() as session:
+        tournament, participant = await _tournament_with_team(session)
+
+        member, created = await add_teammate(session, participant, "7", "Bob")
+        await session.commit()
+
+        assert created is True
+        assert member.user_id == "7"
+        assert member.display_name == "Bob"
+        rosters = await get_rosters(session, tournament.id)
+        assert [m.user_id for m in rosters[participant.id]] == ["7"]
+
+
+@pytest.mark.asyncio
+async def test_add_teammate_is_idempotent(test_db):
+    """Re-adding someone already on the roster is a no-op, not a duplicate row."""
+    async with test_db() as session:
+        tournament, participant = await _tournament_with_team(session)
+
+        await add_teammate(session, participant, "7", "Bob")
+        await session.commit()
+        member, created = await add_teammate(session, participant, "7", "Bob Renamed")
+        await session.commit()
+
+        assert created is False
+        rosters = await get_rosters(session, tournament.id)
+        assert len(rosters[participant.id]) == 1
+        # The stored snapshot is not overwritten by a later add.
+        assert member.display_name == "Bob"
+
+
+@pytest.mark.asyncio
+async def test_add_teammate_rejects_the_captain(test_db):
+    """The captain is already on the team via captain_user_id."""
+    async with test_db() as session:
+        _, participant = await _tournament_with_team(session, captain="42")
+
+        with pytest.raises(ValueError, match="captain"):
+            await add_teammate(session, participant, "42", "Cap")
+
+
+@pytest.mark.asyncio
+async def test_add_teammate_rejects_a_player_on_another_team(test_db):
+    """A player may only appear on one roster per tournament."""
+    async with test_db() as session:
+        tournament, alpha = await _tournament_with_team(session, "Alpha", "42")
+        bravo, _ = await register_team(session, tournament.id, "Bravo", "99")
+        await session.commit()
+
+        await add_teammate(session, alpha, "7", "Bob")
+        await session.commit()
+
+        with pytest.raises(ValueError, match="Alpha"):
+            await add_teammate(session, bravo, "7", "Bob")
+
+
+@pytest.mark.asyncio
+async def test_add_teammate_allows_the_same_player_in_a_different_tournament(test_db):
+    """The one-team rule is scoped per tournament, not globally."""
+    async with test_db() as session:
+        _, alpha = await _tournament_with_team(session, "Alpha", "42")
+        await add_teammate(session, alpha, "7", "Bob")
+        await session.commit()
+
+        other = await create_tournament(session, "g2", "Autumn", 3)
+        await session.commit()
+        echo, _ = await register_team(session, other.id, "Echo", "55")
+        await session.commit()
+
+        _, created = await add_teammate(session, echo, "7", "Bob")
+        await session.commit()
+        assert created is True
+
+
+@pytest.mark.asyncio
+async def test_add_teammate_rejects_a_completed_tournament(test_db):
+    async with test_db() as session:
+        tournament, participant = await _tournament_with_team(session)
+        tournament.status = "completed"
+        await session.commit()
+
+        with pytest.raises(ValueError, match="completed"):
+            await add_teammate(session, participant, "7", "Bob")
+
+
+@pytest.mark.asyncio
+async def test_add_teammate_allowed_after_the_tournament_starts(test_db):
+    """Rosters stay editable mid-event; only a finished tournament is frozen."""
+    async with test_db() as session:
+        tournament, participant = await _tournament_with_team(session)
+        tournament.status = "active"
+        await session.commit()
+
+        _, created = await add_teammate(session, participant, "7", "Bob")
+        await session.commit()
+        assert created is True
+
+
+@pytest.mark.asyncio
+async def test_remove_teammate_takes_the_player_off_the_roster(test_db):
+    async with test_db() as session:
+        tournament, participant = await _tournament_with_team(session)
+        await add_teammate(session, participant, "7", "Bob")
+        await session.commit()
+
+        removed = await remove_teammate(session, participant, "7")
+        await session.commit()
+
+        assert removed is True
+        rosters = await get_rosters(session, tournament.id)
+        assert rosters.get(participant.id, []) == []
+
+
+@pytest.mark.asyncio
+async def test_remove_teammate_reports_when_the_player_was_not_on_the_roster(test_db):
+    async with test_db() as session:
+        _, participant = await _tournament_with_team(session)
+
+        assert await remove_teammate(session, participant, "7") is False
+
+
+@pytest.mark.asyncio
+async def test_find_participant_for_captain(test_db):
+    async with test_db() as session:
+        tournament, participant = await _tournament_with_team(session, "Alpha", "42")
+
+        found = await find_participant_for_captain(session, tournament.id, "42")
+        assert found is not None and found.id == participant.id
+        assert await find_participant_for_captain(session, tournament.id, "99") is None
+
+
+@pytest.mark.asyncio
+async def test_get_rosters_groups_by_participant_and_stays_in_its_tournament(test_db):
+    async with test_db() as session:
+        tournament, alpha = await _tournament_with_team(session, "Alpha", "42")
+        bravo, _ = await register_team(session, tournament.id, "Bravo", "99")
+        await session.commit()
+        other = await create_tournament(session, "g2", "Autumn", 3)
+        await session.commit()
+        echo, _ = await register_team(session, other.id, "Echo", "55")
+        await session.commit()
+
+        await add_teammate(session, alpha, "7", "Bob")
+        await add_teammate(session, alpha, "8", "Cara")
+        await add_teammate(session, bravo, "9", "Dan")
+        await add_teammate(session, echo, "10", "Eve")
+        await session.commit()
+
+        rosters = await get_rosters(session, tournament.id)
+        assert sorted(m.user_id for m in rosters[alpha.id]) == ["7", "8"]
+        assert [m.user_id for m in rosters[bravo.id]] == ["9"]
+        assert echo.id not in rosters
+
+
+@pytest.mark.asyncio
+async def test_remove_team_also_deletes_its_roster(test_db):
+    """Dropping a team must not leave its members orphaned behind it."""
+    async with test_db() as session:
+        tournament, participant = await _tournament_with_team(session, "Alpha", "42")
+        await add_teammate(session, participant, "7", "Bob")
+        await session.commit()
+
+        await remove_team(session, tournament.id, "Alpha")
+        await session.commit()
+
+        left = (await session.execute(select(TournamentTeamMember))).scalars().all()
+        assert left == []
+
+
+@pytest.mark.asyncio
+async def test_add_teammate_rejects_another_teams_captain(test_db):
+    """A captain is on their own team even with no roster row to say so."""
+    async with test_db() as session:
+        tournament, alpha = await _tournament_with_team(session, "Alpha", "42")
+        await register_team(session, tournament.id, "Bravo", "99")
+        await session.commit()
+
+        with pytest.raises(ValueError, match="Bravo"):
+            await add_teammate(session, alpha, "99", "Cap Two")
+
+
+@pytest.mark.asyncio
+async def test_remove_teammate_rejects_a_completed_tournament(test_db):
+    """Rosters of a finished tournament are a record, so removal is frozen too."""
+    async with test_db() as session:
+        tournament, participant = await _tournament_with_team(session)
+        await add_teammate(session, participant, "7", "Bob")
+        await session.commit()
+        tournament.status = "completed"
+        await session.commit()
+
+        with pytest.raises(ValueError, match="completed"):
+            await remove_teammate(session, participant, "7")

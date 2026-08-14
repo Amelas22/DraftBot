@@ -1,7 +1,7 @@
 from .draft_session import DraftSession
 from .match import MatchResult, Match
 from .player import PlayerStats, PlayerLimit
-from .team import Team, TeamRegistration, WeeklyLimit
+from .team import Team, WeeklyLimit
 from .challenge import Challenge, SwissChallenge
 from .utility import TeamFinder
 from .stake import StakeInfo
@@ -19,7 +19,13 @@ from .quiz_stats import QuizStats
 from .quiz_scheduling import QuizChannel, QuizSchedule
 from .debt_ledger import DebtLedger
 from .debt_summary_message import DebtSummaryMessage
-from .tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
+from .tournament import (
+    Tournament,
+    TournamentMatch,
+    TournamentParticipant,
+    TournamentRound,
+    TournamentTeamMember,
+)
 from .trophy_quiz_session import TrophyQuizSession
 from .trophy_quiz_submission import TrophyQuizSubmission
 from .mtgo_account import MtgoAccount
@@ -34,7 +40,6 @@ __all__ = [
     'PlayerStats',
     'PlayerLimit',
     'Team',
-    'TeamRegistration',
     'WeeklyLimit',
     'Challenge',
     'SwissChallenge',
@@ -61,6 +66,7 @@ __all__ = [
     'Tournament',
     'TournamentParticipant',
     'TournamentRound',
+    'TournamentTeamMember',
     'TournamentMatch',
     'TrophyQuizSession',
     'TrophyQuizSubmission',
