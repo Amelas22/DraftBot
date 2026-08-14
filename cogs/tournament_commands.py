@@ -594,6 +594,9 @@ class TournamentCog(commands.Cog):
         if not await self._check_enabled(ctx):
             return
         await ctx.defer(ephemeral=True)
+        if player.bot:
+            await ctx.followup.send("Bots can't be on a team's roster.", ephemeral=True)
+            return
 
         async with db_session() as session:
             tournament = await get_active_tournament(session, ctx.guild.id)
