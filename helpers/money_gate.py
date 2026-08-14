@@ -31,6 +31,50 @@ _custodian_cache: str | None = None
 _background_tasks: set = set()
 
 
+WALLET_HOWTO_TITLE = "💡 Paying with tix"
+
+
+def wallet_howto(guild_id, *, brief=False) -> str | None:
+    """How to pay with tix, in the one place the wording lives.
+
+    It appears wherever a player is confronted with tix they owe — the bet outcomes
+    of a finished staked draft, their own balances, the guild debt summary — and once
+    before they bet at all. Written once here because four copies drift, and because
+    the middle line is the part nobody guesses: funding a wallet settles debts by
+    itself, on any inflow, not just a deposit.
+
+    Returns None where there is no wallet to use. Staked drafts only run on money
+    servers, but debts do not: a card loan via /lend books one on a free server too,
+    so the debt panels render there. Pointing those players at a command the bot
+    refuses is worse than saying nothing, and this is the check they'd each otherwise
+    have to remember.
+    """
+    if not is_money_server(str(guild_id)):
+        return None
+    if brief:
+        return ("Bets settle from your tix wallet — `/wallet deposit <n>` covers "
+                "what you owe automatically.")
+    return (
+        "`/wallet deposit <n>` — credits your wallet, and pays your oldest debts automatically\n"
+        "`/wallet show` — your balance and recent activity\n"
+        "`/wallet pay @player <n>` — send tix straight to someone"
+    )
+
+
+def add_wallet_howto(embed, guild_id) -> bool:
+    """Append the how-to to an embed, where there is a wallet to explain.
+
+    The three embed call sites otherwise each repeat fetch-check-add and import both
+    the text and its title; this leaves them one line and one import. Returns whether
+    anything was added, for callers that care.
+    """
+    text = wallet_howto(guild_id)
+    if not text:
+        return False
+    embed.add_field(name=WALLET_HOWTO_TITLE, value=text, inline=False)
+    return True
+
+
 def gate_read(ctx) -> str | None:
     """Wallet must be used in a money server. Returns an error string, or None."""
     if not ctx.guild:
