@@ -88,3 +88,57 @@ async def test_auto_draw_is_a_no_op_without_funds_or_debts(test_db):  # noqa: F8
     await ws.credit_done(GUILD, PAYER, 4, job_id="j5")
     assert await resolution.auto_draw(GUILD, PAYER) == []      # funds, no debts
     assert await ws.get_balance(GUILD, PAYER) == 4
+
+
+# ---- settling on every inflow, not just deposits --------------------------------
+
+@pytest.mark.asyncio
+async def test_a_payment_settles_the_recipients_debt_on_the_way_in(test_db):  # noqa: F811
+    """The point of the change: a debtor paid by another player has that money applied
+    to what they owe, instead of it landing spendable and the creditor staying unpaid."""
+    await ws.credit_done(GUILD, CRED2, 5, job_id="j1")
+    await _owe(PAYER, CRED, 3, "d1")
+
+    res = await resolution.pay(GUILD, CRED2, PAYER, 5)
+
+    assert res["ok"]
+    assert [d["amount"] for d in res["settled"]] == [3]
+    assert await ws.get_balance(GUILD, PAYER) == 2   # 5 in, 3 straight out to the creditor
+    assert await ws.get_balance(GUILD, CRED) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_returned_withdraw_settles_on_the_way_back(test_db):  # noqa: F811
+    """Tix coming back from a failed withdraw are an inflow like any other."""
+    await ws.credit_done(GUILD, PAYER, 5, job_id="j1")
+    await ws.pay(GUILD, PAYER, ws.SYSTEM_IN_FLIGHT, 5, source="wd:test", notes="withdraw")
+    await _owe(PAYER, CRED, 3, "d1")
+    assert await ws.get_balance(GUILD, PAYER) == 0   # nothing to draw against yet
+
+    await resolution._return_in_flight(GUILD, PAYER, 5, "test")
+
+    assert await ws.get_balance(GUILD, CRED) == 3
+    assert await ws.get_balance(GUILD, PAYER) == 2
+
+
+@pytest.mark.asyncio
+async def test_settle_inflow_skips_system_accounts(test_db):  # noqa: F811
+    """Prize wallets and in-flight hold claims but owe nothing; drawing against them
+    is meaningless, and would let a synthetic holder be treated as a debtor."""
+    await ws.credit_done(GUILD, PAYER, 5, job_id="j1")
+    await ws.pay(GUILD, PAYER, ws.SYSTEM_IN_FLIGHT, 5, source="wd:test", notes="withdraw")
+
+    assert await resolution.settle_inflow(GUILD, ws.SYSTEM_IN_FLIGHT) == []
+
+
+@pytest.mark.asyncio
+async def test_settle_inflow_never_breaks_the_inflow(test_db, monkeypatch):  # noqa: F811
+    """The money has already moved by the time this runs. A settlement failure must not
+    turn a completed transfer into an error -- which is also why the deposit path calls
+    settle_inflow: a raise there would abort before the user's confirmation is sent."""
+    async def boom(*a, **kw):
+        raise RuntimeError("ledger unavailable")
+
+    monkeypatch.setattr(resolution, "auto_draw", boom)
+
+    assert await resolution.settle_inflow(GUILD, PAYER) == []

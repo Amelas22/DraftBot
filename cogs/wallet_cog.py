@@ -114,7 +114,10 @@ class WalletCommands(commands.Cog):
                 # just committed to that entry, so its fee shouldn't be siphoned to a
                 # creditor on the way in.
                 completed = await escrow.sweep_pending_entries(player_id)
-                drawn = await resolution.auto_draw(guild_id, player_id)
+                # settle_inflow, not auto_draw: a raise here would abort _finish before
+                # the followup below, leaving a player whose deposit landed with no
+                # confirmation at all. Deposit is an inflow like the rest.
+                drawn = await resolution.settle_inflow(guild_id, player_id)
                 bal = await wallet_service.get_balance(guild_id, player_id)
                 # Completed entries AND ones this captain is still short on — see
                 # escrow.open_boards_for_captain.
