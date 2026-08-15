@@ -87,13 +87,14 @@ def test_the_last_player_returning_is_subscribed():
 # ---- the handlers behind those names --------------------------------------------
 
 import pytest
-from unittest.mock import AsyncMock, patch
+
+from conftest import make_manager
 
 
 def _manager():
-    mgr = DraftSetupManager(session_id="s", draft_id="d", cube_id="c", guild_id="g")
-    mgr.socket_client = MagicMock()
-    return mgr
+    # make_manager's mocked emit matters here: a disconnect now pauses the draft as
+    # well as recording it — see test_pause_on_disconnect.py for that behaviour.
+    return make_manager()
 
 
 @pytest.mark.asyncio
