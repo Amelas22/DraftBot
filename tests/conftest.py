@@ -95,3 +95,22 @@ class StubUser:
 def embed_field(embed, name):
     """The named field of an embed, or None when it wasn't rendered."""
     return next((f for f in embed.fields if f.name == name), None)
+
+
+def make_manager(**kwargs):
+    """A DraftSetupManager with its socket mocked out.
+
+    Four test files had grown their own copy of this. The constructor's signature is
+    the thing that keeps changing (packs_per_player, cards_per_pack, friendly_id have
+    all been added to it), so the copies are what a signature change has to chase.
+    Pass constructor kwargs through; layer test-specific state on the result.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from services.draft_setup_manager import DraftSetupManager
+
+    mgr = DraftSetupManager(session_id="s", draft_id="d", cube_id="c", guild_id="g", **kwargs)
+    mgr.socket_client = MagicMock()
+    mgr.socket_client.connected = True
+    mgr.socket_client.emit = AsyncMock(return_value=True)
+    return mgr

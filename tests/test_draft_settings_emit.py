@@ -1,22 +1,6 @@
 import pytest
-from unittest.mock import AsyncMock, MagicMock
 
-from services.draft_setup_manager import DraftSetupManager
-
-
-def make_manager(packs_per_player=4, cards_per_pack=10):
-    mgr = DraftSetupManager(
-        session_id="s",
-        draft_id="d",
-        cube_id="c",
-        guild_id="g",
-        packs_per_player=packs_per_player,
-        cards_per_pack=cards_per_pack,
-    )
-    mgr.socket_client = MagicMock()
-    mgr.socket_client.connected = True
-    mgr.socket_client.emit = AsyncMock(return_value=True)
-    return mgr
+from conftest import make_manager
 
 
 @pytest.mark.asyncio

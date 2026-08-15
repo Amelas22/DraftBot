@@ -1,5 +1,6 @@
 import asyncio
 import socketio
+from collections import Counter
 from loguru import logger
 from functools import wraps
 import random
@@ -10,7 +11,8 @@ import pytz
 import discord
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from config import get_draftmancer_websocket_url, get_draftmancer_base_url, get_draftmancer_session_url, is_test_mode
+from config import (get_draftmancer_websocket_url, get_draftmancer_base_url,
+                    get_draftmancer_session_url, is_disconnect_autopause_enabled, is_test_mode)
 from database.db_session import db_session
 from models.draft_session import DraftSession
 from models.match import MatchResult
@@ -59,6 +61,20 @@ else:
     DRAFT_PICK_TIMER_SECONDS = 60
     DRAFT_LOG_UNLOCK_TIMER_MINUTES = 180
 OWNERSHIP_CLAIM_TIMEOUT = 3.0  # Seconds to wait for ownership claim confirmation
+# How long a mid-draft disconnect must last before the bot says anything in Discord.
+# Short drops are common and self-correcting; announcing every one of them would
+# train players to ignore the message that matters.
+DISCONNECT_NOTICE_DELAY = 15
+# Prefix for the decision log of a shadow run, so a whole evaluation can be
+# pulled out of production logs with one grep.
+SHADOW = "[autopause-shadow]"
+# What a paused table can do next. Shared with cogs/draft_control.py's /pause so
+# the bot-triggered and human-triggered pause messages cannot drift apart.
+PAUSED_DRAFT_OPTIONS = (
+    "\u2022 Use `/unpause` to resume once everyone is ready.\n"
+    "\u2022 Use `/replace_with_bots` to replace disconnected users with bots.\n"
+    "\u2022 Use `/scrap` to start a vote to cancel the draft."
+)
 SOCKET_OPERATION_DELAY = 0.5  # Seconds between socket operations
 CONNECTION_CHECK_INTERVAL = 10  # Seconds between connection check iterations
 SETTINGS_OPERATION_DELAY = 1  # Seconds after setting operations
@@ -201,6 +217,13 @@ class DraftSetupManager:
         self.seating_order_set = False
         self.seated_user_ids = set()   # Draftmancer ids we actually seated
         self.disconnected_users = {}   # uid -> name, from Draftmancer mid-draft
+
+        # Auto-pause on a mid-draft disconnect
+        self._paused_for_disconnect = False   # this pause is ours, so ours to lift
+        self._disconnect_notice_task = None
+        self._disconnect_notice_sent = False
+        self._disconnect_started_at = None
+        self.disconnect_notice_delay = DISCONNECT_NOTICE_DELAY
         self.last_db_check_time = None
         self.db_check_cooldown = 15
         self.expected_user_count = 0
@@ -275,7 +298,14 @@ class DraftSetupManager:
         logger.info(f"Draft ended event received: {data}")
         self.drafting = False
         self.draftPaused = False
-        
+        # A draft can end with someone still disconnected — /scrap, or the rest of the
+        # table replacing them with bots and playing on. "Please reconnect" after that
+        # is noise about a draft that no longer exists, so the notice is dropped even
+        # if it had already committed to sending.
+        self._paused_for_disconnect = False
+        self._disconnect_notice_sent = False
+        self._cancel_disconnect_notice()
+
         if self.draft_cancelled:
             logger.info("Draft was manually cancelled - no additional announcement needed")
             self.draft_cancelled = False  # Reset the flag for future drafts
@@ -338,6 +368,10 @@ class DraftSetupManager:
     async def _on_draft_resumed(self, *args):
         self.logger.info("Draft resumed event received")
         self.draftPaused = False
+        # Every resume lands here, whoever caused it — our own emit, or a player's
+        # /unpause. Either way the disconnect pause is over and is not ours to lift
+        # a second time.
+        self._paused_for_disconnect = False
 
     async def _on_resume_on_reconnection(self, *args):
         """Draftmancer's signal that the LAST disconnected player is back.
@@ -351,8 +385,11 @@ class DraftSetupManager:
         Draftmancer respects our pause here: resumeOnReconnection only restarts the
         countdowns `if (!this.draftPaused)`, so a draft the bot paused stays paused.
         """
+        was_out = bool(self.disconnected_users)
         self.disconnected_users = {}
         self.logger.info("Draftmancer reports the last disconnected player reconnected")
+        if was_out:
+            await self._resume_after_disconnect()
         
     def _register_socket_handlers(self):
         """Subscribe to the events Draftmancer actually emits.
@@ -434,10 +471,9 @@ class DraftSetupManager:
         #
         # Two limits on it. Only for someone we actually seated, so an unseated extra
         # wandering off cannot throw away a good seating. And only before the draft is
-        # under way: past that point this flag is the latch that stops anything
-        # touching the seating again — nothing in check_session_stage_and_organize
-        # checks self.drafting — so clearing it on a mid-draft disconnect would let a
-        # reconnect re-emit setSeating into a live draft, which is worse than the bug.
+        # under way — check_session_stage_and_organize refuses to seat a live draft,
+        # but the record of who we seated is still worth keeping accurate rather than
+        # discarding the moment a mid-draft connection wobbles.
         #
         # Asks "is anyone we seated missing" rather than "did the count drop". The two
         # are not the same: one seated player leaving while a newcomer arrives in the
@@ -489,29 +525,211 @@ class DraftSetupManager:
             await self.check_session_stage_and_organize()
 
     async def _on_user_disconnected(self, data=None):
-        """Draftmancer telling us WHO dropped, which sessionUsers cannot.
+        """Draftmancer telling us WHO dropped, which sessionUsers cannot — and the
+        cue to pause, because a drop mid-draft stalls the whole table.
 
         Emitted only while a draft is running (Session.remUser), and it carries the
-        names — where a sessionUsers count going 6 -> 5 leaves the bot to infer who is
-        gone. Production shows this is common rather than exceptional: 58 same-session
-        drop-and-return flaps in three days, a median of 6 seconds apart.
+        names, where a sessionUsers count going 6 -> 5 would leave the bot to infer
+        who is gone. In fact sessionUsers does not fire at all here: mid-draft
+        remUser takes the drafting branch, which holds the seat open in
+        disconnectedUsers and broadcasts only this event.
 
-        Recording, not acting: the seating recovery deliberately does nothing during a
-        draft, and this fires only during one. It exists so the next incident can be
-        read from the logs, and so anything that needs to know who is missing has a
-        source that names them.
+        Holding the seat is what stalls everyone else. Draftmancer stops the absent
+        player's countdown and no one else's, so the table drafts on until a pack
+        reaches the empty seat and then waits, with no timer left to expire. Our
+        sessions are not `managed`, so remUser's 30-second replace-with-bots
+        fallback never fires for us and the wait has no end.
+
+        A count change is not enough to act on, which is why this is the handler that
+        does: only the transitions matter, nobody -> someone and someone -> nobody.
+        A second player dropping while one is already out changes nothing — the draft
+        is paused and the room has been told.
+
+        Deliberately not gated on self.drafting. The event's own existence is the
+        evidence a draft is running, and self.drafting is only ever set by the bot's
+        own start-draft call — so a bot restarted mid-draft has it False, and gating
+        on it would switch the pause off exactly when nobody is watching.
         """
         disconnected = (data or {}).get('disconnectedUsers') or {}
+        previously_out = bool(self.disconnected_users)
         self.disconnected_users = {
             uid: info.get('userName') for uid, info in disconnected.items()
         }
+
         if self.disconnected_users:
             self.logger.info(
                 f"Draftmancer reports disconnected mid-draft: "
                 f"{sorted(n for n in self.disconnected_users.values() if n)}"
             )
+            if not previously_out:
+                await self._pause_for_disconnect()
         else:
             self.logger.info("Draftmancer reports everyone reconnected")
+            if previously_out:
+                await self._resume_after_disconnect()
+
+    async def _pause_for_disconnect(self):
+        """Pause the draft and start the clock on telling the room.
+
+        With DISCONNECT_AUTOPAUSE unset this takes every decision and logs it while
+        performing neither side effect. draftPaused especially is left alone: the
+        seating recovery reads it and /unpause refuses to run without it, so setting
+        it without a real pause would have the rest of the bot believe a draft is
+        paused while Draftmancer plays on.
+        """
+        live = is_disconnect_autopause_enabled()
+        self._disconnect_notice_sent = False
+        self._disconnect_started_at = datetime.now()
+        who = sorted(n for n in self.disconnected_users.values() if n) or ["a player"]
+
+        if self.draftPaused:
+            # Already paused by a participant's /pause. Theirs to lift, not ours —
+            # leaving _paused_for_disconnect False is what stops us undoing it.
+            self.logger.info("Draft already paused; not claiming it for the disconnect")
+        else:
+            self._paused_for_disconnect = True
+            if live:
+                await self.socket_client.emit('pauseDraft')
+                self.draftPaused = True
+                self.logger.info(f"Paused the draft: {who} dropped mid-draft")
+            else:
+                self.logger.info(f"{SHADOW} would pause the draft: {who} dropped mid-draft")
+
+        self._cancel_disconnect_notice()
+        self._disconnect_notice_task = asyncio.create_task(self._announce_disconnect())
+
+    def _disconnect_duration(self):
+        """Seconds the current disconnect has lasted, for the shadow-run write-up.
+
+        The number that decides whether the grace window is set anywhere near right,
+        and it has never been measurable: nothing subscribed to userDisconnected
+        before this, so no build has ever known how long a mid-draft drop lasts.
+        """
+        if not self._disconnect_started_at:
+            return -1
+        return round((datetime.now() - self._disconnect_started_at).total_seconds(), 1)
+
+    async def _announce_disconnect(self):
+        """Ask the missing player to come back, once the drop has lasted."""
+        try:
+            await asyncio.sleep(self.disconnect_notice_delay)
+        except asyncio.CancelledError:
+            return  # back inside the grace window; nobody needs telling
+
+        # Surviving the sleep is the point of no return: the reconnect that would
+        # have cancelled this task can no longer arrive first. Recording it before
+        # the message goes out, rather than after, keeps the two halves from
+        # disagreeing if the send is slow or fails — the draft then stays paused for
+        # /unpause, which is where it would have been without this feature anyway.
+        self._disconnect_notice_sent = True
+
+        try:
+            channel = await self._get_draft_channel()
+            if not channel:
+                return
+            # Built in both modes on purpose: rendering it is what proves the channel
+            # lookup, the sign_ups read and the mention resolution all work before
+            # anything is posted for real.
+            text = await self._disconnect_notice_text()
+            if is_disconnect_autopause_enabled():
+                # Draftmancer takes any setUserName a client sends, and an unresolved
+                # name goes into this message as raw text — so "@everyone" is a name
+                # somebody can pick. Only the mentions this code built are allowed to
+                # ping; everything else renders inert.
+                await channel.send(
+                    text,
+                    allowed_mentions=discord.AllowedMentions(
+                        everyone=False, roles=False, users=True
+                    ),
+                )
+            else:
+                self.logger.info(
+                    f"{SHADOW} would post to channel {self.draft_channel_id} after "
+                    f"{self._disconnect_duration()}s: {text!r}"
+                )
+        except Exception as e:
+            self.logger.error(f"Failed to announce a mid-draft disconnect: {e}")
+
+    async def _disconnect_notice_text(self):
+        """Name the missing players, mentioning them where that is unambiguous.
+
+        sign_ups is keyed by Discord id with the display name as the value, so the
+        lookup runs backwards — and two players can share a display name (the case
+        resolve_seating_ids exists for). A wrong ping is worse than no ping, so a
+        duplicate name is named in plain text instead.
+        """
+        draft_session = await self._get_draft_session_from_db()
+        sign_ups = (draft_session.sign_ups if draft_session else None) or {}
+
+        name_counts = Counter(sign_ups.values())
+        mentions = {
+            name: discord_id for discord_id, name in sign_ups.items()
+            if name_counts[name] == 1
+        }
+
+        who = []
+        for name in sorted(n for n in self.disconnected_users.values() if n):
+            discord_id = mentions.get(name)
+            who.append(f"<@{discord_id}>" if discord_id else name)
+
+        session_url = get_draftmancer_session_url(self.draft_id)
+        return (
+            f"⏸️ **Draft paused** — {', '.join(who) or 'a player'} dropped out of "
+            f"Draftmancer, which stalls the table.\n\n"
+            f"Rejoin here to carry on: {session_url}\n\n"
+            f"• Use `/unpause` to resume once everyone is back.\n"
+            f"• Use `/replace_with_bots` to replace disconnected users with bots.\n"
+            f"• Use `/scrap` to start a vote to cancel the draft."
+        )
+
+    async def _resume_after_disconnect(self):
+        """Everyone is back. Resume only if nobody was ever told to do it themselves.
+
+        Once the notice has gone out, resuming belongs to the players: /unpause runs
+        a ready check across the table, which is worth more than the bot deciding on
+        its own that six people are ready. Before the notice, no such message exists
+        to act on, so a silent pause would strand the draft on a command nobody knows
+        to run.
+        """
+        told_them = self._disconnect_notice_sent
+        self._cancel_disconnect_notice()
+        lasted = self._disconnect_duration()
+
+        if not self._paused_for_disconnect:
+            self.logger.info(f"Everyone is back after {lasted}s; the pause was not ours to lift")
+            return
+        if told_them:
+            # Hand ownership over for good. Leaving this set would let a LATER brief
+            # drop, while the draft is still paused waiting on /unpause, take the
+            # not-told path and resume a pause that a ready check was supposed to lift.
+            self._paused_for_disconnect = False
+            self.logger.info(f"Everyone is back after {lasted}s; leaving the draft paused for /unpause")
+            return
+
+        if is_disconnect_autopause_enabled():
+            await self.socket_client.emit('resumeDraft')
+            self.draftPaused = False
+            self._paused_for_disconnect = False
+            self.logger.info(f"Resumed the draft: the disconnect lasted {lasted}s, inside the grace window")
+        else:
+            self._paused_for_disconnect = False
+            self.logger.info(
+                f"{SHADOW} would resume the draft: the disconnect lasted {lasted}s, "
+                f"inside the {self.disconnect_notice_delay}s grace window"
+            )
+
+    def _cancel_disconnect_notice(self):
+        """Drop a notice that has not yet committed to being sent.
+
+        Deliberately will not cancel past the point of no return: once the grace
+        window has elapsed the task may be mid-send, and killing it there would leave
+        _disconnect_notice_sent True with nothing actually posted — the draft paused,
+        the room never told why.
+        """
+        task = self._disconnect_notice_task
+        if task and not task.done() and not self._disconnect_notice_sent:
+            task.cancel()
+            self._disconnect_notice_task = None
 
     # ============== Helper Methods ==============
 
@@ -1691,10 +1909,23 @@ class DraftSetupManager:
             self.logger.exception(f"Error starting draft: {e}")
             
     async def check_session_stage_and_organize(self):
-        """Check database for session stage and organize seating if appropriate"""
+        """Check database for session stage and organize seating if appropriate.
+
+        This is the only route to emit('setSeating'), so the "never re-seat a draft
+        that is under way" rule belongs here rather than in each caller. It used to
+        rest entirely on seating_order_set staying True, which made that flag a latch
+        nobody could clear safely — and the moment a second caller had reason to clear
+        it, the rule had to be re-derived from scratch at that call site.
+        """
         if self.seating_order_set or self.seating_attempts >= 4:
             return  # Already set or max attempts reached
-            
+        if self.drafting or self.draftPaused or self._should_disconnect:
+            self.logger.info(
+                "Not organizing seating: the draft is already under way or shutting down"
+            )
+            return
+
+
         try:
             # Fetch draft session from database
             draft_session = await DraftSession.get_by_session_id(self.session_id)
@@ -2160,6 +2391,11 @@ class DraftSetupManager:
             reason: Optional description of why cleanup is happening (for logging)
         """
         self.logger.info(f"[LIFECYCLE] === CLEANUP START === Reason: {reason}")
+        # A pending disconnect notice outlives this object otherwise: /mutiny or an
+        # ownership loss during the grace window would still post "please reconnect"
+        # for a draft this manager no longer runs.
+        self._disconnect_notice_sent = False   # nothing was posted, so let it be dropped
+        self._cancel_disconnect_notice()
         self.logger.info(f"[LIFECYCLE] Manager instance ID: {id(self)}")
         self.logger.info(f"[LIFECYCLE] Socket connected before cleanup: {self.socket_client.connected}")
         self.logger.info(f"[LIFECYCLE] Session in ACTIVE_MANAGERS before cleanup: {self.session_id in ACTIVE_MANAGERS}")

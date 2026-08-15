@@ -18,6 +18,7 @@ def _manager():
     m.session_type = "premade"
     m.guild_id = "42"
     m.logger = MagicMock()
+    m._disconnect_notice_task = None  # _on_end_draft drops any pending disconnect notice
     return m
 
 

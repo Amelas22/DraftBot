@@ -24,6 +24,20 @@ def is_test_mode() -> bool:
     """Returns True if TEST_MODE env var is set to a truthy value."""
     return os.environ.get("TEST_MODE", "false").lower() in ("true", "1", "yes")
 
+def is_disconnect_autopause_enabled() -> bool:
+    """Whether the bot may actually pause a draft when a player drops mid-draft.
+
+    Off by default, which runs the whole decision in shadow: the bot works out what
+    it would do and logs it, but emits nothing to Draftmancer and says nothing in
+    Discord. Draftmancer only ever delivers 'userDisconnected' to a session's
+    non-playing owner, and no DraftBot build has ever subscribed to it — so the first
+    evidence that it arrives at all, and how often, comes from those logs. Acting on
+    an event we have never observed would mean pausing real drafts to find out.
+
+    Set DISCONNECT_AUTOPAUSE=true once the logs show it firing when expected.
+    """
+    return os.environ.get("DISCONNECT_AUTOPAUSE", "false").lower() in ("true", "1", "yes")
+
 class Config:
     def __init__(self):
         # Base configuration for all guilds

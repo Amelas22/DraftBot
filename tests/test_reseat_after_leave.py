@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from services.draft_setup_manager import DraftSetupManager
+from conftest import make_manager
 
 SEATS = ["Adham", "Birb", "LSV", "gregg", "Mack", "Mark R"]
 
@@ -28,16 +28,21 @@ def _users(names):
 
 
 def _manager(sign_ups):
-    mgr = DraftSetupManager(session_id="s", draft_id="d", cube_id="c", guild_id="g")
-    mgr.socket_client = MagicMock()
-    mgr.socket_client.connected = True
-    mgr.socket_client.emit = AsyncMock(return_value=True)
+    mgr = make_manager()
     mgr.expected_user_count = len(sign_ups)
     mgr.desired_seating_order = list(sign_ups)
     mgr.draft_channel_id = "chan"
     # Discord I/O is not what this is about.
     mgr.update_status_message_after_user_change = AsyncMock()
     return mgr
+
+
+def _already_seated(mgr, seats=SEATS):
+    """The state the bot is in once it has seated the table."""
+    mgr.session_users = _users(seats)
+    mgr.users_count = len(seats)
+    mgr.seating_order_set = True
+    mgr.seated_user_ids = {f"id-{n}" for n in seats}
 
 
 def _db_session(sign_ups):
@@ -87,11 +92,7 @@ async def test_a_player_leaving_after_seating_clears_the_seated_flag():
     """The narrower contract the recovery depends on: once a seated player is gone,
     the bot must stop believing the seating it sent is still valid."""
     mgr = _manager(SEATS)
-    # the state the bot is in once it has seated everyone
-    mgr.session_users = _users(SEATS)
-    mgr.users_count = len(SEATS)
-    mgr.seating_order_set = True
-    mgr.seated_user_ids = {f"id-{n}" for n in SEATS}
+    _already_seated(mgr)
 
     with patch("services.draft_setup_manager.DraftSession.get_by_session_id",
                new=AsyncMock(return_value=_db_session(SEATS))):
@@ -110,10 +111,7 @@ async def test_a_seated_player_swapped_for_a_newcomer_is_noticed():
     it and reproduce the original incident with no way back.
     """
     mgr = _manager(SEATS)
-    mgr.session_users = _users(SEATS)
-    mgr.users_count = len(SEATS)
-    mgr.seating_order_set = True
-    mgr.seated_user_ids = {f"id-{n}" for n in SEATS}
+    _already_seated(mgr)
 
     swapped = [n for n in SEATS if n != "gregg"] + ["latecomer"]
     assert len(swapped) == len(SEATS), "the point of this test is that the count holds"
@@ -123,6 +121,43 @@ async def test_a_seated_player_swapped_for_a_newcomer_is_noticed():
         await mgr._on_session_users(_users(swapped))
 
     assert mgr.seating_order_set is False
+
+
+@pytest.mark.asyncio
+async def test_the_seating_machinery_itself_refuses_to_seat_a_live_draft():
+    """The invariant belongs to check_session_stage_and_organize, not to its callers.
+
+    It is the only route to emit('setSeating'), and it used to rest entirely on
+    seating_order_set being True — which made that flag a latch nobody could clear
+    safely. This branch adds a second caller that clears it, and any future one would
+    otherwise have to re-derive the same three-flag guard or silently re-seat a draft
+    already in progress.
+
+    The second half of the test is what stops the first half being vacuous: with
+    drafting cleared and nothing else changed, the same call does seat.
+    """
+    mgr = _manager(SEATS)
+    _already_seated(mgr)
+    mgr.seating_order_set = False  # something invalidated the seating
+    mgr.drafting = True
+    mgr._get_draft_channel = AsyncMock(return_value=None)
+
+    attempts = []
+
+    async def fake_attempt(desired_seating_order):
+        attempts.append(list(desired_seating_order))
+
+    mgr.attempt_seating_order = fake_attempt
+
+    with patch("services.draft_setup_manager.DraftSession.get_by_session_id",
+               new=AsyncMock(return_value=_db_session(SEATS))):
+        await mgr.check_session_stage_and_organize()
+        assert not attempts, "seating a draft that is already under way scrambles it"
+
+        mgr.drafting = False
+        await mgr.check_session_stage_and_organize()
+
+    assert attempts, "with the draft not under way the same call must seat"
 
 
 @pytest.mark.asyncio
@@ -157,15 +192,12 @@ async def test_an_unseated_arrival_does_not_reset_anything():
 
 @pytest.mark.asyncio
 async def test_a_disconnect_during_the_draft_does_not_disturb_the_seating():
-    """The dangerous case. Nothing in check_session_stage_and_organize checks
-    self.drafting — seating_order_set IS the latch that stops the seating being
-    touched again — so clearing it mid-draft would let a reconnect re-emit
-    setSeating into a live draft. Worse than the bug this branch fixes."""
+    """The dangerous case: re-emitting setSeating into a live draft would be worse
+    than the bug this fixes. check_session_stage_and_organize now refuses to seat
+    while self.drafting, so this is the second of two locks — the bot also keeps its
+    record of who it seated rather than throwing it away on a mid-draft wobble."""
     mgr = _manager(SEATS)
-    mgr.session_users = _users(SEATS)
-    mgr.users_count = len(SEATS)
-    mgr.seating_order_set = True
-    mgr.seated_user_ids = {f"id-{n}" for n in SEATS}
+    _already_seated(mgr)
     mgr.drafting = True
 
     with patch("services.draft_setup_manager.DraftSession.get_by_session_id",
@@ -178,10 +210,7 @@ async def test_a_disconnect_during_the_draft_does_not_disturb_the_seating():
 @pytest.mark.asyncio
 async def test_a_paused_draft_is_left_alone_too():
     mgr = _manager(SEATS)
-    mgr.session_users = _users(SEATS)
-    mgr.users_count = len(SEATS)
-    mgr.seating_order_set = True
-    mgr.seated_user_ids = {f"id-{n}" for n in SEATS}
+    _already_seated(mgr)
     mgr.draftPaused = True
 
     with patch("services.draft_setup_manager.DraftSession.get_by_session_id",
@@ -235,10 +264,7 @@ async def test_flapping_cannot_reseat_without_limit():
     on every departure would let someone leaving and rejoining drive setSeating
     forever."""
     mgr = _manager(SEATS)
-    mgr.session_users = _users(SEATS)
-    mgr.users_count = len(SEATS)
-    mgr.seating_order_set = True
-    mgr.seated_user_ids = {f"id-{n}" for n in SEATS}
+    _already_seated(mgr)
     mgr.seating_attempts = 3
 
     with patch("services.draft_setup_manager.DraftSession.get_by_session_id",
