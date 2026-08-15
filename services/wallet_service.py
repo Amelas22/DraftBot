@@ -81,6 +81,28 @@ async def _sum_amount(session, *conditions) -> int:
     return int(result.scalar() or 0)
 
 
+# The one failure a caller answers differently: "you have no money" is fixed by
+# depositing, "that amount is nonsense" is not. Named once here so the layer that
+# tags it and the layer that switches on it cannot drift apart on a typo.
+INSUFFICIENT_FUNDS = "insufficient_funds"
+
+
+class InsufficientFunds(ValueError):
+    """Not enough available tix. A ValueError subclass so every existing
+    ``except ValueError`` keeps catching it, but a distinct type so a caller can tell
+    this apart from the other reasons a transfer is refused.
+
+    Carries ``available`` only — the shortfall is the caller's own amount minus that,
+    which every caller already has. The message names the holder for the log; it is
+    deliberately not what a player is shown, since it reads back their Discord id.
+    """
+
+    def __init__(self, player_id: str, needed: int, available: int):
+        super().__init__(
+            f"Insufficient funds: {player_id} needs {needed}, has {available}")
+        self.available = available
+
+
 async def balance_in(session, guild_id: str, player_id: str) -> int:
     """A holder's balance inside an existing session/transaction — the single definition,
     reused by every caller that needs to check funds within its own transaction."""
@@ -257,8 +279,7 @@ async def pay(
                 return existing[0], existing[1]
             balance = await balance_in(session, guild_id, from_player)
             if amount > balance:
-                raise ValueError(
-                    f"Insufficient funds: {from_player} needs {amount}, has {balance}")
+                raise InsufficientFunds(from_player, amount, balance)
             rows = await transfer_in(session, guild_id, from_player, to_player,
                                      amount, source, notes)
             logger.info(f"pay: {from_player} -> {to_player} {amount} tix (source {source})")
