@@ -211,6 +211,7 @@ class DraftSetupManager:
         self.session_users = []
         self.seating_attempts = 0
         self.seating_order_set = False
+        self.seated_user_ids = set()   # Draftmancer ids we actually seated
         self.last_db_check_time = None
         self.db_check_cooldown = 15
         self.expected_user_count = 0
@@ -385,7 +386,45 @@ class DraftSetupManager:
             left_user_name = next(iter(left_users)) if left_users else "Unknown"
             self.logger.info(f"User {left_user_name} joined during active ready check - invalidating ready check")
             await self.invalidate_ready_check(left_user_name)
-        
+
+        # A player we had already SEATED has left. Draftmancer drops them from the
+        # seating, so the order we sent no longer describes the room — but nothing
+        # here reset seating_order_set unless a ready check happened to be running,
+        # and check_session_stage_and_organize returns at its first line while that
+        # flag is True. A player leaving in the gap between the seating landing and
+        # the ready check starting therefore left the session mis-seated with no way
+        # back: their rejoin was detected and then silently discarded, and the only
+        # remaining move was /mutiny. Seen in prod 2026-08-14 22:54.
+        #
+        # Two limits on it. Only for someone we actually seated, so an unseated extra
+        # wandering off cannot throw away a good seating. And only before the draft is
+        # under way: past that point this flag is the latch that stops anything
+        # touching the seating again — nothing in check_session_stage_and_organize
+        # checks self.drafting — so clearing it on a mid-draft disconnect would let a
+        # reconnect re-emit setSeating into a live draft, which is worse than the bug.
+        #
+        # Asks "is anyone we seated missing" rather than "did the count drop". The two
+        # are not the same: one seated player leaving while a newcomer arrives in the
+        # same payload leaves the count identical and the seating just as stale, and a
+        # bot reconnect re-reads the room at whatever size it now is. The set is the
+        # table's size, so computing it on every event costs nothing worth guarding.
+        if (self.seating_order_set
+                and not self.drafting
+                and not self.draftPaused
+                and not self._should_disconnect):
+            present_ids = {user.get('userID') for user in non_bot_users}
+            departed = self.seated_user_ids - present_ids
+            if departed:
+                # seating_attempts is deliberately NOT reset: it caps re-seating at 4
+                # for the whole session, so a player flapping in and out cannot drive
+                # an unbounded setSeating loop.
+                self.logger.info(
+                    f"Seated player(s) {sorted(departed)} left — the seating order is "
+                    f"stale, clearing it so it is set again when they return "
+                    f"(attempt {self.seating_attempts} of 4)"
+                )
+                self.seating_order_set = False
+
         # Check if user list changed and update status message if needed
         if previous_count != self.users_count or len(previous_users) != len(users):
             self.logger.info(f"User count changed from {previous_count} to {self.users_count}, updating status message")
@@ -1550,7 +1589,8 @@ class DraftSetupManager:
 
         # Also reset the seating order flag so it will be re-verified
         self.seating_order_set = False
-        self.seating_attempts = 0  # Reset attempt counter
+        self.seating_attempts = 0
+        self.seated_user_ids = set()
 
         # Note: We don't try to restart the ready check here.
         # The update_status_message_after_user_change method will detect when
@@ -1770,6 +1810,10 @@ class DraftSetupManager:
             # Set the seating order using userIDs (bot not included)
             self.logger.info(f"Setting seating order: {user_id_order}")
             await self.socket_client.emit('setSeating', user_id_order)
+            # Remember who we seated, by id: display names collapse duplicates (the
+            # very case resolve_seating_ids exists to handle) and change on rename,
+            # so a departure can only be detected reliably against these.
+            self.seated_user_ids = set(user_id_order)
             
             # All users are present, so we succeeded
             return True, []
