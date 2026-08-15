@@ -186,19 +186,7 @@ class DraftSetupManager:
         # Initialize DraftSocketClient
         self.socket_client = DraftSocketClient(resource_id=f"DB{draft_id}")
         
-        # Register standard events
-        self.socket_client.sio.on('connect', self._on_connect)
-        self.socket_client.sio.on('connect_error', self._on_connect_error)
-        self.socket_client.sio.on('disconnect', self._on_disconnect)
-        
-        # Register Draftmancer specific events
-        self.socket_client.sio.on('setReady', self._on_set_ready)
-        self.socket_client.sio.on('endDraft', self._on_end_draft)
-        self.socket_client.sio.on('draftPaused', self._on_draft_paused)
-        self.socket_client.sio.on('draftResumed', self._on_draft_resumed)
-        self.socket_client.sio.on('sessionUsers', self._on_session_users)
-        self.socket_client.sio.on('storedSessionSettings', self._on_stored_session_settings)
-        self.socket_client.sio.on('draftLog', self._on_draft_log)
+        self._register_socket_handlers()
         
         # NOTE: self.sio is now deprecated, access via self.socket_client.sio if absolutely needed
         # Mapping properties for compatibility
@@ -212,6 +200,7 @@ class DraftSetupManager:
         self.seating_attempts = 0
         self.seating_order_set = False
         self.seated_user_ids = set()   # Draftmancer ids we actually seated
+        self.disconnected_users = {}   # uid -> name, from Draftmancer mid-draft
         self.last_db_check_time = None
         self.db_check_cooldown = 15
         self.expected_user_count = 0
@@ -335,14 +324,61 @@ class DraftSetupManager:
             # no in-memory timer here.
 
     # Listen for Pause or Unpause (Resume)
-    async def _on_draft_paused(self, data):
-        self.logger.info(f"Draft paused event received: {data}")
+    #
+    # Both are declared `() => void` in Draftmancer's SocketType.ts, so they arrive
+    # with NO payload. A handler that required one would raise TypeError on every
+    # event and leave draftPaused False for ever — the same silent failure as
+    # subscribing to a name nothing emits, which is what this commit is about.
+    # *args rather than a bare signature so that a payload added upstream is ignored
+    # rather than fatal.
+    async def _on_draft_paused(self, *args):
+        self.logger.info("Draft paused event received")
         self.draftPaused = True
 
-    async def _on_draft_resumed(self, data):
-        self.logger.info(f"Draft resumed event received: {data}")
+    async def _on_draft_resumed(self, *args):
+        self.logger.info("Draft resumed event received")
         self.draftPaused = False
+
+    async def _on_resume_on_reconnection(self, *args):
+        """Draftmancer's signal that the LAST disconnected player is back.
+
+        Not a duplicate of userDisconnected: Session.reconnectUser deletes the user
+        from disconnectedUsers and then branches — only the still-missing case calls
+        broadcastDisconnectedUsers(). When the map empties it calls
+        resumeOnReconnection instead, so an empty userDisconnected payload is never
+        sent and this is the only event that says everyone is back.
+
+        Draftmancer respects our pause here: resumeOnReconnection only restarts the
+        countdowns `if (!this.draftPaused)`, so a draft the bot paused stays paused.
+        """
+        self.disconnected_users = {}
+        self.logger.info("Draftmancer reports the last disconnected player reconnected")
         
+    def _register_socket_handlers(self):
+        """Subscribe to the events Draftmancer actually emits.
+
+        These names are a contract with another codebase (Draftmancer's
+        src/Session.ts), and getting one wrong fails silently — the handler simply
+        never runs. Two did: 'draftPaused'/'draftResumed' were subscribed while
+        Draftmancer emits 'pauseDraft'/'resumeDraft', so the bot never once learned
+        that a draft had been paused. Extracted so the list can be asserted in a test
+        rather than being an inline detail of __init__.
+        """
+        # socket.io transport events
+        self.socket_client.sio.on('connect', self._on_connect)
+        self.socket_client.sio.on('connect_error', self._on_connect_error)
+        self.socket_client.sio.on('disconnect', self._on_disconnect)
+
+        # Draftmancer events
+        self.socket_client.sio.on('setReady', self._on_set_ready)
+        self.socket_client.sio.on('endDraft', self._on_end_draft)
+        self.socket_client.sio.on('pauseDraft', self._on_draft_paused)
+        self.socket_client.sio.on('resumeDraft', self._on_draft_resumed)
+        self.socket_client.sio.on('sessionUsers', self._on_session_users)
+        self.socket_client.sio.on('userDisconnected', self._on_user_disconnected)
+        self.socket_client.sio.on('resumeOnReconnection', self._on_resume_on_reconnection)
+        self.socket_client.sio.on('draftLog', self._on_draft_log)
+
     # Listen for user changes in the session
     async def _on_session_users(self, users):
         self.logger.debug(f"Raw users data received: {users}")
@@ -452,8 +488,30 @@ class DraftSetupManager:
             self.logger.info("check session stage from on_session_users")
             await self.check_session_stage_and_organize()
 
-    async def _on_stored_session_settings(self, data):
-        self.logger.info(f"Received updated session settings: {data}")
+    async def _on_user_disconnected(self, data=None):
+        """Draftmancer telling us WHO dropped, which sessionUsers cannot.
+
+        Emitted only while a draft is running (Session.remUser), and it carries the
+        names — where a sessionUsers count going 6 -> 5 leaves the bot to infer who is
+        gone. Production shows this is common rather than exceptional: 58 same-session
+        drop-and-return flaps in three days, a median of 6 seconds apart.
+
+        Recording, not acting: the seating recovery deliberately does nothing during a
+        draft, and this fires only during one. It exists so the next incident can be
+        read from the logs, and so anything that needs to know who is missing has a
+        source that names them.
+        """
+        disconnected = (data or {}).get('disconnectedUsers') or {}
+        self.disconnected_users = {
+            uid: info.get('userName') for uid, info in disconnected.items()
+        }
+        if self.disconnected_users:
+            self.logger.info(
+                f"Draftmancer reports disconnected mid-draft: "
+                f"{sorted(n for n in self.disconnected_users.values() if n)}"
+            )
+        else:
+            self.logger.info("Draftmancer reports everyone reconnected")
 
     # ============== Helper Methods ==============
 
