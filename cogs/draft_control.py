@@ -8,7 +8,11 @@ from discord.ui import View, Button
 from datetime import datetime, timedelta
 from sqlalchemy import select, and_, desc, update
 from database.db_session import db_session
-from services.draft_setup_manager import DraftSetupManager, create_rooms_and_pairings_with_fallback
+from services.draft_setup_manager import (
+    DraftSetupManager,
+    PAUSED_DRAFT_OPTIONS,
+    create_rooms_and_pairings_with_fallback,
+)
 
 # Store active unpause ready checks
 ACTIVE_UNPAUSE_CHECKS = {}
@@ -1096,9 +1100,7 @@ class DraftControlCog(commands.Cog):
             
             await ctx.followup.send(
                 f"⏸️ **Draft paused** by {ctx.author.mention}.\n\n"
-                f"• Use `/unpause` to resume when everyone is ready.\n"
-                f"• Use `/replace_with_bots` to replace disconnected users with bots.\n"
-                f"• Use `/scrap` to start a vote to cancel the draft."
+                f"{PAUSED_DRAFT_OPTIONS}"
             )
                 
         except Exception as e:
