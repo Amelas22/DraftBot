@@ -56,6 +56,13 @@ async def main():
     
     @bot.event
     async def on_ready():
+        # First thing in on_ready: the patch is class-level so it covers the
+        # ViewStore that already exists and every one a later reconnect builds, but
+        # installing it before anything registers a view means the first collision
+        # is also the first one reported.
+        from helpers.view_dispatch_guard import install_dispatch_collision_guard
+        install_dispatch_collision_guard()
+
         try:
             await bot.sync_commands()
             logger.info("Successfully synced commands")

@@ -3582,19 +3582,27 @@ class BetCapToggleButton(CallbackButton):
                 combined_view.add_item(stake_select)
                 
                 # Add bet cap status button (informational only)
+                # No custom_id here either: disabled has nothing to do with it —
+                # py-cord's is_dispatchable() is just `custom_id is not None`, so a
+                # disabled button still takes a dispatch slot and still collides with
+                # the same panel opened by another player in this draft.
                 status_button = discord.ui.Button(
                     label=f"Bet Cap: {status}",
                     style=style,
-                    custom_id=f"bet_cap_status_{self.draft_session_id}",
                     disabled=True
                 )
                 combined_view.add_item(status_button)
                 
                 # Create ON button with its callback
+                # No custom_id: this panel is sent ephemerally, and py-cord keys
+                # dispatch on (type, message_id=None, custom_id) — so an id fixed per
+                # SESSION is shared by every player in that draft who opens it, and
+                # each new panel silently evicts the last. The evicted player's click
+                # then lands on someone else's view, whose callback closes over a
+                # different opener, and tells them "This button is not for you."
                 yes_button = discord.ui.Button(
                     label="Turn ON 🧢",
                     style=discord.ButtonStyle.green,
-                    custom_id=f"cap_yes_{self.draft_session_id}"
                 )
                 
                 async def yes_callback(yes_interaction):
@@ -3609,10 +3617,10 @@ class BetCapToggleButton(CallbackButton):
                 combined_view.add_item(yes_button)
                 
                 # Create OFF button with its callback
+                # Same reasoning as the ON button above.
                 no_button = discord.ui.Button(
                     label="Turn OFF 🏎️", 
                     style=discord.ButtonStyle.red,
-                    custom_id=f"cap_no_{self.draft_session_id}"
                 )
                 
                 async def no_callback(no_interaction):

@@ -114,3 +114,40 @@ def make_manager(**kwargs):
     mgr.socket_client.connected = True
     mgr.socket_client.emit = AsyncMock(return_value=True)
     return mgr
+
+
+@pytest_asyncio.fixture
+async def live_views():
+    """Track discord.ui.View instances and stop them when the test ends.
+
+    A View started under a running loop spawns a timeout task; leaving it running
+    makes pytest report pending tasks at teardown, from whichever test happens to be
+    last. Async on purpose — View.stop() cancels that task, so teardown has to happen
+    while the loop is still open.
+
+    Written out three times across the view-dispatch tests before it landed here.
+    Yields a track(view) callable that returns the view, so it reads inline:
+    ``view = track(SomeView(...))``.
+    """
+    tracked = []
+
+    def track(view):
+        tracked.append(view)
+        return view
+
+    yield track
+    for view in tracked:
+        view.stop()
+
+
+def make_view_store():
+    """A bare py-cord ViewStore for exercising real dispatch registration.
+
+    The ConnectionState it normally holds is only needed for actually dispatching an
+    interaction, so a stand-in is enough for tests about the registration keyspace.
+    """
+    from types import SimpleNamespace
+
+    from discord.ui.view import ViewStore
+
+    return ViewStore(state=SimpleNamespace())
