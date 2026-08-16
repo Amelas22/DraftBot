@@ -7,7 +7,7 @@ for display name logic, including crown icons for leaderboard leaders.
 """
 
 import discord
-from typing import Optional
+from typing import Iterable, Optional
 from leaderboard_config import CROWN_ICONS
 
 
@@ -156,6 +156,22 @@ def get_display_name_by_id(user_id: str, guild: discord.Guild, fallback: str = "
         return get_display_name(member, guild)
     except (ValueError, TypeError):
         return discord.utils.escape_markdown(fallback)
+
+
+SEATING_ORDER_SEPARATOR = " -> "
+
+
+def format_seating_order(display_names: Iterable[str]) -> str:
+    """Render a seating order for an embed field.
+
+    Seating orders are built from raw `sign_ups` values, but the team-name lists
+    shown in the same embed go through get_display_name_by_id, which escapes
+    markdown. Without this, a player named **Bold**User renders bold in one
+    field and literal in the other.
+    """
+    return SEATING_ORDER_SEPARATOR.join(
+        discord.utils.escape_markdown(str(name)) for name in display_names
+    )
 
 
 def format_display_name(display_name: str, user_id: Optional[str] = None, guild: Optional[discord.Guild] = None) -> str:

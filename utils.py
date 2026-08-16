@@ -31,7 +31,7 @@ from services.crown_roles import update_crown_roles_for_guild
 # Module-level dict to track match streak extensions for ring bearer checks
 # {session_id: {player_id: {win_streak_increased: bool, perfect_streak_increased: bool}}}
 MATCH_STREAK_EXTENSIONS = {}
-from helpers.display_names import get_display_name, get_display_name_by_id
+from helpers.display_names import format_seating_order, get_display_name, get_display_name_by_id
 from helpers.skill import (
     PRIOR_MU,
     PRIOR_SIGMA,
@@ -575,7 +575,7 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                         ("\n🔵 **Team Blue Wins:** " + str(team_b_wins) if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"\n**{draft_session.team_b_name} Wins:** {team_b_wins}"), 
                     inline=False)
                 if draft_session.session_type != "premade":
-                    embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+                    embed.add_field(name="Seating Order", value=format_seating_order(seating_order), inline=False)
 
                 # Add stakes information if this is a staked draft
                 if draft_session.session_type == "staked":
@@ -638,7 +638,7 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                 discord_color = discord.Color.dark_magenta()
                 embed = discord.Embed(title=title, description=description, color=discord_color)
                 seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
-                embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+                embed.add_field(name="Seating Order", value=format_seating_order(seating_order), inline=False)
                 bet_embed = None  # Swiss drafts don't have bet outcomes
 
             # Shared draft metadata footer, on the main embed only — bet_embed
@@ -859,7 +859,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                                             discord_color = discord.Color.gold()
                                             embed = discord.Embed(title=title, description=description, color=discord_color)
                                             seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
-                                            embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+                                            embed.add_field(name="Seating Order", value=format_seating_order(seating_order), inline=False)
                                             embed.add_field(name="Standings", value=standings, inline=False)
                                             apply_draft_footer_from_session(embed, draft_session)
 

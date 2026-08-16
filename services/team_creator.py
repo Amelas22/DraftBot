@@ -13,6 +13,7 @@ import random
 from sqlalchemy import update, select
 
 from session import AsyncSessionLocal, DraftSession, StakeInfo
+from helpers.display_names import format_seating_order
 from helpers.draft_footer import apply_draft_footer_from_session
 from models.draft_session import DraftSession as DraftSessionModel
 from utils import split_into_teams, generate_seating_order, reorder_sign_ups, get_formatted_stake_pairs, check_weekly_limits, add_links_to_embed_safely
@@ -266,7 +267,7 @@ async def _create_teams_embed(session, team_a_names, team_b_names, seating_order
         embed.add_field(name=team_a_label, value="\n".join(team_a_names), inline=True)
         embed.add_field(name=team_b_label, value="\n".join(team_b_names), inline=True)
 
-    embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+    embed.add_field(name="Seating Order", value=format_seating_order(seating_order), inline=False)
 
     # Add stakes for staked drafts
     if session_type == "staked":
@@ -315,7 +316,7 @@ async def _create_channel_announcement_embed(session, seating_order, stake_info_
         add_links_to_embed_safely(channel_embed, team_b_links, f"{team_name} Draft Links",
                                   "blue" if session.session_type in ["random", "staked"] else "")
 
-    channel_embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+    channel_embed.add_field(name="Seating Order", value=format_seating_order(seating_order), inline=False)
 
     # Add stakes for staked drafts
     if session_type == "staked":
