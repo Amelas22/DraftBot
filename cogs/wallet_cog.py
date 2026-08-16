@@ -30,7 +30,7 @@ from services.mtgo_tradebot_client import EVENT_TICKET
 from services.tournament_formatter import refresh_boards
 from helpers.money_gate import (
     DEFAULT_WAIT_MINUTES, custodian_name, explain_trade_failure, gate_read, gate_serve,
-    linked_username, spawn_followup,
+    linked_username, mtgo_job_footer, mtgo_trade_prompt, spawn_followup,
 )
 from helpers.permissions import has_bot_manager_role
 
@@ -99,9 +99,9 @@ class WalletCommands(commands.Cog):
         job_id = started["job_id"]
         custodian = await custodian_name()
         await ctx.followup.send(
-            f"**Deposit started.** In MTGO, trade **{amount} {EVENT_TICKET}(s)** to "
-            f"`{custodian}` and accept when the trade window pops. I'll confirm here once it "
-            f"lands.\n_Job `{job_id}` — you have ~{DEFAULT_WAIT_MINUTES} min._", ephemeral=True)
+            f"**Deposit started** — **{amount} {EVENT_TICKET}(s)**. "
+            f"{mtgo_trade_prompt(custodian)}"
+            f"{mtgo_job_footer(job_id)}", ephemeral=True)
 
         # capture only what the poller needs (not ctx) — this task can live for ~14 min
         followup = ctx.followup
@@ -161,9 +161,9 @@ class WalletCommands(commands.Cog):
         job_id = started["job_id"]
         custodian = await custodian_name()
         await ctx.followup.send(
-            f"**Withdraw started** — {amount} tix committed. In MTGO, accept the trade from "
-            f"`{custodian}` when it pops. I'll confirm here once it completes.\n"
-            f"_Job `{job_id}` — you have ~{DEFAULT_WAIT_MINUTES} min._", ephemeral=True)
+            f"**Withdraw started** — **{amount} tix** committed. "
+            f"{mtgo_trade_prompt(custodian)}"
+            f"{mtgo_job_footer(job_id)}", ephemeral=True)
 
         followup = ctx.followup
 
@@ -209,6 +209,19 @@ class WalletCommands(commands.Cog):
             guild_id, str(ctx.author.id), str(player.id), amount,
             notes=f"pay to {player.display_name}")
         if not res.get("ok"):
+            if res.get("code") == wallet_service.INSUFFICIENT_FUNDS:
+                have = res.get("available", 0)
+                # Says where an arriving deposit goes rather than telling the player to
+                # do arithmetic about it: settle_deposit_inflow spends it on a pending
+                # tournament entry first and debts second, so someone with either would
+                # otherwise be surprised to find their deposit gone.
+                return await ctx.followup.send(
+                    f"You have **{have} tix** — sending **{amount}** needs "
+                    f"**{amount - have}** more.\n"
+                    f"Use `/wallet deposit` to trade tix in from MTGO. Deposits "
+                    f"automatically cover any pending tournament entry first, then any "
+                    f"outstanding debts — `/debts summary` shows what you owe.",
+                    ephemeral=True)
             return await ctx.followup.send(f"Couldn't send tix: {res.get('error')}", ephemeral=True)
 
         payer_bal = await wallet_service.get_balance(guild_id, str(ctx.author.id))

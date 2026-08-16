@@ -361,6 +361,11 @@ async def pay(guild_id: str, from_player: str, to_player: str, amount: int, *, n
     """Move tix between two wallets with no MTGO trade (a plain claim transfer)."""
     try:
         debit, credit = await wallet_service.pay(guild_id, from_player, to_player, amount, notes=notes)
+    except wallet_service.InsufficientFunds as e:
+        # Tagged rather than left as prose: the cog answers this one refusal with "go
+        # and deposit", which would be nonsense advice for any of the others.
+        return {"ok": False, "error": str(e),
+                "code": wallet_service.INSUFFICIENT_FUNDS, "available": e.available}
     except ValueError as e:
         return {"ok": False, "error": str(e)}
     # Receiving money is the case you are least likely to be watching for.
@@ -401,7 +406,11 @@ async def settle_debt_from_wallet(guild_id: str, payer_id: str, creditor_id: str
             # formula every wallet op uses
             available = await wallet_service.balance_in(session, guild_id, payer_id)
             if amount > available:
-                return {"ok": False, "error": f"insufficient wallet funds (available {available})"}
+                # Same refusal as pay()'s, tagged the same way so any caller that
+                # wants to answer it with deposit advice can, without matching prose.
+                return {"ok": False,
+                        "error": f"insufficient wallet funds (available {available})",
+                        "code": wallet_service.INSUFFICIENT_FUNDS, "available": available}
 
             # payer must actually owe the creditor at least this much
             debt_balance = int((await session.execute(

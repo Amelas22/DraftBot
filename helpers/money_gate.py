@@ -75,6 +75,28 @@ def add_wallet_howto(embed, guild_id) -> bool:
     return True
 
 
+def mtgo_trade_prompt(custodian: str) -> str:
+    """How a player completes an MTGO trade with the custodian.
+
+    Deposits and withdrawals drive the same serve and so take the same steps, but the
+    two commands used to describe them differently — deposit told the player to open
+    the trade themselves, which is not how the serve works at all. One string so the
+    instructions cannot disagree about a protocol that is identical.
+    """
+    return (f"`{custodian}` will message you in MTGO — reply **YES** and it will open "
+            f"the trade. Accept it and I'll confirm here once it lands.")
+
+
+def mtgo_job_footer(job_id: str) -> str:
+    """The job reference and how long the player has to accept.
+
+    Folded in beside the prompt for the same reason the prompt itself exists: the two
+    commands rendered this line identically and separately, which is exactly how the
+    instructions above it drifted apart in the first place.
+    """
+    return f"\n_Job `{job_id}` — you have ~{DEFAULT_WAIT_MINUTES} min._"
+
+
 def gate_read(ctx) -> str | None:
     """Wallet must be used in a money server. Returns an error string, or None."""
     if not ctx.guild:
