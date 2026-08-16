@@ -268,6 +268,28 @@ class CounterpartySelectView(View):
                 self.guild_id, self.user_id, counterparty_id=counterparty_id
             )
 
+            # Nothing to settle: Discord rejects a select with no options (400, code
+            # 50035), so building the flow from here would kill it outright.
+            #
+            # The picker lists anyone with a non-zero tix balance OR an open card
+            # loan (merge_counterparty_entries), so a card-only counterparty appears
+            # with a balance of 0 — and reaching this means their last card came back
+            # between the menu being drawn and clicked. Note `balance` is the value
+            # captured when the view was built while `positions` is live, so this
+            # deliberately does not claim to notice a tix settlement made meanwhile.
+            # /settle checks the same condition itself, against live values, before it
+            # builds any view.
+            if not build_entity_choices(balance, positions):
+                logger.info(
+                    f"[CounterpartySelect] Nothing left to settle between "
+                    f"{self.user_id} and {counterparty_id}")
+                await interaction.response.edit_message(
+                    content=(f"There's nothing left to settle with "
+                             f"**{get_member_name_plain(self.guild, counterparty_id)}**. "
+                             f"`/debts summary` shows where you stand."),
+                    embed=None, view=None)
+                return
+
             name_decorated = get_member_name(self.guild, counterparty_id)
             name_plain = get_member_name_plain(self.guild, counterparty_id)
 
