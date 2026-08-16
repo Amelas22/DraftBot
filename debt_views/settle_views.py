@@ -232,10 +232,17 @@ class CounterpartySelectView(View):
         # Limit to 25 options (Discord limit)
         options = options[:25]
 
+        # No custom_id: py-cord registers ephemeral views with message_id=None,
+        # so its dispatch key (component_type, message_id, custom_id) has only the
+        # custom_id left to tell instances apart. A fixed one puts every live
+        # instance in ONE process-wide slot, where each new view silently evicts the
+        # last — the evicted view's selections then land on the newest instance (wrong
+        # balances) and, once that stops, on nothing at all. An auto-generated id per
+        # instance gives each view its own slot. Persistent views keep fixed ids;
+        # they are re-registered by id after a restart.
         select = Select(
             placeholder="Select who to settle with...",
             options=options,
-            custom_id="counterparty_select"
         )
         select.callback = self.select_callback
         self.add_item(select)
@@ -610,10 +617,10 @@ class TransferCreditorSelectView(View):
 
         options = options[:25]
 
+        # Ephemeral view — see the note on CounterpartySelectView's select.
         select = Select(
             placeholder="Select whose debt to reduce...",
             options=options,
-            custom_id="transfer_creditor_select"
         )
         select.callback = self.select_callback
         self.add_item(select)
@@ -700,10 +707,10 @@ class DebtorSelectView(View):
 
         options = options[:25]
 
+        # Ephemeral view — see the note on CounterpartySelectView's select.
         select = Select(
             placeholder="Select who to transfer debt from...",
             options=options,
-            custom_id="debtor_select"
         )
         select.callback = self.select_callback
         self.add_item(select)
