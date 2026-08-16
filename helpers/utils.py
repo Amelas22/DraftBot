@@ -30,6 +30,12 @@ def as_messageable(channel: object) -> "discord.abc.Messageable":
     return channel
 
 
+# How long a bot-created thread stays active before Discord auto-archives it.
+# Shared by every thread-spawning feature (quiz discussion, opponent scouting)
+# so they age out together rather than drifting apart per feature.
+THREAD_ARCHIVE_MINUTES = 4320  # 3 days
+
+
 # Define a mapping of cube names to thumbnail URLs
 # This is used for consistent cube thumbnails across the app
 CUBE_THUMBNAILS = {
