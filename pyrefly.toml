@@ -11,6 +11,7 @@ preset = "strict"
 project-includes = [
     "cogs/server_draft_stats.py",
     "helpers/utils.py",
+    "helpers/view_dispatch_guard.py",
     "ready_check.py",
 ]
 
