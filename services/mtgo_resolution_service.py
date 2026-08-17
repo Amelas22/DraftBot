@@ -358,22 +358,71 @@ async def pending_jobs_watchdog(bot=None):
 # ---------------------------------------------------------------------------
 # internal pay (no trade)
 # ---------------------------------------------------------------------------
+async def _settle_owed_portion(guild_id: str, payer_id: str, creditor_id: str,
+                               amount: int) -> dict | None:
+    """Settle up to ``amount`` of what ``payer_id`` owes ``creditor_id``, or None if they
+    owe nothing (or the settlement could not be applied).
+
+    Capped at the outstanding debt because settle_debt_from_wallet refuses an amount that
+    exceeds it. A failure here is deliberately soft: the caller falls through to a plain
+    transfer, which runs its own funds check and surfaces the real error rather than
+    turning a payment into a settlement-shaped one.
+    """
+    balance = await debt_service.get_balance_with(
+        guild_id=guild_id, player_id=payer_id, counterparty_id=creditor_id)
+    if balance >= 0:
+        return None                       # owes them nothing: an ordinary payment
+    res = await settle_debt_from_wallet(
+        guild_id, payer_id, creditor_id, min(amount, -balance))
+    if not res.get("ok"):
+        logger.warning(
+            f"pay: debt settle {payer_id}->{creditor_id} skipped: {res.get('error')}")
+        return None
+    return res
+
+
 async def pay(guild_id: str, from_player: str, to_player: str, amount: int, *, notes: str = None) -> dict:
-    """Move tix between two wallets with no MTGO trade (a plain claim transfer)."""
+    """Move tix between two wallets with no MTGO trade (a plain claim transfer).
+
+    Paying someone you OWE settles that debt (up to the amount owed) rather than landing
+    as a plain transfer that leaves it standing. `/wallet pay` is how a debtor actually
+    pays their creditor, so the ledger has to follow the money — otherwise the tix move,
+    the debt does not, and the pair have to settle it a second time by hand. Anything
+    above the debt moves on as an ordinary payment.
+
+    Note the asymmetry this closes: ``on_inflow`` settles what the RECIPIENT owes, so
+    before this a debtor paying their creditor directly was the one route that skipped
+    settlement entirely — while merely receiving tix would have auto-settled the same debt.
+    """
+    cleared = await _settle_owed_portion(guild_id, from_player, to_player, amount)
+    settled_amount = cleared["amount"] if cleared else 0
+    rest = amount - settled_amount
+
+    if settled_amount:
+        # Tell the creditor, but do NOT run their on_inflow: a settlement must not cascade
+        # down the creditor chain (the rule auto_draw states and keeps).
+        from notification_service import notify_wallet, notify_payment_received
+        await notify_wallet(notify_payment_received, guild_id, to_player, from_player,
+                            settled_amount, note=f"settled {settled_amount} tix of debt")
+
+    if rest <= 0:
+        return {"ok": True, "amount": amount, "debt_settled": cleared, "settled": []}
+
     try:
-        debit, credit = await wallet_service.pay(guild_id, from_player, to_player, amount, notes=notes)
+        debit, credit = await wallet_service.pay(guild_id, from_player, to_player, rest, notes=notes)
     except wallet_service.InsufficientFunds as e:
         # Tagged rather than left as prose: the cog answers this one refusal with "go
         # and deposit", which would be nonsense advice for any of the others.
-        return {"ok": False, "error": str(e),
+        return {"ok": False, "error": str(e), "debt_settled": cleared,
                 "code": wallet_service.INSUFFICIENT_FUNDS, "available": e.available}
     except ValueError as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": str(e), "debt_settled": cleared}
     # Receiving money is the case you are least likely to be watching for.
     from notification_service import notify_payment_received
     drawn = await on_inflow(guild_id, to_player, notify_payment_received,
-                            from_player, amount, note=notes)
-    return {"ok": True, "amount": amount, "tx_ids": [debit.id, credit.id], "settled": drawn}
+                            from_player, rest, note=notes)
+    return {"ok": True, "amount": amount, "tx_ids": [debit.id, credit.id],
+            "debt_settled": cleared, "settled": drawn}
 
 
 # ---------------------------------------------------------------------------
