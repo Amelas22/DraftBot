@@ -3,7 +3,10 @@
 These paths had no coverage, which is how a stale `status=` kwarg survived the move to
 the status-free ledger and broke every settlement at runtime.
 """
+import asyncio
+
 import pytest
+from sqlalchemy import select
 
 from conftest import test_db  # noqa: F401  (fixture)
 from database.db_session import db_session
@@ -171,6 +174,131 @@ async def test_a_deposit_pays_the_players_own_entry_before_their_creditors(test_
     assert await ws.get_balance(GUILD, CRED) == 3      # creditor got only what was left
     assert await ws.get_balance(GUILD, PAYER) == 0
     assert sum(d["amount"] for d in drawn) == 3
+
+
+# ---- a new debt draws against the wallet the moment it appears -------------------
+
+@pytest.mark.asyncio
+async def test_a_new_debt_is_debited_from_the_wallet_immediately(test_db):  # noqa: F811
+    """Losing a staked draft while holding tix must not leave paying up to the debtor's
+    discretion. Settlement used to fire only when money arrived; a debt arriving at
+    someone who ALREADY has funds is the mirror case, and it went uncollected."""
+    await ws.credit_done(GUILD, PAYER, 10, job_id="j1")
+    await _owe(PAYER, CRED, 4, "d1")          # the stake outcome lands
+
+    drawn = await resolution.settle_new_debts(GUILD, [PAYER])
+
+    assert sum(d["amount"] for d in drawn) == 4
+    balances = await debt_service.get_all_balances_for(GUILD, PAYER)
+    assert balances.get(CRED, 0) == 0
+    assert await ws.get_balance(GUILD, PAYER) == 6
+    assert await ws.get_balance(GUILD, CRED) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_new_debt_takes_what_it_can_when_the_wallet_is_short(test_db):  # noqa: F811
+    """Partial funds still collect. Leaving a short wallet untouched would hand back the
+    very discretion this removes -- the remainder simply stays owed."""
+    await ws.credit_done(GUILD, PAYER, 3, job_id="j1")
+    await _owe(PAYER, CRED, 10, "d1")
+
+    drawn = await resolution.settle_new_debts(GUILD, [PAYER])
+
+    assert sum(d["amount"] for d in drawn) == 3
+    assert await ws.get_balance(GUILD, PAYER) == 0
+    balances = await debt_service.get_all_balances_for(GUILD, PAYER)
+    assert balances.get(CRED, 0) == -7, "the unpaid remainder must stay on the books"
+
+
+@pytest.mark.asyncio
+async def test_a_new_debt_against_an_empty_wallet_is_a_clean_no_op(test_db):  # noqa: F811
+    await _owe(PAYER, CRED, 10, "d1")
+
+    assert await resolution.settle_new_debts(GUILD, [PAYER]) == []
+    balances = await debt_service.get_all_balances_for(GUILD, PAYER)
+    assert balances.get(CRED, 0) == -10
+
+
+@pytest.mark.asyncio
+async def test_stake_outcomes_are_debited_as_soon_as_they_are_created(test_db):  # noqa: F811
+    """The slice as the draft-completion path runs it: create the stake debts, then hand
+    the debtors straight to settlement. Losing with a funded wallet settles on the spot."""
+    from models.stake_pairing import StakePairing
+    from services.debt_service import create_debt_entries_from_stakes
+
+    async with db_session() as session:
+        session.add(StakePairing(session_id="s-1", player_a_id=PAYER,
+                                 player_b_id=CRED, amount=4))
+    await ws.credit_done(GUILD, PAYER, 10, job_id="j1")
+
+    debts = await create_debt_entries_from_stakes(
+        guild_id=GUILD, session_id="s-1", winning_team_ids=[CRED])
+    drawn = await resolution.settle_new_debts(GUILD, [debtor for debtor, _, _ in debts])
+
+    assert debts == [(PAYER, CRED, 4)]
+    assert sum(d["amount"] for d in drawn) == 4
+    assert await ws.get_balance(GUILD, PAYER) == 6
+    assert await ws.get_balance(GUILD, CRED) == 4
+    balances = await debt_service.get_all_balances_for(GUILD, PAYER)
+    assert balances.get(CRED, 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_racing_renders_create_one_set_of_stake_debts(test_db):  # noqa: F811
+    """The idempotency check is SELECT-then-insert with no DB uniqueness guard, and the
+    embed that runs it is re-rendered from six call sites. Two racing renders could each
+    see no rows and both insert -- and once a debt is auto-debited, a duplicate is money
+    genuinely taken twice rather than a stray row someone can delete."""
+    from models.stake_pairing import StakePairing
+    from services.debt_service import create_debt_entries_from_stakes
+
+    async with db_session() as session:
+        session.add(StakePairing(session_id="race-1", player_a_id=PAYER,
+                                 player_b_id=CRED, amount=4))
+
+    both = await asyncio.gather(
+        create_debt_entries_from_stakes(guild_id=GUILD, session_id="race-1",
+                                        winning_team_ids=[CRED]),
+        create_debt_entries_from_stakes(guild_id=GUILD, session_id="race-1",
+                                        winning_team_ids=[CRED]),
+    )
+
+    assert sorted(len(r) for r in both) == [0, 1], "exactly one call may create the debts"
+    async with db_session() as session:
+        rows = (await session.execute(
+            select(DebtLedger).where(DebtLedger.source_id == "race-1"))).scalars().all()
+    assert len(rows) == 2, "one debtor row and one creditor row, not four"
+
+
+@pytest.mark.asyncio
+async def test_an_uncollected_stake_debt_is_collected_on_a_later_pass(test_db):  # noqa: F811
+    """Deriving the debtors from create_debt_entries_from_stakes' return value makes
+    settlement one-shot: a replay returns [] so nobody is revisited, and a debtor whose
+    settlement failed -- or who funds their wallet a minute later -- is never collected.
+    Reading the debtors back off the ledger turns every later pass into a retry."""
+    from models.stake_pairing import StakePairing
+    from services.debt_service import create_debt_entries_from_stakes
+
+    async with db_session() as session:
+        session.add(StakePairing(session_id="s-2", player_a_id=PAYER,
+                                 player_b_id=CRED, amount=4))
+
+    debts = await create_debt_entries_from_stakes(
+        guild_id=GUILD, session_id="s-2", winning_team_ids=[CRED])
+    assert await resolution.settle_new_debts(
+        GUILD, [d for d, _, _ in debts]) == [], "empty wallet: nothing to collect yet"
+
+    await ws.credit_done(GUILD, PAYER, 10, job_id="j1")   # funded after the fact
+
+    replay = await create_debt_entries_from_stakes(
+        guild_id=GUILD, session_id="s-2", winning_team_ids=[CRED])
+    assert replay == [], "the creator is idempotent, so it can't name the debtors again"
+
+    debtors = await debt_service.get_draft_debtors(GUILD, "s-2")
+    drawn = await resolution.settle_new_debts(GUILD, debtors)
+
+    assert sum(d["amount"] for d in drawn) == 4
+    assert await ws.get_balance(GUILD, PAYER) == 6
 
 
 # ---- on_inflow: the one call every inflow path makes ----------------------------

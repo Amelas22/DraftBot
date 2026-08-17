@@ -22,6 +22,7 @@ background task within Discord's interaction window.
 """
 import asyncio
 import uuid
+from collections.abc import Iterable
 from datetime import datetime
 
 from loguru import logger
@@ -436,9 +437,11 @@ async def settle_debt_from_wallet(guild_id: str, payer_id: str, creditor_id: str
         return await with_db_retry(_do)
 
 
-async def settle_inflow(guild_id: str, player_id: str) -> list[dict]:
-    """Run ``auto_draw`` for a holder who has just RECEIVED tix. Call this from every
-    inflow path, not just deposits.
+async def settle_inflow(guild_id: str, player_id: str,
+                        occasion: str = "an inflow") -> list[dict]:
+    """Run ``auto_draw`` for a holder, guarded. Call this from every inflow path, not just
+    deposits — and from ``settle_new_debts`` for the mirror case, a debt arriving at
+    someone who already holds tix (``occasion`` only names the trigger in the error log).
 
     Deposits alone are not enough: a payout, a refund, a player-to-player payment or a
     returned withdraw all credit a wallet without going near the deposit path, so a debtor
@@ -461,9 +464,40 @@ async def settle_inflow(guild_id: str, player_id: str) -> list[dict]:
         return []
     try:
         return await auto_draw(guild_id, player_id)
-    except Exception as e:  # noqa: BLE001 - settlement must never fail the inflow itself
-        logger.error(f"settle_inflow: auto_draw failed for {player_id} after an inflow: {e}")
+    except Exception as e:  # noqa: BLE001 - settlement must never fail its trigger
+        logger.error(f"settle_inflow: auto_draw failed for {player_id} after {occasion}: {e}")
         return []
+
+
+async def settle_new_debts(guild_id: str, debtor_ids: Iterable[str]) -> list[dict]:
+    """Draw brand-new debts against what their debtors ALREADY hold.
+
+    The mirror of ``settle_inflow``: that fires when money reaches someone who owes, this
+    when a debt reaches someone who has money. Without it, losing a staked draft while
+    holding tix left paying up to the debtor's discretion — and the whole point of a
+    wallet-backed ledger is that it isn't discretionary.
+
+    De-duplicated because ``auto_draw`` settles a debtor's WHOLE book in one pass, so a
+    loser who owes three people needs one pass, not three.
+    """
+    ids = list(dict.fromkeys(debtor_ids))
+    if not ids:
+        return []
+    # One batched balance read, then only the funded debtors do any work. Most draft
+    # losers have an empty wallet and nothing to draw against, and auto_draw would spend
+    # two sessions apiece just to discover that.
+    balances = await wallet_service.balances_for(guild_id, ids)
+    funded = [pid for pid in ids if balances.get(pid, 0) > 0]
+    if not funded:
+        return []
+    # Concurrent on purpose: MONEY_LOCK covers only each settlement's own transaction, so
+    # the balance reads and the two settlement DMs per creditor run lock-free and would
+    # otherwise just add their round-trips together. Safe because each debtor's failures
+    # are swallowed independently and settle_debt_from_wallet re-checks the live debt and
+    # balance INSIDE the lock, so overlapping work converges instead of over-paying.
+    drawn = await asyncio.gather(*(
+        settle_inflow(guild_id, pid, "a new debt") for pid in funded))
+    return [settlement for per_debtor in drawn for settlement in per_debtor]
 
 
 async def auto_draw(guild_id: str, player_id: str) -> list[dict]:

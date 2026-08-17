@@ -18,7 +18,12 @@ from helpers.draft_footer import apply_draft_footer_from_session
 from services.draft_analysis import DraftAnalysis
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
-from services.debt_service import create_debt_entries_from_stakes, get_balance_with
+from services.debt_service import (
+    create_debt_entries_from_stakes,
+    get_balance_with,
+    get_draft_debtors,
+)
+from services.mtgo_resolution_service import settle_new_debts
 from debt_views import SettleDebtsView
 from debt_views.settle_views import PublicSettleDebtsView
 from models.debt_summary_message import DebtSummaryMessage
@@ -620,15 +625,28 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                             # this is where a loser first learns they owe someone.
                             add_wallet_howto(bet_embed, draft_session.guild_id)
 
-                            # Create debt ledger entries for stake outcomes
+                            # Create the debt ledger entries these outcomes imply, then
+                            # draw them against the losers' wallets: a debt landing on
+                            # someone who already holds tix is settled, not offered to them
+                            # to honour.
+                            # The debtors come from the ledger, not from what this call
+                            # just created: creation is idempotent, so on every later
+                            # render it returns [] while the debts are still there. Reading
+                            # them back makes each render retry anyone still owing, which
+                            # is what stops a settlement that failed once from being
+                            # abandoned for good.
                             try:
                                 await create_debt_entries_from_stakes(
                                     guild_id=draft_session.guild_id,
                                     session_id=draft_session_id,
                                     winning_team_ids=winning_team
                                 )
+                                await settle_new_debts(
+                                    draft_session.guild_id,
+                                    await get_draft_debtors(draft_session.guild_id,
+                                                            draft_session_id))
                             except Exception as e:
-                                logger.error(f"Failed to create debt entries for session {draft_session_id}: {e}")
+                                logger.error(f"Failed to settle stake debts for session {draft_session_id}: {e}")
 
             else:
                 # Code for Swiss drafts
