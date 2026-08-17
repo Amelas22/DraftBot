@@ -13,7 +13,7 @@ import random
 from sqlalchemy import update, select
 
 from session import AsyncSessionLocal, DraftSession, StakeInfo
-from helpers.display_names import format_seating_order
+from helpers.display_names import format_display_name, format_seating_order
 from helpers.draft_footer import apply_draft_footer_from_session
 from models.draft_session import DraftSession as DraftSessionModel
 from utils import split_into_teams, generate_seating_order, reorder_sign_ups, get_formatted_stake_pairs, check_weekly_limits, add_links_to_embed_safely
@@ -255,6 +255,8 @@ async def _create_teams_embed(session, team_a_names, team_b_names, seating_order
     user_links = []
     for user_id, display_name in session.sign_ups.items():
         personalized_link = session.get_draft_link_for_user(display_name)
+        # Label stays RAW: Discord does not process backslash escapes inside a
+        # markdown link label, so escaping here renders literal backslashes.
         user_links.append(f"[{display_name}]({personalized_link})")
 
     add_links_to_embed_safely(embed, user_links, "Your Personalized Draft Links")
@@ -264,8 +266,10 @@ async def _create_teams_embed(session, team_a_names, team_b_names, seating_order
         team_a_label = "🔴 Team Red" if session_type in ["random", "staked"] else session.team_a_name
         team_b_label = "🔵 Team Blue" if session_type in ["random", "staked"] else session.team_b_name
 
-        embed.add_field(name=team_a_label, value="\n".join(team_a_names), inline=True)
-        embed.add_field(name=team_b_label, value="\n".join(team_b_names), inline=True)
+        embed.add_field(name=team_a_label,
+                        value="\n".join(format_display_name(n) for n in team_a_names), inline=True)
+        embed.add_field(name=team_b_label,
+                        value="\n".join(format_display_name(n) for n in team_b_names), inline=True)
 
     embed.add_field(name="Seating Order", value=format_seating_order(seating_order), inline=False)
 
@@ -294,6 +298,7 @@ async def _create_channel_announcement_embed(session, seating_order, stake_info_
 
     for user_id, display_name in session.sign_ups.items():
         personalized_link = session.get_draft_link_for_user(display_name)
+        # Raw label -- see the note in _create_teams_embed.
         link_entry = f"[{display_name}]({personalized_link})"
 
         if session.session_type == 'swiss':
