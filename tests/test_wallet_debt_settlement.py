@@ -355,6 +355,37 @@ async def test_paying_someone_you_do_not_owe_is_still_a_plain_transfer(test_db):
     assert await ws.get_balance(GUILD, CRED) == 3         # 5 in, 2 out to their creditor
     assert await ws.get_balance(GUILD, CRED2) == 2
 
+async def _lend_cards(lender, borrower, quantity, source_id):
+    """Book a card loan: the borrower owes ``quantity`` COPIES back. On a card row
+    ``amount`` is a count of copies, not tix -- which is why every balance read has to
+    filter card_name IS NULL before treating the number as money."""
+    async with db_session() as session:
+        session.add(DebtLedger(guild_id=GUILD, player_id=borrower, counterparty_id=lender,
+                               amount=-quantity, source_type="card_loan",
+                               source_id=source_id, card_name="Black Lotus",
+                               created_by=lender))
+        session.add(DebtLedger(guild_id=GUILD, player_id=lender, counterparty_id=borrower,
+                               amount=quantity, source_type="card_loan",
+                               source_id=source_id, card_name="Black Lotus",
+                               created_by=lender))
+
+
+@pytest.mark.asyncio
+async def test_lent_cards_do_not_block_settling_a_tix_debt(test_db):  # noqa: F811
+    """settle_debt_from_wallet's own debt check is the one balance read in the codebase
+    that omits the tix filter, so it nets copies against money. A payer who owes 5 tix
+    AND has lent 3 cards to the same person looks like they owe 2 -- and their settlement
+    is REJECTED as exceeding the debt, leaving real money uncollected."""
+    await ws.credit_done(GUILD, PAYER, 10, job_id="j1")
+    await _owe(PAYER, CRED, 5, "tix-debt")
+    await _lend_cards(PAYER, CRED, 3, "card-loan")
+
+    res = await resolution.settle_debt_from_wallet(GUILD, PAYER, CRED, 5)
+
+    assert res["ok"], f"5 tix are genuinely owed, but got: {res.get('error')}"
+    assert await ws.get_balance(GUILD, PAYER) == 5
+    assert await ws.get_balance(GUILD, CRED) == 5
+
 
 # ---- on_inflow: the one call every inflow path makes ----------------------------
 

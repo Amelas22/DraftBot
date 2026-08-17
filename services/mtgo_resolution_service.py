@@ -462,12 +462,18 @@ async def settle_debt_from_wallet(guild_id: str, payer_id: str, creditor_id: str
                         "error": f"insufficient wallet funds (available {available})",
                         "code": wallet_service.INSUFFICIENT_FUNDS, "available": available}
 
-            # payer must actually owe the creditor at least this much
+            # payer must actually owe the creditor at least this much, IN TIX. The
+            # card-entity filter is not optional: on a card row ``amount`` is a count of
+            # COPIES, so without it a lent card nets against money owed — a payer owing 5
+            # tix who has lent 3 cards to the same person reads as owing 2, and their
+            # settlement is refused as exceeding the debt, leaving real tix uncollected.
+            # Every other balance read in debt_service applies the same filter.
             debt_balance = int((await session.execute(
                 select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
                     DebtLedger.guild_id == guild_id,
                     DebtLedger.player_id == payer_id,
                     DebtLedger.counterparty_id == creditor_id,
+                    debt_service.TIX_ONLY,
                 ))).scalar() or 0)
             if debt_balance >= 0:
                 return {"ok": False, "error": "no outstanding debt to this creditor"}
