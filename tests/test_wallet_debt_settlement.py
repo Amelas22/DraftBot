@@ -301,6 +301,61 @@ async def test_an_uncollected_stake_debt_is_collected_on_a_later_pass(test_db): 
     assert await ws.get_balance(GUILD, PAYER) == 6
 
 
+# ---- paying someone you owe settles that debt ------------------------------------
+
+@pytest.mark.asyncio
+async def test_paying_a_creditor_settles_that_debt(test_db):  # noqa: F811
+    """Reported live: keezles owed Birb 10, sent 10 with /wallet pay, and the debt stayed
+    on the books until Birb cleared it by hand. Settlement fired only for the RECIPIENT's
+    debts (on_inflow), so a debtor paying their creditor directly was the one route that
+    skipped it -- while merely RECEIVING tix would have settled the very same debt."""
+    await ws.credit_done(GUILD, PAYER, 10, job_id="j1")
+    await _owe(PAYER, CRED, 4, "d1")
+
+    res = await resolution.pay(GUILD, PAYER, CRED, 4)
+
+    assert res["ok"]
+    balances = await debt_service.get_all_balances_for(GUILD, PAYER)
+    assert balances.get(CRED, 0) == 0, "the debt should be cleared, not just the tix moved"
+    assert await ws.get_balance(GUILD, PAYER) == 6
+    assert await ws.get_balance(GUILD, CRED) == 4
+    assert await ws.total_wallets() == 10, "the tix must move exactly once, not twice"
+
+
+@pytest.mark.asyncio
+async def test_paying_more_than_the_debt_settles_it_and_sends_the_rest(test_db):  # noqa: F811
+    """Overpaying stays one command: the debt closes and the surplus lands as an ordinary
+    payment, so the creditor ends up with the whole amount either way."""
+    await ws.credit_done(GUILD, PAYER, 10, job_id="j1")
+    await _owe(PAYER, CRED, 3, "d1")
+
+    res = await resolution.pay(GUILD, PAYER, CRED, 8)
+
+    assert res["ok"]
+    assert res["debt_settled"]["amount"] == 3
+    balances = await debt_service.get_all_balances_for(GUILD, PAYER)
+    assert balances.get(CRED, 0) == 0
+    assert await ws.get_balance(GUILD, CRED) == 8      # 3 settling the debt + 5 plain
+    assert await ws.get_balance(GUILD, PAYER) == 2
+    assert await ws.total_wallets() == 10
+
+
+@pytest.mark.asyncio
+async def test_paying_someone_you_do_not_owe_is_still_a_plain_transfer(test_db):  # noqa: F811
+    """Regression guard: debt-awareness must not disturb the ordinary case, including the
+    recipient's own auto-draw on the way in."""
+    await ws.credit_done(GUILD, PAYER, 10, job_id="j1")
+    await _owe(CRED, CRED2, 2, "d1")          # the RECIPIENT owes someone else
+
+    res = await resolution.pay(GUILD, PAYER, CRED, 5)
+
+    assert res["ok"] and res["debt_settled"] is None
+    assert [d["amount"] for d in res["settled"]] == [2]   # recipient's debt drawn as before
+    assert await ws.get_balance(GUILD, PAYER) == 5
+    assert await ws.get_balance(GUILD, CRED) == 3         # 5 in, 2 out to their creditor
+    assert await ws.get_balance(GUILD, CRED2) == 2
+
+
 # ---- on_inflow: the one call every inflow path makes ----------------------------
 
 @pytest.mark.asyncio

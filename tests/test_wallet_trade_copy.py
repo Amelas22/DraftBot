@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from conftest import test_db  # noqa: F401  (fixture)
 from helpers.money_gate import mtgo_trade_prompt
 
 
@@ -148,7 +149,7 @@ def test_the_funds_failure_is_its_own_type():
 
 
 @pytest.mark.asyncio
-async def test_the_funds_failure_reaches_the_cog_tagged():
+async def test_the_funds_failure_reaches_the_cog_tagged(test_db):  # noqa: F811
     """The tests above hand the cog a ready-made result, so they pin the cog's half of
     the contract and nothing else. This pins the other half: that resolution.pay really
     does turn the exception into the code the cog switches on. Without it, dropping the
@@ -169,7 +170,7 @@ async def test_the_funds_failure_reaches_the_cog_tagged():
 
 
 @pytest.mark.asyncio
-async def test_other_value_errors_stay_untagged():
+async def test_other_value_errors_stay_untagged(test_db):  # noqa: F811
     from services import mtgo_resolution_service as resolution
 
     with patch("services.wallet_service.pay",
