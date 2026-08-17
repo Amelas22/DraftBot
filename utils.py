@@ -18,7 +18,12 @@ from helpers.draft_footer import apply_draft_footer_from_session
 from services.draft_analysis import DraftAnalysis
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
-from services.debt_service import create_debt_entries_from_stakes, get_balance_with
+from services.debt_service import (
+    create_debt_entries_from_stakes,
+    get_balance_with,
+    get_draft_debtors,
+)
+from services.mtgo_resolution_service import settle_new_debts
 from debt_views import SettleDebtsView
 from debt_views.settle_views import PublicSettleDebtsView
 from models.debt_summary_message import DebtSummaryMessage
@@ -31,7 +36,7 @@ from services.crown_roles import update_crown_roles_for_guild
 # Module-level dict to track match streak extensions for ring bearer checks
 # {session_id: {player_id: {win_streak_increased: bool, perfect_streak_increased: bool}}}
 MATCH_STREAK_EXTENSIONS = {}
-from helpers.display_names import get_display_name, get_display_name_by_id
+from helpers.display_names import format_seating_order, get_display_name, get_display_name_by_id
 from helpers.skill import (
     PRIOR_MU,
     PRIOR_SIGMA,
@@ -575,7 +580,7 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                         ("\n🔵 **Team Blue Wins:** " + str(team_b_wins) if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"\n**{draft_session.team_b_name} Wins:** {team_b_wins}"), 
                     inline=False)
                 if draft_session.session_type != "premade":
-                    embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+                    embed.add_field(name="Seating Order", value=format_seating_order(seating_order), inline=False)
 
                 # Add stakes information if this is a staked draft
                 if draft_session.session_type == "staked":
@@ -620,15 +625,28 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                             # this is where a loser first learns they owe someone.
                             add_wallet_howto(bet_embed, draft_session.guild_id)
 
-                            # Create debt ledger entries for stake outcomes
+                            # Create the debt ledger entries these outcomes imply, then
+                            # draw them against the losers' wallets: a debt landing on
+                            # someone who already holds tix is settled, not offered to them
+                            # to honour.
+                            # The debtors come from the ledger, not from what this call
+                            # just created: creation is idempotent, so on every later
+                            # render it returns [] while the debts are still there. Reading
+                            # them back makes each render retry anyone still owing, which
+                            # is what stops a settlement that failed once from being
+                            # abandoned for good.
                             try:
                                 await create_debt_entries_from_stakes(
                                     guild_id=draft_session.guild_id,
                                     session_id=draft_session_id,
                                     winning_team_ids=winning_team
                                 )
+                                await settle_new_debts(
+                                    draft_session.guild_id,
+                                    await get_draft_debtors(draft_session.guild_id,
+                                                            draft_session_id))
                             except Exception as e:
-                                logger.error(f"Failed to create debt entries for session {draft_session_id}: {e}")
+                                logger.error(f"Failed to settle stake debts for session {draft_session_id}: {e}")
 
             else:
                 # Code for Swiss drafts
@@ -638,7 +656,7 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                 discord_color = discord.Color.dark_magenta()
                 embed = discord.Embed(title=title, description=description, color=discord_color)
                 seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
-                embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+                embed.add_field(name="Seating Order", value=format_seating_order(seating_order), inline=False)
                 bet_embed = None  # Swiss drafts don't have bet outcomes
 
             # Shared draft metadata footer, on the main embed only — bet_embed
@@ -859,7 +877,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                                             discord_color = discord.Color.gold()
                                             embed = discord.Embed(title=title, description=description, color=discord_color)
                                             seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
-                                            embed.add_field(name="Seating Order", value=" -> ".join(seating_order), inline=False)
+                                            embed.add_field(name="Seating Order", value=format_seating_order(seating_order), inline=False)
                                             embed.add_field(name="Standings", value=standings, inline=False)
                                             apply_draft_footer_from_session(embed, draft_session)
 

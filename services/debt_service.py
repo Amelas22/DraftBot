@@ -17,6 +17,14 @@ from models.stake_pairing import StakePairing
 # queries go through _open_card_groups instead.
 TIX_ONLY = DebtLedger.card_name.is_(None)
 
+# Serializes the check-then-insert in create_debt_entries_from_stakes. That check is a
+# SELECT with no DB uniqueness guard behind it, and it runs from an embed renderer with
+# six call sites, so two concurrent renders could each find no rows and both insert.
+# An in-process lock is sufficient because the bot is the database's only writer (the
+# same reasoning wallet_service.MONEY_LOCK rests on). Held only around one short
+# transaction, and taken nowhere else — no lock ordering to get wrong.
+_STAKE_DEBT_LOCK = asyncio.Lock()
+
 
 async def create_ledger_entries(
     guild_id: str,
@@ -483,6 +491,12 @@ async def create_debt_entries_from_stakes(
     This function is idempotent - if debt entries already exist for this session,
     it will skip creation and return an empty list.
 
+    Settling those debts is the CALLER's job, not this one's: writing the ledger rows is
+    a pure debt-layer operation, while drawing them against a wallet moves money and
+    belongs a layer up. The one caller (utils.generate_draft_summary_embed) hands the
+    returned debtors straight to mtgo_resolution_service.settle_new_debts — the empty
+    list on replay is what stops a re-render charging anyone twice.
+
     Args:
         guild_id: The guild this draft belongs to
         session_id: The draft session ID
@@ -494,8 +508,11 @@ async def create_debt_entries_from_stakes(
     winning_team_set = set(winning_team_ids)
     debts_created = []
 
-    # Single session for everything: idempotency check, read stakes, create all entries
-    async with db_session() as session:
+    # Single session for everything: idempotency check, read stakes, create all entries.
+    # Serialized (see _STAKE_DEBT_LOCK) so the check and the insert can't be interleaved
+    # by a concurrent render — duplicated stake debts stop being a cosmetic problem once
+    # they are auto-debited from a wallet.
+    async with _STAKE_DEBT_LOCK, db_session() as session:
         # Idempotency check: see if debt entries already exist for this session
         existing_query = select(DebtLedger).where(
             DebtLedger.source_type == 'draft',
@@ -576,6 +593,32 @@ async def create_debt_entries_from_stakes(
 
     logger.info(f"Created {len(debts_created)} debt entries for session {session_id}")
     return debts_created
+
+
+async def get_draft_debtors(guild_id: str, session_id: str) -> list[str]:
+    """Everyone left owing tix from this draft's stake outcomes.
+
+    Settlement callers use THIS rather than create_debt_entries_from_stakes' return
+    value, which names the debtors only on the pass that created them: an idempotent
+    replay returns [], so a debtor whose settlement failed — or who funded their wallet
+    a minute later — would never be revisited. Reading them back off the ledger makes
+    every subsequent pass a free retry, and settling an already-settled debt is a no-op
+    because the balance it draws against is zero.
+
+    Returns everyone the draft made a debtor, settled or not; deciding who still owes
+    is settlement's job, and it re-checks that inside its own transaction anyway.
+    """
+    async with db_session() as session:
+        rows = await session.execute(
+            select(DebtLedger.player_id).where(
+                DebtLedger.guild_id == guild_id,
+                DebtLedger.source_type == 'draft',
+                DebtLedger.source_id == session_id,
+                DebtLedger.amount < 0,      # the debtor side of each mirrored pair
+                TIX_ONLY,
+            ).distinct()
+        )
+        return list(rows.scalars().all())
 
 
 async def adjust_debt(
