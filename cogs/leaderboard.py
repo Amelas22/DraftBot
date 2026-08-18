@@ -14,7 +14,9 @@ from leaderboard_config import (
     LEADERBOARD_GROUPS,
     STANDARD_TIMEFRAMES,
     STREAK_TIMEFRAMES,
-    STREAK_CATEGORIES
+    STREAK_CATEGORIES,
+    pinned_timeframe,
+    effective_timeframe,
 )
 
 class TimeframeView(View):
@@ -182,14 +184,10 @@ class LeaderboardCog(commands.Cog):
             # Get timeframes for each category from database or defaults
             timeframes = {}
             for category in LEADERBOARD_CATEGORIES:
-                if category == "hot_streak":
-                    timeframes[category] = "7d"  # Hot streak is always 7 days
-                else:
-                    # Get stored timeframe or default to "lifetime"
-                    if leaderboard_record and hasattr(leaderboard_record, f"{category}_timeframe"):
-                        timeframes[category] = getattr(leaderboard_record, f"{category}_timeframe") or "lifetime"
-                    else:
-                        timeframes[category] = "lifetime"
+                stored = None
+                if leaderboard_record and hasattr(leaderboard_record, f"{category}_timeframe"):
+                    stored = getattr(leaderboard_record, f"{category}_timeframe")
+                timeframes[category] = effective_timeframe(category, guild_id, stored)
         
         # Create a new record if needed
         if not leaderboard_record:
@@ -341,9 +339,11 @@ class LeaderboardCog(commands.Cog):
         # Create the embed
         embed = await create_leaderboard_embed(guild_id, category, timeframe=timeframe)
         
-        # Create view for categories except hot_streak
+        # A board that fixes its own window has nothing to select, so it gets no
+        # view at all -- offering buttons that cannot change the result reads as
+        # a broken control rather than a pinned board.
         view = None
-        if category != "hot_streak":
+        if not pinned_timeframe(category, guild_id):
             view = TimeframeView(self.bot, guild_id, category, current_timeframe=timeframe)
         
         # Get the message ID field name
@@ -355,10 +355,9 @@ class LeaderboardCog(commands.Cog):
             try:
                 message_id = getattr(leaderboard_record, msg_id_field)
                 existing_msg = await channel.fetch_message(int(message_id))
-                if category != "hot_streak":
-                    await existing_msg.edit(embed=embed, view=view)
-                else:
-                    await existing_msg.edit(embed=embed)
+                # Always pass the view, even when it is None: that is what
+                # clears the buttons off a board that used to offer them.
+                await existing_msg.edit(embed=embed, view=view)
                 message_updated = True
                 logger.info(f"Updated existing {category} message {message_id}")
             except discord.NotFound:
@@ -369,12 +368,13 @@ class LeaderboardCog(commands.Cog):
         # Send new message if needed
         if not message_updated:
             try:
-                if category != "hot_streak":
-                    new_msg = await channel.send(embed=embed, view=view)
-                    setattr(leaderboard_record, f"{category}_view_message_id", str(new_msg.id))
-                else:
-                    new_msg = await channel.send(embed=embed)
+                new_msg = await channel.send(embed=embed, view=view)
+                # hot_streak predates the per-category id columns and still
+                # lives in the legacy `message_id` field; see msg_id_field above.
+                if category == "hot_streak":
                     leaderboard_record.message_id = str(new_msg.id)
+                else:
+                    setattr(leaderboard_record, f"{category}_view_message_id", str(new_msg.id))
 
                 async with db_session() as session:
                     leaderboard_record = await session.merge(leaderboard_record)
@@ -446,15 +446,9 @@ async def refresh_all_leaderboards(bot):
                     # Get timeframes for each category
                     timeframes = {}
                     for category in LEADERBOARD_CATEGORIES:
-                        if category == "hot_streak":
-                            timeframes[category] = "7d"  # Hot streak is always 7 days
-                        else:
-                            # Get stored timeframe or default to "lifetime"
-                            timeframe_field = f"{category}_timeframe"
-                            if hasattr(leaderboard, timeframe_field):
-                                timeframes[category] = getattr(leaderboard, timeframe_field) or "lifetime"
-                            else:
-                                timeframes[category] = "lifetime"
+                        timeframe_field = f"{category}_timeframe"
+                        stored = getattr(leaderboard, timeframe_field, None)
+                        timeframes[category] = effective_timeframe(category, guild_id, stored)
                     
                     # One PlayersDataCache per guild: fold-backed categories
                     # share the per-timeframe assembly during this refresh.
@@ -480,12 +474,11 @@ async def refresh_all_leaderboards(bot):
                                     message_id = getattr(leaderboard, msg_id_field)
                                     existing_msg = await channel.fetch_message(int(message_id))
                                     
-                                    if category != "hot_streak":
+                                    view = None
+                                    if not pinned_timeframe(category, guild_id):
                                         view = TimeframeView(bot, guild_id, category, current_timeframe=timeframes[category])
-                                        await existing_msg.edit(embed=embed, view=view)
-                                    else:
-                                        await existing_msg.edit(embed=embed)
-                                        
+                                    await existing_msg.edit(embed=embed, view=view)
+
                                     message_updated = True
                                     logger.info(f"Updated {category} leaderboard for guild {guild.name}")
                                 except discord.NotFound:

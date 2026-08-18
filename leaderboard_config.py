@@ -17,6 +17,8 @@ The category will automatically propagate to:
 
 import discord
 
+from config import get_config
+
 # Helper function for formatting (used by all categories)
 def get_medal(rank):
     """Return rank with medal emoji for top 3 positions"""
@@ -105,6 +107,19 @@ CATEGORY_CONFIGS = {
         "color": discord.Color.from_rgb(212, 175, 55),  # Trophy gold
         "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['total_points']} points ({p['total_quizzes']} quizzes)"
     },
+    "sr_ladder": {
+        # "Skill Rating" is what /stats calls this number; "Elo" appears nowhere
+        # a player can see it, so naming the board for it would invent a second
+        # word for one thing.
+        "title": "Skill Rating Ladder",
+        # Two things are deliberately absent. The qualifying rating floor:
+        # naming it would turn the board into a number to defend rather than a
+        # board to reach. And the activity window: the rendered title already
+        # appends it, so repeating it here would only drift when it changes.
+        "description_template": "The server's highest rated players",
+        "color": discord.Color.teal(),
+        "formatter": lambda p, rank: f"{get_medal(rank)}**{p['display_name']}**: {p['rating']}"
+    },
     "draft_win_streak": {
         "title": "Order of the White Lotus",
         "description_template": "Longest consecutive draft win streaks (min {streak_min} draft wins)",
@@ -129,7 +144,7 @@ LEADERBOARD_GROUPS = [
         "key": "performance",
         "title": "🏆 Performance",
         "blurb": "Who's winning — win rates, partnerships, and volume.",
-        "categories": ["draft_record", "match_win", "time_vault_and_key", "drafts_played"],
+        "categories": ["sr_ladder", "draft_record", "match_win", "time_vault_and_key", "drafts_played"],
     },
     {
         "key": "streaks",
@@ -181,6 +196,52 @@ STREAK_TIMEFRAMES = [
 
 # Categories that use streak timeframes
 STREAK_CATEGORIES = ["longest_win_streak", "perfect_streak", "draft_win_streak"]
+
+# Timeframes that actually bound a window. "lifetime" is deliberately absent:
+# it means "no cutoff", which cannot express recent activity.
+BOUNDED_TIMEFRAMES = ("7d", "14d", "30d", "90d")
+
+# Matches the crown_roles default written into every guild config by config.py.
+DEFAULT_CROWN_ACTIVITY_TIMEFRAME = "30d"
+
+
+def crown_activity_timeframe(guild_id):
+    """The window an activity-gated board should use for this guild.
+
+    Follows the guild's crown cycle (crown_roles.timeframe) so "recently
+    active" means the same span players already read off their crowns, and one
+    /set_crown_timeframe moves both together.
+
+    Always returns a bounded window: crowns may legitimately run "lifetime",
+    but a board of active players cannot, so anything unbounded or unrecognised
+    falls back to the crown default.
+    """
+    configured = (get_config(guild_id) or {}).get("crown_roles", {}).get("timeframe")
+    if configured in BOUNDED_TIMEFRAMES:
+        return configured
+    return DEFAULT_CROWN_ACTIVITY_TIMEFRAME
+
+
+# Boards that define their own window, so the timeframe selector does not apply.
+# A value is either the fixed window or a function of the guild. THE place that
+# fact is recorded: every refresh path asks here rather than naming a category,
+# so a pinned board cannot end up windowed one way and titled another, or be
+# handed a selector by whichever loop last posted it.
+PINNED_TIMEFRAMES = {
+    "hot_streak": "7d",
+    "sr_ladder": crown_activity_timeframe,
+}
+
+
+def pinned_timeframe(category, guild_id):
+    """This board's own window, or None if the timeframe selector applies."""
+    pinned = PINNED_TIMEFRAMES.get(category)
+    return pinned(guild_id) if callable(pinned) else pinned
+
+
+def effective_timeframe(category, guild_id, stored=None):
+    """The window to render a board with: its pin, else what the user chose."""
+    return pinned_timeframe(category, guild_id) or stored or "lifetime"
 
 # Valid timeframe values (for validation)
 VALID_TIMEFRAMES = ["14d", "30d", "90d", "lifetime", "active"]
