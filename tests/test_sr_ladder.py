@@ -1,9 +1,9 @@
 """
-Unit tests for the Top Elo leaderboard category.
+Unit tests for the SR Ladder leaderboard category.
 
 The board ranks a guild's highest-rated players who have drafted recently.
 Qualifying requires all three of:
-  - a display rating strictly above TOP_ELO_MIN_RATING
+  - a display rating strictly above SR_LADDER_MIN_RATING
   - a draft inside the guild's crown window (crown_roles.timeframe), so the
     board's "recently" matches the cycle players already know from crowns
   - enough rated games to be established (helpers.skill.is_established)
@@ -35,12 +35,12 @@ from helpers.skill import (
     RATING_POINTS_PER_MU, RATING_SHRINK_GAMES, skill_rating,
 )
 from services.leaderboard_service import (
-    TOP_ELO_LIMIT, TOP_ELO_MIN_RATING, get_top_elo_leaderboard_data,
+    SR_LADDER_LIMIT, SR_LADDER_MIN_RATING, get_sr_ladder_leaderboard_data,
 )
 
 
 GUILD = "789"
-CATEGORY = "top_elo"
+CATEGORY = "sr_ladder"
 
 
 @pytest_asyncio.fixture
@@ -109,7 +109,7 @@ async def _fetch(test_db, *players):
     async with test_db() as session:
         session.add_all(players)
         await session.commit()
-        return await get_top_elo_leaderboard_data(GUILD, "lifetime", 20, session)
+        return await get_sr_ladder_leaderboard_data(GUILD, "lifetime", 20, session)
 
 
 # ============================================================================
@@ -134,7 +134,7 @@ async def test_ranks_qualifying_players_by_rating_descending(test_db):
 @pytest.mark.asyncio
 async def test_excludes_rating_exactly_at_threshold(test_db):
     """The floor is strict: a rating equal to the minimum does not qualify."""
-    data = await _fetch(test_db, player("111", "OnTheLine", TOP_ELO_MIN_RATING))
+    data = await _fetch(test_db, player("111", "OnTheLine", SR_LADDER_MIN_RATING))
 
     assert data == []
 
@@ -142,7 +142,7 @@ async def test_excludes_rating_exactly_at_threshold(test_db):
 @pytest.mark.asyncio
 async def test_includes_rating_one_point_above_threshold(test_db):
     """One point over the floor is enough to qualify."""
-    data = await _fetch(test_db, player("111", "JustOver", TOP_ELO_MIN_RATING + 1))
+    data = await _fetch(test_db, player("111", "JustOver", SR_LADDER_MIN_RATING + 1))
 
     assert [p["player_id"] for p in data] == ["111"]
 
@@ -176,7 +176,7 @@ async def test_returns_at_most_ten_players(test_db):
     data = await _fetch(
         test_db, *[player(f"p{i:02d}", f"Player{i}", 1700 + i) for i in range(12)])
 
-    assert len(data) == TOP_ELO_LIMIT
+    assert len(data) == SR_LADDER_LIMIT
     assert data[0]["rating"] == 1711
 
 
@@ -278,7 +278,7 @@ class TestCategoryRegistration:
     def test_description_does_not_reveal_the_rating_floor(self):
         """The cutoff is deliberately unadvertised (owner's call)."""
         description = CATEGORY_CONFIGS[CATEGORY]["description_template"]
-        assert str(TOP_ELO_MIN_RATING) not in description
+        assert str(SR_LADDER_MIN_RATING) not in description
 
     def test_description_leaves_the_window_to_the_title(self):
         """The rendered title already appends the window, so stating it here
@@ -432,7 +432,7 @@ class _FakeSession:
 
 
 @pytest.mark.asyncio
-async def test_get_leaderboard_data_dispatches_to_the_top_elo_query(test_db, monkeypatch):
+async def test_get_leaderboard_data_dispatches_to_the_sr_ladder_query(test_db, monkeypatch):
     """The category must be wired into the dedicated-query dispatch, or the
     generic path would fold the match ledger and return the wrong board."""
     async with test_db() as session:

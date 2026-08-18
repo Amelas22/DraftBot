@@ -48,13 +48,13 @@ DRAFT_WIN_STREAK_MINIMUMS = {
     'lifetime': 8
 }
 
-# Top Elo board: a short list of the strongest players still showing up.
+# SR Ladder board: a short list of the strongest players still showing up.
 # The rating floor is deliberately not named in the category description --
 # a board that advertises its cutoff invites rating-watching rather than play.
 # The activity window is the guild's crown cycle, not a constant here; see
 # leaderboard_config.crown_activity_timeframe.
-TOP_ELO_MIN_RATING = 1650   # strict: a rating equal to this does not qualify
-TOP_ELO_LIMIT = 10
+SR_LADDER_MIN_RATING = 1650   # strict: a rating equal to this does not qualify
+SR_LADDER_LIMIT = 10
 
 def ensure_datetime(date_value):
     """Convert various date formats to datetime objects"""
@@ -283,7 +283,7 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20,
         "quiz_points": get_quiz_points_leaderboard_data,
         "trophy_quiz_points": get_trophy_quiz_points_leaderboard_data,
         "draft_win_streak": get_draft_win_streak_leaderboard_data,
-        "top_elo": get_top_elo_leaderboard_data,
+        "sr_ladder": get_sr_ladder_leaderboard_data,
     }
     if category in dedicated_query_categories:
         async with db_session() as session:
@@ -921,7 +921,7 @@ async def get_trophy_quiz_points_leaderboard_data(guild_id, timeframe, limit, se
     return leaderboard_data[:limit]
 
 
-async def get_top_elo_leaderboard_data(guild_id, timeframe, limit, session):
+async def get_sr_ladder_leaderboard_data(guild_id, timeframe, limit, session):
     """Highest-rated players who have drafted recently.
 
     Reads player_stats directly: the rating lives in the stored TrueSkill
@@ -947,7 +947,7 @@ async def get_top_elo_leaderboard_data(guild_id, timeframe, limit, session):
         if not is_established(games):
             continue
         rating = skill_rating(p.true_skill_mu, p.true_skill_sigma, games)
-        if rating <= TOP_ELO_MIN_RATING:
+        if rating <= SR_LADDER_MIN_RATING:
             continue
         entries.append({
             "player_id": p.player_id,
@@ -959,7 +959,7 @@ async def get_top_elo_leaderboard_data(guild_id, timeframe, limit, session):
     # Rating desc, then the better-evidenced record, then id -- a total order, so
     # equal ratings don't reshuffle between refreshes.
     entries.sort(key=lambda e: (-e["rating"], -e["rated_games"], e["player_id"]))
-    return entries[:min(limit, TOP_ELO_LIMIT)]
+    return entries[:min(limit, SR_LADDER_LIMIT)]
 
 
 async def get_crown_leaders(guild_id: str, categories: list, timeframe: str = "lifetime", cache=None) -> dict:

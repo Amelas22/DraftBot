@@ -32,8 +32,8 @@ class LeaderboardMessage(Base):
     draft_win_streak_timeframe = Column(String(20), default='lifetime')
     trophy_quiz_points_view_message_id = Column(String(64))
     trophy_quiz_points_timeframe = Column(String(20), default='lifetime')
-    top_elo_view_message_id = Column(String(64))
-    top_elo_timeframe = Column(String(20), default='lifetime')
+    sr_ladder_view_message_id = Column(String(64))
+    sr_ladder_timeframe = Column(String(20), default='lifetime')
 
     def __repr__(self):
         return f"<LeaderboardMessage(guild_id={self.guild_id}, message_id={self.message_id})>"

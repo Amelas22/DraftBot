@@ -107,7 +107,7 @@ CATEGORY_CONFIGS = {
         "color": discord.Color.from_rgb(212, 175, 55),  # Trophy gold
         "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['total_points']} points ({p['total_quizzes']} quizzes)"
     },
-    "top_elo": {
+    "sr_ladder": {
         # "Skill Rating" is what /stats calls this number; "Elo" appears nowhere
         # a player can see it, so naming the board for it would invent a second
         # word for one thing.
@@ -144,7 +144,7 @@ LEADERBOARD_GROUPS = [
         "key": "performance",
         "title": "🏆 Performance",
         "blurb": "Who's winning — win rates, partnerships, and volume.",
-        "categories": ["top_elo", "draft_record", "match_win", "time_vault_and_key", "drafts_played"],
+        "categories": ["sr_ladder", "draft_record", "match_win", "time_vault_and_key", "drafts_played"],
     },
     {
         "key": "streaks",
@@ -229,7 +229,7 @@ def crown_activity_timeframe(guild_id):
 # them changes nothing.
 PINNED_TIMEFRAMES = {
     "hot_streak": lambda guild_id: "7d",
-    "top_elo": crown_activity_timeframe,
+    "sr_ladder": crown_activity_timeframe,
 }
 
 
