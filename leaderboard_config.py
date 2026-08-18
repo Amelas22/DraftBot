@@ -105,6 +105,14 @@ CATEGORY_CONFIGS = {
         "color": discord.Color.from_rgb(212, 175, 55),  # Trophy gold
         "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['total_points']} points ({p['total_quizzes']} quizzes)"
     },
+    "top_elo": {
+        "title": "Top Elo Leaderboard",
+        # The qualifying rating floor is deliberately unstated: naming it would
+        # turn the board into a number to defend rather than a board to reach.
+        "description_template": "Highest rated players who have drafted in the last 2 weeks",
+        "color": discord.Color.teal(),
+        "formatter": lambda p, rank: f"{get_medal(rank)}**{p['display_name']}**: {p['rating']}"
+    },
     "draft_win_streak": {
         "title": "Order of the White Lotus",
         "description_template": "Longest consecutive draft win streaks (min {streak_min} draft wins)",
@@ -129,7 +137,7 @@ LEADERBOARD_GROUPS = [
         "key": "performance",
         "title": "🏆 Performance",
         "blurb": "Who's winning — win rates, partnerships, and volume.",
-        "categories": ["draft_record", "match_win", "time_vault_and_key", "drafts_played"],
+        "categories": ["draft_record", "match_win", "top_elo", "time_vault_and_key", "drafts_played"],
     },
     {
         "key": "streaks",

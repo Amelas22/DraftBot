@@ -4,6 +4,7 @@ from loguru import logger
 from sqlalchemy import select, and_
 from database.db_session import db_session
 from helpers.display_names import get_member_name
+from helpers.skill import is_established, skill_rating
 from models.win_streak_history import WinStreakHistory
 from models.perfect_streak_history import PerfectStreakHistory
 from models.draft_streak_history import DraftStreakHistory
@@ -45,6 +46,13 @@ DRAFT_WIN_STREAK_MINIMUMS = {
     '90d': 5,
     'lifetime': 8
 }
+
+# Top Elo board: a short list of the strongest players still showing up.
+# The rating floor is deliberately not named in the category description --
+# a board that advertises its cutoff invites rating-watching rather than play.
+TOP_ELO_MIN_RATING = 1650   # strict: a rating equal to this does not qualify
+TOP_ELO_ACTIVE_DAYS = 14    # measured against PlayerStats.last_draft_timestamp
+TOP_ELO_LIMIT = 10
 
 def ensure_datetime(date_value):
     """Convert various date formats to datetime objects"""
@@ -273,6 +281,7 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20,
         "quiz_points": get_quiz_points_leaderboard_data,
         "trophy_quiz_points": get_trophy_quiz_points_leaderboard_data,
         "draft_win_streak": get_draft_win_streak_leaderboard_data,
+        "top_elo": get_top_elo_leaderboard_data,
     }
     if category in dedicated_query_categories:
         async with db_session() as session:
@@ -908,6 +917,46 @@ async def get_trophy_quiz_points_leaderboard_data(guild_id, timeframe, limit, se
 
     leaderboard_data = sorted(player_aggregates.values(), key=lambda p: p["total_points"], reverse=True)
     return leaderboard_data[:limit]
+
+
+async def get_top_elo_leaderboard_data(guild_id, timeframe, limit, session):
+    """Highest-rated players who have drafted recently.
+
+    Reads player_stats directly: the rating lives in the stored TrueSkill
+    mu/sigma, so this never needs the match-result ledger fold.
+    """
+    del timeframe  # the activity window is fixed; see TOP_ELO_ACTIVE_DAYS
+
+    # A NULL last_draft_timestamp fails this comparison in SQL, which is what we
+    # want: never having drafted is not recent activity.
+    cutoff = datetime.now() - timedelta(days=TOP_ELO_ACTIVE_DAYS)
+    stmt = select(PlayerStats).where(
+        PlayerStats.guild_id == str(guild_id),
+        PlayerStats.true_skill_mu.isnot(None),
+        PlayerStats.true_skill_sigma.isnot(None),
+        PlayerStats.last_draft_timestamp >= cutoff,
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+
+    entries = []
+    for p in rows:
+        games = (p.games_won or 0) + (p.games_lost or 0)
+        if not is_established(games):
+            continue
+        rating = skill_rating(p.true_skill_mu, p.true_skill_sigma, games)
+        if rating <= TOP_ELO_MIN_RATING:
+            continue
+        entries.append({
+            "player_id": p.player_id,
+            "display_name": p.display_name,
+            "rating": rating,
+            "rated_games": games,
+        })
+
+    # Rating desc, then the better-evidenced record, then id -- a total order, so
+    # equal ratings don't reshuffle between refreshes.
+    entries.sort(key=lambda e: (-e["rating"], -e["rated_games"], e["player_id"]))
+    return entries[:min(limit, TOP_ELO_LIMIT)]
 
 
 async def get_crown_leaders(guild_id: str, categories: list, timeframe: str = "lifetime", cache=None) -> dict:
