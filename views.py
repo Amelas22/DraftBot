@@ -19,6 +19,7 @@ from helpers.money_gate import wallet_howto
 from helpers.display_names import get_display_name, get_display_name_by_id
 from helpers.debt_warning import format_staked_sign_ups, DEBT_WARNING_AGE_DAYS
 from helpers.draft_footer import apply_draft_footer_from_session
+from helpers.opponent_threads import spawn_opponent_threads
 from helpers.permissions import bot_manager_button
 from utils import (
     calculate_pairings,
@@ -1403,6 +1404,16 @@ class PersistentView(discord.ui.View):
                                         .where(DraftSession.session_id == self.draft_session_id)
                                         .values(**update_values))
                 await db_session.commit()
+
+        # One scouting thread per opposing player, so each team has a dedicated
+        # place to pool reads on that opponent. Deliberately after the commit
+        # above: channel_ids and the 'pairings' stage are the draft's critical
+        # path, and threads are a nice-to-have. spawn_opponent_threads owns the
+        # guard (it never raises) and no-ops for the shared "Draft" channel --
+        # and so for swiss, whose only channel is "Draft".
+        await spawn_opponent_threads(
+            channel, team_name, team_a, team_b, session.sign_ups
+        )
 
         return channel.id
 

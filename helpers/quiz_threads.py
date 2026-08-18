@@ -7,7 +7,7 @@ from typing import Optional
 import discord
 from loguru import logger
 
-THREAD_ARCHIVE_MINUTES = 4320  # 3 days
+from helpers.utils import THREAD_ARCHIVE_MINUTES
 
 DISCUSSION_THREAD_STARTER = (
     "💬 Discuss the quiz here — spoilers ahead! Use **Share Results** on your "
