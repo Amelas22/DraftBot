@@ -20,8 +20,8 @@ from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
 from services.debt_service import (
     create_debt_entries_from_stakes,
-    get_balance_with,
     get_draft_debtors,
+    get_pair_position_around_draft,
 )
 from services.mtgo_resolution_service import settle_new_debts
 from debt_views import SettleDebtsView
@@ -2886,25 +2886,28 @@ async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
                 winner_name = sign_ups.get(winner_id, "Unknown")
                 loser_name = sign_ups.get(loser_id, "Unknown")
 
-                # Get pre-draft balance from loser's perspective
-                # Exclude entries from THIS session to get the true pre-existing balance
-                pre_draft_balance = await get_balance_with(
+                # Split the pair's history at this draft's own stake debt: what they
+                # owed BEFORE it, and what has been paid off since. Auto-settlement
+                # writes its rows moments later in this same flow, so anything that
+                # merely excludes the draft rows counts the payment as a pre-existing
+                # counter-debt (see get_pair_position_around_draft).
+                pre_draft_balance, settled_since = await get_pair_position_around_draft(
                     guild_id=draft_session.guild_id,
+                    session_id=session_id,
                     player_id=loser_id,
                     counterparty_id=winner_id,
-                    exclude_session_id=session_id
                 )
 
-                # Calculate new balance after this draft
-                # From loser's perspective: negative = loser owes winner
-                new_balance = pre_draft_balance - amount
+                # Where the pair stands now. From loser's perspective: negative = owes.
+                new_balance = pre_draft_balance - amount + settled_since
 
                 # Convert to absolute values for display
                 previous_debt = abs(pre_draft_balance)
                 new_debt = abs(new_balance)
 
                 # Add to unique outcomes list with balances
-                unique_pairs.append((loser_name, winner_name, amount, loser_id, winner_id, pre_draft_balance, new_balance))
+                unique_pairs.append((loser_name, winner_name, amount, loser_id, winner_id,
+                                     pre_draft_balance, new_balance, settled_since))
 
                 # Add to total stake
                 total_stake += amount
@@ -2914,12 +2917,33 @@ async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
 
             # Format for display with pre-existing debt, this draft, and net total
             formatted_lines = []
-            for loser_name, winner_name, amount, loser_id, winner_id, pre_draft_balance, new_balance in unique_pairs:
+            for (loser_name, winner_name, amount, loser_id, winner_id,
+                 pre_draft_balance, new_balance, settled_since) in unique_pairs:
                 previous_debt = abs(pre_draft_balance)
                 new_debt = abs(new_balance)
 
+                # Paid out of the loser's wallet. This has to come first: the
+                # net-based branches below would otherwise describe a debt that was
+                # PAID as one that was "canceled", which means something else entirely
+                # (two debts offsetting) and tells the player nothing moved.
+                if settled_since > 0:
+                    still_owed = abs(new_balance) if new_balance < 0 else 0
+                    lines = [
+                        (f"{loser_name} \u2192 {winner_name}: {amount} tix"
+                         if still_owed == 0 else f"{loser_name} owes {winner_name}:"),
+                        f"  This draft: {amount} tix",
+                    ]
+                    if previous_debt:
+                        lines.append(f"  Pre-existing: {previous_debt} tix")
+                    if still_owed == 0:
+                        lines.append(f"  Paid automatically from {loser_name}'s wallet")
+                        lines.append("  Nothing left to settle")
+                    else:
+                        lines.append(f"  Paid from wallet: {settled_since} tix")
+                        lines.append(f"  Still owed: {still_owed} tix")
+
                 # Determine net debtor/creditor based on new_balance sign
-                if new_balance < 0:
+                elif new_balance < 0:
                     # NET: Loser owes Winner (most common)
                     net_debtor = loser_name
                     net_creditor = winner_name
