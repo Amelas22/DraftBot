@@ -223,20 +223,25 @@ def crown_activity_timeframe(guild_id):
 
 
 # Boards that define their own window, so the timeframe selector does not apply.
-# Each entry resolves the window for a guild; the query and the rendered title
-# both go through it, or the title would advertise a window the board never
-# applied. These boards also drop the "choose a filter" footer, since filtering
-# them changes nothing.
+# A value is either the fixed window or a function of the guild. THE place that
+# fact is recorded: every refresh path asks here rather than naming a category,
+# so a pinned board cannot end up windowed one way and titled another, or be
+# handed a selector by whichever loop last posted it.
 PINNED_TIMEFRAMES = {
-    "hot_streak": lambda guild_id: "7d",
+    "hot_streak": "7d",
     "sr_ladder": crown_activity_timeframe,
 }
 
 
 def pinned_timeframe(category, guild_id):
     """This board's own window, or None if the timeframe selector applies."""
-    resolve = PINNED_TIMEFRAMES.get(category)
-    return resolve(guild_id) if resolve else None
+    pinned = PINNED_TIMEFRAMES.get(category)
+    return pinned(guild_id) if callable(pinned) else pinned
+
+
+def effective_timeframe(category, guild_id, stored=None):
+    """The window to render a board with: its pin, else what the user chose."""
+    return pinned_timeframe(category, guild_id) or stored or "lifetime"
 
 # Valid timeframe values (for validation)
 VALID_TIMEFRAMES = ["14d", "30d", "90d", "lifetime", "active"]

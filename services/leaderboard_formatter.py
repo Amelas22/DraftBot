@@ -27,20 +27,20 @@ async def create_leaderboard_embed(guild_id, category="draft_record", limit=20, 
     # Boards that define their own window ignore the selector entirely, so the
     # title they render matches the players they can actually contain.
     pinned = pinned_timeframe(category, guild_id)
-    effective_timeframe = pinned or timeframe
+    window = pinned or timeframe
     
     # Get the leaderboard data
     leaderboard_data = await get_leaderboard_data(
-        guild_id, category, limit, effective_timeframe, cache=cache)
+        guild_id, category, limit, window, cache=cache)
     
     # Get minimum requirements for description
-    min_requirements = get_minimum_requirements(effective_timeframe)
+    min_requirements = get_minimum_requirements(window)
     
     # Get category configuration
     category_config = LEADERBOARD_CATEGORIES[category]
     
     # Format timeframe for display
-    timeframe_display = TIMEFRAME_DISPLAY.get(effective_timeframe, "Lifetime")
+    timeframe_display = TIMEFRAME_DISPLAY.get(window, "Lifetime")
     
     # Format title and description with timeframe
     title = f"{category_config['title']} ({timeframe_display})"
@@ -48,15 +48,15 @@ async def create_leaderboard_embed(guild_id, category="draft_record", limit=20, 
     # Format description with minimum requirements where needed
     if category == "longest_win_streak":
         # Use streak-specific minimums instead of match count minimums
-        min_streak = STREAK_MINIMUMS.get(effective_timeframe, 10)
+        min_streak = STREAK_MINIMUMS.get(window, 10)
         description = category_config['description_template'].format(streak_min=min_streak)
     elif category == "perfect_streak":
         # Use perfect streak-specific minimums
-        min_streak = PERFECT_STREAK_MINIMUMS.get(effective_timeframe, 8)
+        min_streak = PERFECT_STREAK_MINIMUMS.get(window, 8)
         description = category_config['description_template'].format(streak_min=min_streak)
     elif category == "draft_win_streak":
         # Use draft win streak-specific minimums (Order of the White Lotus)
-        min_streak = DRAFT_WIN_STREAK_MINIMUMS.get(effective_timeframe, 8)
+        min_streak = DRAFT_WIN_STREAK_MINIMUMS.get(window, 8)
         description = category_config['description_template'].format(streak_min=min_streak)
     elif category == "quiz_points":
         # Use quiz-specific minimums

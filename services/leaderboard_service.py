@@ -5,7 +5,7 @@ from sqlalchemy import select, and_
 from database.db_session import db_session
 from helpers.display_names import get_member_name
 from helpers.skill import is_established, skill_rating
-from leaderboard_config import crown_activity_timeframe
+from leaderboard_config import crown_activity_timeframe, effective_timeframe
 from models.win_streak_history import WinStreakHistory
 from models.perfect_streak_history import PerfectStreakHistory
 from models.draft_streak_history import DraftStreakHistory
@@ -273,6 +273,11 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20,
     cache: optional PlayersDataCache to share the expensive per-timeframe
     assembly across several calls in one refresh cycle."""
 
+    # A board that fixes its own window overrides whatever was passed, here at
+    # the single entrance every caller comes through -- so a direct caller gets
+    # the same window the rendered title advertises.
+    timeframe = effective_timeframe(category, guild_id, timeframe)
+
     # Streak/quiz categories are backed by their own dedicated tables
     # (WinStreakHistory, QuizStats, etc) and never touch the match-result
     # ledger fold -- dispatch to them FIRST so they never pay for a fold
@@ -365,7 +370,8 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20,
         sorted_players = sorted(best_partnerships, key=lambda p: p["win_percentage"], reverse=True)
     
     elif category == "hot_streak":
-        # For hot streak, we always use the 7-day timeframe regardless of what was passed
+        # The 7-day window is already applied: PINNED_TIMEFRAMES pinned it at
+        # the top of this function, so players_list is the 7d fold.
         filtered_players = [p for p in players_list if p["completed_matches"] >= 9 and p["match_win_percentage"] > 50]
         logger.info(f"Found {len(filtered_players)} players with at least 9 completed matches for hot_streak")
         # Sort by match win percentage
@@ -927,11 +933,13 @@ async def get_sr_ladder_leaderboard_data(guild_id, timeframe, limit, session):
     Reads player_stats directly: the rating lives in the stored TrueSkill
     mu/sigma, so this never needs the match-result ledger fold.
     """
-    del timeframe  # the board sets its own window from the guild's crown cycle
-
-    # crown_activity_timeframe never returns "lifetime", so this is always a
-    # real cutoff. A NULL last_draft_timestamp fails the comparison in SQL,
+    # This board's window is the crown cycle by definition, so it is resolved
+    # here as well as at get_leaderboard_data -- calling this query directly
+    # must not be able to produce an unbounded "every player who ever drafted"
+    # board. crown_activity_timeframe never returns "lifetime", so the cutoff is
+    # always real. A NULL last_draft_timestamp fails the comparison in SQL,
     # which is what we want: never having drafted is not recent activity.
+    del timeframe
     cutoff = get_timeframe_date(crown_activity_timeframe(guild_id))
     stmt = select(PlayerStats).where(
         PlayerStats.guild_id == str(guild_id),
@@ -959,7 +967,7 @@ async def get_sr_ladder_leaderboard_data(guild_id, timeframe, limit, session):
     # Rating desc, then the better-evidenced record, then id -- a total order, so
     # equal ratings don't reshuffle between refreshes.
     entries.sort(key=lambda e: (-e["rating"], -e["rated_games"], e["player_id"]))
-    return entries[:min(limit, SR_LADDER_LIMIT)]
+    return entries[:SR_LADDER_LIMIT]
 
 
 async def get_crown_leaders(guild_id: str, categories: list, timeframe: str = "lifetime", cache=None) -> dict:

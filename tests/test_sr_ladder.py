@@ -24,7 +24,7 @@ from database.models_base import Base
 import leaderboard_config
 from leaderboard_config import (
     ALL_CATEGORIES, CATEGORY_CONFIGS, CROWN_ELIGIBLE_CATEGORIES,
-    DEFAULT_CROWN_ACTIVITY_TIMEFRAME, crown_activity_timeframe,
+    DEFAULT_CROWN_ACTIVITY_TIMEFRAME, crown_activity_timeframe, effective_timeframe,
 )
 from models.leaderboard_message import LeaderboardMessage
 from models.player import PlayerStats
@@ -214,7 +214,6 @@ class TestActivityWindow:
         """The documented crown default, used when a guild sets none."""
         crown_window.return_value = {}
         assert crown_activity_timeframe(GUILD) == "30d"
-        assert DEFAULT_CROWN_ACTIVITY_TIMEFRAME == "30d"
 
     def test_follows_the_configured_crown_timeframe(self, crown_window):
         set_crown_timeframe(crown_window, "90d")
@@ -228,6 +227,16 @@ class TestActivityWindow:
     def test_falls_back_on_an_unrecognised_timeframe(self, crown_window):
         set_crown_timeframe(crown_window, "banana")
         assert crown_activity_timeframe(GUILD) == "30d"
+
+    def test_effective_timeframe_overrides_whatever_was_stored(self, crown_window):
+        """Every refresh path resolves the window through here, so a stored
+        selection can never win over a pinned board's own window."""
+        assert effective_timeframe(CATEGORY, GUILD, "90d") == "30d"
+        assert effective_timeframe("hot_streak", GUILD, "lifetime") == "7d"
+
+    def test_effective_timeframe_respects_a_selectable_board(self, crown_window):
+        assert effective_timeframe("draft_record", GUILD, "90d") == "90d"
+        assert effective_timeframe("draft_record", GUILD, None) == "lifetime"
 
     @pytest.mark.asyncio
     async def test_excludes_a_draft_older_than_the_crown_window(

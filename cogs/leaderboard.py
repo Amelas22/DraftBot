@@ -16,6 +16,7 @@ from leaderboard_config import (
     STREAK_TIMEFRAMES,
     STREAK_CATEGORIES,
     pinned_timeframe,
+    effective_timeframe,
 )
 
 class TimeframeView(View):
@@ -183,14 +184,10 @@ class LeaderboardCog(commands.Cog):
             # Get timeframes for each category from database or defaults
             timeframes = {}
             for category in LEADERBOARD_CATEGORIES:
-                if category == "hot_streak":
-                    timeframes[category] = "7d"  # Hot streak is always 7 days
-                else:
-                    # Get stored timeframe or default to "lifetime"
-                    if leaderboard_record and hasattr(leaderboard_record, f"{category}_timeframe"):
-                        timeframes[category] = getattr(leaderboard_record, f"{category}_timeframe") or "lifetime"
-                    else:
-                        timeframes[category] = "lifetime"
+                stored = None
+                if leaderboard_record and hasattr(leaderboard_record, f"{category}_timeframe"):
+                    stored = getattr(leaderboard_record, f"{category}_timeframe")
+                timeframes[category] = effective_timeframe(category, guild_id, stored)
         
         # Create a new record if needed
         if not leaderboard_record:
@@ -449,15 +446,9 @@ async def refresh_all_leaderboards(bot):
                     # Get timeframes for each category
                     timeframes = {}
                     for category in LEADERBOARD_CATEGORIES:
-                        if category == "hot_streak":
-                            timeframes[category] = "7d"  # Hot streak is always 7 days
-                        else:
-                            # Get stored timeframe or default to "lifetime"
-                            timeframe_field = f"{category}_timeframe"
-                            if hasattr(leaderboard, timeframe_field):
-                                timeframes[category] = getattr(leaderboard, timeframe_field) or "lifetime"
-                            else:
-                                timeframes[category] = "lifetime"
+                        timeframe_field = f"{category}_timeframe"
+                        stored = getattr(leaderboard, timeframe_field, None)
+                        timeframes[category] = effective_timeframe(category, guild_id, stored)
                     
                     # One PlayersDataCache per guild: fold-backed categories
                     # share the per-timeframe assembly during this refresh.
@@ -483,12 +474,11 @@ async def refresh_all_leaderboards(bot):
                                     message_id = getattr(leaderboard, msg_id_field)
                                     existing_msg = await channel.fetch_message(int(message_id))
                                     
-                                    if category != "hot_streak":
+                                    view = None
+                                    if not pinned_timeframe(category, guild_id):
                                         view = TimeframeView(bot, guild_id, category, current_timeframe=timeframes[category])
-                                        await existing_msg.edit(embed=embed, view=view)
-                                    else:
-                                        await existing_msg.edit(embed=embed)
-                                        
+                                    await existing_msg.edit(embed=embed, view=view)
+
                                     message_updated = True
                                     logger.info(f"Updated {category} leaderboard for guild {guild.name}")
                                 except discord.NotFound:

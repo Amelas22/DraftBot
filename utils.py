@@ -30,7 +30,7 @@ from models.debt_summary_message import DebtSummaryMessage
 from loguru import logger
 from config import is_cleanup_exempt, is_test_mode
 from helpers.money_gate import add_wallet_howto
-from leaderboard_config import AUTO_UPDATE_CATEGORIES
+from leaderboard_config import AUTO_UPDATE_CATEGORIES, effective_timeframe, pinned_timeframe
 from services.crown_roles import update_crown_roles_for_guild
 
 # Module-level dict to track match streak extensions for ring bearer checks
@@ -1173,15 +1173,8 @@ async def update_leaderboards_for_guild(bot, guild_id: str, session_id=None, str
             # Get timeframes for each category from database or defaults
             timeframes = {}
             for category in categories:
-                if category == "hot_streak":
-                    timeframes[category] = "7d"  # Hot streak is always 7 days
-                else:
-                    # Get stored timeframe or default to "lifetime"
-                    timeframe_field = f"{category}_timeframe"
-                    if hasattr(leaderboard_message, timeframe_field):
-                        timeframes[category] = getattr(leaderboard_message, timeframe_field) or "lifetime"
-                    else:
-                        timeframes[category] = "lifetime"
+                stored = getattr(leaderboard_message, f"{category}_timeframe", None)
+                timeframes[category] = effective_timeframe(category, guild_id, stored)
 
             # One PlayersDataCache per refresh cycle: every fold-backed
             # category (and the crown pass below) shares the same
@@ -1207,13 +1200,12 @@ async def update_leaderboards_for_guild(bot, guild_id: str, session_id=None, str
                             message_id = getattr(leaderboard_message, msg_id_field)
                             message = await channel.fetch_message(int(message_id))
 
-                            # For categories with timeframe buttons, update with view
-                            if category != "hot_streak":
+                            # A board that fixes its own window gets no selector;
+                            # passing view=None is also what strips one already there.
+                            view = None
+                            if not pinned_timeframe(category, guild_id):
                                 view = TimeframeView(bot, guild_id, category, current_timeframe=timeframes[category])
-                                await message.edit(embed=embed, view=view)
-                            else:
-                                # Hot streak doesn't have buttons
-                                await message.edit(embed=embed)
+                            await message.edit(embed=embed, view=view)
 
                             logger.info(f"Updated {category} leaderboard for guild {guild_id}")
                         except discord.NotFound:
