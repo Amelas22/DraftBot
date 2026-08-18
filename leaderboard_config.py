@@ -108,10 +108,12 @@ CATEGORY_CONFIGS = {
         "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['total_points']} points ({p['total_quizzes']} quizzes)"
     },
     "top_elo": {
-        "title": "Top Elo Leaderboard",
-        # The qualifying rating floor is deliberately unstated: naming it would
-        # turn the board into a number to defend rather than a board to reach.
-        "description_template": "Highest rated players who have drafted in the last 2 weeks",
+        "title": "Active Player Elo Leaderboard",
+        # Two things are deliberately absent. The qualifying rating floor:
+        # naming it would turn the board into a number to defend rather than a
+        # board to reach. And the activity window: the rendered title already
+        # appends it, so repeating it here would only drift when it changes.
+        "description_template": "The server's highest rated players",
         "color": discord.Color.teal(),
         "formatter": lambda p, rank: f"{get_medal(rank)}**{p['display_name']}**: {p['rating']}"
     },

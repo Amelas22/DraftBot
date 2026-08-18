@@ -271,10 +271,21 @@ class TestCategoryRegistration:
         assert CATEGORY in CATEGORY_CONFIGS
         assert CATEGORY in ALL_CATEGORIES
 
+    def test_title_names_the_active_player_board(self):
+        """The board is about who is still turning up, not an all-time table."""
+        assert "Active" in CATEGORY_CONFIGS[CATEGORY]["title"]
+
     def test_description_does_not_reveal_the_rating_floor(self):
         """The cutoff is deliberately unadvertised (owner's call)."""
         description = CATEGORY_CONFIGS[CATEGORY]["description_template"]
         assert str(TOP_ELO_MIN_RATING) not in description
+
+    def test_description_leaves_the_window_to_the_title(self):
+        """The rendered title already appends the window, so stating it here
+        too would print the same span twice -- and drift when it changes."""
+        description = CATEGORY_CONFIGS[CATEGORY]["description_template"].lower()
+        assert "day" not in description
+        assert "week" not in description
 
     def test_does_not_award_a_crown(self):
         """An activity-gated board churns as players go quiet, like hot_streak."""
@@ -335,6 +346,7 @@ class TestRenderedBoard:
         embed = await _render(test_db, monkeypatch,
                               player("111", "Champ", 1800), timeframe="lifetime")
 
+        assert "Active" in embed.title
         assert "Last 30 Days" in embed.title
         assert "Lifetime" not in embed.title
 
