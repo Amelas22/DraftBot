@@ -14,7 +14,8 @@ from leaderboard_config import (
     LEADERBOARD_GROUPS,
     STANDARD_TIMEFRAMES,
     STREAK_TIMEFRAMES,
-    STREAK_CATEGORIES
+    STREAK_CATEGORIES,
+    pinned_timeframe,
 )
 
 class TimeframeView(View):
@@ -341,9 +342,11 @@ class LeaderboardCog(commands.Cog):
         # Create the embed
         embed = await create_leaderboard_embed(guild_id, category, timeframe=timeframe)
         
-        # Create view for categories except hot_streak
+        # A board that fixes its own window has nothing to select, so it gets no
+        # view at all -- offering buttons that cannot change the result reads as
+        # a broken control rather than a pinned board.
         view = None
-        if category != "hot_streak":
+        if not pinned_timeframe(category, guild_id):
             view = TimeframeView(self.bot, guild_id, category, current_timeframe=timeframe)
         
         # Get the message ID field name
@@ -355,10 +358,9 @@ class LeaderboardCog(commands.Cog):
             try:
                 message_id = getattr(leaderboard_record, msg_id_field)
                 existing_msg = await channel.fetch_message(int(message_id))
-                if category != "hot_streak":
-                    await existing_msg.edit(embed=embed, view=view)
-                else:
-                    await existing_msg.edit(embed=embed)
+                # Always pass the view, even when it is None: that is what
+                # clears the buttons off a board that used to offer them.
+                await existing_msg.edit(embed=embed, view=view)
                 message_updated = True
                 logger.info(f"Updated existing {category} message {message_id}")
             except discord.NotFound:
@@ -369,12 +371,13 @@ class LeaderboardCog(commands.Cog):
         # Send new message if needed
         if not message_updated:
             try:
-                if category != "hot_streak":
-                    new_msg = await channel.send(embed=embed, view=view)
-                    setattr(leaderboard_record, f"{category}_view_message_id", str(new_msg.id))
-                else:
-                    new_msg = await channel.send(embed=embed)
+                new_msg = await channel.send(embed=embed, view=view)
+                # hot_streak predates the per-category id columns and still
+                # lives in the legacy `message_id` field; see msg_id_field above.
+                if category == "hot_streak":
                     leaderboard_record.message_id = str(new_msg.id)
+                else:
+                    setattr(leaderboard_record, f"{category}_view_message_id", str(new_msg.id))
 
                 async with db_session() as session:
                     leaderboard_record = await session.merge(leaderboard_record)

@@ -13,7 +13,7 @@ import os
 import tempfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -365,6 +365,71 @@ class TestRenderedBoard:
         embed = await _render(test_db, monkeypatch, player("111", "Champ", 1800))
 
         assert embed.footer.text == "Updated regularly"
+
+
+class TestNoTimeframeSelector:
+    """The window comes from the crown cycle, so there is nothing to select."""
+
+    @staticmethod
+    def _channel():
+        channel = MagicMock()
+        message = MagicMock()
+        message.id = 999
+        message.edit = AsyncMock()
+        channel.send = AsyncMock(return_value=message)
+        channel.fetch_message = AsyncMock(return_value=message)
+        return channel
+
+    @staticmethod
+    def _record(category):
+        record = MagicMock()
+        setattr(record, f"{category}_view_message_id", None)
+        return record
+
+    async def _post(self, monkeypatch, category):
+        import cogs.leaderboard as mod
+        monkeypatch.setattr(mod, "db_session", _FakeSession.factory)
+        monkeypatch.setattr(mod, "create_leaderboard_embed",
+                            AsyncMock(return_value=MagicMock()))
+        channel = self._channel()
+        await mod.LeaderboardCog(MagicMock())._update_category_leaderboard(
+            category=category, guild_id=GUILD, channel=channel,
+            leaderboard_record=self._record(category), timeframe="lifetime")
+        return channel
+
+    @pytest.mark.asyncio
+    async def test_posts_without_timeframe_buttons(self, monkeypatch):
+        """Buttons here would offer choices that change nothing."""
+        channel = await self._post(monkeypatch, CATEGORY)
+
+        assert channel.send.await_args.kwargs.get("view") is None
+
+    @pytest.mark.asyncio
+    async def test_a_selectable_board_keeps_its_buttons(self, monkeypatch):
+        """Guards the change from silently stripping every board's selector."""
+        channel = await self._post(monkeypatch, "draft_record")
+
+        assert channel.send.await_args.kwargs.get("view") is not None
+
+
+class _FakeSession:
+    """Stands in for db_session(): merge returns the record unchanged."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def merge(self, record):
+        return record
+
+    async def commit(self):
+        return None
+
+    @staticmethod
+    def factory():
+        return _FakeSession()
 
 
 @pytest.mark.asyncio
