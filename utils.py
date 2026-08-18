@@ -604,7 +604,7 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                         winning_team = draft_session.team_a if team_a_wins > team_b_wins else draft_session.team_b
 
                         # Get bet outcome lines
-                        outcome_lines, outcome_total = await get_formatted_bet_outcomes(
+                        outcome_lines, outcome_total, anyone_still_owes = await get_formatted_bet_outcomes(
                             draft_session_id,
                             draft_session.sign_ups,
                             winning_team
@@ -621,9 +621,13 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                                 color=discord_color  # Match main embed color
                             )
                             bet_embed.set_footer(text=f"Total bets settled: {outcome_total} tix")
-                            # These outcomes become debt ledger entries just below, so
-                            # this is where a loser first learns they owe someone.
-                            add_wallet_howto(bet_embed, draft_session.guild_id)
+                            # Only explain how to pay if somebody still has to. A loser
+                            # whose wallet already covered it has nothing left to do, and
+                            # the panel would contradict both the line above it and the
+                            # DM they are about to get. The flag comes from the same pass
+                            # that wrote those lines, so the two cannot disagree.
+                            if anyone_still_owes:
+                                add_wallet_howto(bet_embed, draft_session.guild_id)
 
                             # Create the debt ledger entries these outcomes imply, then
                             # draw them against the losers' wallets: a debt landing on
@@ -2851,7 +2855,7 @@ async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
             draft_session = draft_result.scalars().first()
             
             if not draft_session:
-                return [], 0
+                return [], 0, False
 
             # Get all stake pairings for this session
             pairing_stmt = select(StakePairing).where(StakePairing.session_id == session_id)
@@ -2915,12 +2919,19 @@ async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
             # Sort by amount (highest first)
             unique_pairs.sort(key=lambda x: x[2], reverse=True)
 
-            # Format for display with pre-existing debt, this draft, and net total
+            # Format for display with pre-existing debt, this draft, and net total.
+            # anyone_still_owes rides along with the lines deliberately: the caller
+            # uses it to decide whether to print the how-to-pay panel, and deriving
+            # that separately is how the panel and the lines come to contradict each
+            # other -- "Nothing left to settle" printed above instructions for paying.
             formatted_lines = []
+            anyone_still_owes = False
             for (loser_name, winner_name, amount, loser_id, winner_id,
                  pre_draft_balance, new_balance, settled_since) in unique_pairs:
                 previous_debt = abs(pre_draft_balance)
                 new_debt = abs(new_balance)
+                if new_balance != 0:
+                    anyone_still_owes = True
 
                 # Paid out of the loser's wallet. This has to come first: the
                 # net-based branches below would otherwise describe a debt that was
@@ -2999,7 +3010,7 @@ async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
                 # Join the 4 lines into a single multi-line string
                 formatted_lines.append("\n".join(lines))
 
-            return formatted_lines, total_stake
+            return formatted_lines, total_stake, anyone_still_owes
 
 
 async def check_inactive_players_task(bot):

@@ -75,7 +75,7 @@ class TestBetOutcomesDisplay:
 
         # Call the function (Bob's team wins, so Alice loses)
         sign_ups = {"alice": "Alice", "bob": "Bob"}
-        outcome_lines, total = await get_formatted_bet_outcomes(
+        outcome_lines, total, _owes = await get_formatted_bet_outcomes(
             "test_session_1",
             sign_ups,
             ["bob"]  # winning_team_ids
@@ -133,7 +133,7 @@ class TestBetOutcomesDisplay:
 
         # Call the function (Bob wins again, Alice loses again)
         sign_ups = {"alice": "Alice", "bob": "Bob"}
-        outcome_lines, total = await get_formatted_bet_outcomes(
+        outcome_lines, total, _owes = await get_formatted_bet_outcomes(
             "test_session_2",
             sign_ups,
             ["bob"]
@@ -191,7 +191,7 @@ class TestBetOutcomesDisplay:
 
         # Call the function (Alice wins, Bob loses)
         sign_ups = {"alice": "Alice", "bob": "Bob"}
-        outcome_lines, total = await get_formatted_bet_outcomes(
+        outcome_lines, total, _owes = await get_formatted_bet_outcomes(
             "test_session_3",
             sign_ups,
             ["alice"]  # Alice's team wins
@@ -250,7 +250,7 @@ class TestBetOutcomesDisplay:
 
         # Call the function (Alice wins, Bob loses)
         sign_ups = {"alice": "Alice", "bob": "Bob"}
-        outcome_lines, total = await get_formatted_bet_outcomes(
+        outcome_lines, total, _owes = await get_formatted_bet_outcomes(
             "test_session_4",
             sign_ups,
             ["alice"]  # Alice's team wins
@@ -309,7 +309,7 @@ class TestBetOutcomesDisplay:
 
         # Call the function (Alice wins, Bob loses 30)
         sign_ups = {"alice": "Alice", "bob": "Bob"}
-        outcome_lines, total = await get_formatted_bet_outcomes(
+        outcome_lines, total, _owes = await get_formatted_bet_outcomes(
             "test_session_5",
             sign_ups,
             ["alice"]  # Alice's team wins
@@ -376,7 +376,7 @@ class TestBetOutcomesDisplay:
 
         # Call the function (Bob and Dave win)
         sign_ups = {"alice": "Alice", "bob": "Bob", "charlie": "Charlie", "dave": "Dave"}
-        outcome_lines, total = await get_formatted_bet_outcomes(
+        outcome_lines, total, _owes = await get_formatted_bet_outcomes(
             "test_session_6",
             sign_ups,
             ["bob", "dave"]  # Team B wins
@@ -432,7 +432,7 @@ class TestBetOutcomesDisplay:
         winning_team = ["bob"]
 
         # Call 1: Before debt entries are created
-        outcome_lines_1, total_1 = await get_formatted_bet_outcomes(
+        outcome_lines_1, total_1, _o1 = await get_formatted_bet_outcomes(
             "test_session_idempotent",
             sign_ups,
             winning_team
@@ -446,7 +446,7 @@ class TestBetOutcomesDisplay:
         )
 
         # Call 2: After debt entries are created
-        outcome_lines_2, total_2 = await get_formatted_bet_outcomes(
+        outcome_lines_2, total_2, _o2 = await get_formatted_bet_outcomes(
             "test_session_idempotent",
             sign_ups,
             winning_team
@@ -497,7 +497,7 @@ class TestBetOutcomesAfterWalletSettlement:
             guild_id="test_guild", debtor_id="bob", creditor_id="alice", amount=30,
             source_type="settlement", source_id="some-uuid")
 
-        outcome_lines, _ = await get_formatted_bet_outcomes(
+        outcome_lines, _, _owes = await get_formatted_bet_outcomes(
             "settled_session", {"alice": "Alice", "bob": "Bob"}, ["bob"])
 
         outcome = outcome_lines[0]
@@ -526,7 +526,7 @@ class TestBetOutcomesAfterWalletSettlement:
             guild_id="test_guild", debtor_id="bob", creditor_id="alice", amount=60,
             source_type="settlement", source_id="some-uuid")
 
-        outcome_lines, _ = await get_formatted_bet_outcomes(
+        outcome_lines, _, _owes = await get_formatted_bet_outcomes(
             "partial_session", {"alice": "Alice", "bob": "Bob"}, ["bob"])
 
         outcome = outcome_lines[0]
@@ -551,9 +551,78 @@ class TestBetOutcomesAfterWalletSettlement:
                                             player_a_id="alice", player_b_id="bob", amount=30))
                 await db_session.commit()
 
-        outcome_lines, _ = await get_formatted_bet_outcomes(
+        outcome_lines, _, _owes = await get_formatted_bet_outcomes(
             "offset_session", {"alice": "Alice", "bob": "Bob"}, ["bob"])
 
         outcome = outcome_lines[0]
         assert "Pre-existing" in outcome, "this one really is a pre-existing debt"
         assert "30" in outcome
+
+
+class TestOutcomesReportWhetherAnyoneStillOwes:
+    """The how-to-pay panel is driven by the same computation that writes the lines.
+
+    Deriving it separately (a second balance query, or a check run before this render's
+    settlement) lets the two disagree: the embed can say "Nothing left to settle" while
+    still printing instructions for paying, or hide the instructions from someone who
+    genuinely owes. One computation, one answer.
+    """
+
+    @pytest.mark.asyncio
+    async def test_nobody_owes_once_the_wallet_covered_it(self, test_db):
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                db_session.add(DraftSession(session_id="paid_s", guild_id="test_guild",
+                                            team_a=["alice"], team_b=["bob"]))
+                db_session.add(StakePairing(session_id="paid_s", player_a_id="alice",
+                                            player_b_id="bob", amount=30))
+                await db_session.commit()
+        await create_ledger_entries(guild_id="test_guild", debtor_id="alice",
+                                    creditor_id="bob", amount=30,
+                                    source_type="draft", source_id="paid_s")
+        await create_ledger_entries(guild_id="test_guild", debtor_id="bob",
+                                    creditor_id="alice", amount=30,
+                                    source_type="settlement", source_id="u1")
+
+        lines, _total, still_owed = await get_formatted_bet_outcomes(
+            "paid_s", {"alice": "Alice", "bob": "Bob"}, ["bob"])
+
+        assert still_owed is False, "the wallet covered it; nothing left to pay"
+        assert "Nothing left to settle" in lines[0], "and the line must agree"
+
+    @pytest.mark.asyncio
+    async def test_someone_still_owes_when_the_wallet_fell_short(self, test_db):
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                db_session.add(DraftSession(session_id="part_s", guild_id="test_guild",
+                                            team_a=["alice"], team_b=["bob"]))
+                db_session.add(StakePairing(session_id="part_s", player_a_id="alice",
+                                            player_b_id="bob", amount=100))
+                await db_session.commit()
+        await create_ledger_entries(guild_id="test_guild", debtor_id="alice",
+                                    creditor_id="bob", amount=100,
+                                    source_type="draft", source_id="part_s")
+        await create_ledger_entries(guild_id="test_guild", debtor_id="bob",
+                                    creditor_id="alice", amount=60,
+                                    source_type="settlement", source_id="u1")
+
+        lines, _total, still_owed = await get_formatted_bet_outcomes(
+            "part_s", {"alice": "Alice", "bob": "Bob"}, ["bob"])
+
+        assert still_owed is True, "40 tix are still owed"
+        assert "Still owed: 40 tix" in lines[0]
+
+    @pytest.mark.asyncio
+    async def test_an_unsettled_draft_still_owes(self, test_db):
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                db_session.add(DraftSession(session_id="raw_s", guild_id="test_guild",
+                                            team_a=["alice"], team_b=["bob"]))
+                db_session.add(StakePairing(session_id="raw_s", player_a_id="alice",
+                                            player_b_id="bob", amount=30))
+                await db_session.commit()
+
+        _lines, _total, still_owed = await get_formatted_bet_outcomes(
+            "raw_s", {"alice": "Alice", "bob": "Bob"}, ["bob"])
+
+        assert still_owed is True
