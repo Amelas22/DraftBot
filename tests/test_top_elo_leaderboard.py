@@ -25,6 +25,7 @@ from leaderboard_config import (
 from models.leaderboard_message import LeaderboardMessage
 from models.player import PlayerStats
 import services.leaderboard_service as leaderboard_service
+from services.leaderboard_formatter import create_leaderboard_embed
 from helpers.skill import (
     ESTABLISHED_GAMES, PRIOR_MU, PRIOR_SIGMA, RATING_ANCHOR,
     RATING_POINTS_PER_MU, RATING_SHRINK_GAMES, skill_rating,
@@ -255,6 +256,54 @@ class TestCategoryRegistration:
         columns = LeaderboardMessage.__table__.columns
         assert f"{CATEGORY}_view_message_id" in columns
         assert f"{CATEGORY}_timeframe" in columns
+
+
+class TestRenderedBoard:
+    """What a player actually reads in the channel."""
+
+    @pytest.mark.asyncio
+    async def test_entry_shows_only_name_and_rating(self, test_db, monkeypatch):
+        """The rating is the whole story; game counts are tie-break data, not
+        something to publish."""
+        embed = await _render(test_db, monkeypatch,
+                              player("111", "Champ", 1800, games=137))
+
+        rankings = next(f for f in embed.fields if f.name == "Rankings")
+        assert "Champ" in rankings.value
+        assert "1800" in rankings.value
+        assert "137" not in rankings.value
+
+    @pytest.mark.asyncio
+    async def test_title_reports_the_fixed_activity_window(self, test_db, monkeypatch):
+        """The query ignores the selector, so a title echoing it would lie
+        about which players the board can contain."""
+        embed = await _render(test_db, monkeypatch,
+                              player("111", "Champ", 1800), timeframe="lifetime")
+
+        assert "Last 14 Days" in embed.title
+        assert "Lifetime" not in embed.title
+
+    @pytest.mark.asyncio
+    async def test_footer_does_not_advertise_a_filter_that_does_nothing(
+            self, test_db, monkeypatch):
+        embed = await _render(test_db, monkeypatch, player("111", "Champ", 1800))
+
+        assert embed.footer.text == "Updated regularly"
+
+
+async def _render(test_db, monkeypatch, *players, timeframe="lifetime"):
+    """Build the real embed for the category against a seeded test database."""
+    async with test_db() as session:
+        session.add_all(players)
+        await session.commit()
+
+        @asynccontextmanager
+        async def fake_db_session():
+            yield session
+
+        monkeypatch.setattr(leaderboard_service, "db_session", fake_db_session)
+        return await create_leaderboard_embed(
+            GUILD, category=CATEGORY, limit=20, timeframe=timeframe)
 
 
 @pytest.mark.asyncio

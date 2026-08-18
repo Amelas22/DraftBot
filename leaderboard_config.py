@@ -190,6 +190,16 @@ STREAK_TIMEFRAMES = [
 # Categories that use streak timeframes
 STREAK_CATEGORIES = ["longest_win_streak", "perfect_streak", "draft_win_streak"]
 
+# Boards that define their own window, so the timeframe selector does not apply.
+# The value here is what the query and the rendered title both use, whatever the
+# caller passed -- otherwise the title would advertise a window the board never
+# applied. These boards also drop the "choose a filter" footer, since filtering
+# them changes nothing.
+PINNED_TIMEFRAMES = {
+    "hot_streak": "7d",
+    "top_elo": "14d",
+}
+
 # Valid timeframe values (for validation)
 VALID_TIMEFRAMES = ["14d", "30d", "90d", "lifetime", "active"]
 
