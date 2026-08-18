@@ -108,7 +108,10 @@ CATEGORY_CONFIGS = {
         "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['total_points']} points ({p['total_quizzes']} quizzes)"
     },
     "top_elo": {
-        "title": "Elo Ladder",
+        # "Skill Rating" is what /stats calls this number; "Elo" appears nowhere
+        # a player can see it, so naming the board for it would invent a second
+        # word for one thing.
+        "title": "Skill Rating Ladder",
         # Two things are deliberately absent. The qualifying rating floor:
         # naming it would turn the board into a number to defend rather than a
         # board to reach. And the activity window: the rendered title already

@@ -346,7 +346,7 @@ class TestRenderedBoard:
         embed = await _render(test_db, monkeypatch,
                               player("111", "Champ", 1800), timeframe="lifetime")
 
-        assert embed.title == "Elo Ladder (Last 30 Days)"
+        assert embed.title == "Skill Rating Ladder (Last 30 Days)"
         assert "Lifetime" not in embed.title
 
     @pytest.mark.asyncio
