@@ -2,7 +2,7 @@ import discord
 from datetime import datetime
 from .leaderboard_service import get_leaderboard_data, get_minimum_requirements, STREAK_MINIMUMS, PERFECT_STREAK_MINIMUMS, DRAFT_WIN_STREAK_MINIMUMS, QUIZ_MINIMUMS
 from leaderboard_config import CATEGORY_CONFIGS as LEADERBOARD_CATEGORIES
-from leaderboard_config import PINNED_TIMEFRAMES
+from leaderboard_config import pinned_timeframe
 
 # Default leaderboard timeframe display names
 TIMEFRAME_DISPLAY = {
@@ -26,7 +26,8 @@ async def create_leaderboard_embed(guild_id, category="draft_record", limit=20, 
     
     # Boards that define their own window ignore the selector entirely, so the
     # title they render matches the players they can actually contain.
-    effective_timeframe = PINNED_TIMEFRAMES.get(category, timeframe)
+    pinned = pinned_timeframe(category, guild_id)
+    effective_timeframe = pinned or timeframe
     
     # Get the leaderboard data
     leaderboard_data = await get_leaderboard_data(
@@ -86,7 +87,7 @@ async def create_leaderboard_embed(guild_id, category="draft_record", limit=20, 
         embed.add_field(name="Rankings", value="\n".join(entries), inline=False)
     
     # Only invite filtering on boards where the filter actually does something
-    if category in PINNED_TIMEFRAMES:
+    if pinned:
         embed.set_footer(text="Updated regularly")
     else:
         embed.set_footer(text="Choose a filter to refresh stats")

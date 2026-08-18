@@ -17,6 +17,8 @@ The category will automatically propagate to:
 
 import discord
 
+from config import get_config
+
 # Helper function for formatting (used by all categories)
 def get_medal(rank):
     """Return rank with medal emoji for top 3 positions"""
@@ -190,15 +192,46 @@ STREAK_TIMEFRAMES = [
 # Categories that use streak timeframes
 STREAK_CATEGORIES = ["longest_win_streak", "perfect_streak", "draft_win_streak"]
 
+# Timeframes that actually bound a window. "lifetime" is deliberately absent:
+# it means "no cutoff", which cannot express recent activity.
+BOUNDED_TIMEFRAMES = ("7d", "14d", "30d", "90d")
+
+# Matches the crown_roles default written into every guild config by config.py.
+DEFAULT_CROWN_ACTIVITY_TIMEFRAME = "30d"
+
+
+def crown_activity_timeframe(guild_id):
+    """The window an activity-gated board should use for this guild.
+
+    Follows the guild's crown cycle (crown_roles.timeframe) so "recently
+    active" means the same span players already read off their crowns, and one
+    /set_crown_timeframe moves both together.
+
+    Always returns a bounded window: crowns may legitimately run "lifetime",
+    but a board of active players cannot, so anything unbounded or unrecognised
+    falls back to the crown default.
+    """
+    configured = (get_config(guild_id) or {}).get("crown_roles", {}).get("timeframe")
+    if configured in BOUNDED_TIMEFRAMES:
+        return configured
+    return DEFAULT_CROWN_ACTIVITY_TIMEFRAME
+
+
 # Boards that define their own window, so the timeframe selector does not apply.
-# The value here is what the query and the rendered title both use, whatever the
-# caller passed -- otherwise the title would advertise a window the board never
+# Each entry resolves the window for a guild; the query and the rendered title
+# both go through it, or the title would advertise a window the board never
 # applied. These boards also drop the "choose a filter" footer, since filtering
 # them changes nothing.
 PINNED_TIMEFRAMES = {
-    "hot_streak": "7d",
-    "top_elo": "14d",
+    "hot_streak": lambda guild_id: "7d",
+    "top_elo": crown_activity_timeframe,
 }
+
+
+def pinned_timeframe(category, guild_id):
+    """This board's own window, or None if the timeframe selector applies."""
+    resolve = PINNED_TIMEFRAMES.get(category)
+    return resolve(guild_id) if resolve else None
 
 # Valid timeframe values (for validation)
 VALID_TIMEFRAMES = ["14d", "30d", "90d", "lifetime", "active"]

@@ -5,6 +5,7 @@ from sqlalchemy import select, and_
 from database.db_session import db_session
 from helpers.display_names import get_member_name
 from helpers.skill import is_established, skill_rating
+from leaderboard_config import crown_activity_timeframe
 from models.win_streak_history import WinStreakHistory
 from models.perfect_streak_history import PerfectStreakHistory
 from models.draft_streak_history import DraftStreakHistory
@@ -50,8 +51,9 @@ DRAFT_WIN_STREAK_MINIMUMS = {
 # Top Elo board: a short list of the strongest players still showing up.
 # The rating floor is deliberately not named in the category description --
 # a board that advertises its cutoff invites rating-watching rather than play.
+# The activity window is the guild's crown cycle, not a constant here; see
+# leaderboard_config.crown_activity_timeframe.
 TOP_ELO_MIN_RATING = 1650   # strict: a rating equal to this does not qualify
-TOP_ELO_ACTIVE_DAYS = 14    # measured against PlayerStats.last_draft_timestamp
 TOP_ELO_LIMIT = 10
 
 def ensure_datetime(date_value):
@@ -925,11 +927,12 @@ async def get_top_elo_leaderboard_data(guild_id, timeframe, limit, session):
     Reads player_stats directly: the rating lives in the stored TrueSkill
     mu/sigma, so this never needs the match-result ledger fold.
     """
-    del timeframe  # the activity window is fixed; see TOP_ELO_ACTIVE_DAYS
+    del timeframe  # the board sets its own window from the guild's crown cycle
 
-    # A NULL last_draft_timestamp fails this comparison in SQL, which is what we
-    # want: never having drafted is not recent activity.
-    cutoff = datetime.now() - timedelta(days=TOP_ELO_ACTIVE_DAYS)
+    # crown_activity_timeframe never returns "lifetime", so this is always a
+    # real cutoff. A NULL last_draft_timestamp fails the comparison in SQL,
+    # which is what we want: never having drafted is not recent activity.
+    cutoff = get_timeframe_date(crown_activity_timeframe(guild_id))
     stmt = select(PlayerStats).where(
         PlayerStats.guild_id == str(guild_id),
         PlayerStats.true_skill_mu.isnot(None),
