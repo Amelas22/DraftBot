@@ -465,3 +465,95 @@ class TestBetOutcomesDisplay:
         assert "Net total: 30 tix" in outcome
 
         # This would fail with the bug: "Pre-existing: 30 tix" and "Net total: 60 tix"
+
+
+class TestBetOutcomesAfterWalletSettlement:
+    """A stake debt paid out of the loser's wallet must not read as a pre-existing debt.
+
+    Auto-settlement writes its rows moments after the stake debt, in the same flow that
+    renders this embed. The old pre-existing figure excluded only the draft rows for this
+    session, so the settlement survived the filter and came back as a counter-debt: the
+    embed announced "Pre-existing: 30 tix ... Net total: 0 tix (debts canceled!)" when
+    nobody had owed anything beforehand and the loser had in fact just paid.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_debt_paid_from_the_wallet_is_not_reported_as_pre_existing(self, test_db):
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                db_session.add(DraftSession(
+                    session_id="settled_session", guild_id="test_guild",
+                    team_a=["alice"], team_b=["bob"]))
+                db_session.add(StakePairing(session_id="settled_session",
+                                            player_a_id="alice", player_b_id="bob", amount=30))
+                await db_session.commit()
+
+        # the draft's stake debt: alice owes bob 30
+        await create_ledger_entries(
+            guild_id="test_guild", debtor_id="alice", creditor_id="bob", amount=30,
+            source_type="draft", source_id="settled_session")
+        # auto-settlement pays it straight back out of alice's wallet
+        await create_ledger_entries(
+            guild_id="test_guild", debtor_id="bob", creditor_id="alice", amount=30,
+            source_type="settlement", source_id="some-uuid")
+
+        outcome_lines, _ = await get_formatted_bet_outcomes(
+            "settled_session", {"alice": "Alice", "bob": "Bob"}, ["bob"])
+
+        outcome = outcome_lines[0]
+        assert "Pre-existing: 30" not in outcome, "nobody owed anything before this draft"
+        assert "canceled" not in outcome.lower(), (
+            "'canceled' means two debts offset each other; this one was PAID")
+        assert "This draft: 30 tix" in outcome
+        assert "aid" in outcome, "the line must say the money moved"
+        assert "Nothing left to settle" in outcome
+
+    @pytest.mark.asyncio
+    async def test_a_partly_paid_debt_shows_what_is_still_owed(self, test_db):
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                db_session.add(DraftSession(
+                    session_id="partial_session", guild_id="test_guild",
+                    team_a=["alice"], team_b=["bob"]))
+                db_session.add(StakePairing(session_id="partial_session",
+                                            player_a_id="alice", player_b_id="bob", amount=100))
+                await db_session.commit()
+
+        await create_ledger_entries(
+            guild_id="test_guild", debtor_id="alice", creditor_id="bob", amount=100,
+            source_type="draft", source_id="partial_session")
+        await create_ledger_entries(   # alice's wallet only covered 60
+            guild_id="test_guild", debtor_id="bob", creditor_id="alice", amount=60,
+            source_type="settlement", source_id="some-uuid")
+
+        outcome_lines, _ = await get_formatted_bet_outcomes(
+            "partial_session", {"alice": "Alice", "bob": "Bob"}, ["bob"])
+
+        outcome = outcome_lines[0]
+        assert "This draft: 100 tix" in outcome
+        assert "60" in outcome, "the amount already paid must be visible"
+        assert "40" in outcome, "and what is still owed"
+        assert "Pre-existing: 60" not in outcome, "the payment is not a pre-existing debt"
+
+    @pytest.mark.asyncio
+    async def test_a_genuine_mutual_offset_still_reads_as_cancelled(self, test_db):
+        """The word 'canceled' keeps its real meaning: two debts offsetting, no payment."""
+        await create_ledger_entries(
+            guild_id="test_guild", debtor_id="bob", creditor_id="alice", amount=30,
+            source_type="draft", source_id="older_session")
+
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                db_session.add(DraftSession(
+                    session_id="offset_session", guild_id="test_guild",
+                    team_a=["alice"], team_b=["bob"]))
+                db_session.add(StakePairing(session_id="offset_session",
+                                            player_a_id="alice", player_b_id="bob", amount=30))
+                await db_session.commit()
+
+        outcome_lines, _ = await get_formatted_bet_outcomes(
+            "offset_session", {"alice": "Alice", "bob": "Bob"}, ["bob"])
+
+        outcome = outcome_lines[0]
+        assert "Pre-existing" in outcome, "this one really is a pre-existing debt"
+        assert "30" in outcome

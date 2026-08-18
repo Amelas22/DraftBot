@@ -219,6 +219,64 @@ async def get_balance_with(
         return balance
 
 
+async def get_pair_position_around_draft(
+    guild_id: str,
+    session_id: str,
+    player_id: str,
+    counterparty_id: str,
+) -> tuple[int, int]:
+    """What this pair owed BEFORE this draft's stake debt, and what has been paid since.
+
+    Returns ``(pre_existing, settled_since)`` from ``player_id``'s perspective:
+    pre_existing negative means they already owed the counterparty; settled_since is
+    positive for tix they have paid off since this draft booked its debt.
+
+    The split is by row id, not by source: debt_ledger is append-only and its id is
+    monotonic, so "before this draft" is exactly "rows with a lower id than this draft's
+    own row for this pair". That is what makes the pre-existing figure honest.
+
+    The older ``get_balance_with(exclude_session_id=...)`` could not do this. It dropped
+    rows whose source_type was 'draft' AND source_id was this session — but an
+    auto-settlement paying that very debt is source_type 'settlement' with a uuid, so it
+    survived the filter and read back as a pre-existing counter-debt. The embed then
+    announced "Pre-existing: 60 tix ... Net total: 0 tix (debts canceled!)" when nobody
+    had owed anything beforehand and the loser had simply been debited.
+    """
+    async with db_session() as session:
+        pair = [
+            DebtLedger.guild_id == guild_id,
+            DebtLedger.player_id == player_id,
+            DebtLedger.counterparty_id == counterparty_id,
+            TIX_ONLY,
+        ]
+        cutoff = (await session.execute(
+            select(func.min(DebtLedger.id)).where(
+                *pair,
+                DebtLedger.source_type == 'draft',
+                DebtLedger.source_id == session_id,
+            ))).scalar()
+
+        if cutoff is None:
+            # The stake debt has not been written yet — this embed renders before
+            # create_debt_entries_from_stakes on the first pass. Everything on the
+            # books is therefore pre-existing, and nothing can have been paid against
+            # a debt that does not exist.
+            total = (await session.execute(
+                select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(*pair))).scalar()
+            return int(total or 0), 0
+
+        pre_existing = (await session.execute(
+            select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
+                *pair, DebtLedger.id < cutoff))).scalar()
+        settled_since = (await session.execute(
+            select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
+                *pair,
+                DebtLedger.id > cutoff,
+                DebtLedger.source_type == 'settlement',
+            ))).scalar()
+        return int(pre_existing or 0), int(settled_since or 0)
+
+
 async def get_all_balances_for(
     guild_id: str,
     player_id: str
