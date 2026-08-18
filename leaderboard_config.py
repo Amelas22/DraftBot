@@ -108,7 +108,7 @@ CATEGORY_CONFIGS = {
         "formatter": lambda p, rank: f"{get_medal(rank)}{p['display_name']}: {p['total_points']} points ({p['total_quizzes']} quizzes)"
     },
     "top_elo": {
-        "title": "Active Player Elo Leaderboard",
+        "title": "Elo Ladder",
         # Two things are deliberately absent. The qualifying rating floor:
         # naming it would turn the board into a number to defend rather than a
         # board to reach. And the activity window: the rendered title already
@@ -141,7 +141,7 @@ LEADERBOARD_GROUPS = [
         "key": "performance",
         "title": "🏆 Performance",
         "blurb": "Who's winning — win rates, partnerships, and volume.",
-        "categories": ["draft_record", "match_win", "top_elo", "time_vault_and_key", "drafts_played"],
+        "categories": ["top_elo", "draft_record", "match_win", "time_vault_and_key", "drafts_played"],
     },
     {
         "key": "streaks",
