@@ -155,6 +155,10 @@ class TournamentMatch(Base):
     pairings_channel_id = Column(String(64), nullable=True)
     pairings_message_id = Column(String(64), nullable=True)
     thread_id = Column(String(64), nullable=True)
+    # The pinned per-match control message inside that thread. Nullable: matches
+    # created before this feature (and any match nobody has opened yet) have none,
+    # and the Play button fills it in on first click.
+    control_message_id = Column(String(64), nullable=True)
 
     def __repr__(self):
         return (f"<TournamentMatch(round_id={self.round_id}, "

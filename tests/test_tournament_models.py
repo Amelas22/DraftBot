@@ -146,3 +146,10 @@ async def test_same_team_can_join_different_tournaments(test_db):
 
         result = await session.execute(select(TournamentParticipant))
         assert len(result.scalars().all()) == 2
+
+
+def test_match_control_message_id_defaults_to_none():
+    from models.tournament import TournamentMatch
+
+    match = TournamentMatch(round_id=1, team_a_participant_id=1, team_b_participant_id=2)
+    assert match.control_message_id is None
