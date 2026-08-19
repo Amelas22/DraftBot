@@ -5,6 +5,7 @@ from discord.ext import commands
 from loguru import logger
 
 from config import get_config, update_setting
+from helpers.match_control import recorded_result_line
 from helpers.tournament_channels import (
     PAIRINGS,
     STANDINGS,
@@ -76,11 +77,6 @@ def _cube_picker_for_match(interaction, match_id, a_name, b_name):
     )
 
 
-def _recorded_result_line(a_name, b_name, a_wins, b_wins):
-    """The 'result recorded' line that replaces a played match's Play button."""
-    return f"✅ Result recorded: **{a_name}** {a_wins}–{b_wins} **{b_name}**"
-
-
 async def launch_tournament_match(interaction, match_id):
     """'Play this match' button: run the draft lobby in a per-match thread.
 
@@ -100,7 +96,7 @@ async def launch_tournament_match(interaction, match_id):
             # ephemeral notice to the clicker).
             part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
             part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
-            result_line = _recorded_result_line(
+            result_line = recorded_result_line(
                 part_a.team_name, part_b.team_name, match.team_a_wins, match.team_b_wins)
             edited = False
             if interaction.message is not None:

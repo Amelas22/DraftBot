@@ -42,9 +42,9 @@ def test_register_and_status_are_open_to_everyone():
 
 
 def test_recorded_result_line_formats_score():
-    from cogs.tournament_commands import _recorded_result_line
+    from helpers.match_control import recorded_result_line
 
-    line = _recorded_result_line("Latecomers", "Strixhaven Dropouts", 5, 4)
+    line = recorded_result_line("Latecomers", "Strixhaven Dropouts", 5, 4)
     assert line == "✅ Result recorded: **Latecomers** 5–4 **Strixhaven Dropouts**"
 
 
