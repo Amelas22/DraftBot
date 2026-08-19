@@ -17,6 +17,7 @@ from helpers.money_gate import gate_serve, linked_username
 from helpers.display_names import get_display_name
 from helpers.permissions import has_bot_manager_role, is_bot_manager
 from helpers.pin_helpers import safe_pin
+from match_control_view import MatchControlView, open_match_room
 from models.tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
 from sqlalchemy import or_, select
 from services.tournament_formatter import (
@@ -64,78 +65,49 @@ def tournament_enabled(guild_id):
     return get_config(guild_id).get("features", {}).get("tournament", True)
 
 
-def _cube_picker_for_match(interaction, match_id, a_name, b_name):
-    from modals import CubeDraftSelectionView
-    return CubeDraftSelectionView(
-        session_type="premade",
-        guild_id=interaction.guild_id,
-        session_details_overrides={
-            "tournament_match_id": match_id,
-            "team_a_name": a_name,
-            "team_b_name": b_name,
-        },
-    )
+async def _heal_recorded_pairing_button(interaction, result_line):
+    """Replace a played match's Play button with its result, for everyone."""
+    edited = False
+    if interaction.message is not None:
+        try:
+            existing = interaction.message.content or ""
+            new_content = f"{existing}\n{result_line}" if existing else result_line
+            await interaction.response.edit_message(content=new_content, view=None)
+            edited = True
+        except discord.HTTPException:
+            edited = False
+    if not edited:
+        await interaction.response.send_message(
+            "This match already has a recorded result and can't be replayed. "
+            "Ask an admin if it needs correcting.",
+            ephemeral=True,
+        )
 
 
 async def launch_tournament_match(interaction, match_id):
-    """'Play this match' button: run the draft lobby in a per-match thread.
+    """▶ Play: open this match's room (thread + pinned control message).
 
-    Creates a thread off the pairing message (or reuses an existing one — e.g.
-    a thread the organizer already made) and posts the cube picker inside it.
-    Every following interaction then happens in the thread, so the draft lobby
-    lands there automatically without changing the shared draft flow.
+    Starting the draft is a separate click inside the thread, so a match has
+    somewhere to be scheduled and a second Play click can never start a second
+    draft. The already-recorded branch stays here because it answers by editing
+    the public pairing message, which must happen before we defer.
     """
     async with db_session() as session:
         match = await session.get(TournamentMatch, match_id)
         if match is None or match.is_bye:
-            await interaction.response.send_message("This match no longer exists.", ephemeral=True)
+            await interaction.response.send_message(
+                "This match no longer exists.", ephemeral=True)
             return
         if match.team_a_wins is not None:
-            # Self-heal the stale button: replace it on the public pairing message
-            # with a recorded-result line, so it's gone for everyone (not just an
-            # ephemeral notice to the clicker).
             part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
             part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
             result_line = recorded_result_line(
                 part_a.team_name, part_b.team_name, match.team_a_wins, match.team_b_wins)
-            edited = False
-            if interaction.message is not None:
-                try:
-                    existing = interaction.message.content or ""
-                    new_content = f"{existing}\n{result_line}" if existing else result_line
-                    await interaction.response.edit_message(content=new_content, view=None)
-                    edited = True
-                except discord.HTTPException:
-                    edited = False
-            if not edited:
-                await interaction.response.send_message(
-                    "This match already has a recorded result and can't be replayed. "
-                    "Ask an admin if it needs correcting.",
-                    ephemeral=True,
-                )
+            await _heal_recorded_pairing_button(interaction, result_line)
             return
-        part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
-        part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
-        a_name, b_name = part_a.team_name, part_b.team_name
-        existing_thread_id = match.thread_id
 
-    prompt = (f"Pick a cube to start **{a_name}** vs **{b_name}** "
-              f"(the result records automatically when the draft finishes):")
-
-    if existing_thread_id:
-        thread = interaction.guild.get_channel(int(existing_thread_id))
-        if thread is None:
-            thread = await interaction.guild.fetch_channel(int(existing_thread_id))
-        await thread.send(content=prompt, view=_cube_picker_for_match(interaction, match_id, a_name, b_name))
-        await interaction.response.send_message(f"Continue your match in {thread.mention}.", ephemeral=True)
-        return
-
-    thread = await interaction.message.create_thread(name=f"{a_name} vs {b_name}")
-    async with db_session() as session:
-        m = await session.get(TournamentMatch, match_id)
-        m.thread_id = str(thread.id)
-    await thread.send(content=prompt, view=_cube_picker_for_match(interaction, match_id, a_name, b_name))
-    await interaction.response.send_message(f"Started your match in {thread.mention}.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    await open_match_room(interaction, match_id)
 
 
 class PlayMatchView(discord.ui.View):
@@ -183,6 +155,10 @@ async def re_register_tournament_views(bot):
         matches = (await session.execute(stmt)).scalars().all()
         for m in matches:
             bot.add_view(PlayMatchView(m.id, ""), message_id=int(m.pairings_message_id))
+            # Registering unconditionally is safe: off `scheduling` the control
+            # message renders no button, so there is nothing to click.
+            if m.control_message_id:
+                bot.add_view(MatchControlView(m.id), message_id=int(m.control_message_id))
     logger.info(f"Re-registered {len(matches)} tournament play buttons")
 
 
