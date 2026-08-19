@@ -816,6 +816,8 @@ class TournamentCog(commands.Cog):
                 f"{match.team_b_wins} **{part_b.team_name}**"
             )
             await update_standings_message(self.bot, tournament_id)
+            from match_control_view import refresh_match_control
+            await refresh_match_control(self.bot, match.id)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
 

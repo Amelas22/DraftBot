@@ -245,3 +245,21 @@ async def refresh_match_control(bot: discord.Client, match_id: int) -> None:
         logger.warning(f"Match {match_id} control message {control_id} gone; not refreshed")
     except discord.HTTPException as e:
         logger.error(f"Failed to refresh control message for match {match_id}: {e}")
+
+
+async def announce_and_refresh(
+    bot: discord.Client, channel: discord.abc.Messageable, match_id: int
+) -> None:
+    """Say the draft counts, then flip the match's control message to 'drafting'.
+
+    One path for both entry points (Start draft and /premade_draft in the
+    thread), so a draft that counts always says so the same way.
+    """
+    async with db_session() as session:
+        facts = await match_facts(session, match_id)
+    if facts is not None:
+        _match, a_name, b_name, round_number, _draft = facts
+        await channel.send(
+            f"🔗 Linked to Round {round_number} — **{a_name}** vs **{b_name}**. "
+            "The result will record automatically.")
+    await refresh_match_control(bot, match_id)

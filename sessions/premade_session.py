@@ -20,9 +20,18 @@ class PremadeSession(BaseSession):
         self.session_details.team_a_name = self.session_details.team_a_name or "Team A"
         self.session_details.team_b_name = self.session_details.team_b_name or "Team B"
         await super().create_draft_session(interaction, bot)
-        # A ▶ Play-button launch already carries a tournament_match_id override —
-        # don't nudge those (cheap guard; post_premade_nudge re-checks the DB too).
+        # A launch that already carries a tournament_match_id (▶ Start draft, or
+        # /premade_draft inside a match thread) is certain — say so and update the
+        # match's control message, instead of guessing with the fuzzy-name nudge.
         if getattr(self.session_details, "tournament_match_id", None) is not None:
+            try:
+                from match_control_view import announce_and_refresh
+                await announce_and_refresh(
+                    interaction.client, interaction.channel,
+                    self.session_details.tournament_match_id)
+            except Exception as e:
+                from loguru import logger
+                logger.error(f"match control announce failed: {e}")
             return
         # Nudge: if this looks like an ongoing tournament match, offer to link it.
         try:
