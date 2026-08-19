@@ -272,3 +272,81 @@ async def test_flapping_cannot_reseat_without_limit():
         await mgr._on_session_users(_users([n for n in SEATS if n != "gregg"]))
 
     assert mgr.seating_attempts == 3, "the attempt cap must survive a departure"
+
+
+@pytest.mark.asyncio
+async def test_a_finished_draft_is_not_reseated_when_the_table_empties():
+    """From a live incident (2026-08-19 10:51, session 316309465618055170-1787146235).
+
+    The draft ended at 10:51:50. Eight seconds later a seated player closed
+    Draftmancer — which is simply what finishing looks like — and the bot cleared
+    the seating, re-sent setSeating to the finished session, started a ready check
+    and DM'd five people. It timed out 90 seconds later in front of everyone.
+
+    `drafting` is False both before a draft starts and after it ends, so the guard
+    added with this block could not tell "not yet" from "all over"; the whole table
+    leaving after a draft is the one case guaranteed to hit it.
+    """
+    mgr = _manager(SEATS)
+    _already_seated(mgr)
+    mgr.guild_id = "123"
+    mgr.draft_channel_id = "456"
+
+    attempts = []
+
+    async def fake_attempt(desired_seating_order):
+        attempts.append(list(desired_seating_order))
+
+    mgr.attempt_seating_order = fake_attempt
+
+    bot = MagicMock()
+    bot.get_guild.return_value = None      # take the cheap branch; rooms aren't the point
+    bot.get_channel.return_value = None
+
+    with patch("services.draft_setup_manager.get_bot", return_value=bot), \
+         patch("services.draft_setup_manager.DRAFT_LOG_WAIT_ATTEMPTS", 0), \
+         patch("services.draft_setup_manager.DraftSession.get_by_session_id",
+               new=AsyncMock(return_value=_db_session(SEATS))):
+        await mgr._on_end_draft()
+        assert mgr.drafting is False, "the draft is over; this is the state that misleads"
+
+        # everyone drifts out of the finished session, one payload at a time
+        await mgr._on_session_users(_users([n for n in SEATS if n != "gregg"]))
+        await mgr._on_session_users(_users(SEATS[:2]))
+
+    assert not attempts, "a finished draft must never be re-seated"
+    assert mgr.seating_order_set is True, (
+        "the seating of a finished draft is history, not something to invalidate"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_seating_machinery_itself_refuses_to_seat_a_finished_draft():
+    """The invariant belongs to check_session_stage_and_organize, the only route to
+    emit('setSeating') — a future caller must not be able to re-derive it wrongly.
+
+    Mirrors the live-draft test above: the second half is what stops the first half
+    being vacuous.
+    """
+    mgr = _manager(SEATS)
+    _already_seated(mgr)
+    mgr.seating_order_set = False   # something invalidated the seating
+    mgr.draft_finished = True       # ...but the draft is already over
+    mgr._get_draft_channel = AsyncMock(return_value=None)
+
+    attempts = []
+
+    async def fake_attempt(desired_seating_order):
+        attempts.append(list(desired_seating_order))
+
+    mgr.attempt_seating_order = fake_attempt
+
+    with patch("services.draft_setup_manager.DraftSession.get_by_session_id",
+               new=AsyncMock(return_value=_db_session(SEATS))):
+        await mgr.check_session_stage_and_organize()
+        assert not attempts, "seating a draft that has finished restarts a dead lobby"
+
+        mgr.draft_finished = False
+        await mgr.check_session_stage_and_organize()
+
+    assert attempts, "with the draft not finished the same call must seat"

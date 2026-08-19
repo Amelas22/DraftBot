@@ -244,6 +244,11 @@ class DraftSetupManager:
         self.post_timeout_ready_users = set()
         self.draft_channel_id = None  # Will be populated from database
         self.drafting = False
+        # `drafting` is False both before a draft starts and after it ends, so it
+        # cannot answer "is this session still on its way to a draft". This says so
+        # explicitly: set when Draftmancer reports the draft over, cleared if one
+        # starts again, and consulted anywhere the answer must not be "not yet".
+        self.draft_finished = False
         self.draftPaused = False
         self.draft_cancelled = False
         self.removing_unexpected_user = False
@@ -297,6 +302,7 @@ class DraftSetupManager:
     async def _on_end_draft(self, data=None):
         logger.info(f"Draft ended event received: {data}")
         self.drafting = False
+        self.draft_finished = True
         self.draftPaused = False
         # A draft can end with someone still disconnected — /scrap, or the rest of the
         # table replacing them with bots and playing on. "Please reconnect" after that
@@ -470,10 +476,14 @@ class DraftSetupManager:
         # remaining move was /mutiny. Seen in prod 2026-08-14 22:54.
         #
         # Two limits on it. Only for someone we actually seated, so an unseated extra
-        # wandering off cannot throw away a good seating. And only before the draft is
-        # under way — check_session_stage_and_organize refuses to seat a live draft,
-        # but the record of who we seated is still worth keeping accurate rather than
-        # discarding the moment a mid-draft connection wobbles.
+        # wandering off cannot throw away a good seating. And only while the session is
+        # still on its way to a draft: not once one is under way, and not once one has
+        # FINISHED. The table emptying after a draft is the normal end of every draft,
+        # and reading it as a stale seating restarted a dead lobby — cleared the flag,
+        # re-sent setSeating to the finished session, then ready-checked and DM'd
+        # everyone (prod 2026-08-19 10:51, eight seconds after "Draft completed
+        # naturally"). `drafting` alone cannot see that: it is False before the draft
+        # and False after it.
         #
         # Asks "is anyone we seated missing" rather than "did the count drop". The two
         # are not the same: one seated player leaving while a newcomer arrives in the
@@ -482,6 +492,7 @@ class DraftSetupManager:
         # table's size, so computing it on every event costs nothing worth guarding.
         if (self.seating_order_set
                 and not self.drafting
+                and not self.draft_finished
                 and not self.draftPaused
                 and not self._should_disconnect):
             present_ids = {user.get('userID') for user in non_bot_users}
@@ -1901,6 +1912,7 @@ class DraftSetupManager:
                             await channel.send(f"Error starting draft: {response['error']}")
                 else:
                     self.drafting = True
+                    self.draft_finished = False
                     self.logger.info("Draft started successfully")
             except asyncio.TimeoutError:
                 self.logger.warning("Timeout waiting for draft start response")
@@ -1919,9 +1931,10 @@ class DraftSetupManager:
         """
         if self.seating_order_set or self.seating_attempts >= 4:
             return  # Already set or max attempts reached
-        if self.drafting or self.draftPaused or self._should_disconnect:
+        if self.drafting or self.draft_finished or self.draftPaused or self._should_disconnect:
             self.logger.info(
-                "Not organizing seating: the draft is already under way or shutting down"
+                "Not organizing seating: the draft is already under way, finished, "
+                "or shutting down"
             )
             return
 
