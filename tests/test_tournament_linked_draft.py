@@ -255,3 +255,28 @@ async def test_launch_refuses_already_reported_match(test_db):
     assert "result recorded" in kwargs["content"].lower()
     assert "2–0" in kwargs["content"]
     interaction.response.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_launch_defers_then_opens_the_room_for_a_normal_match(test_db):
+    """Nothing else exercises launch_tournament_match's happy path end to end."""
+    from cogs.tournament_commands import launch_tournament_match
+
+    async with test_db() as session:
+        _t, matches = await _started_round_robin(session, count=2)
+        match_id = matches[0].id
+
+    @asynccontextmanager
+    async def fake_db_session():
+        async with test_db() as inner:
+            yield inner
+            await inner.commit()
+
+    interaction = MagicMock()
+    interaction.response.defer = AsyncMock()
+    with patch("cogs.tournament_commands.db_session", fake_db_session), \
+         patch("cogs.tournament_commands.open_match_room", AsyncMock()) as open_room:
+        await launch_tournament_match(interaction, match_id)
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    open_room.assert_awaited_once_with(interaction, match_id)
