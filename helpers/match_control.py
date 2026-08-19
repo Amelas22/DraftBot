@@ -45,7 +45,8 @@ def render_match_control(
     """Body text of the control message for a match in ``state``."""
     header = f"**Round {round_number} — {a_name} vs {b_name}**"
     if state == RECORDED:
-        a_wins, b_wins = result  # type: ignore[misc]
+        assert result is not None, "result required when state is RECORDED"
+        a_wins, b_wins = result
         return f"{header}\n{recorded_result_line(a_name, b_name, a_wins, b_wins)}"
     if state == DRAFTING:
         if lobby_link:
