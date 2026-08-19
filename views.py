@@ -2421,9 +2421,14 @@ class CancelConfirmationView(discord.ui.View):
         if tournament_match_id is not None:
             # Cancelling is the only way a linked unfinished draft ever goes away
             # (cleanup exempts them), so this is the only place that can put the
-            # control message back to 'scheduling'.
-            from match_control_view import refresh_match_control
-            await refresh_match_control(self.bot, tournament_match_id)
+            # control message back to 'scheduling'. Guarded: the cancellation
+            # itself already succeeded above, so a refresh failure here must
+            # not stop the user from being told that.
+            try:
+                from match_control_view import refresh_match_control
+                await refresh_match_control(self.bot, tournament_match_id)
+            except Exception as e:
+                logger.error(f"Failed to refresh control message for tournament match {tournament_match_id}: {e}")
 
         # # Cancel any scheduled auto-pairings task
         # if self.draft_session_id in PersistentView.AUTO_PAIRINGS_TASKS:
