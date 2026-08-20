@@ -108,6 +108,11 @@ async def test_context_supplies_both_team_names_as_overrides(match_control_db):
     assert overrides["tournament_match_id"] == match.id
     # Both names present is what makes CubeDraftModal drop its name inputs.
     assert set(overrides) == {"tournament_match_id", "team_a_name", "team_b_name"}
+    # Side A must be side A: record_linked_result passes the draft's
+    # team_a_wins straight through to set_result, so a swapped a_name/b_name
+    # here would silently invert every recorded tournament result.
+    assert overrides["team_a_name"] == "Alpha"
+    assert overrides["team_b_name"] == "Bravo"
     assert block is None
 
 

@@ -352,6 +352,15 @@ async def match_room_context(
         return None
     facts = await match_facts(session, match.id)
     if facts is None:
+        # The thread names a real match, but its round or a participant has
+        # gone missing underneath it. Still return None -- a draft in a
+        # broken room should still be creatable, unlinked -- but log it,
+        # since the caller can't tell this apart from "not a match thread"
+        # and the tournament data that would explain it is exactly what's gone.
+        logger.warning(
+            f"Match thread {thread_id} resolves to match {match.id}, but its "
+            "facts are gone (missing round or participant); returning as an "
+            "unlinked draft context")
         return None
     match, a_name, b_name, _round_number, draft = facts
     overrides: dict[str, Any] = {
