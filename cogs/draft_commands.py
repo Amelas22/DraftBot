@@ -59,8 +59,20 @@ class DraftCommands(commands.Cog):
         overrides = None
         if isinstance(ctx.channel, discord.Thread):
             from match_control_view import match_room_context
-            async with db_session() as session:
-                context = await match_room_context(session, ctx.channel.id)
+            try:
+                async with db_session() as session:
+                    context = await match_room_context(session, ctx.channel.id)
+            except Exception:
+                # The tournament lookup is an enhancement to a general-purpose
+                # command — it must never be able to break an ordinary draft.
+                # Fall through to the pre-existing behaviour (typed names plus
+                # the fuzzy nudge); the user sees the difference immediately
+                # because the modal asks for team names again.
+                logger.exception(
+                    f"match_room_context failed for thread {ctx.channel.id}; "
+                    "falling back to the ordinary /premade_draft flow"
+                )
+                context = None
             if context is not None:
                 # A match thread names its own teams, so the modal never asks —
                 # there is no wrong name to type, and draft side A is match side A.
