@@ -183,6 +183,16 @@ async def _started_round_robin(session, count=4):
     return t, matches
 
 
+def _fake_db_session(test_db):
+    """An async-context-manager `db_session` replacement over a throwaway db."""
+    @asynccontextmanager
+    async def fake_db_session():
+        async with test_db() as inner:
+            yield inner
+            await inner.commit()
+    return fake_db_session
+
+
 @pytest.mark.asyncio
 async def test_re_register_skips_reported_matches(test_db):
     from cogs.tournament_commands import re_register_tournament_views
@@ -194,6 +204,7 @@ async def test_re_register_skips_reported_matches(test_db):
         for i, m in enumerate(matches):
             mm = await session.get(TournamentMatch, m.id)
             mm.pairings_message_id = str(1000 + i)
+            mm.control_message_id = str(2000 + i)  # every match already has a room
         await session.commit()
         await set_result(session, matches[0].id, 2, 0)  # report one
         await session.commit()
@@ -214,69 +225,41 @@ async def test_re_register_skips_reported_matches(test_db):
 
 
 @pytest.mark.asyncio
-async def test_play_match_view_has_one_button():
-    from cogs.tournament_commands import PlayMatchView
+async def test_re_register_registers_control_views_not_play_buttons(test_db):
+    from cogs.tournament_commands import re_register_tournament_views
+    from models.tournament import TournamentMatch
 
-    view = PlayMatchView(5, "Alpha vs Bravo")
-    assert view.timeout is None
-    assert len(view.children) == 1
-    assert view.children[0].custom_id == "tournament_play:5"
+    async with test_db() as session:
+        _t, matches = await _started_round_robin(session, count=4)
+        for i, m in enumerate(matches):
+            mm = await session.get(TournamentMatch, m.id)
+            mm.pairings_message_id = str(1000 + i)
+            mm.control_message_id = str(2000 + i)
+        await session.commit()
+        expected = len(matches)
+
+    bot = MagicMock()
+    bot.add_view = MagicMock()
+    with patch("cogs.tournament_commands.db_session", _fake_db_session(test_db)):
+        await re_register_tournament_views(bot)
+
+    assert bot.add_view.call_count == expected
+    # Every registered view is the control message's, keyed to it.
+    for call in bot.add_view.call_args_list:
+        assert call.kwargs["message_id"] >= 2000
 
 
 @pytest.mark.asyncio
-async def test_launch_refuses_already_reported_match(test_db):
-    from cogs.tournament_commands import launch_tournament_match
-    from services.tournament_service import set_result
+async def test_re_register_skips_matches_with_no_control_message(test_db):
+    from cogs.tournament_commands import re_register_tournament_views
 
     async with test_db() as session:
-        _t, matches = await _started_round_robin(session, count=2)
-        match_id = matches[0].id
-        await set_result(session, match_id, 2, 0)
+        await _started_round_robin(session, count=4)  # no control_message_id set
         await session.commit()
 
-    @asynccontextmanager
-    async def fake_db_session():
-        async with test_db() as inner:
-            yield inner
-            await inner.commit()
+    bot = MagicMock()
+    bot.add_view = MagicMock()
+    with patch("cogs.tournament_commands.db_session", _fake_db_session(test_db)):
+        await re_register_tournament_views(bot)
 
-    interaction = MagicMock()
-    interaction.message.content = "Round 1 pairing"
-    interaction.response.edit_message = AsyncMock()
-    interaction.response.send_message = AsyncMock()
-    with patch("cogs.tournament_commands.db_session", fake_db_session):
-        await launch_tournament_match(interaction, match_id)
-
-    # Stale Play button self-heals: the public pairing message is edited to drop
-    # the button (view=None) and show the recorded result; no draft is launched.
-    interaction.response.edit_message.assert_awaited_once()
-    kwargs = interaction.response.edit_message.call_args.kwargs
-    assert kwargs.get("view") is None
-    assert "result recorded" in kwargs["content"].lower()
-    assert "2–0" in kwargs["content"]
-    interaction.response.send_message.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_launch_defers_then_opens_the_room_for_a_normal_match(test_db):
-    """Nothing else exercises launch_tournament_match's happy path end to end."""
-    from cogs.tournament_commands import launch_tournament_match
-
-    async with test_db() as session:
-        _t, matches = await _started_round_robin(session, count=2)
-        match_id = matches[0].id
-
-    @asynccontextmanager
-    async def fake_db_session():
-        async with test_db() as inner:
-            yield inner
-            await inner.commit()
-
-    interaction = MagicMock()
-    interaction.response.defer = AsyncMock()
-    with patch("cogs.tournament_commands.db_session", fake_db_session), \
-         patch("cogs.tournament_commands.open_match_room", AsyncMock()) as open_room:
-        await launch_tournament_match(interaction, match_id)
-
-    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
-    open_room.assert_awaited_once_with(interaction, match_id)
+    bot.add_view.assert_not_called()

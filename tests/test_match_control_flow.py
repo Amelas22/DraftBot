@@ -69,6 +69,7 @@ def make_thread(thread_id=900):
     sent.id = 777
     thread.send = AsyncMock(return_value=sent)
     thread.fetch_message = AsyncMock()
+    thread.delete = AsyncMock()
     return thread
 
 
@@ -83,68 +84,6 @@ def make_interaction(thread):
     interaction.response.edit_message = AsyncMock()
     interaction.followup.send = AsyncMock()
     return interaction
-
-
-@pytest.mark.asyncio
-async def test_play_creates_thread_and_control_message(patched_db):
-    from match_control_view import open_match_room
-
-    async with patched_db() as session:
-        match = await _match(session)
-
-    thread = make_thread()
-    interaction = make_interaction(thread)
-    with patch("match_control_view.safe_pin", AsyncMock()):
-        await open_match_room(interaction, match.id)
-
-    interaction.message.create_thread.assert_awaited_once()
-    thread.send.assert_awaited_once()
-    async with patched_db() as session:
-        stored = await session.get(TournamentMatch, match.id)
-        assert stored.thread_id == "900"
-        assert stored.control_message_id == "777"
-
-
-@pytest.mark.asyncio
-async def test_play_twice_reuses_one_thread_and_one_control_message(patched_db):
-    from match_control_view import open_match_room
-
-    async with patched_db() as session:
-        match = await _match(session)
-
-    thread = make_thread()
-    existing = MagicMock()
-    existing.id = 777
-    existing.edit = AsyncMock()
-    thread.fetch_message = AsyncMock(return_value=existing)
-
-    with patch("match_control_view.safe_pin", AsyncMock()):
-        await open_match_room(make_interaction(thread), match.id)
-        second = make_interaction(thread)
-        await open_match_room(second, match.id)
-
-    # The bug: a second click must not create a second thread or post again.
-    second.message.create_thread.assert_not_awaited()
-    assert thread.send.await_count == 1
-    existing.edit.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_play_adopts_a_thread_made_by_hand(patched_db):
-    from match_control_view import open_match_room
-
-    async with patched_db() as session:
-        match = await _match(session)
-
-    thread = make_thread()
-    interaction = make_interaction(thread)
-    interaction.message.thread = thread  # organiser created it off the pairing message
-
-    with patch("match_control_view.safe_pin", AsyncMock()):
-        await open_match_room(interaction, match.id)
-
-    # Discord rejects a second thread on one message, so it must be adopted.
-    interaction.message.create_thread.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -284,3 +223,54 @@ async def test_create_match_room_degrades_when_discord_refuses(patched_db):
     async with patched_db() as session:
         stored = await session.get(TournamentMatch, match.id)
         assert stored.thread_id is None
+
+
+@pytest.mark.asyncio
+async def test_create_match_room_cleans_up_when_the_control_message_fails(patched_db):
+    import discord as _discord
+    from match_control_view import create_match_room
+
+    async with patched_db() as session:
+        match = await _match(session)
+
+    thread = make_thread()
+    thread.send = AsyncMock(side_effect=_discord.HTTPException(MagicMock(), "boom"))
+    message = MagicMock()
+    message.create_thread = AsyncMock(return_value=thread)
+
+    # A thread with no control message is a dead room: better none at all.
+    assert await create_match_room(message, match.id) is None
+    async with patched_db() as session:
+        stored = await session.get(TournamentMatch, match.id)
+        assert stored.thread_id is None
+        assert stored.control_message_id is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_updates_the_pairing_message_with_the_result(patched_db):
+    import discord as _discord
+    from match_control_view import refresh_match_views
+    from services.tournament_service import set_result
+
+    async with patched_db() as session:
+        match = await _match(session, thread_id="900")
+        stored = await session.get(TournamentMatch, match.id)
+        stored.pairings_channel_id = "10"
+        stored.pairings_message_id = "11"
+        stored.control_message_id = None  # only the pairing message exists
+        await set_result(session, match.id, 2, 1)
+        await session.commit()
+
+    pairing = MagicMock()
+    pairing.edit = AsyncMock()
+    # Spec'd so as_messageable's isinstance narrowing (a real Messageable check,
+    # not a duck-typed one) accepts this mock the way it would a real channel.
+    channel = MagicMock(spec=_discord.TextChannel)
+    channel.fetch_message = AsyncMock(return_value=pairing)
+    bot = MagicMock()
+    bot.get_channel.return_value = channel
+
+    await refresh_match_views(bot, match.id)
+
+    assert "Result recorded" in pairing.edit.call_args.kwargs["content"]
+    assert "<#900>" in pairing.edit.call_args.kwargs["content"]

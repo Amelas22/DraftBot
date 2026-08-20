@@ -5,7 +5,7 @@ from discord.ext import commands
 from loguru import logger
 
 from config import get_config, update_setting
-from helpers.match_control import recorded_result_line
+from helpers.match_control import render_pairing_line
 from helpers.tournament_channels import (
     PAIRINGS,
     STANDINGS,
@@ -17,7 +17,7 @@ from helpers.money_gate import gate_serve, linked_username
 from helpers.display_names import get_display_name
 from helpers.permissions import has_bot_manager_role, is_bot_manager
 from helpers.pin_helpers import safe_pin
-from match_control_view import MatchControlView, open_match_room
+from match_control_view import MatchControlView, create_match_room
 from models.tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
 from sqlalchemy import or_, select
 from services.tournament_formatter import (
@@ -65,76 +65,12 @@ def tournament_enabled(guild_id):
     return get_config(guild_id).get("features", {}).get("tournament", True)
 
 
-async def _heal_recorded_pairing_button(interaction, result_line):
-    """Replace a played match's Play button with its result, for everyone."""
-    edited = False
-    if interaction.message is not None:
-        try:
-            existing = interaction.message.content or ""
-            new_content = f"{existing}\n{result_line}" if existing else result_line
-            await interaction.response.edit_message(content=new_content, view=None)
-            edited = True
-        except discord.HTTPException:
-            edited = False
-    if not edited:
-        await interaction.response.send_message(
-            "This match already has a recorded result and can't be replayed. "
-            "Ask an admin if it needs correcting.",
-            ephemeral=True,
-        )
-
-
-async def launch_tournament_match(interaction, match_id):
-    """▶ Play: open this match's room (thread + pinned control message).
-
-    Starting the draft is a separate click inside the thread, so a match has
-    somewhere to be scheduled and a second Play click can never start a second
-    draft. The already-recorded branch stays here because it answers by editing
-    the public pairing message, which must happen before we defer.
-    """
-    async with db_session() as session:
-        match = await session.get(TournamentMatch, match_id)
-        if match is None or match.is_bye:
-            await interaction.response.send_message(
-                "This match no longer exists.", ephemeral=True)
-            return
-        if match.team_a_wins is not None:
-            part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
-            part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
-            result_line = recorded_result_line(
-                part_a.team_name, part_b.team_name, match.team_a_wins, match.team_b_wins)
-            await _heal_recorded_pairing_button(interaction, result_line)
-            return
-
-    await interaction.response.defer(ephemeral=True)
-    await open_match_room(interaction, match_id)
-
-
-class PlayMatchView(discord.ui.View):
-    """Persistent single-button view on one match's pairing message."""
-
-    def __init__(self, match_id, label):
-        super().__init__(timeout=None)
-        button = discord.ui.Button(
-            label=f"▶ {label}"[:80],
-            style=discord.ButtonStyle.primary,
-            custom_id=f"tournament_play:{match_id}",
-        )
-        button.callback = self._make_callback(match_id)
-        self.add_item(button)
-
-    @staticmethod
-    def _make_callback(match_id):
-        async def callback(interaction):
-            await launch_tournament_match(interaction, match_id)
-        return callback
-
-
 async def re_register_tournament_views(bot):
-    """Re-attach each playable match's Play button after a restart.
+    """Re-attach each playable match's control view after a restart.
 
     Swiss only has its current round live; all-open formats (round_robin/manual)
-    have every round live at once. Reported matches and byes get no button.
+    have every round live at once. Reported matches, byes, and matches with no
+    control message (room creation failed or hasn't happened) get no view.
     """
     async with db_session() as session:
         stmt = (
@@ -150,16 +86,13 @@ async def re_register_tournament_views(bot):
                 TournamentMatch.pairings_message_id.isnot(None),
                 TournamentMatch.team_a_wins.is_(None),
                 TournamentMatch.is_bye.is_(False),
+                TournamentMatch.control_message_id.isnot(None),
             )
         )
         matches = (await session.execute(stmt)).scalars().all()
         for m in matches:
-            bot.add_view(PlayMatchView(m.id, ""), message_id=int(m.pairings_message_id))
-            # Registering unconditionally is safe: off `scheduling` the control
-            # message renders no button, so there is nothing to click.
-            if m.control_message_id:
-                bot.add_view(MatchControlView(m.id), message_id=int(m.control_message_id))
-    logger.info(f"Re-registered {len(matches)} tournament play buttons")
+            bot.add_view(MatchControlView(m.id), message_id=int(m.control_message_id))
+    logger.info(f"Re-registered {len(matches)} tournament control views")
 
 
 _PLACE_MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
@@ -988,8 +921,9 @@ class TournamentCog(commands.Cog):
 
     async def _post_round_messages(self, channel, round_id, round_number):
         """Post a week header, then one message per match. Each playable match
-        gets its own Play button (its thread is created off this message); byes
-        and already-reported matches show as text with no button.
+        gets its own room (a thread + pinned control message, created off its
+        pairing message) and its line carries a link to it; byes and
+        already-reported matches show as text with no room.
 
         Takes a channel rather than the interaction: followup.send can only
         answer in the channel the command was typed in, and pairings may be
@@ -1004,25 +938,28 @@ class TournamentCog(commands.Cog):
             for m in matches:
                 part_a = await session.get(TournamentParticipant, m.team_a_participant_id)
                 if m.is_bye:
-                    rows.append((m.id, f"• **{part_a.team_name}** — BYE (auto win)", None, False))
+                    rows.append((m.id, f"• **{part_a.team_name}** — BYE (auto win)", False, None))
                 else:
                     part_b = await session.get(TournamentParticipant, m.team_b_participant_id)
-                    label = f"{part_a.team_name} vs {part_b.team_name}"
                     if m.team_a_wins is None:
-                        rows.append((m.id, f"• **{label}**", label, True))
+                        rows.append((m.id, None, True, (part_a.team_name, part_b.team_name)))
                     else:
                         rows.append((m.id, f"• **{part_a.team_name}** {m.team_a_wins}–"
-                                           f"{m.team_b_wins} **{part_b.team_name}**", label, False))
+                                           f"{m.team_b_wins} **{part_b.team_name}**", False, None))
 
-        for match_id, text, label, playable in rows:
+        for match_id, text, playable, names in rows:
             if not playable:
                 await channel.send(text)
                 continue
-            message = await channel.send(text, view=PlayMatchView(match_id, label))
+            a_name, b_name = names
+            message = await channel.send(render_pairing_line(a_name, b_name))
             async with db_session() as session:
                 m = await session.get(TournamentMatch, match_id)
                 m.pairings_channel_id = str(message.channel.id)
                 m.pairings_message_id = str(message.id)
+            thread = await create_match_room(message, match_id)
+            if thread is not None:
+                await message.edit(content=render_pairing_line(a_name, b_name, str(thread.id)))
 
     async def _post_standings(self, channel, tournament_id):
         """Post the standings message and remember it for in-place updates.

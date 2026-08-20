@@ -22,7 +22,7 @@ from helpers.match_control import (
     render_pairing_line,
 )
 from helpers.pin_helpers import safe_pin
-from helpers.utils import as_messageable, not_none
+from helpers.utils import as_messageable
 from models.draft_session import DraftSession
 from models.tournament import TournamentMatch, TournamentParticipant, TournamentRound
 
@@ -116,26 +116,6 @@ class MatchControlView(discord.ui.View):
         return callback
 
 
-async def _resolve_thread(
-    interaction: discord.Interaction, thread_id: "str | None", a_name: str, b_name: str
-) -> discord.Thread:
-    """The match's thread, adopting or creating one as needed."""
-    if thread_id:
-        guild = not_none(interaction.guild)
-        channel = guild.get_channel(int(thread_id))
-        if channel is None:
-            channel = await guild.fetch_channel(int(thread_id))
-        # The stored id always names a thread this feature created or adopted;
-        # get_channel/fetch_channel's wider return type covers arbitrary channel ids.
-        return cast(discord.Thread, channel)
-    # A thread may already hang off the pairing message (an organiser made it by
-    # hand). Discord rejects a second thread on the same message, so adopt it.
-    message = not_none(interaction.message)
-    if message.thread is not None:
-        return message.thread
-    return await message.create_thread(name=f"{a_name} vs {b_name}"[:100])
-
-
 async def _resolve_control_message(
     thread: discord.Thread, control_id: "str | None", body: str, view: "MatchControlView | None"
 ) -> discord.Message:
@@ -184,41 +164,24 @@ async def create_match_room(message: discord.Message, match_id: int) -> discord.
         logger.warning(f"Could not create a thread for match {match_id}: {e}")
         return None
 
-    control = await _resolve_control_message(thread, None, body, view)
+    try:
+        control = await _resolve_control_message(thread, None, body, view)
+    except discord.HTTPException as e:
+        logger.warning(
+            f"Created a thread for match {match_id} but could not post its control "
+            f"message ({e}); deleting the thread rather than leaving a dead room")
+        try:
+            await thread.delete()
+        except discord.HTTPException:
+            logger.warning(f"Could not delete the orphaned thread for match {match_id}")
+        return None
+
     async with db_session() as session:
         stored = await session.get(TournamentMatch, match_id)
         if stored is not None:
             stored.thread_id = str(thread.id)
             stored.control_message_id = str(control.id)
     return thread
-
-
-async def open_match_room(interaction: discord.Interaction, match_id: int) -> None:
-    """▶ Play: open the match's room. Never starts a draft.
-
-    Resolve-or-create the per-match thread and its pinned control message, then
-    point the clicker at the thread. Idempotent: any number of clicks converge
-    on one thread and one control message.
-    """
-    async with db_session() as session:
-        facts = await match_facts(session, match_id)
-        if facts is None:
-            await interaction.followup.send("This match no longer exists.", ephemeral=True)
-            return
-        match, a_name, b_name, round_number, draft = facts
-        thread_id, control_id = match.thread_id, match.control_message_id
-        body, view = control_body_and_view(match, a_name, b_name, round_number, draft)
-
-    thread = await _resolve_thread(interaction, thread_id, a_name, b_name)
-    message = await _resolve_control_message(thread, control_id, body, view)
-
-    async with db_session() as session:
-        stored = await session.get(TournamentMatch, match_id)
-        if stored is not None:
-            stored.thread_id = str(thread.id)
-            stored.control_message_id = str(message.id)
-
-    await interaction.followup.send(f"Your match room is {thread.mention}.", ephemeral=True)
 
 
 async def launch_block_for(match_id: int) -> str | None:
@@ -320,7 +283,7 @@ async def refresh_match_views(bot: discord.Client, match_id: int) -> None:
                 logger.warning(f"Match {match_id} thread {thread_id} unreachable; not refreshed")
                 channel = None
         if channel is not None:
-            # The stored id always names a thread opened by open_match_room; the
+            # The stored id always names a thread opened by create_match_room; the
             # wider return type here covers channel ids in general.
             thread = cast(discord.Thread, channel)
             try:
