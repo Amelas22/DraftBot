@@ -3,6 +3,7 @@ import pytest
 
 from conftest import match_control_db, seed_tournament_match  # noqa: F401  (fixture)
 from models.draft_session import DraftSession
+from services.tournament_service import set_result
 
 
 async def _link_draft(session, match_id, session_id="d1"):
@@ -84,3 +85,53 @@ async def test_control_body_drops_the_button_once_drafting(match_control_db):
     assert "Draft in progress" in body
     assert "https://discord.com/channels/7/8/9" in body
     assert view is None
+
+
+@pytest.mark.asyncio
+async def test_context_is_none_outside_a_match_thread(match_control_db):
+    from match_control_view import match_room_context
+
+    async with match_control_db() as session:
+        await seed_tournament_match(session, thread_id="900")
+        assert await match_room_context(session, 12345) is None
+
+
+@pytest.mark.asyncio
+async def test_context_supplies_both_team_names_as_overrides(match_control_db):
+    from match_control_view import match_room_context
+
+    async with match_control_db() as session:
+        match = await seed_tournament_match(session, thread_id="900")
+        match_id, overrides, block = await match_room_context(session, 900)
+
+    assert match_id == match.id
+    assert overrides["tournament_match_id"] == match.id
+    # Both names present is what makes CubeDraftModal drop its name inputs.
+    assert set(overrides) == {"tournament_match_id", "team_a_name", "team_b_name"}
+    assert block is None
+
+
+@pytest.mark.asyncio
+async def test_context_blocks_when_a_draft_is_already_live(match_control_db):
+    from match_control_view import match_room_context
+
+    async with match_control_db() as session:
+        match = await seed_tournament_match(session, thread_id="900")
+        await _link_draft(session, match.id)
+        _id, _overrides, block = await match_room_context(session, 900)
+
+    assert "already underway" in block
+    assert "https://discord.com/channels/g1/55/66" in block
+
+
+@pytest.mark.asyncio
+async def test_context_blocks_when_the_match_is_already_recorded(match_control_db):
+    from match_control_view import match_room_context
+
+    async with match_control_db() as session:
+        match = await seed_tournament_match(session, thread_id="900")
+        await set_result(session, match.id, 2, 1)
+        await session.commit()
+        _id, _overrides, block = await match_room_context(session, 900)
+
+    assert "Result recorded" in block

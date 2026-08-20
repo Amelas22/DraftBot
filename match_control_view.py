@@ -335,6 +335,38 @@ async def safe_refresh_match_views(bot: discord.Client, match_id: int) -> None:
         logger.error(f"Failed to refresh control message for tournament match {match_id}: {e}")
 
 
+async def match_room_context(
+    session: AsyncSession, thread_id: int
+) -> tuple[int, dict[str, Any], str | None] | None:
+    """(match_id, overrides, block) for a match thread, or None if it isn't one.
+
+    ``overrides`` are the session_details_overrides a draft launched here must
+    carry — the same three the room's own Start draft button passes, which is
+    what makes CubeDraftModal drop its team-name inputs. ``block`` is a
+    user-facing reason a new draft can't start right now, or None.
+    """
+    match = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.thread_id == str(thread_id))
+    )).scalars().first()
+    if match is None:
+        return None
+    facts = await match_facts(session, match.id)
+    if facts is None:
+        return None
+    match, a_name, b_name, _round_number, draft = facts
+    overrides: dict[str, Any] = {
+        "tournament_match_id": match.id,
+        "team_a_name": a_name,
+        "team_b_name": b_name,
+    }
+    block = launch_block_text(
+        match_state(match.team_a_wins is not None, draft is not None),
+        lobby_link(draft),
+        recorded_result_line(a_name, b_name, match.team_a_wins, match.team_b_wins),
+    )
+    return match.id, overrides, block
+
+
 async def announce_and_refresh(
     bot: discord.Client, channel: discord.abc.Messageable, match_id: int
 ) -> None:
