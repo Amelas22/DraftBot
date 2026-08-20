@@ -1,7 +1,7 @@
 """add match control message id
 
 Revision ID: a81fdb1d60de
-Revises: srladder0col1
+Revises: sttlmethod01
 Create Date: 2026-08-19 14:55:58.892524
 
 """
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'a81fdb1d60de'
-down_revision: Union[str, Sequence[str], None] = 'srladder0col1'
+down_revision: Union[str, Sequence[str], None] = 'sttlmethod01'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
