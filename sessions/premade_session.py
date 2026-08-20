@@ -17,6 +17,16 @@ class PremadeSession(BaseSession):
 
     async def create_draft_session(self, interaction, bot):
         """Use base class method to handle the creation of the draft session."""
+        match_id = getattr(self.session_details, "tournament_match_id", None)
+        if match_id is not None:
+            # Last point before tournament_match_id is written, and nothing
+            # downstream re-checks it: two pickers open at once would otherwise
+            # each create a draft claiming the same match.
+            from match_control_view import launch_block_for
+            block = await launch_block_for(match_id)
+            if block is not None:
+                await interaction.response.send_message(block, ephemeral=True)
+                return
         self.session_details.team_a_name = self.session_details.team_a_name or "Team A"
         self.session_details.team_b_name = self.session_details.team_b_name or "Team B"
         await super().create_draft_session(interaction, bot)

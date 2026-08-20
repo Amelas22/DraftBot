@@ -49,6 +49,7 @@ async def test_linked_premade_draft_announces_instead_of_nudging():
 
     session = PremadeSession(details)
     with patch("sessions.base_session.BaseSession.create_draft_session", AsyncMock()), \
+         patch("match_control_view.launch_block_for", AsyncMock(return_value=None)), \
          patch("match_control_view.announce_and_refresh", AsyncMock()) as announce, \
          patch("tournament_nudge.post_premade_nudge", AsyncMock()) as nudge:
         await session.create_draft_session(interaction, MagicMock())
@@ -173,3 +174,54 @@ async def test_set_result_refreshes_the_match_control_message(test_db):
             cog, ctx, team="Alpha", team_wins=2, opponent_wins=0)
 
     refresh.assert_awaited_once_with(cog.bot, match_id)
+
+
+@pytest.mark.asyncio
+async def test_premade_draft_refuses_a_match_that_already_has_a_draft():
+    from models.session_details import SessionDetails
+    from sessions.premade_session import PremadeSession
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.guild_id = 123
+    interaction.response.send_message = AsyncMock()
+    details = SessionDetails(interaction)
+    details.cube_choice = "AlphaFrog"
+    details.team_a_name = "Alpha"
+    details.team_b_name = "Bravo"
+    details.tournament_match_id = 77
+
+    session = PremadeSession(details)
+    with patch("sessions.base_session.BaseSession.create_draft_session", AsyncMock()) as create, \
+         patch("match_control_view.launch_block_for",
+               AsyncMock(return_value="A draft for this match is already underway — join it here: LINK")):
+        await session.create_draft_session(interaction, MagicMock())
+
+    # The draft must not be created at all: this is the last point before
+    # tournament_match_id is written, and nothing downstream re-checks it.
+    create.assert_not_awaited()
+    assert "already underway" in interaction.response.send_message.call_args.args[0]
+    assert interaction.response.send_message.call_args.kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_premade_draft_proceeds_when_the_match_is_free():
+    from models.session_details import SessionDetails
+    from sessions.premade_session import PremadeSession
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.guild_id = 123
+    details = SessionDetails(interaction)
+    details.cube_choice = "AlphaFrog"
+    details.team_a_name = "Alpha"
+    details.team_b_name = "Bravo"
+    details.tournament_match_id = 77
+
+    session = PremadeSession(details)
+    with patch("sessions.base_session.BaseSession.create_draft_session", AsyncMock()) as create, \
+         patch("match_control_view.launch_block_for", AsyncMock(return_value=None)), \
+         patch("match_control_view.announce_and_refresh", AsyncMock()):
+        await session.create_draft_session(interaction, MagicMock())
+
+    create.assert_awaited_once()

@@ -186,6 +186,24 @@ async def open_match_room(interaction: discord.Interaction, match_id: int) -> No
     await interaction.followup.send(f"Your match room is {thread.mention}.", ephemeral=True)
 
 
+async def launch_block_for(match_id: int) -> str | None:
+    """Why a new draft can't start for this match right now, or None.
+
+    Opens its own session so any caller can ask, including the draft-creation
+    path in sessions/premade_session.py, which holds no session of its own.
+    """
+    async with db_session() as session:
+        facts = await match_facts(session, match_id)
+        if facts is None:
+            return None
+        match, a_name, b_name, _round_number, draft = facts
+        return launch_block_text(
+            match_state(match.team_a_wins is not None, draft is not None),
+            lobby_link(draft),
+            recorded_result_line(a_name, b_name, match.team_a_wins, match.team_b_wins),
+        )
+
+
 async def start_match_draft(interaction: discord.Interaction, match_id: int) -> None:
     """'Start draft' button: post the cube picker into the match thread."""
     async with db_session() as session:
@@ -196,12 +214,8 @@ async def start_match_draft(interaction: discord.Interaction, match_id: int) -> 
             return
         match, a_name, b_name, round_number, draft = facts
         body, view = control_body_and_view(match, a_name, b_name, round_number, draft)
-        block = launch_block_text(
-            match_state(match.team_a_wins is not None, draft is not None),
-            lobby_link(draft),
-            recorded_result_line(a_name, b_name, match.team_a_wins, match.team_b_wins),
-        )
 
+    block = await launch_block_for(match_id)
     if block is not None:
         # Re-render rather than only complaining: whatever changed underneath is
         # now visible to everyone, not just the clicker.
@@ -209,10 +223,15 @@ async def start_match_draft(interaction: discord.Interaction, match_id: int) -> 
         await interaction.followup.send(block, ephemeral=True)
         return
 
+    # Ephemeral: a picker that persists in the thread is both clutter and a
+    # hazard -- a stale one stays clickable for its 180s view timeout and would
+    # create a SECOND draft linked to this same match. The lobby it produces is
+    # still public, because that is posted by the picker's own submit interaction.
     await interaction.response.send_message(
         content=(f"Pick a cube to start **{a_name}** vs **{b_name}** "
                  f"(the result records automatically when the draft finishes):"),
         view=cube_picker_for_match(interaction.guild_id, match_id, a_name, b_name),
+        ephemeral=True,
     )
 
 

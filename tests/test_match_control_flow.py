@@ -197,3 +197,45 @@ async def test_refresh_is_a_noop_when_no_control_message_exists(patched_db):
     await refresh_match_control(bot, match.id)
 
     bot.get_channel.return_value.fetch_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_start_draft_picker_is_ephemeral(patched_db):
+    from match_control_view import start_match_draft
+
+    async with patched_db() as session:
+        match = await _match(session, thread_id="900")
+
+    interaction = make_interaction(make_thread())
+    with patch("match_control_view.cube_picker_for_match", MagicMock()):
+        await start_match_draft(interaction, match.id)
+
+    # Ephemeral: the picker never persists in the thread, so no stale picker can
+    # create a second draft for this match once one is under way.
+    assert interaction.response.send_message.call_args.kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_launch_block_for_is_none_when_match_is_free(patched_db):
+    from match_control_view import launch_block_for
+
+    async with patched_db() as session:
+        match = await _match(session, thread_id="900")
+
+    assert await launch_block_for(match.id) is None
+
+
+@pytest.mark.asyncio
+async def test_launch_block_for_reports_a_live_draft(patched_db):
+    from match_control_view import launch_block_for
+
+    async with patched_db() as session:
+        match = await _match(session, thread_id="900")
+        session.add(DraftSession(
+            session_id="d1", guild_id="g1", session_type="premade",
+            draft_channel_id="55", message_id="66", tournament_match_id=match.id,
+        ))
+        await session.commit()
+
+    block = await launch_block_for(match.id)
+    assert "already underway" in block
