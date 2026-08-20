@@ -47,6 +47,12 @@ class DebtLedger(Base):
     # quantity (same sign convention as tix). See /lend design spec.
     card_name = Column(String(128), nullable=True)
 
+    # How a settlement row was paid: 'wallet' (auto-drawn from the payer's wallet by
+    # mtgo_resolution_service) or 'external' (tix moved in MTGO and someone recorded it
+    # afterwards). NULL on every non-settlement row -- and on nothing else, because the
+    # backfill below classifies all history.
+    settlement_method = Column(String(16), nullable=True)
+
     # Timestamps
     created_at = Column(DateTime, default=datetime.now)
     created_by = Column(String(64), nullable=True)  # Who recorded this entry

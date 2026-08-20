@@ -492,10 +492,20 @@ class TestBetOutcomesAfterWalletSettlement:
         await create_ledger_entries(
             guild_id="test_guild", debtor_id="alice", creditor_id="bob", amount=30,
             source_type="draft", source_id="settled_session")
-        # auto-settlement pays it straight back out of alice's wallet
-        await create_ledger_entries(
-            guild_id="test_guild", debtor_id="bob", creditor_id="alice", amount=30,
-            source_type="settlement", source_id="some-uuid")
+        # auto-settlement pays it straight back out of alice's wallet. Written
+        # directly (not via create_ledger_entries, which has no settlement_method
+        # param) so this genuinely exercises the wallet path -- settlement_method
+        # is what now distinguishes it from a manually-recorded settlement.
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                db_session.add(DebtLedger(
+                    guild_id="test_guild", player_id="bob", counterparty_id="alice",
+                    amount=-30, source_type="settlement", source_id="some-uuid",
+                    settlement_method="wallet"))
+                db_session.add(DebtLedger(
+                    guild_id="test_guild", player_id="alice", counterparty_id="bob",
+                    amount=30, source_type="settlement", source_id="some-uuid",
+                    settlement_method="wallet"))
 
         outcome_lines, _ = await get_formatted_bet_outcomes(
             "settled_session", {"alice": "Alice", "bob": "Bob"}, ["bob"])
@@ -522,9 +532,18 @@ class TestBetOutcomesAfterWalletSettlement:
         await create_ledger_entries(
             guild_id="test_guild", debtor_id="alice", creditor_id="bob", amount=100,
             source_type="draft", source_id="partial_session")
-        await create_ledger_entries(   # alice's wallet only covered 60
-            guild_id="test_guild", debtor_id="bob", creditor_id="alice", amount=60,
-            source_type="settlement", source_id="some-uuid")
+        # alice's wallet only covered 60 -- written directly (see the wallet
+        # test above) so settlement_method='wallet' is set.
+        async with AsyncSessionLocal() as db_session:
+            async with db_session.begin():
+                db_session.add(DebtLedger(
+                    guild_id="test_guild", player_id="bob", counterparty_id="alice",
+                    amount=-60, source_type="settlement", source_id="some-uuid",
+                    settlement_method="wallet"))
+                db_session.add(DebtLedger(
+                    guild_id="test_guild", player_id="alice", counterparty_id="bob",
+                    amount=60, source_type="settlement", source_id="some-uuid",
+                    settlement_method="wallet"))
 
         outcome_lines, _ = await get_formatted_bet_outcomes(
             "partial_session", {"alice": "Alice", "bob": "Bob"}, ["bob"])

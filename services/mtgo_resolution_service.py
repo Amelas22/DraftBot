@@ -489,10 +489,10 @@ async def settle_debt_from_wallet(guild_id: str, payer_id: str, creditor_id: str
             # 2) debt ledger settlement (payer +amount reduces debt; creditor -amount reduces credit)
             session.add(DebtLedger(guild_id=guild_id, player_id=payer_id, counterparty_id=creditor_id,
                                    amount=amount, source_type="settlement", source_id=link_id,
-                                   notes=note, created_by=payer_id))
+                                   notes=note, created_by=payer_id, settlement_method="wallet"))
             session.add(DebtLedger(guild_id=guild_id, player_id=creditor_id, counterparty_id=payer_id,
                                    amount=-amount, source_type="settlement", source_id=link_id,
-                                   notes=note, created_by=payer_id))
+                                   notes=note, created_by=payer_id, settlement_method="wallet"))
             # single commit on exit -> wallet + debt move together or not at all
             logger.info(f"settle_debt_from_wallet: {payer_id} -> {creditor_id} {amount} tix (link {link_id})")
             return {"ok": True, "amount": amount, "payer": payer_id, "creditor": creditor_id, "id": link_id}
