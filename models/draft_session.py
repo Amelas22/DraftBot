@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, JSON, Boolean, text
+from sqlalchemy import Column, Integer, String, DateTime, JSON, Boolean, text, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy import select, desc
 from datetime import datetime
@@ -63,7 +63,15 @@ class DraftSession(Base):
     pack_first_picks = Column(JSON)
     draftmancer_role_users = Column(JSON)
     status_message_id = Column(String, nullable=True)
-    
+
+    __table_args__ = (
+        # Enforces the invariant a race between two open pickers could otherwise
+        # break: at most one draft session per tournament match. SQLite permits
+        # multiple NULLs in a unique index, so unlinked (non-tournament) drafts
+        # are unaffected.
+        Index('ix_draft_sessions_tournament_match_id', 'tournament_match_id', unique=True),
+    )
+
     # Relationships
     match_results = relationship("MatchResult", back_populates="draft_session", 
                                 foreign_keys="[MatchResult.session_id]")

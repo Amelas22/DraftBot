@@ -191,11 +191,18 @@ async def launch_block_for(match_id: int) -> str | None:
 
     Opens its own session so any caller can ask, including the draft-creation
     path in sessions/premade_session.py, which holds no session of its own.
+
+    A vanished match blocks rather than passing through: the creation-time
+    guard in premade_session.py treats None here as "go ahead", and a
+    dangling tournament_match_id has nothing downstream to catch it.
+    start_match_draft never reaches this branch -- it already answers "This
+    match no longer exists." itself, from the same facts lookup, before
+    calling here.
     """
     async with db_session() as session:
         facts = await match_facts(session, match_id)
         if facts is None:
-            return None
+            return "This match no longer exists."
         match, a_name, b_name, _round_number, draft = facts
         return launch_block_text(
             match_state(match.team_a_wins is not None, draft is not None),
