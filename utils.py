@@ -2931,19 +2931,25 @@ async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
                     ]
                     if previous_debt:
                         lines.append(f"  Pre-existing: {previous_debt} tix")
+                    # Gate each line on > 0, not truthiness: a settlement in the
+                    # reverse direction landing after this draft's cutoff row can make
+                    # one bucket negative even while settled_since (their sum) is
+                    # positive. The arithmetic above must keep summing both buckets
+                    # as-is -- that's what keeps new_balance correct -- only these
+                    # display lines need to ignore a negative bucket.
                     if still_owed == 0:
-                        if settled_wallet and settled_external:
+                        if settled_wallet > 0 and settled_external > 0:
                             lines.append(f"  Paid automatically from {loser_name}'s wallet: {settled_wallet} tix")
                             lines.append(f"  Settled: {settled_external} tix")
-                        elif settled_wallet:
+                        elif settled_wallet > 0:
                             lines.append(f"  Paid automatically from {loser_name}'s wallet")
-                        else:
+                        elif settled_external > 0:
                             lines.append("  Settled")
                         lines.append("  Nothing left to settle")
                     else:
-                        if settled_wallet:
+                        if settled_wallet > 0:
                             lines.append(f"  Paid from wallet: {settled_wallet} tix")
-                        if settled_external:
+                        if settled_external > 0:
                             lines.append(f"  Settled: {settled_external} tix")
                         lines.append(f"  Still owed: {still_owed} tix")
 

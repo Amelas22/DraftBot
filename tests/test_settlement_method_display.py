@@ -256,3 +256,42 @@ class TestSettlementDisplayWording:
         assert "Settled: 20 tix" in text
         assert "Still owed: 30 tix" in text
         assert "wallet" not in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_negative_bucket_renders_no_line_but_still_sums_into_balance(self, test_db):
+        """A settlement in the reverse direction landing after this draft's cutoff
+        row can make one bucket negative even while their sum (settled_since) is
+        positive -- the old single-netted-figure code could never produce this.
+        The negative bucket must not render its line (no "-20 tix" nonsense), but
+        the balance figures must still reflect the SUM of both buckets, not a
+        clamped one -- that's what proves the fix is in the display, not the math.
+        """
+        await self._seed_draft("s1", "g1", "alice", "bob", 100)
+        # Alice overpays 70 from her wallet.
+        await _settle("g1", "alice", "bob", 70, "wallet", "settle-wallet")
+        # A reverse-direction external correction: bob pays alice back 20, which
+        # lands as -20 on alice's external bucket.
+        await _settle("g1", "bob", "alice", 20, "external", "settle-correction")
+
+        pre_existing, settled_wallet, settled_external = await get_pair_position_around_draft(
+            guild_id="g1", session_id="s1", player_id="alice", counterparty_id="bob",
+        )
+        assert settled_wallet == 70
+        assert settled_external == -20  # the split itself is NOT clamped
+
+        lines, _ = await get_formatted_bet_outcomes(
+            "s1", {"alice": "Alice", "bob": "Bob"}, winning_team_ids=["bob"],
+        )
+        text = self._text(lines)
+
+        # Wallet line renders normally.
+        assert "Paid from wallet: 70 tix" in text
+        # The negative external bucket renders no line at all -- no "Settled"
+        # text and definitely no negative number leaking into the display.
+        assert "Settled" not in text
+        assert "-20" not in text
+        # The balance figure reflects the SUMMED buckets (70 + -20 = 50 paid off
+        # 100), not a clamped settled_wallet-only figure (which would read
+        # "Still owed: 30 tix" if the arithmetic, not just the display, had been
+        # changed to ignore the negative bucket).
+        assert "Still owed: 50 tix" in text
