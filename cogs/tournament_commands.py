@@ -959,7 +959,12 @@ class TournamentCog(commands.Cog):
                 m.pairings_message_id = str(message.id)
             thread = await create_match_room(message, match_id)
             if thread is not None:
-                await message.edit(content=render_pairing_line(a_name, b_name, str(thread.id)))
+                try:
+                    await message.edit(content=render_pairing_line(a_name, b_name, str(thread.id)))
+                except discord.HTTPException as e:
+                    # The room exists and the control message is in it; losing the
+                    # link costs discoverability, not the round.
+                    logger.warning(f"Could not add the room link for match {match_id}: {e}")
 
     async def _post_standings(self, channel, tournament_id):
         """Post the standings message and remember it for in-place updates.

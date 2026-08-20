@@ -252,9 +252,17 @@ async def test_re_register_registers_control_views_not_play_buttons(test_db):
 @pytest.mark.asyncio
 async def test_re_register_skips_matches_with_no_control_message(test_db):
     from cogs.tournament_commands import re_register_tournament_views
+    from models.tournament import TournamentMatch
 
     async with test_db() as session:
-        await _started_round_robin(session, count=4)  # no control_message_id set
+        # pairings_message_id IS set on every match, so it's only the missing
+        # control_message_id that must exclude them -- otherwise this test
+        # would pass even with the control_message_id filter deleted, because
+        # the pre-existing pairings_message_id filter would exclude them too.
+        _t, matches = await _started_round_robin(session, count=4)
+        for i, m in enumerate(matches):
+            mm = await session.get(TournamentMatch, m.id)
+            mm.pairings_message_id = str(1000 + i)
         await session.commit()
 
     bot = MagicMock()
@@ -263,3 +271,91 @@ async def test_re_register_skips_matches_with_no_control_message(test_db):
         await re_register_tournament_views(bot)
 
     bot.add_view.assert_not_called()
+
+
+# ---- _post_round_messages gives only the playable match a room --------------------
+
+@pytest.mark.asyncio
+async def test_post_round_messages_gives_only_the_playable_match_a_room(test_db):
+    """One bye, one already-reported match, one playable match: only the
+    playable one should get create_match_room called and its line edited."""
+    from cogs.tournament_commands import TournamentCog
+    from models.tournament import TournamentMatch, TournamentRound
+    from services.tournament_service import create_tournament, register_team
+
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "Cup", 3)
+        await session.commit()
+        alpha, _ = await register_team(session, tournament.id, "Alpha", "1")
+        bravo, _ = await register_team(session, tournament.id, "Bravo", "2")
+        charlie, _ = await register_team(session, tournament.id, "Charlie", "3")
+        delta, _ = await register_team(session, tournament.id, "Delta", "4")
+        echo, _ = await register_team(session, tournament.id, "Echo", "5")
+        await session.commit()
+
+        round_ = TournamentRound(tournament_id=tournament.id, round_number=1)
+        session.add(round_)
+        await session.flush()
+
+        bye = TournamentMatch(round_id=round_.id, team_a_participant_id=alpha.id,
+                               team_b_participant_id=None, is_bye=True)
+        reported = TournamentMatch(round_id=round_.id, team_a_participant_id=bravo.id,
+                                    team_b_participant_id=charlie.id,
+                                    team_a_wins=2, team_b_wins=0)
+        playable = TournamentMatch(round_id=round_.id, team_a_participant_id=delta.id,
+                                    team_b_participant_id=echo.id)
+        session.add_all([bye, reported, playable])
+        await session.commit()
+        round_id = round_.id
+        playable_id, reported_id, bye_id = playable.id, reported.id, bye.id
+        bye_text = "• **Alpha** — BYE (auto win)"
+        reported_text = "• **Bravo** 2–0 **Charlie**"
+
+    cog = TournamentCog.__new__(TournamentCog)  # no bot needed; not touched
+
+    def make_message(*_a, **_k):
+        msg = MagicMock()
+        msg.id = 500 + make_message.count
+        msg.channel.id = 555
+        msg.edit = AsyncMock()
+        make_message.count += 1
+        return msg
+    make_message.count = 0
+
+    channel = MagicMock()
+    channel.send = AsyncMock(side_effect=make_message)
+
+    thread = MagicMock()
+    thread.id = 9999
+
+    with patch("cogs.tournament_commands.db_session", _fake_db_session(test_db)), \
+         patch("cogs.tournament_commands.create_match_room",
+               AsyncMock(return_value=thread)) as create_room:
+        await cog._post_round_messages(channel, round_id, 1)
+
+    # Header + one line per match, exactly three lines beyond the header.
+    assert channel.send.call_count == 4
+    texts = [c.args[0] for c in channel.send.call_args_list]
+    assert bye_text in texts
+    assert reported_text in texts
+    assert any("Delta" in t and "Echo" in t for t in texts)
+
+    # Only the playable match's room gets created.
+    create_room.assert_awaited_once()
+    room_message, room_match_id = create_room.call_args.args
+    assert room_match_id == playable_id
+
+    # Only that match's line is edited, to carry the room link.
+    room_message.edit.assert_awaited_once()
+    assert "<#9999>" in room_message.edit.call_args.kwargs["content"]
+
+    async with test_db() as session:
+        stored_playable = await session.get(TournamentMatch, playable_id)
+        assert stored_playable.pairings_message_id == str(room_message.id)
+        assert stored_playable.pairings_channel_id == str(room_message.channel.id)
+        # The bye and the reported match never got pairing ids persisted --
+        # they're posted as plain text and never enter the room-creating branch.
+        stored_bye = await session.get(TournamentMatch, bye_id)
+        assert stored_bye.pairings_message_id is None
+        stored_reported = await session.get(TournamentMatch, reported_id)
+        assert stored_reported.pairings_message_id is None
