@@ -19,9 +19,10 @@ from helpers.match_control import (
     match_state,
     recorded_result_line,
     render_match_control,
+    render_pairing_line,
 )
 from helpers.pin_helpers import safe_pin
-from helpers.utils import not_none
+from helpers.utils import as_messageable, not_none
 from models.draft_session import DraftSession
 from models.tournament import TournamentMatch, TournamentParticipant, TournamentRound
 
@@ -158,6 +159,40 @@ async def _resolve_control_message(
     return message
 
 
+async def create_match_room(message: discord.Message, match_id: int) -> discord.Thread | None:
+    """Open a match's room off its pairing message: thread + pinned control message.
+
+    Returns the thread, or None when Discord refuses (typically missing Manage
+    Threads). A failure must not take the round's pairings down with it, so the
+    caller simply leaves that match's line without a link.
+    """
+    async with db_session() as session:
+        facts = await match_facts(session, match_id)
+        if facts is None:
+            return None
+        match, a_name, b_name, round_number, draft = facts
+        body, view = control_body_and_view(match, a_name, b_name, round_number, draft)
+
+    try:
+        thread = await message.create_thread(
+            name=f"{a_name} vs {b_name}"[:100],
+            # 7 days, the maximum: rooms are created when pairings post, and a
+            # match played midweek must not have archived out of the sidebar.
+            auto_archive_duration=10080,
+        )
+    except discord.HTTPException as e:
+        logger.warning(f"Could not create a thread for match {match_id}: {e}")
+        return None
+
+    control = await _resolve_control_message(thread, None, body, view)
+    async with db_session() as session:
+        stored = await session.get(TournamentMatch, match_id)
+        if stored is not None:
+            stored.thread_id = str(thread.id)
+            stored.control_message_id = str(control.id)
+    return thread
+
+
 async def open_match_room(interaction: discord.Interaction, match_id: int) -> None:
     """▶ Play: open the match's room. Never starts a draft.
 
@@ -242,35 +277,61 @@ async def start_match_draft(interaction: discord.Interaction, match_id: int) -> 
     )
 
 
-async def refresh_match_control(bot: discord.Client, match_id: int) -> None:
-    """Re-render a match's control message in place. No-op if never posted."""
+async def _refresh_pairing_message(
+    bot: discord.Client, match: TournamentMatch, a_name: str, b_name: str
+) -> None:
+    """Re-render this match's line on the pairings message. No-op if unposted."""
+    if not match.pairings_channel_id or not match.pairings_message_id:
+        return
+    channel = bot.get_channel(int(match.pairings_channel_id))
+    if channel is None:
+        return
+    try:
+        message = await as_messageable(channel).fetch_message(int(match.pairings_message_id))
+        await message.edit(content=render_pairing_line(
+            a_name, b_name, match.thread_id,
+            (match.team_a_wins, match.team_b_wins)))
+    except discord.NotFound:
+        logger.warning(f"Pairing message for match {match.id} is gone; not refreshed")
+    except discord.HTTPException as e:
+        logger.error(f"Failed to refresh pairing message for match {match.id}: {e}")
+
+
+async def refresh_match_views(bot: discord.Client, match_id: int) -> None:
+    """Re-render a match's control message and its pairing line in place.
+
+    No-op on the control message if it was never posted. The pairing refresh
+    runs after and cannot prevent the control refresh that already happened.
+    """
     async with db_session() as session:
         facts = await match_facts(session, match_id)
         if facts is None:
             return
         match, a_name, b_name, round_number, draft = facts
-        if not match.control_message_id or not match.thread_id:
-            return
-        thread_id, control_id = int(match.thread_id), int(match.control_message_id)
         body, view = control_body_and_view(match, a_name, b_name, round_number, draft)
 
-    channel = bot.get_channel(thread_id)
-    if channel is None:
-        try:
-            channel = await bot.fetch_channel(thread_id)
-        except discord.HTTPException:
-            logger.warning(f"Match {match_id} thread {thread_id} unreachable; not refreshed")
-            return
-    # The stored id always names a thread opened by open_match_room; the
-    # wider return type here covers channel ids in general.
-    thread = cast(discord.Thread, channel)
-    try:
-        message = await thread.fetch_message(control_id)
-        await message.edit(content=body, view=view)
-    except discord.NotFound:
-        logger.warning(f"Match {match_id} control message {control_id} gone; not refreshed")
-    except discord.HTTPException as e:
-        logger.error(f"Failed to refresh control message for match {match_id}: {e}")
+    if match.control_message_id and match.thread_id:
+        thread_id, control_id = int(match.thread_id), int(match.control_message_id)
+        channel = bot.get_channel(thread_id)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(thread_id)
+            except discord.HTTPException:
+                logger.warning(f"Match {match_id} thread {thread_id} unreachable; not refreshed")
+                channel = None
+        if channel is not None:
+            # The stored id always names a thread opened by open_match_room; the
+            # wider return type here covers channel ids in general.
+            thread = cast(discord.Thread, channel)
+            try:
+                message = await thread.fetch_message(control_id)
+                await message.edit(content=body, view=view)
+            except discord.NotFound:
+                logger.warning(f"Match {match_id} control message {control_id} gone; not refreshed")
+            except discord.HTTPException as e:
+                logger.error(f"Failed to refresh control message for match {match_id}: {e}")
+
+    await _refresh_pairing_message(bot, match, a_name, b_name)
 
 
 async def announce_and_refresh(
@@ -288,4 +349,4 @@ async def announce_and_refresh(
         await channel.send(
             f"🔗 Linked to Round {round_number} — **{a_name}** vs **{b_name}**. "
             "The result will record automatically.")
-    await refresh_match_control(bot, match_id)
+    await refresh_match_views(bot, match_id)

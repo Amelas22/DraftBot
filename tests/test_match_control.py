@@ -7,6 +7,7 @@ from helpers.match_control import (
     match_state,
     recorded_result_line,
     render_match_control,
+    render_pairing_line,
 )
 
 LINK = "https://discord.com/channels/1/2/3"
@@ -73,3 +74,26 @@ def test_block_when_recorded_repeats_the_result():
     text = launch_block_text(RECORDED, None, "✅ Result recorded: **Alpha** 2–1 **Bravo**")
     assert "Result recorded" in text
     assert "admin" in text
+
+
+def test_pairing_line_without_a_thread_is_just_the_teams():
+    line = render_pairing_line("Alpha", "Bravo")
+    assert line == "• **Alpha** vs **Bravo**"
+
+
+def test_pairing_line_links_the_thread_when_there_is_one():
+    line = render_pairing_line("Alpha", "Bravo", thread_id="900")
+    assert "<#900>" in line
+    assert "Alpha" in line and "Bravo" in line
+
+
+def test_pairing_line_shows_the_result_once_recorded():
+    line = render_pairing_line("Alpha", "Bravo", thread_id="900", result=(2, 1))
+    assert "<#900>" in line
+    assert "✅ Result recorded: **Alpha** 2–1 **Bravo**" in line
+
+
+def test_pairing_line_with_an_unplayed_result_pair_stays_unrecorded():
+    # (None, None) is what an unplayed match carries; it must not render a score.
+    line = render_pairing_line("Alpha", "Bravo", thread_id="900", result=(None, None))
+    assert "Result recorded" not in line

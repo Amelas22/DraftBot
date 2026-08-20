@@ -1035,8 +1035,8 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                                         f"{team_a_wins}-{team_b_wins} from draft {draft_session_id}")
                             await update_standings_message_for_match(bot, draft_session.tournament_match_id)
                             try:
-                                from match_control_view import refresh_match_control
-                                await refresh_match_control(bot, draft_session.tournament_match_id)
+                                from match_control_view import refresh_match_views
+                                await refresh_match_views(bot, draft_session.tournament_match_id)
                             except Exception as e:
                                 logger.error(f"Failed to refresh control message for tournament match "
                                              f"{draft_session.tournament_match_id}: {e}")

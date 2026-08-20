@@ -24,7 +24,7 @@ async def test_announce_posts_the_link_line_and_refreshes():
 
     with patch.object(match_control_view, "match_facts", AsyncMock(return_value=facts)), \
          patch.object(match_control_view, "db_session", _fake_db_session()), \
-         patch.object(match_control_view, "refresh_match_control", AsyncMock()) as refresh:
+         patch.object(match_control_view, "refresh_match_views", AsyncMock()) as refresh:
         await match_control_view.announce_and_refresh(bot, channel, 7)
 
     posted = channel.send.call_args.args[0]
@@ -92,7 +92,7 @@ async def test_cancel_reads_tournament_match_id_before_the_row_is_deleted():
     delete to mutate the session's tournament_match_id as a side effect, the
     way a real ORM delete can leave an object in a changed state. A capture
     that moved to *after* the delete block would read the mutated value and
-    call refresh_match_control with it instead of the real id, failing the
+    call refresh_match_views with it instead of the real id, failing the
     assertion below. (Verified by hand: temporarily moving the capture after
     the delete block makes this test fail with the mutated value — see the
     fix-round report.)
@@ -135,7 +135,7 @@ async def test_cancel_reads_tournament_match_id_before_the_row_is_deleted():
          patch("views.AsyncSessionLocal", session_factory), \
          patch.dict(ACTIVE_MANAGERS, {}, clear=True), \
          patch.object(ReadyCheckSession, "cleanup", AsyncMock()), \
-         patch("match_control_view.refresh_match_control", AsyncMock()) as refresh:
+         patch("match_control_view.refresh_match_views", AsyncMock()) as refresh:
         await view.confirm_button(MagicMock(), interaction)
 
     db_sess.delete.assert_awaited_once_with(session)
@@ -169,7 +169,7 @@ async def test_set_result_refreshes_the_match_control_message(test_db):
     ctx.followup.send = AsyncMock()
 
     with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
-         patch("match_control_view.refresh_match_control", AsyncMock()) as refresh:
+         patch("match_control_view.refresh_match_views", AsyncMock()) as refresh:
         await TournamentCog.set_result.callback(
             cog, ctx, team="Alpha", team_wins=2, opponent_wins=0)
 

@@ -2425,8 +2425,8 @@ class CancelConfirmationView(discord.ui.View):
             # itself already succeeded above, so a refresh failure here must
             # not stop the user from being told that.
             try:
-                from match_control_view import refresh_match_control
-                await refresh_match_control(self.bot, tournament_match_id)
+                from match_control_view import refresh_match_views
+                await refresh_match_views(self.bot, tournament_match_id)
             except Exception as e:
                 logger.error(f"Failed to refresh control message for tournament match {tournament_match_id}: {e}")
 

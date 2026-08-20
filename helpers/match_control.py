@@ -55,6 +55,27 @@ def render_match_control(
     return f"{header}\nNot started yet. Hit **Start draft** when both teams are ready."
 
 
+def render_pairing_line(
+    a_name: str,
+    b_name: str,
+    thread_id: str | None = None,
+    result: tuple[int | None, int | None] | None = None,
+) -> str:
+    """One match's line on the pairings message.
+
+    Carries a link to the match's room, and the score once the match is played,
+    so the pairings channel reads as an index of the round. A match with no
+    thread (Discord refused to create one) degrades to the names alone rather
+    than rendering a broken mention.
+    """
+    line = f"• **{a_name}** vs **{b_name}**"
+    if thread_id:
+        line = f"{line} — <#{thread_id}>"
+    if result is not None and result[0] is not None and result[1] is not None:
+        return f"{line}\n{recorded_result_line(a_name, b_name, result[0], result[1])}"
+    return line
+
+
 def launch_block_text(
     state: str, lobby_link: str | None, recorded_line: str
 ) -> str | None:

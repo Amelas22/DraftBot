@@ -817,8 +817,8 @@ class TournamentCog(commands.Cog):
             )
             await update_standings_message(self.bot, tournament_id)
             try:
-                from match_control_view import refresh_match_control
-                await refresh_match_control(self.bot, match.id)
+                from match_control_view import refresh_match_views
+                await refresh_match_views(self.bot, match.id)
             except Exception as e:
                 logger.error(f"Failed to refresh control message for tournament match {match.id}: {e}")
         except ValueError as e:

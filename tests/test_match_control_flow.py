@@ -187,14 +187,14 @@ async def test_start_draft_refuses_when_a_draft_is_live(patched_db):
 
 @pytest.mark.asyncio
 async def test_refresh_is_a_noop_when_no_control_message_exists(patched_db):
-    from match_control_view import refresh_match_control
+    from match_control_view import refresh_match_views
 
     async with patched_db() as session:
         match = await _match(session, thread_id="900")
 
     bot = MagicMock()
     bot.get_channel.return_value = make_thread()
-    await refresh_match_control(bot, match.id)
+    await refresh_match_views(bot, match.id)
 
     bot.get_channel.return_value.fetch_message.assert_not_awaited()
 
@@ -239,3 +239,48 @@ async def test_launch_block_for_reports_a_live_draft(patched_db):
 
     block = await launch_block_for(match.id)
     assert "already underway" in block
+
+
+@pytest.mark.asyncio
+async def test_create_match_room_makes_a_long_lived_thread_and_pins_control(patched_db):
+    from match_control_view import create_match_room
+
+    async with patched_db() as session:
+        match = await _match(session)
+
+    thread = make_thread()
+    message = MagicMock()
+    message.create_thread = AsyncMock(return_value=thread)
+
+    with patch("match_control_view.safe_pin", AsyncMock()) as pin:
+        result = await create_match_room(message, match.id)
+
+    assert result is thread
+    # 7 days: a thread made when pairings post must still be in the sidebar when
+    # the match is actually played midweek.
+    assert message.create_thread.call_args.kwargs["auto_archive_duration"] == 10080
+    thread.send.assert_awaited_once()
+    pin.assert_awaited_once()
+    async with patched_db() as session:
+        stored = await session.get(TournamentMatch, match.id)
+        assert stored.thread_id == "900"
+        assert stored.control_message_id == "777"
+
+
+@pytest.mark.asyncio
+async def test_create_match_room_degrades_when_discord_refuses(patched_db):
+    import discord as _discord
+    from match_control_view import create_match_room
+
+    async with patched_db() as session:
+        match = await _match(session)
+
+    message = MagicMock()
+    message.create_thread = AsyncMock(
+        side_effect=_discord.HTTPException(MagicMock(), "no Manage Threads"))
+
+    # The round must still post: a missing room costs a link, not the pairings.
+    assert await create_match_room(message, match.id) is None
+    async with patched_db() as session:
+        stored = await session.get(TournamentMatch, match.id)
+        assert stored.thread_id is None
