@@ -274,3 +274,6 @@ async def test_refresh_updates_the_pairing_message_with_the_result(patched_db):
 
     assert "Result recorded" in pairing.edit.call_args.kwargs["content"]
     assert "<#900>" in pairing.edit.call_args.kwargs["content"]
+    # A pairing message posted before this task's switchover can still carry a
+    # dead ▶ Play button; the rewrite must strip it, not just replace the text.
+    assert pairing.edit.call_args.kwargs["view"] is None

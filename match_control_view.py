@@ -251,9 +251,14 @@ async def _refresh_pairing_message(
         return
     try:
         message = await as_messageable(channel).fetch_message(int(match.pairings_message_id))
+        # view=None strips components: a message posted before this task's
+        # switchover can still carry a ▶ Play button whose handler is gone, and
+        # a bare content edit would leave that dead button in place. Messages
+        # posted by the current code have no components, so this is a no-op
+        # for them and a repair for legacy ones.
         await message.edit(content=render_pairing_line(
             a_name, b_name, match.thread_id,
-            (match.team_a_wins, match.team_b_wins)))
+            (match.team_a_wins, match.team_b_wins)), view=None)
     except discord.NotFound:
         logger.warning(f"Pairing message for match {match.id} is gone; not refreshed")
     except discord.HTTPException as e:
