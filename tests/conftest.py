@@ -9,6 +9,10 @@ this one.
 seed_session: the one seeder for DraftSession + MatchResult fixtures --
 import it (``from conftest import seed_session``) instead of hand-writing
 another per-file variant.
+
+seed_settlement: the one seeder for a paired settlement DebtLedger write --
+import it (``from conftest import seed_settlement``) instead of hand-writing
+another per-file variant.
 """
 import os
 import tempfile
@@ -19,6 +23,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from database.models_base import Base
 from database.db_session import AsyncSessionLocal
+from models.debt_ledger import DebtLedger
 from models.draft_session import DraftSession
 from models.match import MatchResult
 
@@ -65,6 +70,29 @@ async def seed_session(session_id="s1", guild="g", stype="staked",
             s.add(MatchResult(session_id=session_id, match_number=i + 1,
                               player1_id=p1, player2_id=p2, winner_id=w,
                               result_submitted_at=ts))
+        await s.commit()
+
+
+async def seed_settlement(guild, payer, payee, amount, method, source_id):
+    """Insert a pair of settlement DebtLedger rows directly, with an explicit
+    settlement_method -- including None, to simulate a row some other path
+    forgot to classify.
+
+    Mirrors the amount convention of both real writers: the payer's entry is
+    positive (it reduces what they owe), the payee's is negative (it reduces
+    what they're owed).
+    """
+    async with AsyncSessionLocal() as s:
+        s.add(DebtLedger(
+            guild_id=guild, player_id=payer, counterparty_id=payee,
+            amount=amount, source_type='settlement', source_id=source_id,
+            settlement_method=method,
+        ))
+        s.add(DebtLedger(
+            guild_id=guild, player_id=payee, counterparty_id=payer,
+            amount=-amount, source_type='settlement', source_id=source_id,
+            settlement_method=method,
+        ))
         await s.commit()
 
 

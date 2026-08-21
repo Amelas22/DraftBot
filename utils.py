@@ -2900,7 +2900,8 @@ async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
 
                 # Add to unique outcomes list with balances
                 unique_pairs.append((loser_name, winner_name, amount, loser_id, winner_id,
-                                     pre_draft_balance, new_balance, settled_wallet, settled_external))
+                                     pre_draft_balance, new_balance, settled_wallet, settled_external,
+                                     settled_since))
 
                 # Add to total stake
                 total_stake += amount
@@ -2911,10 +2912,10 @@ async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
             # Format for display with pre-existing debt, this draft, and net total
             formatted_lines = []
             for (loser_name, winner_name, amount, loser_id, winner_id,
-                 pre_draft_balance, new_balance, settled_wallet, settled_external) in unique_pairs:
+                 pre_draft_balance, new_balance, settled_wallet, settled_external,
+                 settled_since) in unique_pairs:
                 previous_debt = abs(pre_draft_balance)
                 new_debt = abs(new_balance)
-                settled_since = settled_wallet + settled_external
 
                 # Paid off since this draft's debt was booked \u2014 either auto-drawn from
                 # the loser's wallet, or settled manually after the fact (tix moved in

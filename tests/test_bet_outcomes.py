@@ -9,11 +9,11 @@ from database.models_base import Base
 from database.db_session import AsyncSessionLocal
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from conftest import seed_settlement
 from utils import get_formatted_bet_outcomes
 from models.draft_session import DraftSession
 from models.stake import StakeInfo
 from models.stake_pairing import StakePairing
-from models.debt_ledger import DebtLedger
 from services.debt_service import create_ledger_entries
 
 
@@ -496,16 +496,7 @@ class TestBetOutcomesAfterWalletSettlement:
         # directly (not via create_ledger_entries, which has no settlement_method
         # param) so this genuinely exercises the wallet path -- settlement_method
         # is what now distinguishes it from a manually-recorded settlement.
-        async with AsyncSessionLocal() as db_session:
-            async with db_session.begin():
-                db_session.add(DebtLedger(
-                    guild_id="test_guild", player_id="bob", counterparty_id="alice",
-                    amount=-30, source_type="settlement", source_id="some-uuid",
-                    settlement_method="wallet"))
-                db_session.add(DebtLedger(
-                    guild_id="test_guild", player_id="alice", counterparty_id="bob",
-                    amount=30, source_type="settlement", source_id="some-uuid",
-                    settlement_method="wallet"))
+        await seed_settlement("test_guild", "alice", "bob", 30, "wallet", "some-uuid")
 
         outcome_lines, _ = await get_formatted_bet_outcomes(
             "settled_session", {"alice": "Alice", "bob": "Bob"}, ["bob"])
@@ -534,16 +525,7 @@ class TestBetOutcomesAfterWalletSettlement:
             source_type="draft", source_id="partial_session")
         # alice's wallet only covered 60 -- written directly (see the wallet
         # test above) so settlement_method='wallet' is set.
-        async with AsyncSessionLocal() as db_session:
-            async with db_session.begin():
-                db_session.add(DebtLedger(
-                    guild_id="test_guild", player_id="bob", counterparty_id="alice",
-                    amount=-60, source_type="settlement", source_id="some-uuid",
-                    settlement_method="wallet"))
-                db_session.add(DebtLedger(
-                    guild_id="test_guild", player_id="alice", counterparty_id="bob",
-                    amount=60, source_type="settlement", source_id="some-uuid",
-                    settlement_method="wallet"))
+        await seed_settlement("test_guild", "alice", "bob", 60, "wallet", "some-uuid")
 
         outcome_lines, _ = await get_formatted_bet_outcomes(
             "partial_session", {"alice": "Alice", "bob": "Bob"}, ["bob"])

@@ -11,8 +11,8 @@ by mtgo_resolution_service, or recorded after the fact via the manual
 """
 import pytest
 
+from conftest import seed_settlement as _settle
 from database.db_session import AsyncSessionLocal
-from models.debt_ledger import DebtLedger
 from models.draft_session import DraftSession
 from models.stake_pairing import StakePairing
 from services.debt_service import (
@@ -21,29 +21,6 @@ from services.debt_service import (
     get_pair_position_around_draft,
 )
 from utils import get_formatted_bet_outcomes
-
-
-async def _settle(guild, payer, payee, amount, method, source_id):
-    """Insert a pair of settlement rows directly, with an explicit
-    settlement_method -- including None, to simulate a row some other path
-    forgot to classify.
-
-    Mirrors the amount convention of both real writers: the payer's entry is
-    positive (it reduces what they owe), the payee's is negative (it reduces
-    what they're owed).
-    """
-    async with AsyncSessionLocal() as session:
-        session.add(DebtLedger(
-            guild_id=guild, player_id=payer, counterparty_id=payee,
-            amount=amount, source_type='settlement', source_id=source_id,
-            settlement_method=method,
-        ))
-        session.add(DebtLedger(
-            guild_id=guild, player_id=payee, counterparty_id=payer,
-            amount=-amount, source_type='settlement', source_id=source_id,
-            settlement_method=method,
-        ))
-        await session.commit()
 
 
 class TestGetPairPositionAroundDraft:
@@ -175,87 +152,71 @@ class TestSettlementDisplayWording:
     def _text(self, lines):
         return "\n".join(lines)
 
+    # Each case books a stake debt, settles part or all of it from a wallet
+    # amount and/or an external amount, and checks the resulting wording.
+    # must_contain / must_not_contain are checked verbatim; must_not_contain_ci
+    # is checked against the lowercased text (used for the "wallet" word,
+    # which must never appear when nothing was paid from a wallet -- that
+    # absence is the assertion that actually pins the bug fix).
     @pytest.mark.asyncio
-    async def test_fully_paid_wallet_only(self, test_db):
-        await self._seed_draft("s1", "g1", "alice", "bob", 30)
-        await _settle("g1", "alice", "bob", 30, "wallet", "settle-1")
+    @pytest.mark.parametrize(
+        "amount,wallet_amt,external_amt,must_contain,must_not_contain,must_not_contain_ci",
+        [
+            pytest.param(
+                30, 30, 0,
+                ["Paid automatically from Alice's wallet", "Nothing left to settle"],
+                ["Settled"], [],
+                id="fully_paid_wallet_only",
+            ),
+            pytest.param(
+                30, 0, 30,
+                ["Settled", "Nothing left to settle"],
+                [], ["wallet"],
+                id="fully_paid_external_only",
+            ),
+            pytest.param(
+                30, 20, 10,
+                ["Paid automatically from Alice's wallet: 20 tix", "Settled: 10 tix",
+                 "Nothing left to settle"],
+                [], [],
+                id="fully_paid_mixed",
+            ),
+            pytest.param(
+                50, 20, 0,
+                ["Paid from wallet: 20 tix", "Still owed: 30 tix"],
+                ["Settled"], [],
+                id="partially_paid_wallet_only",
+            ),
+            pytest.param(
+                50, 0, 20,
+                ["Settled: 20 tix", "Still owed: 30 tix"],
+                [], ["wallet"],
+                id="partially_paid_external_only",
+            ),
+        ],
+    )
+    async def test_settlement_wording(self, test_db, amount, wallet_amt, external_amt,
+                                       must_contain, must_not_contain, must_not_contain_ci):
+        await self._seed_draft("s1", "g1", "alice", "bob", amount)
+        if wallet_amt:
+            await _settle("g1", "alice", "bob", wallet_amt, "wallet", "settle-w")
+        if external_amt:
+            await create_settlement(
+                guild_id="g1", payer_id="alice", payee_id="bob",
+                amount=external_amt, settled_by="alice",
+            )
 
         lines, _ = await get_formatted_bet_outcomes(
             "s1", {"alice": "Alice", "bob": "Bob"}, winning_team_ids=["bob"],
         )
         text = self._text(lines)
 
-        assert "Paid automatically from Alice's wallet" in text
-        assert "Nothing left to settle" in text
-        assert "Settled" not in text
-
-    @pytest.mark.asyncio
-    async def test_fully_paid_external_only(self, test_db):
-        await self._seed_draft("s1", "g1", "alice", "bob", 30)
-        await create_settlement(
-            guild_id="g1", payer_id="alice", payee_id="bob",
-            amount=30, settled_by="alice",
-        )
-
-        lines, _ = await get_formatted_bet_outcomes(
-            "s1", {"alice": "Alice", "bob": "Bob"}, winning_team_ids=["bob"],
-        )
-        text = self._text(lines)
-
-        assert "Settled" in text
-        assert "Nothing left to settle" in text
-        # The assertion that actually pins the bug: no wallet wording at all
-        # for a settlement that never touched the wallet.
-        assert "wallet" not in text.lower()
-
-    @pytest.mark.asyncio
-    async def test_fully_paid_mixed(self, test_db):
-        await self._seed_draft("s1", "g1", "alice", "bob", 30)
-        await _settle("g1", "alice", "bob", 20, "wallet", "settle-w")
-        await create_settlement(
-            guild_id="g1", payer_id="alice", payee_id="bob",
-            amount=10, settled_by="alice",
-        )
-
-        lines, _ = await get_formatted_bet_outcomes(
-            "s1", {"alice": "Alice", "bob": "Bob"}, winning_team_ids=["bob"],
-        )
-        text = self._text(lines)
-
-        assert "Paid automatically from Alice's wallet: 20 tix" in text
-        assert "Settled: 10 tix" in text
-        assert "Nothing left to settle" in text
-
-    @pytest.mark.asyncio
-    async def test_partially_paid_wallet_only(self, test_db):
-        await self._seed_draft("s1", "g1", "alice", "bob", 50)
-        await _settle("g1", "alice", "bob", 20, "wallet", "settle-1")
-
-        lines, _ = await get_formatted_bet_outcomes(
-            "s1", {"alice": "Alice", "bob": "Bob"}, winning_team_ids=["bob"],
-        )
-        text = self._text(lines)
-
-        assert "Paid from wallet: 20 tix" in text
-        assert "Still owed: 30 tix" in text
-        assert "Settled" not in text
-
-    @pytest.mark.asyncio
-    async def test_partially_paid_external_only(self, test_db):
-        await self._seed_draft("s1", "g1", "alice", "bob", 50)
-        await create_settlement(
-            guild_id="g1", payer_id="alice", payee_id="bob",
-            amount=20, settled_by="alice",
-        )
-
-        lines, _ = await get_formatted_bet_outcomes(
-            "s1", {"alice": "Alice", "bob": "Bob"}, winning_team_ids=["bob"],
-        )
-        text = self._text(lines)
-
-        assert "Settled: 20 tix" in text
-        assert "Still owed: 30 tix" in text
-        assert "wallet" not in text.lower()
+        for expected in must_contain:
+            assert expected in text, f"expected {expected!r} in:\n{text}"
+        for unexpected in must_not_contain:
+            assert unexpected not in text, f"unexpected {unexpected!r} in:\n{text}"
+        for unexpected in must_not_contain_ci:
+            assert unexpected not in text.lower(), f"unexpected {unexpected!r} in:\n{text}"
 
     @pytest.mark.asyncio
     async def test_negative_bucket_renders_no_line_but_still_sums_into_balance(self, test_db):

@@ -5,7 +5,7 @@ import asyncio
 import uuid
 from datetime import datetime, timedelta
 from loguru import logger
-from sqlalchemy import select, func, or_, tuple_
+from sqlalchemy import select, func, or_, tuple_, case
 from sqlalchemy.exc import OperationalError
 from database.db_session import db_session
 from models.debt_ledger import DebtLedger
@@ -274,20 +274,21 @@ async def get_pair_position_around_draft(
         pre_existing = (await session.execute(
             select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
                 *pair, DebtLedger.id < cutoff))).scalar()
-        settled_wallet = (await session.execute(
-            select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
+        settled_wallet, settled_external = (await session.execute(
+            select(
+                func.coalesce(func.sum(case(
+                    (DebtLedger.settlement_method == 'wallet', DebtLedger.amount),
+                    else_=0,
+                )), 0),
+                func.coalesce(func.sum(case(
+                    (or_(DebtLedger.settlement_method == 'external', DebtLedger.settlement_method.is_(None)), DebtLedger.amount),
+                    else_=0,
+                )), 0),
+            ).where(
                 *pair,
                 DebtLedger.id > cutoff,
                 DebtLedger.source_type == 'settlement',
-                DebtLedger.settlement_method == 'wallet',
-            ))).scalar()
-        settled_external = (await session.execute(
-            select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
-                *pair,
-                DebtLedger.id > cutoff,
-                DebtLedger.source_type == 'settlement',
-                or_(DebtLedger.settlement_method == 'external', DebtLedger.settlement_method.is_(None)),
-            ))).scalar()
+            ))).one()
         return int(pre_existing or 0), int(settled_wallet or 0), int(settled_external or 0)
 
 
