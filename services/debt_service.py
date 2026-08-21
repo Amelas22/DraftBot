@@ -49,7 +49,13 @@ async def create_ledger_entries(
         debtor_id: The player who owes money
         creditor_id: The player who is owed money
         amount: The amount owed (positive integer)
-        source_type: 'draft', 'settlement', 'admin', 'card_loan', or 'card_return'
+        source_type: 'draft', 'settlement', 'admin', 'card_loan', or 'card_return'.
+            This function never sets settlement_method, so a 'settlement' row
+            written through it would silently display as external even if the
+            tix moved out of a wallet. No production caller does this today --
+            settlement rows must go through create_settlement (external) or
+            settle_debt_from_wallet (wallet), which are what actually record
+            the method.
         source_id: session_id for drafts, UUID otherwise
         notes: Optional human-readable context
         created_by: Optional - who recorded this entry
@@ -274,6 +280,12 @@ async def get_pair_position_around_draft(
         pre_existing = (await session.execute(
             select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
                 *pair, DebtLedger.id < cutoff))).scalar()
+        # 'wallet' is the only enumerated case; everything else -- 'external',
+        # NULL, and any future or malformed value -- falls to the else branch.
+        # The two buckets must stay exhaustive over every row this WHERE can
+        # match: their sum feeds settled_since and therefore new_balance, so a
+        # row that fell into neither bucket would silently understate what was
+        # actually paid.
         settled_wallet, settled_external = (await session.execute(
             select(
                 func.coalesce(func.sum(case(
@@ -281,8 +293,8 @@ async def get_pair_position_around_draft(
                     else_=0,
                 )), 0),
                 func.coalesce(func.sum(case(
-                    (or_(DebtLedger.settlement_method == 'external', DebtLedger.settlement_method.is_(None)), DebtLedger.amount),
-                    else_=0,
+                    (DebtLedger.settlement_method == 'wallet', 0),
+                    else_=DebtLedger.amount,
                 )), 0),
             ).where(
                 *pair,

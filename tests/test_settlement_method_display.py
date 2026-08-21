@@ -99,6 +99,25 @@ class TestGetPairPositionAroundDraft:
         assert settled_external == 30
 
     @pytest.mark.asyncio
+    async def test_unknown_settlement_method_counts_as_external(self, test_db):
+        """The buckets are exhaustive by construction: 'wallet' is the only
+        enumerated case, so a future or malformed value must still land in
+        settled_external rather than vanishing from both buckets (which would
+        silently understate settled_since and therefore new_balance).
+        """
+        await create_ledger_entries(
+            guild_id="g1", debtor_id="alice", creditor_id="bob",
+            amount=30, source_type="draft", source_id="s1",
+        )
+        await _settle("g1", "alice", "bob", 30, "carrier_pigeon", "settle-unknown")
+
+        pre_existing, settled_wallet, settled_external = await get_pair_position_around_draft(
+            guild_id="g1", session_id="s1", player_id="alice", counterparty_id="bob",
+        )
+        assert settled_wallet == 0
+        assert settled_external == 30
+
+    @pytest.mark.asyncio
     async def test_rows_before_draft_stay_out_of_settled_buckets(self, test_db):
         """Regression pin: the id-based cutoff must still hold. A debt fully
         resolved before this draft's own row is pre-existing history, not
