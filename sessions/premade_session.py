@@ -25,17 +25,50 @@ class PremadeSession(BaseSession):
             # pass it. draft_sessions.tournament_match_id's unique index is the actual
             # backstop for that race -- the except below turns the loser's IntegrityError
             # into the same message this guard would have given it.
-            from match_control_view import launch_block_for
-            block = await launch_block_for(match_id)
+            from database.db_session import db_session
+            from match_control_view import block_for_facts, match_facts
+
+            async with db_session() as session:
+                facts = await match_facts(session, match_id)
+            if facts is None:
+                await interaction.response.send_message(
+                    "This match no longer exists.", ephemeral=True)
+                return
+            block = block_for_facts(facts)
             if block is not None:
                 await interaction.response.send_message(block, ephemeral=True)
                 return
+            # The names must come from the match's facts fetched JUST NOW, not from
+            # self.session_details -- those were set when the picker was OPENED, and
+            # the match's side order can flip in the gap before this submit
+            # (services/tournament_linking.py's link_draft_to_match swaps
+            # team_a/b_participant_id on a reversed-name match, and a later
+            # cancellation never restores it). Trusting the stale capture here would
+            # persist the OLD names against the NEW side order and silently invert
+            # the recorded result.
+            _match, current_a_name, current_b_name, _round_number, _draft = facts
+            self.session_details.team_a_name = current_a_name
+            self.session_details.team_b_name = current_b_name
         self.session_details.team_a_name = self.session_details.team_a_name or "Team A"
         self.session_details.team_b_name = self.session_details.team_b_name or "Team B"
         try:
             await super().create_draft_session(interaction, bot)
         except IntegrityError:
             if match_id is None:
+                raise
+            # Scoped precisely to the race described above: re-check for a draft
+            # actually linked to this match before blaming this failure on it. An
+            # IntegrityError from an unrelated constraint would otherwise be
+            # mislabelled with the "already underway" message below. (db_session
+            # was already imported above, when match_id was established as non-None.)
+            from sqlalchemy import select
+
+            from models.draft_session import DraftSession
+            async with db_session() as session:
+                existing = (await session.execute(
+                    select(DraftSession).where(DraftSession.tournament_match_id == match_id)
+                )).scalars().first()
+            if existing is None:
                 raise
             # Lost the race described above: the other pick's draft committed first and
             # claimed this match, so ours failed the unique index. Nothing has replied

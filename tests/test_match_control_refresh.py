@@ -36,9 +36,14 @@ async def test_announce_posts_the_link_line_and_refreshes():
 
 
 @pytest.mark.asyncio
-async def test_linked_premade_draft_announces_instead_of_nudging():
+async def test_linked_premade_draft_announces_instead_of_nudging(test_db):
+    from conftest import seed_tournament_match
+    from database.db_session import db_session
     from models.session_details import SessionDetails
     from sessions.premade_session import PremadeSession
+
+    async with db_session() as seed_session:
+        match = await seed_tournament_match(seed_session)
 
     interaction = MagicMock()
     interaction.user.id = 42
@@ -47,11 +52,10 @@ async def test_linked_premade_draft_announces_instead_of_nudging():
     details.cube_choice = "AlphaFrog"
     details.team_a_name = "Alpha"
     details.team_b_name = "Bravo"
-    details.tournament_match_id = 77
+    details.tournament_match_id = match.id
 
     session = PremadeSession(details)
     with patch("sessions.base_session.BaseSession.create_draft_session", AsyncMock()), \
-         patch("match_control_view.launch_block_for", AsyncMock(return_value=None)), \
          patch("match_control_view.announce_and_refresh", AsyncMock()) as announce, \
          patch("tournament_nudge.post_premade_nudge", AsyncMock()) as nudge:
         await session.create_draft_session(interaction, MagicMock())
@@ -85,16 +89,22 @@ async def test_unlinked_premade_draft_still_nudges():
 
 
 @pytest.mark.asyncio
-async def test_integrity_error_race_answers_with_the_friendly_message():
-    """launch_block_for's guard is read-then-act, not atomic: two pickers can
+async def test_integrity_error_race_answers_with_the_friendly_message(test_db):
+    """The creation-time guard is read-then-act, not atomic: two pickers can
     both pass it and then race draft_sessions.tournament_match_id's unique
     index at commit. The loser's IntegrityError must not surface as a broken
     interaction -- it must read exactly like the guard's own message would
     have, so the player sees "already underway" either way."""
     from sqlalchemy.exc import IntegrityError
 
+    from conftest import seed_tournament_match
+    from database.db_session import db_session
+    from models.draft_session import DraftSession
     from models.session_details import SessionDetails
     from sessions.premade_session import PremadeSession
+
+    async with db_session() as seed_session:
+        match = await seed_tournament_match(seed_session)
 
     interaction = MagicMock()
     interaction.user.id = 42
@@ -104,13 +114,23 @@ async def test_integrity_error_race_answers_with_the_friendly_message():
     details.cube_choice = "AlphaFrog"
     details.team_a_name = "Alpha"
     details.team_b_name = "Bravo"
-    details.tournament_match_id = 77
+    details.tournament_match_id = match.id
 
     session = PremadeSession(details)
-    race_lost = IntegrityError("INSERT", {}, Exception("UNIQUE constraint failed"))
-    with patch("sessions.base_session.BaseSession.create_draft_session",
-               AsyncMock(side_effect=race_lost)), \
-         patch("match_control_view.launch_block_for", AsyncMock(return_value=None)):
+
+    async def _lose_the_race(*_args, **_kwargs):
+        # The race's winner commits ITS draft during this call -- the guard
+        # above already ran and saw the match free, exactly like the real
+        # race this simulates (both pickers pass the guard, then race the
+        # unique-index commit).
+        async with db_session() as winner_session:
+            winner_session.add(DraftSession(
+                session_id="winner", guild_id="g1", session_type="premade",
+                draft_channel_id="55", message_id="66", tournament_match_id=match.id,
+            ))
+        raise IntegrityError("INSERT", {}, Exception("UNIQUE constraint failed"))
+
+    with patch("sessions.base_session.BaseSession.create_draft_session", _lose_the_race):
         await session.create_draft_session(interaction, MagicMock())
 
     interaction.response.send_message.assert_awaited_once_with(
@@ -141,6 +161,46 @@ async def test_integrity_error_without_a_tournament_match_still_raises():
                AsyncMock(side_effect=other_error)):
         with pytest.raises(IntegrityError):
             await session.create_draft_session(interaction, MagicMock())
+
+
+@pytest.mark.asyncio
+async def test_integrity_error_for_a_match_with_no_existing_draft_still_raises(test_db):
+    """Narrowed per the correctness review: the catch must not blame ANY
+    IntegrityError on the tournament-match race just because a match id is
+    present. If nothing is actually linked to this match after the failure,
+    it must re-raise so the real error surfaces -- not lie with the
+    "already underway" message, which would point players at a race that
+    never happened."""
+    from sqlalchemy.exc import IntegrityError
+
+    from conftest import seed_tournament_match
+    from database.db_session import db_session
+    from models.session_details import SessionDetails
+    from sessions.premade_session import PremadeSession
+
+    async with db_session() as seed_session:
+        match = await seed_tournament_match(seed_session)
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.guild_id = 123
+    interaction.response.send_message = AsyncMock()
+    details = SessionDetails(interaction)
+    details.cube_choice = "AlphaFrog"
+    details.team_a_name = "Alpha"
+    details.team_b_name = "Bravo"
+    details.tournament_match_id = match.id
+
+    session = PremadeSession(details)
+    # No draft ever gets linked to this match -- unlike the race test above,
+    # nothing commits one as a side effect of the failure below.
+    unrelated_error = IntegrityError("INSERT", {}, Exception("some other constraint"))
+    with patch("sessions.base_session.BaseSession.create_draft_session",
+               AsyncMock(side_effect=unrelated_error)):
+        with pytest.raises(IntegrityError):
+            await session.create_draft_session(interaction, MagicMock())
+
+    interaction.response.send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -238,9 +298,19 @@ async def test_set_result_refreshes_the_match_control_message(test_db):
 
 
 @pytest.mark.asyncio
-async def test_premade_draft_refuses_a_match_that_already_has_a_draft():
+async def test_premade_draft_refuses_a_match_that_already_has_a_draft(test_db):
+    from conftest import seed_tournament_match
+    from database.db_session import db_session
+    from models.draft_session import DraftSession
     from models.session_details import SessionDetails
     from sessions.premade_session import PremadeSession
+
+    async with db_session() as seed_session:
+        match = await seed_tournament_match(seed_session)
+        seed_session.add(DraftSession(
+            session_id="existing", guild_id="g1", session_type="premade",
+            draft_channel_id="55", message_id="66", tournament_match_id=match.id,
+        ))
 
     interaction = MagicMock()
     interaction.user.id = 42
@@ -250,12 +320,10 @@ async def test_premade_draft_refuses_a_match_that_already_has_a_draft():
     details.cube_choice = "AlphaFrog"
     details.team_a_name = "Alpha"
     details.team_b_name = "Bravo"
-    details.tournament_match_id = 77
+    details.tournament_match_id = match.id
 
     session = PremadeSession(details)
-    with patch("sessions.base_session.BaseSession.create_draft_session", AsyncMock()) as create, \
-         patch("match_control_view.launch_block_for",
-               AsyncMock(return_value="A draft for this match is already underway — join it here: LINK")):
+    with patch("sessions.base_session.BaseSession.create_draft_session", AsyncMock()) as create:
         await session.create_draft_session(interaction, MagicMock())
 
     # The draft must not be created at all: this is the last point before
@@ -266,9 +334,14 @@ async def test_premade_draft_refuses_a_match_that_already_has_a_draft():
 
 
 @pytest.mark.asyncio
-async def test_premade_draft_proceeds_when_the_match_is_free():
+async def test_premade_draft_proceeds_when_the_match_is_free(test_db):
+    from conftest import seed_tournament_match
+    from database.db_session import db_session
     from models.session_details import SessionDetails
     from sessions.premade_session import PremadeSession
+
+    async with db_session() as seed_session:
+        match = await seed_tournament_match(seed_session)
 
     interaction = MagicMock()
     interaction.user.id = 42
@@ -277,12 +350,81 @@ async def test_premade_draft_proceeds_when_the_match_is_free():
     details.cube_choice = "AlphaFrog"
     details.team_a_name = "Alpha"
     details.team_b_name = "Bravo"
-    details.tournament_match_id = 77
+    details.tournament_match_id = match.id
 
     session = PremadeSession(details)
     with patch("sessions.base_session.BaseSession.create_draft_session", AsyncMock()) as create, \
-         patch("match_control_view.launch_block_for", AsyncMock(return_value=None)), \
          patch("match_control_view.announce_and_refresh", AsyncMock()):
         await session.create_draft_session(interaction, MagicMock())
 
     create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_premade_draft_rederives_current_match_names_over_stale_overrides(test_db):
+    """Correctness fix: the picker's session_details_overrides are captured
+    when it OPENS. If the match's side order flips before this submit
+    (services/tournament_linking.py's link_draft_to_match swaps
+    team_a/b_participant_id on a reversed-name match, and a later
+    cancellation never restores it), a picker opened before the flip and
+    submitted after it would otherwise persist the OLD names against the
+    NEW side order -- silently inverting the recorded result.
+    create_draft_session must re-derive the names from the match's CURRENT
+    facts at creation time instead of trusting the captured overrides."""
+    from sqlalchemy import select
+
+    from conftest import seed_tournament_match
+    from database.db_session import db_session
+    from models.draft_session import DraftSession
+    from models.session_details import SessionDetails
+    from sessions.premade_session import PremadeSession
+
+    async with db_session() as seed_session:
+        match = await seed_tournament_match(seed_session)  # current order: Alpha=A, Bravo=B
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.guild_id = 123
+    interaction.guild = MagicMock()
+    interaction.guild.id = 123
+    interaction.response = AsyncMock()
+    interaction.original_response = AsyncMock()
+    mock_message = MagicMock()
+    mock_message.id = "1"
+    mock_message.channel = MagicMock()
+    mock_message.channel.id = "2"
+    interaction.original_response.return_value = mock_message
+    interaction.client = MagicMock()
+
+    details = SessionDetails(interaction)
+    details.cube_choice = "AlphaFrog"
+    details.tournament_match_id = match.id
+    # Stale overrides, as if the picker opened before the match's sides
+    # swapped: reversed relative to the match's CURRENT order (Alpha=A,
+    # Bravo=B).
+    details.team_a_name = "Bravo"
+    details.team_b_name = "Alpha"
+
+    premade_session = PremadeSession(details)
+
+    mock_draft_manager = MagicMock()
+    mock_draft_manager.keep_connection_alive = AsyncMock()
+    mock_draft_manager.socket_client = MagicMock()
+    mock_draft_manager.socket_client.connected = False
+
+    with patch('sessions.base_session.DraftSetupManager', return_value=mock_draft_manager), \
+         patch('sessions.base_session.PersistentView'), \
+         patch('sessions.base_session.make_message_sticky', new_callable=AsyncMock), \
+         patch('sessions.base_session.get_session_deletion_hours', return_value=5), \
+         patch('sessions.base_session.get_cube_thumbnail_url', return_value='https://example.com/thumb.jpg'), \
+         patch('match_control_view.announce_and_refresh', new_callable=AsyncMock):
+        await premade_session.create_draft_session(interaction, interaction.client)
+
+    async with db_session() as check_session:
+        draft = (await check_session.execute(
+            select(DraftSession).where(DraftSession.session_id == details.session_id)
+        )).scalars().first()
+
+    assert draft is not None
+    assert draft.team_a_name == "Alpha", "must use the match's CURRENT name, not the stale override"
+    assert draft.team_b_name == "Bravo", "must use the match's CURRENT name, not the stale override"

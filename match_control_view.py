@@ -62,6 +62,25 @@ def lobby_link(draft: DraftSession | None) -> str | None:
             f"{draft.draft_channel_id}/{draft.message_id}")
 
 
+def block_for_facts(
+    facts: tuple[TournamentMatch, str, str, int, DraftSession | None],
+) -> str | None:
+    """launch_block_text for an already-fetched facts tuple, or None.
+
+    match_state -> lobby_link -> recorded_result_line -> launch_block_text is
+    the derivation every caller that already holds a match's facts needs
+    (the Start draft button, /premade_draft's match-thread context, and the
+    draft-creation guard in sessions/premade_session.py); written once here
+    so the three cannot render "why not" differently for the same state.
+    """
+    match, a_name, b_name, _round_number, draft = facts
+    return launch_block_text(
+        match_state(match.team_a_wins is not None, draft is not None),
+        lobby_link(draft),
+        recorded_result_line(a_name, b_name, match.team_a_wins, match.team_b_wins),
+    )
+
+
 def control_body_and_view(
     match: TournamentMatch, a_name: str, b_name: str, round_number: int, draft: DraftSession | None
 ) -> tuple[str, "MatchControlView | None"]:
@@ -75,6 +94,24 @@ def control_body_and_view(
     return body, (MatchControlView(match.id) if state == SCHEDULING else None)
 
 
+def _picker_overrides(match_id: int, a_name: str, b_name: str) -> dict[str, Any]:
+    """The session_details_overrides a draft launched against a match must carry.
+
+    The three keys travel together on purpose: CubeDraftModal only drops its
+    team-name inputs when tournament_match_id is present alongside both names
+    (modals.py). This is the one place that shape is built, for both entry
+    points (the Start draft button's picker and /premade_draft's match-thread
+    context) -- if they ever built it separately and drifted apart, the
+    typed-names bug this suppresses would silently come back for whichever
+    one fell out of sync.
+    """
+    return {
+        "tournament_match_id": match_id,
+        "team_a_name": a_name,
+        "team_b_name": b_name,
+    }
+
+
 def cube_picker_for_match(guild_id: int | None, match_id: int, a_name: str, b_name: str) -> discord.ui.View:
     """The premade cube picker, pre-named from the pairing.
 
@@ -85,11 +122,7 @@ def cube_picker_for_match(guild_id: int | None, match_id: int, a_name: str, b_na
     return CubeDraftSelectionView(
         session_type="premade",
         guild_id=guild_id,
-        session_details_overrides={
-            "tournament_match_id": match_id,
-            "team_a_name": a_name,
-            "team_b_name": b_name,
-        },
+        session_details_overrides=_picker_overrides(match_id, a_name, b_name),
     )
 
 
@@ -187,10 +220,9 @@ async def create_match_room(message: discord.Message, match_id: int) -> discord.
 async def launch_block_for(match_id: int) -> str | None:
     """Why a new draft can't start for this match right now, or None.
 
-    Opens its own session so any caller can ask, including the draft-creation
-    guard in sessions/premade_session.py, which holds no facts of its own at
-    that point. Callers who already have this match's facts (start_match_draft
-    is the other one) should call launch_block_text directly instead, rather
+    Opens its own session so any caller without facts of its own can ask.
+    Callers who already have this match's facts (start_match_draft,
+    match_room_context) should call block_for_facts directly instead, rather
     than paying for a second lookup here.
 
     A vanished match blocks rather than passing through: the creation-time
@@ -201,12 +233,7 @@ async def launch_block_for(match_id: int) -> str | None:
         facts = await match_facts(session, match_id)
         if facts is None:
             return "This match no longer exists."
-        match, a_name, b_name, _round_number, draft = facts
-        return launch_block_text(
-            match_state(match.team_a_wins is not None, draft is not None),
-            lobby_link(draft),
-            recorded_result_line(a_name, b_name, match.team_a_wins, match.team_b_wins),
-        )
+        return block_for_facts(facts)
 
 
 async def start_match_draft(interaction: discord.Interaction, match_id: int) -> None:
@@ -221,11 +248,7 @@ async def start_match_draft(interaction: discord.Interaction, match_id: int) -> 
         body, view = control_body_and_view(match, a_name, b_name, round_number, draft)
         # Same facts already fetched above -- launch_block_for would open a
         # second session and re-run the same lookup for nothing.
-        block = launch_block_text(
-            match_state(match.team_a_wins is not None, draft is not None),
-            lobby_link(draft),
-            recorded_result_line(a_name, b_name, match.team_a_wins, match.team_b_wins),
-        )
+        block = block_for_facts(facts)
 
     if block is not None:
         # Re-render rather than only complaining: whatever changed underneath is
@@ -362,17 +385,9 @@ async def match_room_context(
             "facts are gone (missing round or participant); returning as an "
             "unlinked draft context")
         return None
-    match, a_name, b_name, _round_number, draft = facts
-    overrides: dict[str, Any] = {
-        "tournament_match_id": match.id,
-        "team_a_name": a_name,
-        "team_b_name": b_name,
-    }
-    block = launch_block_text(
-        match_state(match.team_a_wins is not None, draft is not None),
-        lobby_link(draft),
-        recorded_result_line(a_name, b_name, match.team_a_wins, match.team_b_wins),
-    )
+    match, a_name, b_name, _round_number, _draft = facts
+    overrides = _picker_overrides(match.id, a_name, b_name)
+    block = block_for_facts(facts)
     return match.id, overrides, block
 
 
