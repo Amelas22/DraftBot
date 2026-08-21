@@ -17,7 +17,7 @@ from helpers.money_gate import gate_serve, linked_username
 from helpers.display_names import get_display_name
 from helpers.permissions import has_bot_manager_role, is_bot_manager
 from helpers.pin_helpers import safe_pin
-from match_control_view import MatchControlView, create_match_room
+from match_control_view import MatchControlView, create_match_room, match_facts
 from models.tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
 from sqlalchemy import or_, select
 from services.tournament_formatter import (
@@ -898,6 +898,108 @@ class TournamentCog(commands.Cog):
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
 
+    @tournament.command(name="open_rooms",
+                        description="Admin: open match rooms for a round that was posted without them")
+    @has_bot_manager_role()
+    async def open_rooms(
+        self,
+        ctx,
+        round_number: discord.Option(
+            int, "Round to open (defaults to the earliest round still missing rooms)",
+            required=False, default=None,
+        ),
+    ):
+        if not await self._check_enabled(ctx):
+            return
+        await ctx.defer(ephemeral=True)
+        async with db_session() as session:
+            tournament = await get_active_tournament(session, ctx.guild.id)
+            if tournament is None:
+                await ctx.followup.send("There is no active tournament.", ephemeral=True)
+                return
+            target_round, match_ids = await self._rooms_needed(session, tournament.id, round_number)
+
+        if not match_ids:
+            if round_number is not None:
+                await ctx.followup.send(
+                    f"Nothing to do — Week {round_number} has no room-less matches "
+                    f"(every playable match already has a room, or that round doesn't exist).",
+                    ephemeral=True)
+            else:
+                await ctx.followup.send(
+                    "Nothing to do — every round already has its rooms.", ephemeral=True)
+            return
+
+        opened = 0
+        for match_id in match_ids:
+            async with db_session() as session:
+                facts = await match_facts(session, match_id)
+            if facts is None:
+                continue
+            match, a_name, b_name, _round_number, _draft = facts
+            if not match.pairings_channel_id or not match.pairings_message_id:
+                continue
+            channel = self.bot.get_channel(int(match.pairings_channel_id))
+            if channel is None:
+                try:
+                    channel = await self.bot.fetch_channel(int(match.pairings_channel_id))
+                except discord.HTTPException as e:
+                    logger.warning(f"open_rooms: pairings channel for match {match_id} unreachable: {e}")
+                    continue
+            try:
+                message = await channel.fetch_message(int(match.pairings_message_id))
+            except discord.HTTPException as e:
+                logger.warning(f"open_rooms: pairing message for match {match_id} unreachable: {e}")
+                continue
+            thread = await create_match_room(message, match_id)
+            if thread is None:
+                continue
+            try:
+                await message.edit(content=render_pairing_line(a_name, b_name, str(thread.id)))
+            except discord.HTTPException as e:
+                logger.warning(f"open_rooms: could not add the room link for match {match_id}: {e}")
+            opened += 1
+
+        logger.info(f"open_rooms opened {opened} room(s) for Week {target_round} of tournament "
+                    f"{tournament.id} by {ctx.author.id}")
+        if opened == 0:
+            await ctx.followup.send(
+                f"Nothing to do — Week {target_round}'s matches already have rooms, or Discord "
+                f"refused every one of them.", ephemeral=True)
+        else:
+            await ctx.followup.send(f"✅ Opened {opened} room(s) for Week {target_round}.", ephemeral=True)
+
+    async def _rooms_needed(self, session, tournament_id, round_number):
+        """(round_number, [match_id, ...]) of the playable, unreported,
+        non-bye matches in that round that have a pairing message but no
+        room -- exactly what /tournament open_rooms creates rooms for.
+
+        round_number=None searches every round in ascending order and returns
+        the first that has any; that round's number and matches come back
+        together, so a caller never has to re-derive it. (None, []) means
+        nothing needs a room anywhere in the tournament (or, when a specific
+        round_number was passed, in that round).
+        """
+        stmt = (
+            select(TournamentMatch, TournamentRound.round_number)
+            .join(TournamentRound, TournamentMatch.round_id == TournamentRound.id)
+            .where(
+                TournamentRound.tournament_id == tournament_id,
+                TournamentMatch.is_bye.is_(False),
+                TournamentMatch.team_a_wins.is_(None),
+                TournamentMatch.pairings_message_id.isnot(None),
+                TournamentMatch.thread_id.is_(None),
+            )
+            .order_by(TournamentRound.round_number)
+        )
+        if round_number is not None:
+            stmt = stmt.where(TournamentRound.round_number == round_number)
+        rows = (await session.execute(stmt)).all()
+        if not rows:
+            return None, []
+        found_round = round_number if round_number is not None else rows[0][1]
+        return found_round, [m.id for m, r in rows if r == found_round]
+
     def _destination(self, ctx, setting):
         """Where a tournament message goes: the configured channel, else here.
 
@@ -908,7 +1010,17 @@ class TournamentCog(commands.Cog):
 
     async def _post_schedule(self, channel, tournament_id):
         """Post the whole schedule, one message per match. Swiss has one round;
-        all-open formats reveal every round at once."""
+        all-open formats reveal every round at once.
+
+        Only the first round gets rooms created here. An all-open format's
+        remaining rounds can number in the dozens of matches, and opening a
+        room is ~5 Discord calls per match -- doing that for every round in
+        one command would stall /tournament start for the better part of a
+        minute. Their lines still post (so standings/pairings are complete
+        immediately); an admin opens their rooms afterward with
+        /tournament open_rooms. Swiss is unaffected: start only ever creates
+        round 1, so this loop never sees a second round for it.
+        """
         async with db_session() as session:
             rounds = (await session.execute(
                 select(TournamentRound)
@@ -916,20 +1028,30 @@ class TournamentCog(commands.Cog):
                 .order_by(TournamentRound.round_number)
             )).scalars().all()
             round_meta = [(r.id, r.round_number) for r in rounds]
-        for round_id, round_number in round_meta:
-            await self._post_round_messages(channel, round_id, round_number)
+        for i, (round_id, round_number) in enumerate(round_meta):
+            await self._post_round_messages(channel, round_id, round_number, create_rooms=(i == 0))
 
-    async def _post_round_messages(self, channel, round_id, round_number):
+    async def _post_round_messages(self, channel, round_id, round_number, create_rooms=True):
         """Post a week header, then one message per match. Each playable match
         gets its own room (a thread + pinned control message, created off its
         pairing message) and its line carries a link to it; byes and
         already-reported matches show as text with no room.
 
+        create_rooms=False skips room creation for every playable match (used
+        by _post_schedule for an all-open format's later rounds); the header
+        then says how to open them later, and the pairing line/ids still post
+        and persist so /tournament open_rooms has something to act on.
+
         Takes a channel rather than the interaction: followup.send can only
         answer in the channel the command was typed in, and pairings may be
         destined for the play channel instead.
         """
-        await channel.send(f"**Week {round_number} pairings:**")
+        if create_rooms:
+            await channel.send(f"**Week {round_number} pairings:**")
+        else:
+            await channel.send(
+                f"**Week {round_number} pairings:** — rooms open with "
+                f"`/tournament open_rooms {round_number}`")
         async with db_session() as session:
             matches = (await session.execute(
                 select(TournamentMatch).where(TournamentMatch.round_id == round_id)
@@ -948,15 +1070,24 @@ class TournamentCog(commands.Cog):
                                            f"{m.team_b_wins} **{part_b.team_name}**", False, None))
 
         for match_id, text, playable, names in rows:
-            if not playable:
-                await channel.send(text)
+            # One match's post failing (e.g. a transient Discord error) must not
+            # take the rest of the round down with it -- a round missing one
+            # line is far better than a round missing everything after it.
+            try:
+                if not playable:
+                    await channel.send(text)
+                    continue
+                a_name, b_name = names
+                message = await channel.send(render_pairing_line(a_name, b_name))
+            except discord.HTTPException as e:
+                logger.error(f"Could not post the pairing line for match {match_id}; skipping it: {e}")
                 continue
-            a_name, b_name = names
-            message = await channel.send(render_pairing_line(a_name, b_name))
             async with db_session() as session:
                 m = await session.get(TournamentMatch, match_id)
                 m.pairings_channel_id = str(message.channel.id)
                 m.pairings_message_id = str(message.id)
+            if not create_rooms:
+                continue
             thread = await create_match_room(message, match_id)
             if thread is not None:
                 try:

@@ -83,6 +83,65 @@ async def test_unlinked_premade_draft_still_nudges():
 
 
 @pytest.mark.asyncio
+async def test_integrity_error_race_answers_with_the_friendly_message():
+    """launch_block_for's guard is read-then-act, not atomic: two pickers can
+    both pass it and then race draft_sessions.tournament_match_id's unique
+    index at commit. The loser's IntegrityError must not surface as a broken
+    interaction -- it must read exactly like the guard's own message would
+    have, so the player sees "already underway" either way."""
+    from sqlalchemy.exc import IntegrityError
+
+    from models.session_details import SessionDetails
+    from sessions.premade_session import PremadeSession
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.guild_id = 123
+    interaction.response.send_message = AsyncMock()
+    details = SessionDetails(interaction)
+    details.cube_choice = "AlphaFrog"
+    details.team_a_name = "Alpha"
+    details.team_b_name = "Bravo"
+    details.tournament_match_id = 77
+
+    session = PremadeSession(details)
+    race_lost = IntegrityError("INSERT", {}, Exception("UNIQUE constraint failed"))
+    with patch("sessions.base_session.BaseSession.create_draft_session",
+               AsyncMock(side_effect=race_lost)), \
+         patch("match_control_view.launch_block_for", AsyncMock(return_value=None)):
+        await session.create_draft_session(interaction, MagicMock())
+
+    interaction.response.send_message.assert_awaited_once_with(
+        "A draft for this match is already underway.", ephemeral=True)
+
+
+@pytest.mark.asyncio
+async def test_integrity_error_without_a_tournament_match_still_raises():
+    """The catch is scoped to the tournament-match race -- an IntegrityError
+    from an unrelated cause on a non-tournament draft must not be swallowed
+    into a message that has nothing to do with it."""
+    from sqlalchemy.exc import IntegrityError
+
+    from models.session_details import SessionDetails
+    from sessions.premade_session import PremadeSession
+
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.guild_id = 123
+    details = SessionDetails(interaction)
+    details.cube_choice = "AlphaFrog"
+    details.team_a_name = "Alpha"
+    details.team_b_name = "Bravo"
+
+    session = PremadeSession(details)
+    other_error = IntegrityError("INSERT", {}, Exception("some other constraint"))
+    with patch("sessions.base_session.BaseSession.create_draft_session",
+               AsyncMock(side_effect=other_error)):
+        with pytest.raises(IntegrityError):
+            await session.create_draft_session(interaction, MagicMock())
+
+
+@pytest.mark.asyncio
 async def test_cancel_reads_tournament_match_id_before_the_row_is_deleted():
     """Cancelling hard-deletes the draft row -- extend_deletion_if_unfinished
     exempts a linked unfinished draft from the reaper -- so this is the only

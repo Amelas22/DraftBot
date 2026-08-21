@@ -1,5 +1,6 @@
 from .base_session import BaseSession
 import discord
+from sqlalchemy.exc import IntegrityError
 
 
 class PremadeSession(BaseSession):
@@ -19,9 +20,11 @@ class PremadeSession(BaseSession):
         """Use base class method to handle the creation of the draft session."""
         match_id = getattr(self.session_details, "tournament_match_id", None)
         if match_id is not None:
-            # Last point before tournament_match_id is written, and nothing
-            # downstream re-checks it: two pickers open at once would otherwise
-            # each create a draft claiming the same match.
+            # This is the guard for the common case (one picker open at a time), but
+            # it's read-then-act and not atomic: two pickers submitted at once can both
+            # pass it. draft_sessions.tournament_match_id's unique index is the actual
+            # backstop for that race -- the except below turns the loser's IntegrityError
+            # into the same message this guard would have given it.
             from match_control_view import launch_block_for
             block = await launch_block_for(match_id)
             if block is not None:
@@ -29,7 +32,20 @@ class PremadeSession(BaseSession):
                 return
         self.session_details.team_a_name = self.session_details.team_a_name or "Team A"
         self.session_details.team_b_name = self.session_details.team_b_name or "Team B"
-        await super().create_draft_session(interaction, bot)
+        try:
+            await super().create_draft_session(interaction, bot)
+        except IntegrityError:
+            if match_id is None:
+                raise
+            # Lost the race described above: the other pick's draft committed first and
+            # claimed this match, so ours failed the unique index. Nothing has replied
+            # to the interaction yet (the base class's send_message is later, past the
+            # commit that just raised), so it's safe to answer here -- fail closed, but
+            # with the same friendly message the guard above would have given.
+            from helpers.match_control import DRAFTING, launch_block_text
+            await interaction.response.send_message(
+                launch_block_text(DRAFTING, None, ""), ephemeral=True)
+            return
         # A launch that already carries a tournament_match_id (▶ Start draft, or
         # /premade_draft inside a match thread) is certain — say so and update the
         # match's control message, instead of guessing with the fuzzy-name nudge.

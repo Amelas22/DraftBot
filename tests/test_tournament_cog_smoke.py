@@ -22,7 +22,7 @@ def test_tournament_group_has_slice_one_and_two_commands():
     assert {"create", "register", "status",
             "start", "set_result", "next_round", "finish",
             "add_team", "remove_team", "add_match", "refresh_standings",
-            "recover_draft"} <= subcommands
+            "recover_draft", "open_rooms"} <= subcommands
 
 
 def test_admin_commands_are_gated_by_bot_manager_check():
@@ -30,7 +30,7 @@ def test_admin_commands_are_gated_by_bot_manager_check():
 
     for command in ("create", "start", "set_result", "next_round", "finish",
                     "add_team", "remove_team", "add_match", "refresh_standings",
-                    "recover_draft"):
+                    "recover_draft", "open_rooms"):
         assert is_bot_manager in getattr(TournamentCog, command).checks, command
 
 

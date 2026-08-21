@@ -359,3 +359,271 @@ async def test_post_round_messages_gives_only_the_playable_match_a_room(test_db)
         assert stored_bye.pairings_message_id is None
         stored_reported = await session.get(TournamentMatch, reported_id)
         assert stored_reported.pairings_message_id is None
+
+
+# ---- create_rooms=False: post everything, room nothing ----------------------------
+
+@pytest.mark.asyncio
+async def test_post_round_messages_without_create_rooms_skips_rooms(test_db):
+    """create_rooms=False must still post the header and every match's line and
+    persist its pairing ids (so /tournament open_rooms has something to act on
+    later), but must never call create_match_room -- and the header must name
+    the remedy."""
+    from cogs.tournament_commands import TournamentCog
+    from models.tournament import TournamentMatch, TournamentRound
+    from services.tournament_service import create_tournament, register_team
+
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "Cup", 0, format="round_robin")
+        await session.commit()
+        alpha, _ = await register_team(session, tournament.id, "Alpha", "1")
+        bravo, _ = await register_team(session, tournament.id, "Bravo", "2")
+        await session.commit()
+
+        round_ = TournamentRound(tournament_id=tournament.id, round_number=2)
+        session.add(round_)
+        await session.flush()
+        playable = TournamentMatch(round_id=round_.id, team_a_participant_id=alpha.id,
+                                    team_b_participant_id=bravo.id)
+        session.add(playable)
+        await session.commit()
+        round_id, round_number, playable_id = round_.id, round_.round_number, playable.id
+
+    cog = TournamentCog.__new__(TournamentCog)
+
+    def make_message(*_a, **_k):
+        msg = MagicMock()
+        msg.id = 700
+        msg.channel.id = 555
+        msg.edit = AsyncMock()
+        return msg
+
+    channel = MagicMock()
+    channel.send = AsyncMock(side_effect=make_message)
+
+    with patch("cogs.tournament_commands.db_session", _fake_db_session(test_db)), \
+         patch("cogs.tournament_commands.create_match_room", AsyncMock()) as create_room:
+        await cog._post_round_messages(channel, round_id, round_number, create_rooms=False)
+
+    header = channel.send.call_args_list[0].args[0]
+    assert f"Week {round_number} pairings" in header
+    assert "/tournament open_rooms" in header
+    assert channel.send.call_count == 2  # header + the one match's line
+    create_room.assert_not_awaited()
+
+    async with test_db() as session:
+        stored = await session.get(TournamentMatch, playable_id)
+        assert stored.pairings_message_id == "700"
+        assert stored.pairings_channel_id == "555"
+        assert stored.thread_id is None
+
+
+# ---- _post_schedule only rooms the first round -------------------------------------
+
+@pytest.mark.asyncio
+async def test_post_schedule_only_rooms_the_first_round(test_db):
+    """An 8-team round robin (or any all-open format) reveals every round at
+    once; only the first round may pay the per-match room-creation cost inline
+    -- the rest post room-less and get caught up by /tournament open_rooms."""
+    from cogs.tournament_commands import TournamentCog
+
+    async with test_db() as session:
+        tournament, _matches = await _started_round_robin(session, count=4)  # 3 rounds
+        tournament_id = tournament.id
+
+    cog = TournamentCog.__new__(TournamentCog)
+    channel = MagicMock()
+    calls = []
+
+    async def fake_post(_channel, _round_id, round_number, create_rooms=True):
+        calls.append((round_number, create_rooms))
+
+    cog._post_round_messages = fake_post
+    with patch("cogs.tournament_commands.db_session", _fake_db_session(test_db)):
+        await cog._post_schedule(channel, tournament_id)
+
+    assert calls == [(1, True), (2, False), (3, False)]
+
+
+@pytest.mark.asyncio
+async def test_post_schedule_swiss_still_rooms_its_one_round(test_db):
+    """Swiss must post and room exactly as it did before this change. /start
+    only ever creates round 1 for Swiss (later rounds come through
+    /tournament next_round, which is untouched), so _post_schedule must see
+    exactly one round and create its room inline."""
+    from cogs.tournament_commands import TournamentCog
+    from services.tournament_service import create_tournament, register_team, start_tournament
+
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "Cup", 3)  # swiss (default)
+        await session.commit()
+        await register_team(session, tournament.id, "Alpha", "1")
+        await register_team(session, tournament.id, "Bravo", "2")
+        await session.commit()
+        await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        tournament_id = tournament.id
+
+    cog = TournamentCog.__new__(TournamentCog)
+    channel = MagicMock()
+    calls = []
+
+    async def fake_post(_channel, _round_id, round_number, create_rooms=True):
+        calls.append((round_number, create_rooms))
+
+    cog._post_round_messages = fake_post
+    with patch("cogs.tournament_commands.db_session", _fake_db_session(test_db)):
+        await cog._post_schedule(channel, tournament_id)
+
+    assert calls == [(1, True)]
+
+
+# ---- the posting loop survives one match's line failing to post -------------------
+
+@pytest.mark.asyncio
+async def test_post_round_messages_continues_past_a_failing_match(test_db):
+    """A discord.HTTPException posting one match's line must be logged and
+    skipped, not abort the round -- every match after it must still post."""
+    import discord
+
+    from cogs.tournament_commands import TournamentCog
+    from models.tournament import TournamentMatch, TournamentRound
+    from services.tournament_service import create_tournament, register_team
+
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "Cup", 3)
+        await session.commit()
+        alpha, _ = await register_team(session, tournament.id, "Alpha", "1")
+        bravo, _ = await register_team(session, tournament.id, "Bravo", "2")
+        charlie, _ = await register_team(session, tournament.id, "Charlie", "3")
+        delta, _ = await register_team(session, tournament.id, "Delta", "4")
+        await session.commit()
+
+        round_ = TournamentRound(tournament_id=tournament.id, round_number=1)
+        session.add(round_)
+        await session.flush()
+        m1 = TournamentMatch(round_id=round_.id, team_a_participant_id=alpha.id,
+                              team_b_participant_id=bravo.id)
+        m2 = TournamentMatch(round_id=round_.id, team_a_participant_id=charlie.id,
+                              team_b_participant_id=delta.id)
+        session.add_all([m1, m2])
+        await session.commit()
+        round_id, m1_id, m2_id = round_.id, m1.id, m2.id
+
+    def make_message(*_a, **_k):
+        msg = MagicMock()
+        msg.id = 900
+        msg.channel.id = 555
+        msg.edit = AsyncMock()
+        return msg
+
+    channel = MagicMock()
+    # header succeeds, match 1's line raises, match 2's line succeeds.
+    channel.send = AsyncMock(side_effect=[
+        MagicMock(),
+        discord.HTTPException(MagicMock(), "boom"),
+        make_message(),
+    ])
+
+    with patch("cogs.tournament_commands.db_session", _fake_db_session(test_db)), \
+         patch("cogs.tournament_commands.create_match_room", AsyncMock(return_value=None)):
+        cog = TournamentCog.__new__(TournamentCog)
+        await cog._post_round_messages(channel, round_id, 1)
+
+    assert channel.send.call_count == 3  # header + failed attempt + surviving line
+    async with test_db() as session:
+        m1_stored = await session.get(TournamentMatch, m1_id)
+        m2_stored = await session.get(TournamentMatch, m2_id)
+        # The failed match never got its pairing ids persisted...
+        assert m1_stored.pairings_message_id is None
+        # ...but the match after it in the loop still did.
+        assert m2_stored.pairings_message_id == "900"
+
+
+# ---- /tournament open_rooms ---------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_open_rooms_opens_only_roomless_matches_and_is_idempotent(test_db):
+    """Round 1 already has rooms (posted normally); rounds 2 and 3 were posted
+    room-less. With no round given, open_rooms must open exactly round 2's
+    room-less matches and leave round 3 untouched. Running it again for round 2
+    must find nothing to do (idempotent); a further run with no round given
+    then reaches round 3."""
+    from sqlalchemy import select
+
+    from cogs.tournament_commands import TournamentCog
+    from models.tournament import TournamentMatch, TournamentRound
+
+    async with test_db() as session:
+        tournament, matches = await _started_round_robin(session, count=4)  # 3 rounds, 2/round
+        tournament_id = tournament.id
+        rounds = (await session.execute(
+            select(TournamentRound).where(TournamentRound.tournament_id == tournament_id)
+            .order_by(TournamentRound.round_number)
+        )).scalars().all()
+        round_number_of = {r.id: r.round_number for r in rounds}
+        for m in matches:
+            mm = await session.get(TournamentMatch, m.id)
+            mm.pairings_channel_id = "555"
+            mm.pairings_message_id = str(1000 + m.id)
+            if round_number_of[m.round_id] == 1:
+                mm.thread_id = str(9000 + m.id)  # round 1 was posted normally, already roomed
+        await session.commit()
+        round2_ids = {m.id for m in matches if round_number_of[m.round_id] == 2}
+        round3_ids = {m.id for m in matches if round_number_of[m.round_id] == 3}
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+    channel = MagicMock()
+    channel.fetch_message = AsyncMock(return_value=message)
+
+    bot = MagicMock()
+    bot.get_channel = MagicMock(return_value=channel)
+    cog = TournamentCog(bot)
+
+    ctx = MagicMock()
+    ctx.guild.id = "g1"
+    ctx.author.id = 999
+    ctx.defer = AsyncMock()
+    ctx.followup.send = AsyncMock()
+
+    opened_ids = []
+
+    async def fake_create_room(_message, match_id):
+        """Stands in for create_match_room, including its DB-visible effect
+        (setting thread_id) -- open_rooms' idempotency depends on that being
+        true, exactly like it would against the real implementation."""
+        opened_ids.append(match_id)
+        thread = MagicMock()
+        thread.id = 9000 + match_id
+        async with test_db() as s:
+            mm = await s.get(TournamentMatch, match_id)
+            mm.thread_id = str(thread.id)
+            await s.commit()
+        return thread
+
+    with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
+         patch("cogs.tournament_commands.db_session", _fake_db_session(test_db)), \
+         patch("cogs.tournament_commands.create_match_room", fake_create_room):
+        await TournamentCog.open_rooms.callback(cog, ctx, round_number=None)
+        first_reply = ctx.followup.send.call_args.args[0]
+        assert set(opened_ids) == round2_ids
+        assert "Opened 2 room(s) for Week 2" in first_reply
+
+        opened_ids.clear()
+        await TournamentCog.open_rooms.callback(cog, ctx, round_number=2)
+        second_reply = ctx.followup.send.call_args.args[0]
+        assert opened_ids == []
+        assert "Nothing to do" in second_reply
+
+        await TournamentCog.open_rooms.callback(cog, ctx, round_number=None)
+        third_reply = ctx.followup.send.call_args.args[0]
+        assert set(opened_ids) == round3_ids
+        assert "Opened 2 room(s) for Week 3" in third_reply
+
+    async with test_db() as session:
+        for match_id in round2_ids | round3_ids:
+            stored = await session.get(TournamentMatch, match_id)
+            assert stored.thread_id is not None
+            # Each match's line was edited to carry its room link.
+        assert message.edit.await_count == 4  # 2 matches x 2 opening runs
