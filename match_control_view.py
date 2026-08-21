@@ -188,14 +188,14 @@ async def launch_block_for(match_id: int) -> str | None:
     """Why a new draft can't start for this match right now, or None.
 
     Opens its own session so any caller can ask, including the draft-creation
-    path in sessions/premade_session.py, which holds no session of its own.
+    guard in sessions/premade_session.py, which holds no facts of its own at
+    that point. Callers who already have this match's facts (start_match_draft
+    is the other one) should call launch_block_text directly instead, rather
+    than paying for a second lookup here.
 
     A vanished match blocks rather than passing through: the creation-time
     guard in premade_session.py treats None here as "go ahead", and a
     dangling tournament_match_id has nothing downstream to catch it.
-    start_match_draft never reaches this branch -- it already answers "This
-    match no longer exists." itself, from the same facts lookup, before
-    calling here.
     """
     async with db_session() as session:
         facts = await match_facts(session, match_id)
@@ -219,8 +219,14 @@ async def start_match_draft(interaction: discord.Interaction, match_id: int) -> 
             return
         match, a_name, b_name, round_number, draft = facts
         body, view = control_body_and_view(match, a_name, b_name, round_number, draft)
+        # Same facts already fetched above -- launch_block_for would open a
+        # second session and re-run the same lookup for nothing.
+        block = launch_block_text(
+            match_state(match.team_a_wins is not None, draft is not None),
+            lobby_link(draft),
+            recorded_result_line(a_name, b_name, match.team_a_wins, match.team_b_wins),
+        )
 
-    block = await launch_block_for(match_id)
     if block is not None:
         # Re-render rather than only complaining: whatever changed underneath is
         # now visible to everyone, not just the clicker.
@@ -265,18 +271,20 @@ async def _refresh_pairing_message(
         logger.error(f"Failed to refresh pairing message for match {match.id}: {e}")
 
 
-async def refresh_match_views(bot: discord.Client, match_id: int) -> None:
-    """Re-render a match's control message and its pairing line in place.
+async def _refresh_match_views_with_facts(
+    bot: discord.Client,
+    match_id: int,
+    facts: tuple[TournamentMatch, str, str, int, DraftSession | None] | None,
+) -> None:
+    """refresh_match_views's actual work, given facts the caller already fetched.
 
     No-op on the control message if it was never posted. The pairing refresh
     runs after and cannot prevent the control refresh that already happened.
     """
-    async with db_session() as session:
-        facts = await match_facts(session, match_id)
-        if facts is None:
-            return
-        match, a_name, b_name, round_number, draft = facts
-        body, view = control_body_and_view(match, a_name, b_name, round_number, draft)
+    if facts is None:
+        return
+    match, a_name, b_name, round_number, draft = facts
+    body, view = control_body_and_view(match, a_name, b_name, round_number, draft)
 
     if match.control_message_id and match.thread_id:
         thread_id, control_id = int(match.thread_id), int(match.control_message_id)
@@ -302,6 +310,31 @@ async def refresh_match_views(bot: discord.Client, match_id: int) -> None:
     await _refresh_pairing_message(bot, match, a_name, b_name)
 
 
+async def refresh_match_views(bot: discord.Client, match_id: int) -> None:
+    """Re-render a match's control message and its pairing line in place.
+
+    Fetches its own facts. announce_and_refresh already holds this match's
+    facts by the time it needs a refresh and calls the with-facts helper
+    directly instead of coming through here.
+    """
+    async with db_session() as session:
+        facts = await match_facts(session, match_id)
+    await _refresh_match_views_with_facts(bot, match_id, facts)
+
+
+async def safe_refresh_match_views(bot: discord.Client, match_id: int) -> None:
+    """refresh_match_views, but a failure is logged and swallowed.
+
+    Shared by every caller that triggers a refresh as a side effect of work
+    that already succeeded (a result got recorded, a draft got cancelled,
+    ...): a refresh failure must never break the flow that triggered it.
+    """
+    try:
+        await refresh_match_views(bot, match_id)
+    except Exception as e:
+        logger.error(f"Failed to refresh control message for tournament match {match_id}: {e}")
+
+
 async def announce_and_refresh(
     bot: discord.Client, channel: discord.abc.Messageable, match_id: int
 ) -> None:
@@ -317,4 +350,6 @@ async def announce_and_refresh(
         await channel.send(
             f"🔗 Linked to Round {round_number} — **{a_name}** vs **{b_name}**. "
             "The result will record automatically.")
-    await refresh_match_views(bot, match_id)
+    # Facts already fetched above -- the public refresh_match_views would
+    # open a second session and fetch them again for the same match.
+    await _refresh_match_views_with_facts(bot, match_id, facts)

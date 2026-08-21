@@ -17,7 +17,12 @@ from helpers.money_gate import gate_serve, linked_username
 from helpers.display_names import get_display_name
 from helpers.permissions import has_bot_manager_role, is_bot_manager
 from helpers.pin_helpers import safe_pin
-from match_control_view import MatchControlView, create_match_room, match_facts
+from match_control_view import (
+    MatchControlView,
+    create_match_room,
+    match_facts,
+    safe_refresh_match_views,
+)
 from models.tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
 from sqlalchemy import or_, select
 from services.tournament_formatter import (
@@ -749,11 +754,7 @@ class TournamentCog(commands.Cog):
                 f"{match.team_b_wins} **{part_b.team_name}**"
             )
             await update_standings_message(self.bot, tournament_id)
-            try:
-                from match_control_view import refresh_match_views
-                await refresh_match_views(self.bot, match.id)
-            except Exception as e:
-                logger.error(f"Failed to refresh control message for tournament match {match.id}: {e}")
+            await safe_refresh_match_views(self.bot, match.id)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
 
@@ -1060,21 +1061,23 @@ class TournamentCog(commands.Cog):
             for m in matches:
                 part_a = await session.get(TournamentParticipant, m.team_a_participant_id)
                 if m.is_bye:
-                    rows.append((m.id, f"• **{part_a.team_name}** — BYE (auto win)", False, None))
+                    rows.append((m.id, f"• **{part_a.team_name}** — BYE (auto win)", None))
                 else:
                     part_b = await session.get(TournamentParticipant, m.team_b_participant_id)
                     if m.team_a_wins is None:
-                        rows.append((m.id, None, True, (part_a.team_name, part_b.team_name)))
+                        rows.append((m.id, None, (part_a.team_name, part_b.team_name)))
                     else:
                         rows.append((m.id, f"• **{part_a.team_name}** {m.team_a_wins}–"
-                                           f"{m.team_b_wins} **{part_b.team_name}**", False, None))
+                                           f"{m.team_b_wins} **{part_b.team_name}**", None))
 
-        for match_id, text, playable, names in rows:
+        for match_id, text, names in rows:
             # One match's post failing (e.g. a transient Discord error) must not
             # take the rest of the round down with it -- a round missing one
             # line is far better than a round missing everything after it.
             try:
-                if not playable:
+                # A bye or an already-reported match carries its own text and no
+                # names; only a still-playable match needs the pairing line built.
+                if names is None:
                     await channel.send(text)
                     continue
                 a_name, b_name = names

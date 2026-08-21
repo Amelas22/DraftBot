@@ -13,19 +13,38 @@ another per-file variant.
 seed_settlement: the one seeder for a paired settlement DebtLedger write --
 import it (``from conftest import seed_settlement``) instead of hand-writing
 another per-file variant.
+
+match_control_db: a DIFFERENT throwaway SQLite database from test_db above --
+this one yields the raw sessionmaker factory instead of rebinding the app's
+global AsyncSessionLocal. Use it for code that takes its own session/engine
+rather than going through AsyncSessionLocal (e.g. match_control_view.py,
+which opens sessions via database.db_session.db_session). Open sessions with
+``async with match_control_db() as session: ...``, or patch a module's own
+db_session to route through it -- see test_match_control_flow.py's
+patched_db fixture. Use test_db instead for anything that goes through the
+app-wide AsyncSessionLocal.
+
+seed_tournament_match: the one seeder for a started 2-team tournament's only
+match (Alpha vs Bravo) -- import it (``from conftest import
+seed_tournament_match``) instead of hand-writing another per-file variant.
+Takes the session to seed into (e.g. one opened via match_control_db).
 """
 import os
+import random
 import tempfile
 from datetime import datetime
 
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
 
 from database.models_base import Base
 from database.db_session import AsyncSessionLocal
 from models.debt_ledger import DebtLedger
 from models.draft_session import DraftSession
 from models.match import MatchResult
+from models.tournament import TournamentMatch
+from services.tournament_service import create_tournament, register_team, start_tournament
 
 
 @pytest_asyncio.fixture
@@ -45,6 +64,46 @@ async def test_db():
     AsyncSessionLocal.configure(bind=previous_bind)
     await engine.dispose()
     os.unlink(tmp.name)
+
+
+@pytest_asyncio.fixture
+async def match_control_db():
+    """A throwaway file-backed SQLite database, as a raw sessionmaker factory.
+
+    See the module docstring for how this differs from test_db above -- use
+    that one instead unless the code under test opens its own sessions
+    rather than going through the app-wide AsyncSessionLocal.
+    """
+    temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+    temp_db.close()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{temp_db.name}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    yield factory
+    await engine.dispose()
+    os.unlink(temp_db.name)
+
+
+async def seed_tournament_match(session, thread_id=None):
+    """A started 2-team tournament's (Alpha vs Bravo) only match.
+
+    thread_id, if given, is written directly onto the match row -- the shape
+    match_facts / control-message tests need without actually creating a
+    Discord thread via create_match_room.
+    """
+    tournament = await create_tournament(session, "g1", "Spring", 3)
+    await session.commit()
+    await register_team(session, tournament.id, "Alpha", "1")
+    await register_team(session, tournament.id, "Bravo", "2")
+    await session.commit()
+    matches = await start_tournament(session, tournament.id, random.Random(7))
+    await session.commit()
+    match = await session.get(TournamentMatch, matches[0].id)
+    if thread_id:
+        match.thread_id = thread_id
+    await session.commit()
+    return match
 
 
 async def seed_session(session_id="s1", guild="g", stype="staked",

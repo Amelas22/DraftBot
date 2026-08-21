@@ -1,64 +1,25 @@
 """Play / Start draft behaviour, with Discord mocked at the boundary."""
-import os
-import random
-import tempfile
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
 
-from database.models_base import Base
+from conftest import match_control_db, seed_tournament_match  # noqa: F401  (fixture)
 from models.draft_session import DraftSession
 from models.tournament import TournamentMatch
-from services.tournament_service import (
-    create_tournament,
-    register_team,
-    start_tournament,
-)
-
-
-@pytest_asyncio.fixture
-async def test_db():
-    temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
-    temp_db.close()
-    engine = create_async_engine(f"sqlite+aiosqlite:///{temp_db.name}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
-    yield factory
-    await engine.dispose()
-    os.unlink(temp_db.name)
 
 
 @pytest.fixture
-def patched_db(test_db):
+def patched_db(match_control_db):
     """Point match_control_view's db_session at the throwaway database."""
     @asynccontextmanager
     async def fake_db_session():
-        async with test_db() as inner:
+        async with match_control_db() as inner:
             yield inner
             await inner.commit()
 
     with patch("match_control_view.db_session", fake_db_session):
-        yield test_db
-
-
-async def _match(session, thread_id=None):
-    tournament = await create_tournament(session, "g1", "Spring", 3)
-    await session.commit()
-    await register_team(session, tournament.id, "Alpha", "1")
-    await register_team(session, tournament.id, "Bravo", "2")
-    await session.commit()
-    matches = await start_tournament(session, tournament.id, random.Random(7))
-    await session.commit()
-    match = await session.get(TournamentMatch, matches[0].id)
-    if thread_id:
-        match.thread_id = thread_id
-    await session.commit()
-    return match
+        yield match_control_db
 
 
 def make_thread(thread_id=900):
@@ -91,7 +52,7 @@ async def test_start_draft_posts_the_cube_picker(patched_db):
     from match_control_view import start_match_draft
 
     async with patched_db() as session:
-        match = await _match(session, thread_id="900")
+        match = await seed_tournament_match(session, thread_id="900")
 
     interaction = make_interaction(make_thread())
     with patch("match_control_view.cube_picker_for_match", MagicMock()) as picker:
@@ -107,7 +68,7 @@ async def test_start_draft_refuses_when_a_draft_is_live(patched_db):
     from match_control_view import start_match_draft
 
     async with patched_db() as session:
-        match = await _match(session, thread_id="900")
+        match = await seed_tournament_match(session, thread_id="900")
         session.add(DraftSession(
             session_id="d1", guild_id="g1", session_type="premade",
             draft_channel_id="55", message_id="66", tournament_match_id=match.id,
@@ -129,7 +90,7 @@ async def test_refresh_is_a_noop_when_no_control_message_exists(patched_db):
     from match_control_view import refresh_match_views
 
     async with patched_db() as session:
-        match = await _match(session, thread_id="900")
+        match = await seed_tournament_match(session, thread_id="900")
 
     bot = MagicMock()
     bot.get_channel.return_value = make_thread()
@@ -143,7 +104,7 @@ async def test_start_draft_picker_is_ephemeral(patched_db):
     from match_control_view import start_match_draft
 
     async with patched_db() as session:
-        match = await _match(session, thread_id="900")
+        match = await seed_tournament_match(session, thread_id="900")
 
     interaction = make_interaction(make_thread())
     with patch("match_control_view.cube_picker_for_match", MagicMock()):
@@ -159,7 +120,7 @@ async def test_launch_block_for_is_none_when_match_is_free(patched_db):
     from match_control_view import launch_block_for
 
     async with patched_db() as session:
-        match = await _match(session, thread_id="900")
+        match = await seed_tournament_match(session, thread_id="900")
 
     assert await launch_block_for(match.id) is None
 
@@ -169,7 +130,7 @@ async def test_launch_block_for_reports_a_live_draft(patched_db):
     from match_control_view import launch_block_for
 
     async with patched_db() as session:
-        match = await _match(session, thread_id="900")
+        match = await seed_tournament_match(session, thread_id="900")
         session.add(DraftSession(
             session_id="d1", guild_id="g1", session_type="premade",
             draft_channel_id="55", message_id="66", tournament_match_id=match.id,
@@ -185,7 +146,7 @@ async def test_create_match_room_makes_a_long_lived_thread_and_pins_control(patc
     from match_control_view import create_match_room
 
     async with patched_db() as session:
-        match = await _match(session)
+        match = await seed_tournament_match(session)
 
     thread = make_thread()
     message = MagicMock()
@@ -212,7 +173,7 @@ async def test_create_match_room_degrades_when_discord_refuses(patched_db):
     from match_control_view import create_match_room
 
     async with patched_db() as session:
-        match = await _match(session)
+        match = await seed_tournament_match(session)
 
     message = MagicMock()
     message.create_thread = AsyncMock(
@@ -231,7 +192,7 @@ async def test_create_match_room_cleans_up_when_the_control_message_fails(patche
     from match_control_view import create_match_room
 
     async with patched_db() as session:
-        match = await _match(session)
+        match = await seed_tournament_match(session)
 
     thread = make_thread()
     thread.send = AsyncMock(side_effect=_discord.HTTPException(MagicMock(), "boom"))
@@ -253,7 +214,7 @@ async def test_refresh_updates_the_pairing_message_with_the_result(patched_db):
     from services.tournament_service import set_result
 
     async with patched_db() as session:
-        match = await _match(session, thread_id="900")
+        match = await seed_tournament_match(session, thread_id="900")
         stored = await session.get(TournamentMatch, match.id)
         stored.pairings_channel_id = "10"
         stored.pairings_message_id = "11"

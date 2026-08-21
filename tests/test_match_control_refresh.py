@@ -24,13 +24,15 @@ async def test_announce_posts_the_link_line_and_refreshes():
 
     with patch.object(match_control_view, "match_facts", AsyncMock(return_value=facts)), \
          patch.object(match_control_view, "db_session", _fake_db_session()), \
-         patch.object(match_control_view, "refresh_match_views", AsyncMock()) as refresh:
+         patch.object(match_control_view, "_refresh_match_views_with_facts", AsyncMock()) as refresh:
         await match_control_view.announce_and_refresh(bot, channel, 7)
 
     posted = channel.send.call_args.args[0]
     assert "Round 2" in posted and "Alpha" in posted and "Bravo" in posted
     assert "record automatically" in posted
-    refresh.assert_awaited_once_with(bot, 7)
+    # Facts already fetched for the announcement text are passed straight
+    # through -- announce_and_refresh must not fetch this match a second time.
+    refresh.assert_awaited_once_with(bot, 7, facts)
 
 
 @pytest.mark.asyncio

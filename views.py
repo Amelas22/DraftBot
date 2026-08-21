@@ -2424,11 +2424,8 @@ class CancelConfirmationView(discord.ui.View):
             # control message back to 'scheduling'. Guarded: the cancellation
             # itself already succeeded above, so a refresh failure here must
             # not stop the user from being told that.
-            try:
-                from match_control_view import refresh_match_views
-                await refresh_match_views(self.bot, tournament_match_id)
-            except Exception as e:
-                logger.error(f"Failed to refresh control message for tournament match {tournament_match_id}: {e}")
+            from match_control_view import safe_refresh_match_views
+            await safe_refresh_match_views(self.bot, tournament_match_id)
 
         # # Cancel any scheduled auto-pairings task
         # if self.draft_session_id in PersistentView.AUTO_PAIRINGS_TASKS:
