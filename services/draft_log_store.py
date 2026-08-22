@@ -96,6 +96,11 @@ _PostableMember = namedtuple("_PostableMember", "discord_id dm_user_id name safe
 
 THREAD_NAME_LIMIT = 100
 TEAM_POOLS_AUTO_ARCHIVE_MINUTES = 10080  # 7 days, the max — matches the tournament match rooms
+# Bound on how far back the no-thread fallback scans the team CHANNEL's
+# history for already-posted players. The channel is a general team chat, not
+# a pools-only thread, so an unbounded scan there could walk a very long,
+# mostly-irrelevant history on every retry tick.
+CHANNEL_HISTORY_SCAN_LIMIT = 200
 
 
 def _postable_members(
@@ -116,7 +121,28 @@ def _postable_members(
                 or (sign_ups or {}).get(discord_id) or discord_id)
         safe = "".join(c for c in str(name) if c.isalnum() or c in " _-").strip() or str(discord_id)
         members.append(_PostableMember(discord_id, dm_user_id, name, safe, pool))
-    return members
+    return _dedupe_safe_names(members)
+
+
+def _dedupe_safe_names(members: list[_PostableMember]) -> list[_PostableMember]:
+    """Disambiguate `safe` only where it collides within the team. Sanitising
+    strips everything but alphanumerics/space/`_`/`-`, so e.g. 'j.doe' and
+    'jdoe', or 'Bob!' and 'Bob?', collapse to the same filename. Left alone,
+    the posted-set (computed once, up front, from `{safe}.txt` filenames)
+    would make a retry after a partial failure see the one shared `.txt` and
+    wrongly treat the OTHER colliding player as already posted too -- lost
+    silently, the same failure mode as an unscoped posted-check. Only the
+    colliding names get a short suffix (last 4 of their Discord id), so the
+    common case stays exactly 'Alice.txt' / 'Bob.txt'."""
+    counts: dict[str, int] = {}
+    for m in members:
+        counts[m.safe] = counts.get(m.safe, 0) + 1
+    result: list[_PostableMember] = []
+    for m in members:
+        if counts[m.safe] > 1:
+            m = m._replace(safe=f"{m.safe}-{str(m.discord_id)[-4:]}")
+        result.append(m)
+    return result
 
 
 async def _send_pool(destination, member: _PostableMember, draft_data: dict) -> None:
@@ -146,10 +172,16 @@ async def _send_pool(destination, member: _PostableMember, draft_data: dict) -> 
 
 
 async def _resolve_thread(bot, thread_id: str | None):
-    """The live thread named by a stored id, or None if there isn't one (never
-    stored, or Discord no longer has it). Checked against the cache first,
-    then a real fetch — the cache alone can miss a thread across a bot
-    restart."""
+    """The live thread named by a stored id, or None if there genuinely isn't
+    one (never stored, or Discord confirms it's gone via NotFound/Forbidden).
+    Checked against the cache first, then a real fetch — the cache alone can
+    miss a thread across a bot restart.
+
+    Any OTHER `discord.HTTPException` (a transient 5xx, a timeout — exactly
+    the kind of blip that made this a retry in the first place) is NOT
+    swallowed into "gone": it propagates to the caller, which must abort this
+    run rather than read it as "no thread" and open a second one alongside
+    the still-live first thread."""
     if not thread_id:
         return None
     tid = int(thread_id)
@@ -157,24 +189,61 @@ async def _resolve_thread(bot, thread_id: str | None):
     if thread is None:
         try:
             thread = await bot.fetch_channel(tid)
-        except discord.HTTPException:
+        except (discord.NotFound, discord.Forbidden):
             return None
     return thread
 
 
-async def _posted_txt_filenames(thread) -> set[str]:
-    """Filenames of every `.txt` attachment already posted in `thread`, used to
-    work out who is already posted on a retry. Matched on the attachment
-    filename rather than the message text: the `.txt` is the deliverable and
-    its name is derived per player, whereas the message wording is the kind of
-    thing that gets reworded later — which would silently make every player
-    look unposted and re-post the lot."""
+async def _posted_txt_filenames(bot, destination, limit: int | None = None) -> set[str]:
+    """Filenames of every `.txt` attachment the BOT has already posted in
+    `destination` (the pools thread, or — in the no-thread fallback — the
+    team channel itself), used to work out who is already posted on a retry.
+
+    Scoped to messages authored by the bot: `destination` is a channel/thread
+    the team actually talks in, so a player uploading their own `Alice.txt`
+    there must never be mistaken for a completed post — that would silently
+    skip the real Alice pool and stamp the session complete.
+
+    Matched on the attachment filename rather than the message text: the
+    `.txt` is the deliverable and its name is derived per player, whereas the
+    message wording is the kind of thing that gets reworded later — which
+    would silently make every player look unposted and re-post the lot."""
     names: set[str] = set()
-    async for message in thread.history(limit=None):
+    bot_id = getattr(getattr(bot, "user", None), "id", None)
+    async for message in destination.history(limit=limit):
+        author = getattr(message, "author", None)
+        author_id = getattr(author, "id", None)
+        if bot_id is None or author_id != bot_id:
+            continue
         for attachment in message.attachments:
             if attachment.filename.endswith(".txt"):
                 names.add(attachment.filename)
     return names
+
+
+async def _post_missing_players(
+    destination,
+    postable: list[_PostableMember],
+    draft_data: dict,
+    already_posted: set[str],
+) -> bool:
+    """Post each postable member not already in `already_posted` to
+    `destination` (a thread, or the channel on the no-thread fallback).
+    Guards each send individually — one player's failure is logged and the
+    loop continues rather than costing the others their pools. Returns True
+    iff every postable member ends up posted."""
+    all_posted = True
+    for member in postable:
+        if f"{member.safe}.txt" in already_posted:
+            continue
+        try:
+            await _send_pool(destination, member, draft_data)
+        except Exception as e:
+            logger.warning(
+                f"[team-logs] failed to post pool for {member.name} ({member.dm_user_id}): {e}"
+            )
+            all_posted = False
+    return all_posted
 
 
 async def _post_pools_for_team(
@@ -208,12 +277,35 @@ async def _post_pools_for_team(
         # raising into the caller.
         return thread_id, False
 
-    thread = await _resolve_thread(bot, thread_id)
+    try:
+        thread = await _resolve_thread(bot, thread_id)
+    except discord.HTTPException as e:
+        # A stored thread id exists but Discord couldn't confirm either way
+        # (not a clean "gone" NotFound/Forbidden) -- e.g. a transient 5xx or
+        # timeout, exactly the kind of blip a retry exists to ride out.
+        # Abort this run rather than risk opening a second thread alongside
+        # a first one that may still be perfectly alive.
+        logger.warning(
+            f"[team-logs] could not resolve the stored pools thread for {friendly_id}, "
+            f"aborting this run rather than risk a second thread: {e}"
+        )
+        return thread_id, False
+
     if thread is None:
         try:
             summary = await channel.send(
                 content=f"📥 **Drafted pools** — {friendly_id} ({len(postable)} players)"
             )
+        except discord.HTTPException as e:
+            logger.warning(
+                f"[team-logs] could not post the pools summary message for {friendly_id}, "
+                f"falling back to per-player channel posts: {e}"
+            )
+            already_posted = await _posted_txt_filenames(bot, channel, limit=CHANNEL_HISTORY_SCAN_LIMIT)
+            all_posted = await _post_missing_players(channel, postable, draft_data, already_posted)
+            return thread_id, all_posted
+
+        try:
             thread = await summary.create_thread(
                 name=f"Drafted pools — {friendly_id}"[:THREAD_NAME_LIMIT],
                 auto_archive_duration=TEAM_POOLS_AUTO_ARCHIVE_MINUTES,
@@ -223,15 +315,8 @@ async def _post_pools_for_team(
                 f"[team-logs] thread creation failed for {friendly_id}, "
                 f"falling back to per-player channel posts: {e}"
             )
-            all_posted = True
-            for member in postable:
-                try:
-                    await _send_pool(channel, member, draft_data)
-                except Exception as e2:
-                    logger.warning(
-                        f"[team-logs] failed to post pool for {member.name} ({member.dm_user_id}): {e2}"
-                    )
-                    all_posted = False
+            already_posted = await _posted_txt_filenames(bot, channel, limit=CHANNEL_HISTORY_SCAN_LIMIT)
+            all_posted = await _post_missing_players(channel, postable, draft_data, already_posted)
             return thread_id, all_posted
 
         # The thread exists from here on out — persist it before posting any
@@ -240,18 +325,8 @@ async def _post_pools_for_team(
         thread_id = str(thread.id)
         await persist_thread_id(thread_id)
 
-    already_posted = await _posted_txt_filenames(thread)
-    all_posted = True
-    for member in postable:
-        if f"{member.safe}.txt" in already_posted:
-            continue
-        try:
-            await _send_pool(thread, member, draft_data)
-        except Exception as e:
-            logger.warning(
-                f"[team-logs] failed to post pool for {member.name} ({member.dm_user_id}): {e}"
-            )
-            all_posted = False
+    already_posted = await _posted_txt_filenames(bot, thread)
+    all_posted = await _post_missing_players(thread, postable, draft_data, already_posted)
     return thread_id, all_posted
 
 

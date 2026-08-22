@@ -86,6 +86,18 @@ def test_map_discord_to_draftmancer_returns_empty_on_count_mismatch():
     assert mapping == {}
 
 
+def _collision_log():
+    """Two players whose display names sanitise to the same filename: 'Bob!'
+    and 'Bob?' both strip down to 'Bob'."""
+    return {
+        "carddata": {"c1": {"name": "Lightning Bolt"}, "c2": {"name": "Counterspell"}},
+        "users": {
+            "dm_x": {"userName": "Bob!", "seatNum": 0, "cards": ["c1"]},
+            "dm_y": {"userName": "Bob?", "seatNum": 1, "cards": ["c2"]},
+        },
+    }
+
+
 def _team3_log():
     return {
         "carddata": {
@@ -101,10 +113,25 @@ def _team3_log():
     }
 
 
+# The bot's own Discord user id, shared by _bot_for and every fake
+# channel/thread below so the "who's already posted" scan (which is scoped to
+# messages the bot itself authored) recognizes the bot's own sends.
+_BOT_ID = 999000111
+
+
+async def _empty_history(limit=None):
+    """An async generator that yields nothing -- the default .history() for
+    plain mock channels/threads that don't need the posted-check to find
+    anything already there."""
+    if False:  # pragma: no cover - never runs; just makes this a generator fn
+        yield None
+
+
 def _channel(name):
     ch = MagicMock()
     ch.name = name
     ch.send = AsyncMock()
+    ch.history = _empty_history
     return ch
 
 
@@ -140,6 +167,7 @@ class _FakeThread:
 
     async def _do_send(self, content=None, files=None):
         msg = MagicMock()
+        msg.author = SimpleNamespace(id=_BOT_ID)   # a real send from the bot itself
         msg.attachments = [
             MagicMock(filename=(f[1] if isinstance(f, tuple) else getattr(f, "filename", None)))
             for f in (files or [])
@@ -150,6 +178,16 @@ class _FakeThread:
     async def history(self, limit=None):
         for msg in self._messages:
             yield msg
+
+    def inject_foreign_message(self, filename, author_id=424242):
+        """Simulate a message some OTHER user posted directly in the
+        thread/channel (e.g. uploading their own decklist) -- appended
+        straight to history, bypassing .send(), since it never came from the
+        bot. Used to prove the posted-check ignores non-bot attachments."""
+        msg = MagicMock()
+        msg.author = SimpleNamespace(id=author_id)
+        msg.attachments = [MagicMock(filename=filename)]
+        self._messages.append(msg)
 
     def posted_txt_filenames(self):
         """Filenames of .txt attachments actually recorded as sent -- unlike
@@ -175,6 +213,24 @@ class _FlakyThread(_FakeThread):
             self._bob_attempts += 1
             raise RuntimeError("discord hiccup")
         return await super()._do_send(content=content, files=files)
+
+
+class _FakeChannel(_FakeThread):
+    """A team-channel stand-in for the no-thread fallback: like _FakeThread
+    (.send() records real messages, .history() replays them so the fallback's
+    posted-check is exercised for real), but its .send() also returns a
+    summary-shaped message whose create_thread() can be made to fail --
+    covering the resolve-or-create attempt that precedes the fallback."""
+
+    def __init__(self, name, create_thread_error=None):
+        super().__init__(tid=None)
+        self.name = name
+        self._create_thread_error = create_thread_error
+
+    async def _do_send(self, content=None, files=None):
+        msg = await super()._do_send(content=content, files=files)
+        msg.create_thread = AsyncMock(side_effect=self._create_thread_error)
+        return msg
 
 
 def _team_ds(team_b=("disc_b",), channel_ids=(111, 222), friendly_id="ABC"):
@@ -221,14 +277,19 @@ def _bot_for(channels):
     (via guild.get_channel, used to find team channels) and whose own
     get_channel resolves the same map (used to resolve a stored thread id);
     any other id resolves to None. fetch_channel -- the restart-safe fallback
-    when get_channel misses -- raises HTTPException by default; tests that
-    need it to succeed register the thread in `channels` instead."""
+    when get_channel misses -- raises NotFound by default (a clean "it's
+    gone"); tests that need it to succeed register the thread in `channels`
+    instead, and tests covering a transient lookup error override
+    fetch_channel with a non-NotFound/Forbidden HTTPException explicitly.
+    bot.user is fixed so the posted-check's bot-authorship scoping matches
+    every fake channel/thread's messages."""
     guild = MagicMock()
     guild.get_channel = lambda cid: channels.get(cid)
     bot = MagicMock()
+    bot.user = SimpleNamespace(id=_BOT_ID)
     bot.get_guild.return_value = guild
     bot.get_channel = lambda cid: channels.get(cid)
-    bot.fetch_channel = AsyncMock(side_effect=discord.HTTPException(MagicMock(), "not found"))
+    bot.fetch_channel = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "not found"))
     return bot
 
 
@@ -562,3 +623,140 @@ async def test_post_pools_for_team_falls_back_to_channel_posts_when_thread_creat
     # to the channel: two sends total, the second carrying Alice's pool.
     assert channel.send.await_count == 2
     assert _attachment_names(channel) == ["Alice.txt"]
+
+
+@pytest.mark.asyncio
+async def test_post_pools_for_team_ignores_non_bot_txt_attachments_when_checking_who_posted():
+    """A player uploading their own decklist as e.g. 'Alice.txt' into the
+    thread must not be mistaken for the bot's own pool post -- otherwise
+    Alice's real pool is silently skipped and the run reports her done."""
+    draft_data = _team_log()
+    sign_ups = {"disc_a": "Alice", "disc_b": "Bob"}
+    mapping = {"disc_a": "dm_a", "disc_b": "dm_b"}
+    thread = _FakeThread(9001)
+    thread.inject_foreign_message("Alice.txt")   # someone else's upload, not the bot's post
+    channel = _summary_channel("Red-Team-Chat-ABC")   # thread already stored; no creation needed
+    bot = _bot_for({9001: thread})
+    persisted = []
+
+    async def persist(tid):
+        persisted.append(tid)
+
+    with patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
+         patch("services.draft_log_store.PileImageBuilder") as PIB:
+        PIB.return_value.build = AsyncMock(return_value=None)
+        thread_id, all_posted = await _post_pools_for_team(
+            bot, channel, "9001", "ABC", ["disc_a", "disc_b"], mapping, draft_data, sign_ups, persist,
+        )
+
+    assert all_posted is True
+    assert thread_id == "9001"
+    channel.send.assert_not_awaited()             # thread already resolved -- no new summary
+    assert persisted == []                        # nothing new to persist
+    # Alice's real pool WAS posted by the bot despite the foreign 'Alice.txt'
+    # already sitting in the thread's history.
+    assert _attachment_names(thread) == ["Alice.txt", "Bob.txt"]
+
+
+@pytest.mark.asyncio
+async def test_post_pools_for_team_disambiguates_names_that_sanitise_identically():
+    """'Bob!' and 'Bob?' both sanitise to 'Bob' -- both players must still be
+    delivered under distinct filenames, and a retry must not mistake one's
+    post for the other's."""
+    draft_data = _collision_log()
+    sign_ups = {"disc_x": "Bob!", "disc_y": "Bob?"}
+    mapping = {"disc_x": "dm_x", "disc_y": "dm_y"}
+    thread = _FakeThread(9001)
+    channel = _summary_channel("Red-Team-Chat-ABC", thread=thread)
+    bot = _bot_for({})
+    persisted = []
+
+    async def persist(tid):
+        persisted.append(tid)
+
+    with patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
+         patch("services.draft_log_store.PileImageBuilder") as PIB:
+        PIB.return_value.build = AsyncMock(return_value=None)
+        first_id, first_ok = await _post_pools_for_team(
+            bot, channel, None, "ABC", ["disc_x", "disc_y"], mapping, draft_data, sign_ups, persist,
+        )
+        assert first_ok is True
+
+        filenames = thread.posted_txt_filenames()
+        assert len(filenames) == 2
+        assert len(set(filenames)) == 2            # both delivered, under distinct names
+
+        # Retry with the same thread must not skip either player.
+        channel.send.reset_mock()
+        bot2 = _bot_for({9001: thread})
+        second_id, second_ok = await _post_pools_for_team(
+            bot2, channel, first_id, "ABC", ["disc_x", "disc_y"], mapping, draft_data, sign_ups, persist,
+        )
+
+    assert second_ok is True
+    channel.send.assert_not_awaited()              # no second thread
+    assert thread.send.await_count == 2            # nobody re-posted on the retry
+
+
+@pytest.mark.asyncio
+async def test_post_team_logs_transient_thread_lookup_error_does_not_open_second_thread_or_stamp():
+    """A stored thread id whose lookup raises a non-NotFound/Forbidden
+    HTTPException (a transient 5xx/timeout -- exactly the blip that made
+    this a retry) must abort the run rather than read it as 'thread is
+    gone', which would open a second thread alongside a first one that may
+    still be perfectly alive."""
+    ds = _team_ds(team_b=(), channel_ids=(111,))
+    ds.team_a_pools_thread_id = "9001"   # a thread already exists from an earlier run
+    _, ctx = _db_ctx(ds)
+    red = _channel("Red-Team-Chat-ABC")
+    bot = _bot_for({111: red})   # 9001 not cached -> get_channel misses, fetch_channel is hit
+    bot.fetch_channel = AsyncMock(side_effect=discord.HTTPException(MagicMock(status=500), "server error"))
+
+    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
+         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)):
+        ok = await post_team_logs("sid", bot)
+
+    assert ok is False
+    assert ds.team_logs_posted_at is None
+    assert ds.team_a_pools_thread_id == "9001"     # unchanged -- no second thread created
+    red.send.assert_not_awaited()                  # no summary posted; no fallback attempted either
+
+
+@pytest.mark.asyncio
+async def test_post_pools_for_team_fallback_does_not_repost_a_player_already_in_the_channel():
+    """If thread creation stays refused, a retry must not re-post players the
+    fallback already delivered straight into the channel -- otherwise every
+    postable player gets re-posted every tick for up to 72h."""
+    draft_data = _team_log()
+    sign_ups = {"disc_a": "Alice", "disc_b": "Bob"}
+    mapping = {"disc_a": "dm_a", "disc_b": "dm_b"}
+    channel = _FakeChannel(
+        "Red-Team-Chat-ABC",
+        create_thread_error=discord.HTTPException(MagicMock(), "no Manage Threads"),
+    )
+    bot = _bot_for({})
+    persisted = []
+
+    async def persist(tid):
+        persisted.append(tid)
+
+    with patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
+         patch("services.draft_log_store.PileImageBuilder") as PIB:
+        PIB.return_value.build = AsyncMock(return_value=None)
+        first_id, first_ok = await _post_pools_for_team(
+            bot, channel, None, "ABC", ["disc_a", "disc_b"], mapping, draft_data, sign_ups, persist,
+        )
+        assert first_ok is True
+        assert first_id is None
+        assert channel.posted_txt_filenames() == ["Alice.txt", "Bob.txt"]
+
+        channel.send.reset_mock()
+        second_id, second_ok = await _post_pools_for_team(
+            bot, channel, None, "ABC", ["disc_a", "disc_b"], mapping, draft_data, sign_ups, persist,
+        )
+
+    assert second_ok is True
+    assert second_id is None
+    # Only the (failed) summary attempt happened again -- nobody re-posted.
+    assert channel.send.await_count == 1
+    assert channel.posted_txt_filenames() == ["Alice.txt", "Bob.txt"]   # unchanged
