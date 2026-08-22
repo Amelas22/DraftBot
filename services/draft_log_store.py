@@ -5,8 +5,9 @@ logic so it can be unit-tested in isolation."""
 from __future__ import annotations
 
 import io
+from collections import namedtuple
 from datetime import datetime
-from typing import Iterable
+from typing import Awaitable, Callable, Iterable
 
 import discord
 from loguru import logger
@@ -88,16 +89,22 @@ def _find_team_channel(
     return None
 
 
-async def _post_pools_for_team(
-    channel: discord.abc.GuildChannel | None,
+# One postable team member: someone with a Draftmancer user id and a
+# non-empty pool. Members without a mapping or with an empty pool never had a
+# post to begin with, so they don't count toward "all posted".
+_PostableMember = namedtuple("_PostableMember", "discord_id dm_user_id name safe pool")
+
+THREAD_NAME_LIMIT = 100
+TEAM_POOLS_AUTO_ARCHIVE_MINUTES = 10080  # 7 days, the max — matches the tournament match rooms
+
+
+def _postable_members(
     member_discord_ids: list[str],
     mapping: dict[str, str],
     draft_data: dict,
     sign_ups: dict,
-) -> None:
-    """Post one .txt pool attachment per team member to their team channel."""
-    if channel is None:
-        return
+) -> list[_PostableMember]:
+    members: list[_PostableMember] = []
     for discord_id in member_discord_ids or []:
         dm_user_id = mapping.get(discord_id)
         if not dm_user_id:
@@ -108,26 +115,144 @@ async def _post_pools_for_team(
         name = (draft_data["users"][dm_user_id].get("userName")
                 or (sign_ups or {}).get(discord_id) or discord_id)
         safe = "".join(c for c in str(name) if c.isalnum() or c in " _-").strip() or str(discord_id)
-        files = [discord.File(io.BytesIO(pool.encode("utf-8")), filename=f"{safe}.txt")]
+        members.append(_PostableMember(discord_id, dm_user_id, name, safe, pool))
+    return members
 
-        # Best-effort mana-value pile image (main deck + sideboard) alongside the
-        # .txt. The .txt is the deliverable and post_team_logs is reconciler-driven,
-        # so any image failure (Scryfall exhaustion -> build None, or an exception)
-        # is logged and skipped — never blocking the post or the stamp.
-        try:
-            split = split_decklist(draft_data, dm_user_id)
-            image = await PileImageBuilder().build(
-                split["main"], split["side"], draft_data.get("carddata", {})
-            )
-            if image:
-                files.append(discord.File(io.BytesIO(image.getvalue()), filename=f"{safe}.jpg"))
-        except Exception as e:
-            logger.warning(f"[team-logs] deck image failed for {name} ({dm_user_id}): {e}")
 
-        await channel.send(
-            content=f"**{name}** — drafted pool ({pool.count(chr(10)) + 1} cards):",
-            files=files,
+async def _send_pool(destination, member: _PostableMember, draft_data: dict) -> None:
+    """Send one player's pool (.txt, plus a best-effort .jpg pile image) to
+    `destination` (a channel or thread), with exactly the content and
+    attachments the channel posts carried before threading."""
+    files = [discord.File(io.BytesIO(member.pool.encode("utf-8")), filename=f"{member.safe}.txt")]
+
+    # Best-effort mana-value pile image (main deck + sideboard) alongside the
+    # .txt. The .txt is the deliverable and post_team_logs is reconciler-driven,
+    # so any image failure (Scryfall exhaustion -> build None, or an exception)
+    # is logged and skipped — never blocking the post.
+    try:
+        split = split_decklist(draft_data, member.dm_user_id)
+        image = await PileImageBuilder().build(
+            split["main"], split["side"], draft_data.get("carddata", {})
         )
+        if image:
+            files.append(discord.File(io.BytesIO(image.getvalue()), filename=f"{member.safe}.jpg"))
+    except Exception as e:
+        logger.warning(f"[team-logs] deck image failed for {member.name} ({member.dm_user_id}): {e}")
+
+    await destination.send(
+        content=f"**{member.name}** — drafted pool ({member.pool.count(chr(10)) + 1} cards):",
+        files=files,
+    )
+
+
+async def _resolve_thread(bot, thread_id: str | None):
+    """The live thread named by a stored id, or None if there isn't one (never
+    stored, or Discord no longer has it). Checked against the cache first,
+    then a real fetch — the cache alone can miss a thread across a bot
+    restart."""
+    if not thread_id:
+        return None
+    tid = int(thread_id)
+    thread = bot.get_channel(tid)
+    if thread is None:
+        try:
+            thread = await bot.fetch_channel(tid)
+        except discord.HTTPException:
+            return None
+    return thread
+
+
+async def _posted_txt_filenames(thread) -> set[str]:
+    """Filenames of every `.txt` attachment already posted in `thread`, used to
+    work out who is already posted on a retry. Matched on the attachment
+    filename rather than the message text: the `.txt` is the deliverable and
+    its name is derived per player, whereas the message wording is the kind of
+    thing that gets reworded later — which would silently make every player
+    look unposted and re-post the lot."""
+    names: set[str] = set()
+    async for message in thread.history(limit=None):
+        for attachment in message.attachments:
+            if attachment.filename.endswith(".txt"):
+                names.add(attachment.filename)
+    return names
+
+
+async def _post_pools_for_team(
+    bot,
+    channel: discord.abc.GuildChannel | None,
+    thread_id: str | None,
+    friendly_id: str,
+    member_discord_ids: list[str],
+    mapping: dict[str, str],
+    draft_data: dict,
+    sign_ups: dict,
+    persist_thread_id: Callable[[str], Awaitable[None]],
+) -> tuple[str | None, bool]:
+    """Post every postable team member's pool into a thread hanging off one
+    summary message in the team channel, resuming into the thread named by
+    `thread_id` rather than re-posting or opening a second one.
+
+    Returns `(thread_id, all_posted)`: `thread_id` is what the caller should
+    keep on the session (unchanged, newly created, or still None if Discord
+    refused thread creation and we fell back to channel posts); `all_posted`
+    is False if any postable player is still missing a pool at the end (a
+    send failure, or a still-missing player on a fallback pass).
+    """
+    postable = _postable_members(member_discord_ids, mapping, draft_data, sign_ups)
+    if not postable:
+        return thread_id, True
+    if channel is None:
+        # The all-or-nothing channel-resolution rule in the caller should
+        # prevent this (a team with postable members always has a resolved
+        # channel by the time we get here) — guarded defensively rather than
+        # raising into the caller.
+        return thread_id, False
+
+    thread = await _resolve_thread(bot, thread_id)
+    if thread is None:
+        try:
+            summary = await channel.send(
+                content=f"📥 **Drafted pools** — {friendly_id} ({len(postable)} players)"
+            )
+            thread = await summary.create_thread(
+                name=f"Drafted pools — {friendly_id}"[:THREAD_NAME_LIMIT],
+                auto_archive_duration=TEAM_POOLS_AUTO_ARCHIVE_MINUTES,
+            )
+        except discord.HTTPException as e:
+            logger.warning(
+                f"[team-logs] thread creation failed for {friendly_id}, "
+                f"falling back to per-player channel posts: {e}"
+            )
+            all_posted = True
+            for member in postable:
+                try:
+                    await _send_pool(channel, member, draft_data)
+                except Exception as e2:
+                    logger.warning(
+                        f"[team-logs] failed to post pool for {member.name} ({member.dm_user_id}): {e2}"
+                    )
+                    all_posted = False
+            return thread_id, all_posted
+
+        # The thread exists from here on out — persist it before posting any
+        # player, so a run that dies partway through resumes into this thread
+        # on the next tick instead of opening a second one.
+        thread_id = str(thread.id)
+        await persist_thread_id(thread_id)
+
+    already_posted = await _posted_txt_filenames(thread)
+    all_posted = True
+    for member in postable:
+        if f"{member.safe}.txt" in already_posted:
+            continue
+        try:
+            await _send_pool(thread, member, draft_data)
+        except Exception as e:
+            logger.warning(
+                f"[team-logs] failed to post pool for {member.name} ({member.dm_user_id}): {e}"
+            )
+            all_posted = False
+    return thread_id, all_posted
 
 
 # Sessions with a post_team_logs run currently in flight. The endDraft push
@@ -169,6 +294,9 @@ async def _post_team_logs_locked(session_id: str, bot) -> bool:
         channel_ids = list(ds.channel_ids or [])
         sign_ups = dict(ds.sign_ups or {})
         guild_id = ds.guild_id
+        friendly_id = ds.friendly_id or ds.draft_id or session_id
+        team_a_thread_id = ds.team_a_pools_thread_id
+        team_b_thread_id = ds.team_b_pools_thread_id
 
     guild = bot.get_guild(int(guild_id)) if guild_id else None
     if guild is None:
@@ -204,8 +332,36 @@ async def _post_team_logs_locked(session_id: str, bot) -> bool:
         )
         return False
 
-    await _post_pools_for_team(red, team_a, mapping, draft_data, sign_ups)
-    await _post_pools_for_team(blue, team_b, mapping, draft_data, sign_ups)
+    async def _persist_thread_id(field: str, thread_id: str) -> None:
+        async with db_session() as persist_session:
+            row = (await persist_session.execute(
+                select(DraftSession).filter(DraftSession.session_id == session_id)
+            )).scalar_one_or_none()
+            if row is not None:
+                setattr(row, field, thread_id)
+                await persist_session.commit()
+
+    _, red_all_posted = await _post_pools_for_team(
+        bot, red, team_a_thread_id, friendly_id, team_a, mapping, draft_data, sign_ups,
+        persist_thread_id=lambda tid: _persist_thread_id("team_a_pools_thread_id", tid),
+    )
+    _, blue_all_posted = await _post_pools_for_team(
+        bot, blue, team_b_thread_id, friendly_id, team_b, mapping, draft_data, sign_ups,
+        persist_thread_id=lambda tid: _persist_thread_id("team_b_pools_thread_id", tid),
+    )
+
+    if not (red_all_posted and blue_all_posted):
+        # Some player(s) are still missing a pool (a send failure, or a
+        # thread-creation refusal whose fallback pass also failed). Leave
+        # team_logs_posted_at unset so the reconciler retries and posts only
+        # the stragglers next tick.
+        logger.warning(
+            f"post_team_logs: not every player posted for session {session_id} "
+            f"(red={'ok' if red_all_posted else 'incomplete'}, "
+            f"blue={'ok' if blue_all_posted else 'incomplete'}); "
+            "leaving team_logs_posted_at unset for retry"
+        )
+        return False
 
     async with db_session() as session:
         ds = (await session.execute(
