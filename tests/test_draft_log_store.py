@@ -260,6 +260,16 @@ class _FlakyThread(_FakeThread):
         return await super()._do_send(content=content, files=files)
 
 
+class _TagRefusingThread(_FakeThread):
+    """Refuses the opening team tag (the one send carrying no files) but
+    accepts every pool post."""
+
+    async def _do_send(self, content=None, files=None):
+        if not files:
+            raise discord.HTTPException(MagicMock(), "cannot mention here")
+        return await super()._do_send(content=content, files=files)
+
+
 class _FakeChannel(_FakeThread):
     """A team-channel stand-in for the no-thread fallback: like _FakeThread
     (.send() records real messages, .history() replays them so the fallback's
@@ -496,8 +506,9 @@ async def test_post_team_logs_concurrent_calls_post_once():
     assert sorted(results) == [False, True]          # one ran, one was dropped
     assert red.send.await_count == 1                 # one summary message, not two
     assert blue.send.await_count == 1
-    assert red_thread.send.await_count == 1           # Alice posted exactly once
-    assert blue_thread.send.await_count == 1          # Bob posted exactly once
+    # One team tag + one pool post each; the duplicate call added neither.
+    assert red_thread.send.await_count == 2           # Alice posted exactly once
+    assert blue_thread.send.await_count == 2          # Bob posted exactly once
 
 
 @pytest.mark.asyncio
@@ -642,6 +653,66 @@ async def test_post_pools_for_team_ignores_non_bot_txt_attachments_when_checking
 
 
 @pytest.mark.asyncio
+async def test_post_pools_for_team_tags_the_whole_team_first_and_only_on_creation():
+    """The thread opens by mentioning the team -- that mention is what adds
+    them to the thread, which is what puts it in their sidebar. It must come
+    before the pools, cover the whole roster (including a member with no pool
+    of their own), and never fire again on a resume."""
+    draft_data = _team_log()
+    sign_ups = {"disc_a": "Alice", "disc_b": "Bob"}
+    mapping = {"disc_a": "dm_a"}                  # Bob has no mapped pool...
+    thread = _FakeThread(9001)
+    channel = _summary_channel("Red-Team-Chat-ABC", thread=thread)
+    bot = _bot_for({})
+    persist, persisted = _persist_recorder()
+
+    with _patched_discord():
+        first_ok = await _post_pools_for_team(
+            bot, channel, None, "ABC", ["disc_a", "disc_b"], mapping, draft_data, sign_ups, persist,
+        )
+
+    assert first_ok is True
+    tag = thread.send.await_args_list[0]
+    content = tag.kwargs.get("content") or tag.args[0]
+    assert "<@disc_a>" in content and "<@disc_b>" in content   # ...but is still tagged
+    assert "ABC" in content
+    assert not tag.kwargs.get("files")             # the tag carries no pool of its own
+    assert _attachment_names(thread) == ["Alice.txt"]
+
+    # A resume into the same thread must not tag the team a second time.
+    bot2 = _bot_for({9001: thread})
+    with _patched_discord():
+        second_ok = await _post_pools_for_team(
+            bot2, channel, persisted[-1], "ABC", ["disc_a", "disc_b"], mapping, draft_data, sign_ups, persist,
+        )
+
+    assert second_ok is True
+    assert thread.send.await_count == 2            # the tag + Alice, nothing added
+
+
+@pytest.mark.asyncio
+async def test_post_pools_for_team_still_posts_pools_when_the_team_tag_fails():
+    """Tagging is best-effort: a failed mention costs the team their sidebar
+    entry, not their pools, and must not leave the run looking incomplete."""
+    draft_data = _team_log()
+    sign_ups = {"disc_a": "Alice"}
+    mapping = {"disc_a": "dm_a"}
+    thread = _TagRefusingThread(9001)
+    channel = _summary_channel("Red-Team-Chat-ABC", thread=thread)
+    bot = _bot_for({})
+    persist, persisted = _persist_recorder()
+
+    with _patched_discord():
+        all_posted = await _post_pools_for_team(
+            bot, channel, None, "ABC", ["disc_a"], mapping, draft_data, sign_ups, persist,
+        )
+
+    assert all_posted is True                      # the tag failure is not a delivery failure
+    assert persisted == ["9001"]
+    assert _attachment_names(thread) == ["Alice.txt"]
+
+
+@pytest.mark.asyncio
 async def test_post_pools_for_team_disambiguates_names_that_sanitise_identically():
     """'Bob!' and 'Bob?' both sanitise to 'Bob' -- both players must still be
     delivered under distinct filenames, and a retry must not mistake one's
@@ -673,7 +744,8 @@ async def test_post_pools_for_team_disambiguates_names_that_sanitise_identically
 
     assert second_ok is True
     channel.send.assert_not_awaited()              # no second thread
-    assert thread.send.await_count == 2            # nobody re-posted on the retry
+    # One team tag + two pool posts on the first run; the retry added nothing.
+    assert thread.send.await_count == 3            # nobody re-posted on the retry
 
 
 @pytest.mark.asyncio
