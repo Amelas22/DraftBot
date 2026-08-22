@@ -171,6 +171,7 @@ def _summary_channel(name, thread=None, create_thread_error=None):
     return value is unused there, so one AsyncMock covers both."""
     ch = _channel(name)
     summary = MagicMock()
+    summary.delete = AsyncMock()
     if create_thread_error is not None:
         summary.create_thread = AsyncMock(side_effect=create_thread_error)
     else:
@@ -199,6 +200,16 @@ class _FakeThread:
             MagicMock(filename=(f[1] if isinstance(f, tuple) else getattr(f, "filename", None)))
             for f in (files or [])
         ]
+
+        async def _delete():
+            # A real delete leaves history, so the double's must too --
+            # otherwise a test could never tell an orphan summary was removed.
+            if getattr(self, "delete_error", None) is not None:
+                raise self.delete_error
+            if msg in self._messages:
+                self._messages.remove(msg)
+
+        msg.delete = AsyncMock(side_effect=_delete)
         self._messages.append(msg)
         return msg
 
@@ -215,6 +226,11 @@ class _FakeThread:
         msg.author = SimpleNamespace(id=author_id)
         msg.attachments = [MagicMock(filename=filename)]
         self._messages.append(msg)
+
+    def summary_messages(self):
+        """Messages carrying no attachment -- i.e. the "Drafted pools" headers.
+        A refused thread must leave none of these behind."""
+        return [msg for msg in self._messages if not msg.attachments]
 
     def posted_txt_filenames(self):
         """Filenames of .txt attachments actually recorded as sent -- unlike
@@ -253,6 +269,7 @@ class _FakeChannel(_FakeThread):
         super().__init__(tid=None)
         self.name = name
         self._create_thread_error = create_thread_error
+        self.delete_error = None      # set to make .delete() raise as well
 
     async def _do_send(self, content=None, files=None):
         msg = await super()._do_send(content=content, files=files)
@@ -682,6 +699,33 @@ async def test_post_team_logs_transient_thread_lookup_error_does_not_open_second
 
 
 @pytest.mark.asyncio
+async def test_post_pools_for_team_still_posts_pools_when_the_orphan_summary_cannot_be_deleted():
+    """Taking the orphan summary back down is best-effort. A guild that also
+    refuses the delete gets a stray header -- annoying, but the pools are the
+    deliverable and must still go out."""
+    draft_data = _team_log()
+    sign_ups = {"disc_a": "Alice"}
+    mapping = {"disc_a": "dm_a"}
+    channel = _FakeChannel(
+        "Red-Team-Chat-ABC",
+        create_thread_error=discord.HTTPException(MagicMock(), "no Manage Threads"),
+    )
+    channel.delete_error = discord.HTTPException(MagicMock(), "no Manage Messages")
+    bot = _bot_for({})
+    persist, persisted = _persist_recorder()
+
+    with _patched_discord():
+        all_posted = await _post_pools_for_team(
+            bot, channel, None, "ABC", ["disc_a"], mapping, draft_data, sign_ups, persist,
+        )
+
+    assert all_posted is True
+    assert channel.posted_txt_filenames() == ["Alice.txt"]   # the pool went out regardless
+    assert len(channel.summary_messages()) == 1              # the header we could not remove
+    assert persisted == []
+
+
+@pytest.mark.asyncio
 async def test_post_pools_for_team_fallback_does_not_repost_a_player_already_in_the_channel():
     """If thread creation stays refused, a retry must not re-post players the
     fallback already delivered straight into the channel -- otherwise every
@@ -702,6 +746,7 @@ async def test_post_pools_for_team_fallback_does_not_repost_a_player_already_in_
         )
         assert first_ok is True
         assert channel.posted_txt_filenames() == ["Alice.txt", "Bob.txt"]
+        assert channel.summary_messages() == []      # the orphan header was taken back down
 
         channel.send.reset_mock()
         second_ok = await _post_pools_for_team(
@@ -713,3 +758,6 @@ async def test_post_pools_for_team_fallback_does_not_repost_a_player_already_in_
     # Only the (failed) summary attempt happened again -- nobody re-posted.
     assert channel.send.await_count == 1
     assert channel.posted_txt_filenames() == ["Alice.txt", "Bob.txt"]   # unchanged
+    # ...and that attempt left nothing behind either, so orphan headers cannot
+    # pile up across the reconciler's 72h of retries.
+    assert channel.summary_messages() == []

@@ -270,6 +270,20 @@ async def _open_pools_thread(channel, friendly_id: str, player_count: int):
             f"[team-logs] thread creation failed for {friendly_id}, "
             f"falling back to per-player channel posts: {e}"
         )
+        # Take the summary back down. It now heads an empty thread that will
+        # never exist, and leaving it makes the retry non-idempotent: a run
+        # whose fallback ALSO fails a player send returns incomplete, so the
+        # reconciler re-enters here on its next 60s tick and posts another
+        # orphan header — up to 72h of them stacking up in a channel the team
+        # is trying to talk in. Best-effort: if the delete is refused too, the
+        # players' pools still go out below, which is what matters.
+        try:
+            await summary.delete()
+        except discord.HTTPException as delete_error:
+            logger.warning(
+                f"[team-logs] could not remove the orphaned pools summary for "
+                f"{friendly_id}: {delete_error}"
+            )
         return None
 
 
