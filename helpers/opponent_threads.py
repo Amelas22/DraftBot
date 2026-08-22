@@ -44,6 +44,22 @@ def opponent_ids(
     return []
 
 
+def own_team_ids(
+    team_name: str,
+    team_a: list[str] | None,
+    team_b: list[str] | None,
+) -> list[str]:
+    """The roster of the team whose channel this is -- the mirror of
+    `opponent_ids`. These are the people who should be pulled into each
+    scouting thread; the opponents being scouted must never be, since this is
+    the other team's private channel."""
+    if team_name == TEAM_A_CHANNEL_PREFIX:
+        return list(team_a or [])
+    if team_name == TEAM_B_CHANNEL_PREFIX:
+        return list(team_b or [])
+    return []
+
+
 def _thread_name(discord_id: str, sign_ups: dict[str, str] | None) -> str:
     """Thread label for one opponent, derived from their sign-up display name.
 
@@ -89,9 +105,22 @@ async def _existing_thread_names(channel: discord.TextChannel) -> set[str]:
     return names
 
 
-def _starter(name: str, opponent_team_label: str) -> str:
+def _starter(name: str, opponent_team_label: str, own_ids: list[str] | None = None) -> str:
+    """The thread's opening message, which also tags the team that owns this
+    channel.
+
+    The mention is not decoration: Discord adds a mentioned member to the
+    thread, and a thread you belong to is the one that appears in your
+    sidebar rather than staying buried behind the channel. Carried inside the
+    starter that was already being posted, so tagging costs no extra message.
+
+    Tags the OWN team only. The player being scouted is on the other team and
+    cannot see this channel; mentioning them would be both useless and rude.
+    """
+    mentions = " ".join(f"<@{discord_id}>" for discord_id in own_ids or [])
+    lead = f"{mentions} " if mentions else ""
     return (
-        f"🔍 Scouting thread for **{name}** ({opponent_team_label}). "
+        f"{lead}🔍 Scouting thread for **{name}** ({opponent_team_label}). "
         "Share reads, matchup notes, and what you saw them pick."
     )
 
@@ -117,6 +146,7 @@ async def spawn_opponent_threads(
         if not ids:
             return 0
         label = _OPPONENT_LABEL[team_name]
+        own_ids = own_team_ids(team_name, team_a, team_b)
         existing = await _existing_thread_names(channel)
     except Exception as e:
         logger.warning(f"[opponent-threads] could not resolve opponents for '{team_name}': {e}")
@@ -145,7 +175,13 @@ async def spawn_opponent_threads(
         existing.add(name)
         created += 1
         try:
-            await thread.send(_starter(name, label))
+            # silent: one scouting thread per OPPONENT means a 4v4 draft would
+            # otherwise ping every player four times at room creation. A silent
+            # mention still adds them to the thread -- verified against Discord,
+            # with a loud send as the control -- so the sidebar entry survives
+            # while the notification storm does not. The pools thread stays
+            # loud: that is one message per draft and worth a ping.
+            await thread.send(_starter(name, label, own_ids), silent=True)
         except Exception as e:
             logger.warning(f"[opponent-threads] created '{name}' but its starter failed: {e}")
     return created
