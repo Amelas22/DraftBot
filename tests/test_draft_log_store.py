@@ -277,14 +277,21 @@ class _FakeChannel(_FakeThread):
     summary-shaped message whose create_thread() can be made to fail --
     covering the resolve-or-create attempt that precedes the fallback."""
 
-    def __init__(self, name, create_thread_error=None):
+    def __init__(self, name, create_thread_error=None, thread=None):
         super().__init__(tid=None)
         self.name = name
-        self._create_thread_error = create_thread_error
+        self.create_thread_error = create_thread_error
+        # The thread handed back once creation stops failing. Settable, so a
+        # test can model a refusal that later clears -- a transient 5xx, or an
+        # admin granting Manage Threads between reconciler ticks.
+        self.thread = thread
 
     async def _do_send(self, content=None, files=None):
         msg = await super()._do_send(content=content, files=files)
-        msg.create_thread = AsyncMock(side_effect=self._create_thread_error)
+        msg.create_thread = AsyncMock(
+            side_effect=self.create_thread_error,
+            return_value=self.thread,
+        )
         return msg
 
 
@@ -796,6 +803,46 @@ async def test_post_pools_for_team_still_posts_pools_when_the_orphan_summary_can
     assert channel.posted_txt_filenames() == ["Alice.txt"]   # the pool went out regardless
     assert len(channel.summary_messages()) == 1              # the header we could not remove
     assert persisted == []
+
+
+@pytest.mark.asyncio
+async def test_post_pools_for_team_does_not_repost_into_a_thread_what_the_fallback_already_posted():
+    """Thread creation is refused once, so the pools go into the channel. The
+    OTHER team then fails, so nothing is stamped and the reconciler retries --
+    and by then thread creation works. The new thread must not re-post players
+    the channel fallback already delivered, or their pools appear twice."""
+    draft_data = _team_log()
+    sign_ups = {"disc_a": "Alice", "disc_b": "Bob"}
+    mapping = {"disc_a": "dm_a", "disc_b": "dm_b"}
+    channel = _FakeChannel(
+        "Red-Team-Chat-ABC",
+        create_thread_error=discord.HTTPException(MagicMock(), "transient"),
+    )
+    bot = _bot_for({})
+    persist, persisted = _persist_recorder()
+
+    with _patched_discord():
+        first_ok = await _post_pools_for_team(
+            bot, channel, None, "ABC", ["disc_a", "disc_b"], mapping, draft_data, sign_ups, persist,
+        )
+    assert first_ok is True
+    assert channel.posted_txt_filenames() == ["Alice.txt", "Bob.txt"]   # delivered in-channel
+    assert persisted == []
+
+    # The retry: thread creation now succeeds.
+    thread = _FakeThread(9001)
+    channel.create_thread_error = None
+    channel.thread = thread
+    with _patched_discord():
+        second_ok = await _post_pools_for_team(
+            bot, channel, None, "ABC", ["disc_a", "disc_b"], mapping, draft_data, sign_ups, persist,
+        )
+
+    assert second_ok is True
+    assert persisted == ["9001"]                       # the thread is now the record
+    # Nobody is re-posted: both pools already exist in the channel above.
+    assert _attachment_names(thread) == []
+    assert channel.posted_txt_filenames() == ["Alice.txt", "Bob.txt"]   # unchanged
 
 
 @pytest.mark.asyncio

@@ -133,11 +133,18 @@ def _dedupe_safe_names(members: list[_PostableMember]) -> list[_PostableMember]:
     would make a retry after a partial failure see the one shared `.txt` and
     wrongly treat the OTHER colliding player as already posted too -- lost
     silently, the same failure mode as an unscoped posted-check. Only the
-    colliding names get a short suffix (last 4 of their Discord id), so the
-    common case stays exactly 'Alice.txt' / 'Bob.txt'."""
+    colliding names get the suffix, so the common case stays exactly
+    'Alice.txt' / 'Bob.txt'.
+
+    The suffix is the WHOLE Discord id, not a short fragment of it: a
+    fragment can collide too (two players whose names sanitise alike and
+    whose ids share those digits), which would silently reintroduce the exact
+    bug this function exists to prevent. Ids are unique by construction, so
+    the full one makes the filename unique by construction -- an ugly
+    filename only ever appears in the already-rare collision case."""
     counts = Counter(m.safe for m in members)
     return [
-        m._replace(safe=f"{m.safe}-{str(m.discord_id)[-4:]}") if counts[m.safe] > 1 else m
+        m._replace(safe=f"{m.safe}-{m.discord_id}") if counts[m.safe] > 1 else m
         for m in members
     ]
 
@@ -374,9 +381,15 @@ async def _post_pools_for_team(
     # on the next tick instead of opening a second one.
     await persist_thread_id(str(thread.id))
     await _tag_team_in_thread(thread, member_discord_ids, friendly_id)
-    # Nothing can already be in a thread created microseconds ago, so skip
-    # the history scan the resume path above needs.
-    return await _post_missing_players(thread, postable, draft_data, set())
+    # The thread is empty -- but the CHANNEL may not be. If an earlier run had
+    # thread creation refused (a transient 5xx, or a permission since granted)
+    # its pools went straight into the channel, and the stamp stays unset
+    # while the OTHER team is incomplete. So this can be the second run for
+    # these players even though it is the first for this thread. Scan the
+    # channel, not the thread, or everyone the fallback already served gets a
+    # duplicate pool here.
+    already_posted = await _posted_txt_filenames(bot, channel, limit=CHANNEL_HISTORY_SCAN_LIMIT)
+    return await _post_missing_players(thread, postable, draft_data, already_posted)
 
 
 # Sessions with a post_team_logs run currently in flight. The endDraft push
