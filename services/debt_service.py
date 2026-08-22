@@ -5,7 +5,7 @@ import asyncio
 import uuid
 from datetime import datetime, timedelta
 from loguru import logger
-from sqlalchemy import select, func, or_, tuple_
+from sqlalchemy import select, func, or_, tuple_, case
 from sqlalchemy.exc import OperationalError
 from database.db_session import db_session
 from models.debt_ledger import DebtLedger
@@ -49,7 +49,13 @@ async def create_ledger_entries(
         debtor_id: The player who owes money
         creditor_id: The player who is owed money
         amount: The amount owed (positive integer)
-        source_type: 'draft', 'settlement', 'admin', 'card_loan', or 'card_return'
+        source_type: 'draft', 'settlement', 'admin', 'card_loan', or 'card_return'.
+            This function never sets settlement_method, so a 'settlement' row
+            written through it would silently display as external even if the
+            tix moved out of a wallet. No production caller does this today --
+            settlement rows must go through create_settlement (external) or
+            settle_debt_from_wallet (wallet), which are what actually record
+            the method.
         source_id: session_id for drafts, UUID otherwise
         notes: Optional human-readable context
         created_by: Optional - who recorded this entry
@@ -224,12 +230,18 @@ async def get_pair_position_around_draft(
     session_id: str,
     player_id: str,
     counterparty_id: str,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """What this pair owed BEFORE this draft's stake debt, and what has been paid since.
 
-    Returns ``(pre_existing, settled_since)`` from ``player_id``'s perspective:
-    pre_existing negative means they already owed the counterparty; settled_since is
-    positive for tix they have paid off since this draft booked its debt.
+    Returns ``(pre_existing, settled_wallet, settled_external)`` from ``player_id``'s
+    perspective: pre_existing negative means they already owed the counterparty;
+    settled_wallet/settled_external are each positive for tix paid off since this draft
+    booked its debt, split by how the settlement was recorded — auto-drawn from the
+    payer's wallet (mtgo_resolution_service) vs. recorded after the fact because tix
+    moved outside the bot (the manual /settle path). A settlement row with no
+    settlement_method set (should not happen after the backfill migration, but treated
+    defensively) counts as external: never let an unclassified row read as a wallet
+    debit the player never authorised.
 
     The split is by row id, not by source: debt_ledger is append-only and its id is
     monotonic, so "before this draft" is exactly "rows with a lower id than this draft's
@@ -263,18 +275,33 @@ async def get_pair_position_around_draft(
             # a debt that does not exist.
             total = (await session.execute(
                 select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(*pair))).scalar()
-            return int(total or 0), 0
+            return int(total or 0), 0, 0
 
         pre_existing = (await session.execute(
             select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
                 *pair, DebtLedger.id < cutoff))).scalar()
-        settled_since = (await session.execute(
-            select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
+        # 'wallet' is the only enumerated case; everything else -- 'external',
+        # NULL, and any future or malformed value -- falls to the else branch.
+        # The two buckets must stay exhaustive over every row this WHERE can
+        # match: their sum feeds settled_since and therefore new_balance, so a
+        # row that fell into neither bucket would silently understate what was
+        # actually paid.
+        settled_wallet, settled_external = (await session.execute(
+            select(
+                func.coalesce(func.sum(case(
+                    (DebtLedger.settlement_method == 'wallet', DebtLedger.amount),
+                    else_=0,
+                )), 0),
+                func.coalesce(func.sum(case(
+                    (DebtLedger.settlement_method == 'wallet', 0),
+                    else_=DebtLedger.amount,
+                )), 0),
+            ).where(
                 *pair,
                 DebtLedger.id > cutoff,
                 DebtLedger.source_type == 'settlement',
-            ))).scalar()
-        return int(pre_existing or 0), int(settled_since or 0)
+            ))).one()
+        return int(pre_existing or 0), int(settled_wallet or 0), int(settled_external or 0)
 
 
 async def get_all_balances_for(
@@ -496,7 +523,8 @@ async def create_settlement(
                     source_type='settlement',
                     source_id=settlement_id,
                     notes=notes,
-                    created_by=settled_by
+                    created_by=settled_by,
+                    settlement_method='external'
                 )
 
                 # Entry from payee's perspective (they received, so negative - reduces credit)
@@ -508,7 +536,8 @@ async def create_settlement(
                     source_type='settlement',
                     source_id=settlement_id,
                     notes=notes,
-                    created_by=settled_by
+                    created_by=settled_by,
+                    settlement_method='external'
                 )
 
                 session.add(payer_entry)

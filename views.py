@@ -2411,11 +2411,21 @@ class CancelConfirmationView(discord.ui.View):
                 logger.error(f"Failed to delete draft message: {e}")
 
         # Remove from database
+        tournament_match_id = session.tournament_match_id
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
                 await db_session.delete(session)
                 await db_session.commit()
                 logger.info(f"Removed draft session {self.draft_session_id} from database")
+
+        if tournament_match_id is not None:
+            # Cancelling is the only way a linked unfinished draft ever goes away
+            # (cleanup exempts them), so this is the only place that can put the
+            # control message back to 'scheduling'. Guarded: the cancellation
+            # itself already succeeded above, so a refresh failure here must
+            # not stop the user from being told that.
+            from match_control_view import safe_refresh_match_views
+            await safe_refresh_match_views(self.bot, tournament_match_id)
 
         # # Cancel any scheduled auto-pairings task
         # if self.draft_session_id in PersistentView.AUTO_PAIRINGS_TASKS:

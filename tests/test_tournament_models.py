@@ -146,3 +146,49 @@ async def test_same_team_can_join_different_tournaments(test_db):
 
         result = await session.execute(select(TournamentParticipant))
         assert len(result.scalars().all()) == 2
+
+
+def test_match_control_message_id_defaults_to_none():
+    from models.tournament import TournamentMatch
+
+    match = TournamentMatch(round_id=1, team_a_participant_id=1, team_b_participant_id=2)
+    assert match.control_message_id is None
+
+
+@pytest.mark.asyncio
+async def test_second_draft_for_the_same_tournament_match_is_rejected(test_db):
+    """DB-level backstop for the premade creation guard (Task 5b fix round 1).
+
+    The guard in sessions/premade_session.py is a check-then-act race: two
+    submits milliseconds apart can both pass its query. The invariant it's
+    protecting -- at most one draft session per tournament match -- has to
+    also hold as a hard constraint, via the unique index on
+    draft_sessions.tournament_match_id, regardless of which code path writes
+    the column.
+    """
+    from models.draft_session import DraftSession
+
+    async with test_db() as session:
+        session.add(DraftSession(session_id="d1", guild_id="g1", tournament_match_id=77))
+        await session.commit()
+
+    async with test_db() as session:
+        session.add(DraftSession(session_id="d2", guild_id="g1", tournament_match_id=77))
+        with pytest.raises(IntegrityError):
+            await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_unlinked_draft_sessions_can_share_a_null_tournament_match_id(test_db):
+    """SQLite permits multiple NULLs in a unique index, so ordinary
+    (non-tournament) drafts -- tournament_match_id always None -- are
+    unaffected by the guard's unique index."""
+    from models.draft_session import DraftSession
+
+    async with test_db() as session:
+        session.add(DraftSession(session_id="d3", guild_id="g1"))
+        session.add(DraftSession(session_id="d4", guild_id="g1"))
+        await session.commit()
+
+        result = await session.execute(select(DraftSession))
+        assert len(result.scalars().all()) == 2

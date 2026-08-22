@@ -3,6 +3,7 @@ from discord.ext import commands
 from loguru import logger
 from modals import CubeDraftSelectionView, StakedCubeDraftSelectionView
 
+from database.db_session import db_session
 from session import DraftSession, MatchResult
 from views import MatchResultSelect
 from config import is_money_server
@@ -55,7 +56,32 @@ class DraftCommands(commands.Cog):
     @discord.slash_command(name='premade_draft', description='Start a team draft with premade teams', guild_ids=None)
     async def premade_draft(self, ctx):
         logger.info("Received premade_draft command")
-        view = CubeDraftSelectionView(session_type="premade", guild_id=ctx.guild.id)
+        overrides = None
+        if isinstance(ctx.channel, discord.Thread):
+            from match_control_view import match_room_context
+            try:
+                async with db_session() as session:
+                    context = await match_room_context(session, ctx.channel.id)
+            except Exception:
+                # The tournament lookup is an enhancement to a general-purpose
+                # command — it must never be able to break an ordinary draft.
+                # Fall through to the pre-existing behaviour (typed names plus
+                # the fuzzy nudge); the user sees the difference immediately
+                # because the modal asks for team names again.
+                logger.exception(
+                    f"match_room_context failed for thread {ctx.channel.id}; "
+                    "falling back to the ordinary /premade_draft flow"
+                )
+                context = None
+            if context is not None:
+                # A match thread names its own teams, so the modal never asks —
+                # there is no wrong name to type, and draft side A is match side A.
+                _match_id, overrides, block = context
+                if block is not None:
+                    await ctx.response.send_message(block, ephemeral=True)
+                    return
+        view = CubeDraftSelectionView(session_type="premade", guild_id=ctx.guild.id,
+                                      session_details_overrides=overrides)
         await ctx.response.send_message("Select a cube:", view=view, ephemeral=True)
         
     # @discord.slash_command(name='dynamic_stake', description='Start a team draft with random teams and customizable stakes')

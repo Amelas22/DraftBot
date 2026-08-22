@@ -42,8 +42,8 @@ STANDINGS = ChannelSpec(
 PAIRINGS = ChannelSpec(
     setting="default_play_channel_id",
     name="tournament-pairings",
-    topic="Weekly pairings — hit Play on your match to start the draft.",
-    # Players click Play here and talk in the match threads that hang off it.
+    topic="Weekly pairings — each match gets its own thread; start the draft in there.",
+    # Players talk in the match threads that hang off this channel's lines.
     read_only=False,
 )
 

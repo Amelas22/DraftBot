@@ -9,11 +9,11 @@ from database.models_base import Base
 from database.db_session import AsyncSessionLocal
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from conftest import seed_settlement
 from utils import get_formatted_bet_outcomes
 from models.draft_session import DraftSession
 from models.stake import StakeInfo
 from models.stake_pairing import StakePairing
-from models.debt_ledger import DebtLedger
 from services.debt_service import create_ledger_entries
 
 
@@ -492,10 +492,11 @@ class TestBetOutcomesAfterWalletSettlement:
         await create_ledger_entries(
             guild_id="test_guild", debtor_id="alice", creditor_id="bob", amount=30,
             source_type="draft", source_id="settled_session")
-        # auto-settlement pays it straight back out of alice's wallet
-        await create_ledger_entries(
-            guild_id="test_guild", debtor_id="bob", creditor_id="alice", amount=30,
-            source_type="settlement", source_id="some-uuid")
+        # auto-settlement pays it straight back out of alice's wallet. Written
+        # directly (not via create_ledger_entries, which has no settlement_method
+        # param) so this genuinely exercises the wallet path -- settlement_method
+        # is what now distinguishes it from a manually-recorded settlement.
+        await seed_settlement("test_guild", "alice", "bob", 30, "wallet", "some-uuid")
 
         outcome_lines, _ = await get_formatted_bet_outcomes(
             "settled_session", {"alice": "Alice", "bob": "Bob"}, ["bob"])
@@ -522,9 +523,9 @@ class TestBetOutcomesAfterWalletSettlement:
         await create_ledger_entries(
             guild_id="test_guild", debtor_id="alice", creditor_id="bob", amount=100,
             source_type="draft", source_id="partial_session")
-        await create_ledger_entries(   # alice's wallet only covered 60
-            guild_id="test_guild", debtor_id="bob", creditor_id="alice", amount=60,
-            source_type="settlement", source_id="some-uuid")
+        # alice's wallet only covered 60 -- written directly (see the wallet
+        # test above) so settlement_method='wallet' is set.
+        await seed_settlement("test_guild", "alice", "bob", 60, "wallet", "some-uuid")
 
         outcome_lines, _ = await get_formatted_bet_outcomes(
             "partial_session", {"alice": "Alice", "bob": "Bob"}, ["bob"])
