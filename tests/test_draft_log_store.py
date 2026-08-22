@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import io
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -117,6 +118,32 @@ def _team3_log():
 # channel/thread below so the "who's already posted" scan (which is scoped to
 # messages the bot itself authored) recognizes the bot's own sends.
 _BOT_ID = 999000111
+
+
+def _persist_recorder():
+    """`(callback, list)` for _post_pools_for_team's persist_thread_id argument.
+    The list records every thread id persisted, in order -- which is the only
+    channel production code has for reporting a newly created thread, so it is
+    also what a test reads to learn the id."""
+    persisted: list[str] = []
+
+    async def persist(thread_id):
+        persisted.append(thread_id)
+
+    return persist, persisted
+
+
+@contextlib.contextmanager
+def _patched_discord(build=None):
+    """Patch the two collaborators every pool-posting test needs. `discord.File`
+    becomes a plain `("FILE", filename)` tuple -- which the fake threads and
+    `_attachment_names` both read -- and `PileImageBuilder().build` returns no
+    image, since the .txt is the deliverable and the .jpg is best-effort. Pass
+    `build=` for the tests that are specifically about the image."""
+    with patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
+         patch("services.draft_log_store.PileImageBuilder") as PIB:
+        PIB.return_value.build = build or AsyncMock(return_value=None)
+        yield
 
 
 async def _empty_history(limit=None):
@@ -302,23 +329,23 @@ def _attachment_names(destination):
     ]
 
 
-async def _noop_persist(_thread_id: str) -> None:
-    pass
-
-
 @pytest.mark.asyncio
-async def test_post_team_logs_scopes_pools_to_own_team_and_stamps():
+@pytest.mark.parametrize("red_name, blue_name", [
+    ("Red-Team-Chat-ABC", "Blue-Team-Chat-ABC"),
+    # Discord stores text-channel names lowercased in production, so channel
+    # matching must be case-insensitive or post_team_logs silently posts
+    # nothing in prod.
+    ("red-team-chat-abc", "blue-team-chat-abc"),
+])
+async def test_post_team_logs_scopes_pools_to_own_team_and_stamps(red_name, blue_name):
     ds = _team_ds()
     _, ctx = _db_ctx(ds)
     red_thread, blue_thread = _FakeThread(1001), _FakeThread(2002)
-    red = _summary_channel("Red-Team-Chat-ABC", thread=red_thread)
-    blue = _summary_channel("Blue-Team-Chat-ABC", thread=blue_thread)
+    red = _summary_channel(red_name, thread=red_thread)
+    blue = _summary_channel(blue_name, thread=blue_thread)
     bot = _bot_for({111: red, 222: blue})
 
-    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
-         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
-         patch("services.draft_log_store.PileImageBuilder") as PIB:
-        PIB.return_value.build = AsyncMock(return_value=None)   # best-effort: no image → txt only
+    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), _patched_discord():
         ok = await post_team_logs("sid", bot)
 
     assert ok is True
@@ -334,30 +361,6 @@ async def test_post_team_logs_scopes_pools_to_own_team_and_stamps():
 
 
 @pytest.mark.asyncio
-async def test_post_team_logs_matches_lowercased_discord_channel_names():
-    """Discord stores text-channel names lowercased in production, e.g.
-    'red-team-chat-abc', not 'Red-Team-Chat-ABC'. Channel matching must be
-    case-insensitive or post_team_logs silently posts nothing in prod."""
-    ds = _team_ds()
-    _, ctx = _db_ctx(ds)
-    red_thread, blue_thread = _FakeThread(1001), _FakeThread(2002)
-    red = _summary_channel("red-team-chat-abc", thread=red_thread)
-    blue = _summary_channel("blue-team-chat-abc", thread=blue_thread)
-    bot = _bot_for({111: red, 222: blue})
-
-    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
-         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
-         patch("services.draft_log_store.PileImageBuilder") as PIB:
-        PIB.return_value.build = AsyncMock(return_value=None)
-        ok = await post_team_logs("sid", bot)
-
-    assert ok is True
-    assert ds.team_logs_posted_at is not None
-    assert _attachment_names(red_thread) == ["Alice.txt"]
-    assert _attachment_names(blue_thread) == ["Bob.txt"]
-
-
-@pytest.mark.asyncio
 async def test_post_team_logs_attaches_deck_image_alongside_txt():
     """When a pile image builds, the member's post carries BOTH the .txt and a
     .jpg deck image in one message."""
@@ -367,10 +370,7 @@ async def test_post_team_logs_attaches_deck_image_alongside_txt():
     red = _summary_channel("Red-Team-Chat-ABC", thread=thread)
     bot = _bot_for({111: red})
 
-    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
-         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
-         patch("services.draft_log_store.PileImageBuilder") as PIB:
-        PIB.return_value.build = AsyncMock(return_value=io.BytesIO(b"\xff\xd8jpg"))
+    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), _patched_discord(AsyncMock(return_value=io.BytesIO(b"\xff\xd8jpg"))):
         ok = await post_team_logs("sid", bot)
 
     assert ok is True
@@ -388,10 +388,7 @@ async def test_post_team_logs_still_posts_txt_when_image_build_raises():
     red = _summary_channel("Red-Team-Chat-ABC", thread=thread)
     bot = _bot_for({111: red})
 
-    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
-         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
-         patch("services.draft_log_store.PileImageBuilder") as PIB:
-        PIB.return_value.build = AsyncMock(side_effect=RuntimeError("scryfall down"))
+    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), _patched_discord(AsyncMock(side_effect=RuntimeError("scryfall down"))):
         ok = await post_team_logs("sid", bot)
 
     assert ok is True                                       # still succeeded
@@ -411,8 +408,7 @@ async def test_post_team_logs_partial_channel_resolution_does_not_stamp():
     red = _channel("Red-Team-Chat-ABC")
     bot = _bot_for({111: red})   # only Red resolves; Blue's channel id has no match
 
-    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
-         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)):
+    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), _patched_discord():
         ok = await post_team_logs("sid", bot)
 
     assert ok is False
@@ -473,10 +469,7 @@ async def test_post_team_logs_concurrent_calls_post_once():
     blue.send = _slow_summary(blue_thread)
     bot = _bot_for({111: red, 222: blue})
 
-    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
-         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
-         patch("services.draft_log_store.PileImageBuilder") as PIB:
-        PIB.return_value.build = AsyncMock(return_value=None)
+    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), _patched_discord():
         results = await asyncio.gather(
             post_team_logs("sid", bot),
             post_team_logs("sid", bot),
@@ -497,10 +490,7 @@ async def test_post_team_logs_three_player_team_gets_one_summary_and_three_threa
     red = _summary_channel("Red-Team-Chat-ABC", thread=thread)
     bot = _bot_for({111: red})
 
-    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
-         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
-         patch("services.draft_log_store.PileImageBuilder") as PIB:
-        PIB.return_value.build = AsyncMock(return_value=None)
+    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), _patched_discord():
         ok = await post_team_logs("sid", bot)
 
     assert ok is True
@@ -523,28 +513,21 @@ async def test_post_pools_for_team_resumes_into_stored_thread_and_reposts_nothin
     thread = _FakeThread(9001)
     channel = _summary_channel("Red-Team-Chat-ABC", thread=thread)
     bot = _bot_for({})
-    persisted = []
+    persist, persisted = _persist_recorder()
 
-    async def persist(tid):
-        persisted.append(tid)
-
-    with patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
-         patch("services.draft_log_store.PileImageBuilder") as PIB:
-        PIB.return_value.build = AsyncMock(return_value=None)
-        first_id, first_ok = await _post_pools_for_team(
+    with _patched_discord():
+        first_ok = await _post_pools_for_team(
             bot, channel, None, "ABC", ["disc_a", "disc_b", "disc_c"], mapping, draft_data, sign_ups, persist,
         )
         assert first_ok is True
-        assert first_id == "9001"
 
         channel.send.reset_mock()   # only care whether run 2 opens a NEW summary/thread
         bot2 = _bot_for({9001: thread})   # second run resolves the stored id via bot.get_channel
 
-        second_id, second_ok = await _post_pools_for_team(
-            bot2, channel, first_id, "ABC", ["disc_a", "disc_b", "disc_c"], mapping, draft_data, sign_ups, persist,
+        second_ok = await _post_pools_for_team(
+            bot2, channel, persisted[-1], "ABC", ["disc_a", "disc_b", "disc_c"], mapping, draft_data, sign_ups, persist,
         )
 
-    assert second_id == first_id == "9001"
     assert second_ok is True
     channel.send.assert_not_awaited()          # no second summary message / no second thread
     assert persisted == ["9001"]               # persisted exactly once, at creation
@@ -562,10 +545,7 @@ async def test_post_team_logs_one_players_send_failure_leaves_stamp_unset_then_r
     red = _summary_channel("Red-Team-Chat-ABC", thread=thread)
     bot = _bot_for({111: red})   # thread not registered yet -- created fresh on the first run
 
-    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
-         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
-         patch("services.draft_log_store.PileImageBuilder") as PIB:
-        PIB.return_value.build = AsyncMock(return_value=None)
+    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), _patched_discord():
         first_ok = await post_team_logs("sid", bot)
 
     assert first_ok is False
@@ -577,10 +557,7 @@ async def test_post_team_logs_one_players_send_failure_leaves_stamp_unset_then_r
     # resumes into it rather than opening a second one; Bob's earlier hiccup
     # doesn't recur.
     bot2 = _bot_for({111: red, 9001: thread})
-    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
-         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
-         patch("services.draft_log_store.PileImageBuilder") as PIB:
-        PIB.return_value.build = AsyncMock(return_value=None)
+    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), _patched_discord():
         second_ok = await post_team_logs("sid", bot2)
 
     assert second_ok is True
@@ -603,19 +580,13 @@ async def test_post_pools_for_team_falls_back_to_channel_posts_when_thread_creat
         create_thread_error=discord.HTTPException(MagicMock(), "no Manage Threads"),
     )
     bot = _bot_for({})
-    persisted = []
+    persist, persisted = _persist_recorder()
 
-    async def persist(tid):
-        persisted.append(tid)
-
-    with patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
-         patch("services.draft_log_store.PileImageBuilder") as PIB:
-        PIB.return_value.build = AsyncMock(return_value=None)
-        thread_id, all_posted = await _post_pools_for_team(
+    with _patched_discord():
+        all_posted = await _post_pools_for_team(
             bot, channel, None, "ABC", ["disc_a"], mapping, draft_data, sign_ups, persist,
         )
 
-    assert thread_id is None
     assert all_posted is True
     assert persisted == []                       # no thread was ever created
     channel.summary.create_thread.assert_awaited_once()
@@ -637,20 +608,14 @@ async def test_post_pools_for_team_ignores_non_bot_txt_attachments_when_checking
     thread.inject_foreign_message("Alice.txt")   # someone else's upload, not the bot's post
     channel = _summary_channel("Red-Team-Chat-ABC")   # thread already stored; no creation needed
     bot = _bot_for({9001: thread})
-    persisted = []
+    persist, persisted = _persist_recorder()
 
-    async def persist(tid):
-        persisted.append(tid)
-
-    with patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
-         patch("services.draft_log_store.PileImageBuilder") as PIB:
-        PIB.return_value.build = AsyncMock(return_value=None)
-        thread_id, all_posted = await _post_pools_for_team(
+    with _patched_discord():
+        all_posted = await _post_pools_for_team(
             bot, channel, "9001", "ABC", ["disc_a", "disc_b"], mapping, draft_data, sign_ups, persist,
         )
 
     assert all_posted is True
-    assert thread_id == "9001"
     channel.send.assert_not_awaited()             # thread already resolved -- no new summary
     assert persisted == []                        # nothing new to persist
     # Alice's real pool WAS posted by the bot despite the foreign 'Alice.txt'
@@ -669,15 +634,10 @@ async def test_post_pools_for_team_disambiguates_names_that_sanitise_identically
     thread = _FakeThread(9001)
     channel = _summary_channel("Red-Team-Chat-ABC", thread=thread)
     bot = _bot_for({})
-    persisted = []
+    persist, persisted = _persist_recorder()
 
-    async def persist(tid):
-        persisted.append(tid)
-
-    with patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
-         patch("services.draft_log_store.PileImageBuilder") as PIB:
-        PIB.return_value.build = AsyncMock(return_value=None)
-        first_id, first_ok = await _post_pools_for_team(
+    with _patched_discord():
+        first_ok = await _post_pools_for_team(
             bot, channel, None, "ABC", ["disc_x", "disc_y"], mapping, draft_data, sign_ups, persist,
         )
         assert first_ok is True
@@ -689,8 +649,8 @@ async def test_post_pools_for_team_disambiguates_names_that_sanitise_identically
         # Retry with the same thread must not skip either player.
         channel.send.reset_mock()
         bot2 = _bot_for({9001: thread})
-        second_id, second_ok = await _post_pools_for_team(
-            bot2, channel, first_id, "ABC", ["disc_x", "disc_y"], mapping, draft_data, sign_ups, persist,
+        second_ok = await _post_pools_for_team(
+            bot2, channel, persisted[-1], "ABC", ["disc_x", "disc_y"], mapping, draft_data, sign_ups, persist,
         )
 
     assert second_ok is True
@@ -712,8 +672,7 @@ async def test_post_team_logs_transient_thread_lookup_error_does_not_open_second
     bot = _bot_for({111: red})   # 9001 not cached -> get_channel misses, fetch_channel is hit
     bot.fetch_channel = AsyncMock(side_effect=discord.HTTPException(MagicMock(status=500), "server error"))
 
-    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), \
-         patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)):
+    with patch("services.draft_log_store.db_session", MagicMock(return_value=ctx)), _patched_discord():
         ok = await post_team_logs("sid", bot)
 
     assert ok is False
@@ -735,28 +694,22 @@ async def test_post_pools_for_team_fallback_does_not_repost_a_player_already_in_
         create_thread_error=discord.HTTPException(MagicMock(), "no Manage Threads"),
     )
     bot = _bot_for({})
-    persisted = []
+    persist, persisted = _persist_recorder()
 
-    async def persist(tid):
-        persisted.append(tid)
-
-    with patch("services.draft_log_store.discord.File", lambda fp, filename=None: ("FILE", filename)), \
-         patch("services.draft_log_store.PileImageBuilder") as PIB:
-        PIB.return_value.build = AsyncMock(return_value=None)
-        first_id, first_ok = await _post_pools_for_team(
+    with _patched_discord():
+        first_ok = await _post_pools_for_team(
             bot, channel, None, "ABC", ["disc_a", "disc_b"], mapping, draft_data, sign_ups, persist,
         )
         assert first_ok is True
-        assert first_id is None
         assert channel.posted_txt_filenames() == ["Alice.txt", "Bob.txt"]
 
         channel.send.reset_mock()
-        second_id, second_ok = await _post_pools_for_team(
+        second_ok = await _post_pools_for_team(
             bot, channel, None, "ABC", ["disc_a", "disc_b"], mapping, draft_data, sign_ups, persist,
         )
 
     assert second_ok is True
-    assert second_id is None
+    assert persisted == []            # no thread was ever created
     # Only the (failed) summary attempt happened again -- nobody re-posted.
     assert channel.send.await_count == 1
     assert channel.posted_txt_filenames() == ["Alice.txt", "Bob.txt"]   # unchanged

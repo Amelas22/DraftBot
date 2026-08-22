@@ -5,8 +5,9 @@ logic so it can be unit-tested in isolation."""
 from __future__ import annotations
 
 import io
-from collections import namedtuple
+from collections import Counter, namedtuple
 from datetime import datetime
+from functools import partial
 from typing import Awaitable, Callable, Iterable
 
 import discord
@@ -14,6 +15,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from database.db_session import db_session
+from helpers.opponent_threads import DISCORD_THREAD_NAME_LIMIT
 from helpers.pile_compositor import PileImageBuilder
 from helpers.substitutes import TEAM_A_CHANNEL_PREFIX, TEAM_B_CHANNEL_PREFIX
 from models.draft_session import DraftSession
@@ -94,7 +96,6 @@ def _find_team_channel(
 # post to begin with, so they don't count toward "all posted".
 _PostableMember = namedtuple("_PostableMember", "discord_id dm_user_id name safe pool")
 
-THREAD_NAME_LIMIT = 100
 TEAM_POOLS_AUTO_ARCHIVE_MINUTES = 10080  # 7 days, the max — matches the tournament match rooms
 # Bound on how far back the no-thread fallback scans the team CHANNEL's
 # history for already-posted players. The channel is a general team chat, not
@@ -134,15 +135,11 @@ def _dedupe_safe_names(members: list[_PostableMember]) -> list[_PostableMember]:
     silently, the same failure mode as an unscoped posted-check. Only the
     colliding names get a short suffix (last 4 of their Discord id), so the
     common case stays exactly 'Alice.txt' / 'Bob.txt'."""
-    counts: dict[str, int] = {}
-    for m in members:
-        counts[m.safe] = counts.get(m.safe, 0) + 1
-    result: list[_PostableMember] = []
-    for m in members:
-        if counts[m.safe] > 1:
-            m = m._replace(safe=f"{m.safe}-{str(m.discord_id)[-4:]}")
-        result.append(m)
-    return result
+    counts = Counter(m.safe for m in members)
+    return [
+        m._replace(safe=f"{m.safe}-{str(m.discord_id)[-4:]}") if counts[m.safe] > 1 else m
+        for m in members
+    ]
 
 
 async def _send_pool(destination, member: _PostableMember, draft_data: dict) -> None:
@@ -208,16 +205,16 @@ async def _posted_txt_filenames(bot, destination, limit: int | None = None) -> s
     `.txt` is the deliverable and its name is derived per player, whereas the
     message wording is the kind of thing that gets reworded later — which
     would silently make every player look unposted and re-post the lot."""
+    bot_id = getattr(bot.user, "id", None)
+    if bot_id is None:
+        # Not logged in, so nothing here can be ours to recognise. Bail before
+        # the history call rather than scanning and matching nothing.
+        return set()
     names: set[str] = set()
-    bot_id = getattr(getattr(bot, "user", None), "id", None)
     async for message in destination.history(limit=limit):
-        author = getattr(message, "author", None)
-        author_id = getattr(author, "id", None)
-        if bot_id is None or author_id != bot_id:
+        if message.author.id != bot_id:
             continue
-        for attachment in message.attachments:
-            if attachment.filename.endswith(".txt"):
-                names.add(attachment.filename)
+        names.update(a.filename for a in message.attachments if a.filename.endswith(".txt"))
     return names
 
 
@@ -246,6 +243,36 @@ async def _post_missing_players(
     return all_posted
 
 
+async def _open_pools_thread(channel, friendly_id: str, player_count: int):
+    """The newly-created pools thread for this team, hanging off one summary
+    message in the team channel — or None if Discord refused, either the
+    summary send or the thread creation itself (typically missing Manage
+    Threads). A None sends the caller down the per-player fallback: losing the
+    tidy grouping is acceptable, losing people's pools is not."""
+    try:
+        summary = await channel.send(
+            content=f"📥 **Drafted pools** — {friendly_id} ({player_count} players)"
+        )
+    except discord.HTTPException as e:
+        logger.warning(
+            f"[team-logs] could not post the pools summary message for {friendly_id}, "
+            f"falling back to per-player channel posts: {e}"
+        )
+        return None
+
+    try:
+        return await summary.create_thread(
+            name=f"Drafted pools — {friendly_id}"[:DISCORD_THREAD_NAME_LIMIT],
+            auto_archive_duration=TEAM_POOLS_AUTO_ARCHIVE_MINUTES,
+        )
+    except discord.HTTPException as e:
+        logger.warning(
+            f"[team-logs] thread creation failed for {friendly_id}, "
+            f"falling back to per-player channel posts: {e}"
+        )
+        return None
+
+
 async def _post_pools_for_team(
     bot,
     channel: discord.abc.GuildChannel | None,
@@ -256,26 +283,29 @@ async def _post_pools_for_team(
     draft_data: dict,
     sign_ups: dict,
     persist_thread_id: Callable[[str], Awaitable[None]],
-) -> tuple[str | None, bool]:
+) -> bool:
     """Post every postable team member's pool into a thread hanging off one
     summary message in the team channel, resuming into the thread named by
     `thread_id` rather than re-posting or opening a second one.
 
-    Returns `(thread_id, all_posted)`: `thread_id` is what the caller should
-    keep on the session (unchanged, newly created, or still None if Discord
-    refused thread creation and we fell back to channel posts); `all_posted`
-    is False if any postable player is still missing a pool at the end (a
-    send failure, or a still-missing player on a fallback pass).
+    Returns whether every postable player ends up with a pool posted. False
+    (a send failure, a still-missing player on a fallback pass, or an
+    unresolvable stored thread) leaves the caller's team_logs_posted_at stamp
+    unset, so the reconciler retries and posts only the stragglers.
+
+    A newly created thread is persisted via `persist_thread_id` before any
+    player is posted — that callback, not the return value, is what a later
+    retry reads to find this thread again.
     """
     postable = _postable_members(member_discord_ids, mapping, draft_data, sign_ups)
     if not postable:
-        return thread_id, True
+        return True
     if channel is None:
         # The all-or-nothing channel-resolution rule in the caller should
         # prevent this (a team with postable members always has a resolved
         # channel by the time we get here) — guarded defensively rather than
         # raising into the caller.
-        return thread_id, False
+        return False
 
     try:
         thread = await _resolve_thread(bot, thread_id)
@@ -289,45 +319,24 @@ async def _post_pools_for_team(
             f"[team-logs] could not resolve the stored pools thread for {friendly_id}, "
             f"aborting this run rather than risk a second thread: {e}"
         )
-        return thread_id, False
+        return False
 
+    if thread is not None:
+        already_posted = await _posted_txt_filenames(bot, thread)
+        return await _post_missing_players(thread, postable, draft_data, already_posted)
+
+    thread = await _open_pools_thread(channel, friendly_id, len(postable))
     if thread is None:
-        try:
-            summary = await channel.send(
-                content=f"📥 **Drafted pools** — {friendly_id} ({len(postable)} players)"
-            )
-        except discord.HTTPException as e:
-            logger.warning(
-                f"[team-logs] could not post the pools summary message for {friendly_id}, "
-                f"falling back to per-player channel posts: {e}"
-            )
-            already_posted = await _posted_txt_filenames(bot, channel, limit=CHANNEL_HISTORY_SCAN_LIMIT)
-            all_posted = await _post_missing_players(channel, postable, draft_data, already_posted)
-            return thread_id, all_posted
+        already_posted = await _posted_txt_filenames(bot, channel, limit=CHANNEL_HISTORY_SCAN_LIMIT)
+        return await _post_missing_players(channel, postable, draft_data, already_posted)
 
-        try:
-            thread = await summary.create_thread(
-                name=f"Drafted pools — {friendly_id}"[:THREAD_NAME_LIMIT],
-                auto_archive_duration=TEAM_POOLS_AUTO_ARCHIVE_MINUTES,
-            )
-        except discord.HTTPException as e:
-            logger.warning(
-                f"[team-logs] thread creation failed for {friendly_id}, "
-                f"falling back to per-player channel posts: {e}"
-            )
-            already_posted = await _posted_txt_filenames(bot, channel, limit=CHANNEL_HISTORY_SCAN_LIMIT)
-            all_posted = await _post_missing_players(channel, postable, draft_data, already_posted)
-            return thread_id, all_posted
-
-        # The thread exists from here on out — persist it before posting any
-        # player, so a run that dies partway through resumes into this thread
-        # on the next tick instead of opening a second one.
-        thread_id = str(thread.id)
-        await persist_thread_id(thread_id)
-
-    already_posted = await _posted_txt_filenames(bot, thread)
-    all_posted = await _post_missing_players(thread, postable, draft_data, already_posted)
-    return thread_id, all_posted
+    # The thread exists from here on out — persist it before posting any
+    # player, so a run that dies partway through resumes into this thread
+    # on the next tick instead of opening a second one.
+    await persist_thread_id(str(thread.id))
+    # Nothing can already be in a thread created microseconds ago, so skip
+    # the history scan the resume path above needs.
+    return await _post_missing_players(thread, postable, draft_data, set())
 
 
 # Sessions with a post_team_logs run currently in flight. The endDraft push
@@ -416,13 +425,13 @@ async def _post_team_logs_locked(session_id: str, bot) -> bool:
                 setattr(row, field, thread_id)
                 await persist_session.commit()
 
-    _, red_all_posted = await _post_pools_for_team(
+    red_all_posted = await _post_pools_for_team(
         bot, red, team_a_thread_id, friendly_id, team_a, mapping, draft_data, sign_ups,
-        persist_thread_id=lambda tid: _persist_thread_id("team_a_pools_thread_id", tid),
+        persist_thread_id=partial(_persist_thread_id, "team_a_pools_thread_id"),
     )
-    _, blue_all_posted = await _post_pools_for_team(
+    blue_all_posted = await _post_pools_for_team(
         bot, blue, team_b_thread_id, friendly_id, team_b, mapping, draft_data, sign_ups,
-        persist_thread_id=lambda tid: _persist_thread_id("team_b_pools_thread_id", tid),
+        persist_thread_id=partial(_persist_thread_id, "team_b_pools_thread_id"),
     )
 
     if not (red_all_posted and blue_all_posted):
