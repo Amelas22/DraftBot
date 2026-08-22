@@ -191,6 +191,7 @@ class _FakeThread:
     def __init__(self, tid):
         self.id = tid
         self._messages = []
+        self.delete_error = None      # set to make a message's .delete() raise
         self.send = AsyncMock(side_effect=self._do_send)
 
     async def _do_send(self, content=None, files=None):
@@ -204,10 +205,11 @@ class _FakeThread:
         async def _delete():
             # A real delete leaves history, so the double's must too --
             # otherwise a test could never tell an orphan summary was removed.
-            if getattr(self, "delete_error", None) is not None:
+            if self.delete_error is not None:
                 raise self.delete_error
-            if msg in self._messages:
-                self._messages.remove(msg)
+            # Unguarded on purpose: Discord raises NotFound on a second
+            # delete, so a double-delete should surface here too.
+            self._messages.remove(msg)
 
         msg.delete = AsyncMock(side_effect=_delete)
         self._messages.append(msg)
@@ -269,7 +271,6 @@ class _FakeChannel(_FakeThread):
         super().__init__(tid=None)
         self.name = name
         self._create_thread_error = create_thread_error
-        self.delete_error = None      # set to make .delete() raise as well
 
     async def _do_send(self, content=None, files=None):
         msg = await super()._do_send(content=content, files=files)
