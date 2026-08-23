@@ -215,7 +215,10 @@ async def _report_all(session, round_id):
 async def test_advance_round_pairs_the_bracket_winners(session):
     t = await _swiss_done(session, cut_to=4, teams=6)
     first = await start_playoff(session, t.id)
-    await _report_all(session, first.id)
+    reported = await _report_all(session, first.id)
+    # _report_all always scores team A 2-0, so team A is the winner of record
+    # for every match it touches.
+    winners = {m.team_a_participant_id for m in reported}
 
     second = await advance_round(session, t.id, random.Random(1))
     assert second.stage == "playoff"
@@ -223,6 +226,60 @@ async def test_advance_round_pairs_the_bracket_winners(session):
         select(TournamentMatch).where(TournamentMatch.round_id == second.id)
     )).scalars().all()
     assert len(matches) == 1                     # the final
+    final = matches[0]
+    # Not just "a match exists" -- the two teams IN it must be the two
+    # reported winners, not the losers.
+    assert {final.team_a_participant_id, final.team_b_participant_id} == winners
+
+
+@pytest.mark.asyncio
+async def test_advance_round_carries_a_bye_team_into_the_next_round(session):
+    """The bye branch in _advance_playoff: a team that sat out round 1 on a
+    bye must still appear in round 2, paired against a real winner -- not
+    dropped, and not paired against the other bye team."""
+    t = await _swiss_done(session, cut_to=6, teams=6)
+    first = await start_playoff(session, t.id)
+    first_matches = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == first.id)
+    )).scalars().all()
+    bye_team_ids = {m.team_a_participant_id for m in first_matches if m.is_bye}
+    assert len(bye_team_ids) == 2
+
+    reported = await _report_all(session, first.id)
+    winner_ids = {m.team_a_participant_id for m in reported if not m.is_bye}
+
+    second = await advance_round(session, t.id, random.Random(1))
+    second_matches = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == second.id)
+    )).scalars().all()
+    assert len(second_matches) == 2
+    for m in second_matches:
+        pair = {m.team_a_participant_id, m.team_b_participant_id}
+        assert len(pair & bye_team_ids) == 1     # exactly one bye team...
+        assert len(pair & winner_ids) == 1       # ...paired against one real winner
+
+
+@pytest.mark.asyncio
+async def test_a_drawn_playoff_match_refuses_to_advance(session):
+    """Single elimination has no drawn match. set_result permits equal wins
+    (an admin typo, or a genuine Bo3 draw), so silently crowning team B would
+    hand the bracket to the wrong team with zero signal -- this must raise
+    instead, and must not create the next round."""
+    from services.tournament_service import _playoff_rounds, set_result
+    t = await _swiss_done(session, cut_to=4, teams=6)
+    first = await start_playoff(session, t.id)
+    matches = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == first.id)
+    )).scalars().all()
+    non_byes = [m for m in matches if not m.is_bye]
+    await set_result(session, non_byes[0].id, 1, 1)             # the draw
+    await set_result(session, non_byes[1].id, 2, 0)
+
+    with pytest.raises(ValueError, match="draw"):
+        await advance_round(session, t.id, random.Random(1))
+
+    rounds_after = await _playoff_rounds(session, t.id)
+    assert len(rounds_after) == 1                # no new round was created
 
 
 @pytest.mark.asyncio

@@ -487,6 +487,12 @@ async def _advance_playoff(session, tournament, last_round):
     for m in matches:
         if m.is_bye:
             winners.append(m.team_a_participant_id)
+        elif m.team_a_wins == m.team_b_wins:
+            raise ValueError(
+                f"Match {m.id} in round {last_round.round_number} is a draw "
+                f"({m.team_a_wins}-{m.team_b_wins}); a single-elimination match "
+                "needs a decisive result before the bracket can advance."
+            )
         elif m.team_a_wins > m.team_b_wins:
             winners.append(m.team_a_participant_id)
         else:
@@ -745,8 +751,14 @@ async def find_current_match(session, tournament_id, team_name):
 async def advance_round(session, tournament_id, rng):
     """Advance to the next round, or complete the tournament after round N.
 
-    Returns the new TournamentRound, or None when the tournament completes.
-    Raises ValueError while the current round still has unreported matches.
+    Returns the new TournamentRound. Returns None when the tournament
+    completes (end of swiss with no cut declared, or the playoff final has
+    just been decided). Raises ValueError while the current round still has
+    unreported matches (or, in the bracket, on a drawn match — single
+    elimination has no such result). Raises SwissComplete(cut_to, eligible)
+    at the end of swiss instead of completing when a cut IS declared: the
+    caller must ask the organizer whether to start the bracket or finish and
+    crown the swiss leader, since completing is otherwise irreversible.
     """
     tournament = await session.get(Tournament, tournament_id)
     if tournament is None:
