@@ -24,13 +24,20 @@ from match_control_view import (
     match_facts,
     safe_refresh_match_views,
 )
-from models.tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
+from models.tournament import (
+    STAGE_SWISS,
+    Tournament,
+    TournamentMatch,
+    TournamentParticipant,
+    TournamentRound,
+)
 from sqlalchemy import or_, select
 from services.tournament_formatter import (
     create_registration_embed,
     create_standings_embed,
     post_registration_board,
     refresh_boards,
+    round_label,
     update_standings_message,
 )
 from services.tournament_service import (
@@ -39,6 +46,7 @@ from services.tournament_service import (
     add_teammate,
     count_unreported_matches,
     create_tournament,
+    current_round_stage,
     finish_tournament,
     find_current_match,
     find_participant_by_name,
@@ -48,6 +56,7 @@ from services.tournament_service import (
     get_latest_completed_tournament,
     get_rosters,
     get_standings_data,
+    is_playoff,
     list_participants,
     other_teams_for_user,
     register_team,
@@ -218,8 +227,40 @@ class PlayoffPromptView(discord.ui.View):
         self.cog = cog
         self.tournament_id = tournament_id
         self.cut_to = cut_to
+        # Set by the poster, so the prompt can be rewritten when it expires or
+        # when an answer fails. Without it the buttons still LOOK live 15
+        # minutes later and clicking one gets Discord's "interaction failed".
+        self.message = None
         self.start_playoff_button.disabled = disabled
         self.start_playoff_button.label = f"Start top-{cut_to} playoff"
+
+    async def _rewrite(self, content):
+        """Replace the prompt's text and take its buttons away, if we have the
+        message. Never raises: the prompt is a view, and losing this edit must
+        not take the handler down with it."""
+        if self.message is None:
+            return
+        try:
+            await self.message.edit(content=content, view=None)
+        except Exception as e:
+            logger.warning(f"[PlayoffPrompt] could not rewrite the prompt: {e}")
+
+    async def _failed(self, interaction, message):
+        """Report a failed answer to the clicker AND on the prompt itself.
+
+        Both handlers close the prompt with a "⏳ …" line before their slow
+        work, so without this the public message is left claiming the work is
+        still running while only the clicker's ephemeral reply says otherwise.
+        """
+        await interaction.followup.send(message, ephemeral=True)
+        await self._rewrite(message)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        await self._rewrite(
+            f"This prompt expired — cut with `/tournament playoff top:{self.cut_to}`, "
+            f"or crown the Swiss leader with `/tournament finish`.")
 
     async def _answer(self, interaction, taken):
         """Close the prompt before doing any slow work.
@@ -255,7 +296,7 @@ class PlayoffPromptView(discord.ui.View):
         try:
             await self.cog._run_playoff(interaction, self.tournament_id)
         except ValueError as e:
-            await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            await self._failed(interaction, f"❌ {e}")
             return
         await interaction.followup.send(f"🏆 Top {self.cut_to} playoff started.")
         self.stop()
@@ -267,7 +308,7 @@ class PlayoffPromptView(discord.ui.View):
         try:
             announcement = await self.cog._run_finish(interaction, self.tournament_id)
         except ValueError as e:
-            await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            await self._failed(interaction, f"❌ {e}")
             return
         await interaction.followup.send(announcement)
         self.stop()
@@ -1008,7 +1049,7 @@ class TournamentCog(commands.Cog):
                         f"\n\n⚠️ Only **{done.eligible}** eligible team(s) — not enough for a "
                         f"top {done.cut_to}.{fallback}"
                     ) if short else ""
-                    await ctx.followup.send(
+                    view.message = await ctx.followup.send(
                         f"Swiss is over for **{tournament_name}**. Cut to top "
                         f"**{done.cut_to}**?{note}", view=view)
                     return
@@ -1032,10 +1073,13 @@ class TournamentCog(commands.Cog):
                     return
                 new_round_id = new_round.id
                 new_round_number = new_round.round_number
+                new_round_label = round_label(
+                    tournament.total_rounds, new_round_number, new_round.stage,
+                    swiss_noun="Week")
             play = self._destination(ctx, PAIRINGS.setting)
             await self._post_round_messages(play, new_round_id, new_round_number)
             if play != ctx.channel:
-                await ctx.followup.send(f"✅ Week {new_round_number} pairings posted in {play.mention}.")
+                await ctx.followup.send(f"✅ {new_round_label} pairings posted in {play.mention}.")
             await update_standings_message(self.bot, tournament_id)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
@@ -1130,7 +1174,7 @@ class TournamentCog(commands.Cog):
                 facts = await match_facts(session, match_id)
             if facts is None:
                 continue
-            match, a_name, b_name, _round_number, _draft = facts
+            match, a_name, b_name, _label, _draft = facts
             if not match.pairings_channel_id or not match.pairings_message_id:
                 continue
             channel = self.bot.get_channel(int(match.pairings_channel_id))
@@ -1240,12 +1284,6 @@ class TournamentCog(commands.Cog):
         answer in the channel the command was typed in, and pairings may be
         destined for the play channel instead.
         """
-        if create_rooms:
-            await channel.send(f"**Week {round_number} pairings:**")
-        else:
-            await channel.send(
-                f"**Week {round_number} pairings:** — rooms open with "
-                f"`/tournament open_rooms {round_number}`")
         async with db_session() as session:
             matches = (await session.execute(
                 select(TournamentMatch).where(TournamentMatch.round_id == round_id)
@@ -1255,8 +1293,17 @@ class TournamentCog(commands.Cog):
             # scores nothing, so it must not be announced as an "auto win".
             round_ = await session.get(TournamentRound, round_id)
             bye_note = ("— bye, advances (no match, no points)"
-                        if round_ is not None and round_.stage == "playoff"
+                        if is_playoff(round_)
                         else "— BYE (auto win)")
+            tournament = (await session.get(Tournament, round_.tournament_id)
+                          if round_ is not None else None)
+            # Bracket rounds are numbered past total_rounds, so the header used
+            # to post the semifinal of a 3-round swiss as "Week 4 pairings".
+            label = round_label(
+                tournament.total_rounds if tournament is not None else round_number,
+                round_number,
+                round_.stage if round_ is not None else STAGE_SWISS,
+                swiss_noun="Week")
             rows = []
             for m in matches:
                 part_a = await session.get(TournamentParticipant, m.team_a_participant_id)
@@ -1269,6 +1316,13 @@ class TournamentCog(commands.Cog):
                     else:
                         rows.append((m.id, f"• **{part_a.team_name}** {m.team_a_wins}–"
                                            f"{m.team_b_wins} **{part_b.team_name}**", None))
+
+        if create_rooms:
+            await channel.send(f"**{label} pairings:**")
+        else:
+            await channel.send(
+                f"**{label} pairings:** — rooms open with "
+                f"`/tournament open_rooms {round_number}`")
 
         for match_id, text, names in rows:
             # One match's post failing (e.g. a transient Discord error) must not
@@ -1309,7 +1363,8 @@ class TournamentCog(commands.Cog):
         async with db_session() as session:
             tournament = await session.get(Tournament, tournament_id)
             participants = await get_standings_data(session, tournament_id)
-            embed = create_standings_embed(tournament, participants)
+            embed = create_standings_embed(
+                tournament, participants, await current_round_stage(session, tournament))
         message = await channel.send(embed=embed)
         await safe_pin(message)
         async with db_session() as session:
@@ -1411,6 +1466,7 @@ class TournamentCog(commands.Cog):
                 rosters = await get_rosters(session, tournament.id)
             else:
                 participants = await get_standings_data(session, tournament.id)
+            stage = await current_round_stage(session, tournament)
 
         fee = tournament.entry_fee or 0
         if tournament.status == "registration":
@@ -1425,7 +1481,7 @@ class TournamentCog(commands.Cog):
             embed = create_registration_embed(tournament, participants, held, deficits,
                                               rosters=rosters)
         else:
-            embed = create_standings_embed(tournament, participants)
+            embed = create_standings_embed(tournament, participants, stage)
             if fee > 0:
                 pool = await escrow.prize_pool(str(ctx.guild.id), tournament.id)
                 embed.add_field(name="🏦 Prize pool", value=f"{pool} tix", inline=False)

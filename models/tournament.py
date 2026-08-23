@@ -128,6 +128,13 @@ class TournamentTeamMember(Base):
                 f"user_id={self.user_id})>")
 
 
+# A round's stage. Named here rather than in the service layer so the column
+# default and every predicate that reads it share one spelling -- a service-side
+# constant would be a circular import back into this module.
+STAGE_SWISS = 'swiss'
+STAGE_PLAYOFF = 'playoff'
+
+
 class TournamentRound(Base):
     __tablename__ = 'tournament_rounds'
 
@@ -136,8 +143,8 @@ class TournamentRound(Base):
     round_number = Column(Integer, nullable=False)
     # 'swiss' | 'playoff'. The single fact that freezes swiss records: a result
     # on a playoff round skips the participant-stat update entirely.
-    stage = Column(String(16), nullable=False, default='swiss',
-                   server_default=text("'swiss'"))
+    stage = Column(String(16), nullable=False, default=STAGE_SWISS,
+                   server_default=text(f"'{STAGE_SWISS}'"))
     created_at = Column(DateTime, default=datetime.now)
     # Where this round's pairings message lives, for view re-registration on restart
     pairings_channel_id = Column(String(64), nullable=True)

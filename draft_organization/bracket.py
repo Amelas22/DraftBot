@@ -80,7 +80,7 @@ def final_placement(rounds: list[list[tuple[Any, Any | None]]], seeds: dict[Any,
     if not rounds:
         return []
     eliminated = {loser for rnd in rounds for _, loser in rnd if loser is not None}
-    entrants = {winner for rnd in rounds for winner, _ in rnd} | eliminated
+    never_lost = {winner for rnd in rounds for winner, _ in rnd} - eliminated
     order: list[Any] = []
     placed: set[Any] = set()
 
@@ -98,7 +98,7 @@ def final_placement(rounds: list[list[tuple[Any, Any | None]]], seeds: dict[Any,
             placed.add(pid)
             order.append(pid)
 
-    _place(sorted(entrants - eliminated, key=_seed_key))
+    _place(sorted(never_lost, key=_seed_key))
     for rnd in reversed(rounds):
         _place(sorted((loser for _, loser in rnd if loser is not None), key=_seed_key))
     return order

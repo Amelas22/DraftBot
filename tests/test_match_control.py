@@ -32,19 +32,19 @@ def test_result_wins_over_a_still_linked_draft():
 
 
 def test_scheduling_body_names_both_teams_and_invites_start():
-    body = render_match_control(SCHEDULING, "Alpha", "Bravo", 2)
+    body = render_match_control(SCHEDULING, "Alpha", "Bravo", "Round 2")
     assert "Round 2" in body and "Alpha" in body and "Bravo" in body
     assert "Start draft" in body
 
 
 def test_drafting_body_links_the_lobby():
-    body = render_match_control(DRAFTING, "Alpha", "Bravo", 2, lobby_link=LINK)
+    body = render_match_control(DRAFTING, "Alpha", "Bravo", "Round 2", lobby_link=LINK)
     assert LINK in body
     assert "Draft in progress" in body
 
 
 def test_recorded_body_shows_the_score():
-    body = render_match_control(RECORDED, "Alpha", "Bravo", 2, result=(2, 1))
+    body = render_match_control(RECORDED, "Alpha", "Bravo", "Round 2", result=(2, 1))
     assert "Result recorded" in body
     assert "2–1" in body
 

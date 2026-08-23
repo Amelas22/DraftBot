@@ -464,3 +464,23 @@ async def test_finish_button_gives_the_payout_hint_and_refreshes_standings():
     assert "**Cup** (#7)" in message
     assert "Champion: **Alpha**" in message
     refresh.assert_awaited_once_with(cog.bot, 7)
+
+
+@pytest.mark.asyncio
+async def test_playoff_prompt_says_so_when_it_expires():
+    """timeout=900 with no on_timeout left two live-looking buttons behind: a TO
+    coming back later clicked one and got Discord's generic "interaction failed".
+    The expired prompt must name the commands that still work."""
+    from cogs.tournament_commands import PlayoffPromptView
+
+    view = PlayoffPromptView(MagicMock(), tournament_id=1, cut_to=8)
+    view.message = MagicMock()
+    view.message.edit = AsyncMock()
+
+    await view.on_timeout()
+
+    content = view.message.edit.call_args.kwargs["content"]
+    assert "/tournament playoff top:8" in content
+    assert "/tournament finish" in content
+    assert view.message.edit.call_args.kwargs["view"] is None
+    assert all(item.disabled for item in view.children)

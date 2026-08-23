@@ -19,7 +19,7 @@ async def test_announce_posts_the_link_line_and_refreshes():
 
     channel = MagicMock()
     channel.send = AsyncMock()
-    facts = (MagicMock(), "Alpha", "Bravo", 2, None)
+    facts = (MagicMock(), "Alpha", "Bravo", "Round 2", None)
     bot = MagicMock()
 
     with patch.object(match_control_view, "match_facts", AsyncMock(return_value=facts)), \

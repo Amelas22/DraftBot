@@ -9,29 +9,53 @@ import discord
 from loguru import logger
 
 from database.db_session import db_session
-from models.tournament import Tournament
+from models.tournament import STAGE_PLAYOFF, STAGE_SWISS, Tournament
 from services.tournament_escrow_service import describe_structure
 from services.tournament_service import (
+    current_round_stage,
     get_standings_data,
     get_tournament_id_for_match,
 )
 
 
-def _round_line(tournament):
-    """The "**Round:** …" line. Playoff rounds are numbered past total_rounds,
-    so the swiss "N of M" form reads "Round: 4/3" once the bracket starts."""
-    if tournament.current_round > tournament.total_rounds:
-        return f"**Round:** Playoff round {tournament.current_round - tournament.total_rounds}"
+def round_label(total_rounds, round_number, stage, swiss_noun="Round"):
+    """How one round is named, wherever a round is named.
+
+    Bracket rounds are numbered past total_rounds -- the first one of a 3-round
+    swiss is round 4 -- so naming them as swiss rounds calls the semifinal
+    "Week 4". Three display sites did that arithmetic differently (or not at
+    all); this is the one that answers now.
+
+    ``swiss_noun`` is the word a site already uses for a swiss round: "Week" in
+    the pairings channel, "Round" on a match's control message. Only the swiss
+    wording differs between sites -- the playoff form is identical everywhere,
+    which is the half that was wrong.
+    """
+    if stage == STAGE_PLAYOFF:
+        return f"Playoff round {round_number - total_rounds}"
+    return f"{swiss_noun} {round_number}"
+
+
+def _round_line(tournament, stage):
+    """The "**Round:** …" line. A bracket round is named, not counted: the
+    swiss "N of M" form reads "Round: 4/3" once the bracket starts."""
+    if stage == STAGE_PLAYOFF:
+        return (f"**Round:** "
+                f"{round_label(tournament.total_rounds, tournament.current_round, stage)}")
     return f"**Round:** {tournament.current_round}/{tournament.total_rounds}"
 
 
-def create_standings_embed(tournament, participants):
-    """Build the standings embed for a tournament (pure)."""
+def create_standings_embed(tournament, participants, stage=STAGE_SWISS):
+    """Build the standings embed for a tournament (pure).
+
+    ``stage`` is the stage of the round it is on (see
+    tournament_service.current_round_stage). It defaults to swiss for the
+    read-only callers of a tournament that has none."""
     embed = discord.Embed(
         title=f"🏆 {tournament.name} — Standings",
         description=(
             f"**Status:** {tournament.status.title()}\n"
-            f"{_round_line(tournament)}"
+            f"{_round_line(tournament, stage)}"
         ),
         color=discord.Color.gold(),
     )
@@ -113,7 +137,7 @@ def create_registration_embed(tournament, participants, pot=0, deficits=None,
     if fee > 0:
         desc = f"**Entry fee:** {fee} tix/team · **Prize pool:** {pot} tix\n"
         desc += f"**Payout:** {describe_structure(tournament.payout_structure or 'winner_take_all')}"
-    if getattr(tournament, "cut_to", None):
+    if tournament.cut_to:
         desc += (" · " if desc else "") + f"**Cut:** top {tournament.cut_to}"
     embed = discord.Embed(title=title, description=desc,
                           color=discord.Color.gold())
@@ -170,7 +194,8 @@ async def update_standings_message(bot, tournament_id):
         if tournament is None or not tournament.standings_message_id:
             return
         participants = await get_standings_data(session, tournament_id)
-        embed = create_standings_embed(tournament, participants)
+        embed = create_standings_embed(
+            tournament, participants, await current_round_stage(session, tournament))
         channel_id = int(tournament.standings_channel_id)
         message_id = int(tournament.standings_message_id)
 

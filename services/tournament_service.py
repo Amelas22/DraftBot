@@ -14,6 +14,8 @@ from draft_organization.bracket import advance_pairs, build_bracket, final_place
 from draft_organization.swiss import pair_round, rank_standings, round_robin_schedule
 from models.team import Team
 from models.tournament import (
+    STAGE_PLAYOFF,
+    STAGE_SWISS,
     Tournament,
     TournamentMatch,
     TournamentParticipant,
@@ -24,6 +26,30 @@ from models.tournament import (
 ACTIVE_STATUSES = ("registration", "active")
 POINTS_WIN = 3
 POINTS_DRAW = 1
+# STAGE_SWISS / STAGE_PLAYOFF live in models.tournament, which owns them: the
+# column default needs them too, and a constant defined here would be a circular
+# import back into the model. They are imported above beside POINTS_WIN's peers.
+
+
+def is_playoff(round_):
+    """True when a round is a bracket round.
+
+    The one place a stage value is interpreted. It used to be spelled out as
+    `== "playoff"` in three places and `!= "playoff"` in a fourth, so any third
+    stage would have been included by one predicate and excluded by the other.
+    """
+    return round_ is not None and round_.stage == STAGE_PLAYOFF
+
+
+def _cut_eligible(standings):
+    """The teams a cut can seat: those that completed registration (escrow paid).
+
+    One rule, because the end-of-swiss prompt disables its Start button on this
+    count while start_playoff refuses on this list -- if the two drift, the
+    prompt offers a button that then refuses, which is the failure the disabled
+    state exists to prevent.
+    """
+    return [p for p in standings if p.status == "paid"]
 
 
 class SwissComplete(Exception):
@@ -401,7 +427,7 @@ async def _playoff_rounds(session, tournament_id):
     stmt = (
         select(TournamentRound)
         .where(TournamentRound.tournament_id == tournament_id)
-        .where(TournamentRound.stage == "playoff")
+        .where(TournamentRound.stage == STAGE_PLAYOFF)
         .order_by(TournamentRound.round_number)
     )
     return (await session.execute(stmt)).scalars().all()
@@ -454,7 +480,7 @@ async def start_playoff(session, tournament_id, size=None):
         )
 
     standings = await get_standings_data(session, tournament_id)
-    eligible = [p for p in standings if p.status == "paid"]
+    eligible = _cut_eligible(standings)
     if len(eligible) < size:
         raise ValueError(
             f"Only {len(eligible)} eligible team(s) — can't cut to top {size}. "
@@ -466,23 +492,35 @@ async def start_playoff(session, tournament_id, size=None):
         participant.seed = position
     by_seed = {position: p.id for position, p in enumerate(cut, start=1)}
 
-    round_number = tournament.total_rounds + 1
+    pairs = [
+        (by_seed[seed_a], None if seed_b is None else by_seed[seed_b])
+        for seed_a, seed_b in build_bracket(size)
+    ]
+    return await _create_playoff_round(
+        session, tournament, tournament.total_rounds + 1, pairs)
+
+
+async def _create_playoff_round(session, tournament, round_number, pairs):
+    """Create a bracket round and its matches, and move the tournament onto it.
+
+    ``pairs`` is (participant_id, partner_id_or_None) in bracket order; a None
+    partner is a bye. Deliberately NOT merged with _create_round_with_pairings:
+    a swiss round pairs itself from standings and SCORES its bye, and a bracket
+    bye is the absence of a match -- nothing is awarded, because swiss records
+    are frozen at the cut.
+    """
     new_round = TournamentRound(
-        tournament_id=tournament.id, round_number=round_number, stage="playoff"
+        tournament_id=tournament.id, round_number=round_number, stage=STAGE_PLAYOFF
     )
     session.add(new_round)
     await session.flush()
-
-    for seed_a, seed_b in build_bracket(size):
+    for id_a, id_b in pairs:
         session.add(TournamentMatch(
             round_id=new_round.id,
-            team_a_participant_id=by_seed[seed_a],
-            team_b_participant_id=None if seed_b is None else by_seed[seed_b],
-            # A bracket bye is the ABSENCE of a match, not a result: no call
-            # to _award_bye, because swiss records are frozen at the cut.
-            is_bye=seed_b is None,
+            team_a_participant_id=id_a,
+            team_b_participant_id=id_b,
+            is_bye=id_b is None,
         ))
-
     tournament.current_round = round_number
     await session.flush()
     return new_round
@@ -513,42 +551,19 @@ def _winner_loser(match):
 
 async def _advance_playoff(session, tournament, last_round):
     """Pair the winners of `last_round` into the next bracket round, or
-    complete the tournament when the final has been decided."""
-    stmt = (
-        select(TournamentMatch)
-        .where(TournamentMatch.round_id == last_round.id)
-        .order_by(TournamentMatch.id)          # creation order IS bracket order
-    )
-    matches = (await session.execute(stmt)).scalars().all()
-    unreported = [m for m in matches if not m.is_bye and m.team_a_wins is None]
-    if unreported:
-        raise ValueError(
-            f"{len(unreported)} match(es) in round {last_round.round_number} "
-            "still need results."
-        )
+    complete the tournament when the final has been decided.
 
-    winners = [_winner_loser(m)[0] for m in matches]
-
+    `last_round` is the round advance_round already fetched and checked for
+    unreported matches -- the same object, so this does not re-check it and
+    cannot disagree with it.
+    """
+    winners = [_winner_loser(m)[0] for m in await _round_matches(session, last_round.id)]
     if len(winners) == 1:
         tournament.status = "completed"
         await session.flush()
         return None
-
-    round_number = last_round.round_number + 1
-    new_round = TournamentRound(
-        tournament_id=tournament.id, round_number=round_number, stage="playoff"
-    )
-    session.add(new_round)
-    await session.flush()
-    for id_a, id_b in advance_pairs(winners):
-        session.add(TournamentMatch(
-            round_id=new_round.id,
-            team_a_participant_id=id_a,
-            team_b_participant_id=id_b,
-        ))
-    tournament.current_round = round_number
-    await session.flush()
-    return new_round
+    return await _create_playoff_round(
+        session, tournament, last_round.round_number + 1, advance_pairs(winners))
 
 
 async def start_tournament(session, tournament_id, rng):
@@ -708,7 +723,7 @@ async def set_result(session, match_id, team_a_wins, team_b_wins):
     if match is None:
         raise ValueError("Match not found.")
     round_ = await session.get(TournamentRound, match.round_id)
-    is_playoff = round_ is not None and round_.stage == "playoff"
+    playoff_round = is_playoff(round_)
     if match.is_bye:
         # A swiss bye is a RESULT (points awarded); a bracket bye is the
         # absence of a match. Neither can be reported, but saying "scored
@@ -716,10 +731,10 @@ async def set_result(session, match_id, team_a_wins, team_b_wins):
         # of what the code does — nothing is scored there.
         raise ValueError(
             "That team has a bye this round — there is no match to report."
-            if is_playoff
+            if playoff_round
             else "Byes are scored automatically and cannot be reported."
         )
-    if is_playoff:
+    if playoff_round:
         # A completed tournament has been announced and, on a money event,
         # paid out from this very bracket. record_linked_result writes to any
         # match id whenever a linked draft finishes, so a draft that lands
@@ -748,7 +763,7 @@ async def set_result(session, match_id, team_a_wins, team_b_wins):
 
     # Swiss records freeze at the cut: a playoff result is recorded on the
     # match and drives the bracket, but never moves points/W-L/OMW%.
-    if round_ is not None and not is_playoff:
+    if round_ is not None and not playoff_round:
         if match.team_a_wins is not None:
             _apply_result(part_a, part_b, match.team_a_wins, match.team_b_wins, sign=-1)
         _apply_result(part_a, part_b, team_a_wins, team_b_wins, sign=1)
@@ -788,8 +803,30 @@ async def _current_round(session, tournament):
     return (await session.execute(stmt)).scalars().first()
 
 
+async def current_round_stage(session, tournament):
+    """The stage of the round a tournament is currently on.
+
+    STAGE_SWISS when it has no rounds yet, which is what a registration-status
+    board wants. Read off the round rather than inferred from
+    `current_round > total_rounds`: that arithmetic happens to agree today and
+    stops agreeing the moment any other stage exists.
+    """
+    round_ = await _current_round(session, tournament)
+    return round_.stage if round_ is not None else STAGE_SWISS
+
+
 async def _round_matches(session, round_id):
-    stmt = select(TournamentMatch).where(TournamentMatch.round_id == round_id)
+    """A round's matches, in creation order.
+
+    The order is load-bearing in the bracket -- creation order IS bracket order,
+    which is the invariant advance_pairs rests on -- and free for the swiss
+    callers, which only ask which matches are unreported.
+    """
+    stmt = (
+        select(TournamentMatch)
+        .where(TournamentMatch.round_id == round_id)
+        .order_by(TournamentMatch.id)
+    )
     return (await session.execute(stmt)).scalars().all()
 
 
@@ -854,17 +891,13 @@ async def advance_round(session, tournament_id, rng):
             "still need results."
         )
 
-    playoff_rounds = await _playoff_rounds(session, tournament_id)
-    if playoff_rounds:
-        return await _advance_playoff(session, tournament, playoff_rounds[-1])
+    if is_playoff(round_):
+        return await _advance_playoff(session, tournament, round_)
 
     if tournament.current_round >= tournament.total_rounds:
         if tournament.cut_to:
             standings = await get_standings_data(session, tournament_id)
-            raise SwissComplete(
-                tournament.cut_to,
-                len([p for p in standings if p.status == "paid"]),
-            )
+            raise SwissComplete(tournament.cut_to, len(_cut_eligible(standings)))
         tournament.status = "completed"
         await session.flush()
         return None
@@ -909,7 +942,7 @@ async def get_standings_data(session, tournament_id):
         select(TournamentMatch)
         .join(TournamentRound, TournamentMatch.round_id == TournamentRound.id)
         .where(TournamentRound.tournament_id == tournament_id)
-        .where(TournamentRound.stage != "playoff")
+        .where(TournamentRound.stage != STAGE_PLAYOFF)
     )).scalars().all()
     return rank_standings(participants, matches)
 
@@ -938,12 +971,7 @@ async def get_final_placement(session, tournament_id):
     seeds = {p.id: p.seed for p in standings if p.seed is not None}
     results = []
     for round_ in rounds:
-        stmt = (
-            select(TournamentMatch)
-            .where(TournamentMatch.round_id == round_.id)
-            .order_by(TournamentMatch.id)
-        )
-        matches = (await session.execute(stmt)).scalars().all()
+        matches = await _round_matches(session, round_.id)
         playable = [m for m in matches if not m.is_bye]
         if any(m.team_a_wins is None for m in playable):
             break

@@ -84,11 +84,11 @@ def test_standings_embed_lists_teams_in_given_order():
 def test_standings_embed_labels_playoff_rounds_instead_of_counting_past_the_end():
     """Playoff rounds are numbered past total_rounds (round N+1 is the first
     bracket round), so the swiss "N of M" form renders "Round: 4/3" once the
-    cut is made."""
+    cut is made. The stage is passed in, not inferred from the round number."""
     tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
     tournament.status = "active"
     tournament.current_round = 5           # second bracket round
-    embed = create_standings_embed(tournament, [])
+    embed = create_standings_embed(tournament, [], "playoff")
     assert "5/3" not in embed.description
     assert "Playoff round 2" in embed.description
 
@@ -202,3 +202,35 @@ async def test_update_for_match_resolves_tournament_and_edits(test_db):
         await update_standings_message_for_match(bot, match_id)
 
     message.edit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_update_standings_message_names_the_bracket_round(test_db):
+    """The pinned window is the one standings display everyone reads. Its round
+    line now takes the stage rather than inferring it, so this covers the wiring:
+    a caller that forgot to pass it would silently print "Round: 4/3" again."""
+    from models.tournament import TournamentRound
+
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "Spring", 3, cut_to=2)
+        await session.commit()
+        session.add(TournamentRound(tournament_id=tournament.id, round_number=4,
+                                    stage="playoff"))
+        tournament.current_round = 4
+        tournament.standings_channel_id = "555"
+        tournament.standings_message_id = "777"
+        await session.commit()
+        tid = tournament.id
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+    channel = MagicMock()
+    channel.fetch_message = AsyncMock(return_value=message)
+    bot = MagicMock()
+    bot.get_channel.return_value = channel
+
+    with patch("services.tournament_formatter.db_session", _fake_db_session(test_db)):
+        await update_standings_message(bot, tid)
+
+    description = message.edit.call_args.kwargs["embed"].description
+    assert "Playoff round 1" in description and "4/3" not in description
