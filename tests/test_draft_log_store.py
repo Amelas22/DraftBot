@@ -284,11 +284,15 @@ class _FlakyThread(_FakeThread):
 
 class _TagRefusingThread(_FakeThread):
     """Refuses the opening team tag (the one send carrying no files) but
-    accepts every pool post."""
+    accepts every pool post. `error` lets a test choose HOW it fails."""
+
+    def __init__(self, tid, error=None):
+        super().__init__(tid)
+        self.error = error or discord.HTTPException(MagicMock(), "cannot mention here")
 
     async def _do_send(self, content=None, files=None):
         if not files:
-            raise discord.HTTPException(MagicMock(), "cannot mention here")
+            raise self.error
         return await super()._do_send(content=content, files=files)
 
 
@@ -711,13 +715,20 @@ async def test_post_pools_for_team_tags_the_whole_team_first_and_only_on_creatio
 
 
 @pytest.mark.asyncio
-async def test_post_pools_for_team_still_posts_pools_when_the_team_tag_fails():
+@pytest.mark.parametrize("error", [
+    discord.HTTPException(MagicMock(), "cannot mention here"),
+    # Not every failure arrives as an HTTPException. "Best-effort" is only
+    # true if it holds for all of them, so the guard is on Exception -- this
+    # row is what keeps it from being narrowed back to HTTPException.
+    RuntimeError("something else entirely"),
+])
+async def test_post_pools_for_team_still_posts_pools_when_the_team_tag_fails(error):
     """Tagging is best-effort: a failed mention costs the team their sidebar
     entry, not their pools, and must not leave the run looking incomplete."""
     draft_data = _team_log()
     sign_ups = {"disc_a": "Alice"}
     mapping = {"disc_a": "dm_a"}
-    thread = _TagRefusingThread(9001)
+    thread = _TagRefusingThread(9001, error=error)
     channel = _summary_channel("Red-Team-Chat-ABC", thread=thread)
     bot = _bot_for({})
     persist, persisted = _persist_recorder()

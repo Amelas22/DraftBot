@@ -329,7 +329,10 @@ async def _tag_team_in_thread(thread, member_discord_ids: list[str], friendly_id
         return
     try:
         await thread.send(f"{mentions} — your drafted pools for {friendly_id}:")
-    except discord.HTTPException as e:
+    except Exception as e:
+        # Exception, not HTTPException: "must not cost anyone their pools" is
+        # only true if it holds for every failure. The deck-image build and
+        # each pool send guard the same way, as does the scouting starter.
         logger.warning(f"[team-logs] could not tag the team in the pools thread for {friendly_id}: {e}")
 
 
@@ -412,8 +415,8 @@ async def _post_pools_for_team(
 
     in_channel = destination is channel
     # The channel is general team chat, so its history is bounded; a pools
-    # thread holds nothing but one message per player, so scanning it whole is
-    # both cheap and exact.
+    # thread holds nothing but the team tag and one message per player, so
+    # scanning it whole is both cheap and exact.
     already_posted = await _posted_txt_filenames(
         bot, destination, limit=CHANNEL_HISTORY_SCAN_LIMIT if in_channel else None
     )
