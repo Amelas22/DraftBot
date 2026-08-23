@@ -9,40 +9,54 @@ session to the 'pairings' stage, so nothing here may raise into that path.
 """
 from __future__ import annotations
 
+from collections import namedtuple
+
 import discord
 from loguru import logger
 
 from helpers.substitutes import TEAM_A_CHANNEL_PREFIX, TEAM_B_CHANNEL_PREFIX
-from helpers.utils import THREAD_ARCHIVE_MINUTES
+from helpers.utils import DISCORD_THREAD_NAME_LIMIT, THREAD_ARCHIVE_MINUTES, mention_all
 
-DISCORD_THREAD_NAME_LIMIT = 100
 ARCHIVED_THREAD_LOOKUP_LIMIT = 100
 
-# Team channel -> how to describe the team its occupants are playing against.
-# Keyed on the shared prefix constants: the channel names have been renamed once
-# already, and a stale literal here would silently produce no threads at all.
-_OPPONENT_LABEL = {
-    TEAM_A_CHANNEL_PREFIX: "Blue Team",
-    TEAM_B_CHANNEL_PREFIX: "Red Team",
+# One row per team channel: who its occupants are, and how to describe the
+# team they face. Keyed on the shared prefix constants -- the channel names
+# have been renamed once already, and a stale literal here would silently
+# produce no threads at all.
+#
+# One table, not three. The rosters and the label were previously three
+# separate dispatches on the same two keys, so "an unknown channel name
+# yields nothing" was an invariant spread across them -- and the label lookup
+# was an unguarded dict access that only happened to be safe because the
+# roster lookup had already returned empty and short-circuited the caller.
+_TeamChannel = namedtuple("_TeamChannel", "own_is_team_a opponent_label")
+_TEAM_CHANNELS = {
+    TEAM_A_CHANNEL_PREFIX: _TeamChannel(own_is_team_a=True, opponent_label="Blue Team"),
+    TEAM_B_CHANNEL_PREFIX: _TeamChannel(own_is_team_a=False, opponent_label="Red Team"),
 }
 
 
-def opponent_ids(
+def team_channel_rosters(
     team_name: str,
     team_a: list[str] | None,
     team_b: list[str] | None,
-) -> list[str]:
-    """Discord ids of the players a `team_name` channel's occupants face.
+) -> tuple[list[str], list[str], str]:
+    """`(own roster, opponents, opponent label)` for a team channel.
 
-    Returns [] for the shared "Draft" channel (which holds both teams, so nobody
-    in it is an opponent) and for any other channel name, which is what keeps
-    swiss -- whose only channel is "Draft" -- out of this feature entirely.
+    `([], [], "")` for the shared "Draft" channel -- which holds both teams,
+    so nobody in it is an opponent -- and for any other channel name, which is
+    what keeps swiss (whose only channel is "Draft") out of this feature.
+
+    "Own" is who gets tagged into each scouting thread; "opponents" is who
+    gets a thread. Returning both from one lookup is what makes it impossible
+    to tag one team while scouting the wrong one.
     """
-    if team_name == TEAM_A_CHANNEL_PREFIX:
-        return list(team_b or [])
-    if team_name == TEAM_B_CHANNEL_PREFIX:
-        return list(team_a or [])
-    return []
+    entry = _TEAM_CHANNELS.get(team_name)
+    if entry is None:
+        return [], [], ""
+    a, b = list(team_a or []), list(team_b or [])
+    own, opponents = (a, b) if entry.own_is_team_a else (b, a)
+    return own, opponents, entry.opponent_label
 
 
 def _thread_name(discord_id: str, sign_ups: dict[str, str] | None) -> str:
@@ -90,9 +104,22 @@ async def _existing_thread_names(channel: discord.TextChannel) -> set[str]:
     return names
 
 
-def _starter(name: str, opponent_team_label: str) -> str:
+def _starter(name: str, opponent_team_label: str, own_ids: list[str] | None = None) -> str:
+    """The thread's opening message, which also tags the team that owns this
+    channel.
+
+    The mention is not decoration: Discord adds a mentioned member to the
+    thread, and a thread you belong to is the one that appears in your
+    sidebar rather than staying buried behind the channel. Carried inside the
+    starter that was already being posted, so tagging costs no extra message.
+
+    Tags the OWN team only. The player being scouted is on the other team and
+    cannot see this channel; mentioning them would be both useless and rude.
+    """
+    mentions = mention_all(own_ids)
+    lead = f"{mentions} " if mentions else ""
     return (
-        f"🔍 Scouting thread for **{name}** ({opponent_team_label}). "
+        f"{lead}🔍 Scouting thread for **{name}** ({opponent_team_label}). "
         "Share reads, matchup notes, and what you saw them pick."
     )
 
@@ -114,10 +141,9 @@ async def spawn_opponent_threads(
     an existing channel (recover_draft_channels) doesn't double up.
     """
     try:
-        ids = opponent_ids(team_name, team_a, team_b)
+        own_ids, ids, label = team_channel_rosters(team_name, team_a, team_b)
         if not ids:
             return 0
-        label = _OPPONENT_LABEL[team_name]
         existing = await _existing_thread_names(channel)
     except Exception as e:
         logger.warning(f"[opponent-threads] could not resolve opponents for '{team_name}': {e}")
@@ -146,7 +172,13 @@ async def spawn_opponent_threads(
         existing.add(name)
         created += 1
         try:
-            await thread.send(_starter(name, label))
+            # silent: one scouting thread per OPPONENT means a 4v4 draft would
+            # otherwise ping every player four times at room creation. A silent
+            # mention still adds them to the thread -- verified against Discord,
+            # with a loud send as the control -- so the sidebar entry survives
+            # while the notification storm does not. The pools thread stays
+            # loud: that is one message per draft and worth a ping.
+            await thread.send(_starter(name, label, own_ids), silent=True)
         except Exception as e:
             logger.warning(f"[opponent-threads] created '{name}' but its starter failed: {e}")
     return created

@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from helpers.opponent_threads import opponent_ids, spawn_opponent_threads
+from helpers.opponent_threads import spawn_opponent_threads, team_channel_rosters
 
 
 def make_channel(existing_thread_names=(), archived_thread_names=(), starter_fails=False):
@@ -38,26 +38,21 @@ def thread_names(channel):
     return [c.kwargs["name"] for c in channel.create_thread.await_args_list]
 
 
-def test_red_team_channel_gets_team_b_as_opponents():
-    assert opponent_ids("Red-Team", ["a1", "a2"], ["b1", "b2"]) == ["b1", "b2"]
+@pytest.mark.parametrize("team_name, own, opponents, label", [
+    ("Red-Team", ["a1", "a2"], ["b1"], "Blue Team"),
+    ("Blue-Team", ["b1"], ["a1", "a2"], "Red Team"),
+    # The shared "Draft" channel holds both teams, so nobody in it is an
+    # opponent -- this row is what keeps swiss out of the feature entirely.
+    ("Draft", [], [], ""),
+    ("Some-Other-Channel", [], [], ""),
+])
+def test_team_channel_rosters_dispatches_on_the_channel_name(team_name, own, opponents, label):
+    assert team_channel_rosters(team_name, ["a1", "a2"], ["b1"]) == (own, opponents, label)
 
 
-def test_blue_team_channel_gets_team_a_as_opponents():
-    assert opponent_ids("Blue-Team", ["a1", "a2"], ["b1", "b2"]) == ["a1", "a2"]
-
-
-def test_shared_draft_channel_has_no_opponents():
-    """The 'Draft' channel holds both teams, so nobody in it is an opponent."""
-    assert opponent_ids("Draft", ["a1"], ["b1"]) == []
-
-
-def test_unknown_team_name_has_no_opponents():
-    assert opponent_ids("Green-Team", ["a1"], ["b1"]) == []
-
-
-def test_missing_team_rosters_yield_no_opponents():
+def test_team_channel_rosters_tolerates_missing_rosters():
     """team_a/team_b default to None in create_team_channel's signature."""
-    assert opponent_ids("Red-Team", None, None) == []
+    assert team_channel_rosters("Red-Team", None, None) == ([], [], "Blue Team")
 
 
 SIGN_UPS = {"a1": "Alice", "b1": "Dave", "b2": "Erin"}
@@ -82,6 +77,50 @@ async def test_thread_starter_names_the_opponent_and_their_team():
     starter = thread.send.await_args.args[0]
     assert "Dave" in starter
     assert "Blue Team" in starter
+
+
+@pytest.mark.asyncio
+async def test_starter_tags_the_owning_team_and_never_the_opponent():
+    """The mention is what adds the team to the thread, which is what puts it
+    in their sidebar. The scouted player is on the other team and cannot see
+    this channel, so tagging them would be useless and rude."""
+    channel = make_channel()
+    await spawn_opponent_threads(channel, "Red-Team", ["a1", "a2"], ["b1"], SIGN_UPS)
+    (thread,) = channel.created_threads
+    starter = thread.send.await_args.args[0]
+
+    assert "<@a1>" in starter and "<@a2>" in starter    # the whole owning team
+    assert "<@b1>" not in starter                       # never the scouted opponent
+    # Mentions lead, so the tag is the first thing in the thread.
+    assert starter.startswith("<@a1> <@a2> ")
+    # Silent: one thread per opponent would otherwise ping the team once each.
+    # A silent mention still adds them to the thread (verified against Discord),
+    # so this must not regress to a loud send.
+    assert thread.send.await_args.kwargs.get("silent") is True
+
+
+@pytest.mark.asyncio
+async def test_starter_tags_blue_teams_own_roster_in_its_own_channel():
+    channel = make_channel()
+    await spawn_opponent_threads(channel, "Blue-Team", ["a1"], ["b1", "b2"], SIGN_UPS)
+    (thread,) = channel.created_threads
+    starter = thread.send.await_args.args[0]
+
+    assert "<@b1>" in starter and "<@b2>" in starter
+    assert "<@a1>" not in starter
+
+
+@pytest.mark.asyncio
+async def test_starter_without_a_resolvable_own_team_still_posts():
+    """An empty roster must not produce a stray leading space or drop the
+    scouting text -- the thread is still useful untagged."""
+    channel = make_channel()
+    await spawn_opponent_threads(channel, "Red-Team", [], ["b1"], SIGN_UPS)
+    (thread,) = channel.created_threads
+    starter = thread.send.await_args.args[0]
+
+    assert starter.startswith("🔍 Scouting thread for")
+    assert "Dave" in starter
 
 
 @pytest.mark.asyncio
