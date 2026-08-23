@@ -106,7 +106,7 @@ def create_registration_embed(tournament, participants, pot=0, deficits=None,
         desc = f"**Entry fee:** {fee} tix/team · **Prize pool:** {pot} tix\n"
         desc += f"**Payout:** {describe_structure(tournament.payout_structure or 'winner_take_all')}"
     if getattr(tournament, "cut_to", None):
-        desc += f" · **Cut:** top {tournament.cut_to}"
+        desc += (" · " if desc else "") + f"**Cut:** top {tournament.cut_to}"
     embed = discord.Embed(title=title, description=desc,
                           color=discord.Color.gold())
 

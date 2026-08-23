@@ -15,7 +15,7 @@ from helpers.tournament_channels import (
 from database.db_session import db_session
 from helpers.money_gate import gate_serve, linked_username
 from helpers.display_names import get_display_name
-from helpers.permissions import has_bot_manager_role, is_bot_manager
+from helpers.permissions import bot_manager_button, has_bot_manager_role, is_bot_manager
 from helpers.pin_helpers import safe_pin
 from helpers.utils import ui_button
 from match_control_view import (
@@ -221,6 +221,11 @@ class PlayoffPromptView(discord.ui.View):
         self.start_playoff_button.disabled = disabled
         self.start_playoff_button.label = f"Start top-{cut_to} playoff"
 
+    # The prompt is posted publicly (any bot manager should be able to answer
+    # it, not only the one who ran next_round) — bot_manager_button is what
+    # keeps a non-manager from clicking either option, since finish_button
+    # below does exactly what the role-gated /tournament finish does.
+    @bot_manager_button
     @ui_button(label="Start playoff", style=discord.ButtonStyle.success)
     async def start_playoff_button(self, button, interaction):
         await interaction.response.defer()
@@ -236,11 +241,16 @@ class PlayoffPromptView(discord.ui.View):
         await interaction.followup.send(f"🏆 Top {self.cut_to} playoff started.")
         self.stop()
 
+    @bot_manager_button
     @ui_button(label="Finish now — crown the Swiss leader", style=discord.ButtonStyle.secondary)
     async def finish_button(self, button, interaction):
         await interaction.response.defer()
-        async with db_session() as session:
-            champion = await finish_tournament(session, self.tournament_id)
+        try:
+            async with db_session() as session:
+                champion = await finish_tournament(session, self.tournament_id)
+        except ValueError as e:
+            await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            return
         name = champion.team_name if champion else "nobody"
         await interaction.followup.send(f"🏁 Complete! Champion: **{name}** 🏆")
         self.stop()

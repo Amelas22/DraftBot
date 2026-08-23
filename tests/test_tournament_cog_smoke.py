@@ -187,3 +187,70 @@ def test_playoff_command_is_registered():
     from cogs.tournament_commands import TournamentCog
     names = {c.name for c in TournamentCog.tournament.subcommands}
     assert "playoff" in names
+
+
+def _playoff_prompt_interaction(is_owner=False):
+    """A mock discord.Interaction that passes isinstance checks, for clicking
+    a PlayoffPromptView button. Mirrors _component_interaction in
+    tests/test_permissions.py."""
+    import discord
+    interaction = MagicMock(spec=discord.Interaction)
+    interaction.client.is_owner = AsyncMock(return_value=is_owner)
+    interaction.user.roles = []
+    interaction.user.guild_permissions.manage_roles = False
+    interaction.guild.id = 123
+    interaction.response.defer = AsyncMock()
+    interaction.response.send_message = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    return interaction
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("button_name", ["start_playoff_button", "finish_button"])
+async def test_playoff_prompt_buttons_reject_non_managers(button_name):
+    """Regression for the end-of-swiss prompt being posted publicly: without a
+    gate, any guild member could click 'Finish now' and do what the role-gated
+    /tournament finish does (or force the bracket to start). Both buttons must
+    reject a non-manager before their body -- and therefore start_playoff /
+    finish_tournament -- ever runs."""
+    from cogs.tournament_commands import PlayoffPromptView
+
+    with patch("cogs.tournament_commands.start_playoff", AsyncMock()) as mock_start, \
+         patch("cogs.tournament_commands.finish_tournament", AsyncMock()) as mock_finish, \
+         patch("helpers.permissions.get_config", return_value={}):
+        view = PlayoffPromptView(MagicMock(), tournament_id=1, cut_to=8)
+        button = getattr(view, button_name)
+        interaction = _playoff_prompt_interaction(is_owner=False)
+        await button.callback(interaction)
+
+    interaction.response.send_message.assert_called_once()
+    assert interaction.response.send_message.call_args.kwargs.get("ephemeral") is True
+    interaction.response.defer.assert_not_called()
+    mock_start.assert_not_awaited()
+    mock_finish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_finish_button_surfaces_a_value_error_instead_of_dying_silently():
+    """finish_tournament raises ValueError if the tournament isn't active
+    (double-click, or another path finished it first). Without a try/except,
+    that falls through to py-cord's default on_error -- a stderr log and a
+    failed interaction with no explanation. Must match start_playoff_button's
+    handling of the same failure class."""
+    from cogs.tournament_commands import PlayoffPromptView
+
+    with patch("cogs.tournament_commands.finish_tournament",
+               AsyncMock(side_effect=ValueError("'Cup' is not active."))), \
+         patch("helpers.permissions.get_config", return_value={}):
+        view = PlayoffPromptView(MagicMock(), tournament_id=1, cut_to=8)
+        role = MagicMock()
+        role.name = "Bot Manager"
+        interaction = _playoff_prompt_interaction(is_owner=False)
+        interaction.user.roles = [role]
+
+        await view.finish_button.callback(interaction)
+
+    interaction.followup.send.assert_awaited_once()
+    msg = interaction.followup.send.call_args.args[0]
+    assert msg.startswith("❌")
+    assert interaction.followup.send.call_args.kwargs.get("ephemeral") is True
