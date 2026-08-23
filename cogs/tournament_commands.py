@@ -43,6 +43,7 @@ from services.tournament_service import (
     find_participant_by_name,
     find_participants_for_captain,
     get_active_tournament,
+    get_final_placement,
     get_latest_completed_tournament,
     get_rosters,
     get_standings_data,
@@ -825,9 +826,11 @@ class TournamentCog(commands.Cog):
             t_id, t_name = tournament.id, tournament.name
             fee = tournament.entry_fee or 0
             struct = structure or tournament.payout_structure or "winner_take_all"
-            standings = await get_standings_data(session, tournament.id)
+            # Finishing order, not standings order: a cut tournament pays the
+            # bracket winner, who may not be the swiss leader.
+            placement = await get_final_placement(session, tournament.id)
             # Only teams that actually completed registration can win the pot.
-            ranked = [(p.captain_user_id, p.team_name) for p in standings if p.status == "paid"]
+            ranked = [(p.captain_user_id, p.team_name) for p in placement if p.status == "paid"]
             # A tournament can be finished early with results still missing — warn before paying.
             unreported = await count_unreported_matches(session, tournament.id)
 
@@ -881,8 +884,13 @@ class TournamentCog(commands.Cog):
                 tournament_name = tournament.name
                 new_round = await advance_round(session, tournament.id, random.Random())
                 if new_round is None:
-                    standings = await get_standings_data(session, tournament.id)
-                    winner = standings[0]
+                    # Finishing order, not standings: after a bracket the
+                    # champion is whoever won the final, not the swiss leader.
+                    placement = await get_final_placement(session, tournament.id)
+                    if not placement:
+                        await ctx.followup.send("Tournament complete.", ephemeral=True)
+                        return
+                    winner = placement[0]
                     await ctx.followup.send(
                         f"🏁 **{tournament_name}** is complete! "
                         f"Champion: **{winner.team_name}** 🏆"

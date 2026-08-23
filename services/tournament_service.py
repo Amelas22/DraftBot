@@ -660,8 +660,8 @@ async def finish_tournament(session, tournament_id):
         raise ValueError(f"'{tournament.name}' is not active.")
     tournament.status = "completed"
     await session.flush()
-    standings = await get_standings_data(session, tournament_id)
-    return standings[0] if standings else None
+    placement = await get_final_placement(session, tournament_id)
+    return placement[0] if placement else None
 
 
 async def set_result(session, match_id, team_a_wins, team_b_wins):
@@ -832,6 +832,47 @@ async def get_standings_data(session, tournament_id):
         .where(TournamentRound.tournament_id == tournament_id)
     )).scalars().all()
     return rank_standings(participants, matches)
+
+
+async def get_final_placement(session, tournament_id):
+    """Participants in finishing order, best first.
+
+    Bracket placement when a cut was played, plain standings otherwise — so a
+    tournament with no cut behaves exactly as it always has, and callers
+    (payout, the champion announcement) never learn what a bracket is.
+    """
+    standings = await get_standings_data(session, tournament_id)
+    rounds = await _playoff_rounds(session, tournament_id)
+    if not rounds:
+        return standings
+
+    by_id = {p.id: p for p in standings}
+    seeds = {p.id: p.seed for p in standings if p.seed is not None}
+    results = []
+    for round_ in rounds:
+        stmt = (
+            select(TournamentMatch)
+            .where(TournamentMatch.round_id == round_.id)
+            .order_by(TournamentMatch.id)
+        )
+        matches = (await session.execute(stmt)).scalars().all()
+        pairs = []
+        for m in matches:
+            if m.is_bye:
+                pairs.append((m.team_a_participant_id, None))
+            elif m.team_a_wins is None:
+                continue
+            elif m.team_a_wins > m.team_b_wins:
+                pairs.append((m.team_a_participant_id, m.team_b_participant_id))
+            else:
+                pairs.append((m.team_b_participant_id, m.team_a_participant_id))
+        if pairs:
+            results.append(pairs)
+
+    ordered = [by_id[pid] for pid in final_placement(results, seeds) if pid in by_id]
+    ranked_ids = {p.id for p in ordered}
+    # Teams that missed the cut rank below every bracket team, in swiss order.
+    return ordered + [p for p in standings if p.id not in ranked_ids]
 
 
 async def count_unreported_matches(session, tournament_id):

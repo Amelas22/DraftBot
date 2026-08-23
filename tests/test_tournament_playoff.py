@@ -304,3 +304,64 @@ async def test_end_of_swiss_with_a_cut_pending_asks_instead_of_completing(sessio
     assert exc.value.cut_to == 4
     assert exc.value.eligible == 6
     assert t.status == "active"                  # NOT completed
+
+
+@pytest.mark.asyncio
+async def test_final_placement_without_a_bracket_is_just_standings(session):
+    """Non-cut tournaments must pay out exactly as they do today."""
+    from services.tournament_service import get_final_placement, get_standings_data
+    t = await _swiss_done(session, cut_to=None, teams=4)
+    placement = await get_final_placement(session, t.id)
+    standings = await get_standings_data(session, t.id)
+    assert [p.id for p in placement] == [p.id for p in standings]
+
+
+@pytest.mark.asyncio
+async def test_the_bracket_winner_places_first_even_if_seeded_lower(session):
+    """The whole point: paying the swiss leader after they lost the final
+    would be wrong."""
+    from services.tournament_service import get_final_placement, set_result
+    t = await _swiss_done(session, cut_to=4, teams=4)
+    first = await start_playoff(session, t.id)
+    matches = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == first.id)
+        .order_by(TournamentMatch.id)
+    )).scalars().all()
+    # Seed 4 upsets seed 1; seed 2 wins its match.
+    await set_result(session, matches[0].id, 0, 2)
+    await set_result(session, matches[1].id, 2, 0)
+    final = await advance_round(session, t.id, random.Random(1))
+    fm = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == final.id)
+    )).scalars().first()
+    await set_result(session, fm.id, 2, 0)       # the seed-4 team wins it all
+    await advance_round(session, t.id, random.Random(1))
+
+    placement = await get_final_placement(session, t.id)
+    assert placement[0].seed == 4
+    assert [p.seed for p in placement] == [4, 2, 1, 3]
+
+
+@pytest.mark.asyncio
+async def test_finish_tournament_returns_the_bracket_winner(session):
+    """finish_tournament is the early-exit path and the champion announcement
+    both read its return value -- neither may report the swiss leader once a
+    bracket has been played."""
+    from services.tournament_service import finish_tournament, set_result
+    t = await _swiss_done(session, cut_to=4, teams=4)
+    first = await start_playoff(session, t.id)
+    matches = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == first.id)
+        .order_by(TournamentMatch.id)
+    )).scalars().all()
+    await set_result(session, matches[0].id, 0, 2)     # seed 4 upsets seed 1
+    await set_result(session, matches[1].id, 2, 0)
+    final = await advance_round(session, t.id, random.Random(1))
+    fm = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == final.id)
+    )).scalars().first()
+    await set_result(session, fm.id, 2, 0)
+
+    t.status = "active"                                 # finish_tournament needs it active
+    champion = await finish_tournament(session, t.id)
+    assert champion.seed == 4
