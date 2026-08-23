@@ -22,7 +22,7 @@ from helpers.match_control import (
     render_pairing_line,
 )
 from helpers.pin_helpers import safe_pin
-from helpers.utils import as_messageable
+from helpers.utils import DISCORD_THREAD_NAME_LIMIT, THREAD_ARCHIVE_MAX_MINUTES, as_messageable
 from models.draft_session import DraftSession
 from models.tournament import TournamentMatch, TournamentParticipant, TournamentRound
 
@@ -188,10 +188,10 @@ async def create_match_room(message: discord.Message, match_id: int) -> discord.
 
     try:
         thread = await message.create_thread(
-            name=f"{a_name} vs {b_name}"[:100],
-            # 7 days, the maximum: rooms are created when pairings post, and a
-            # match played midweek must not have archived out of the sidebar.
-            auto_archive_duration=10080,
+            name=f"{a_name} vs {b_name}"[:DISCORD_THREAD_NAME_LIMIT],
+            # Rooms are created when pairings post, and a match played midweek
+            # must not have archived out of the sidebar.
+            auto_archive_duration=THREAD_ARCHIVE_MAX_MINUTES,
         )
     except discord.HTTPException as e:
         logger.warning(f"Could not create a thread for match {match_id}: {e}")

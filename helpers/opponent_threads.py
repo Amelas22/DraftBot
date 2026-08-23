@@ -13,9 +13,8 @@ import discord
 from loguru import logger
 
 from helpers.substitutes import TEAM_A_CHANNEL_PREFIX, TEAM_B_CHANNEL_PREFIX
-from helpers.utils import THREAD_ARCHIVE_MINUTES
+from helpers.utils import DISCORD_THREAD_NAME_LIMIT, THREAD_ARCHIVE_MINUTES
 
-DISCORD_THREAD_NAME_LIMIT = 100
 ARCHIVED_THREAD_LOOKUP_LIMIT = 100
 
 # Team channel -> how to describe the team its occupants are playing against.

@@ -30,10 +30,17 @@ def as_messageable(channel: object) -> "discord.abc.Messageable":
     return channel
 
 
+# Discord's cap on a thread name. A platform limit, not a product choice, so
+# it lives here rather than inside whichever feature happened to need it first.
+DISCORD_THREAD_NAME_LIMIT = 100
+
 # How long a bot-created thread stays active before Discord auto-archives it.
-# Shared by every thread-spawning feature (quiz discussion, opponent scouting)
-# so they age out together rather than drifting apart per feature.
+# The default is shared by the short-lived, chatty threads (quiz discussion,
+# opponent scouting) so they age out together rather than drifting per feature.
 THREAD_ARCHIVE_MINUTES = 4320  # 3 days
+# The maximum Discord allows, for threads that must survive a whole week --
+# e.g. a tournament match room for a match played midweek.
+THREAD_ARCHIVE_MAX_MINUTES = 10080  # 7 days
 
 
 # Define a mapping of cube names to thumbnail URLs
