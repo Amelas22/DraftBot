@@ -10,6 +10,7 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from database.db_session import db_session
+from draft_organization.bracket import advance_pairs, build_bracket, final_placement
 from draft_organization.swiss import pair_round, rank_standings, round_robin_schedule
 from models.team import Team
 from models.tournament import (
@@ -376,6 +377,80 @@ async def _create_round_with_pairings(session, tournament, participants, history
     tournament.current_round = round_number
     await session.flush()
     return new_round, matches
+
+
+async def _playoff_rounds(session, tournament_id):
+    """Playoff rounds for a tournament, earliest first."""
+    stmt = (
+        select(TournamentRound)
+        .where(TournamentRound.tournament_id == tournament_id)
+        .where(TournamentRound.stage == "playoff")
+        .order_by(TournamentRound.round_number)
+    )
+    return (await session.execute(stmt)).scalars().all()
+
+
+async def start_playoff(session, tournament_id, size=None):
+    """Cut to the top `size` and create the first playoff round.
+
+    Seeds are stamped from final swiss standings and never recomputed: they
+    are the numbers players were told, and they are what orders teams that
+    went out at the same depth.
+    """
+    tournament = await session.get(Tournament, tournament_id)
+    if tournament is None:
+        raise ValueError("Tournament not found.")
+    if tournament.status != "active":
+        raise ValueError(f"'{tournament.name}' is not active.")
+
+    size = size or tournament.cut_to
+    if not size:
+        raise ValueError(
+            "No cut size — declare one at creation or pass `top:` to this command."
+        )
+    if size < 2:
+        raise ValueError("A cut needs at least 2 teams.")
+    if tournament.current_round < tournament.total_rounds:
+        raise ValueError(
+            f"Swiss isn't finished — round {tournament.current_round} of "
+            f"{tournament.total_rounds}."
+        )
+    if await _playoff_rounds(session, tournament_id):
+        raise ValueError("The bracket has already been built.")
+
+    standings = await get_standings_data(session, tournament_id)
+    eligible = [p for p in standings if p.status == "paid"]
+    if len(eligible) < size:
+        raise ValueError(
+            f"Only {len(eligible)} eligible team(s) — can't cut to top {size}. "
+            f"Re-run with a smaller `top:`."
+        )
+
+    cut = eligible[:size]
+    for position, participant in enumerate(cut, start=1):
+        participant.seed = position
+    by_seed = {position: p.id for position, p in enumerate(cut, start=1)}
+
+    round_number = tournament.total_rounds + 1
+    new_round = TournamentRound(
+        tournament_id=tournament.id, round_number=round_number, stage="playoff"
+    )
+    session.add(new_round)
+    await session.flush()
+
+    for seed_a, seed_b in build_bracket(size):
+        session.add(TournamentMatch(
+            round_id=new_round.id,
+            team_a_participant_id=by_seed[seed_a],
+            team_b_participant_id=None if seed_b is None else by_seed[seed_b],
+            # A bracket bye is the ABSENCE of a match, not a result: no call
+            # to _award_bye, because swiss records are frozen at the cut.
+            is_bye=seed_b is None,
+        ))
+
+    tournament.current_round = round_number
+    await session.flush()
+    return new_round
 
 
 async def start_tournament(session, tournament_id, rng):
