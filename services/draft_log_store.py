@@ -17,7 +17,7 @@ from sqlalchemy import select
 from database.db_session import db_session
 from helpers.pile_compositor import PileImageBuilder
 from helpers.substitutes import TEAM_A_CHANNEL_PREFIX, TEAM_B_CHANNEL_PREFIX
-from helpers.utils import DISCORD_THREAD_NAME_LIMIT, THREAD_ARCHIVE_MAX_MINUTES
+from helpers.utils import DISCORD_THREAD_NAME_LIMIT, THREAD_ARCHIVE_MAX_MINUTES, mention_all
 from models.draft_session import DraftSession
 
 
@@ -308,6 +308,31 @@ async def _open_pools_thread(channel, friendly_id: str, player_count: int):
         return None
 
 
+async def _tag_team_in_thread(thread, member_discord_ids: list[str], friendly_id: str) -> None:
+    """Open the thread by mentioning the team, so it surfaces in their sidebar.
+
+    Discord adds a mentioned member to the thread, and a thread you belong to
+    is the one that shows up in the channel list rather than staying buried
+    behind the summary message. So the mention is what makes this organised,
+    not just polite.
+
+    Mentions the whole team roster, not only the players whose pools are in
+    here: a member without a mapped pool is still on the team and still wants
+    the thread. Best-effort — the pools are the deliverable, and a failure to
+    tag must not cost anyone theirs, nor leave the run looking incomplete.
+
+    Called only on the branch that CREATES the thread, so a retry resuming
+    into an existing thread never tags twice.
+    """
+    mentions = mention_all(member_discord_ids)
+    if not mentions:
+        return
+    try:
+        await thread.send(f"{mentions} — your drafted pools for {friendly_id}:")
+    except discord.HTTPException as e:
+        logger.warning(f"[team-logs] could not tag the team in the pools thread for {friendly_id}: {e}")
+
+
 async def _post_pools_for_team(
     bot,
     channel: discord.abc.GuildChannel | None,
@@ -376,6 +401,7 @@ async def _post_pools_for_team(
             # Persist before posting anyone, so a run that dies partway
             # resumes into this thread instead of opening a second one.
             await persist_destination_id(str(thread.id))
+            await _tag_team_in_thread(thread, member_discord_ids, friendly_id)
             destination = thread
         else:
             # Fall back to the channel. Not recorded yet -- only actually

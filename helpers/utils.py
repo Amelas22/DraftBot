@@ -1,4 +1,4 @@
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Iterable, TypeVar
 
 import discord
 
@@ -28,6 +28,18 @@ def as_messageable(channel: object) -> "discord.abc.Messageable":
     if not isinstance(channel, discord.abc.Messageable):
         raise TypeError(f"channel is not messageable: {type(channel).__name__}")
     return channel
+
+
+def mention_all(user_ids: Iterable[object] | None, sep: str = " ") -> str:
+    """Discord mentions for `user_ids`, joined. "" for an empty or None
+    iterable, so callers can branch on the result.
+
+    One name for a wire format that was spelled three different ways across
+    six call sites. Deliberately does NOT wrap the single-mention case:
+    `f"<@{uid}>"` inline in an f-string reads better than a call, and there
+    are twenty-odd of those.
+    """
+    return sep.join(f"<@{uid}>" for uid in user_ids or [])
 
 
 # Discord's cap on a thread name. A platform limit, not a product choice, so
