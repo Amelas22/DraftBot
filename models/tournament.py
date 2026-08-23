@@ -35,6 +35,9 @@ class Tournament(Base):
     # they pay: 'winner_take_all' | 'top2' | 'top3' | 'top4' (see PAYOUT_STRUCTURES).
     payout_structure = Column(String(32), nullable=False, default='winner_take_all',
                               server_default=text("'winner_take_all'"))
+    # Top-N cut declared at creation. NULL = no cut (today's behaviour). The
+    # bracket is seeded from final swiss standings; see draft_organization/bracket.py.
+    cut_to = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
     # Where the auto-updating standings message lives (edited in place on every result)
     standings_channel_id = Column(String(64), nullable=True)
@@ -75,6 +78,11 @@ class TournamentParticipant(Base):
     game_wins = Column(Integer, nullable=False, default=0, server_default=text('0'))
     game_losses = Column(Integer, nullable=False, default=0, server_default=text('0'))
     byes = Column(Integer, nullable=False, default=0, server_default=text('0'))
+    # Seed stamped once, at the cut, from rank_standings. NULL for teams that
+    # missed the cut and for tournaments with no cut. Stored rather than
+    # recomputed because it is the number players were told, and it is what
+    # makes 3rd/4th well-defined between two semifinal losers.
+    seed = Column(Integer, nullable=True)
 
     __table_args__ = (
         UniqueConstraint('tournament_id', 'team_id', name='uq_tournament_team'),
@@ -126,6 +134,10 @@ class TournamentRound(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     tournament_id = Column(Integer, ForeignKey('tournaments.id'), nullable=False)
     round_number = Column(Integer, nullable=False)
+    # 'swiss' | 'playoff'. The single fact that freezes swiss records: a result
+    # on a playoff round skips the participant-stat update entirely.
+    stage = Column(String(16), nullable=False, default='swiss',
+                   server_default=text("'swiss'"))
     created_at = Column(DateTime, default=datetime.now)
     # Where this round's pairings message lives, for view re-registration on restart
     pairings_channel_id = Column(String(64), nullable=True)

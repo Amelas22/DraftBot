@@ -192,3 +192,18 @@ async def test_unlinked_draft_sessions_can_share_a_null_tournament_match_id(test
 
         result = await session.execute(select(DraftSession))
         assert len(result.scalars().all()) == 2
+
+
+def test_cut_columns_exist_with_safe_defaults():
+    """cut_to NULL means "no cut" -- every existing tournament reads that way,
+    which is what keeps non-cut behaviour unchanged."""
+    from models.tournament import Tournament, TournamentParticipant, TournamentRound
+
+    assert "cut_to" in Tournament.__table__.columns
+    assert Tournament.__table__.columns["cut_to"].nullable
+
+    stage = TournamentRound.__table__.columns["stage"]
+    assert not stage.nullable
+    assert stage.default.arg == "swiss"
+
+    assert TournamentParticipant.__table__.columns["seed"].nullable
