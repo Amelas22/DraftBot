@@ -174,27 +174,32 @@ async def _send_pool(destination, member: _PostableMember, draft_data: dict) -> 
     )
 
 
-async def _resolve_destination(bot, destination_id: str | None):
-    """The live channel-or-thread named by a stored id, or None if there
-    genuinely isn't one (never stored, or Discord confirms it's gone via
-    NotFound/Forbidden). Either kind resolves the same way, which is what lets
-    one column record whichever of the two carried a team's pools.
-    Checked against the cache first, then a real fetch — the cache alone can
-    miss a thread across a bot restart.
+async def _resolve_destination(bot, destination_id: str):
+    """The live channel-or-thread named by a STORED id. Either kind resolves
+    the same way, which is what lets one column record whichever of the two
+    carried a team's pools. Checked against the cache first, then a real
+    fetch — the cache alone can miss a thread across a bot restart.
 
-    Any OTHER `discord.HTTPException` (a transient 5xx, a timeout — exactly
-    the kind of blip that made this a retry in the first place) is NOT
-    swallowed into "gone": it propagates to the caller, which must abort this
-    run rather than read it as "no thread" and open a second one alongside
-    the still-live first thread."""
-    if not destination_id:
-        return None
+    Takes a real id, never None: "this team has no destination yet" is the
+    caller's own state, not something to ask Discord about, and answering it
+    here would collapse it into the same None as a failed lookup.
+
+    Returns None for exactly one thing — `NotFound`, meaning Discord confirms
+    the destination is gone. That is safe to treat as "start again": whatever
+    was posted there went with it, so re-posting duplicates nothing.
+
+    Every other `discord.HTTPException` propagates, including `Forbidden`.
+    Forbidden is not "gone", it is "I cannot see it" — the destination may be
+    perfectly alive with every pool already in it, and a bot that reads that
+    as absent opens a second thread, re-posts everyone, and strands the
+    first. The caller must abort the run and let the retry sort it out; a
+    transient 5xx or timeout is the same story."""
     cid = int(destination_id)
     destination = bot.get_channel(cid)
     if destination is None:
         try:
             destination = await bot.fetch_channel(cid)
-        except (discord.NotFound, discord.Forbidden):
+        except discord.NotFound:
             return None
     return destination
 
@@ -338,13 +343,17 @@ async def _post_pools_for_team(
         return False
 
     try:
-        destination = await _resolve_destination(bot, destination_id)
+        # "Nothing stored yet" is our own state, so it is answered here rather
+        # than by a lookup that would report it as the same None as a failure.
+        destination = (
+            await _resolve_destination(bot, destination_id) if destination_id else None
+        )
     except discord.HTTPException as e:
-        # A destination is stored but Discord couldn't confirm either way
-        # (not a clean "gone" NotFound/Forbidden) -- e.g. a transient 5xx or
-        # timeout, exactly the kind of blip a retry exists to ride out.
-        # Abort this run rather than risk opening a second thread alongside
-        # a first one that may still be perfectly alive.
+        # A destination is stored but Discord would not confirm it is gone:
+        # a transient 5xx, a timeout, or a Forbidden that means "I cannot see
+        # it" rather than "it does not exist". Abort rather than risk opening
+        # a second thread alongside a first one that may be perfectly alive,
+        # holding the very pools we are about to re-post.
         logger.warning(
             f"[team-logs] could not resolve the stored pools destination for {friendly_id}, "
             f"aborting this run rather than risk a second thread: {e}"

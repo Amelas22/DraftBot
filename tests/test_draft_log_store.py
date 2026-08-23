@@ -699,6 +699,26 @@ async def test_post_pools_for_team_disambiguates_names_that_sanitise_identically
 
 
 @pytest.mark.asyncio
+async def test_post_pools_for_team_forbidden_destination_does_not_open_a_second_thread():
+    """Forbidden means "I cannot see it", NOT "it is gone". The stored thread
+    may be perfectly alive with everyone's pools already in it -- creating a
+    second one would duplicate every pool and strand the first."""
+    channel = _summary_channel("Red-Team-Chat-ABC", thread=_FakeThread(9002))
+    bot = _bot_for({})
+    bot.fetch_channel = AsyncMock(
+        side_effect=discord.Forbidden(MagicMock(status=403), "Missing Access")
+    )
+    persist, persisted = _persist_recorder()
+
+    with _patched_discord():
+        all_posted = await _post_pools(bot, channel, persist, destination_id="9001")
+
+    assert all_posted is False          # unresolved, so the stamp stays unset
+    channel.send.assert_not_awaited()   # no summary => no second thread
+    assert persisted == []
+
+
+@pytest.mark.asyncio
 async def test_post_team_logs_transient_thread_lookup_error_does_not_open_second_thread_or_stamp():
     """A stored thread id whose lookup raises a non-NotFound/Forbidden
     HTTPException (a transient 5xx/timeout -- exactly the blip that made
