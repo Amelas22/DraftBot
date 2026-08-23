@@ -5,7 +5,7 @@ opaque. Sits beside swiss.py, which owns the pairing maths for the rounds
 that decide these seeds.
 """
 
-from typing import Any, cast
+from typing import Any
 
 
 def bracket_size(seed_count: int) -> int:
@@ -68,12 +68,14 @@ def final_placement(rounds: list[list[tuple[Any, Any | None]]], seeds: dict[Any,
     within a round, ties break by seed, which is why the seed is stored at
     the cut rather than recomputed.
     """
+    def _seed_key(pid: Any) -> int:
+        return seeds.get(pid, len(seeds) + 1)
+
     if not rounds:
         return []
     order = [rounds[-1][0][0]]          # the champion won the last match
     for rnd in reversed(rounds):
         losers: list[Any] = [loser for _, loser in rnd if loser is not None]
-        # pyrefly: ignore [implicit-any-lambda]
-        losers.sort(key=lambda pid: seeds.get(pid, len(seeds) + 1))
+        losers.sort(key=_seed_key)
         order.extend(losers)
     return order
