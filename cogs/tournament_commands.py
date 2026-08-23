@@ -887,6 +887,10 @@ class TournamentCog(commands.Cog):
                     # Finishing order, not standings: after a bracket the
                     # champion is whoever won the final, not the swiss leader.
                     placement = await get_final_placement(session, tournament.id)
+                    # Defensive, not reachable today: start_tournament refuses
+                    # fewer than 2 paid teams and remove_team refuses once
+                    # registration closes, so an active tournament always has
+                    # participants. Guards anyway in case those invariants move.
                     if not placement:
                         await ctx.followup.send("Tournament complete.", ephemeral=True)
                         return

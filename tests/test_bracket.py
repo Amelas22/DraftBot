@@ -76,3 +76,14 @@ def test_final_placement_ignores_byes():
     rounds = [[(1, None), (4, 5), (2, None), (3, 6)], [(1, 4), (2, 3)], [(1, 2)]]
     seeds = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}
     assert final_placement(rounds, seeds) == [1, 2, 3, 4, 5, 6]
+
+
+def test_final_placement_ranks_still_live_teams_above_eliminated_ones():
+    # Four-team bracket: semis decided (4 beat 1, 3 beat 2), final not yet
+    # played -- only the semis round is passed in. Teams 3 and 4 are still
+    # alive and must rank above 1 and 2, who are already eliminated. Ties
+    # among the still-alive teams (nobody has lost) break by seed, same as
+    # ties among eliminated teams in the same round.
+    rounds = [[(4, 1), (3, 2)]]
+    seeds = {1: 1, 2: 2, 3: 3, 4: 4}
+    assert final_placement(rounds, seeds) == [3, 4, 1, 2]

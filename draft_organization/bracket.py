@@ -67,15 +67,22 @@ def final_placement(rounds: list[list[tuple[Any, Any | None]]], seeds: dict[Any,
     `loser` None for a bye. Teams eliminated in a later round place higher;
     within a round, ties break by seed, which is why the seed is stored at
     the cut rather than recomputed.
+
+    Also handles an INCOMPLETE bracket: any team that has never lost across
+    the rounds given ranks above every eliminated team, ordered by seed.
+    When the bracket is complete, exactly one team has never lost, so this
+    returns precisely the single-champion result it always did — callers
+    passing a full set of rounds see no change in behavior.
     """
     def _seed_key(pid: Any) -> int:
         return seeds.get(pid, len(seeds) + 1)
 
     if not rounds:
         return []
-    order = [rounds[-1][0][0]]          # the champion won the last match
+    eliminated = {loser for rnd in rounds for _, loser in rnd if loser is not None}
+    entrants = {winner for rnd in rounds for winner, _ in rnd} | eliminated
+    order = sorted(entrants - eliminated, key=_seed_key)
     for rnd in reversed(rounds):
-        losers: list[Any] = [loser for _, loser in rnd if loser is not None]
-        losers.sort(key=_seed_key)
+        losers: list[Any] = sorted((loser for _, loser in rnd if loser is not None), key=_seed_key)
         order.extend(losers)
     return order

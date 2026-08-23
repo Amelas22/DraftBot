@@ -365,3 +365,79 @@ async def test_finish_tournament_returns_the_bracket_winner(session):
     t.status = "active"                                 # finish_tournament needs it active
     champion = await finish_tournament(session, t.id)
     assert champion.seed == 4
+
+
+@pytest.mark.asyncio
+async def test_a_partially_reported_bracket_ranks_live_teams_above_eliminated_ones(session):
+    """Regression: a tournament can be `finish`ed (or paid out) with the
+    bracket mid-stream -- /tournament finish performs no unreported-match
+    check. A team still alive in an unreported later round must never rank
+    below a team the bracket has already eliminated in an earlier one."""
+    from services.tournament_service import get_final_placement, set_result
+    t = await _swiss_done(session, cut_to=4, teams=4)
+    first = await start_playoff(session, t.id)
+    matches = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == first.id)
+        .order_by(TournamentMatch.id)
+    )).scalars().all()
+    await set_result(session, matches[0].id, 0, 2)     # seed 4 upsets seed 1
+    await set_result(session, matches[1].id, 0, 2)     # seed 3 upsets seed 2
+    await advance_round(session, t.id, random.Random(1))  # final created, NOT reported
+
+    placement = await get_final_placement(session, t.id)
+    # The two live finalists (seed 3, seed 4) rank above the two teams the
+    # bracket has already eliminated (seed 1, seed 2); ties within each
+    # group break by seed.
+    assert [p.seed for p in placement] == [3, 4, 1, 2]
+
+
+@pytest.mark.asyncio
+async def test_teams_that_missed_the_cut_place_below_every_bracket_team_in_swiss_order(session):
+    """The bracket only covers the cut; teams that missed it must still be
+    ranked -- below every bracket team, in swiss order."""
+    from services.tournament_service import get_final_placement, get_standings_data
+    t = await _swiss_done(session, cut_to=4, teams=6)
+    first = await start_playoff(session, t.id)
+    await _report_all(session, first.id)
+    final = await advance_round(session, t.id, random.Random(1))
+    await _report_all(session, final.id)
+    await advance_round(session, t.id, random.Random(1))
+
+    placement = await get_final_placement(session, t.id)
+    standings = await get_standings_data(session, t.id)
+    missed_cut_ids_in_swiss_order = [p.id for p in standings if p.seed is None]
+    tail = placement[len(placement) - len(missed_cut_ids_in_swiss_order):]
+    assert [p.id for p in tail] == missed_cut_ids_in_swiss_order
+    assert all(p.seed is None for p in tail)
+    head = placement[:len(placement) - len(tail)]
+    assert all(p.seed is not None for p in head)
+
+
+@pytest.mark.asyncio
+async def test_payout_allocations_follow_bracket_placement_not_swiss_order(session):
+    """Design spec: payout allocations follow bracket placement, not swiss
+    order. compute_allocations is pure, so feed it get_final_placement's
+    output from a tournament where the swiss leader lost the final, and
+    assert the winner's share goes to whoever actually won the bracket."""
+    from services.tournament_service import get_final_placement, set_result
+    from services.tournament_escrow_service import compute_allocations
+    t = await _swiss_done(session, cut_to=4, teams=4)
+    first = await start_playoff(session, t.id)
+    matches = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == first.id)
+        .order_by(TournamentMatch.id)
+    )).scalars().all()
+    await set_result(session, matches[0].id, 0, 2)     # seed 4 upsets seed 1
+    await set_result(session, matches[1].id, 2, 0)
+    final = await advance_round(session, t.id, random.Random(1))
+    fm = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == final.id)
+    )).scalars().first()
+    await set_result(session, fm.id, 2, 0)             # seed 4 wins it all
+    await advance_round(session, t.id, random.Random(1))
+
+    placement = await get_final_placement(session, t.id)
+    assert placement[0].seed == 4                      # not the swiss leader (seed 1)
+    ranked = [(p.captain_user_id, p.team_name) for p in placement if p.status == "paid"]
+    allocations = compute_allocations(1000, "winner_take_all", ranked)
+    assert allocations == [(1, placement[0].captain_user_id, placement[0].team_name, 1000)]

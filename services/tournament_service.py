@@ -651,8 +651,9 @@ async def _build_round_robin(session, tournament, participants, rng):
 
 
 async def finish_tournament(session, tournament_id):
-    """End an active tournament now, ranking current standings. Returns the
-    champion participant (top of standings), or None if there are none."""
+    """End an active tournament now. Returns the champion participant (top of
+    final placement — bracket order if a cut was played, standings otherwise),
+    or None if there are none."""
     tournament = await session.get(Tournament, tournament_id)
     if tournament is None:
         raise ValueError("Tournament not found.")
@@ -840,6 +841,14 @@ async def get_final_placement(session, tournament_id):
     Bracket placement when a cut was played, plain standings otherwise — so a
     tournament with no cut behaves exactly as it always has, and callers
     (payout, the champion announcement) never learn what a bracket is.
+
+    A round counts as played only when every one of its non-bye matches has
+    a result. `/tournament finish` can end a tournament with the bracket
+    mid-stream, so we stop at the first incomplete round rather than skip
+    past individual unreported matches within it — a later round's results
+    cannot be trusted once an earlier one is incomplete, and `final_placement`
+    ranks any team that never lost in the rounds given above every eliminated
+    team, so a live team is never mistaken for one that missed the cut.
     """
     standings = await get_standings_data(session, tournament_id)
     rounds = await _playoff_rounds(session, tournament_id)
@@ -856,12 +865,13 @@ async def get_final_placement(session, tournament_id):
             .order_by(TournamentMatch.id)
         )
         matches = (await session.execute(stmt)).scalars().all()
+        playable = [m for m in matches if not m.is_bye]
+        if any(m.team_a_wins is None for m in playable):
+            break
         pairs = []
         for m in matches:
             if m.is_bye:
                 pairs.append((m.team_a_participant_id, None))
-            elif m.team_a_wins is None:
-                continue
             elif m.team_a_wins > m.team_b_wins:
                 pairs.append((m.team_a_participant_id, m.team_b_participant_id))
             else:
