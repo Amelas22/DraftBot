@@ -120,6 +120,32 @@ def _team3_log():
 _BOT_ID = 999000111
 
 
+# The Alice/Bob pair most of these tests use. None of them is ABOUT the
+# sign-ups or the mapping -- it is scaffolding, so it lives here rather than
+# three lines at the top of each test.
+_SIGN_UPS_AB = {"disc_a": "Alice", "disc_b": "Bob"}
+_MAPPING_AB = {"disc_a": "dm_a", "disc_b": "dm_b"}
+
+
+async def _post_pools(bot, channel, persist, *, destination_id=None,
+                      members=("disc_a", "disc_b"), mapping=None, draft_data=None,
+                      sign_ups=None, friendly_id="ABC"):
+    """Keyword wrapper over _post_pools_for_team's nine positional arguments.
+
+    `mapping` and `sign_ups` are adjacent and both dict[str, str], so a
+    transposed pair reads as a plausible call and fails somewhere confusing.
+    Naming them at the call site makes that impossible, and adding a
+    parameter to the production function no longer means editing 14 tests.
+    """
+    return await _post_pools_for_team(
+        bot, channel, destination_id, friendly_id, list(members),
+        mapping if mapping is not None else _MAPPING_AB,
+        draft_data if draft_data is not None else _team_log(),
+        sign_ups if sign_ups is not None else _SIGN_UPS_AB,
+        persist,
+    )
+
+
 def _persist_recorder():
     """`(callback, list)` for _post_pools_for_team's persist_thread_id argument.
     The list records every thread id persisted, in order -- which is the only
@@ -230,11 +256,6 @@ class _FakeThread:
         msg.attachments = [MagicMock(filename=filename)]
         self._messages.append(msg)
 
-    def summary_messages(self):
-        """Messages carrying no attachment -- i.e. the "Drafted pools" headers.
-        A refused thread must leave none of these behind."""
-        return [msg for msg in self._messages if not msg.attachments]
-
     def posted_txt_filenames(self):
         """Filenames of .txt attachments actually recorded as sent -- unlike
         _attachment_names (which reads Mock.await_args_list and so includes
@@ -294,6 +315,15 @@ class _FakeChannel(_FakeThread):
             return_value=self.thread,
         )
         return msg
+
+    def summary_messages(self):
+        """Messages carrying no attachment -- i.e. the "Drafted pools" headers.
+        A refused thread must leave none of these behind.
+
+        Lives on the CHANNEL double, not the thread one: inside a thread an
+        attachment-free message is the team tag, so the same predicate there
+        would quietly count the tag as an orphan header."""
+        return [msg for msg in self._messages if not msg.attachments]
 
 
 def _team_ds(team_b=("disc_b",), channel_ids=(111, 222), friendly_id="ABC"):
@@ -515,8 +545,8 @@ async def test_post_team_logs_concurrent_calls_post_once():
     assert red.send.await_count == 1                 # one summary message, not two
     assert blue.send.await_count == 1
     # One team tag + one pool post each; the duplicate call added neither.
-    assert red_thread.send.await_count == 2           # Alice posted exactly once
-    assert blue_thread.send.await_count == 2          # Bob posted exactly once
+    assert red_thread.send.await_count == 2
+    assert blue_thread.send.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -553,17 +583,13 @@ async def test_post_pools_for_team_resumes_into_stored_thread_and_reposts_nothin
     persist, persisted = _persist_recorder()
 
     with _patched_discord():
-        first_ok = await _post_pools_for_team(
-            bot, channel, None, "ABC", ["disc_a", "disc_b", "disc_c"], mapping, draft_data, sign_ups, persist,
-        )
+        first_ok = await _post_pools(bot, channel, persist, members=["disc_a", "disc_b", "disc_c"], mapping=mapping, draft_data=draft_data, sign_ups=sign_ups)
         assert first_ok is True
 
         channel.send.reset_mock()   # only care whether run 2 opens a NEW summary/thread
         bot2 = _bot_for({9001: thread})   # second run resolves the stored id via bot.get_channel
 
-        second_ok = await _post_pools_for_team(
-            bot2, channel, persisted[-1], "ABC", ["disc_a", "disc_b", "disc_c"], mapping, draft_data, sign_ups, persist,
-        )
+        second_ok = await _post_pools(bot2, channel, persist, destination_id=persisted[-1], members=["disc_a", "disc_b", "disc_c"], mapping=mapping, draft_data=draft_data, sign_ups=sign_ups)
 
     assert second_ok is True
     channel.send.assert_not_awaited()          # no second summary message / no second thread
@@ -609,9 +635,6 @@ async def test_post_pools_for_team_falls_back_to_channel_posts_when_thread_creat
     """If thread creation raises discord.HTTPException (typically missing
     Manage Threads), fall back to posting the per-player messages directly
     into the channel exactly as before threading existed."""
-    draft_data = _team_log()
-    sign_ups = {"disc_a": "Alice", "disc_b": "Bob"}
-    mapping = {"disc_a": "dm_a", "disc_b": "dm_b"}
     channel = _summary_channel(
         "Red-Team-Chat-ABC",
         create_thread_error=discord.HTTPException(MagicMock(), "no Manage Threads"),
@@ -620,9 +643,7 @@ async def test_post_pools_for_team_falls_back_to_channel_posts_when_thread_creat
     persist, persisted = _persist_recorder()
 
     with _patched_discord():
-        all_posted = await _post_pools_for_team(
-            bot, channel, None, "ABC", ["disc_a"], mapping, draft_data, sign_ups, persist,
-        )
+        all_posted = await _post_pools(bot, channel, persist, members=["disc_a"])
 
     assert all_posted is True
     assert persisted == ["7000"]     # the channel carried the pool, so it is the record
@@ -638,9 +659,6 @@ async def test_post_pools_for_team_ignores_non_bot_txt_attachments_when_checking
     """A player uploading their own decklist as e.g. 'Alice.txt' into the
     thread must not be mistaken for the bot's own pool post -- otherwise
     Alice's real pool is silently skipped and the run reports her done."""
-    draft_data = _team_log()
-    sign_ups = {"disc_a": "Alice", "disc_b": "Bob"}
-    mapping = {"disc_a": "dm_a", "disc_b": "dm_b"}
     thread = _FakeThread(9001)
     thread.inject_foreign_message("Alice.txt")   # someone else's upload, not the bot's post
     channel = _summary_channel("Red-Team-Chat-ABC")   # thread already stored; no creation needed
@@ -648,9 +666,7 @@ async def test_post_pools_for_team_ignores_non_bot_txt_attachments_when_checking
     persist, persisted = _persist_recorder()
 
     with _patched_discord():
-        all_posted = await _post_pools_for_team(
-            bot, channel, "9001", "ABC", ["disc_a", "disc_b"], mapping, draft_data, sign_ups, persist,
-        )
+        all_posted = await _post_pools(bot, channel, persist, destination_id="9001")
 
     assert all_posted is True
     channel.send.assert_not_awaited()             # thread already resolved -- no new summary
@@ -675,9 +691,7 @@ async def test_post_pools_for_team_tags_the_whole_team_first_and_only_on_creatio
     persist, persisted = _persist_recorder()
 
     with _patched_discord():
-        first_ok = await _post_pools_for_team(
-            bot, channel, None, "ABC", ["disc_a", "disc_b"], mapping, draft_data, sign_ups, persist,
-        )
+        first_ok = await _post_pools(bot, channel, persist, mapping=mapping, draft_data=draft_data, sign_ups=sign_ups)
 
     assert first_ok is True
     tag = thread.send.await_args_list[0]
@@ -690,9 +704,7 @@ async def test_post_pools_for_team_tags_the_whole_team_first_and_only_on_creatio
     # A resume into the same thread must not tag the team a second time.
     bot2 = _bot_for({9001: thread})
     with _patched_discord():
-        second_ok = await _post_pools_for_team(
-            bot2, channel, persisted[-1], "ABC", ["disc_a", "disc_b"], mapping, draft_data, sign_ups, persist,
-        )
+        second_ok = await _post_pools(bot2, channel, persist, destination_id=persisted[-1], mapping=mapping, draft_data=draft_data, sign_ups=sign_ups)
 
     assert second_ok is True
     assert thread.send.await_count == 2            # the tag + Alice, nothing added
@@ -711,9 +723,7 @@ async def test_post_pools_for_team_still_posts_pools_when_the_team_tag_fails():
     persist, persisted = _persist_recorder()
 
     with _patched_discord():
-        all_posted = await _post_pools_for_team(
-            bot, channel, None, "ABC", ["disc_a"], mapping, draft_data, sign_ups, persist,
-        )
+        all_posted = await _post_pools(bot, channel, persist, members=["disc_a"], mapping=mapping, draft_data=draft_data, sign_ups=sign_ups)
 
     assert all_posted is True                      # the tag failure is not a delivery failure
     assert persisted == ["9001"]
@@ -734,9 +744,7 @@ async def test_post_pools_for_team_disambiguates_names_that_sanitise_identically
     persist, persisted = _persist_recorder()
 
     with _patched_discord():
-        first_ok = await _post_pools_for_team(
-            bot, channel, None, "ABC", ["disc_x", "disc_y"], mapping, draft_data, sign_ups, persist,
-        )
+        first_ok = await _post_pools(bot, channel, persist, members=["disc_x", "disc_y"], mapping=mapping, draft_data=draft_data, sign_ups=sign_ups)
         assert first_ok is True
 
         filenames = thread.posted_txt_filenames()
@@ -746,14 +754,12 @@ async def test_post_pools_for_team_disambiguates_names_that_sanitise_identically
         # Retry with the same thread must not skip either player.
         channel.send.reset_mock()
         bot2 = _bot_for({9001: thread})
-        second_ok = await _post_pools_for_team(
-            bot2, channel, persisted[-1], "ABC", ["disc_x", "disc_y"], mapping, draft_data, sign_ups, persist,
-        )
+        second_ok = await _post_pools(bot2, channel, persist, destination_id=persisted[-1], members=["disc_x", "disc_y"], mapping=mapping, draft_data=draft_data, sign_ups=sign_ups)
 
     assert second_ok is True
     channel.send.assert_not_awaited()              # no second thread
     # One team tag + two pool posts on the first run; the retry added nothing.
-    assert thread.send.await_count == 3            # nobody re-posted on the retry
+    assert thread.send.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -796,9 +802,7 @@ async def test_post_pools_for_team_still_posts_pools_when_the_orphan_summary_can
     persist, persisted = _persist_recorder()
 
     with _patched_discord():
-        all_posted = await _post_pools_for_team(
-            bot, channel, None, "ABC", ["disc_a"], mapping, draft_data, sign_ups, persist,
-        )
+        all_posted = await _post_pools(bot, channel, persist, members=["disc_a"], mapping=mapping, draft_data=draft_data, sign_ups=sign_ups)
 
     assert all_posted is True
     assert channel.posted_txt_filenames() == ["Alice.txt"]   # the pool went out regardless
@@ -815,9 +819,6 @@ async def test_post_pools_for_team_resumes_into_the_channel_the_fallback_claimed
     either duplicate the pools into it or, once deduped, leave the team tagged
     into a thread containing nothing. Their pools live in the channel; that is
     where the retry belongs."""
-    draft_data = _team_log()
-    sign_ups = {"disc_a": "Alice", "disc_b": "Bob"}
-    mapping = {"disc_a": "dm_a", "disc_b": "dm_b"}
     channel = _FakeChannel(
         "Red-Team-Chat-ABC",
         create_thread_error=discord.HTTPException(MagicMock(), "transient"),
@@ -826,9 +827,7 @@ async def test_post_pools_for_team_resumes_into_the_channel_the_fallback_claimed
     persist, persisted = _persist_recorder()
 
     with _patched_discord():
-        first_ok = await _post_pools_for_team(
-            bot, channel, None, "ABC", ["disc_a", "disc_b"], mapping, draft_data, sign_ups, persist,
-        )
+        first_ok = await _post_pools(bot, channel, persist)
     assert first_ok is True
     assert channel.posted_txt_filenames() == ["Alice.txt", "Bob.txt"]   # delivered in-channel
     assert persisted == ["7000"]                    # the channel is the record
@@ -841,10 +840,7 @@ async def test_post_pools_for_team_resumes_into_the_channel_the_fallback_claimed
     channel.send.reset_mock()
 
     with _patched_discord():
-        second_ok = await _post_pools_for_team(
-            bot, channel, persisted[-1], "ABC", ["disc_a", "disc_b"], mapping,
-            draft_data, sign_ups, persist,
-        )
+        second_ok = await _post_pools(bot, channel, persist, destination_id=persisted[-1])
 
     assert second_ok is True
     assert persisted == ["7000"]                    # unchanged; nothing new claimed
@@ -858,9 +854,6 @@ async def test_post_pools_for_team_fallback_does_not_repost_a_player_already_in_
     """If thread creation stays refused, a retry must not re-post players the
     fallback already delivered straight into the channel -- otherwise every
     postable player gets re-posted every tick for up to 72h."""
-    draft_data = _team_log()
-    sign_ups = {"disc_a": "Alice", "disc_b": "Bob"}
-    mapping = {"disc_a": "dm_a", "disc_b": "dm_b"}
     channel = _FakeChannel(
         "Red-Team-Chat-ABC",
         create_thread_error=discord.HTTPException(MagicMock(), "no Manage Threads"),
@@ -869,17 +862,13 @@ async def test_post_pools_for_team_fallback_does_not_repost_a_player_already_in_
     persist, persisted = _persist_recorder()
 
     with _patched_discord():
-        first_ok = await _post_pools_for_team(
-            bot, channel, None, "ABC", ["disc_a", "disc_b"], mapping, draft_data, sign_ups, persist,
-        )
+        first_ok = await _post_pools(bot, channel, persist)
         assert first_ok is True
         assert channel.posted_txt_filenames() == ["Alice.txt", "Bob.txt"]
         assert channel.summary_messages() == []      # the orphan header was taken back down
 
         channel.send.reset_mock()
-        second_ok = await _post_pools_for_team(
-            bot, channel, None, "ABC", ["disc_a", "disc_b"], mapping, draft_data, sign_ups, persist,
-        )
+        second_ok = await _post_pools(bot, channel, persist)
 
     assert second_ok is True
     assert persisted == ["7000"]      # the channel itself is now the record
