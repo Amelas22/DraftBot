@@ -205,5 +205,9 @@ def test_cut_columns_exist_with_safe_defaults():
     stage = TournamentRound.__table__.columns["stage"]
     assert not stage.nullable
     assert stage.default.arg == "swiss"
+    # The Python-side default above does nothing for rows the migration itself
+    # backfills -- only server_default reaches those, so guard it explicitly.
+    assert stage.server_default is not None
+    assert "swiss" in str(stage.server_default.arg)
 
     assert TournamentParticipant.__table__.columns["seed"].nullable
