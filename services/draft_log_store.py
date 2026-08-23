@@ -96,10 +96,12 @@ def _find_team_channel(
 # post to begin with, so they don't count toward "all posted".
 _PostableMember = namedtuple("_PostableMember", "discord_id dm_user_id name safe pool")
 
-# Bound on how far back the no-thread fallback scans the team CHANNEL's
-# history for already-posted players. The channel is a general team chat, not
-# a pools-only thread, so an unbounded scan there could walk a very long,
-# mostly-irrelevant history on every retry tick.
+# Bound on how far back the team CHANNEL's history is scanned for
+# already-posted players. Applies whenever the channel is the destination --
+# the run that fell back, and every retry after it, since the channel is then
+# the recorded destination. The channel is general team chat, not a pools-only
+# thread, so an unbounded scan there could walk a very long, mostly-irrelevant
+# history on every tick.
 CHANNEL_HISTORY_SCAN_LIMIT = 200
 
 
@@ -321,11 +323,18 @@ async def _post_pools_for_team(
     summary message in the team channel — or, if Discord refuses that thread,
     into the channel itself.
 
-    Whichever of the two ends up carrying the pools becomes this team's
-    recorded destination, persisted via `persist_destination_id`. That is the
+    Whichever of the two carries the pools becomes this team's recorded
+    destination, persisted via `persist_destination_id`. That is the
     load-bearing idea: a retry resumes into the SAME place, so pools are never
     split across a channel and a thread, and a team whose fallback already
     delivered never gets a second, empty thread opened for them later.
+
+    The two are claimed on purpose asymmetrically. A new thread is recorded
+    immediately, before anyone is posted, so a run that dies mid-way resumes
+    into it instead of opening another. The channel is recorded only once a
+    pool actually lands there, so a fallback that delivers nothing leaves the
+    team eligible for a thread next tick instead of being pinned to the
+    channel by a failure.
 
     Returns whether every postable player ended up with a pool posted. False
     (a send failure, or an unresolvable stored destination) leaves the
@@ -377,8 +386,8 @@ async def _post_pools_for_team(
 
     in_channel = destination is channel
     # The channel is general team chat, so its history is bounded; a pools
-    # thread holds nothing but the tag and one message per player, so scanning
-    # it whole is both cheap and exact.
+    # thread holds nothing but one message per player, so scanning it whole is
+    # both cheap and exact.
     already_posted = await _posted_txt_filenames(
         bot, destination, limit=CHANNEL_HISTORY_SCAN_LIMIT if in_channel else None
     )
