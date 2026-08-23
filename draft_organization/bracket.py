@@ -5,6 +5,8 @@ opaque. Sits beside swiss.py, which owns the pairing maths for the rounds
 that decide these seeds.
 """
 
+from typing import Any, cast
+
 
 def bracket_size(seed_count: int) -> int:
     """The smallest power of two that seats `seed_count` teams."""
@@ -43,3 +45,35 @@ def build_bracket(seed_count: int) -> list[tuple[int, int | None]]:
         high, low = min(a, b), max(a, b)
         pairs.append((high, None if low > seed_count else low))
     return pairs
+
+
+def advance_pairs(winners: list[Any]) -> list[tuple[Any, Any]]:
+    """Pair adjacent winners, in order, to form the next round.
+
+    This is the invariant the whole bracket rests on: the order matches
+    `build_bracket`'s output, so pairing neighbours preserves the halves.
+    An odd count means a round was mis-built, not a bye -- byes live in the
+    first round only.
+    """
+    if len(winners) % 2:
+        raise ValueError(f"Cannot pair {len(winners)} winners into a round.")
+    return list(zip(winners[::2], winners[1::2]))
+
+
+def final_placement(rounds: list[list[tuple[Any, Any | None]]], seeds: dict[Any, int]) -> list[Any]:
+    """Bracket teams in finishing order, best first.
+
+    `rounds` is earliest-first; each round is a list of (winner, loser) with
+    `loser` None for a bye. Teams eliminated in a later round place higher;
+    within a round, ties break by seed, which is why the seed is stored at
+    the cut rather than recomputed.
+    """
+    if not rounds:
+        return []
+    order = [rounds[-1][0][0]]          # the champion won the last match
+    for rnd in reversed(rounds):
+        losers: list[Any] = [loser for _, loser in rnd if loser is not None]
+        # pyrefly: ignore [implicit-any-lambda]
+        losers.sort(key=lambda pid: seeds.get(pid, len(seeds) + 1))
+        order.extend(losers)
+    return order
