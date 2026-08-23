@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from helpers.opponent_threads import opponent_ids, own_team_ids, spawn_opponent_threads
+from helpers.opponent_threads import spawn_opponent_threads, team_channel_rosters
 
 
 def make_channel(existing_thread_names=(), archived_thread_names=(), starter_fails=False):
@@ -38,26 +38,21 @@ def thread_names(channel):
     return [c.kwargs["name"] for c in channel.create_thread.await_args_list]
 
 
-def test_red_team_channel_gets_team_b_as_opponents():
-    assert opponent_ids("Red-Team", ["a1", "a2"], ["b1", "b2"]) == ["b1", "b2"]
+@pytest.mark.parametrize("team_name, own, opponents, label", [
+    ("Red-Team", ["a1", "a2"], ["b1"], "Blue Team"),
+    ("Blue-Team", ["b1"], ["a1", "a2"], "Red Team"),
+    # The shared "Draft" channel holds both teams, so nobody in it is an
+    # opponent -- this row is what keeps swiss out of the feature entirely.
+    ("Draft", [], [], ""),
+    ("Some-Other-Channel", [], [], ""),
+])
+def test_team_channel_rosters_dispatches_on_the_channel_name(team_name, own, opponents, label):
+    assert team_channel_rosters(team_name, ["a1", "a2"], ["b1"]) == (own, opponents, label)
 
 
-def test_blue_team_channel_gets_team_a_as_opponents():
-    assert opponent_ids("Blue-Team", ["a1", "a2"], ["b1", "b2"]) == ["a1", "a2"]
-
-
-def test_shared_draft_channel_has_no_opponents():
-    """The 'Draft' channel holds both teams, so nobody in it is an opponent."""
-    assert opponent_ids("Draft", ["a1"], ["b1"]) == []
-
-
-def test_unknown_team_name_has_no_opponents():
-    assert opponent_ids("Green-Team", ["a1"], ["b1"]) == []
-
-
-def test_missing_team_rosters_yield_no_opponents():
+def test_team_channel_rosters_tolerates_missing_rosters():
     """team_a/team_b default to None in create_team_channel's signature."""
-    assert opponent_ids("Red-Team", None, None) == []
+    assert team_channel_rosters("Red-Team", None, None) == ([], [], "Blue Team")
 
 
 SIGN_UPS = {"a1": "Alice", "b1": "Dave", "b2": "Erin"}
@@ -82,12 +77,6 @@ async def test_thread_starter_names_the_opponent_and_their_team():
     starter = thread.send.await_args.args[0]
     assert "Dave" in starter
     assert "Blue Team" in starter
-
-
-def test_own_team_ids_is_the_mirror_of_opponent_ids():
-    assert own_team_ids("Red-Team", ["a1", "a2"], ["b1"]) == ["a1", "a2"]
-    assert own_team_ids("Blue-Team", ["a1", "a2"], ["b1"]) == ["b1"]
-    assert own_team_ids("Not-A-Team", ["a1"], ["b1"]) == []
 
 
 @pytest.mark.asyncio
