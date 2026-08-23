@@ -612,3 +612,79 @@ async def test_a_bracket_bye_is_not_described_as_an_auto_win(session):
         await set_result(session, bye.id, 2, 0)
     assert "scored automatically" not in str(exc.value)
     assert "no match to report" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_final_placement_refuses_a_drawn_playoff_match(session):
+    """A draw has no winner, and _advance_playoff already refuses one. The
+    placement copy of that decision fell through to "team B won", so
+    /tournament finish could complete -- and then pay out -- a tournament on a
+    team nobody beat."""
+    from services.tournament_service import (
+        finish_tournament,
+        get_final_placement,
+        set_result,
+    )
+    t = await _swiss_done(session, cut_to=4, teams=4)
+    first = await start_playoff(session, t.id)
+    matches = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == first.id)
+        .order_by(TournamentMatch.id)
+    )).scalars().all()
+    await set_result(session, matches[0].id, 2, 0)
+    await set_result(session, matches[1].id, 2, 0)
+    final = await advance_round(session, t.id, random.Random(1))
+    fm = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == final.id)
+    )).scalars().first()
+    await set_result(session, fm.id, 1, 1)          # an admin typo, or a real Bo3 draw
+
+    with pytest.raises(ValueError, match="draw"):
+        await get_final_placement(session, t.id)
+    # ...and therefore no champion is crowned off it either.
+    with pytest.raises(ValueError, match="draw"):
+        await finish_tournament(session, t.id)
+
+
+@pytest.mark.asyncio
+async def test_a_completed_tournaments_playoff_result_cannot_be_rewritten(session):
+    """The closed-round guard only refuses a round with a LATER playoff round,
+    and the final has none -- so it stayed rewritable forever. record_linked_result
+    writes to any match id when a linked draft finishes, which is how a late draft
+    could rewrite the champion of a tournament already announced and paid out."""
+    from services.tournament_service import get_final_placement, set_result
+    t = await _swiss_done(session, cut_to=4, teams=4)
+    first = await start_playoff(session, t.id)
+    await _report_all(session, first.id)
+    final = await advance_round(session, t.id, random.Random(1))
+    fm = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == final.id)
+    )).scalars().first()
+    await set_result(session, fm.id, 2, 0)
+    assert await advance_round(session, t.id, random.Random(1)) is None
+    assert t.status == "completed"
+    champion_id = (await get_final_placement(session, t.id))[0].id
+
+    with pytest.raises(ValueError, match="results are final"):
+        await set_result(session, fm.id, 0, 2)      # "actually, the other team won"
+
+    assert (fm.team_a_wins, fm.team_b_wins) == (2, 0)
+    assert (await get_final_placement(session, t.id))[0].id == champion_id
+
+
+@pytest.mark.asyncio
+async def test_advance_round_refuses_a_current_round_with_no_round_row(session):
+    """A tournament whose current_round points at a missing round row used to
+    sail through the unreported-match check on an empty match list and complete
+    itself -- irreversibly, and silently. Completing must never be the quiet
+    branch."""
+    from sqlalchemy import delete
+    t = await _swiss_done(session, cut_to=None, teams=4)
+    await session.execute(
+        delete(TournamentRound).where(TournamentRound.tournament_id == t.id))
+    await session.flush()
+
+    with pytest.raises(ValueError, match="no round row"):
+        await advance_round(session, t.id, random.Random(1))
+
+    assert t.status == "active"

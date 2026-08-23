@@ -488,6 +488,29 @@ async def start_playoff(session, tournament_id, size=None):
     return new_round
 
 
+def _winner_loser(match):
+    """(winner_id, loser_id) for a decided playoff match; loser is None for a bye.
+
+    Raises ValueError on a draw -- single elimination has no drawn match, and
+    both the advancement and the payout order depend on this answer being the
+    same one. The two copies of this decision had already drifted: the
+    placement copy fell through to "team B won" on a draw, so /tournament
+    finish could complete a tournament -- and pay it out -- on a team nobody
+    beat.
+    """
+    if match.is_bye:
+        return match.team_a_participant_id, None
+    if match.team_a_wins == match.team_b_wins:
+        raise ValueError(
+            f"Match {match.id} is a draw ({match.team_a_wins}-{match.team_b_wins}); "
+            "a single-elimination match needs a decisive result before the bracket "
+            "can advance."
+        )
+    if match.team_a_wins > match.team_b_wins:
+        return match.team_a_participant_id, match.team_b_participant_id
+    return match.team_b_participant_id, match.team_a_participant_id
+
+
 async def _advance_playoff(session, tournament, last_round):
     """Pair the winners of `last_round` into the next bracket round, or
     complete the tournament when the final has been decided."""
@@ -504,20 +527,7 @@ async def _advance_playoff(session, tournament, last_round):
             "still need results."
         )
 
-    winners = []
-    for m in matches:
-        if m.is_bye:
-            winners.append(m.team_a_participant_id)
-        elif m.team_a_wins == m.team_b_wins:
-            raise ValueError(
-                f"Match {m.id} in round {last_round.round_number} is a draw "
-                f"({m.team_a_wins}-{m.team_b_wins}); a single-elimination match "
-                "needs a decisive result before the bracket can advance."
-            )
-        elif m.team_a_wins > m.team_b_wins:
-            winners.append(m.team_a_participant_id)
-        else:
-            winners.append(m.team_b_participant_id)
+    winners = [_winner_loser(m)[0] for m in matches]
 
     if len(winners) == 1:
         tournament.status = "completed"
@@ -710,6 +720,18 @@ async def set_result(session, match_id, team_a_wins, team_b_wins):
             else "Byes are scored automatically and cannot be reported."
         )
     if is_playoff:
+        # A completed tournament has been announced and, on a money event,
+        # paid out from this very bracket. record_linked_result writes to any
+        # match id whenever a linked draft finishes, so a draft that lands
+        # after /tournament finish would otherwise rewrite the champion of a
+        # closed event. The later-round guard below cannot catch it: the final
+        # has no later round.
+        tournament = await session.get(Tournament, round_.tournament_id)
+        if tournament is not None and tournament.status != "active":
+            raise ValueError(
+                f"'{tournament.name}' is {tournament.status} — a finished "
+                "tournament's playoff results are final."
+            )
         # A bracket round closes the moment the next one is paired: its winners
         # are already playing on. Rewriting it would recompute placement from a
         # contradictory bracket — the round-1 loser could end up "champion", and
@@ -814,7 +836,17 @@ async def advance_round(session, tournament_id, rng):
         )
 
     round_ = await _current_round(session, tournament)
-    matches = await _round_matches(session, round_.id) if round_ else []
+    if round_ is None:
+        # Completing is irreversible, so the branch that completes must never
+        # be the quiet one: with `matches = [] if round_ is None`, a tournament
+        # whose current_round pointed at a missing round row sailed through the
+        # unreported check and completed itself. The cog's `except ValueError`
+        # surfaces this to the organizer instead.
+        raise ValueError(
+            f"Round {tournament.current_round} has no round row — "
+            f"'{tournament.name}' cannot be advanced."
+        )
+    matches = await _round_matches(session, round_.id)
     unreported = [m for m in matches if not m.is_bye and m.team_a_wins is None]
     if unreported:
         raise ValueError(
@@ -915,14 +947,7 @@ async def get_final_placement(session, tournament_id):
         playable = [m for m in matches if not m.is_bye]
         if any(m.team_a_wins is None for m in playable):
             break
-        pairs = []
-        for m in matches:
-            if m.is_bye:
-                pairs.append((m.team_a_participant_id, None))
-            elif m.team_a_wins > m.team_b_wins:
-                pairs.append((m.team_a_participant_id, m.team_b_participant_id))
-            else:
-                pairs.append((m.team_b_participant_id, m.team_a_participant_id))
+        pairs = [_winner_loser(m) for m in matches]
         if pairs:
             results.append(pairs)
 

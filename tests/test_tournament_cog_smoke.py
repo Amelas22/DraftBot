@@ -238,12 +238,17 @@ async def test_finish_button_surfaces_a_value_error_instead_of_dying_silently():
     that falls through to py-cord's default on_error -- a stderr log and a
     failed interaction with no explanation. Must match start_playoff_button's
     handling of the same failure class."""
-    from cogs.tournament_commands import PlayoffPromptView
+    from cogs.tournament_commands import PlayoffPromptView, TournamentCog
 
-    with patch("cogs.tournament_commands.finish_tournament",
+    tournament = MagicMock()
+    tournament.name = "Cup"
+    tournament.entry_fee = 0
+    with patch("cogs.tournament_commands.db_session",
+               _fake_db_session(_session_stub(tournament))), \
+         patch("cogs.tournament_commands.finish_tournament",
                AsyncMock(side_effect=ValueError("'Cup' is not active."))), \
          patch("helpers.permissions.get_config", return_value={}):
-        view = PlayoffPromptView(MagicMock(), tournament_id=1, cut_to=8)
+        view = PlayoffPromptView(TournamentCog(MagicMock()), tournament_id=1, cut_to=8)
         role = MagicMock()
         role.name = "Bot Manager"
         interaction = _playoff_prompt_interaction(is_owner=False)
@@ -287,7 +292,10 @@ async def test_playoff_prompt_closes_before_doing_the_slow_work(button_name, oth
         return MagicMock()      # a TournamentRound / champion stand-in
 
     cog = MagicMock()
-    cog._post_round_messages = AsyncMock(side_effect=_record)
+    # Both buttons hand off to one cog launcher each; those are what must find
+    # the prompt already closed.
+    cog._run_playoff = AsyncMock(side_effect=_record)
+    cog._run_finish = AsyncMock(side_effect=_record)
 
     with patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
          patch("cogs.tournament_commands.start_playoff", AsyncMock(side_effect=_record)), \
@@ -338,3 +346,121 @@ async def test_short_field_only_suggests_a_playoff_size_the_option_accepts(eligi
     message = ctx.followup.send.call_args.args[0]
     assert f"Only **{eligible}**" in message           # the warning still fires
     assert (f"top:{eligible}" in message) is expected
+
+
+def _fake_db_session(session_stub):
+    """A db_session() stand-in yielding a prepared session double."""
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def fake():
+        yield session_stub
+    return fake
+
+
+def _session_stub(tournament):
+    stub = MagicMock()
+    stub.get = AsyncMock(return_value=tournament)
+    return stub
+
+
+def _manager_interaction():
+    interaction = _playoff_prompt_interaction(is_owner=False)
+    role = MagicMock()
+    role.name = "Bot Manager"
+    interaction.user.roles = [role]
+    return interaction
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fmt", ["round_robin", "manual"])
+async def test_create_refuses_a_cut_on_a_format_that_can_never_cut(fmt):
+    """start_playoff seeds a cut from Swiss standings and refuses every other
+    format, but creation stored cut_to regardless -- so the registration board
+    advertised a cut that could never be run. Refuse at creation instead of
+    silently dropping the value."""
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog.__new__(TournamentCog)
+    ctx = MagicMock()
+    ctx.guild.id = 123
+    ctx.author.id = 456
+    ctx.defer = AsyncMock()
+    ctx.followup.send = AsyncMock()
+
+    with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
+         patch("cogs.tournament_commands.post_registration_board", AsyncMock()), \
+         patch("cogs.tournament_commands.create_tournament", AsyncMock()) as create:
+        await TournamentCog.create.callback(
+            cog, ctx, name="Cup", format=fmt, rounds=None, entry_fee=0,
+            payout="winner_take_all", cut=8,
+        )
+
+    create.assert_not_awaited()
+    message = ctx.followup.send.call_args.args[0]
+    assert message.startswith("❌") and "swiss" in message.lower()
+
+
+@pytest.mark.asyncio
+async def test_start_playoff_button_refreshes_the_pinned_standings():
+    """Every refresh path is routed through the pinned standings window. The
+    prompt's Start button was not: answering the prompt posted the bracket while
+    the pinned window still showed the last Swiss round."""
+    from cogs.tournament_commands import PlayoffPromptView, TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    cog._destination = MagicMock(return_value=MagicMock())
+    cog._post_round_messages = AsyncMock()
+    tournament = MagicMock()
+    tournament.cut_to = 4
+    new_round = MagicMock()
+    new_round.id, new_round.round_number = 11, 4
+
+    with patch("cogs.tournament_commands.db_session",
+               _fake_db_session(_session_stub(tournament))), \
+         patch("cogs.tournament_commands.start_playoff",
+               AsyncMock(return_value=new_round)), \
+         patch("cogs.tournament_commands.update_standings_message",
+               AsyncMock()) as refresh, \
+         patch("helpers.permissions.get_config", return_value={}):
+        view = PlayoffPromptView(cog, tournament_id=7, cut_to=4)
+        await view.start_playoff_button.callback(_manager_interaction())
+
+    cog._post_round_messages.assert_awaited_once()
+    refresh.assert_awaited_once_with(cog.bot, 7)
+
+
+@pytest.mark.asyncio
+async def test_finish_button_gives_the_payout_hint_and_refreshes_standings():
+    """The prompt is the path a TO answers by default, so it must not be the
+    poorer one. The button's inlined two-liner dropped the payout hint -- on a
+    money tournament the only prompt that says to pay it out -- along with the
+    standings refresh and the tournament's name and id."""
+    from cogs.tournament_commands import PlayoffPromptView, TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    tournament = MagicMock()
+    tournament.name = "Cup"
+    tournament.entry_fee = 5
+    champion = MagicMock()
+    champion.team_name = "Alpha"
+
+    with patch("cogs.tournament_commands.db_session",
+               _fake_db_session(_session_stub(tournament))), \
+         patch("cogs.tournament_commands.finish_tournament",
+               AsyncMock(return_value=champion)), \
+         patch("cogs.tournament_commands.escrow.prize_pool", AsyncMock(return_value=40)), \
+         patch("cogs.tournament_commands.escrow.is_paid_out", AsyncMock(return_value=False)), \
+         patch("cogs.tournament_commands.update_standings_message",
+               AsyncMock()) as refresh, \
+         patch("helpers.permissions.get_config", return_value={}):
+        view = PlayoffPromptView(cog, tournament_id=7, cut_to=4)
+        interaction = _manager_interaction()
+        await view.finish_button.callback(interaction)
+
+    message = interaction.followup.send.call_args.args[0]
+    assert "Prize pool: **40 tix**" in message
+    assert "/tournament payout" in message
+    assert "**Cup** (#7)" in message
+    assert "Champion: **Alpha**" in message
+    refresh.assert_awaited_once_with(cog.bot, 7)

@@ -253,14 +253,10 @@ class PlayoffPromptView(discord.ui.View):
     async def start_playoff_button(self, button, interaction):
         await self._answer(interaction, f"⏳ Cutting to the top {self.cut_to}…")
         try:
-            async with db_session() as session:
-                new_round = await start_playoff(session, self.tournament_id)
-                round_id, round_number = new_round.id, new_round.round_number
+            await self.cog._run_playoff(interaction, self.tournament_id)
         except ValueError as e:
             await interaction.followup.send(f"❌ {e}", ephemeral=True)
             return
-        play = self.cog._destination(interaction, PAIRINGS.setting)
-        await self.cog._post_round_messages(play, round_id, round_number)
         await interaction.followup.send(f"🏆 Top {self.cut_to} playoff started.")
         self.stop()
 
@@ -269,13 +265,11 @@ class PlayoffPromptView(discord.ui.View):
     async def finish_button(self, button, interaction):
         await self._answer(interaction, "⏳ Finishing now — crowning the Swiss leader…")
         try:
-            async with db_session() as session:
-                champion = await finish_tournament(session, self.tournament_id)
+            announcement = await self.cog._run_finish(interaction, self.tournament_id)
         except ValueError as e:
             await interaction.followup.send(f"❌ {e}", ephemeral=True)
             return
-        name = champion.team_name if champion else "nobody"
-        await interaction.followup.send(f"🏁 Complete! Champion: **{name}** 🏆")
+        await interaction.followup.send(announcement)
         self.stop()
 
 
@@ -397,6 +391,14 @@ class TournamentCog(commands.Cog):
         await ctx.defer(ephemeral=True)
         if format == "swiss" and rounds is None:
             await ctx.followup.send("❌ Swiss tournaments need a `rounds` count.", ephemeral=True)
+            return
+        if cut is not None and format != "swiss":
+            # start_playoff refuses any format but swiss, so storing cut_to here
+            # would put a cut on the registration board that can never be run.
+            await ctx.followup.send(
+                f"❌ A cut is seeded from Swiss standings — `format:swiss` is required "
+                f"(this one is {format.replace('_', '-')}). Create it without `cut:`.",
+                ephemeral=True)
             return
         if entry_fee > 0:
             gate = gate_serve(ctx)
@@ -852,21 +854,47 @@ class TournamentCog(commands.Cog):
                     await ctx.followup.send("There is no active tournament.", ephemeral=True)
                     return
                 tournament_id = tournament.id
-                tournament_name = tournament.name
-                fee = tournament.entry_fee or 0
-                champion = await finish_tournament(session, tournament.id)
-            champ_text = f"Champion: **{champion.team_name}** 🏆" if champion else "No teams competed."
-            logger.info(f"Tournament {tournament_id} finished in guild {ctx.guild.id} by {ctx.author.id}")
-            payout_hint = ""
-            if fee > 0:
-                pool = await escrow.prize_pool(str(ctx.guild.id), tournament_id)
-                if pool > 0 and not await escrow.is_paid_out(tournament_id):
-                    payout_hint = (f"\n🏦 Prize pool: **{pool} tix** — run `/tournament payout` "
-                                   f"(this tournament is #{tournament_id}) to distribute it.")
-            await ctx.followup.send(f"🏁 **{tournament_name}** (#{tournament_id}) is complete! {champ_text}{payout_hint}")
-            await update_standings_message(self.bot, tournament_id)
+            await ctx.followup.send(await self._run_finish(ctx, tournament_id))
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
+
+    async def _run_finish(self, source, tournament_id):
+        """Complete a tournament, refresh the pinned standings, and return the
+        announcement text.
+
+        Shared by /tournament finish and the end-of-swiss prompt's "Finish now"
+        button. The button had inlined its own two-line version, which silently
+        dropped everything else this does: the payout hint (on a money
+        tournament, the only prompt that tells the TO to pay it out), the audit
+        line, the standings refresh, and the tournament's name and id. The
+        prompt is the path a TO answers by default, so it must not be the
+        poorer one.
+
+        ``source`` is a ctx or an Interaction; only .guild and the invoking user
+        are read. Raises ValueError from finish_tournament -- callers own how
+        they surface it, and their own success wording around the text returned.
+        """
+        guild_id = str(source.guild.id)
+        async with db_session() as session:
+            tournament = await session.get(Tournament, tournament_id)
+            if tournament is None:
+                raise ValueError("Tournament not found.")
+            tournament_name = tournament.name
+            fee = tournament.entry_fee or 0
+            champion = await finish_tournament(session, tournament_id)
+        champ_text = f"Champion: **{champion.team_name}** 🏆" if champion else "No teams competed."
+        actor = getattr(source, "author", None) or getattr(source, "user", None)
+        logger.info(f"Tournament {tournament_id} finished in guild {guild_id} by "
+                    f"{getattr(actor, 'id', 'unknown')}")
+        payout_hint = ""
+        if fee > 0:
+            pool = await escrow.prize_pool(guild_id, tournament_id)
+            if pool > 0 and not await escrow.is_paid_out(tournament_id):
+                payout_hint = (f"\n🏦 Prize pool: **{pool} tix** — run `/tournament payout` "
+                               f"(this tournament is #{tournament_id}) to distribute it.")
+        await update_standings_message(self.bot, tournament_id)
+        return (f"🏁 **{tournament_name}** (#{tournament_id}) is complete! "
+                f"{champ_text}{payout_hint}")
 
     @tournament.command(name="payout", description="Admin: distribute a tournament's prize pool to the winners")
     @has_bot_manager_role()
@@ -1026,23 +1054,43 @@ class TournamentCog(commands.Cog):
         if not await self._check_enabled(ctx):
             return
         await ctx.defer()
+        async with db_session() as session:
+            tournament = await get_active_tournament(session, ctx.guild.id)
+            if tournament is None:
+                await ctx.followup.send("There is no active tournament.", ephemeral=True)
+                return
+            tournament_id = tournament.id
         try:
-            async with db_session() as session:
-                tournament = await get_active_tournament(session, ctx.guild.id)
-                if tournament is None:
-                    await ctx.followup.send("There is no active tournament.", ephemeral=True)
-                    return
-                tournament_id = tournament.id
-                new_round = await start_playoff(session, tournament.id, top)
-                round_id, round_number = new_round.id, new_round.round_number
-                size = top or tournament.cut_to
+            play, size = await self._run_playoff(ctx, tournament_id, top)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
             return
-        play = self._destination(ctx, PAIRINGS.setting)
-        await self._post_round_messages(play, round_id, round_number)
         await ctx.followup.send(f"🏆 Top {size} playoff started — bracket posted in {play.mention}.")
+
+    async def _run_playoff(self, source, tournament_id, size=None):
+        """Cut to the bracket, post its round, and refresh the pinned standings.
+
+        Shared by /tournament playoff and the end-of-swiss prompt's "Start
+        playoff" button. The refresh lives in here rather than in the callers
+        because the button had been missing it: the bracket was posted while the
+        pinned standings window still showed the last swiss round. Every other
+        refresh path goes through that window, and this is what keeps this one
+        there too.
+
+        ``source`` is a ctx or an Interaction (only .guild/.channel are read, via
+        _destination). Returns (channel, size) -- where the bracket was posted
+        and the cut size actually used -- so callers word their own success
+        message. Raises ValueError from start_playoff.
+        """
+        async with db_session() as session:
+            tournament = await session.get(Tournament, tournament_id)
+            declared = tournament.cut_to if tournament is not None else None
+            new_round = await start_playoff(session, tournament_id, size)
+            round_id, round_number = new_round.id, new_round.round_number
+        play = self._destination(source, PAIRINGS.setting)
+        await self._post_round_messages(play, round_id, round_number)
         await update_standings_message(self.bot, tournament_id)
+        return play, size or declared
 
     @tournament.command(name="open_rooms",
                         description="Admin: open match rooms for a round that was posted without them")
