@@ -614,9 +614,13 @@ async def set_result(session, match_id, team_a_wins, team_b_wins):
     part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
     part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
 
-    if match.team_a_wins is not None:
-        _apply_result(part_a, part_b, match.team_a_wins, match.team_b_wins, sign=-1)
-    _apply_result(part_a, part_b, team_a_wins, team_b_wins, sign=1)
+    # Swiss records freeze at the cut: a playoff result is recorded on the
+    # match and drives the bracket, but never moves points/W-L/OMW%.
+    round_ = await session.get(TournamentRound, match.round_id)
+    if round_ is not None and round_.stage != "playoff":
+        if match.team_a_wins is not None:
+            _apply_result(part_a, part_b, match.team_a_wins, match.team_b_wins, sign=-1)
+        _apply_result(part_a, part_b, team_a_wins, team_b_wins, sign=1)
     match.team_a_wins = team_a_wins
     match.team_b_wins = team_b_wins
     await session.flush()

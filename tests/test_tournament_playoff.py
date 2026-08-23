@@ -144,3 +144,46 @@ async def test_start_playoff_needs_a_size(session):
     t = await _swiss_done(session, cut_to=None, teams=6)
     with pytest.raises(ValueError, match="cut size"):
         await start_playoff(session, t.id)
+
+
+@pytest.mark.asyncio
+async def test_a_playoff_result_does_not_move_swiss_records(session):
+    """The freeze. A team that went 3-0 in swiss still reads 3-0 after losing
+    in the bracket -- otherwise the standings that produced the seeding become
+    unrecoverable and OMW% is polluted by bracket matches."""
+    from services.tournament_service import set_result
+    t = await _swiss_done(session, cut_to=4, teams=6)
+    round_ = await start_playoff(session, t.id)
+    match = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == round_.id)
+    )).scalars().first()
+
+    before = {p.id: (p.points, p.match_wins, p.match_losses, p.game_wins)
+              for p in await _participants(session, t.id)}
+    await set_result(session, match.id, 2, 0)
+    after = {p.id: (p.points, p.match_wins, p.match_losses, p.game_wins)
+             for p in await _participants(session, t.id)}
+
+    assert before == after
+    assert match.team_a_wins == 2 and match.team_b_wins == 0   # still recorded
+
+
+@pytest.mark.asyncio
+async def test_a_swiss_result_still_moves_records(session):
+    """Guard against the freeze leaking into swiss."""
+    from services.tournament_service import set_result, start_tournament
+    t = await create_tournament(session, "g2", "Normal", 2)
+    for i in range(4):
+        participant, _ = await register_team(session, t.id, f"T{i}", f"c{i}")
+        participant.status = "paid"
+    await start_tournament(session, t.id, random.Random(1))
+    round_ = (await session.execute(
+        select(TournamentRound).where(TournamentRound.tournament_id == t.id)
+    )).scalars().first()
+    match = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == round_.id)
+    )).scalars().first()
+    winner = await session.get(TournamentParticipant, match.team_a_participant_id)
+    before = winner.points
+    await set_result(session, match.id, 2, 0)
+    assert winner.points > before
