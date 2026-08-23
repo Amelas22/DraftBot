@@ -1,4 +1,4 @@
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Iterable, TypeVar
 
 import discord
 
@@ -30,10 +30,29 @@ def as_messageable(channel: object) -> "discord.abc.Messageable":
     return channel
 
 
+def mention_all(user_ids: Iterable[object] | None, sep: str = " ") -> str:
+    """Discord mentions for `user_ids`, joined. "" for an empty or None
+    iterable, so callers can branch on the result.
+
+    One name for a wire format that was spelled three different ways across
+    six call sites. Deliberately does NOT wrap the single-mention case:
+    `f"<@{uid}>"` inline in an f-string reads better than a call, and there
+    are twenty-odd of those.
+    """
+    return sep.join(f"<@{uid}>" for uid in user_ids or [])
+
+
+# Discord's cap on a thread name. Platform limit, not a product choice, so it
+# lives here rather than inside whichever feature happened to need it first.
+DISCORD_THREAD_NAME_LIMIT = 100
+
 # How long a bot-created thread stays active before Discord auto-archives it.
-# Shared by every thread-spawning feature (quiz discussion, opponent scouting)
-# so they age out together rather than drifting apart per feature.
+# The default is shared by the short-lived, chatty threads (quiz discussion,
+# opponent scouting) so they age out together rather than drifting per feature.
 THREAD_ARCHIVE_MINUTES = 4320  # 3 days
+# The maximum Discord allows, for threads that must survive a whole week: a
+# match played midweek, or drafted pools nobody opens until the weekend.
+THREAD_ARCHIVE_MAX_MINUTES = 10080  # 7 days
 
 
 # Define a mapping of cube names to thumbnail URLs

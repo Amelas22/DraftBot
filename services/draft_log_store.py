@@ -15,9 +15,9 @@ from loguru import logger
 from sqlalchemy import select
 
 from database.db_session import db_session
-from helpers.opponent_threads import DISCORD_THREAD_NAME_LIMIT
 from helpers.pile_compositor import PileImageBuilder
 from helpers.substitutes import TEAM_A_CHANNEL_PREFIX, TEAM_B_CHANNEL_PREFIX
+from helpers.utils import DISCORD_THREAD_NAME_LIMIT, THREAD_ARCHIVE_MAX_MINUTES, mention_all
 from models.draft_session import DraftSession
 
 
@@ -96,7 +96,6 @@ def _find_team_channel(
 # post to begin with, so they don't count toward "all posted".
 _PostableMember = namedtuple("_PostableMember", "discord_id dm_user_id name safe pool")
 
-TEAM_POOLS_AUTO_ARCHIVE_MINUTES = 10080  # 7 days, the max — matches the tournament match rooms
 # Bound on how far back the no-thread fallback scans the team CHANNEL's
 # history for already-posted players. The channel is a general team chat, not
 # a pools-only thread, so an unbounded scan there could walk a very long,
@@ -278,7 +277,7 @@ async def _open_pools_thread(channel, friendly_id: str, player_count: int):
     try:
         return await summary.create_thread(
             name=f"Drafted pools — {friendly_id}"[:DISCORD_THREAD_NAME_LIMIT],
-            auto_archive_duration=TEAM_POOLS_AUTO_ARCHIVE_MINUTES,
+            auto_archive_duration=THREAD_ARCHIVE_MAX_MINUTES,
         )
     except discord.HTTPException as e:
         logger.warning(
@@ -318,7 +317,7 @@ async def _tag_team_in_thread(thread, member_discord_ids: list[str], friendly_id
     Called only on the branch that CREATES the thread, so a retry resuming
     into an existing thread never tags twice.
     """
-    mentions = " ".join(f"<@{discord_id}>" for discord_id in member_discord_ids or [])
+    mentions = mention_all(member_discord_ids)
     if not mentions:
         return
     try:
