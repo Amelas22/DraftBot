@@ -26,6 +26,20 @@ POINTS_WIN = 3
 POINTS_DRAW = 1
 
 
+class SwissComplete(Exception):
+    """Swiss is over and a cut is declared, so the next step is a choice:
+    start the bracket, or finish and crown the swiss leader.
+
+    Raised rather than returned because `advance_round` completing the
+    tournament is irreversible and one call away — the caller must decide.
+    """
+
+    def __init__(self, cut_to, eligible):
+        super().__init__(f"Swiss complete; cut to top {cut_to} is pending.")
+        self.cut_to = cut_to
+        self.eligible = eligible
+
+
 async def get_active_tournament(session, guild_id):
     """Return the guild's current registration/active tournament, or None."""
     stmt = select(Tournament).where(
@@ -453,6 +467,53 @@ async def start_playoff(session, tournament_id, size=None):
     return new_round
 
 
+async def _advance_playoff(session, tournament, last_round):
+    """Pair the winners of `last_round` into the next bracket round, or
+    complete the tournament when the final has been decided."""
+    stmt = (
+        select(TournamentMatch)
+        .where(TournamentMatch.round_id == last_round.id)
+        .order_by(TournamentMatch.id)          # creation order IS bracket order
+    )
+    matches = (await session.execute(stmt)).scalars().all()
+    unreported = [m for m in matches if not m.is_bye and m.team_a_wins is None]
+    if unreported:
+        raise ValueError(
+            f"{len(unreported)} match(es) in round {last_round.round_number} "
+            "still need results."
+        )
+
+    winners = []
+    for m in matches:
+        if m.is_bye:
+            winners.append(m.team_a_participant_id)
+        elif m.team_a_wins > m.team_b_wins:
+            winners.append(m.team_a_participant_id)
+        else:
+            winners.append(m.team_b_participant_id)
+
+    if len(winners) == 1:
+        tournament.status = "completed"
+        await session.flush()
+        return None
+
+    round_number = last_round.round_number + 1
+    new_round = TournamentRound(
+        tournament_id=tournament.id, round_number=round_number, stage="playoff"
+    )
+    session.add(new_round)
+    await session.flush()
+    for id_a, id_b in advance_pairs(winners):
+        session.add(TournamentMatch(
+            round_id=new_round.id,
+            team_a_participant_id=id_a,
+            team_b_participant_id=id_b,
+        ))
+    tournament.current_round = round_number
+    await session.flush()
+    return new_round
+
+
 async def start_tournament(session, tournament_id, rng):
     """Activate a tournament and create its first round(s).
 
@@ -692,14 +753,14 @@ async def advance_round(session, tournament_id, rng):
         raise ValueError("Tournament not found.")
     if tournament.status != "active":
         raise ValueError(f"'{tournament.name}' is not active.")
-    if tournament.format != "swiss":
+    if tournament.format != "swiss" and not await _playoff_rounds(session, tournament_id):
         raise ValueError(
             "next_round is for Swiss tournaments — this one's schedule is fixed; "
             "use /tournament finish to end it."
         )
 
     round_ = await _current_round(session, tournament)
-    matches = await _round_matches(session, round_.id)
+    matches = await _round_matches(session, round_.id) if round_ else []
     unreported = [m for m in matches if not m.is_bye and m.team_a_wins is None]
     if unreported:
         raise ValueError(
@@ -707,7 +768,17 @@ async def advance_round(session, tournament_id, rng):
             "still need results."
         )
 
+    playoff_rounds = await _playoff_rounds(session, tournament_id)
+    if playoff_rounds:
+        return await _advance_playoff(session, tournament, playoff_rounds[-1])
+
     if tournament.current_round >= tournament.total_rounds:
+        if tournament.cut_to:
+            standings = await get_standings_data(session, tournament_id)
+            raise SwissComplete(
+                tournament.cut_to,
+                len([p for p in standings if p.status == "paid"]),
+            )
         tournament.status = "completed"
         await session.flush()
         return None

@@ -187,3 +187,57 @@ async def test_a_swiss_result_still_moves_records(session):
     before = winner.points
     await set_result(session, match.id, 2, 0)
     assert winner.points > before
+
+
+from services.tournament_service import SwissComplete, advance_round
+import random
+
+
+async def _report_all(session, round_id):
+    """Report 2-0 to team A for every playable match in a round."""
+    from services.tournament_service import set_result
+    matches = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == round_id)
+    )).scalars().all()
+    for m in matches:
+        if not m.is_bye:
+            await set_result(session, m.id, 2, 0)
+    return matches
+
+
+@pytest.mark.asyncio
+async def test_advance_round_pairs_the_bracket_winners(session):
+    t = await _swiss_done(session, cut_to=4, teams=6)
+    first = await start_playoff(session, t.id)
+    await _report_all(session, first.id)
+
+    second = await advance_round(session, t.id, random.Random(1))
+    assert second.stage == "playoff"
+    matches = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == second.id)
+    )).scalars().all()
+    assert len(matches) == 1                     # the final
+
+
+@pytest.mark.asyncio
+async def test_the_final_completes_the_tournament(session):
+    t = await _swiss_done(session, cut_to=4, teams=6)
+    first = await start_playoff(session, t.id)
+    await _report_all(session, first.id)
+    final = await advance_round(session, t.id, random.Random(1))
+    await _report_all(session, final.id)
+
+    assert await advance_round(session, t.id, random.Random(1)) is None
+    assert t.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_end_of_swiss_with_a_cut_pending_asks_instead_of_completing(session):
+    """Completing is irreversible and one call away; with a cut declared the
+    caller must be given the choice rather than have it made for them."""
+    t = await _swiss_done(session, cut_to=4, teams=6)
+    with pytest.raises(SwissComplete) as exc:
+        await advance_round(session, t.id, random.Random(1))
+    assert exc.value.cut_to == 4
+    assert exc.value.eligible == 6
+    assert t.status == "active"                  # NOT completed
