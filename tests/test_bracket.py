@@ -41,7 +41,7 @@ def test_advance_pairs_rejects_an_odd_number_of_winners():
         advance_pairs(["a", "b", "c"])
 
 
-@pytest.mark.parametrize("size", [4, 8, 16])
+@pytest.mark.parametrize("size", range(4, 17))
 def test_seeds_one_and_two_meet_only_in_the_final(size):
     """The property that makes seeding worth earning. Simulate the higher seed
     always winning and assert 1 and 2 first meet in the LAST round.
@@ -49,15 +49,22 @@ def test_seeds_one_and_two_meet_only_in_the_final(size):
     This is the test that catches a plausible-looking but wrong pairing order:
     pairings sorted by top seed read more naturally and put 1 and 2 together
     in the semifinal instead.
+
+    Every size the spec allows, not just the powers of two: the non-power
+    sizes are the ones where byes shift who meets whom, so they are where a
+    bad seat order would actually surface.
     """
     pairs = build_bracket(size)
-    total_rounds = size.bit_length() - 1
+    # Rounds are set by the FULL bracket, not the entry count: a top 6 plays
+    # three rounds (two of its first-round seats are byes), not two.
+    total_rounds = bracket_size(size).bit_length() - 1
     met_in = None
     for rnd in range(1, total_rounds + 1):
         for a, b in pairs:
             if {a, b} == {1, 2}:
                 met_in = rnd
-        winners = [min(a, b) for a, b in pairs]
+        # `b is None` is a bye, so `a` walks through.
+        winners = [a if b is None else min(a, b) for a, b in pairs]
         if len(winners) > 1:
             pairs = advance_pairs(winners)
     assert met_in == total_rounds
@@ -87,3 +94,16 @@ def test_final_placement_ranks_still_live_teams_above_eliminated_ones():
     rounds = [[(4, 1), (3, 2)]]
     seeds = {1: 1, 2: 2, 3: 3, 4: 4}
     assert final_placement(rounds, seeds) == [3, 4, 1, 2]
+
+
+def test_final_placement_never_lists_a_team_twice():
+    """A corrected result can leave one team recorded as the loser of two
+    rounds (e.g. an admin rewrites a semifinal after the final was played).
+    Placement is a finishing ORDER, so listing that team twice hands the same
+    captain two prize slots when compute_allocations walks it."""
+    # A lost round 1 to B and round 2 to C -- contradictory, but reachable.
+    rounds = [[("B", "A")], [("C", "A")]]
+    seeds = {"A": 1, "B": 2, "C": 3}
+    order = final_placement(rounds, seeds)
+    assert order.count("A") == 1
+    assert sorted(order) == ["A", "B", "C"]

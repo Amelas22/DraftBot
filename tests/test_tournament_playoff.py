@@ -441,3 +441,174 @@ async def test_payout_allocations_follow_bracket_placement_not_swiss_order(sessi
     ranked = [(p.captain_user_id, p.team_name) for p in placement if p.status == "paid"]
     allocations = compute_allocations(1000, "winner_take_all", ranked)
     assert allocations == [(1, placement[0].captain_user_id, placement[0].team_name, 1000)]
+
+
+async def _played_swiss(session, cut_to=4):
+    """A COMPLETE 4-team round-robin swiss with real, reported matches.
+
+    Rigged (found by brute force over the 64 possible result sets) so that
+    three teams tie on 3 points and OMW% -- the first tiebreak -- is what
+    separates them. That is what makes the standings order sensitive to which
+    matches are in the opponent graph.
+    """
+    from services.tournament_service import set_result
+    t = await create_tournament(session, "g_omw", "OMW Test", 3, cut_to=cut_to)
+    teams = {}
+    for name in ("AA", "BB", "CC", "DD"):
+        participant, _ = await register_team(session, t.id, name, f"cap{name}")
+        participant.status = "paid"
+        teams[name] = participant
+    t.status = "active"
+    schedule = [
+        [("AA", "BB", 2, 0), ("CC", "DD", 2, 0)],
+        [("AA", "CC", 2, 0), ("BB", "DD", 0, 2)],
+        [("AA", "DD", 2, 0), ("BB", "CC", 2, 0)],
+    ]
+    for number, pairs in enumerate(schedule, start=1):
+        rnd = TournamentRound(tournament_id=t.id, round_number=number, stage="swiss")
+        session.add(rnd)
+        await session.flush()
+        for name_a, name_b, wins_a, wins_b in pairs:
+            match = TournamentMatch(
+                round_id=rnd.id,
+                team_a_participant_id=teams[name_a].id,
+                team_b_participant_id=teams[name_b].id,
+            )
+            session.add(match)
+            await session.flush()
+            await set_result(session, match.id, wins_a, wins_b)
+    t.current_round = 3
+    await session.flush()
+    return t, teams
+
+
+@pytest.mark.asyncio
+async def test_the_bracket_does_not_reorder_frozen_standings(session):
+    """The freeze covers OMW%, not just records. OMW% is the FIRST tiebreak and
+    is computed from the opponent graph, so a bracket pairing in that graph
+    reorders tied teams the instant the bracket is built -- before a single
+    playoff game is played -- and the standings message then contradicts the
+    seeds just announced."""
+    from services.tournament_service import get_standings_data, set_result
+    t, _ = await _played_swiss(session, cut_to=4)
+
+    before = [p.team_name for p in await get_standings_data(session, t.id)]
+    # The premise: without a points tie there is nothing for OMW% to reorder.
+    assert len({p.points for p in await get_standings_data(session, t.id)}) < 4
+
+    await start_playoff(session, t.id)
+    after = [p.team_name for p in await get_standings_data(session, t.id)]
+    assert after == before
+
+    # And it still holds once bracket results exist.
+    first = (await session.execute(
+        select(TournamentRound).where(TournamentRound.tournament_id == t.id)
+        .where(TournamentRound.stage == "playoff")
+    )).scalars().first()
+    for m in (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == first.id)
+    )).scalars().all():
+        await set_result(session, m.id, 2, 0)
+    assert [p.team_name for p in await get_standings_data(session, t.id)] == before
+
+
+@pytest.mark.asyncio
+async def test_start_playoff_refuses_while_a_swiss_match_is_unreported(session):
+    """advance_round refuses to move on with results outstanding; the explicit
+    command must too. Otherwise seeds -- and the money that follows them -- are
+    stamped from partial standings."""
+    t = await _swiss_done(session, cut_to=4, teams=6)
+    rounds = (await session.execute(
+        select(TournamentRound).where(TournamentRound.tournament_id == t.id)
+        .order_by(TournamentRound.round_number)
+    )).scalars().all()
+    parts = await _participants(session, t.id)
+    session.add(TournamentMatch(
+        round_id=rounds[-1].id,
+        team_a_participant_id=parts[0].id,
+        team_b_participant_id=parts[1].id,
+    ))
+    await session.flush()
+
+    with pytest.raises(ValueError, match="need results"):
+        await start_playoff(session, t.id)
+
+
+@pytest.mark.asyncio
+async def test_start_playoff_refuses_a_non_swiss_format(session):
+    """A cut is defined off swiss standings. round_robin and manual set
+    current_round = total_rounds at START, so the "swiss isn't finished" gate
+    passes immediately -- /tournament playoff typed right after /tournament
+    start would seed a bracket over a field that has played nothing."""
+    t = await _swiss_done(session, cut_to=4, teams=6)
+    t.format = "round_robin"
+    await session.flush()
+
+    with pytest.raises(ValueError, match="Swiss standings"):
+        await start_playoff(session, t.id)
+
+
+@pytest.mark.asyncio
+async def test_a_decided_playoff_round_cannot_be_rewritten(session):
+    """A bracket round closes the moment the next one is paired: its winners
+    are already playing on. Reachable via record_linked_result, which writes to
+    any match id -- the "a draft finishes after an admin ruling" case. Without
+    the guard, correcting an advanced semifinal makes its loser champion
+    without playing the final."""
+    from services.tournament_service import get_final_placement, set_result
+    t = await _swiss_done(session, cut_to=4, teams=4)
+    first = await start_playoff(session, t.id)
+    matches = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == first.id)
+        .order_by(TournamentMatch.id)
+    )).scalars().all()
+    await set_result(session, matches[0].id, 2, 0)      # seed 1 beats seed 4
+    await set_result(session, matches[1].id, 2, 0)      # seed 2 beats seed 3
+    final = await advance_round(session, t.id, random.Random(1))
+    fm = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == final.id)
+    )).scalars().first()
+    await set_result(session, fm.id, 2, 0)              # seed 1 wins it all
+    assert [p.seed for p in await get_final_placement(session, t.id)] == [1, 2, 3, 4]
+
+    with pytest.raises(ValueError, match="already decided"):
+        await set_result(session, matches[0].id, 0, 2)  # "actually, 4 beat 1"
+
+    # The bracket -- and the payout order read off it -- is unchanged.
+    assert [p.seed for p in await get_final_placement(session, t.id)] == [1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_the_latest_playoff_round_can_still_be_corrected(session):
+    """The guard closes DECIDED rounds only: the round currently being played
+    has no later round depending on it, so an admin typo there must still be
+    fixable."""
+    from services.tournament_service import set_result
+    t = await _swiss_done(session, cut_to=4, teams=4)
+    first = await start_playoff(session, t.id)
+    match = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == first.id)
+        .order_by(TournamentMatch.id)
+    )).scalars().first()
+    await set_result(session, match.id, 2, 0)
+    await set_result(session, match.id, 0, 2)           # corrected, no next round yet
+    assert (match.team_a_wins, match.team_b_wins) == (0, 2)
+
+
+@pytest.mark.asyncio
+async def test_a_bracket_bye_is_not_described_as_an_auto_win(session):
+    """A swiss bye is a result (points awarded); a bracket bye is the absence
+    of a match. The refusal must not tell an organizer the bracket bye was
+    'scored automatically' -- nothing is scored there."""
+    from services.tournament_service import set_result
+    t = await _swiss_done(session, cut_to=6, teams=6)
+    round_ = await start_playoff(session, t.id)
+    bye = (await session.execute(
+        select(TournamentMatch).where(TournamentMatch.round_id == round_.id)
+        .where(TournamentMatch.is_bye.is_(True))
+    )).scalars().first()
+
+    with pytest.raises(ValueError) as exc:
+        await set_result(session, bye.id, 2, 0)
+    assert "scored automatically" not in str(exc.value)
+    assert "no match to report" in str(exc.value)

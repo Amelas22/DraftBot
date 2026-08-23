@@ -200,6 +200,7 @@ def _playoff_prompt_interaction(is_owner=False):
     interaction.user.guild_permissions.manage_roles = False
     interaction.guild.id = 123
     interaction.response.defer = AsyncMock()
+    interaction.response.edit_message = AsyncMock()
     interaction.response.send_message = AsyncMock()
     interaction.followup.send = AsyncMock()
     return interaction
@@ -254,3 +255,86 @@ async def test_finish_button_surfaces_a_value_error_instead_of_dying_silently():
     msg = interaction.followup.send.call_args.args[0]
     assert msg.startswith("❌")
     assert interaction.followup.send.call_args.kwargs.get("ephemeral") is True
+
+
+class _NullSession:
+    """Stands in for db_session(): an async context manager yielding a mock."""
+    async def __aenter__(self):
+        return MagicMock()
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("button_name,other_name", [
+    ("start_playoff_button", "finish_button"),
+    ("finish_button", "start_playoff_button"),
+])
+async def test_playoff_prompt_closes_before_doing_the_slow_work(button_name, other_name):
+    """The prompt is public and its work is slow -- starting the bracket posts a
+    pairing message, a thread and a control message per match. While that ran,
+    BOTH buttons stayed dispatchable: a manager who saw nothing happen (or a
+    second one answering the same prompt) could hit "Finish now" and
+    irreversibly complete the tournament mid-bracket. Each handler must disable
+    both items and say what was taken BEFORE any of that work starts."""
+    from cogs.tournament_commands import PlayoffPromptView
+
+    seen = {}
+
+    async def _record(*_a, **_k):
+        seen["disabled"] = [item.disabled for item in view.children]
+        return MagicMock()      # a TournamentRound / champion stand-in
+
+    cog = MagicMock()
+    cog._post_round_messages = AsyncMock(side_effect=_record)
+
+    with patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
+         patch("cogs.tournament_commands.start_playoff", AsyncMock(side_effect=_record)), \
+         patch("cogs.tournament_commands.finish_tournament", AsyncMock(side_effect=_record)), \
+         patch("helpers.permissions.get_config", return_value={}):
+        view = PlayoffPromptView(cog, tournament_id=1, cut_to=4)
+        role = MagicMock()
+        role.name = "Bot Manager"
+        interaction = _playoff_prompt_interaction(is_owner=False)
+        interaction.user.roles = [role]
+
+        await getattr(view, button_name).callback(interaction)
+
+    # The prompt itself was rewritten, carrying the disabled view.
+    interaction.response.edit_message.assert_awaited_once()
+    assert interaction.response.edit_message.call_args.kwargs["view"] is view
+    # ...and by the time the service call ran, neither option was clickable.
+    assert seen["disabled"] == [True, True], (
+        f"{other_name} was still live while {button_name} was working")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("eligible,expected", [(1, False), (3, True)])
+async def test_short_field_only_suggests_a_playoff_size_the_option_accepts(eligible, expected):
+    """`top:` is min_value=2, so `/tournament playoff top:1` is a command
+    Discord refuses to send. With too few teams for the declared cut, the
+    remedy offered must be one the TO can actually type."""
+    from cogs.tournament_commands import TournamentCog
+    from services.tournament_service import SwissComplete
+
+    cog = TournamentCog.__new__(TournamentCog)
+    tournament = MagicMock()
+    tournament.id, tournament.name = 1, "Cup"
+
+    ctx = MagicMock()
+    ctx.guild.id = 123
+    ctx.defer = AsyncMock()
+    ctx.followup.send = AsyncMock()
+
+    with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
+         patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
+         patch("cogs.tournament_commands.get_active_tournament",
+               AsyncMock(return_value=tournament)), \
+         patch("cogs.tournament_commands.advance_round",
+               AsyncMock(side_effect=SwissComplete(4, eligible))):
+        await TournamentCog.next_round.callback(cog, ctx)
+
+    message = ctx.followup.send.call_args.args[0]
+    assert f"Only **{eligible}**" in message           # the warning still fires
+    assert (f"top:{eligible}" in message) is expected

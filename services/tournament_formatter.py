@@ -17,13 +17,21 @@ from services.tournament_service import (
 )
 
 
+def _round_line(tournament):
+    """The "**Round:** …" line. Playoff rounds are numbered past total_rounds,
+    so the swiss "N of M" form reads "Round: 4/3" once the bracket starts."""
+    if tournament.current_round > tournament.total_rounds:
+        return f"**Round:** Playoff round {tournament.current_round - tournament.total_rounds}"
+    return f"**Round:** {tournament.current_round}/{tournament.total_rounds}"
+
+
 def create_standings_embed(tournament, participants):
     """Build the standings embed for a tournament (pure)."""
     embed = discord.Embed(
         title=f"🏆 {tournament.name} — Standings",
         description=(
             f"**Status:** {tournament.status.title()}\n"
-            f"**Round:** {tournament.current_round}/{tournament.total_rounds}"
+            f"{_round_line(tournament)}"
         ),
         color=discord.Color.gold(),
     )

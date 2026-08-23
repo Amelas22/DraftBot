@@ -419,6 +419,14 @@ async def start_playoff(session, tournament_id, size=None):
         raise ValueError("Tournament not found.")
     if tournament.status != "active":
         raise ValueError(f"'{tournament.name}' is not active.")
+    # A cut is defined off swiss standings. The all-open formats stamp
+    # current_round = total_rounds at START, so without this a cut could be
+    # made over a field that has not played a single match.
+    if tournament.format != "swiss":
+        raise ValueError(
+            f"A cut is made off Swiss standings — '{tournament.name}' is a "
+            f"{tournament.format} tournament. Use /tournament finish to end it."
+        )
 
     size = size or tournament.cut_to
     if not size:
@@ -434,6 +442,16 @@ async def start_playoff(session, tournament_id, size=None):
         )
     if await _playoff_rounds(session, tournament_id):
         raise ValueError("The bracket has already been built.")
+    # advance_round refuses to move on with results outstanding; the explicit
+    # command must too, or seeds get stamped from partial standings and the
+    # money follows them. Checked across every round, not just the last: the
+    # seeds come from the whole swiss record.
+    unreported = await count_unreported_matches(session, tournament_id)
+    if unreported:
+        raise ValueError(
+            f"{unreported} match(es) still need results — seeds must come from "
+            "final standings."
+        )
 
     standings = await get_standings_data(session, tournament_id)
     eligible = [p for p in standings if p.status == "paid"]
@@ -679,16 +697,36 @@ async def set_result(session, match_id, team_a_wins, team_b_wins):
     match = await session.get(TournamentMatch, match_id)
     if match is None:
         raise ValueError("Match not found.")
+    round_ = await session.get(TournamentRound, match.round_id)
+    is_playoff = round_ is not None and round_.stage == "playoff"
     if match.is_bye:
-        raise ValueError("Byes are scored automatically and cannot be reported.")
+        # A swiss bye is a RESULT (points awarded); a bracket bye is the
+        # absence of a match. Neither can be reported, but saying "scored
+        # automatically" about a bracket bye tells the organizer the opposite
+        # of what the code does — nothing is scored there.
+        raise ValueError(
+            "That team has a bye this round — there is no match to report."
+            if is_playoff
+            else "Byes are scored automatically and cannot be reported."
+        )
+    if is_playoff:
+        # A bracket round closes the moment the next one is paired: its winners
+        # are already playing on. Rewriting it would recompute placement from a
+        # contradictory bracket — the round-1 loser could end up "champion", and
+        # a team that lost twice could be paid two prize slots.
+        latest = (await _playoff_rounds(session, round_.tournament_id))[-1]
+        if latest.id != round_.id:
+            raise ValueError(
+                f"Playoff round {round_.round_number} is already decided; its "
+                "result cannot be changed once a later bracket round exists."
+            )
 
     part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
     part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
 
     # Swiss records freeze at the cut: a playoff result is recorded on the
     # match and drives the bracket, but never moves points/W-L/OMW%.
-    round_ = await session.get(TournamentRound, match.round_id)
-    if round_ is not None and round_.stage != "playoff":
+    if round_ is not None and not is_playoff:
         if match.team_a_wins is not None:
             _apply_result(part_a, part_b, match.team_a_wins, match.team_b_wins, sign=-1)
         _apply_result(part_a, part_b, team_a_wins, team_b_wins, sign=1)
@@ -824,6 +862,11 @@ async def get_standings_data(session, tournament_id):
 
     OMW% (opponents' match-win %, byes excluded) needs the full match graph, so
     we load participants and matches and rank in memory (tournaments are small).
+
+    Swiss rounds only. Records freeze at the cut, but OMW% is the FIRST
+    tiebreak and is computed from the opponent graph, so letting bracket
+    pairings into it would reorder two tied teams the instant the bracket is
+    paired — the standings would contradict the seeds just announced.
     """
     participants = (await session.execute(
         select(TournamentParticipant).where(
@@ -834,6 +877,7 @@ async def get_standings_data(session, tournament_id):
         select(TournamentMatch)
         .join(TournamentRound, TournamentMatch.round_id == TournamentRound.id)
         .where(TournamentRound.tournament_id == tournament_id)
+        .where(TournamentRound.stage != "playoff")
     )).scalars().all()
     return rank_standings(participants, matches)
 

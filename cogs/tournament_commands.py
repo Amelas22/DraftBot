@@ -221,6 +221,29 @@ class PlayoffPromptView(discord.ui.View):
         self.start_playoff_button.disabled = disabled
         self.start_playoff_button.label = f"Start top-{cut_to} playoff"
 
+    async def _answer(self, interaction, taken):
+        """Close the prompt before doing any slow work.
+
+        Starting the bracket posts a whole round — pairing message, thread and
+        control message per match, seconds of Discord I/O. While that runs both
+        buttons stay clickable on a PUBLIC message, so a manager who sees
+        nothing happen (or a second one answering the same prompt) can hit
+        "Finish now" and irreversibly complete the tournament mid-bracket —
+        the exact accident this prompt exists to prevent. Disabling the items
+        and editing the message also acknowledges the interaction, so the
+        handlers use followup from here on.
+        """
+        for item in self.children:
+            item.disabled = True
+        try:
+            await interaction.response.edit_message(content=taken, view=self)
+        except Exception as e:
+            logger.warning(f"[PlayoffPrompt] could not close the prompt: {e}")
+            try:
+                await interaction.response.defer()
+            except Exception:
+                pass
+
     # The prompt is posted publicly (any bot manager should be able to answer
     # it, not only the one who ran next_round) — bot_manager_button is what
     # keeps a non-manager from clicking either option, since finish_button
@@ -228,7 +251,7 @@ class PlayoffPromptView(discord.ui.View):
     @bot_manager_button
     @ui_button(label="Start playoff", style=discord.ButtonStyle.success)
     async def start_playoff_button(self, button, interaction):
-        await interaction.response.defer()
+        await self._answer(interaction, f"⏳ Cutting to the top {self.cut_to}…")
         try:
             async with db_session() as session:
                 new_round = await start_playoff(session, self.tournament_id)
@@ -244,7 +267,7 @@ class PlayoffPromptView(discord.ui.View):
     @bot_manager_button
     @ui_button(label="Finish now — crown the Swiss leader", style=discord.ButtonStyle.secondary)
     async def finish_button(self, button, interaction):
-        await interaction.response.defer()
+        await self._answer(interaction, "⏳ Finishing now — crowning the Swiss leader…")
         try:
             async with db_session() as session:
                 champion = await finish_tournament(session, self.tournament_id)
@@ -946,10 +969,16 @@ class TournamentCog(commands.Cog):
                     # chooses rather than having the choice made for them.
                     short = done.eligible < done.cut_to
                     view = PlayoffPromptView(self, tournament_id, done.cut_to, disabled=short)
+                    # `top:` has min_value=2, so suggesting top:1 (or top:0)
+                    # hands the TO a command Discord will refuse to send.
+                    fallback = (
+                        f" Use `/tournament playoff top:{done.eligible}` or a smaller size."
+                        if done.eligible >= 2
+                        else " Finish now to crown the Swiss leader."
+                    )
                     note = (
                         f"\n\n⚠️ Only **{done.eligible}** eligible team(s) — not enough for a "
-                        f"top {done.cut_to}. Use `/tournament playoff top:{done.eligible}` "
-                        f"or a smaller size."
+                        f"top {done.cut_to}.{fallback}"
                     ) if short else ""
                     await ctx.followup.send(
                         f"Swiss is over for **{tournament_name}**. Cut to top "
@@ -1173,11 +1202,18 @@ class TournamentCog(commands.Cog):
             matches = (await session.execute(
                 select(TournamentMatch).where(TournamentMatch.round_id == round_id)
             )).scalars().all()
+            # A swiss bye is a result (points are awarded); a bracket bye is
+            # the absence of a match — the seed simply sits this round out and
+            # scores nothing, so it must not be announced as an "auto win".
+            round_ = await session.get(TournamentRound, round_id)
+            bye_note = ("— bye, advances (no match, no points)"
+                        if round_ is not None and round_.stage == "playoff"
+                        else "— BYE (auto win)")
             rows = []
             for m in matches:
                 part_a = await session.get(TournamentParticipant, m.team_a_participant_id)
                 if m.is_bye:
-                    rows.append((m.id, f"• **{part_a.team_name}** — BYE (auto win)", None))
+                    rows.append((m.id, f"• **{part_a.team_name}** {bye_note}", None))
                 else:
                     part_b = await session.get(TournamentParticipant, m.team_b_participant_id)
                     if m.team_a_wins is None:

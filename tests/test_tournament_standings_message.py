@@ -81,6 +81,26 @@ def test_standings_embed_lists_teams_in_given_order():
     assert "3" in body  # points shown
 
 
+def test_standings_embed_labels_playoff_rounds_instead_of_counting_past_the_end():
+    """Playoff rounds are numbered past total_rounds (round N+1 is the first
+    bracket round), so the swiss "N of M" form renders "Round: 4/3" once the
+    cut is made."""
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 5           # second bracket round
+    embed = create_standings_embed(tournament, [])
+    assert "5/3" not in embed.description
+    assert "Playoff round 2" in embed.description
+
+
+def test_standings_embed_still_counts_swiss_rounds_normally():
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 2
+    embed = create_standings_embed(tournament, [])
+    assert "**Round:** 2/3" in embed.description
+
+
 def test_standings_embed_handles_no_participants():
     tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
     tournament.status = "registration"

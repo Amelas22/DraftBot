@@ -81,8 +81,24 @@ def final_placement(rounds: list[list[tuple[Any, Any | None]]], seeds: dict[Any,
         return []
     eliminated = {loser for rnd in rounds for _, loser in rnd if loser is not None}
     entrants = {winner for rnd in rounds for winner, _ in rnd} | eliminated
-    order = sorted(entrants - eliminated, key=_seed_key)
+    order: list[Any] = []
+    placed: set[Any] = set()
+
+    def _place(pids: list[Any]) -> None:
+        """Append these, skipping anyone already placed.
+
+        A corrected result can leave one team recorded as the loser of two
+        different rounds. Placing it once — at the deepest round it lost,
+        since we walk backwards — keeps this a finishing ORDER; without the
+        skip a team appears twice and the payout pays it two prize slots.
+        """
+        for pid in pids:
+            if pid in placed:
+                continue
+            placed.add(pid)
+            order.append(pid)
+
+    _place(sorted(entrants - eliminated, key=_seed_key))
     for rnd in reversed(rounds):
-        losers: list[Any] = sorted((loser for _, loser in rnd if loser is not None), key=_seed_key)
-        order.extend(losers)
+        _place(sorted((loser for _, loser in rnd if loser is not None), key=_seed_key))
     return order

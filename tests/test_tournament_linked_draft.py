@@ -627,3 +627,42 @@ async def test_open_rooms_opens_only_roomless_matches_and_is_idempotent(test_db)
             assert stored.thread_id is not None
             # Each match's line was edited to carry its room link.
         assert message.edit.await_count == 4  # 2 matches x 2 opening runs
+
+
+# ---- a bracket bye is not a swiss bye ---------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_bracket_bye_is_not_posted_as_an_auto_win(test_db):
+    """A swiss bye is a RESULT: _award_bye grants points and a match win, so
+    "BYE (auto win)" is accurate there. A bracket bye is the absence of a
+    match -- swiss records are frozen and nothing is scored -- so posting it
+    as an auto win tells organizers the opposite of what the code does."""
+    from cogs.tournament_commands import TournamentCog
+    from models.tournament import TournamentMatch, TournamentRound
+
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "Cup", 3, cut_to=4)
+        await session.commit()
+        alpha, _ = await register_team(session, tournament.id, "Alpha", "1")
+        await session.commit()
+        round_ = TournamentRound(tournament_id=tournament.id, round_number=4,
+                                 stage="playoff")
+        session.add(round_)
+        await session.flush()
+        session.add(TournamentMatch(round_id=round_.id,
+                                    team_a_participant_id=alpha.id,
+                                    team_b_participant_id=None, is_bye=True))
+        await session.commit()
+        round_id = round_.id
+
+    cog = TournamentCog.__new__(TournamentCog)
+    channel = MagicMock()
+    channel.send = AsyncMock(return_value=MagicMock())
+
+    with patch("cogs.tournament_commands.db_session", _fake_db_session(test_db)):
+        await cog._post_round_messages(channel, round_id, 4)
+
+    texts = [c.args[0] for c in channel.send.call_args_list]
+    bye_line = next(t for t in texts if "Alpha" in t)
+    assert "auto win" not in bye_line
+    assert "no match" in bye_line
