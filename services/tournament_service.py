@@ -76,14 +76,16 @@ async def get_latest_completed_tournament(session, guild_id):
 
 
 async def create_tournament(session, guild_id, name, total_rounds, format="swiss", entry_fee=0,
-                            payout_structure="winner_take_all"):
+                            payout_structure="winner_take_all", cut_to=None):
     """Create a tournament in registration status.
 
     ``format`` is 'swiss', 'round_robin', or 'manual'. For the all-open formats
     total_rounds is set at start (derived from the schedule), so callers may
     pass 0. ``entry_fee`` is the per-team escrow in tix (0 = free); ``payout_structure``
-    is how the pool splits at payout. Raises ValueError if the guild already has a
-    registration/active tournament (one active per guild keeps other commands argument-free).
+    is how the pool splits at payout. ``cut_to`` declares a top-N single-elimination
+    playoff to follow Swiss (None = no cut, i.e. today's behavior). Raises ValueError
+    if the guild already has a registration/active tournament (one active per guild
+    keeps other commands argument-free).
     """
     if format not in ("swiss",) + ALL_OPEN_FORMATS:
         raise ValueError(f"Unknown tournament format: {format}")
@@ -96,6 +98,7 @@ async def create_tournament(session, guild_id, name, total_rounds, format="swiss
     tournament = Tournament(
         guild_id=str(guild_id), name=name, total_rounds=total_rounds, format=format,
         entry_fee=max(0, int(entry_fee or 0)), payout_structure=payout_structure,
+        cut_to=cut_to or None,
     )
     session.add(tournament)
     await session.flush()

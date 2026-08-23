@@ -106,6 +106,7 @@ async def test_create_posts_the_board_even_if_the_confirmation_reply_fails(test_
     with patch("cogs.tournament_commands.tournament_enabled", return_value=True):
         await TournamentCog.create.callback(
             cog, ctx, name="Cup", format="swiss", rounds=3, entry_fee=0, payout="winner_take_all",
+            cut=None,
         )
 
     ctx.channel.send.assert_awaited_once()
@@ -180,3 +181,9 @@ def test_roster_commands_are_open_to_captains():
 
     assert is_bot_manager not in TournamentCog.add_teammate_cmd.checks
     assert is_bot_manager not in TournamentCog.remove_teammate_cmd.checks
+
+
+def test_playoff_command_is_registered():
+    from cogs.tournament_commands import TournamentCog
+    names = {c.name for c in TournamentCog.tournament.subcommands}
+    assert "playoff" in names

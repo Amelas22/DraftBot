@@ -17,6 +17,7 @@ from helpers.money_gate import gate_serve, linked_username
 from helpers.display_names import get_display_name
 from helpers.permissions import has_bot_manager_role, is_bot_manager
 from helpers.pin_helpers import safe_pin
+from helpers.utils import ui_button
 from match_control_view import (
     MatchControlView,
     create_match_room,
@@ -52,6 +53,8 @@ from services.tournament_service import (
     register_team,
     remove_teammate,
     set_result,
+    start_playoff,
+    SwissComplete,
 )
 from services.mtgo_tradebot_client import EVENT_TICKET
 from services import tournament_escrow_service as escrow
@@ -203,6 +206,46 @@ class PayoutConfirmView(discord.ui.View):
                 pass
 
 
+class PlayoffPromptView(discord.ui.View):
+    """End-of-swiss choice: start the bracket, or finish now.
+
+    Times out like any view, which is why /tournament playoff exists as an
+    explicit path — a TO returning later must not be stranded by a dead prompt.
+    """
+
+    def __init__(self, cog, tournament_id, cut_to, disabled=False):
+        super().__init__(timeout=900)
+        self.cog = cog
+        self.tournament_id = tournament_id
+        self.cut_to = cut_to
+        self.start_playoff_button.disabled = disabled
+        self.start_playoff_button.label = f"Start top-{cut_to} playoff"
+
+    @ui_button(label="Start playoff", style=discord.ButtonStyle.success)
+    async def start_playoff_button(self, button, interaction):
+        await interaction.response.defer()
+        try:
+            async with db_session() as session:
+                new_round = await start_playoff(session, self.tournament_id)
+                round_id, round_number = new_round.id, new_round.round_number
+        except ValueError as e:
+            await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            return
+        play = self.cog._destination(interaction, PAIRINGS.setting)
+        await self.cog._post_round_messages(play, round_id, round_number)
+        await interaction.followup.send(f"🏆 Top {self.cut_to} playoff started.")
+        self.stop()
+
+    @ui_button(label="Finish now — crown the Swiss leader", style=discord.ButtonStyle.secondary)
+    async def finish_button(self, button, interaction):
+        await interaction.response.defer()
+        async with db_session() as session:
+            champion = await finish_tournament(session, self.tournament_id)
+        name = champion.team_name if champion else "nobody"
+        await interaction.followup.send(f"🏁 Complete! Champion: **{name}** 🏆")
+        self.stop()
+
+
 class TournamentCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -311,6 +354,10 @@ class TournamentCog(commands.Cog):
             str, "Prize-pool split for entry-fee tournaments",
             choices=list(escrow.PAYOUT_CHOICES), default="winner_take_all"
         ),
+        cut: discord.Option(
+            int, "Cut to a top-N single-elimination playoff after Swiss (blank = no cut)",
+            min_value=2, max_value=32, required=False, default=None,
+        ),
     ):
         if not await self._check_enabled(ctx):
             return
@@ -329,7 +376,7 @@ class TournamentCog(commands.Cog):
             async with db_session() as session:
                 tournament = await create_tournament(
                     session, ctx.guild.id, name, total_rounds, format=format,
-                    entry_fee=entry_fee, payout_structure=payout
+                    entry_fee=entry_fee, payout_structure=payout, cut_to=cut
                 )
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
@@ -882,7 +929,22 @@ class TournamentCog(commands.Cog):
                     return
                 tournament_id = tournament.id
                 tournament_name = tournament.name
-                new_round = await advance_round(session, tournament.id, random.Random())
+                try:
+                    new_round = await advance_round(session, tournament.id, random.Random())
+                except SwissComplete as done:
+                    # Completing is irreversible and one call away, so the TO
+                    # chooses rather than having the choice made for them.
+                    short = done.eligible < done.cut_to
+                    view = PlayoffPromptView(self, tournament_id, done.cut_to, disabled=short)
+                    note = (
+                        f"\n\n⚠️ Only **{done.eligible}** eligible team(s) — not enough for a "
+                        f"top {done.cut_to}. Use `/tournament playoff top:{done.eligible}` "
+                        f"or a smaller size."
+                    ) if short else ""
+                    await ctx.followup.send(
+                        f"Swiss is over for **{tournament_name}**. Cut to top "
+                        f"**{done.cut_to}**?{note}", view=view)
+                    return
                 if new_round is None:
                     # Finishing order, not standings: after a bracket the
                     # champion is whoever won the final, not the swiss leader.
@@ -910,6 +972,38 @@ class TournamentCog(commands.Cog):
             await update_standings_message(self.bot, tournament_id)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
+
+    @tournament.command(name="playoff",
+                        description="Admin: cut to a top-N single-elimination bracket")
+    @has_bot_manager_role()
+    async def playoff(
+        self,
+        ctx,
+        top: discord.Option(
+            int, "Cut size (defaults to the size declared at creation)",
+            min_value=2, max_value=32, required=False, default=None,
+        ),
+    ):
+        if not await self._check_enabled(ctx):
+            return
+        await ctx.defer()
+        try:
+            async with db_session() as session:
+                tournament = await get_active_tournament(session, ctx.guild.id)
+                if tournament is None:
+                    await ctx.followup.send("There is no active tournament.", ephemeral=True)
+                    return
+                tournament_id = tournament.id
+                new_round = await start_playoff(session, tournament.id, top)
+                round_id, round_number = new_round.id, new_round.round_number
+                size = top or tournament.cut_to
+        except ValueError as e:
+            await ctx.followup.send(f"❌ {e}", ephemeral=True)
+            return
+        play = self._destination(ctx, PAIRINGS.setting)
+        await self._post_round_messages(play, round_id, round_number)
+        await ctx.followup.send(f"🏆 Top {size} playoff started — bracket posted in {play.mention}.")
+        await update_standings_message(self.bot, tournament_id)
 
     @tournament.command(name="open_rooms",
                         description="Admin: open match rooms for a round that was posted without them")
