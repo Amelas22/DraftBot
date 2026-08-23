@@ -154,22 +154,23 @@ async def _empty_history(limit=None):
         yield None
 
 
-def _channel(name):
+def _channel(name, cid=7000):
     ch = MagicMock()
+    ch.id = cid
     ch.name = name
     ch.send = AsyncMock()
     ch.history = _empty_history
     return ch
 
 
-def _summary_channel(name, thread=None, create_thread_error=None):
+def _summary_channel(name, thread=None, create_thread_error=None, cid=7000):
     """Channel stand-in for the resolve-or-create step: `channel.send()`
     resolves to a summary message whose `create_thread()` either resolves to
     `thread` or raises `create_thread_error` (simulating Discord refusing
     thread creation, e.g. missing Manage Threads). The same `channel.send`
     also serves the HTTPException fallback path's per-player posts -- its
     return value is unused there, so one AsyncMock covers both."""
-    ch = _channel(name)
+    ch = _channel(name, cid=cid)
     summary = MagicMock()
     summary.delete = AsyncMock()
     if create_thread_error is not None:
@@ -277,8 +278,8 @@ class _FakeChannel(_FakeThread):
     summary-shaped message whose create_thread() can be made to fail --
     covering the resolve-or-create attempt that precedes the fallback."""
 
-    def __init__(self, name, create_thread_error=None, thread=None):
-        super().__init__(tid=None)
+    def __init__(self, name, create_thread_error=None, thread=None, cid=7000):
+        super().__init__(tid=cid)
         self.name = name
         self.create_thread_error = create_thread_error
         # The thread handed back once creation stops failing. Settable, so a
@@ -306,7 +307,7 @@ def _team_ds(team_b=("disc_b",), channel_ids=(111, 222), friendly_id="ABC"):
         team_a=["disc_a"], team_b=list(team_b),
         sign_ups={"disc_a": "Alice", "disc_b": "Bob"},
         channel_ids=list(channel_ids),
-        team_a_pools_thread_id=None, team_b_pools_thread_id=None,
+        team_a_pools_destination_id=None, team_b_pools_destination_id=None,
     )
 
 
@@ -318,7 +319,7 @@ def _team_ds3(friendly_id="ABC"):
         team_a=["disc_a", "disc_b", "disc_c"], team_b=[],
         sign_ups={"disc_a": "Alice", "disc_b": "Bob", "disc_c": "Carol"},
         channel_ids=[111],
-        team_a_pools_thread_id=None, team_b_pools_thread_id=None,
+        team_a_pools_destination_id=None, team_b_pools_destination_id=None,
     )
 
 
@@ -386,8 +387,8 @@ async def test_post_team_logs_scopes_pools_to_own_team_and_stamps(red_name, blue
     assert ok is True
     assert ds.team_logs_posted_at is not None
     # Thread ids persisted onto the session for a retry to find.
-    assert ds.team_a_pools_thread_id == "1001"
-    assert ds.team_b_pools_thread_id == "2002"
+    assert ds.team_a_pools_destination_id == "1001"
+    assert ds.team_b_pools_destination_id == "2002"
     # One summary message per team channel; the pools themselves land in the thread.
     assert red.send.await_count == 1
     assert blue.send.await_count == 1
@@ -448,7 +449,7 @@ async def test_post_team_logs_partial_channel_resolution_does_not_stamp():
 
     assert ok is False
     assert ds.team_logs_posted_at is None
-    assert ds.team_a_pools_thread_id is None
+    assert ds.team_a_pools_destination_id is None
     red.send.assert_not_awaited()
     session.commit.assert_not_awaited()
 
@@ -530,7 +531,7 @@ async def test_post_team_logs_three_player_team_gets_one_summary_and_three_threa
         ok = await post_team_logs("sid", bot)
 
     assert ok is True
-    assert ds.team_a_pools_thread_id == "9001"
+    assert ds.team_a_pools_destination_id == "9001"
     assert red.send.await_count == 1
     assert red.send.await_args.kwargs["content"] == "📥 **Drafted pools** — ABC (3 players)"
     red.summary.create_thread.assert_awaited_once()
@@ -586,7 +587,7 @@ async def test_post_team_logs_one_players_send_failure_leaves_stamp_unset_then_r
 
     assert first_ok is False
     assert ds.team_logs_posted_at is None
-    assert ds.team_a_pools_thread_id == "9001"                          # persisted despite the failure
+    assert ds.team_a_pools_destination_id == "9001"                          # persisted despite the failure
     assert thread.posted_txt_filenames() == ["Alice.txt", "Carol.txt"]  # Bob missing
 
     # Retry: the stored thread id must resolve (bot.get_channel) so the run
@@ -598,7 +599,7 @@ async def test_post_team_logs_one_players_send_failure_leaves_stamp_unset_then_r
 
     assert second_ok is True
     assert ds.team_logs_posted_at is not None
-    assert ds.team_a_pools_thread_id == "9001"                # no second thread created
+    assert ds.team_a_pools_destination_id == "9001"                # no second thread created
     assert red.send.await_count == 1                          # one summary across both runs
     assert thread.posted_txt_filenames() == ["Alice.txt", "Carol.txt", "Bob.txt"]   # only Bob added
 
@@ -624,7 +625,7 @@ async def test_post_pools_for_team_falls_back_to_channel_posts_when_thread_creat
         )
 
     assert all_posted is True
-    assert persisted == []                       # no thread was ever created
+    assert persisted == ["7000"]     # the channel carried the pool, so it is the record
     channel.summary.create_thread.assert_awaited_once()
     # Both the summary attempt and the per-player fallback post went straight
     # to the channel: two sends total, the second carrying Alice's pool.
@@ -653,7 +654,7 @@ async def test_post_pools_for_team_ignores_non_bot_txt_attachments_when_checking
 
     assert all_posted is True
     channel.send.assert_not_awaited()             # thread already resolved -- no new summary
-    assert persisted == []                        # nothing new to persist
+    assert persisted == []                        # resumed into the stored thread; nothing new
     # Alice's real pool WAS posted by the bot despite the foreign 'Alice.txt'
     # already sitting in the thread's history.
     assert _attachment_names(thread) == ["Alice.txt", "Bob.txt"]
@@ -763,7 +764,7 @@ async def test_post_team_logs_transient_thread_lookup_error_does_not_open_second
     gone', which would open a second thread alongside a first one that may
     still be perfectly alive."""
     ds = _team_ds(team_b=(), channel_ids=(111,))
-    ds.team_a_pools_thread_id = "9001"   # a thread already exists from an earlier run
+    ds.team_a_pools_destination_id = "9001"   # a thread already exists from an earlier run
     _, ctx = _db_ctx(ds)
     red = _channel("Red-Team-Chat-ABC")
     bot = _bot_for({111: red})   # 9001 not cached -> get_channel misses, fetch_channel is hit
@@ -774,7 +775,7 @@ async def test_post_team_logs_transient_thread_lookup_error_does_not_open_second
 
     assert ok is False
     assert ds.team_logs_posted_at is None
-    assert ds.team_a_pools_thread_id == "9001"     # unchanged -- no second thread created
+    assert ds.team_a_pools_destination_id == "9001"     # unchanged -- no second thread created
     red.send.assert_not_awaited()                  # no summary posted; no fallback attempted either
 
 
@@ -802,15 +803,18 @@ async def test_post_pools_for_team_still_posts_pools_when_the_orphan_summary_can
     assert all_posted is True
     assert channel.posted_txt_filenames() == ["Alice.txt"]   # the pool went out regardless
     assert len(channel.summary_messages()) == 1              # the header we could not remove
-    assert persisted == []
+    assert persisted == ["7000"]     # the channel carried the pool, so it is the record
 
 
 @pytest.mark.asyncio
-async def test_post_pools_for_team_does_not_repost_into_a_thread_what_the_fallback_already_posted():
-    """Thread creation is refused once, so the pools go into the channel. The
-    OTHER team then fails, so nothing is stamped and the reconciler retries --
-    and by then thread creation works. The new thread must not re-post players
-    the channel fallback already delivered, or their pools appear twice."""
+async def test_post_pools_for_team_resumes_into_the_channel_the_fallback_claimed():
+    """Thread creation is refused, so the pools go into the channel and the
+    CHANNEL becomes this team's recorded destination. The other team then
+    fails, so nothing is stamped and the reconciler retries -- and by now
+    thread creation would succeed. It must not: opening a thread here would
+    either duplicate the pools into it or, once deduped, leave the team tagged
+    into a thread containing nothing. Their pools live in the channel; that is
+    where the retry belongs."""
     draft_data = _team_log()
     sign_ups = {"disc_a": "Alice", "disc_b": "Bob"}
     mapping = {"disc_a": "dm_a", "disc_b": "dm_b"}
@@ -818,7 +822,7 @@ async def test_post_pools_for_team_does_not_repost_into_a_thread_what_the_fallba
         "Red-Team-Chat-ABC",
         create_thread_error=discord.HTTPException(MagicMock(), "transient"),
     )
-    bot = _bot_for({})
+    bot = _bot_for({7000: channel})
     persist, persisted = _persist_recorder()
 
     with _patched_discord():
@@ -827,22 +831,26 @@ async def test_post_pools_for_team_does_not_repost_into_a_thread_what_the_fallba
         )
     assert first_ok is True
     assert channel.posted_txt_filenames() == ["Alice.txt", "Bob.txt"]   # delivered in-channel
-    assert persisted == []
+    assert persisted == ["7000"]                    # the channel is the record
 
-    # The retry: thread creation now succeeds.
+    # The retry, resuming from the stored destination. Thread creation would
+    # work now -- the point is that it is never attempted.
     thread = _FakeThread(9001)
     channel.create_thread_error = None
     channel.thread = thread
+    channel.send.reset_mock()
+
     with _patched_discord():
         second_ok = await _post_pools_for_team(
-            bot, channel, None, "ABC", ["disc_a", "disc_b"], mapping, draft_data, sign_ups, persist,
+            bot, channel, persisted[-1], "ABC", ["disc_a", "disc_b"], mapping,
+            draft_data, sign_ups, persist,
         )
 
     assert second_ok is True
-    assert persisted == ["9001"]                       # the thread is now the record
-    # Nobody is re-posted: both pools already exist in the channel above.
-    assert _attachment_names(thread) == []
-    assert channel.posted_txt_filenames() == ["Alice.txt", "Bob.txt"]   # unchanged
+    assert persisted == ["7000"]                    # unchanged; nothing new claimed
+    channel.send.assert_not_awaited()               # no summary, so no thread either
+    assert _attachment_names(thread) == []          # the thread was never used
+    assert channel.posted_txt_filenames() == ["Alice.txt", "Bob.txt"]   # nobody re-posted
 
 
 @pytest.mark.asyncio
@@ -874,7 +882,7 @@ async def test_post_pools_for_team_fallback_does_not_repost_a_player_already_in_
         )
 
     assert second_ok is True
-    assert persisted == []            # no thread was ever created
+    assert persisted == ["7000"]      # the channel itself is now the record
     # Only the (failed) summary attempt happened again -- nobody re-posted.
     assert channel.send.await_count == 1
     assert channel.posted_txt_filenames() == ["Alice.txt", "Bob.txt"]   # unchanged

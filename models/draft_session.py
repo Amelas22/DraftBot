@@ -51,11 +51,13 @@ class DraftSession(Base):
     spaces_object_key = Column(String(256), nullable=True)  # DigitalOcean Spaces object path
     unlock_at = Column(DateTime)              # when the public embed may publish (logs_captured_at + PUBLISH_DELAY; manual release = now)
     team_logs_posted_at = Column(DateTime)    # when per-team pools were posted to team channels (immediate; no time gate)
-    # Where each team's drafted pools were aggregated. Set when the thread is
-    # created; the thread itself is the record of which players have posted,
-    # so a retry resumes into it instead of re-posting or starting a second one.
-    team_a_pools_thread_id = Column(String(64), nullable=True)
-    team_b_pools_thread_id = Column(String(64), nullable=True)
+    # Where each team's drafted pools are being delivered: the pools thread,
+    # or the team channel itself when Discord refused a thread. Whichever one
+    # carried a pool is recorded here, and it IS the record of who has posted
+    # -- so a retry resumes into the same place rather than re-posting, and a
+    # team the fallback already served never gets a second, empty thread.
+    team_a_pools_destination_id = Column(String(64), nullable=True)
+    team_b_pools_destination_id = Column(String(64), nullable=True)
     cube = Column(String(128))
     live_draft_message_id = Column(String(64))
     min_stake = Column(Integer, default=10, server_default=text('10'))

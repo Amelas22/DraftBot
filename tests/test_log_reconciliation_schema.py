@@ -25,14 +25,14 @@ def test_model_has_the_per_team_pools_thread_columns():
     """The thread id is the record a retry resumes from -- if either column
     goes missing, post_team_logs silently opens a second thread per tick."""
     cols = DraftSession.__table__.columns
-    for name in ("team_a_pools_thread_id", "team_b_pools_thread_id"):
+    for name in ("team_a_pools_destination_id", "team_b_pools_destination_id"):
         assert name in cols
         assert isinstance(cols[name].type, String)
         assert cols[name].nullable          # NULL until a thread is created
 
 
 def test_instance_accepts_the_pools_thread_fields():
-    ds = DraftSession(session_id="s", team_a_pools_thread_id="1001",
-                      team_b_pools_thread_id="2002")
-    assert ds.team_a_pools_thread_id == "1001"
-    assert ds.team_b_pools_thread_id == "2002"
+    ds = DraftSession(session_id="s", team_a_pools_destination_id="1001",
+                      team_b_pools_destination_id="2002")
+    assert ds.team_a_pools_destination_id == "1001"
+    assert ds.team_b_pools_destination_id == "2002"
