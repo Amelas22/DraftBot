@@ -1038,3 +1038,36 @@ async def test_post_team_logs_opens_shared_pools_only_for_a_tournament_match():
         posted_open = bool(_attachment_names(open_thread))
         assert posted_open is expect_open, (
             f"match_id={match_id}: open pools {'posted' if posted_open else 'absent'}")
+
+
+@pytest.mark.asyncio
+async def test_open_pools_one_send_failing_below_discord_does_not_abort_the_rest():
+    """A send can fail beneath discord.py — a real e2e run died on an aiohttp
+    ClientOSError mid-upload. That must cost one player a retry, not abort the run."""
+    from services.draft_log_store import post_open_pools
+
+    ds = _tournament_ds()
+    thread = _FakeThread(3003)
+    chat = _FakeChannel("draft-chat", thread=thread, cid=555)
+    real_send = thread._do_send
+    calls = {"n": 0}
+
+    async def _flaky(content=None, files=None):
+        calls["n"] += 1
+        if files and calls["n"] == 2:          # the first pool, after the header
+            raise OSError("[SSL: SSLV3_ALERT_BAD_RECORD_MAC] bad record mac")
+        return await real_send(content=content, files=files)
+
+    thread.send = AsyncMock(side_effect=_flaky)
+
+    with _patched_discord():
+        ok = await post_open_pools(
+            _bot_for({555: chat}), chat, None, ds.friendly_id,
+            [("Cosmos", ds.team_a), ("gypsy caravan", ds.team_b)],
+            _MAPPING_AB, ds.draft_data, ds.sign_ups,
+            persist_destination_id=lambda d: _record([], d),
+        )
+
+    assert ok is False, "an incomplete run must report False so the reconciler retries"
+    # the OTHER team's pool still went out rather than being taken down with it
+    assert "Bob.txt" in _attachment_names(thread)

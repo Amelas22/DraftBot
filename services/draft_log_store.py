@@ -699,12 +699,18 @@ async def post_open_pools(
             continue
         try:
             await destination.send(content=f"__**{label}**__")
-        except discord.HTTPException as e:
+        except Exception as e:
+            # The header is signposting; losing it must not cost the team its pools.
             logger.warning(f"[open-pools] team header failed for {label}: {e}")
         for member in pending:
             try:
                 await _send_open_pool(destination, member, label, draft_data)
-            except discord.HTTPException as e:
+            except Exception as e:
+                # Deliberately broad, like _post_missing_players. A send can fail
+                # below discord.py — an e2e run died here on an aiohttp
+                # ClientOSError (SSL bad record mac) mid-upload, which is not an
+                # HTTPException. One player's transport hiccup should cost that
+                # player a retry, not abort the whole run and strand the rest.
                 logger.warning(f"[open-pools] failed to post {member.name}: {e}")
                 all_posted = False
     return all_posted
