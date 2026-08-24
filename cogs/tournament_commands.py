@@ -391,24 +391,46 @@ class TournamentCog(commands.Cog):
         This runs after the start has committed, against the authoritative set.
 
         Best-effort by design: the tournament HAS started, so nothing here may
-        raise. Drift that survives is logged with the ids needed to fix it by
-        hand.
+        raise. Drift that survives is logged with the role ids needed to fix it
+        by hand.
+
+        `role_ids` is what THIS run created, and it is not redundant with the
+        database: if store_role_ids failed a moment ago, every team reads as
+        role-less while its role already exists in the guild. Those two cases
+        need opposite treatment, which is why both are consulted.
         """
         try:
             async with db_session() as session:
                 paid = [p for p in await list_participants(session, tournament_id)
                         if p.status == "paid"]
-                missing = [role_target(p) for p in paid if not p.role_id]
+                unroled = {p.id: role_target(p) for p in paid if not p.role_id}
                 paid_ids = {p.id for p in paid}
             stranded = [r for pid, r in role_ids.items() if pid not in paid_ids and r]
             if stranded:
                 logger.info(f"[team-roles] tournament {tournament_id}: dropping "
                             f"{len(stranded)} role(s) for teams that did not start")
                 await delete_team_roles(ctx.guild, stranded)
+            # A role this run already created, whose id merely failed to
+            # persist, is RE-RECORDED -- never re-created. Creating it again
+            # would leave every team holding two real roles, with the first set
+            # recorded nowhere, so /tournament finish would never delete them:
+            # 42 teams would burn 84 of the guild's 250 slots and strand half.
+            unrecorded = {pid: r for pid, r in role_ids.items()
+                          if r and pid in unroled}
+            if unrecorded:
+                logger.info(f"[team-roles] tournament {tournament_id}: re-recording "
+                            f"{len(unrecorded)} role id(s) that did not persist")
+                await store_role_ids(unrecorded)
+            missing = [t for pid, t in unroled.items() if pid not in role_ids]
             if missing:
                 logger.info(f"[team-roles] tournament {tournament_id}: creating "
                             f"{len(missing)} role(s) for teams that paid during start")
-                await store_role_ids(await create_team_roles(ctx.guild, missing))
+                created = await create_team_roles(ctx.guild, missing)
+                # Logged BEFORE the write, so the ids survive even if recording
+                # them is what fails -- otherwise the roles are real, assigned,
+                # and named nowhere.
+                logger.info(f"[team-roles] tournament {tournament_id}: created {created}")
+                await store_role_ids(created)
         except Exception:
             logger.exception(
                 f"[team-roles] could not reconcile roles for tournament "
@@ -956,8 +978,9 @@ class TournamentCog(commands.Cog):
                     await delete_team_roles(ctx.guild, role_ids.values())
                 except Exception:
                     logger.exception(
-                        f"Could not roll back tournament roles {list(role_ids.values())} "
-                        f"after a failed start in guild {ctx.guild.id}"
+                        f"[team-roles] could not roll back roles "
+                        f"{list(role_ids.values())} after a failed start in guild "
+                        f"{ctx.guild.id}"
                     )
                 raise
             try:

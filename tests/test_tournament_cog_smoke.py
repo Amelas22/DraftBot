@@ -574,6 +574,90 @@ async def test_start_takes_back_a_role_from_a_team_that_dropped_while_it_was_run
 
 
 @pytest.mark.asyncio
+async def test_roles_created_during_reconcile_are_logged_even_if_recording_them_fails():
+    """The reconcile's own write can fail too. Those roles are real and already
+    assigned to players, so if their ids reach neither the database nor the log
+    they are unrecoverable -- nothing left in the system names them, and
+    /tournament finish deletes by stored id."""
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    cog._refresh_board = AsyncMock()
+    cog._post_schedule = AsyncMock()
+    cog._post_standings = AsyncMock()
+    ctx = _ctx()
+    latecomer = SimpleNamespace(id=7, status="paid", team_name="Late",
+                                captain_user_id="777", roster_user_ids=[], role_id=None)
+    seated = [SimpleNamespace(id=i, status="paid", team_name=f"T{i}",
+                              captain_user_id=str(100 + i), roster_user_ids=[],
+                              role_id=str(500 + i)) for i in range(2)]
+
+    with _registration_open(paid_teams=2) as stack, \
+         patch("cogs.tournament_commands.escrow.close_registration_and_seed",
+               AsyncMock(return_value={"tournament_id": 1, "name": "Cup", "fee": 0, "pot": 0})), \
+         patch("cogs.tournament_commands.create_team_roles",
+               AsyncMock(side_effect=[{0: "500", 1: "501"}, {7: "507"}])), \
+         patch("cogs.tournament_commands.store_role_ids",
+               AsyncMock(side_effect=[None, RuntimeError("db blipped")])), \
+         patch("cogs.tournament_commands.logger") as log:
+        stack.enter_context(patch(
+            "cogs.tournament_commands.list_participants",
+            AsyncMock(side_effect=[seated, seated + [latecomer]])))
+        await TournamentCog.start.callback(cog, ctx)
+
+    logged = " ".join(str(c) for c in log.info.call_args_list)
+    assert "507" in logged, ("the role created for the latecomer was never named in the "
+                             "log, and its id reached nothing else either")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_role_id_write_is_re_recorded_not_re_created():
+    """store_role_ids failing leaves every team reading as role-less while its
+    role already exists in the guild. Creating again there would be strictly
+    worse than the bookkeeping gap it replaces: 42 teams would hold two real
+    roles each, burning 84 of the guild's 250 slots, and the first 42 would be
+    recorded nowhere -- so /tournament finish would never delete them."""
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    cog._refresh_board = AsyncMock()
+    cog._post_schedule = AsyncMock()
+    cog._post_standings = AsyncMock()
+    ctx = _ctx()
+    # The write fails once; the reconcile's retry is allowed to succeed, so the
+    # test can tell "re-recorded" apart from "gave up".
+    store = AsyncMock(side_effect=[RuntimeError("db blipped"), None])
+    started = [SimpleNamespace(id=i, status="paid", team_name=f"T{i}",
+                               captain_user_id=str(100 + i), roster_user_ids=[],
+                               role_id=None)          # <- the write did not land
+               for i in range(2)]
+
+    with _registration_open(paid_teams=2) as stack, \
+         patch("cogs.tournament_commands.escrow.close_registration_and_seed",
+               AsyncMock(return_value={"tournament_id": 1, "name": "Cup", "fee": 0, "pot": 0})), \
+         patch("cogs.tournament_commands.create_team_roles",
+               AsyncMock(return_value={0: "500", 1: "501"})) as mk, \
+         patch("cogs.tournament_commands.delete_team_roles",
+               AsyncMock(return_value=set())) as gone, \
+         patch("cogs.tournament_commands.store_role_ids", store):
+        stack.enter_context(patch(
+            "cogs.tournament_commands.list_participants",
+            AsyncMock(side_effect=[
+                [SimpleNamespace(id=i, status="paid", team_name=f"T{i}",
+                                 captain_user_id=str(100 + i), roster_user_ids=[],
+                                 role_id=None) for i in range(2)],
+                started,
+            ])))
+        await TournamentCog.start.callback(cog, ctx)
+
+    assert mk.await_count == 1, "the roles were created a second time"
+    assert store.await_count == 2, "the failed write was not retried"
+    assert store.await_args.args[0] == {0: "500", 1: "501"}, (
+        "the retry did not re-record the ids this run already created")
+    gone.assert_not_awaited()  # never tidy real roles off a live tournament
+
+
+@pytest.mark.asyncio
 async def test_start_survives_role_ids_failing_to_persist():
     """The tournament has already committed as started, so a store_role_ids
     failure must never take the command down with it -- the roles are real and
