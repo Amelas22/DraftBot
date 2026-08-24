@@ -32,6 +32,11 @@ from services.tournament_service import (get_active_tournament, list_participant
                                          remove_team, start_tournament)
 
 
+# How many unpaid team names the start refusal spells out before summarising the rest.
+# 20 names sits comfortably inside Discord's 2000-char message limit at any roster size.
+_UNPAID_NAMES_SHOWN = 20
+
+
 def escrow_source(tournament_id, participant_id) -> str:
     """LEGACY entry key, kept for READING only — entries booked before the move to
     entry_source() are tagged this way and must still be findable by a refund and by
@@ -327,9 +332,15 @@ async def close_registration_and_seed(guild_id, rng) -> dict:
             unpaid = sorted(p.team_name for p in await list_participants(session, tournament.id)
                             if p.status != "paid")
             if unpaid:
+                # Naming every team is unbounded, and this reaches Discord as message
+                # content (2000 chars). A league that grew 16 -> 42 teams in four days
+                # can outrun that, and the failure would be the same shape as the bug
+                # this guard exists to avoid: the command blows up instead of telling
+                # the TO what to do. Name enough to act on, count the rest.
+                shown, extra = unpaid[:_UNPAID_NAMES_SHOWN], len(unpaid) - _UNPAID_NAMES_SHOWN
+                names = ", ".join(shown) + (f", and {extra} more" if extra > 0 else "")
                 who = (f"{unpaid[0]} hasn't paid the entry fee" if len(unpaid) == 1
-                       else f"{len(unpaid)} teams haven't paid the entry fee: "
-                            f"{', '.join(unpaid)}")
+                       else f"{len(unpaid)} teams haven't paid the entry fee: {names}")
                 raise ValueError(
                     f"{who}. Drop them with `/tournament remove_team`, or wait for "
                     f"payment, then run `/tournament start` again."

@@ -7,6 +7,8 @@ already-booked transfer, seating the newcomer without charging them. The key is
 keyed on the persistent Team identity instead; these pin that down, and pin down
 that entries booked under the OLD key still refund.
 """
+import random
+
 import pytest
 
 from conftest import test_db  # noqa: F401  (fixture)
@@ -144,3 +146,49 @@ async def test_a_team_that_drops_and_re_registers_pays_again(test_db):  # noqa: 
     assert status == "paid"
     assert await wallet_service.get_balance(GUILD, CAP_A) == 0, "re-entry was not charged"
     assert await escrow.prize_pool(GUILD, t_id) == 150, "pot did not receive the re-entry fee"
+
+
+@pytest.mark.asyncio
+async def test_a_refunded_legacy_entry_does_not_read_as_paid(test_db):  # noqa: F811
+    """The netting has to apply to the legacy key too. Otherwise a team paid under the
+    old key, refunded, then re-registered onto the freed participant id would be seated
+    free — the original bug, one branch lower."""
+    t_id = await _tournament()
+    async with db_session() as s:
+        p, _ = await tsvc.register_team(s, t_id, "Old Key", CAP_A)
+        p_id = p.id
+    await wallet_service.credit_done(GUILD, CAP_A, 300, job_id="j-oldkey")
+    legacy = escrow.escrow_source(t_id, p_id)
+    async with db_session() as s:
+        # Paid under the legacy key, then refunded — both legs stay in the ledger.
+        await wallet_service.transfer_in(
+            s, GUILD, CAP_A, wallet_service.prize_wallet_id(t_id), 150, legacy,
+            notes="tournament entry: Old Key")
+        await wallet_service.transfer_in(
+            s, GUILD, wallet_service.prize_wallet_id(t_id), CAP_A, 150, f"refund:{legacy}",
+            notes="entry refund: Old Key")
+    assert await escrow.prize_pool(GUILD, t_id) == 0
+
+    await escrow.sweep_pending_entries()
+
+    async with db_session() as s:
+        assert (await s.get(TournamentParticipant, p_id)).status == "paid"
+    assert await wallet_service.get_balance(GUILD, CAP_A) == 150, "the re-entry was not charged"
+    assert await escrow.prize_pool(GUILD, t_id) == 150
+
+
+@pytest.mark.asyncio
+async def test_the_unpaid_refusal_stays_inside_discords_message_limit(test_db):  # noqa: F811
+    """Every unpaid name in one message is unbounded; Discord caps content at 2000."""
+    t_id = await _tournament()
+    async with db_session() as s:
+        for i in range(60):
+            await tsvc.register_team(s, t_id, f"A Team With A Fairly Long Name {i:02d}", f"cap{i}")
+
+    with pytest.raises(ValueError) as err:
+        await escrow.close_registration_and_seed(GUILD, random.Random(1))
+
+    message = str(err.value)
+    assert len(message) < 2000, f"refusal is {len(message)} chars"
+    assert "60 teams haven't paid" in message
+    assert "and 40 more" in message      # 20 named, the rest counted
