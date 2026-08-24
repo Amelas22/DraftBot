@@ -354,8 +354,18 @@ class TournamentCog(commands.Cog):
         close_registration_and_seed on purpose: that call commits the start, so
         a role failure afterwards would mean un-starting a started tournament.
         The cheap read here means 42 roles are not created for a tournament
-        that was never going to start; the authoritative checks still happen
-        under the money lock.
+        that was never going to start.
+
+        This reads the tournament and its participants in their own session,
+        released before close_registration_and_seed re-reads under MONEY_LOCK --
+        so the two reads are not atomic with each other. The status check is
+        reconciled by that second read; the participant SET is not. A payment
+        landing in the gap seeds a paid team with role_id=None (no role, ever,
+        until someone notices); a refund-driven drop in the gap leaves that
+        team's already-created role stranded with nothing recording it. Both are
+        documented, recoverable drift, not corruption, and this is a deliberate
+        choice to leave the window open: closing it means creating roles inside
+        the money lock, which the spec rejects.
         """
         async with db_session() as session:
             tournament = await get_active_tournament(session, ctx.guild.id)
@@ -856,13 +866,41 @@ class TournamentCog(commands.Cog):
         await ctx.defer()
         try:
             role_ids = await self._create_roles_for_start(ctx)
+        except discord.HTTPException as e:
+            # discord.Forbidden (missing "Manage Roles") is a subclass of this.
+            # Scoped to only this call: a Discord failure from a LATER step
+            # (posting the schedule, refreshing the board, ...) must keep
+            # propagating to py-cord's on_error instead of being misreported
+            # here as a role-creation failure.
+            await ctx.followup.send(f"❌ Could not create team roles: {e}", ephemeral=True)
+            return
+        try:
             try:
                 res = await escrow.close_registration_and_seed(ctx.guild.id, random.Random())
             except Exception:
                 # The start did not happen, so the roles must not survive it.
-                await delete_team_roles(ctx.guild, role_ids.values())
+                # A failure in the rollback itself must not replace the
+                # exception below (e.g. "already started") with an
+                # unrelated transport error, so it's logged, not raised.
+                try:
+                    await delete_team_roles(ctx.guild, role_ids.values())
+                except Exception:
+                    logger.exception(
+                        f"Could not roll back tournament roles {list(role_ids.values())} "
+                        f"after a failed start in guild {ctx.guild.id}"
+                    )
                 raise
-            await store_role_ids(role_ids)
+            try:
+                await store_role_ids(role_ids)
+            except Exception:
+                # The tournament HAS started at this point (that transaction
+                # already committed) -- the roles are real and already
+                # assigned to players, so they must NOT be deleted to tidy a
+                # bookkeeping gap. Log for manual recovery and keep going.
+                logger.error(
+                    f"Tournament {res['tournament_id']} started but role ids "
+                    f"{role_ids} were not persisted; recover by hand"
+                )
             tournament_id = res["tournament_id"]
             logger.info(f"Tournament {tournament_id} started in guild {ctx.guild.id} by {ctx.author.id}")
             await self._refresh_board(tournament_id)
@@ -876,11 +914,6 @@ class TournamentCog(commands.Cog):
             await self._post_standings(standings, tournament_id)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
-        except discord.HTTPException as e:
-            # discord.Forbidden (missing "Manage Roles") is a subclass of this;
-            # without this handler it would fall through to py-cord's default
-            # on_error instead of telling the TO what went wrong.
-            await ctx.followup.send(f"❌ Could not create team roles: {e}", ephemeral=True)
 
     @tournament.command(name="set_result", description="Admin: record or correct a match result")
     @has_bot_manager_role()

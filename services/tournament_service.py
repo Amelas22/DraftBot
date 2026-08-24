@@ -6,6 +6,7 @@ standings.
 All functions take an AsyncSession so callers control the transaction and tests
 can point them at a temp database (mirrors the leaderboard_service convention).
 """
+from loguru import logger
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
@@ -1037,5 +1038,15 @@ async def store_role_ids(role_ids: dict) -> None:
     async with db_session() as session:
         for participant_id, role_id in role_ids.items():
             participant = await session.get(TournamentParticipant, participant_id)
-            if participant is not None:
-                participant.role_id = role_id
+            if participant is None:
+                # The participant dropped (with a refund) in the gap between
+                # _create_roles_for_start's read and the money-locked start --
+                # its role was already created and assigned, and now nothing
+                # will ever record its id. Log it so it can be found by hand;
+                # every other skip in this feature does the same.
+                logger.warning(
+                    f"[team-roles] participant {participant_id} is gone; "
+                    f"role {role_id} was created but cannot be recorded"
+                )
+                continue
+            participant.role_id = role_id

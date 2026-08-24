@@ -1,8 +1,9 @@
 """Tournament team roles: naming, creation with rollback, sync, deletion."""
 import os
 import tempfile
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import pytest
@@ -13,6 +14,7 @@ from sqlalchemy.orm import sessionmaker
 
 from database.models_base import Base
 from models.tournament import Tournament, TournamentParticipant, TournamentTeamMember
+from services.tournament_service import store_role_ids
 from services.tournament_roles import (
     create_team_roles,
     delete_team_roles,
@@ -248,3 +250,67 @@ async def test_roster_user_ids_loads_from_a_fresh_session_without_a_greenlet_err
         )
         fresh_participant = result.scalar_one()
         assert fresh_participant.roster_user_ids == ["200"]
+
+
+def _route_store_role_ids_at(test_db):
+    """store_role_ids (services/tournament_service.py) opens its own session via
+    `database.db_session.db_session`, not the raw `test_db` factory the rest of
+    this file uses directly -- so testing it for real means patching that name
+    to open sessions against this fixture's engine instead of the real one."""
+    @asynccontextmanager
+    async def fake_db_session():
+        async with test_db() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    return patch("services.tournament_service.db_session", fake_db_session)
+
+
+@pytest.mark.asyncio
+async def test_store_role_ids_persists_and_is_readable_from_a_fresh_session(test_db):
+    """store_role_ids is Task 3's write half of Task 1's role_id column, and
+    tests/test_tournament_cog_smoke.py only ever mocks it -- nothing there
+    would catch a wrong attribute name or a write that never got committed.
+    Reading back through a FRESH session (rather than the one that wrote it)
+    is what actually proves the commit happened, mirroring
+    test_roster_user_ids_loads_from_a_fresh_session_without_a_greenlet_error
+    above."""
+    async with test_db() as session:
+        tournament = Tournament(guild_id="g1", name="Cup", total_rounds=3)
+        session.add(tournament)
+        await session.flush()
+        participant = TournamentParticipant(
+            tournament_id=tournament.id, team_id=1, team_name="Alpha",
+            captain_user_id="10",
+        )
+        session.add(participant)
+        await session.commit()
+        participant_id = participant.id
+
+    with _route_store_role_ids_at(test_db):
+        await store_role_ids({participant_id: "555"})
+
+    async with test_db() as fresh_session:
+        result = await fresh_session.execute(
+            select(TournamentParticipant).where(TournamentParticipant.id == participant_id)
+        )
+        assert result.scalar_one().role_id == "555"
+
+
+@pytest.mark.asyncio
+async def test_store_role_ids_logs_and_skips_a_participant_that_has_vanished(test_db):
+    """A team can drop (with a refund) in the gap between _create_roles_for_start's
+    read and the money-locked start -- its role was already created and
+    assigned, and store_role_ids finds no row to record it against. It must
+    not raise (the other, real ids in the same call still need to be saved),
+    but the skip must be logged like every other skip in this feature."""
+    with _route_store_role_ids_at(test_db), \
+         patch("services.tournament_service.logger") as mock_logger:
+        await store_role_ids({999999: "555"})  # no such participant
+
+    mock_logger.warning.assert_called_once()
+    logged = str(mock_logger.warning.call_args.args[0])
+    assert "999999" in logged and "555" in logged
