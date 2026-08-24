@@ -45,6 +45,36 @@ def _round_line(tournament, stage):
     return f"**Round:** {tournament.current_round}/{tournament.total_rounds}"
 
 
+# Discord caps a single embed field's value at 1024 characters, and rejects the WHOLE
+# embed if any field is over — not just that field. Both the roster and the standings
+# outgrow it well before a league this size, so both go through the same splitter.
+_FIELD_LIMIT = 1024
+
+
+def _add_chunked_field(embed, label, lines, cont_label=None):
+    """Add ``lines`` as one field, or as many as the 1024-char cap requires.
+
+    Splits BETWEEN lines, so it cannot rescue a single line that is itself over the
+    cap — callers keep individual lines short. Continuation fields are named
+    ``cont_label`` (default "<label> (cont.)") so the first field keeps the real
+    heading and the rest read as overflow.
+    """
+    cont = cont_label or f"{label} (cont.)"
+    chunks, current, current_len = [], [], 0
+    for line in lines:
+        added_len = len(line) + (1 if current else 0)  # + the newline joiner
+        if current and current_len + added_len > _FIELD_LIMIT:
+            chunks.append(current)
+            current, current_len = [line], len(line)
+        else:
+            current.append(line)
+            current_len += added_len
+    if current:
+        chunks.append(current)
+    for i, chunk in enumerate(chunks):
+        embed.add_field(name=label if i == 0 else cont, value="\n".join(chunk), inline=False)
+
+
 def create_standings_embed(tournament, participants, stage=STAGE_SWISS):
     """Build the standings embed for a tournament (pure).
 
@@ -60,12 +90,12 @@ def create_standings_embed(tournament, participants, stage=STAGE_SWISS):
         color=discord.Color.gold(),
     )
     if participants:
-        rows = "\n".join(
+        rows = [
             f"{i}. **{p.team_name}** — {p.points} pts "
             f"({p.match_wins}-{p.match_losses}-{p.match_draws})"
             for i, p in enumerate(participants, start=1)
-        )
-        embed.add_field(name="Standings", value=rows, inline=False)
+        ]
+        _add_chunked_field(embed, "Standings", rows)
     else:
         embed.add_field(name="Standings", value="No teams registered yet.", inline=False)
     return embed
@@ -159,29 +189,11 @@ def create_registration_embed(tournament, participants, pot=0, deficits=None,
     else:
         label = f"Teams ({len(participants)})"
 
-    # Discord caps a single embed field's value at 1024 characters. A paid roster's
-    # deficit lines push this well past that at ~10+ pending teams, and Discord then
-    # rejects the whole edit (the board freezes on a stale roster). Pack lines into
-    # as many fields as needed, each under the cap.
-    _FIELD_LIMIT = 1024
-    chunks = []
-    current = []
-    current_len = 0
-    for line in lines:
-        added_len = len(line) + (1 if current else 0)  # + newline joiner
-        if current and current_len + added_len > _FIELD_LIMIT:
-            chunks.append(current)
-            current = [line]
-            current_len = len(line)
-        else:
-            current.append(line)
-            current_len += added_len
-    if current:
-        chunks.append(current)
-
-    for i, chunk in enumerate(chunks):
-        name = label if i == 0 else "Teams (cont.)"
-        embed.add_field(name=name, value="\n".join(chunk), inline=False)
+    # A paid roster's deficit lines push past the 1024-char field cap at ~10+ pending
+    # teams, and Discord then rejects the whole edit (the board freezes on a stale
+    # roster). The continuation label is fixed rather than derived, because `label`
+    # carries the paid count and repeating it on every field would read as a new total.
+    _add_chunked_field(embed, label, lines, cont_label="Teams (cont.)")
     embed.set_footer(text=f"{CAPTAIN_MARK} team captain")
     _add_how_to_join(embed, fee, closed)
     return embed
