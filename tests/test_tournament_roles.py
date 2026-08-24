@@ -51,9 +51,16 @@ def _participant(pid, team_name, captain, roster=()):
                            roster_user_ids=[str(u) for u in roster])
 
 
-def _guild(create_fails_on=None):
+def _guild(create_fails_on=None, present_user_ids=()):
     """A guild stand-in. `create_fails_on` is a team name whose role creation
-    raises, so the all-or-nothing rollback can be exercised."""
+    raises, so the all-or-nothing rollback can be exercised. `present_user_ids`
+    lists which user ids are still in the guild: each gets a member stub whose
+    `add_roles`/`remove_roles` are `AsyncMock`s, reachable via `guild.members`,
+    so a test can assert who actually got which role rather than just a call
+    count. Any id not listed resolves to None from `get_member`, matching a
+    player who has left the guild -- the default when no ids are given, so
+    tests that only care about role creation/deletion don't need to think
+    about membership at all."""
     created = []
 
     async def create_role(name, **kwargs):
@@ -66,10 +73,18 @@ def _guild(create_fails_on=None):
         created.append(role)
         return role
 
+    members = {}
+    for uid in present_user_ids:
+        member = MagicMock()
+        member.add_roles = AsyncMock()
+        member.remove_roles = AsyncMock()
+        members[int(uid)] = member
+
     guild = MagicMock()
     guild.create_role = AsyncMock(side_effect=create_role)
     guild.created = created
-    guild.get_member = MagicMock(return_value=None)
+    guild.members = members
+    guild.get_member = MagicMock(side_effect=lambda uid: members.get(uid))
     return guild
 
 
@@ -113,6 +128,61 @@ async def test_a_failed_creation_deletes_the_roles_already_made():
     assert len(guild.created) == 2
     for role in guild.created:
         role.delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_create_team_roles_gives_the_role_to_captain_and_roster():
+    """The point of the feature: the role has to actually reach people, not
+    just get created. Asserted against the real add_roles calls -- who got
+    which role -- not a call count, since a call count survives mutations
+    that assign the wrong people or the wrong role."""
+    guild = _guild(present_user_ids=["10", "20", "30"])
+    parts = [_participant(1, "Alpha", 10, roster=[20, 30])]
+
+    await create_team_roles(guild, parts)
+
+    role = guild.created[0]
+    guild.members[10].add_roles.assert_awaited_once_with(role)
+    guild.members[20].add_roles.assert_awaited_once_with(role)
+    guild.members[30].add_roles.assert_awaited_once_with(role)
+
+
+@pytest.mark.asyncio
+async def test_create_team_roles_succeeds_when_one_roster_member_left_the_guild():
+    """One absent player must not fail a 42-team start: creation still
+    succeeds and the members still in the guild still get the role."""
+    guild = _guild(present_user_ids=["10"])   # roster member 20 has left
+    parts = [_participant(1, "Alpha", 10, roster=[20])]
+
+    out = await create_team_roles(guild, parts)
+
+    role = guild.created[0]
+    assert out == {1: str(role.id)}
+    guild.members[10].add_roles.assert_awaited_once_with(role)
+
+
+@pytest.mark.asyncio
+async def test_sync_member_add_gives_the_role():
+    guild = _guild(present_user_ids=["12345"])
+    role = MagicMock()
+    guild.get_role = MagicMock(return_value=role)
+
+    await sync_member(guild, "1000", "12345", add=True)
+
+    guild.members[12345].add_roles.assert_awaited_once_with(role)
+
+
+@pytest.mark.asyncio
+async def test_sync_member_remove_takes_the_role():
+    """No coverage at all before this: the remove branch is reachable only
+    through add=False, and no earlier test exercised it."""
+    guild = _guild(present_user_ids=["12345"])
+    role = MagicMock()
+    guild.get_role = MagicMock(return_value=role)
+
+    await sync_member(guild, "1000", "12345", add=False)
+
+    guild.members[12345].remove_roles.assert_awaited_once_with(role)
 
 
 @pytest.mark.asyncio

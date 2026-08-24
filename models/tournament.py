@@ -113,8 +113,15 @@ class TournamentParticipant(Base):
     def roster_user_ids(self) -> list:
         """Roster member ids as strings. The captain is NOT here --
         captain_user_id is the single authority for who owns the team -- so
-        callers that want everyone must include the captain themselves."""
-        return [m.user_id for m in (self.team_members or [])]
+        callers that want everyone must include the captain themselves.
+
+        Only safe on a participant that came back from a query: `selectin`
+        above protects that shape, but a participant that was `add()`ed and
+        flushed in the same session, or one read again after `expire()` /
+        `refresh()` / `rollback()`, is not eager-loaded and will raise
+        MissingGreenlet here on this codebase's async sessions.
+        """
+        return [m.user_id for m in self.team_members]
 
     def __repr__(self):
         return f"<TournamentParticipant(tournament_id={self.tournament_id}, team={self.team_name!r})>"
@@ -151,7 +158,12 @@ class TournamentTeamMember(Base):
         UniqueConstraint('participant_id', 'user_id', name='uq_participant_member'),
     )
 
-    participant = relationship("TournamentParticipant", back_populates="team_members")
+    # lazy="raise": nothing reads .participant today; this turns the first
+    # accidental read into an immediate, self-explaining error instead of a
+    # silent MissingGreenlet under this codebase's async sessions (the same
+    # hazard team_members above is eager-loaded to avoid).
+    participant = relationship("TournamentParticipant", back_populates="team_members",
+                                lazy="raise")
 
     def __repr__(self):
         return (f"<TournamentTeamMember(participant_id={self.participant_id}, "

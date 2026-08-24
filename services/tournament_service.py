@@ -206,9 +206,14 @@ async def remove_team(session, tournament_id, team_name):
     participant = (await session.execute(stmt)).scalars().first()
     if participant is None:
         raise ValueError(f"'{team_name}' is not registered for this tournament.")
-    # The roster has no ORM relationship to cascade through (deliberately — lazy
-    # loading a relationship on an async session is a footgun), so its rows are
-    # cleared explicitly. Without this they would outlive the team that owned them.
+    # TournamentParticipant.team_members is an ORM relationship now (services/
+    # tournament_roles.py needs it), but it carries no delete cascade, so this
+    # explicit delete is still required -- not redundant double-bookkeeping.
+    # Without it, session.delete(participant) would make SQLAlchemy try to
+    # nullify participant_id on the loaded children instead, and
+    # participant_id is nullable=False, so the flush would fail with an
+    # IntegrityError. This delete is what keeps the roster rows from either
+    # outliving or corrupting the team.
     await session.execute(
         delete(TournamentTeamMember).where(
             TournamentTeamMember.participant_id == participant.id

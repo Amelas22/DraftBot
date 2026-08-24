@@ -91,7 +91,11 @@ async def sync_member(guild: discord.Guild, role_id: str | None, user_id: str, *
         return
     try:
         await member.remove_roles(role)
-    except (discord.NotFound, discord.Forbidden) as e:
+    except discord.HTTPException as e:
+        # Widened to match services/crown_roles.py's remove branch (:130-145):
+        # unlike create_team_roles, there is no all-or-nothing unwind here to
+        # justify letting an unexpected 5xx propagate into the caller (e.g.
+        # remove_teammate).
         logger.warning(f"[team-roles] could not take {role} from {user_id}: {e}")
 
 
