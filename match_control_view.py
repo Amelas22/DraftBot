@@ -110,8 +110,10 @@ def control_body_and_view(
     - A mention is a live query against guild state, not a record (the same
       property that keeps pairings posts as plain names). Once the tournament
       ends and its roles are deleted, a mention preserved in the body would
-      re-render as @deleted-role -- leaving it out of refreshes means the
-      finished match room reads cleanly.
+      re-render as @deleted-role. Leaving it out of refreshes means a room
+      that saw any activity reads cleanly afterwards; a room that was never
+      drafted and never had a result is never re-rendered, so it does keep
+      its literal mention and will show @deleted-role once the roles go.
     """
     state = match_state(match.team_a_wins is not None, draft is not None)
     body = render_match_control(

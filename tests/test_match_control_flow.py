@@ -255,6 +255,26 @@ async def test_create_match_room_mentions_both_team_roles(patched_db):
     # teams and adds their members to the thread.
     allowed_mentions = thread.send.call_args.kwargs["allowed_mentions"]
     assert allowed_mentions.roles is True
+    # everyone=False is the only thing standing between a team name containing
+    # "@everyone" and a guild-wide ping: register_team only strips whitespace.
+    assert allowed_mentions.everyone is False
+
+
+@pytest.mark.asyncio
+async def test_control_message_permits_role_mentions_without_a_view():
+    """_resolve_control_message has two send branches. The no-view one is
+    unreachable today -- both callers filter to unreported matches, so a view
+    always exists -- but it must not be the one that quietly drops roles=True
+    if that ever changes."""
+    from match_control_view import _resolve_control_message
+
+    thread = make_thread()
+    with patch("match_control_view.safe_pin", AsyncMock()):
+        await _resolve_control_message(thread, None, "body", None)
+
+    allowed_mentions = thread.send.call_args.kwargs["allowed_mentions"]
+    assert allowed_mentions.roles is True
+    assert allowed_mentions.everyone is False
 
 
 @pytest.mark.asyncio
