@@ -696,7 +696,15 @@ async def test_finish_button_gives_the_payout_hint_and_refreshes_standings():
          patch("cogs.tournament_commands.escrow.is_paid_out", AsyncMock(return_value=False)), \
          patch("cogs.tournament_commands.update_standings_message",
                AsyncMock()) as refresh, \
-         patch("helpers.permissions.get_config", return_value={}):
+         patch("helpers.permissions.get_config", return_value={}), \
+         patch("cogs.tournament_commands.list_participants", AsyncMock(return_value=[])), \
+         patch("cogs.tournament_commands.delete_team_roles", AsyncMock(return_value=set())):
+        # Round 2 review, non-blocking 2: this test previously left
+        # _drop_team_roles's real list_participants call to run against the
+        # MagicMock session_stub, raising internally on every run -- a defect
+        # invisible here because _drop_team_roles never raises. Patching both
+        # is what makes this test exercise the real cleanup path instead of a
+        # silently-broken one.
         view = PlayoffPromptView(cog, tournament_id=7, cut_to=4)
         interaction = _manager_interaction()
         await view.finish_button.callback(interaction)
@@ -923,15 +931,19 @@ async def test_finishing_deletes_the_team_roles():
     from cogs.tournament_commands import TournamentCog
     cog = TournamentCog(MagicMock())
     tournament = SimpleNamespace(id=1, name="Cup", entry_fee=0)
+    ctx = _ctx()
     with patch("cogs.tournament_commands.db_session",
                _fake_db_session(_session_stub(tournament))), \
          patch("cogs.tournament_commands.list_participants", AsyncMock(return_value=[])), \
-         patch("cogs.tournament_commands.delete_team_roles", AsyncMock(return_value=2)) as gone, \
+         patch("cogs.tournament_commands.delete_team_roles", AsyncMock(return_value=set())) as gone, \
          patch("cogs.tournament_commands.finish_tournament", AsyncMock(return_value=MagicMock())), \
          patch("cogs.tournament_commands.update_standings_message", AsyncMock()), \
-         patch.object(TournamentCog, "_drop_team_roles", wraps=cog._drop_team_roles):
-        await cog._run_finish(_ctx(), 1)
+         patch.object(TournamentCog, "_drop_team_roles", wraps=cog._drop_team_roles) as drop:
+        await cog._run_finish(ctx, 1)
     gone.assert_awaited_once()
+    # Round 2 review, non-blocking 4: a wrong guild (e.g. ctx.author, self.bot)
+    # passed every prior test since none checked the argument.
+    drop.assert_awaited_once_with(ctx.guild, 1)
 
 
 @pytest.mark.asyncio
@@ -949,9 +961,12 @@ async def test_completing_via_next_round_also_deletes_the_team_roles():
          patch("cogs.tournament_commands.get_final_placement", AsyncMock(return_value=[MagicMock()])), \
          patch("cogs.tournament_commands.update_standings_message", AsyncMock()), \
          patch("cogs.tournament_commands.list_participants", AsyncMock(return_value=[])), \
-         patch("cogs.tournament_commands.delete_team_roles", AsyncMock(return_value=2)) as gone:
+         patch("cogs.tournament_commands.delete_team_roles", AsyncMock(return_value=set())) as gone, \
+         patch.object(TournamentCog, "_drop_team_roles", wraps=cog._drop_team_roles) as drop:
         await TournamentCog.next_round.callback(cog, ctx)
     gone.assert_awaited_once()
+    # Round 2 review, non-blocking 4: same coverage gap as the finish path.
+    drop.assert_awaited_once_with(ctx.guild, 1)
 
 
 @pytest.mark.asyncio
@@ -968,7 +983,8 @@ async def test_drop_team_roles_deletes_the_real_ids_before_clearing_them():
     participants = [SimpleNamespace(role_id="111"), SimpleNamespace(role_id="222")]
     with patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
          patch("cogs.tournament_commands.list_participants", AsyncMock(return_value=participants)), \
-         patch("cogs.tournament_commands.delete_team_roles", AsyncMock(return_value=2)) as gone:
+         patch("cogs.tournament_commands.delete_team_roles",
+               AsyncMock(return_value={"111", "222"})) as gone:
         await cog._drop_team_roles(guild, 1)
 
     gone.assert_awaited_once_with(guild, ["111", "222"])
@@ -976,10 +992,37 @@ async def test_drop_team_roles_deletes_the_real_ids_before_clearing_them():
 
 
 @pytest.mark.asyncio
+async def test_drop_team_roles_keeps_the_id_of_a_role_that_did_not_delete():
+    """Round 2 review, Blocking 1: delete_team_roles can leave a role alive
+    (Discord refuses one of 42 deletes) while still returning without
+    raising. Clearing every role_id regardless -- which the round-1 code did,
+    by discarding the return value entirely -- erases the only record that
+    the survivor exists: exactly the stranding the delete-before-clear
+    ordering exists to prevent, reintroduced one level up. Only ids that
+    delete_team_roles actually confirms gone may be cleared."""
+    from cogs.tournament_commands import TournamentCog
+    cog = TournamentCog(MagicMock())
+    participants = [SimpleNamespace(role_id="111"), SimpleNamespace(role_id="222")]
+    with patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
+         patch("cogs.tournament_commands.list_participants", AsyncMock(return_value=participants)), \
+         patch("cogs.tournament_commands.delete_team_roles",
+               AsyncMock(return_value={"111"})):  # "222" survived
+        await cog._drop_team_roles(MagicMock(), 1)
+
+    assert participants[0].role_id is None
+    assert participants[1].role_id == "222"
+
+
+@pytest.mark.asyncio
 async def test_drop_team_roles_logs_instead_of_raising_on_failure():
     """Never raises -- a tournament is over either way -- but a failure
     swallowed with no trace would leave up to 42 roles stranded against the
-    guild's 250-role cap with nobody told to go recover them by hand."""
+    guild's 250-role cap with nobody told to go recover them by hand.
+    logger.opt(exception=True) is asserted (not a bare logger.warning) because
+    round 2 review found a bare logger.warning(f"...{e}") gives only str(e)
+    with no traceback -- which is exactly how a fully-broken _drop_team_roles
+    (raising TypeError against a MagicMock session) passed silently in round 1
+    inside test_finish_button_gives_the_payout_hint_and_refreshes_standings."""
     from cogs.tournament_commands import TournamentCog
     cog = TournamentCog(MagicMock())
     with patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
@@ -989,4 +1032,52 @@ async def test_drop_team_roles_logs_instead_of_raising_on_failure():
          patch("cogs.tournament_commands.logger") as log:
         await cog._drop_team_roles(MagicMock(), 1)  # must not raise
 
-    log.warning.assert_called_once()
+    log.opt.assert_called_once_with(exception=True)
+    log.opt.return_value.warning.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_run_finish_refreshes_standings_before_dropping_roles():
+    """Round 2 review, non-blocking 5: role cleanup is bookkeeping that must
+    never delay or fail the visible parts of finishing a tournament. The
+    return-value shape doesn't expose call order on its own, so this pins it
+    directly with a shared list."""
+    from cogs.tournament_commands import TournamentCog
+    cog = TournamentCog(MagicMock())
+    tournament = SimpleNamespace(id=1, name="Cup", entry_fee=0)
+    order = []
+    with patch("cogs.tournament_commands.db_session",
+               _fake_db_session(_session_stub(tournament))), \
+         patch("cogs.tournament_commands.finish_tournament", AsyncMock(return_value=MagicMock())), \
+         patch("cogs.tournament_commands.update_standings_message",
+               AsyncMock(side_effect=lambda *a, **k: order.append("standings"))), \
+         patch.object(TournamentCog, "_drop_team_roles",
+                       AsyncMock(side_effect=lambda *a, **k: order.append("cleanup"))):
+        await cog._run_finish(_ctx(), 1)
+
+    assert order == ["standings", "cleanup"]
+
+
+@pytest.mark.asyncio
+async def test_next_round_announces_the_champion_before_dropping_roles():
+    """Round 2 review, non-blocking 5: the champion message is what the TO is
+    waiting for; cleanup must not delay or risk it. Pins the order that
+    mutation M6 (moving cleanup ahead of the announcement) slipped past
+    undetected in round 1."""
+    from cogs.tournament_commands import TournamentCog
+    cog = TournamentCog(MagicMock())
+    ctx = _ctx()
+    order = []
+    ctx.followup.send = AsyncMock(side_effect=lambda *a, **k: order.append("announce"))
+    with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
+         patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
+         patch("cogs.tournament_commands.get_active_tournament",
+               AsyncMock(return_value=SimpleNamespace(id=1, name="Cup", total_rounds=3))), \
+         patch("cogs.tournament_commands.advance_round", AsyncMock(return_value=None)), \
+         patch("cogs.tournament_commands.get_final_placement", AsyncMock(return_value=[MagicMock()])), \
+         patch("cogs.tournament_commands.update_standings_message", AsyncMock()), \
+         patch.object(TournamentCog, "_drop_team_roles",
+                       AsyncMock(side_effect=lambda *a, **k: order.append("cleanup"))):
+        await TournamentCog.next_round.callback(cog, ctx)
+
+    assert order == ["announce", "cleanup"]

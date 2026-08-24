@@ -1012,8 +1012,8 @@ class TournamentCog(commands.Cog):
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
 
     async def _run_finish(self, source, tournament_id):
-        """Complete a tournament, refresh the pinned standings, and return the
-        announcement text.
+        """Complete a tournament, refresh the pinned standings, release its
+        team roles, and return the announcement text.
 
         Shared by /tournament finish and the end-of-swiss prompt's "Finish now"
         button. The button had inlined its own two-line version, which silently
@@ -1051,7 +1051,8 @@ class TournamentCog(commands.Cog):
                 f"{champ_text}{payout_hint}")
 
     async def _drop_team_roles(self, guild, tournament_id):
-        """Delete a finished tournament's team roles and clear their ids.
+        """Delete a finished tournament's team roles, and clear role_id only
+        for the ones actually confirmed gone.
 
         Called from BOTH completion paths -- /tournament finish and next_round
         past the final. Never raises: a tournament is over either way, and a
@@ -1062,18 +1063,25 @@ class TournamentCog(commands.Cog):
             async with db_session() as session:
                 role_ids = [p.role_id
                             for p in await list_participants(session, tournament_id)]
-            # Delete the real roles BEFORE forgetting their ids. role_id is the
-            # only record that a role exists, so clearing first and then failing
-            # would strand 42 roles against the guild's 250-role cap with
-            # nothing left pointing at them. This order can only leave the
-            # harmless case: an id pointing at a role that is already gone,
-            # which delete_team_roles and sync_member both treat as a no-op.
-            await delete_team_roles(guild, role_ids)
+            # Delete the real roles BEFORE forgetting their ids. delete_team_roles
+            # reports back exactly which ids are now gone (deleted, or already
+            # absent) -- a role Discord refuses to delete (its role moved above
+            # the bot's, a 5xx, ...) is NOT in that set, so its id is left alone
+            # below and stays in the database, which is the only thing that
+            # makes it recoverable by hand.
+            gone = await delete_team_roles(guild, role_ids)
+            survivors = [r for r in role_ids if r and r not in gone]
+            if survivors:
+                logger.warning(
+                    f"[team-roles] tournament {tournament_id}: roles {survivors} "
+                    f"could not be deleted; their ids were kept for manual recovery")
             async with db_session() as session:
                 for participant in await list_participants(session, tournament_id):
-                    participant.role_id = None
-        except Exception as e:
-            logger.warning(f"[team-roles] cleanup failed for tournament {tournament_id}: {e}")
+                    if participant.role_id in gone:
+                        participant.role_id = None
+        except Exception:
+            logger.opt(exception=True).warning(
+                f"[team-roles] cleanup failed for tournament {tournament_id}")
 
     @tournament.command(name="payout", description="Admin: distribute a tournament's prize pool to the winners")
     @has_bot_manager_role()

@@ -322,16 +322,41 @@ async def test_sync_member_remove_treats_a_member_who_already_left_as_synced():
 
 @pytest.mark.asyncio
 async def test_delete_team_roles_treats_an_already_deleted_role_as_done():
-    """Roles outlive the bot process; cleanup has to be idempotent."""
-    gone = MagicMock()
-    gone.delete = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "unknown role"))
+    """Roles outlive the bot process; cleanup has to be idempotent. Both ids
+    come back in the returned set: "1" was already gone (NotFound), "2" was
+    just deleted -- the caller (TournamentCog._drop_team_roles) uses the set,
+    not a count, to decide which role_ids are now safe to forget."""
+    already_gone = MagicMock()
+    already_gone.delete = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "unknown role"))
     live = MagicMock()
     live.delete = AsyncMock()
     guild = MagicMock()
-    guild.get_role = MagicMock(side_effect=lambda rid: {1: gone, 2: live}.get(rid))
+    guild.get_role = MagicMock(side_effect=lambda rid: {1: already_gone, 2: live}.get(rid))
 
-    assert await delete_team_roles(guild, ["1", "2"]) == 1
+    assert await delete_team_roles(guild, ["1", "2"]) == {"1", "2"}
     live.delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_delete_team_roles_excludes_a_role_discord_refuses_to_delete():
+    """Round 2 review, Blocking 1: a role Discord won't delete (403 -- its
+    role moved above the bot's, a 5xx, ...) must not be reported as gone.
+    TournamentCog._drop_team_roles uses this return value to decide which
+    role_ids are safe to clear; a survivor's id has to stay out of it so the
+    role stays recoverable by hand instead of being stranded with nothing
+    pointing at it."""
+    stuck = MagicMock()
+    stuck.delete = AsyncMock(
+        side_effect=discord.Forbidden(MagicMock(status=403), "Missing Permissions"))
+    live = MagicMock()
+    live.delete = AsyncMock()
+    guild = MagicMock()
+    guild.get_role = MagicMock(side_effect=lambda rid: {1: stuck, 2: live}.get(rid))
+
+    gone = await delete_team_roles(guild, ["1", "2"])
+
+    assert gone == {"2"}
+    stuck.delete.assert_awaited_once()
 
 
 @pytest.mark.asyncio

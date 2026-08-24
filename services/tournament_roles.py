@@ -122,24 +122,34 @@ async def sync_member(guild: discord.Guild, role_id: str | None, user_id: str, *
         return False
 
 
-async def delete_team_roles(guild: discord.Guild, role_ids: Iterable[str | None]) -> int:
-    """Delete a tournament's roles. Returns how many were actually deleted.
+async def delete_team_roles(guild: discord.Guild, role_ids: Iterable[str | None]) -> set[str]:
+    """Delete a tournament's roles. Returns the set of ids that are now gone
+    -- both the ones this call actually deleted and the ones already absent
+    (someone removed the role by hand, or this is a repeat cleanup).
 
-    Idempotent: a role someone already removed by hand counts as done. Roles
+    Idempotent: a role someone already removed by hand counts as gone. Roles
     outlive the bot process, so this must tolerate a guild that has moved on.
+
+    A role Discord refuses to delete (HTTPException -- its role moved above
+    the bot's, a 5xx, ...) is deliberately left OUT of the returned set: the
+    caller uses this to decide which role_ids are safe to forget, and an id
+    for a still-live role must survive so the role can be found and deleted
+    later instead of being stranded against the guild's 250-role cap with
+    nothing left pointing at it.
     """
-    deleted = 0
+    gone: set[str] = set()
     for role_id in role_ids:
         if not role_id:
             continue
         role = guild.get_role(int(role_id))
         if role is None:
+            gone.add(role_id)
             continue
         try:
             await role.delete(reason="tournament completed")
-            deleted += 1
+            gone.add(role_id)
         except discord.NotFound:
-            pass
+            gone.add(role_id)
         except discord.HTTPException as e:
             logger.warning(f"[team-roles] could not delete role {role_id}: {e}")
-    return deleted
+    return gone
