@@ -58,6 +58,10 @@ class DraftSession(Base):
     # team the fallback already served never gets a second, empty thread.
     team_a_pools_destination_id = Column(String(64), nullable=True)
     team_b_pools_destination_id = Column(String(64), nullable=True)
+    # Same idea for the OPEN pools thread a tournament match gets in the shared draft
+    # chat. Separate from the two above because it is a third destination with its own
+    # partial-failure story: the open thread can fail while both team threads succeed.
+    open_pools_destination_id = Column(String(64), nullable=True)
     cube = Column(String(128))
     live_draft_message_id = Column(String(64))
     min_stake = Column(Integer, default=10, server_default=text('10'))

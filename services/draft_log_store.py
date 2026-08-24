@@ -470,6 +470,13 @@ async def _post_team_logs_locked(session_id: str, bot) -> bool:
         friendly_id = ds.friendly_id or ds.draft_id or session_id
         team_a_destination_id = ds.team_a_pools_destination_id
         team_b_destination_id = ds.team_b_pools_destination_id
+        tournament_match_id = getattr(ds, "tournament_match_id", None)
+        draft_chat_channel = getattr(ds, "draft_chat_channel", None)
+        open_destination_id = getattr(ds, "open_pools_destination_id", None)
+        # Tournament matches are premade, so these are real team names. Falling back
+        # to Red/Blue keeps the grouping readable if one is ever missing.
+        team_a_label = getattr(ds, "team_a_name", None) or "Red Team"
+        team_b_label = getattr(ds, "team_b_name", None) or "Blue Team"
 
     guild = bot.get_guild(int(guild_id)) if guild_id else None
     if guild is None:
@@ -523,7 +530,22 @@ async def _post_team_logs_locked(session_id: str, bot) -> bool:
         persist_destination_id=partial(_persist_destination_id, "team_b_pools_destination_id"),
     )
 
-    if not (red_all_posted and blue_all_posted):
+    # A tournament match is played with pools open, so both teams' pools also go to
+    # one thread in the shared draft chat. Deliberately after the private threads:
+    # those are the deliverable each team imports from, and a failure to open the
+    # shared thread must not cost a team its own pools.
+    open_all_posted = True
+    if tournament_match_id is not None:
+        open_all_posted = await post_open_pools(
+            bot, guild.get_channel(int(draft_chat_channel)) if draft_chat_channel else None,
+            open_destination_id, friendly_id,
+            [(team_a_label, team_a), (team_b_label, team_b)],
+            mapping, draft_data, sign_ups,
+            persist_destination_id=partial(_persist_destination_id,
+                                           "open_pools_destination_id"),
+        )
+
+    if not (red_all_posted and blue_all_posted and open_all_posted):
         # Some player(s) are still missing a pool (a send failure, or a
         # thread-creation refusal whose fallback pass also failed). Leave
         # team_logs_posted_at unset so the reconciler retries and posts only
@@ -581,3 +603,108 @@ def build_mtgo_deck_text(split: dict, carddata: dict) -> str:
     if side_lines:
         return "\n".join(main_lines) + "\n\n" + "\n".join(side_lines)
     return "\n".join(main_lines)
+
+
+# --- open pools (tournament matches) ---------------------------------------------
+
+async def _send_open_pool(destination, member: _PostableMember, team_label: str,
+                          draft_data: dict) -> None:
+    """One player's pool for an OPEN thread: same `.txt` deliverable as the private
+    posts, but labelled with the team and imaged as a single pile.
+
+    The pile is built with the whole pool as `main` and an empty sideboard on purpose.
+    PileImageBuilder buckets main and side into separate groups, which is the right
+    read when a pool is private and the built deck is the story; with pools open the
+    split is noise — an opponent wants to see everything that was drafted, in one
+    screenshot.
+    """
+    files = [discord.File(io.BytesIO(member.pool.encode("utf-8")), filename=f"{member.safe}.txt")]
+    try:
+        split = split_decklist(draft_data, member.dm_user_id)
+        whole_pool = list(split.get("main") or []) + list(split.get("side") or [])
+        image = await PileImageBuilder().build(whole_pool, [], draft_data.get("carddata", {}))
+        if image:
+            files.append(discord.File(io.BytesIO(image.getvalue()), filename=f"{member.safe}.jpg"))
+    except Exception as e:
+        logger.warning(f"[open-pools] deck image failed for {member.name}: {e}")
+
+    await destination.send(
+        content=f"**{member.name}** — {team_label} ({member.pool.count(chr(10)) + 1} cards):",
+        files=files,
+    )
+
+
+async def post_open_pools(
+    bot,
+    channel,
+    destination_id: str | None,
+    friendly_id: str,
+    teams: list[tuple[str, list[str]]],
+    mapping: dict[str, str],
+    draft_data: dict,
+    sign_ups: dict,
+    persist_destination_id: Callable[[str], Awaitable[None]],
+) -> bool:
+    """Both teams' pools in ONE thread off the shared draft chat, grouped by team.
+
+    Only for tournament matches, which are played with pools open. The private
+    per-team threads still happen — this is additional, and deliberately so: the
+    private thread is where a team imports its own `.txt` from, and taking it away
+    would trade a working habit for a tidier channel list.
+
+    `teams` is [(team_label, [discord_ids]), …] in board order; the label heads that
+    team's group and is repeated on each pool, so a post that is linked or scrolled
+    to in isolation still says which side it belongs to.
+
+    Resume works exactly like the per-team path: the thread is claimed before anyone
+    is posted, and players already carrying a posted `.txt` are skipped — so a retry
+    after a partial run finishes the stragglers instead of doubling the thread.
+    """
+    groups = [(label, _postable_members(ids, mapping, draft_data, sign_ups))
+              for label, ids in teams]
+    groups = [(label, members) for label, members in groups if members]
+    if not groups:
+        return True
+    if channel is None:
+        return False
+
+    try:
+        destination = (
+            await _resolve_destination(bot, destination_id) if destination_id else None
+        )
+    except discord.HTTPException as e:
+        # Same reasoning as _post_pools_for_team: a stored destination Discord won't
+        # confirm is gone must not become a second thread beside a live first one.
+        logger.warning(
+            f"[open-pools] could not resolve the stored destination for {friendly_id}, "
+            f"aborting rather than risk a second thread: {e}"
+        )
+        return False
+
+    if destination is None:
+        total = sum(len(members) for _, members in groups)
+        destination = await _open_pools_thread(channel, friendly_id, total)
+        if destination is None:
+            # No fallback to the channel here (unlike the private path): the shared
+            # draft chat is where the match is being played, and spraying every
+            # pool into it unthreaded is worse than not posting them at all.
+            return False
+        await persist_destination_id(str(destination.id))
+
+    already = await _posted_txt_filenames(bot, destination)
+    all_posted = True
+    for label, members in groups:
+        pending = [m for m in members if f"{m.safe}.txt" not in already]
+        if not pending:
+            continue
+        try:
+            await destination.send(content=f"__**{label}**__")
+        except discord.HTTPException as e:
+            logger.warning(f"[open-pools] team header failed for {label}: {e}")
+        for member in pending:
+            try:
+                await _send_open_pool(destination, member, label, draft_data)
+            except discord.HTTPException as e:
+                logger.warning(f"[open-pools] failed to post {member.name}: {e}")
+                all_posted = False
+    return all_posted

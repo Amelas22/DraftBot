@@ -120,6 +120,11 @@ def _team3_log():
 _BOT_ID = 999000111
 
 
+async def _record(sink, destination_id):
+    """persist_destination_id double: records what the code claims as its destination."""
+    sink.append(destination_id)
+
+
 # The Alice/Bob pair most of these tests use. None of them is ABOUT the
 # sign-ups or the mapping -- it is scaffolding, so it lives here rather than
 # three lines at the top of each test.
@@ -909,3 +914,127 @@ async def test_post_pools_for_team_fallback_does_not_repost_a_player_already_in_
     # ...and that attempt left nothing behind either, so orphan headers cannot
     # pile up across the reconciler's 72h of retries.
     assert channel.summary_messages() == []
+
+
+# ---- open pools for tournament matches ------------------------------------------
+# A tournament match is played with pools open, so both teams' pools also go to one
+# thread in the SHARED draft chat — grouped under a per-team header, each labelled
+# with player and team, and each image combining main + sideboard into one pile.
+
+def _tournament_ds(match_id=7, chat="555"):
+    """_team_ds, plus what makes a draft a tournament match: a linked match id, the
+    shared draft chat to post into, and real team names to group and label by."""
+    ds = _team_ds()
+    ds.tournament_match_id = match_id
+    ds.draft_chat_channel = chat
+    ds.team_a_name = "Cosmos"
+    ds.team_b_name = "gypsy caravan"
+    ds.open_pools_destination_id = None
+    return ds
+
+
+@pytest.mark.asyncio
+async def test_open_pools_posts_both_teams_into_one_shared_thread():
+    from services.draft_log_store import post_open_pools
+
+    ds = _tournament_ds()
+    thread = _FakeThread(3003)
+    chat = _FakeChannel("draft-chat", thread=thread, cid=555)
+    persisted = []
+
+    with _patched_discord():
+        ok = await post_open_pools(
+            _bot_for({555: chat}), chat, None, ds.friendly_id,
+            [("Cosmos", ds.team_a), ("gypsy caravan", ds.team_b)],
+            _MAPPING_AB, ds.draft_data, ds.sign_ups,
+            persist_destination_id=lambda d: _record(persisted, d),
+        )
+
+    assert ok
+    posts = [c.kwargs.get("content", "") for c in thread.send.await_args_list]
+    body = "\n".join(posts)
+    # grouped: a header per team, in board order
+    assert body.index("Cosmos") < body.index("gypsy caravan")
+    # labelled: every pool names its player AND its team
+    assert any("Alice" in p and "Cosmos" in p for p in posts)
+    assert any("Bob" in p and "gypsy caravan" in p for p in posts)
+    # both teams' pools really landed
+    assert sorted(_attachment_names(thread)) == ["Alice.txt", "Bob.txt"]
+    assert persisted == [str(thread.id)]
+
+
+@pytest.mark.asyncio
+async def test_open_pools_image_combines_main_and_sideboard_into_one_pile():
+    """Pools are open, so the split into deck vs sideboard is noise — one pile."""
+    from services.draft_log_store import post_open_pools
+
+    ds = _tournament_ds()
+    thread = _FakeThread(3003)
+    chat = _FakeChannel("draft-chat", thread=thread, cid=555)
+    seen = []
+
+    async def _spy(main_ids, side_ids, carddata):
+        seen.append((list(main_ids), list(side_ids)))
+        return io.BytesIO(b"img")
+
+    with _patched_discord(build=AsyncMock(side_effect=_spy)):
+        await post_open_pools(
+            _bot_for({555: chat}), chat, None, ds.friendly_id,
+            [("Cosmos", ds.team_a), ("gypsy caravan", ds.team_b)],
+            _MAPPING_AB, ds.draft_data, ds.sign_ups,
+            persist_destination_id=lambda d: _record([], d),
+        )
+
+    assert seen, "no image was built"
+    for main_ids, side_ids in seen:
+        assert side_ids == [], "sideboard must be folded into the single pile"
+        assert main_ids, "the combined pile must carry the whole pool"
+
+
+@pytest.mark.asyncio
+async def test_open_pools_resumes_into_the_stored_thread_without_reposting():
+    from services.draft_log_store import post_open_pools
+
+    ds = _tournament_ds()
+    thread = _FakeThread(3003)
+    chat = _FakeChannel("draft-chat", thread=thread, cid=555)
+    args = dict(friendly_id=ds.friendly_id,
+                teams=[("Cosmos", ds.team_a), ("gypsy caravan", ds.team_b)],
+                mapping=_MAPPING_AB, draft_data=ds.draft_data, sign_ups=ds.sign_ups)
+
+    bot = _bot_for({555: chat, 3003: thread})
+    with _patched_discord():
+        await post_open_pools(bot, chat, None,
+                              persist_destination_id=lambda d: _record([], d), **args)
+        first = len(thread.send.await_args_list)
+
+        await post_open_pools(bot, chat, str(thread.id),
+                              persist_destination_id=lambda d: _record([], d), **args)
+
+    assert len(thread.send.await_args_list) == first, "a retry re-posted pools"
+
+
+@pytest.mark.asyncio
+async def test_post_team_logs_opens_shared_pools_only_for_a_tournament_match():
+    """An ordinary draft keeps its pools private; a tournament match also gets the
+    open thread. The trigger is the linked match, nothing else."""
+    for match_id, expect_open in ((None, False), (7, True)):
+        ds = _tournament_ds(match_id=match_id)
+        red, blue = _FakeThread(1001), _FakeThread(2002)
+        open_thread = _FakeThread(3003)
+        chat = _FakeChannel("draft-chat", thread=open_thread, cid=555)
+        red_ch = _FakeChannel("Red-Team-Chat-ABC", thread=red, cid=111)
+        blue_ch = _FakeChannel("Blue-Team-Chat-ABC", thread=blue, cid=222)
+        _session, ctx = _db_ctx(ds)
+
+        with _patched_discord(), patch("services.draft_log_store.db_session", return_value=ctx):
+            ok = await post_team_logs("sid", _bot_for(
+                {111: red_ch, 222: blue_ch, 555: chat}))
+
+        assert ok, f"post_team_logs failed for match_id={match_id}"
+        # the private per-team threads happen either way
+        assert _attachment_names(red) == ["Alice.txt"]
+        assert _attachment_names(blue) == ["Bob.txt"]
+        posted_open = bool(_attachment_names(open_thread))
+        assert posted_open is expect_open, (
+            f"match_id={match_id}: open pools {'posted' if posted_open else 'absent'}")
