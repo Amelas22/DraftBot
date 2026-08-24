@@ -20,10 +20,12 @@ async def test_match_facts_returns_team_names_and_round(match_control_db):
 
     async with match_control_db() as session:
         match = await seed_tournament_match(session, thread_id="900")
-        _m, a_name, b_name, round_number, draft = await match_facts(session, match.id)
+        _m, a_name, b_name, label, draft = await match_facts(session, match.id)
 
     assert {a_name, b_name} == {"Alpha", "Bravo"}
-    assert round_number == 1
+    # The round's NAME, not its number: a bracket round is numbered past the
+    # swiss total, so the number alone renders a semifinal as a swiss week.
+    assert label == "Round 1"
     assert draft is None
 
 
@@ -34,7 +36,7 @@ async def test_match_facts_finds_the_linked_draft(match_control_db):
     async with match_control_db() as session:
         match = await seed_tournament_match(session, thread_id="900")
         await _link_draft(session, match.id)
-        _m, _a, _b, _r, draft = await match_facts(session, match.id)
+        _m, _a, _b, _label, draft = await match_facts(session, match.id)
 
     assert draft is not None and draft.session_id == "d1"
 
@@ -66,7 +68,7 @@ async def test_control_body_offers_start_when_scheduling(match_control_db):
 
     async with match_control_db() as session:
         match = await seed_tournament_match(session, thread_id="900")
-        body, view = control_body_and_view(match, "Alpha", "Bravo", 1, None)
+        body, view = control_body_and_view(match, "Alpha", "Bravo", "Round 1", None)
 
     assert "Not started yet" in body
     assert view is not None
@@ -80,7 +82,7 @@ async def test_control_body_drops_the_button_once_drafting(match_control_db):
     async with match_control_db() as session:
         match = await seed_tournament_match(session, thread_id="900")
         draft = DS(session_id="d1", guild_id="7", draft_channel_id="8", message_id="9")
-        body, view = control_body_and_view(match, "Alpha", "Bravo", 1, draft)
+        body, view = control_body_and_view(match, "Alpha", "Bravo", "Round 1", draft)
 
     assert "Draft in progress" in body
     assert "https://discord.com/channels/7/8/9" in body

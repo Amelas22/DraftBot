@@ -10,9 +10,10 @@ from models.tournament import (
 from services.tournament_formatter import create_registration_embed
 
 
-def _tournament(name="Fee Cup", fee=1, status="registration"):
+def _tournament(name="Fee Cup", fee=1, status="registration", cut_to=None):
     return Tournament(id=1, guild_id="g1", name=name, total_rounds=0, format="manual",
-                      status=status, entry_fee=fee, payout_structure="winner_take_all")
+                      status=status, entry_fee=fee, payout_structure="winner_take_all",
+                      cut_to=cut_to)
 
 
 def _team(pid, name, captain, status):
@@ -44,6 +45,27 @@ def test_free_board_is_a_plain_roster():
     assert "Teams (1)" in text
     assert "Entry fee" not in text and "Prize pool" not in text
     assert "needs" not in text and "⏳" not in text
+
+
+def test_free_board_with_a_cut_has_no_leading_separator():
+    """A cut can be declared with no entry fee, so desc starts empty ("").
+    The '· Cut: top N' bullet must not carry a stray leading separator when
+    there was no payout line in front of it."""
+    teams = [_team(1, "Alpha", "10", "paid")]
+    embed = create_registration_embed(_tournament(fee=0, cut_to=8), teams)
+    text = _text(embed)
+
+    assert "**Cut:** top 8" in text
+    assert not embed.description.startswith(" ·")
+    assert not embed.description.startswith("·")
+
+
+def test_paid_board_with_a_cut_appends_after_the_payout_line():
+    teams = [_team(1, "Alpha", "10", "paid")]
+    embed = create_registration_embed(_tournament(fee=1, cut_to=4), teams, pot=1)
+
+    assert "Payout:" in embed.description
+    assert "· **Cut:** top 4" in embed.description
 
 
 def test_all_paid_board_shows_no_deficit_lines():

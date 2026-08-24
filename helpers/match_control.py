@@ -38,12 +38,17 @@ def render_match_control(
     state: str,
     a_name: str,
     b_name: str,
-    round_number: int,
+    round_label: str,
     lobby_link: str | None = None,
     result: tuple[int, int] | None = None,
 ) -> str:
-    """Body text of the control message for a match in ``state``."""
-    header = f"**Round {round_number} — {a_name} vs {b_name}**"
+    """Body text of the control message for a match in ``state``.
+
+    ``round_label`` is the round's name, already rendered by
+    tournament_formatter.round_label -- this module stays free of the database
+    a bracket round's name has to be read from.
+    """
+    header = f"**{round_label} — {a_name} vs {b_name}**"
     if state == RECORDED:
         assert result is not None, "result required when state is RECORDED"
         a_wins, b_wins = result
