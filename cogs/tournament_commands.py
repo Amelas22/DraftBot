@@ -63,11 +63,13 @@ from services.tournament_service import (
     remove_teammate,
     set_result,
     start_playoff,
+    store_role_ids,
     SwissComplete,
 )
 from services.mtgo_tradebot_client import EVENT_TICKET
 from services import tournament_escrow_service as escrow
 from services import wallet_service
+from services.tournament_roles import create_team_roles, delete_team_roles
 
 
 # Registering records only the captain, so every successful registration has to say
@@ -344,6 +346,26 @@ class TournamentCog(commands.Cog):
         Discord failure break the command that changed the roster. Open vs closed is
         derived from the tournament's own status inside the refresh."""
         await refresh_boards(self.bot, [tournament_id])
+
+    async def _create_roles_for_start(self, ctx):
+        """Create a role per paid team, before the tournament starts.
+
+        Returns {participant id: role id}, or raises. Ordered before
+        close_registration_and_seed on purpose: that call commits the start, so
+        a role failure afterwards would mean un-starting a started tournament.
+        The cheap read here means 42 roles are not created for a tournament
+        that was never going to start; the authoritative checks still happen
+        under the money lock.
+        """
+        async with db_session() as session:
+            tournament = await get_active_tournament(session, ctx.guild.id)
+            if tournament is None or tournament.status != "registration":
+                return {}
+            paid = [p for p in await list_participants(session, tournament.id)
+                    if p.status == "paid"]
+            if len(paid) < 2:
+                return {}
+            return await create_team_roles(ctx.guild, paid)
 
     @tournament.command(name="enable", description="Admin: enable tournament commands on this server")
     @has_bot_manager_role()
@@ -833,7 +855,14 @@ class TournamentCog(commands.Cog):
             return
         await ctx.defer()
         try:
-            res = await escrow.close_registration_and_seed(ctx.guild.id, random.Random())
+            role_ids = await self._create_roles_for_start(ctx)
+            try:
+                res = await escrow.close_registration_and_seed(ctx.guild.id, random.Random())
+            except Exception:
+                # The start did not happen, so the roles must not survive it.
+                await delete_team_roles(ctx.guild, role_ids.values())
+                raise
+            await store_role_ids(role_ids)
             tournament_id = res["tournament_id"]
             logger.info(f"Tournament {tournament_id} started in guild {ctx.guild.id} by {ctx.author.id}")
             await self._refresh_board(tournament_id)
@@ -847,6 +876,11 @@ class TournamentCog(commands.Cog):
             await self._post_standings(standings, tournament_id)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
+        except discord.HTTPException as e:
+            # discord.Forbidden (missing "Manage Roles") is a subclass of this;
+            # without this handler it would fall through to py-cord's default
+            # on_error instead of telling the TO what went wrong.
+            await ctx.followup.send(f"❌ Could not create team roles: {e}", ephemeral=True)
 
     @tournament.command(name="set_result", description="Admin: record or correct a match result")
     @has_bot_manager_role()

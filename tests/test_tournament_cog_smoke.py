@@ -1,4 +1,6 @@
 """Smoke tests for cogs/tournament_commands.py (Slice 1)."""
+from contextlib import ExitStack
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -300,6 +302,86 @@ class _NullSession:
 
     async def __aexit__(self, *_exc):
         return False
+
+
+def _ctx():
+    """An ApplicationContext stand-in for invoking a command callback."""
+    ctx = MagicMock()
+    ctx.guild.id = 123
+    ctx.author.id = 456
+    ctx.defer = AsyncMock()
+    ctx.followup.send = AsyncMock()
+    ctx.channel.send = AsyncMock()
+    return ctx
+
+
+def _registration_open(paid_teams=2):
+    """Patch the reads `_create_roles_for_start` makes, so it reaches Discord.
+
+    Without this the command reads the real database. `_NullSession` and the
+    patch targets are the pattern already used elsewhere in this file.
+    """
+    stack = ExitStack()
+    stack.enter_context(patch("cogs.tournament_commands.tournament_enabled",
+                              return_value=True))
+    stack.enter_context(patch("cogs.tournament_commands.db_session",
+                              lambda: _NullSession()))
+    stack.enter_context(patch("cogs.tournament_commands.get_active_tournament",
+                              AsyncMock(return_value=SimpleNamespace(
+                                  id=1, status="registration"))))
+    stack.enter_context(patch("cogs.tournament_commands.list_participants",
+                              AsyncMock(return_value=[
+                                  SimpleNamespace(id=i, status="paid",
+                                                  team_name=f"T{i}",
+                                                  captain_user_id=str(100 + i),
+                                                  roster_user_ids=[])
+                                  for i in range(paid_teams)])))
+    return stack
+
+
+@pytest.mark.asyncio
+async def test_start_creates_a_role_per_team_and_stores_the_ids():
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    # As in test_start_freezes_the_board: this test is about role creation, not
+    # the rest of start()'s tail, so the board/schedule/standings posts are
+    # stubbed out rather than run for real against a fake session.
+    cog._refresh_board = AsyncMock()
+    cog._post_schedule = AsyncMock()
+    cog._post_standings = AsyncMock()
+    ctx = _ctx()                       # reuse this file's existing ctx helper
+    with _registration_open(), \
+         patch("cogs.tournament_commands.escrow.close_registration_and_seed",
+               AsyncMock(return_value={"tournament_id": 1, "name": "Cup", "fee": 0, "pot": 0})), \
+         patch("cogs.tournament_commands.create_team_roles",
+               AsyncMock(return_value={7: "555"})) as mk, \
+         patch("cogs.tournament_commands.store_role_ids", AsyncMock()) as store:
+        await TournamentCog.start.callback(cog, ctx)
+
+    mk.assert_awaited_once()
+    store.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_start_refuses_when_roles_cannot_be_created():
+    """Failing at start is far cheaper than discovering it when the first match
+    room opens, and the roles are unwound rather than left behind."""
+    import discord
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    ctx = _ctx()
+    with _registration_open(), \
+         patch("cogs.tournament_commands.create_team_roles",
+               AsyncMock(side_effect=discord.Forbidden(MagicMock(status=403), "Missing Permissions"))), \
+         patch("cogs.tournament_commands.escrow.close_registration_and_seed",
+               AsyncMock()) as seed:
+        await TournamentCog.start.callback(cog, ctx)
+
+    seed.assert_not_awaited()          # the tournament never started
+    sent = " ".join(str(c) for c in ctx.followup.send.await_args_list)
+    assert "role" in sent.lower()
 
 
 @pytest.mark.asyncio

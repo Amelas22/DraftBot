@@ -1028,3 +1028,14 @@ async def extend_deletion_if_unfinished(session, draft_session, now):
         draft_session.deletion_time = now + timedelta(days=7)
         return True
     return False
+
+
+async def store_role_ids(role_ids: dict) -> None:
+    """Persist each team's role id after a successful start."""
+    if not role_ids:
+        return
+    async with db_session() as session:
+        for participant_id, role_id in role_ids.items():
+            participant = await session.get(TournamentParticipant, participant_id)
+            if participant is not None:
+                participant.role_id = role_id
