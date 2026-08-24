@@ -207,6 +207,37 @@ def _playoff_prompt_interaction(is_owner=False):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("button_name, expected", [
+    ("start_playoff_button", "Cut to the top"),
+    ("finish_button", "Finished"),
+])
+async def test_playoff_prompt_settles_its_message_after_a_successful_answer(button_name, expected):
+    """_answer closes the prompt with a "⏳ ..." line before its slow work, and
+    _failed replaces that line when the work raises. Success had nothing, so a
+    prompt that had been answered went on advertising work in progress -- it
+    reads as a hung command to everyone in the channel except the clicker."""
+    from cogs.tournament_commands import PlayoffPromptView
+
+    cog = MagicMock()
+    cog._run_playoff = AsyncMock(return_value=(MagicMock(), 8))
+    cog._run_finish = AsyncMock(return_value="🏁 Complete! Champion: **Alpha** 🏆")
+    view = PlayoffPromptView(cog, tournament_id=1, cut_to=8)
+    view.message = MagicMock()
+    view.message.edit = AsyncMock()
+
+    with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
+         patch("helpers.permissions.is_bot_manager", return_value=True):
+        interaction = _playoff_prompt_interaction(is_owner=True)
+        await getattr(view, button_name).callback(interaction)
+
+    # The last edit is what the channel is left reading.
+    assert view.message.edit.await_count >= 1
+    final = view.message.edit.await_args.kwargs["content"]
+    assert expected in final, final
+    assert "⏳" not in final, f"prompt left advertising work in progress: {final!r}"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("button_name", ["start_playoff_button", "finish_button"])
 async def test_playoff_prompt_buttons_reject_non_managers(button_name):
     """Regression for the end-of-swiss prompt being posted publicly: without a

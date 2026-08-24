@@ -245,6 +245,16 @@ class PlayoffPromptView(discord.ui.View):
         except Exception as e:
             logger.warning(f"[PlayoffPrompt] could not rewrite the prompt: {e}")
 
+    async def _settled(self, message):
+        """Replace the "⏳ …" line once the answer has actually landed.
+
+        _answer closes the prompt with a progress line before its slow work,
+        and _failed replaces that line when the work raises. Success had
+        nothing: the public message went on claiming the cut was still running
+        long after the bracket was posted, which reads as a hung command to
+        everyone in the channel except the person who clicked."""
+        await self._rewrite(message)
+
     async def _failed(self, interaction, message):
         """Report a failed answer to the clicker AND on the prompt itself.
 
@@ -298,6 +308,7 @@ class PlayoffPromptView(discord.ui.View):
         except ValueError as e:
             await self._failed(interaction, f"❌ {e}")
             return
+        await self._settled(f"✅ Cut to the top {self.cut_to} — the bracket is posted.")
         await interaction.followup.send(f"🏆 Top {self.cut_to} playoff started.")
         self.stop()
 
@@ -310,6 +321,7 @@ class PlayoffPromptView(discord.ui.View):
         except ValueError as e:
             await self._failed(interaction, f"❌ {e}")
             return
+        await self._settled("✅ Finished — the Swiss leader was crowned.")
         await interaction.followup.send(announcement)
         self.stop()
 
