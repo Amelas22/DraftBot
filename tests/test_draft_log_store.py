@@ -8,6 +8,7 @@ import discord
 import pytest
 
 from services.draft_log_store import (
+    _post_open_pools,
     _post_pools_for_team,
     map_discord_to_draftmancer,
     post_team_logs,
@@ -247,8 +248,13 @@ class _FakeThread:
         self._messages.append(msg)
         return msg
 
-    async def history(self, limit=None):
-        for msg in self._messages:
+    async def history(self, limit=None, oldest_first=False):
+        # _messages is append-ordered, i.e. oldest-first. Discord's real history()
+        # is NEWEST-first unless oldest_first=True, and the open-pools scan relies
+        # on that distinction — a newest-first bound would walk past the pools once
+        # the thread gets chatty. The double has to model it or the bound is untested.
+        msgs = self._messages if oldest_first else list(reversed(self._messages))
+        for msg in msgs[:limit] if limit else msgs:
             yield msg
 
     def inject_foreign_message(self, filename, author_id=424242):
@@ -347,6 +353,10 @@ def _team_ds(team_b=("disc_b",), channel_ids=(111, 222), friendly_id="ABC"):
         sign_ups={"disc_a": "Alice", "disc_b": "Bob"},
         channel_ids=list(channel_ids),
         team_a_pools_destination_id=None, team_b_pools_destination_id=None,
+        # Present on every DraftSession, so the double carries them too — the
+        # production read is plain attribute access, not a defensive getattr.
+        tournament_match_id=None, draft_chat_channel=None,
+        open_pools_destination_id=None, team_a_name=None, team_b_name=None,
     )
 
 
@@ -359,6 +369,8 @@ def _team_ds3(friendly_id="ABC"):
         sign_ups={"disc_a": "Alice", "disc_b": "Bob", "disc_c": "Carol"},
         channel_ids=[111],
         team_a_pools_destination_id=None, team_b_pools_destination_id=None,
+        tournament_match_id=None, draft_chat_channel=None,
+        open_pools_destination_id=None, team_a_name=None, team_b_name=None,
     )
 
 
@@ -935,15 +947,13 @@ def _tournament_ds(match_id=7, chat="555"):
 
 @pytest.mark.asyncio
 async def test_open_pools_posts_both_teams_into_one_shared_thread():
-    from services.draft_log_store import post_open_pools
-
     ds = _tournament_ds()
     thread = _FakeThread(3003)
     chat = _FakeChannel("draft-chat", thread=thread, cid=555)
     persisted = []
 
     with _patched_discord():
-        ok = await post_open_pools(
+        ok = await _post_open_pools(
             _bot_for({555: chat}), chat, None, ds.friendly_id,
             [("Cosmos", ds.team_a), ("gypsy caravan", ds.team_b)],
             _MAPPING_AB, ds.draft_data, ds.sign_ups,
@@ -966,8 +976,6 @@ async def test_open_pools_posts_both_teams_into_one_shared_thread():
 @pytest.mark.asyncio
 async def test_open_pools_image_combines_main_and_sideboard_into_one_pile():
     """Pools are open, so the split into deck vs sideboard is noise — one pile."""
-    from services.draft_log_store import post_open_pools
-
     ds = _tournament_ds()
     thread = _FakeThread(3003)
     chat = _FakeChannel("draft-chat", thread=thread, cid=555)
@@ -978,7 +986,7 @@ async def test_open_pools_image_combines_main_and_sideboard_into_one_pile():
         return io.BytesIO(b"img")
 
     with _patched_discord(build=AsyncMock(side_effect=_spy)):
-        await post_open_pools(
+        await _post_open_pools(
             _bot_for({555: chat}), chat, None, ds.friendly_id,
             [("Cosmos", ds.team_a), ("gypsy caravan", ds.team_b)],
             _MAPPING_AB, ds.draft_data, ds.sign_ups,
@@ -993,8 +1001,6 @@ async def test_open_pools_image_combines_main_and_sideboard_into_one_pile():
 
 @pytest.mark.asyncio
 async def test_open_pools_resumes_into_the_stored_thread_without_reposting():
-    from services.draft_log_store import post_open_pools
-
     ds = _tournament_ds()
     thread = _FakeThread(3003)
     chat = _FakeChannel("draft-chat", thread=thread, cid=555)
@@ -1004,11 +1010,11 @@ async def test_open_pools_resumes_into_the_stored_thread_without_reposting():
 
     bot = _bot_for({555: chat, 3003: thread})
     with _patched_discord():
-        await post_open_pools(bot, chat, None,
+        await _post_open_pools(bot, chat, None,
                               persist_destination_id=lambda d: _record([], d), **args)
         first = len(thread.send.await_args_list)
 
-        await post_open_pools(bot, chat, str(thread.id),
+        await _post_open_pools(bot, chat, str(thread.id),
                               persist_destination_id=lambda d: _record([], d), **args)
 
     assert len(thread.send.await_args_list) == first, "a retry re-posted pools"
@@ -1044,8 +1050,6 @@ async def test_post_team_logs_opens_shared_pools_only_for_a_tournament_match():
 async def test_open_pools_one_send_failing_below_discord_does_not_abort_the_rest():
     """A send can fail beneath discord.py — a real e2e run died on an aiohttp
     ClientOSError mid-upload. That must cost one player a retry, not abort the run."""
-    from services.draft_log_store import post_open_pools
-
     ds = _tournament_ds()
     thread = _FakeThread(3003)
     chat = _FakeChannel("draft-chat", thread=thread, cid=555)
@@ -1061,7 +1065,7 @@ async def test_open_pools_one_send_failing_below_discord_does_not_abort_the_rest
     thread.send = AsyncMock(side_effect=_flaky)
 
     with _patched_discord():
-        ok = await post_open_pools(
+        ok = await _post_open_pools(
             _bot_for({555: chat}), chat, None, ds.friendly_id,
             [("Cosmos", ds.team_a), ("gypsy caravan", ds.team_b)],
             _MAPPING_AB, ds.draft_data, ds.sign_ups,
@@ -1071,3 +1075,58 @@ async def test_open_pools_one_send_failing_below_discord_does_not_abort_the_rest
     assert ok is False, "an incomplete run must report False so the reconciler retries"
     # the OTHER team's pool still went out rather than being taken down with it
     assert "Bob.txt" in _attachment_names(thread)
+
+
+@pytest.mark.asyncio
+async def test_open_pools_disambiguates_names_that_collide_across_teams():
+    """_postable_members dedupes safe names WITHIN a team. The open thread merges
+    both teams, so two opponents whose names sanitise alike would collide on
+    {safe}.txt — and the posted-check would silently skip the second one."""
+    log = {
+        "carddata": {"c1": {"name": "Lightning Bolt"}, "c2": {"name": "Counterspell"}},
+        "users": {
+            "dm_a": {"userName": "Bob!", "seatNum": 0, "cards": ["c1"]},
+            "dm_b": {"userName": "Bob?", "seatNum": 1, "cards": ["c2"]},
+        },
+    }
+    thread = _FakeThread(3003)
+    chat = _FakeChannel("draft-chat", thread=thread, cid=555)
+
+    with _patched_discord():
+        await _post_open_pools(
+            _bot_for({555: chat}), chat, None, "ABC",
+            [("Cosmos", ["disc_a"]), ("gypsy caravan", ["disc_b"])],
+            {"disc_a": "dm_a", "disc_b": "dm_b"}, log,
+            {"disc_a": "Bob!", "disc_b": "Bob?"},
+            persist_destination_id=lambda d: _record([], d),
+        )
+
+    names = _attachment_names(thread)
+    txts = [n for n in names if n.endswith(".txt")]
+    assert len(txts) == 2, f"one opponent's pool was dropped by a name collision: {txts}"
+    assert len(set(txts)) == 2, f"both pools posted under the same filename: {txts}"
+
+
+@pytest.mark.asyncio
+async def test_open_pools_thread_refusal_is_terminal_and_does_not_churn():
+    """A draft chat the bot cannot thread in must not hold the whole run hostage.
+
+    Blocking the stamp on it kept the session in the reconciler's 72h retry window —
+    ~4,320 ticks, each re-posting and deleting a summary message in the channel the
+    match is being played in. The private pools are the deliverable; a refused open
+    thread is reported and dropped, not retried forever.
+    """
+    ds = _tournament_ds()
+    chat = _FakeChannel("draft-chat", create_thread_error=discord.Forbidden(
+        MagicMock(status=403), "Missing Permissions"), cid=555)
+
+    with _patched_discord():
+        ok = await _post_open_pools(
+            _bot_for({555: chat}), chat, None, ds.friendly_id,
+            [("Cosmos", ds.team_a), ("gypsy caravan", ds.team_b)],
+            _MAPPING_AB, ds.draft_data, ds.sign_ups,
+            persist_destination_id=lambda d: _record([], d),
+        )
+
+    assert ok is True, "a refused open thread must not block team_logs_posted_at"
+    assert chat.summary_messages() == [], "the orphan summary was left in the draft chat"
