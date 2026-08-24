@@ -49,6 +49,33 @@ def test_recorded_body_shows_the_score():
     assert "2–1" in body
 
 
+def test_control_body_mentions_both_team_roles_when_they_exist():
+    """Mentioning a role adds those members to the thread, and that membership
+    is what surfaces the match in each player's sidebar. A mention that did not
+    add them would only be a notification."""
+    body = render_match_control(
+        SCHEDULING, "Alpha", "Bravo", "Round 1",
+        role_mentions=("111", "222"),
+    )
+    assert "<@&111>" in body and "<@&222>" in body
+
+
+def test_control_body_is_unchanged_without_roles():
+    """role_id is NULL for tournaments that predate this feature; they must
+    render exactly as they do today."""
+    without_roles = render_match_control(SCHEDULING, "Alpha", "Bravo", "Round 1")
+    assert "<@&" not in without_roles
+
+
+def test_one_team_without_a_role_mentions_neither():
+    """Half a tagged match is worse than none: one team pulled into the thread
+    and the other not, with nothing on the message saying so."""
+    body = render_match_control(
+        SCHEDULING, "Alpha", "Bravo", "Round 1", role_mentions=("111", None),
+    )
+    assert "<@&" not in body
+
+
 def test_recorded_result_line_orders_names_with_scores():
     line = recorded_result_line("Alpha", "Bravo", 2, 1)
     assert line == "✅ Result recorded: **Alpha** 2–1 **Bravo**"

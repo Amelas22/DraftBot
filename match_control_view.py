@@ -95,14 +95,32 @@ def block_for_facts(
 
 
 def control_body_and_view(
-    match: TournamentMatch, a_name: str, b_name: str, label: str, draft: DraftSession | None
+    match: TournamentMatch, a_name: str, b_name: str, label: str, draft: DraftSession | None,
+    role_mentions: tuple[str | None, str | None] | None = None,
 ) -> tuple[str, "MatchControlView | None"]:
-    """(body, view) for a match's control message. View is None off `scheduling`."""
+    """(body, view) for a match's control message. View is None off `scheduling`.
+
+    role_mentions is only ever supplied by create_match_room, at the message's
+    first post. start_match_draft and _refresh_match_views_with_facts re-render
+    this same message on later refreshes and deliberately leave it out:
+
+    - The mention's job is done the instant the message is first posted: it
+      notifies both teams and adds them to the thread, and that thread
+      membership persists whatever the message later says.
+    - A mention is a live query against guild state, not a record (the same
+      property that keeps pairings posts as plain names). Once the tournament
+      ends and its roles are deleted, a mention preserved in the body would
+      re-render as @deleted-role. Leaving it out of refreshes means a room
+      that saw any activity reads cleanly afterwards; a room that was never
+      drafted and never had a result is never re-rendered, so it does keep
+      its literal mention and will show @deleted-role once the roles go.
+    """
     state = match_state(match.team_a_wins is not None, draft is not None)
     body = render_match_control(
         state, a_name, b_name, label,
         lobby_link=lobby_link(draft),
         result=(match.team_a_wins, match.team_b_wins),
+        role_mentions=role_mentions,
     )
     return body, (MatchControlView(match.id) if state == SCHEDULING else None)
 
@@ -174,13 +192,17 @@ async def _resolve_control_message(
         except discord.NotFound:
             logger.warning(
                 f"Control message {control_id} missing in thread {thread.id}; reposting")
+    # roles=True is load-bearing: without it Discord renders the role mention
+    # as a plain pill, notifies nobody, and adds nobody to the thread -- the
+    # entire point of tagging both teams' roles in the body above.
+    allowed_mentions = discord.AllowedMentions(everyone=False, roles=True, users=True)
     # Messageable.send's view overloads don't accept an explicit None (only a
     # real View or the omitted-argument default), even though py-cord treats
     # a falsy view as "no view" at runtime.
     if view is not None:
-        message = await thread.send(content=body, view=view)
+        message = await thread.send(content=body, view=view, allowed_mentions=allowed_mentions)
     else:
-        message = await thread.send(content=body)
+        message = await thread.send(content=body, allowed_mentions=allowed_mentions)
     await safe_pin(message)
     return message
 
@@ -197,7 +219,22 @@ async def create_match_room(message: discord.Message, match_id: int) -> discord.
         if facts is None:
             return None
         match, a_name, b_name, label, draft = facts
-        body, view = control_body_and_view(match, a_name, b_name, label, draft)
+        # Two columns, one query. session.get would return whole participants
+        # instead -- and each of those drags in its team_members relationship,
+        # which is eager (lazy="selectin"), so the pair costs four queries to
+        # read two strings. match_facts' own participants are NOT reusable
+        # here: it drops them before returning and the identity map holds them
+        # only weakly.
+        roles = dict((await session.execute(
+            select(TournamentParticipant.id, TournamentParticipant.role_id)
+            .where(TournamentParticipant.id.in_(
+                [match.team_a_participant_id, match.team_b_participant_id]))
+        )).all())
+        body, view = control_body_and_view(
+            match, a_name, b_name, label, draft,
+            role_mentions=(roles.get(match.team_a_participant_id),
+                           roles.get(match.team_b_participant_id)),
+        )
 
     try:
         thread = await message.create_thread(

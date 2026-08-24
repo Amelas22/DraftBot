@@ -6,6 +6,7 @@ standings.
 All functions take an AsyncSession so callers control the transaction and tests
 can point them at a temp database (mirrors the leaderboard_service convention).
 """
+from loguru import logger
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
@@ -206,9 +207,14 @@ async def remove_team(session, tournament_id, team_name):
     participant = (await session.execute(stmt)).scalars().first()
     if participant is None:
         raise ValueError(f"'{team_name}' is not registered for this tournament.")
-    # The roster has no ORM relationship to cascade through (deliberately — lazy
-    # loading a relationship on an async session is a footgun), so its rows are
-    # cleared explicitly. Without this they would outlive the team that owned them.
+    # TournamentParticipant.team_members is an ORM relationship now (services/
+    # tournament_roles.py needs it), but it carries no delete cascade, so this
+    # explicit delete is still required -- not redundant double-bookkeeping.
+    # Without it, session.delete(participant) would make SQLAlchemy try to
+    # nullify participant_id on the loaded children instead, and
+    # participant_id is nullable=False, so the flush would fail with an
+    # IntegrityError. This delete is what keeps the roster rows from either
+    # outliving or corrupting the team.
     await session.execute(
         delete(TournamentTeamMember).where(
             TournamentTeamMember.participant_id == participant.id
@@ -1023,3 +1029,24 @@ async def extend_deletion_if_unfinished(session, draft_session, now):
         draft_session.deletion_time = now + timedelta(days=7)
         return True
     return False
+
+
+async def store_role_ids(role_ids: dict[int, str]) -> None:
+    """Persist each team's role id after a successful start."""
+    if not role_ids:
+        return
+    async with db_session() as session:
+        for participant_id, role_id in role_ids.items():
+            participant = await session.get(TournamentParticipant, participant_id)
+            if participant is None:
+                # The participant dropped (with a refund) in the gap between
+                # _create_roles_for_start's read and the money-locked start --
+                # its role was already created and assigned, and now nothing
+                # will ever record its id. Log it so it can be found by hand;
+                # every other skip in this feature does the same.
+                logger.warning(
+                    f"[team-roles] participant {participant_id} is gone; "
+                    f"role {role_id} was created but cannot be recorded"
+                )
+                continue
+            participant.role_id = role_id

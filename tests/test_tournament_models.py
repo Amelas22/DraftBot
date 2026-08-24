@@ -211,3 +211,14 @@ def test_cut_columns_exist_with_safe_defaults():
     assert "swiss" in str(stage.server_default.arg)
 
     assert TournamentParticipant.__table__.columns["seed"].nullable
+
+
+def test_participant_has_a_nullable_role_id():
+    """NULL means no role: not started, predates the feature, or completed and
+    cleaned up. Every existing row reads that way, which is what keeps
+    role-free tournaments on exactly today's behaviour."""
+    from models.tournament import TournamentParticipant
+
+    col = TournamentParticipant.__table__.columns["role_id"]
+    assert col.nullable
+    assert col.type.length == 64

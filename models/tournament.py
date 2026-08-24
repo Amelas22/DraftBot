@@ -10,6 +10,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy.orm import relationship
 
 from database.models_base import Base
 
@@ -83,10 +84,49 @@ class TournamentParticipant(Base):
     # recomputed because it is the number players were told, and it is what
     # makes 3rd/4th well-defined between two semifinal losers.
     seed = Column(Integer, nullable=True)
+    # The team's Discord role for THIS tournament. NULL means no role: the
+    # tournament has not started, predates this feature, or has completed and
+    # had its roles deleted. Stored as an id rather than a name so cleanup
+    # deletes the role this team actually got, not whatever currently answers
+    # to its name -- Discord permits duplicate role names, and two concurrent
+    # tournaments may each have an "Alpha".
+    role_id = Column(String(64), nullable=True)
 
     __table_args__ = (
         UniqueConstraint('tournament_id', 'team_id', name='uq_tournament_team'),
     )
+
+    # No relationship existed on this model before this property was added; the
+    # roster was always queried explicitly (see services/tournament_service.py).
+    # lazy="selectin": this codebase's sessions are all AsyncSession
+    # (database/db_session.py), and the default lazy="select" issues its
+    # SELECT at attribute-access time -- there is no greenlet to run that IO
+    # in outside an explicit await, so a plain lazy load raises
+    # MissingGreenlet the first time something reads .team_members (or
+    # .roster_user_ids) on a participant that came back from a query.
+    # selectin issues its own eager SELECT while the loading query still has
+    # a greenlet, avoiding that.
+    team_members = relationship("TournamentTeamMember", back_populates="participant",
+                                 lazy="selectin")
+
+    @property
+    def roster_user_ids(self) -> list[str]:
+        """Roster member ids as strings. The captain is NOT here --
+        captain_user_id is the single authority for who owns the team -- so
+        callers that want everyone must include the captain themselves.
+
+        Only safe on a participant that came back from a query: `selectin`
+        above protects that shape, but a participant that was `add()`ed and
+        flushed in the same session, or one read again after `expire()` /
+        `refresh()` / `rollback()`, is not eager-loaded and will raise
+        MissingGreenlet here on this codebase's async sessions.
+
+        The quieter hazard is the one that does NOT raise: this was loaded once,
+        so a roster row added or deleted later in the same session is not
+        reflected here. Re-query the participant if you need the roster after
+        changing it.
+        """
+        return [m.user_id for m in self.team_members]
 
     def __repr__(self):
         return f"<TournamentParticipant(tournament_id={self.tournament_id}, team={self.team_name!r})>"
@@ -122,6 +162,13 @@ class TournamentTeamMember(Base):
     __table_args__ = (
         UniqueConstraint('participant_id', 'user_id', name='uq_participant_member'),
     )
+
+    # lazy="raise": nothing reads .participant today; this turns the first
+    # accidental read into an immediate, self-explaining error instead of a
+    # silent MissingGreenlet under this codebase's async sessions (the same
+    # hazard team_members above is eager-loaded to avoid).
+    participant = relationship("TournamentParticipant", back_populates="team_members",
+                                lazy="raise")
 
     def __repr__(self):
         return (f"<TournamentTeamMember(participant_id={self.participant_id}, "

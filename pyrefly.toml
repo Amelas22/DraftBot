@@ -17,6 +17,7 @@ project-includes = [
     "helpers/view_dispatch_guard.py",
     "match_control_view.py",
     "ready_check.py",
+    "services/tournament_roles.py",
 ]
 
 # SQLAlchemy 1.x-style Column() declarations type column attributes as Column[T]
