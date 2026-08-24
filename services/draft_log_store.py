@@ -96,6 +96,14 @@ def _find_team_channel(
 # post to begin with, so they don't count toward "all posted".
 _PostableMember = namedtuple("_PostableMember", "discord_id dm_user_id name safe pool")
 
+# The outcome of trying to open a pools thread. `permanent` separates "Discord
+# will never allow this" (no Manage Threads, channel gone) from "not right now"
+# (a 5xx, a timeout, a TLS error mid-upload). The private path ignores it -- it
+# falls back to the channel either way -- but the open path has no fallback, so
+# the distinction is the difference between dropping the thread on purpose and
+# losing it forever to a blip.
+_ThreadAttempt = namedtuple("_ThreadAttempt", "thread permanent")
+
 # Bound on how far back the team CHANNEL's history is scanned for
 # already-posted players. Applies whenever the channel is the destination --
 # the run that fell back, and every retry after it, since the channel is then
@@ -142,12 +150,26 @@ def _dedupe_safe_names(members: list[_PostableMember]) -> list[_PostableMember]:
     whose ids share those digits), which would silently reintroduce the exact
     bug this function exists to prevent. Ids are unique by construction, so
     the full one makes the filename unique by construction -- an ugly
-    filename only ever appears in the already-rare collision case."""
+    filename only ever appears in the already-rare collision case.
+
+    Checked against every name already handed out, not just the ones that
+    collided on the way in. A display name is long enough to hold 'Bob-' plus
+    a real snowflake, so a player called literally 'Bob-<someone's id>' can
+    collide with the suffix GENERATED for that someone -- and since the
+    posted-check reads filenames, that suppresses the victim's pool on every
+    retry, for good. Rare by accident, trivial to do on purpose."""
     counts = Counter(m.safe for m in members)
-    return [
-        m._replace(safe=f"{m.safe}-{m.discord_id}") if counts[m.safe] > 1 else m
-        for m in members
-    ]
+    used: set[str] = set()
+    out = []
+    for m in members:
+        name = m.safe if counts[m.safe] == 1 else f"{m.safe}-{m.discord_id}"
+        while name in used:
+            # Strictly lengthens, so this terminates; reached only when a name
+            # was crafted to look like another player's generated one.
+            name = f"{name}-{m.discord_id}"
+        used.add(name)
+        out.append(m._replace(safe=name))
+    return out
 
 
 async def _send_pool(destination, member: _PostableMember, draft_data: dict) -> None:
@@ -206,7 +228,9 @@ async def _resolve_destination(bot, destination_id: str):
     return destination
 
 
-async def _posted_txt_filenames(bot, destination, limit: int | None = None) -> set[str]:
+async def _posted_txt_filenames(bot, destination, limit: int | None = None,
+                                oldest_first: bool = False,
+                                stop_when: set[str] | None = None) -> set[str]:
     """Filenames of every `.txt` attachment the BOT has already posted in
     `destination` (the pools thread, or — in the no-thread fallback — the
     team channel itself), used to work out who is already posted on a retry.
@@ -226,10 +250,14 @@ async def _posted_txt_filenames(bot, destination, limit: int | None = None) -> s
         # the history call rather than scanning and matching nothing.
         return set()
     names: set[str] = set()
-    async for message in destination.history(limit=limit):
+    history = (destination.history(limit=limit, oldest_first=True) if oldest_first
+               else destination.history(limit=limit))
+    async for message in history:
         if message.author.id != bot_id:
             continue
         names.update(a.filename for a in message.attachments if a.filename.endswith(".txt"))
+        if stop_when and stop_when <= names:
+            break
     return names
 
 
@@ -238,11 +266,16 @@ async def _post_missing_players(
     postable: list[_PostableMember],
     draft_data: dict,
     already_posted: set[str],
+    send: Callable[..., Awaitable[None]] | None = None,
 ) -> tuple[bool, int]:
     """Post each postable member not already in `already_posted` to
     `destination` (a thread, or the channel on the no-thread fallback).
     Guards each send individually — one player's failure is logged and the
     loop continues rather than costing the others their pools.
+
+    `send` overrides how one pool is written (default `_send_pool`); the open-pools
+    path passes a partial that adds the team label and the combined pile. The skip
+    rule, the error policy and the filename convention stay here either way.
 
     Returns `(all_posted, sent)`: whether every postable member ended up
     posted, and how many pools this call actually delivered. The caller needs
@@ -254,7 +287,7 @@ async def _post_missing_players(
         if f"{member.safe}.txt" in already_posted:
             continue
         try:
-            await _send_pool(destination, member, draft_data)
+            await (send or _send_pool)(destination, member, draft_data)
             sent += 1
         except Exception as e:
             logger.warning(
@@ -264,32 +297,49 @@ async def _post_missing_players(
     return all_posted, sent
 
 
-async def _open_pools_thread(channel, friendly_id: str, player_count: int):
-    """The newly-created pools thread for this team, hanging off one summary
-    message in the team channel — or None if Discord refused, either the
-    summary send or the thread creation itself (typically missing Manage
-    Threads). A None sends the caller down the per-player fallback: losing the
-    tidy grouping is acceptable, losing people's pools is not."""
+def _is_permanent(error: Exception) -> bool:
+    """Whether Discord is saying "never" rather than "not now".
+
+    Forbidden is a missing permission and NotFound is a channel that no longer
+    exists; neither improves by being retried for 72h. Everything else — 5xx,
+    rate-limit exhaustion, a timeout, or an SSL/connection error from below
+    discord.py — is a blip, and blips are what retries are for.
+    """
+    return isinstance(error, (discord.Forbidden, discord.NotFound))
+
+
+async def _open_pools_thread(channel, friendly_id: str, player_count: int) -> _ThreadAttempt:
+    """The newly-created pools thread, hanging off one summary message in the
+    channel — or a no-thread attempt if Discord refused, either the summary send
+    or the thread creation itself (typically missing Manage Threads).
+
+    A missing thread sends the private path down its per-player fallback: losing
+    the tidy grouping is acceptable, losing people's pools is not. The open path
+    has no fallback and reads `permanent` instead.
+
+    Catches Exception, not just HTTPException: an aiohttp connection/SSL error
+    (seen repeatedly mid-upload in live runs) is not a discord.py exception, and
+    letting it escape here would cost the whole reconciler run — including the
+    private pools that are the actual deliverable — over one optional thread.
+    """
     try:
         summary = await channel.send(
             content=f"📥 **Drafted pools** — {friendly_id} ({player_count} players)"
         )
-    except discord.HTTPException as e:
+    except Exception as e:
         logger.warning(
-            f"[team-logs] could not post the pools summary message for {friendly_id}, "
-            f"falling back to per-player channel posts: {e}"
+            f"[team-logs] could not post the pools summary message for {friendly_id}: {e}"
         )
-        return None
+        return _ThreadAttempt(None, _is_permanent(e))
 
     try:
-        return await summary.create_thread(
+        return _ThreadAttempt(await summary.create_thread(
             name=f"Drafted pools — {friendly_id}"[:DISCORD_THREAD_NAME_LIMIT],
             auto_archive_duration=THREAD_ARCHIVE_MAX_MINUTES,
-        )
-    except discord.HTTPException as e:
+        ), False)
+    except Exception as e:
         logger.warning(
-            f"[team-logs] thread creation failed for {friendly_id}, "
-            f"falling back to per-player channel posts: {e}"
+            f"[team-logs] thread creation failed for {friendly_id}: {e}"
         )
         # Take the summary back down. It now heads an empty thread that will
         # never exist, and leaving it makes the retry non-idempotent: a run
@@ -300,12 +350,12 @@ async def _open_pools_thread(channel, friendly_id: str, player_count: int):
         # players' pools still go out below, which is what matters.
         try:
             await summary.delete()
-        except discord.HTTPException as delete_error:
+        except Exception as delete_error:
             logger.warning(
                 f"[team-logs] could not remove the orphaned pools summary for "
                 f"{friendly_id}: {delete_error}"
             )
-        return None
+        return _ThreadAttempt(None, _is_permanent(e))
 
 
 async def _tag_team_in_thread(thread, member_discord_ids: list[str], friendly_id: str) -> None:
@@ -377,6 +427,9 @@ async def _post_pools_for_team(
         # prevent this (a team with postable members always has a resolved
         # channel by the time we get here) — guarded defensively rather than
         # raising into the caller.
+        logger.warning(
+            f"[team-logs] no channel for a team with {len(postable)} postable "
+            f"players in {friendly_id}; posting nothing for them this run")
         return False
 
     try:
@@ -399,7 +452,7 @@ async def _post_pools_for_team(
 
     if destination is None:
         # Nothing recorded yet, so this team has never had a pool delivered.
-        thread = await _open_pools_thread(channel, friendly_id, len(postable))
+        thread = (await _open_pools_thread(channel, friendly_id, len(postable))).thread
         if thread is not None:
             # Persist before posting anyone, so a run that dies partway
             # resumes into this thread instead of opening a second one.
@@ -456,11 +509,14 @@ async def _post_team_logs_locked(session_id: str, bot) -> bool:
             select(DraftSession).filter(DraftSession.session_id == session_id)
         )).scalar_one_or_none()
         if ds is None:
+            logger.warning(f"post_team_logs: no session row for {session_id}")
             return False
         if ds.team_logs_posted_at is not None:
             return True
         draft_data = ds.draft_data
         if not draft_data:
+            logger.warning(
+                f"post_team_logs: session {session_id} has no draft_data yet; nothing to post")
             return False
         team_a = list(ds.team_a or [])
         team_b = list(ds.team_b or [])
@@ -470,9 +526,17 @@ async def _post_team_logs_locked(session_id: str, bot) -> bool:
         friendly_id = ds.friendly_id or ds.draft_id or session_id
         team_a_destination_id = ds.team_a_pools_destination_id
         team_b_destination_id = ds.team_b_pools_destination_id
+        tournament_match_id = ds.tournament_match_id
+        draft_chat_channel = ds.draft_chat_channel
+        open_destination_id = ds.open_pools_destination_id
+        # Always real names: tournament_linking only links a draft whose team names
+        # score against the participants, so neither can be empty by the time we're here.
+        team_a_label, team_b_label = ds.team_a_name, ds.team_b_name
 
     guild = bot.get_guild(int(guild_id)) if guild_id else None
     if guild is None:
+        logger.warning(
+            f"post_team_logs: guild {guild_id} not resolvable for session {session_id}")
         return False
 
     mapping = map_discord_to_draftmancer(draft_data, sign_ups)
@@ -523,7 +587,22 @@ async def _post_team_logs_locked(session_id: str, bot) -> bool:
         persist_destination_id=partial(_persist_destination_id, "team_b_pools_destination_id"),
     )
 
-    if not (red_all_posted and blue_all_posted):
+    # A tournament match is played with pools open, so both teams' pools also go to
+    # one thread in the shared draft chat. Deliberately after the private threads:
+    # those are the deliverable each team imports from, and a failure to open the
+    # shared thread must not cost a team its own pools.
+    open_all_posted = True
+    if tournament_match_id is not None:
+        open_all_posted = await _post_open_pools(
+            bot, guild.get_channel(int(draft_chat_channel)) if draft_chat_channel else None,
+            open_destination_id, friendly_id,
+            [(team_a_label, team_a), (team_b_label, team_b)],
+            mapping, draft_data, sign_ups,
+            persist_destination_id=partial(_persist_destination_id,
+                                           "open_pools_destination_id"),
+        )
+
+    if not (red_all_posted and blue_all_posted and open_all_posted):
         # Some player(s) are still missing a pool (a send failure, or a
         # thread-creation refusal whose fallback pass also failed). Leave
         # team_logs_posted_at unset so the reconciler retries and posts only
@@ -531,7 +610,8 @@ async def _post_team_logs_locked(session_id: str, bot) -> bool:
         logger.warning(
             f"post_team_logs: not every player posted for session {session_id} "
             f"(red={'ok' if red_all_posted else 'incomplete'}, "
-            f"blue={'ok' if blue_all_posted else 'incomplete'}); "
+            f"blue={'ok' if blue_all_posted else 'incomplete'}, "
+            f"open={'ok' if open_all_posted else 'incomplete'}); "
             "leaving team_logs_posted_at unset for retry"
         )
         return False
@@ -581,3 +661,167 @@ def build_mtgo_deck_text(split: dict, carddata: dict) -> str:
     if side_lines:
         return "\n".join(main_lines) + "\n\n" + "\n".join(side_lines)
     return "\n".join(main_lines)
+
+
+# --- open pools (tournament matches) ---------------------------------------------
+
+async def _send_open_pool(destination, member: _PostableMember, draft_data: dict,
+                          *, team_label: str, header: str | None = None) -> None:
+    """One player's pool for an OPEN thread: same `.txt` deliverable as the private
+    posts, but labelled with the team and imaged as a single pile.
+
+    `header` heads the team's group. It rides on this post rather than going out as
+    its own message so that it cannot be posted twice (see _post_open_pools) and
+    cannot fail on its own.
+
+    The pile is built with the whole pool as `main` and an empty sideboard on purpose.
+    PileImageBuilder buckets main and side into separate groups, which is the right
+    read when a pool is private and the built deck is the story; with pools open the
+    split is noise — an opponent wants to see everything that was drafted, in one
+    screenshot.
+    """
+    files = [discord.File(io.BytesIO(member.pool.encode("utf-8")), filename=f"{member.safe}.txt")]
+    try:
+        split = split_decklist(draft_data, member.dm_user_id)
+        whole_pool = list(split.get("main") or []) + list(split.get("side") or [])
+        image = await PileImageBuilder().build(whole_pool, [], draft_data.get("carddata", {}))
+        if image:
+            files.append(discord.File(io.BytesIO(image.getvalue()), filename=f"{member.safe}.jpg"))
+    except Exception as e:
+        logger.warning(f"[open-pools] deck image failed for {member.name}: {e}")
+
+    line = f"**{member.name}** — {team_label} ({member.pool.count(chr(10)) + 1} cards):"
+    await destination.send(content=f"{header}\n{line}" if header else line, files=files)
+
+
+async def _post_open_pools(
+    bot,
+    channel,
+    destination_id: str | None,
+    friendly_id: str,
+    teams: list[tuple[str, list[str]]],
+    mapping: dict[str, str],
+    draft_data: dict,
+    sign_ups: dict,
+    persist_destination_id: Callable[[str], Awaitable[None]],
+) -> bool:
+    """Both teams' pools in ONE thread off the shared draft chat, grouped by team.
+
+    Only for tournament matches, which are played with pools open. The private
+    per-team threads still happen — this is additional, and deliberately so: the
+    private thread is where a team imports its own `.txt` from, and taking it away
+    would trade a working habit for a tidier channel list.
+
+    `teams` is [(team_label, [discord_ids]), …] in board order; the label heads that
+    team's group and is repeated on each pool, so a post that is linked or scrolled
+    to in isolation still says which side it belongs to.
+
+    Resume works exactly like the per-team path: the thread is claimed before anyone
+    is posted, and players already carrying a posted `.txt` are skipped — so a retry
+    after a partial run finishes the stragglers instead of doubling the thread.
+    """
+    groups = [(label, members) for label, ids in teams
+              if (members := _postable_members(ids, mapping, draft_data, sign_ups))]
+    if not groups:
+        return True
+
+    # _postable_members dedupes safe names WITHIN a team, which is all the private
+    # threads need — each team has its own destination. This thread merges both, so
+    # two OPPONENTS whose names sanitise alike (say 'Bob!' and 'Bob?') would still
+    # share Bob.txt here. They would both post on a first run, but the posted-check
+    # reads filenames, so any retry would see one Bob.txt and skip the other's pool
+    # for good. Re-dedupe over the set that actually shares this destination.
+    merged = _dedupe_safe_names([m for _, members in groups for m in members])
+    resolved, cursor = [], 0
+    for label, members in groups:
+        resolved.append((label, merged[cursor:cursor + len(members)]))
+        cursor += len(members)
+    groups = resolved
+    if channel is None:
+        return False
+
+    try:
+        destination = (
+            await _resolve_destination(bot, destination_id) if destination_id else None
+        )
+    except discord.HTTPException as e:
+        # Same reasoning as _post_pools_for_team: a stored destination Discord won't
+        # confirm is gone must not become a second thread beside a live first one.
+        logger.warning(
+            f"[open-pools] could not resolve the stored destination for {friendly_id}, "
+            f"aborting rather than risk a second thread: {e}"
+        )
+        return False
+
+    if destination is None:
+        total = sum(len(members) for _, members in groups)
+        attempt = await _open_pools_thread(channel, friendly_id, total)
+        destination = attempt.thread
+        if destination is None:
+            # No fallback to the channel (unlike the private path): the shared draft
+            # chat is where the match is being played, and spraying every pool into
+            # it unthreaded is worse than not posting them at all.
+            #
+            # Reported as SUCCESS on purpose. The private per-team pools are the
+            # deliverable; these are additional. Returning False here would leave
+            # team_logs_posted_at unstamped, which keeps the session in the
+            # reconciler's 72h window — ~4,320 ticks, each re-entering here to post
+            # a summary into the live match channel and delete it again. A draft
+            # chat the bot cannot thread in does not get better by being retried
+            # 4,320 times, so this is terminal. A send failure AFTER the thread
+            # exists still returns False: by then the destination is persisted, so
+            # the retry resumes into it and posts only the stragglers.
+            if not attempt.permanent:
+                # A blip, not a refusal. Returning True here would stamp the
+                # session complete with no destination recorded and no tick ever
+                # coming back — the open pools lost silently and for good.
+                logger.warning(
+                    f"[open-pools] could not open the shared pools thread for "
+                    f"{friendly_id} (transient); leaving the run incomplete to retry"
+                )
+                return False
+            logger.warning(
+                f"[open-pools] the shared pools thread for {friendly_id} was refused; "
+                "the private team pools stand on their own, not retrying"
+            )
+            return True
+        await persist_destination_id(str(destination.id))
+
+    # OLDEST-first, and bounded by finding what it is looking for rather than by a
+    # message count. This thread hangs off the shared draft chat for a match played
+    # with pools open, so opponents talking in it is the point — it is the one pools
+    # destination where arbitrary chatter is expected. Any fixed window can be
+    # exceeded by conversation landing between two pools while a slow image upload is
+    # in flight, which hides the later pool and re-posts it; reading from the start
+    # until every expected filename is accounted for cannot be fooled that way.
+    already = await _posted_txt_filenames(
+        bot, destination, oldest_first=True,
+        stop_when={f"{m.safe}.txt" for _, members in groups for m in members})
+    all_posted = True
+    for label, members in groups:
+        pending = [m for m in members if f"{m.safe}.txt" not in already]
+        if not pending:
+            continue
+        # The team header rides on the group's first pool instead of being its own
+        # message, so it is idempotent for free: a retry finishing a straggler is
+        # never the group's first post, so it cannot drop a second header into the
+        # middle of that team's pools. Tracking it by message content instead would
+        # mean a header-aware history scan; tracking it by "is the group untouched"
+        # gets a one-player team wrong, because its only pool failing makes the
+        # group look untouched again.
+        head = [f"__**{label}**__" if len(pending) == len(members) else None]
+
+        async def _send(dest, member, data, _head=head, _label=label):
+            await _send_open_pool(dest, member, data, team_label=_label, header=_head[0])
+            _head[0] = None      # cleared only on success, so a failed first post
+                                 # hands the header to whoever posts next
+
+        # The same helper the private path uses, so the skip-already-posted rule, the
+        # per-member error policy, and the filename convention have ONE home. A copy
+        # of this loop shipped catching only discord.HTTPException and had to be
+        # re-fixed when an e2e run died on an aiohttp ClientOSError mid-upload —
+        # a lesson _post_missing_players had already learned.
+        posted, _ = await _post_missing_players(
+            destination, pending, draft_data, already, send=_send)
+        all_posted = all_posted and posted
+    return all_posted
