@@ -1046,8 +1046,34 @@ class TournamentCog(commands.Cog):
                 payout_hint = (f"\n🏦 Prize pool: **{pool} tix** — run `/tournament payout` "
                                f"(this tournament is #{tournament_id}) to distribute it.")
         await update_standings_message(self.bot, tournament_id)
+        await self._drop_team_roles(source.guild, tournament_id)
         return (f"🏁 **{tournament_name}** (#{tournament_id}) is complete! "
                 f"{champ_text}{payout_hint}")
+
+    async def _drop_team_roles(self, guild, tournament_id):
+        """Delete a finished tournament's team roles and clear their ids.
+
+        Called from BOTH completion paths -- /tournament finish and next_round
+        past the final. Never raises: a tournament is over either way, and a
+        role that outlives it costs a slot against the guild's 250-role cap,
+        not correctness.
+        """
+        try:
+            async with db_session() as session:
+                role_ids = [p.role_id
+                            for p in await list_participants(session, tournament_id)]
+            # Delete the real roles BEFORE forgetting their ids. role_id is the
+            # only record that a role exists, so clearing first and then failing
+            # would strand 42 roles against the guild's 250-role cap with
+            # nothing left pointing at them. This order can only leave the
+            # harmless case: an id pointing at a role that is already gone,
+            # which delete_team_roles and sync_member both treat as a no-op.
+            await delete_team_roles(guild, role_ids)
+            async with db_session() as session:
+                for participant in await list_participants(session, tournament_id):
+                    participant.role_id = None
+        except Exception as e:
+            logger.warning(f"[team-roles] cleanup failed for tournament {tournament_id}: {e}")
 
     @tournament.command(name="payout", description="Admin: distribute a tournament's prize pool to the winners")
     @has_bot_manager_role()
@@ -1136,6 +1162,7 @@ class TournamentCog(commands.Cog):
             return
         await ctx.defer()
         try:
+            completed = None
             async with db_session() as session:
                 tournament = await get_active_tournament(session, ctx.guild.id)
                 if tournament is None:
@@ -1181,13 +1208,19 @@ class TournamentCog(commands.Cog):
                         f"🏁 **{tournament_name}** is complete! "
                         f"Champion: **{winner.team_name}** 🏆"
                     )
-                    await update_standings_message(self.bot, tournament_id)
-                    return
-                new_round_id = new_round.id
-                new_round_number = new_round.round_number
-                new_round_label = round_label(
-                    tournament.total_rounds, new_round_number, new_round.stage,
-                    swiss_noun="Week")
+                    completed = tournament_id
+                else:
+                    new_round_id = new_round.id
+                    new_round_number = new_round.round_number
+                    new_round_label = round_label(
+                        tournament.total_rounds, new_round_number, new_round.stage,
+                        swiss_noun="Week")
+            # Outside the session: both of these do Discord work, and the role
+            # cleanup opens a session of its own.
+            if completed is not None:
+                await update_standings_message(self.bot, completed)
+                await self._drop_team_roles(ctx.guild, completed)
+                return
             play = self._destination(ctx, PAIRINGS.setting)
             await self._post_round_messages(play, new_round_id, new_round_number)
             if play != ctx.channel:

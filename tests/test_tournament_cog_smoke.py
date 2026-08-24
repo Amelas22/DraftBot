@@ -916,3 +916,77 @@ async def test_removing_someone_who_was_not_on_the_roster_leaves_roles_alone():
     sync.assert_not_awaited()
     reply = ctx.followup.send.call_args.args[0]
     assert "isn't on" in reply
+
+
+@pytest.mark.asyncio
+async def test_finishing_deletes_the_team_roles():
+    from cogs.tournament_commands import TournamentCog
+    cog = TournamentCog(MagicMock())
+    tournament = SimpleNamespace(id=1, name="Cup", entry_fee=0)
+    with patch("cogs.tournament_commands.db_session",
+               _fake_db_session(_session_stub(tournament))), \
+         patch("cogs.tournament_commands.list_participants", AsyncMock(return_value=[])), \
+         patch("cogs.tournament_commands.delete_team_roles", AsyncMock(return_value=2)) as gone, \
+         patch("cogs.tournament_commands.finish_tournament", AsyncMock(return_value=MagicMock())), \
+         patch("cogs.tournament_commands.update_standings_message", AsyncMock()), \
+         patch.object(TournamentCog, "_drop_team_roles", wraps=cog._drop_team_roles):
+        await cog._run_finish(_ctx(), 1)
+    gone.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_completing_via_next_round_also_deletes_the_team_roles():
+    """The second completion path. Wiring only _run_finish leaves roles behind
+    on the path most tournaments actually take."""
+    from cogs.tournament_commands import TournamentCog
+    cog = TournamentCog(MagicMock())
+    ctx = _ctx()
+    with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
+         patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
+         patch("cogs.tournament_commands.get_active_tournament",
+               AsyncMock(return_value=SimpleNamespace(id=1, name="Cup", total_rounds=3))), \
+         patch("cogs.tournament_commands.advance_round", AsyncMock(return_value=None)), \
+         patch("cogs.tournament_commands.get_final_placement", AsyncMock(return_value=[MagicMock()])), \
+         patch("cogs.tournament_commands.update_standings_message", AsyncMock()), \
+         patch("cogs.tournament_commands.list_participants", AsyncMock(return_value=[])), \
+         patch("cogs.tournament_commands.delete_team_roles", AsyncMock(return_value=2)) as gone:
+        await TournamentCog.next_round.callback(cog, ctx)
+    gone.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_drop_team_roles_deletes_the_real_ids_before_clearing_them():
+    """Pins the ordering this task turns on: role_id is the only record that a
+    role exists, so if the ids were cleared first, delete_team_roles would be
+    called with a list of Nones and every role would be stranded against the
+    guild's 250-role cap. The other two tests use tournaments with no
+    participants, so a reordering wouldn't touch them -- this one needs real
+    participants to observe the order at all."""
+    from cogs.tournament_commands import TournamentCog
+    cog = TournamentCog(MagicMock())
+    guild = MagicMock()
+    participants = [SimpleNamespace(role_id="111"), SimpleNamespace(role_id="222")]
+    with patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
+         patch("cogs.tournament_commands.list_participants", AsyncMock(return_value=participants)), \
+         patch("cogs.tournament_commands.delete_team_roles", AsyncMock(return_value=2)) as gone:
+        await cog._drop_team_roles(guild, 1)
+
+    gone.assert_awaited_once_with(guild, ["111", "222"])
+    assert all(p.role_id is None for p in participants)
+
+
+@pytest.mark.asyncio
+async def test_drop_team_roles_logs_instead_of_raising_on_failure():
+    """Never raises -- a tournament is over either way -- but a failure
+    swallowed with no trace would leave up to 42 roles stranded against the
+    guild's 250-role cap with nobody told to go recover them by hand."""
+    from cogs.tournament_commands import TournamentCog
+    cog = TournamentCog(MagicMock())
+    with patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
+         patch("cogs.tournament_commands.list_participants", AsyncMock(return_value=[])), \
+         patch("cogs.tournament_commands.delete_team_roles",
+               AsyncMock(side_effect=RuntimeError("boom"))), \
+         patch("cogs.tournament_commands.logger") as log:
+        await cog._drop_team_roles(MagicMock(), 1)  # must not raise
+
+    log.warning.assert_called_once()
