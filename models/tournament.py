@@ -110,7 +110,7 @@ class TournamentParticipant(Base):
                                  lazy="selectin")
 
     @property
-    def roster_user_ids(self) -> list:
+    def roster_user_ids(self) -> list[str]:
         """Roster member ids as strings. The captain is NOT here --
         captain_user_id is the single authority for who owns the team -- so
         callers that want everyone must include the captain themselves.
@@ -120,6 +120,11 @@ class TournamentParticipant(Base):
         flushed in the same session, or one read again after `expire()` /
         `refresh()` / `rollback()`, is not eager-loaded and will raise
         MissingGreenlet here on this codebase's async sessions.
+
+        The quieter hazard is the one that does NOT raise: this was loaded once,
+        so a roster row added or deleted later in the same session is not
+        reflected here. Re-query the participant if you need the roster after
+        changing it.
         """
         return [m.user_id for m in self.team_members]
 

@@ -1031,7 +1031,7 @@ async def extend_deletion_if_unfinished(session, draft_session, now):
     return False
 
 
-async def store_role_ids(role_ids: dict) -> None:
+async def store_role_ids(role_ids: dict[int, str]) -> None:
     """Persist each team's role id after a successful start."""
     if not role_ids:
         return

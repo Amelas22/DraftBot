@@ -69,7 +69,8 @@ from services.tournament_service import (
 from services.mtgo_tradebot_client import EVENT_TICKET
 from services import tournament_escrow_service as escrow
 from services import wallet_service
-from services.tournament_roles import create_team_roles, delete_team_roles, sync_member
+from services.tournament_roles import (create_team_roles, delete_team_roles, role_target,
+                                       sync_member)
 
 
 # Registering records only the captain, so every successful registration has to say
@@ -353,19 +354,21 @@ class TournamentCog(commands.Cog):
         Returns {participant id: role id}, or raises. Ordered before
         close_registration_and_seed on purpose: that call commits the start, so
         a role failure afterwards would mean un-starting a started tournament.
-        The cheap read here means 42 roles are not created for a tournament
-        that was never going to start.
+        Doing it first also skips 42 role creations for a tournament that the
+        cheap refusals here already reject -- though not for every refusal:
+        close_registration_and_seed and _open_manual_schedule have their own,
+        and those still fire after the roles exist, which is what the rollback
+        in `start` is for.
 
-        This reads the tournament and its participants in their own session,
-        released before close_registration_and_seed re-reads under MONEY_LOCK --
-        so the two reads are not atomic with each other. The status check is
-        reconciled by that second read; the participant SET is not. A payment
-        landing in the gap seeds a paid team with role_id=None (no role, ever,
-        until someone notices); a refund-driven drop in the gap leaves that
-        team's already-created role stranded with nothing recording it. Both are
-        documented, recoverable drift, not corruption, and this is a deliberate
-        choice to leave the window open: closing it means creating roles inside
-        the money lock, which the spec rejects.
+        The participant set read here is NOT authoritative: registration is
+        still open, and creating 42 roles is ~160 sequential Discord calls, so
+        a payment or refund can easily land while this runs.
+        _reconcile_roles_after_start fixes the drift once the money lock has
+        settled the real set.
+
+        The session is deliberately closed before any Discord call -- see
+        role_target -- so a SQLite session is never held open across minutes of
+        API round-trips.
         """
         async with db_session() as session:
             tournament = await get_active_tournament(session, ctx.guild.id)
@@ -375,7 +378,41 @@ class TournamentCog(commands.Cog):
                     if p.status == "paid"]
             if len(paid) < 2:
                 return {}
-            return await create_team_roles(ctx.guild, paid)
+            targets = [role_target(p) for p in paid]
+        return await create_team_roles(ctx.guild, targets)
+
+    async def _reconcile_roles_after_start(self, ctx, tournament_id, role_ids):
+        """Settle the roles against the set of teams that actually started.
+
+        _create_roles_for_start reads while registration is still open, so by
+        the time close_registration_and_seed has committed under MONEY_LOCK the
+        truth may have moved: a team that paid during those ~160 Discord calls
+        has no role, and a team that took a refund has one nobody will collect.
+        This runs after the start has committed, against the authoritative set.
+
+        Best-effort by design: the tournament HAS started, so nothing here may
+        raise. Drift that survives is logged with the ids needed to fix it by
+        hand.
+        """
+        try:
+            async with db_session() as session:
+                paid = [p for p in await list_participants(session, tournament_id)
+                        if p.status == "paid"]
+                missing = [role_target(p) for p in paid if not p.role_id]
+                paid_ids = {p.id for p in paid}
+            stranded = [r for pid, r in role_ids.items() if pid not in paid_ids and r]
+            if stranded:
+                logger.info(f"[team-roles] tournament {tournament_id}: dropping "
+                            f"{len(stranded)} role(s) for teams that did not start")
+                await delete_team_roles(ctx.guild, stranded)
+            if missing:
+                logger.info(f"[team-roles] tournament {tournament_id}: creating "
+                            f"{len(missing)} role(s) for teams that paid during start")
+                await store_role_ids(await create_team_roles(ctx.guild, missing))
+        except Exception:
+            logger.exception(
+                f"[team-roles] could not reconcile roles for tournament "
+                f"{tournament_id}; teams may be missing a role or holding a stale one")
 
     @tournament.command(name="enable", description="Admin: enable tournament commands on this server")
     @has_bot_manager_role()
@@ -930,10 +967,12 @@ class TournamentCog(commands.Cog):
                 # already committed) -- the roles are real and already
                 # assigned to players, so they must NOT be deleted to tidy a
                 # bookkeeping gap. Log for manual recovery and keep going.
-                logger.error(
-                    f"Tournament {res['tournament_id']} started but role ids "
-                    f"{role_ids} were not persisted; recover by hand"
+                logger.exception(
+                    f"[team-roles] tournament {res['tournament_id']} started but role "
+                    f"ids {role_ids} were not persisted; recover by hand"
                 )
+            await self._reconcile_roles_after_start(
+                ctx, res["tournament_id"], role_ids)
             tournament_id = res["tournament_id"]
             logger.info(f"Tournament {tournament_id} started in guild {ctx.guild.id} by {ctx.author.id}")
             await self._refresh_board(tournament_id)
@@ -1080,7 +1119,7 @@ class TournamentCog(commands.Cog):
                     if participant.role_id in gone:
                         participant.role_id = None
         except Exception:
-            logger.opt(exception=True).warning(
+            logger.exception(
                 f"[team-roles] cleanup failed for tournament {tournament_id}")
 
     @tournament.command(name="payout", description="Admin: distribute a tournament's prize pool to the winners")

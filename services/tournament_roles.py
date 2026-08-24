@@ -8,13 +8,38 @@ guild state, and every function takes the guild it is reconciling.
 A role's lifetime is one tournament. The largest real event had 42 teams and a
 guild caps at 250 roles, so roles are given back when the tournament ends.
 """
-from typing import Any, Iterable
+from typing import Any, Iterable, NamedTuple
 
 import discord
 from loguru import logger
 
 # Discord's cap on a role name. A platform limit, not a product choice.
 DISCORD_ROLE_NAME_LIMIT = 100
+
+
+class TeamRoleTarget(NamedTuple):
+    """Everything create_team_roles needs about one team, detached from the ORM.
+
+    Creating 42 roles is ~160 sequential Discord calls, and a caller must not
+    hold a database session open across them. Snapshotting into this lets the
+    session close first -- and it is why create_team_roles never touches a
+    participant attribute that would lazy-load.
+    """
+    id: int
+    team_name: str
+    captain_user_id: str
+    roster_user_ids: list[str]
+
+
+def role_target(participant: Any) -> TeamRoleTarget:
+    """Snapshot a TournamentParticipant. Must be called while its session is
+    still open: roster_user_ids reads an eager-loaded relationship."""
+    return TeamRoleTarget(
+        id=participant.id,
+        team_name=participant.team_name,
+        captain_user_id=participant.captain_user_id,
+        roster_user_ids=list(participant.roster_user_ids),
+    )
 
 
 def team_role_name(team_name: str) -> str:

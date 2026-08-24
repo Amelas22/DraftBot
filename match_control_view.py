@@ -219,14 +219,21 @@ async def create_match_room(message: discord.Message, match_id: int) -> discord.
         if facts is None:
             return None
         match, a_name, b_name, label, draft = facts
-        # match_facts already loaded both participants into this session, so
-        # these are identity-map hits, not extra queries.
-        part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
-        part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
+        # Two columns, one query. session.get would return whole participants
+        # instead -- and each of those drags in its team_members relationship,
+        # which is eager (lazy="selectin"), so the pair costs four queries to
+        # read two strings. match_facts' own participants are NOT reusable
+        # here: it drops them before returning and the identity map holds them
+        # only weakly.
+        roles = dict((await session.execute(
+            select(TournamentParticipant.id, TournamentParticipant.role_id)
+            .where(TournamentParticipant.id.in_(
+                [match.team_a_participant_id, match.team_b_participant_id]))
+        )).all())
         body, view = control_body_and_view(
             match, a_name, b_name, label, draft,
-            role_mentions=(part_a.role_id if part_a else None,
-                           part_b.role_id if part_b else None),
+            role_mentions=(roles.get(match.team_a_participant_id),
+                           roles.get(match.team_b_participant_id)),
         )
 
     try:
