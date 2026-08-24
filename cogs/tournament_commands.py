@@ -1155,12 +1155,15 @@ class TournamentCog(commands.Cog):
             if tournament is None:
                 await ctx.followup.send("There is no active tournament.", ephemeral=True)
                 return
-            target_round, match_ids = await self._rooms_needed(session, tournament.id, round_number)
+            target_round, target_stage, match_ids = await self._rooms_needed(
+                session, tournament.id, round_number)
+            total_rounds = tournament.total_rounds
 
         if not match_ids:
             if round_number is not None:
                 await ctx.followup.send(
-                    f"Nothing to do — Week {round_number} has no room-less matches "
+                    f"Nothing to do — {round_label(total_rounds, round_number, target_stage, swiss_noun='Week')} "
+                    f"has no room-less matches "
                     f"(every playable match already has a room, or that round doesn't exist).",
                     ephemeral=True)
             else:
@@ -1198,28 +1201,36 @@ class TournamentCog(commands.Cog):
                 logger.warning(f"open_rooms: could not add the room link for match {match_id}: {e}")
             opened += 1
 
-        logger.info(f"open_rooms opened {opened} room(s) for Week {target_round} of tournament "
+        logger.info(f"open_rooms opened {opened} room(s) for "
+                    f"{round_label(total_rounds, target_round, target_stage, swiss_noun='Week')} of tournament "
                     f"{tournament.id} by {ctx.author.id}")
         if opened == 0:
             await ctx.followup.send(
-                f"Nothing to do — Week {target_round}'s matches already have rooms, or Discord "
+                f"Nothing to do — {round_label(total_rounds, target_round, target_stage, swiss_noun='Week')}'s "
+                f"matches already have rooms, or Discord "
                 f"refused every one of them.", ephemeral=True)
         else:
-            await ctx.followup.send(f"✅ Opened {opened} room(s) for Week {target_round}.", ephemeral=True)
+            await ctx.followup.send(
+                f"✅ Opened {opened} room(s) for "
+                f"{round_label(total_rounds, target_round, target_stage, swiss_noun='Week')}.",
+                ephemeral=True)
 
     async def _rooms_needed(self, session, tournament_id, round_number):
-        """(round_number, [match_id, ...]) of the playable, unreported,
+        """(round_number, stage, [match_id, ...]) of the playable, unreported,
         non-bye matches in that round that have a pairing message but no
         room -- exactly what /tournament open_rooms creates rooms for.
 
         round_number=None searches every round in ascending order and returns
-        the first that has any; that round's number and matches come back
-        together, so a caller never has to re-derive it. (None, []) means
-        nothing needs a room anywhere in the tournament (or, when a specific
-        round_number was passed, in that round).
+        the first that has any; that round's number, stage and matches come
+        back together, so a caller never has to re-derive them. The stage
+        comes from the row rather than from comparing the number against
+        total_rounds -- that arithmetic proxy is what named the semifinal
+        "Week 4". (None, None, []) means nothing needs a room anywhere in the
+        tournament (or, when a specific round_number was passed, in that
+        round).
         """
         stmt = (
-            select(TournamentMatch, TournamentRound.round_number)
+            select(TournamentMatch, TournamentRound.round_number, TournamentRound.stage)
             .join(TournamentRound, TournamentMatch.round_id == TournamentRound.id)
             .where(
                 TournamentRound.tournament_id == tournament_id,
@@ -1234,9 +1245,10 @@ class TournamentCog(commands.Cog):
             stmt = stmt.where(TournamentRound.round_number == round_number)
         rows = (await session.execute(stmt)).all()
         if not rows:
-            return None, []
+            return None, None, []
         found_round = round_number if round_number is not None else rows[0][1]
-        return found_round, [m.id for m, r in rows if r == found_round]
+        stage = next(st for _, r, st in rows if r == found_round)
+        return found_round, stage, [m.id for m, r, _ in rows if r == found_round]
 
     def _destination(self, ctx, setting):
         """Where a tournament message goes: the configured channel, else here.
