@@ -28,7 +28,8 @@ from models.tournament import Tournament, TournamentParticipant
 from models.wallet_tx import WalletTx
 from services import wallet_service
 from services.wallet_service import prize_wallet_id
-from services.tournament_service import get_active_tournament, remove_team, start_tournament
+from services.tournament_service import (get_active_tournament, list_participants,
+                                         remove_team, start_tournament)
 
 
 def escrow_source(tournament_id, participant_id) -> str:
@@ -270,6 +271,25 @@ async def close_registration_and_seed(guild_id, rng) -> dict:
             if tournament.status != "registration":
                 raise ValueError(f"**{tournament.name}** has already started.")
             fee = tournament.entry_fee or 0
+            # Refuse rather than warn. remove_team is registration-only, so a start
+            # that went ahead would flip the tournament to 'active' and take away the
+            # only tool for clearing the teams it just complained about — the warning
+            # would land one moment after it could be acted on. Stopping here leaves
+            # the TO in the phase where dropping still works, and the choice between
+            # dropping and waiting for payment stays theirs. Checked before
+            # start_tournament's own "at least 2 paid teams" guard so the more
+            # actionable message wins. Free tournaments mark everyone 'paid', so this
+            # is a no-op there.
+            unpaid = sorted(p.team_name for p in await list_participants(session, tournament.id)
+                            if p.status != "paid")
+            if unpaid:
+                who = (f"{unpaid[0]} hasn't paid the entry fee" if len(unpaid) == 1
+                       else f"{len(unpaid)} teams haven't paid the entry fee: "
+                            f"{', '.join(unpaid)}")
+                raise ValueError(
+                    f"{who}. Drop them with `/tournament remove_team`, or wait for "
+                    f"payment, then run `/tournament start` again."
+                )
             await start_tournament(session, tournament.id, rng)
             pot = await _pool(session, str(guild_id), tournament.id) if fee > 0 else 0
             return {"tournament_id": tournament.id, "name": tournament.name,
