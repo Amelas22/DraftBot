@@ -230,6 +230,9 @@ class _FakeThread:
     async def _do_send(self, content=None, files=None):
         msg = MagicMock()
         msg.author = SimpleNamespace(id=_BOT_ID)   # a real send from the bot itself
+        # Recorded so a test can tell an attempted send from a LANDED one: a send
+        # that raised still appears in send.await_args_list, but never in history.
+        msg.content = content or ""
         msg.attachments = [
             MagicMock(filename=(f[1] if isinstance(f, tuple) else getattr(f, "filename", None)))
             for f in (files or [])
@@ -266,6 +269,22 @@ class _FakeThread:
         msg.author = SimpleNamespace(id=author_id)
         msg.attachments = [MagicMock(filename=filename)]
         self._messages.append(msg)
+
+    def inject_chatter(self, count, at=None, author_id=424242):
+        """Plain messages from other people, with no attachments -- the thing an
+        OPEN pools thread accumulates and a private one never does. `at` inserts
+        them mid-history, modelling chatter that lands while a slow image upload
+        is still in flight, which is what can push a later pool out of a
+        newest-first window."""
+        for _ in range(count):
+            msg = MagicMock()
+            msg.author = SimpleNamespace(id=author_id)
+            msg.attachments = []
+            self._messages.insert(at, msg) if at is not None else self._messages.append(msg)
+
+    def posted_contents(self):
+        """Message text that actually landed, oldest-first."""
+        return [m.content for m in self._messages]
 
     def posted_txt_filenames(self):
         """Filenames of .txt attachments actually recorded as sent -- unlike
@@ -1130,3 +1149,141 @@ async def test_open_pools_thread_refusal_is_terminal_and_does_not_churn():
 
     assert ok is True, "a refused open thread must not block team_logs_posted_at"
     assert chat.summary_messages() == [], "the orphan summary was left in the draft chat"
+
+
+@pytest.mark.asyncio
+async def test_open_pools_a_transient_thread_failure_is_retried_not_dropped():
+    """Terminal-on-refusal must mean REFUSAL, not "any failure".
+
+    A 500 says "try later"; treating it like a missing permission stamps the
+    session complete with open_pools_destination_id still NULL, and no tick ever
+    comes back -- the open pools are lost silently and permanently.
+    """
+    ds = _tournament_ds()
+    chat = _FakeChannel("draft-chat", create_thread_error=discord.HTTPException(
+        MagicMock(status=500), "Internal Server Error"), cid=555)
+
+    with _patched_discord():
+        ok = await _post_open_pools(
+            _bot_for({555: chat}), chat, None, ds.friendly_id,
+            [("Cosmos", ds.team_a), ("gypsy caravan", ds.team_b)],
+            _MAPPING_AB, ds.draft_data, ds.sign_ups,
+            persist_destination_id=lambda d: _record([], d),
+        )
+
+    assert ok is False, "a transient 5xx must leave the run incomplete so it retries"
+
+
+@pytest.mark.asyncio
+async def test_open_pools_survives_a_thread_failure_from_below_discord():
+    """The lesson _post_missing_players already learned, one layer up.
+
+    Thread creation guarded only discord.HTTPException, so the aiohttp SSL error
+    seen repeatedly in live e2e runs escaped the whole reconciler run instead of
+    costing one optional thread.
+    """
+    ds = _tournament_ds()
+    chat = _FakeChannel("draft-chat", cid=555, create_thread_error=OSError(
+        "[SSL: SSLV3_ALERT_BAD_RECORD_MAC] ssl/tls alert bad record mac"))
+
+    with _patched_discord():
+        ok = await _post_open_pools(
+            _bot_for({555: chat}), chat, None, ds.friendly_id,
+            [("Cosmos", ds.team_a), ("gypsy caravan", ds.team_b)],
+            _MAPPING_AB, ds.draft_data, ds.sign_ups,
+            persist_destination_id=lambda d: _record([], d),
+        )
+
+    assert ok is False, "a below-discord failure is transient, so the run retries"
+
+
+@pytest.mark.asyncio
+async def test_open_pools_disambiguates_a_name_that_mimics_a_generated_suffix():
+    """The collision fix must not be defeated by a name shaped like its own output.
+
+    Suffixing only the names that collide BEFORE the pass leaves the generated
+    'Bob-<id>' free to collide with a player literally called 'Bob-<that id>'.
+    Display names are long enough to hold 'Bob-' plus a real snowflake, so this
+    is reachable on purpose, not just by accident: it silently suppresses the
+    victim's pool on every retry.
+    """
+    log = {
+        "carddata": {"c1": {"name": "Lightning Bolt"}, "c2": {"name": "Counterspell"},
+                     "c3": {"name": "Brainstorm"}},
+        "users": {
+            "dm_a": {"userName": "Bob!", "seatNum": 0, "cards": ["c1"]},
+            "dm_b": {"userName": "Bob?", "seatNum": 1, "cards": ["c2"]},
+            "dm_c": {"userName": "Bob-disc_a", "seatNum": 2, "cards": ["c3"]},
+        },
+    }
+    thread = _FakeThread(3003)
+    chat = _FakeChannel("draft-chat", thread=thread, cid=555)
+
+    with _patched_discord():
+        await _post_open_pools(
+            _bot_for({555: chat}), chat, None, "ABC",
+            [("Cosmos", ["disc_a"]), ("gypsy caravan", ["disc_b", "disc_c"])],
+            {"disc_a": "dm_a", "disc_b": "dm_b", "disc_c": "dm_c"}, log,
+            {"disc_a": "Bob!", "disc_b": "Bob?", "disc_c": "Bob-disc_a"},
+            persist_destination_id=lambda d: _record([], d),
+        )
+
+    txts = [n for n in _attachment_names(thread) if n.endswith(".txt")]
+    assert len(txts) == 3, f"a pool was dropped by a name collision: {txts}"
+    assert len(set(txts)) == 3, f"two pools posted under the same filename: {txts}"
+    # The two-player group is the only place the header's "clear once it has
+    # landed" step is observable -- a one-player group would look the same either
+    # way. Its second pool must not carry the label a second time.
+    heads = [c for c in thread.posted_contents() if "__**gypsy caravan**__" in c]
+    assert len(heads) == 1, f"the group header repeated within one run: {heads}"
+
+
+@pytest.mark.asyncio
+async def test_open_pools_finds_a_pool_posted_behind_a_wall_of_chatter():
+    """The scan bound must not be able to hide a pool that IS posted.
+
+    This thread is open and meant to be talked in, and each pool carries a slow
+    image upload -- so conversation really can land between two pools. Any fixed
+    window smaller than that conversation makes the later pool invisible, and the
+    retry posts it a second time.
+    """
+    ds = _tournament_ds()
+    thread = _FakeThread(3003)
+    chat = _FakeChannel("draft-chat", thread=thread, cid=555)
+    args = dict(friendly_id=ds.friendly_id,
+                teams=[("Cosmos", ds.team_a), ("gypsy caravan", ds.team_b)],
+                mapping=_MAPPING_AB, draft_data=ds.draft_data, sign_ups=ds.sign_ups)
+
+    with _patched_discord():
+        await _post_open_pools(_bot_for({555: chat}), chat, None, **args,
+                               persist_destination_id=lambda d: _record([], d))
+        # Both teams talking while the last pool's image was still uploading.
+        thread.inject_chatter(75, at=len(thread._messages) - 1)
+        await _post_open_pools(_bot_for({555: chat, 3003: thread}), chat,
+                               str(thread.id), **args,
+                               persist_destination_id=lambda d: _record([], d))
+
+    txts = thread.posted_txt_filenames()
+    assert sorted(txts) == ["Alice.txt", "Bob.txt"], f"a pool was re-posted: {txts}"
+
+
+@pytest.mark.asyncio
+async def test_open_pools_retry_does_not_repeat_a_team_header():
+    """A header is signposting for a group, not per straggler."""
+    ds = _tournament_ds()
+    thread = _FlakyThread(3003)          # fails Bob's first send only
+    chat = _FakeChannel("draft-chat", thread=thread, cid=555)
+    args = dict(friendly_id=ds.friendly_id,
+                teams=[("Cosmos", ds.team_a), ("gypsy caravan", ds.team_b)],
+                mapping=_MAPPING_AB, draft_data=ds.draft_data, sign_ups=ds.sign_ups)
+
+    with _patched_discord():
+        first = await _post_open_pools(_bot_for({555: chat}), chat, None, **args,
+                                       persist_destination_id=lambda d: _record([], d))
+        second = await _post_open_pools(_bot_for({555: chat, 3003: thread}), chat,
+                                        str(thread.id), **args,
+                                        persist_destination_id=lambda d: _record([], d))
+
+    assert first is False and second is True
+    headers = [p for p in thread.posted_contents() if "__**gypsy caravan**__" in p]
+    assert len(headers) == 1, f"the team header was posted again on the retry: {headers}"
