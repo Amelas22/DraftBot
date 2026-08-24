@@ -4,12 +4,14 @@ A pending registration survives a failed/absent trade window and completes whene
 tix arrive by any route; the fee then lives in the prize wallet (not a hold on the
 captain), and dropping the team transfers it back.
 """
+import random
+
 import pytest
 from sqlalchemy import select
 
 from conftest import test_db  # noqa: F401  (fixture)
 from database.db_session import db_session
-from models.tournament import Tournament, TournamentParticipant
+from models.tournament import Tournament, TournamentParticipant, TournamentRound
 from models.wallet_tx import WalletTx
 from services import tournament_escrow_service as escrow
 from services import wallet_service
@@ -63,8 +65,10 @@ async def test_fee_transfers_into_the_prize_wallet_when_funds_arrive(test_db):  
     assert await wallet_service.get_balance(GUILD, CAPTAIN) == 1
     assert await escrow.prize_pool(GUILD, t_id) == 2
     async with db_session() as session:
+        # Keyed on the Team, not the participant row — see escrow.entry_source.
+        team_id = (await session.get(TournamentParticipant, p_id)).team_id
         rows = (await session.execute(
-            select(WalletTx).where(WalletTx.source == escrow.escrow_source(t_id, p_id))
+            select(WalletTx).where(WalletTx.source == escrow.entry_source(t_id, team_id))
         )).scalars().all()
     assert sorted(r.amount for r in rows) == [-2, 2]  # one transfer pair, nets to zero
 
@@ -217,3 +221,125 @@ async def test_payout_name_is_absent_when_the_row_cannot_be_read(test_db):  # no
 
     assert res["ok"]
     assert res["tournament_name"] is None
+
+
+# --- dropping one team must not disturb any other team's payment ----------------
+# The escrow once hung a mutable status and an escrow_tx_id off the participant, so a
+# drop reached into ledger rows and could perturb a *different* team's payment state.
+# b668a76 replaced that with plain transfers; nothing asserted the multi-team property
+# it was supposed to buy, so these pin it down.
+
+async def _team(t_id, team, captain, team_id):
+    async with db_session() as session:
+        p = TournamentParticipant(tournament_id=t_id, team_id=team_id, team_name=team,
+                                  captain_user_id=captain, status="pending")
+        session.add(p)
+        await session.flush()
+        return p.id
+
+
+async def _participant(participant_id):
+    async with db_session() as session:
+        return await session.get(TournamentParticipant, participant_id)
+
+
+@pytest.mark.asyncio
+async def test_dropping_one_team_leaves_the_others_paid_and_the_pot_intact(test_db):  # noqa: F811
+    """A drop touches exactly one team's money and nobody else's."""
+    t_id, a_id = await _paid_tournament(fee=2, team="Team A")
+    b_id = await _team(t_id, "Team B", "cap-b", 2)
+    c_id = await _team(t_id, "Team C", "cap-c", 3)
+    for captain, job in ((CAPTAIN, "j-a"), ("cap-b", "j-b"), ("cap-c", "j-c")):
+        await wallet_service.credit_done(GUILD, captain, 2, job_id=job)
+    await escrow.sweep_pending_entries()
+    assert await escrow.prize_pool(GUILD, t_id) == 6
+
+    before_a, before_c = await _participant(a_id), await _participant(c_id)
+    assert (before_a.status, before_c.status) == ("paid", "paid")
+
+    res = await escrow.drop_with_refund(t_id, "Team B")
+
+    assert res["refunded"] == 2
+    assert await _status(b_id) is None                      # B is gone
+    assert await wallet_service.get_balance(GUILD, "cap-b") == 2   # B made whole
+
+    after_a, after_c = await _participant(a_id), await _participant(c_id)
+    assert (after_a.status, after_c.status) == ("paid", "paid")
+    assert (after_a.paid_at, after_c.paid_at) == (before_a.paid_at, before_c.paid_at)
+    assert await wallet_service.get_balance(GUILD, CAPTAIN) == 0   # A's fee still committed
+    assert await wallet_service.get_balance(GUILD, "cap-c") == 0
+    assert await escrow.prize_pool(GUILD, t_id) == 4               # only B's fee left
+    assert await wallet_service.total_wallets() == 6               # transfers net to zero
+
+
+@pytest.mark.asyncio
+async def test_dropping_the_same_team_twice_refunds_once(test_db):  # noqa: F811
+    """The second drop must not pay the captain a second time out of the pot."""
+    t_id, _ = await _paid_tournament(fee=2, team="Twice")
+    await wallet_service.credit_done(GUILD, CAPTAIN, 2, job_id="j-twice")
+    await escrow.sweep_pending_entries()
+
+    assert (await escrow.drop_with_refund(t_id, "Twice"))["refunded"] == 2
+    balance_after_first = await wallet_service.get_balance(GUILD, CAPTAIN)
+
+    with pytest.raises(ValueError):
+        await escrow.drop_with_refund(t_id, "Twice")
+
+    assert await wallet_service.get_balance(GUILD, CAPTAIN) == balance_after_first
+    assert await escrow.prize_pool(GUILD, t_id) == 0
+    assert await wallet_service.total_wallets() == 2
+
+
+# --- /tournament start refuses while anyone is unpaid ---------------------------
+# remove_team is registration-only, so a start that merely warned would flip the
+# tournament to 'active' and strand the unpaid rows with no way to clear them. The
+# start has to refuse, leaving the TO in the phase where they can still act.
+
+async def _swiss_registration(fee=2):
+    """A swiss tournament with two paid teams and one that never paid."""
+    async with db_session() as session:
+        t = Tournament(guild_id=GUILD, name="Gate Cup", total_rounds=3, format="swiss",
+                       status="registration", entry_fee=fee)
+        session.add(t)
+        await session.flush()
+        t_id = t.id
+    for team, captain, team_id in (("Paid One", CAPTAIN, 1), ("Paid Two", "cap-2", 2),
+                                   ("Skint", "cap-3", 3)):
+        await _team(t_id, team, captain, team_id)
+    for captain, job in ((CAPTAIN, "j-g1"), ("cap-2", "j-g2")):
+        await wallet_service.credit_done(GUILD, captain, fee, job_id=job)
+    await escrow.sweep_pending_entries()
+    return t_id
+
+
+async def _round_count(t_id):
+    async with db_session() as session:
+        rows = (await session.execute(
+            select(TournamentRound).where(TournamentRound.tournament_id == t_id))).scalars().all()
+        return len(rows)
+
+
+@pytest.mark.asyncio
+async def test_start_refuses_while_a_team_has_not_paid(test_db):  # noqa: F811
+    t_id = await _swiss_registration()
+
+    with pytest.raises(ValueError, match="Skint"):
+        await escrow.close_registration_and_seed(GUILD, random.Random(1))
+
+    async with db_session() as session:
+        assert (await session.get(Tournament, t_id)).status == "registration"
+    assert await _round_count(t_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_start_proceeds_once_the_unpaid_team_is_dropped(test_db):  # noqa: F811
+    """The TO's actual workflow: told who is short, drop them, start again."""
+    t_id = await _swiss_registration()
+    await escrow.drop_with_refund(t_id, "Skint")
+
+    res = await escrow.close_registration_and_seed(GUILD, random.Random(1))
+
+    assert res["tournament_id"] == t_id
+    async with db_session() as session:
+        assert (await session.get(Tournament, t_id)).status == "active"
+    assert await _round_count(t_id) == 1

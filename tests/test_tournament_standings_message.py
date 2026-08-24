@@ -234,3 +234,28 @@ async def test_update_standings_message_names_the_bracket_round(test_db):
 
     description = message.edit.call_args.kwargs["embed"].description
     assert "Playoff round 1" in description and "4/3" not in description
+
+
+def test_standings_embed_splits_across_fields_past_discords_cap():
+    """A field value over 1024 chars makes Discord reject the WHOLE embed, so a big
+    field has to span several. Found on a 40-team prod copy: /tournament start seeded
+    the tournament and created every room, then failed with
+    "50035 ... embeds.0.fields.0.value: Must be 1024 or fewer in length" — leaving an
+    active tournament with no standings, no board and no pairings message.
+    """
+    tournament = Tournament(guild_id="1", name="Lotus League 2026", total_rounds=4)
+    tournament.status = "active"
+    tournament.current_round = 1
+    participants = [_participant(f"Team Number {i:02d}", points=3 * (40 - i), wins=40 - i)
+                    for i in range(40)]
+
+    embed = create_standings_embed(tournament, participants)
+
+    assert len(embed.fields) > 1, "40 teams should not fit in one field"
+    for field in embed.fields:
+        assert len(field.value) <= 1024, f"'{field.name}' is {len(field.value)} chars"
+    body = "\n".join(f.value for f in embed.fields)
+    for i in range(40):
+        assert f"Team Number {i:02d}" in body, f"team {i} was dropped by the split"
+    assert embed.fields[0].name == "Standings"
+    assert embed.fields[1].name == "Standings (cont.)"

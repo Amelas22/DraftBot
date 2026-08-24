@@ -28,13 +28,60 @@ from models.tournament import Tournament, TournamentParticipant
 from models.wallet_tx import WalletTx
 from services import wallet_service
 from services.wallet_service import prize_wallet_id
-from services.tournament_service import get_active_tournament, remove_team, start_tournament
+from services.tournament_service import (get_active_tournament, list_participants,
+                                         remove_team, start_tournament)
+
+
+# How many unpaid team names the start refusal spells out before summarising the rest.
+# 20 names sits comfortably inside Discord's 2000-char message limit at any roster size.
+_UNPAID_NAMES_SHOWN = 20
 
 
 def escrow_source(tournament_id, participant_id) -> str:
-    """Stable per-participant tag on the entry transfer — its idempotency key and the
-    handle a refund reverses."""
+    """LEGACY entry key, kept for READING only — entries booked before the move to
+    entry_source() are tagged this way and must still be findable by a refund and by
+    the sweep's already-paid probe. Never write a new transfer under it."""
     return f"tourney:{tournament_id}:{participant_id}"
+
+
+def entry_source(tournament_id, team_id) -> str:
+    """Idempotency key for a team's entry fee, and the handle a refund reverses.
+
+    Keyed on the persistent Team identity, never on the participant row.
+    ``remove_team`` deletes the participant, and tournament_participants.id is a plain
+    SQLite rowid alias (no AUTOINCREMENT), so the next registrant inherits the freed
+    id. A participant-keyed source then collided with the dropped team's already-booked
+    transfer: the sweep saw "already paid", stamped the newcomer paid without charging
+    them, and left the pot one fee short. The Team row outlives a drop, so this key
+    cannot be recycled.
+    """
+    return f"tourney:{tournament_id}:team:{team_id}"
+
+
+async def _booked_entry(session, tournament_id: int, participant: TournamentParticipant):
+    """``(credit_leg, source)`` for this team's entry fee if it is still STANDING,
+    else ``(None, None)``.
+
+    Tries the current Team-keyed source, then the legacy participant-keyed one. Both
+    readers need this: a refund has to find the leg to know what to return, and the
+    sweep has to recognise an entry it already charged so it doesn't bill twice.
+
+    "Still standing" is the load-bearing part. The ledger is append-only, so a refund
+    does not remove the entry leg — it books a compensating pair under ``refund:<src>``
+    and the original stays forever. An existence check would therefore read a refunded
+    entry as paid, and since a re-registered team keeps its Team identity, dropping and
+    re-registering would seat it for free every time. Netting the refund off is what
+    makes the key safe to reuse across registrations rather than merely unrecycled.
+    """
+    for src in (entry_source(tournament_id, participant.team_id),
+                escrow_source(tournament_id, participant.id)):
+        leg = await wallet_service.transfer_credit(session, src)
+        if leg is None:
+            continue
+        if await wallet_service.transfer_legs(session, f"refund:{src}"):
+            continue  # paid once, then refunded — this entry no longer stands
+        return leg, src
+    return None, None
 
 
 # Prize-pool split presets (top-heavy, per MTG convention). Ratios need not sum to 100 —
@@ -134,7 +181,6 @@ async def secure_from_wallet(guild_id: str, captain_id: str, participant_id: int
     if fee <= 0:
         raise ValueError("secure_from_wallet needs a positive fee (free entries never pay)")
 
-    source = escrow_source(tournament_id, participant_id)
     prize_id = prize_wallet_id(tournament_id)
 
     async def _do():
@@ -143,7 +189,8 @@ async def secure_from_wallet(guild_id: str, captain_id: str, participant_id: int
             if p is None:
                 return {"ok": False, "error": "team no longer registered"}
 
-            if await wallet_service.transfer_credit(session, source):
+            leg, _ = await _booked_entry(session, tournament_id, p)
+            if leg is not None:
                 _mark_paid(p)
                 return {"ok": True, "done": True, "paid": fee, "reused": True}
 
@@ -152,7 +199,9 @@ async def secure_from_wallet(guild_id: str, captain_id: str, participant_id: int
                 return {"ok": True, "done": False, "deficit": fee - balance, "available": balance}
 
             await wallet_service.transfer_in(
-                session, guild_id, captain_id, prize_id, fee, source,
+                session, guild_id, captain_id, prize_id, fee,
+                # Names the Team, which a drop cannot free — see entry_source.
+                entry_source(tournament_id, p.team_id),
                 notes=f"tournament entry: {team_name}")  # funds checked just above
             _mark_paid(p)
             logger.info(f"escrow: participant {participant_id} paid {fee} into {prize_id}")
@@ -167,8 +216,9 @@ async def refund_entry(session, guild_id: str, tournament_id: int,
     """Return a paid entry fee from the pot to its captain, inside the caller's session.
     Idempotent by the ``refund:`` source; returns the amount refunded (0 if the entry was
     never paid, e.g. a comp, or was already refunded)."""
-    source = escrow_source(tournament_id, participant.id)
-    leg = await wallet_service.transfer_credit(session, source)
+    # Reverses whichever key the entry was actually booked under, so a fee paid before
+    # the key changed still refunds — and stays idempotent against its own refund tag.
+    leg, source = await _booked_entry(session, tournament_id, participant)
     if leg is None:
         return 0  # comped or never funded
     refund_source = f"refund:{source}"
@@ -270,6 +320,31 @@ async def close_registration_and_seed(guild_id, rng) -> dict:
             if tournament.status != "registration":
                 raise ValueError(f"**{tournament.name}** has already started.")
             fee = tournament.entry_fee or 0
+            # Refuse rather than warn. remove_team is registration-only, so a start
+            # that went ahead would flip the tournament to 'active' and take away the
+            # only tool for clearing the teams it just complained about — the warning
+            # would land one moment after it could be acted on. Stopping here leaves
+            # the TO in the phase where dropping still works, and the choice between
+            # dropping and waiting for payment stays theirs. Checked before
+            # start_tournament's own "at least 2 paid teams" guard so the more
+            # actionable message wins. Free tournaments mark everyone 'paid', so this
+            # is a no-op there.
+            unpaid = sorted(p.team_name for p in await list_participants(session, tournament.id)
+                            if p.status != "paid")
+            if unpaid:
+                # Naming every team is unbounded, and this reaches Discord as message
+                # content (2000 chars). A league that grew 16 -> 42 teams in four days
+                # can outrun that, and the failure would be the same shape as the bug
+                # this guard exists to avoid: the command blows up instead of telling
+                # the TO what to do. Name enough to act on, count the rest.
+                shown, extra = unpaid[:_UNPAID_NAMES_SHOWN], len(unpaid) - _UNPAID_NAMES_SHOWN
+                names = ", ".join(shown) + (f", and {extra} more" if extra > 0 else "")
+                who = (f"{unpaid[0]} hasn't paid the entry fee" if len(unpaid) == 1
+                       else f"{len(unpaid)} teams haven't paid the entry fee: {names}")
+                raise ValueError(
+                    f"{who}. Drop them with `/tournament remove_team`, or wait for "
+                    f"payment, then run `/tournament start` again."
+                )
             await start_tournament(session, tournament.id, rng)
             pot = await _pool(session, str(guild_id), tournament.id) if fee > 0 else 0
             return {"tournament_id": tournament.id, "name": tournament.name,
