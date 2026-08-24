@@ -41,23 +41,34 @@ def render_match_control(
     round_label: str,
     lobby_link: str | None = None,
     result: tuple[int, int] | None = None,
+    role_mentions: tuple[str | None, str | None] | None = None,
 ) -> str:
     """Body text of the control message for a match in ``state``.
 
     ``round_label`` is the round's name, already rendered by
     tournament_formatter.round_label -- this module stays free of the database
     a bracket round's name has to be read from.
+
+    ``role_mentions`` is (team_a's role id, team_b's role id), and only
+    prepends a mention line when BOTH are present -- tagging one team and not
+    the other is worse than tagging neither, since nothing on the message
+    would explain the gap.
     """
     header = f"**{round_label} — {a_name} vs {b_name}**"
     if state == RECORDED:
         assert result is not None, "result required when state is RECORDED"
         a_wins, b_wins = result
-        return f"{header}\n{recorded_result_line(a_name, b_name, a_wins, b_wins)}"
-    if state == DRAFTING:
+        body = f"{header}\n{recorded_result_line(a_name, b_name, a_wins, b_wins)}"
+    elif state == DRAFTING:
         if lobby_link:
-            return f"{header}\n🟢 Draft in progress — [jump to the lobby]({lobby_link})"
-        return f"{header}\n🟢 Draft in progress."
-    return f"{header}\nNot started yet. Hit **Start draft** when both teams are ready."
+            body = f"{header}\n🟢 Draft in progress — [jump to the lobby]({lobby_link})"
+        else:
+            body = f"{header}\n🟢 Draft in progress."
+    else:
+        body = f"{header}\nNot started yet. Hit **Start draft** when both teams are ready."
+    if role_mentions and all(role_mentions):
+        body = f"<@&{role_mentions[0]}> <@&{role_mentions[1]}>\n" + body
+    return body
 
 
 def render_pairing_line(

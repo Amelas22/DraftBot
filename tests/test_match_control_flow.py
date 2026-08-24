@@ -116,6 +116,65 @@ async def test_start_draft_picker_is_ephemeral(patched_db):
 
 
 @pytest.mark.asyncio
+async def test_start_draft_refresh_does_not_remention_roles(patched_db):
+    """start_match_draft re-renders the SAME control message a live draft
+    already blocks on; it must not re-add the mention line even when both
+    teams have roles (control_body_and_view's docstring explains why)."""
+    from match_control_view import start_match_draft
+    from models.tournament import TournamentParticipant
+
+    async with patched_db() as session:
+        match = await seed_tournament_match(session, thread_id="900")
+        part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
+        part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
+        part_a.role_id = "111"
+        part_b.role_id = "222"
+        session.add(DraftSession(
+            session_id="d1", guild_id="g1", session_type="premade",
+            draft_channel_id="55", message_id="66", tournament_match_id=match.id,
+        ))
+        await session.commit()
+
+    interaction = make_interaction(make_thread())
+    with patch("match_control_view.cube_picker_for_match", MagicMock()):
+        await start_match_draft(interaction, match.id)
+
+    body = interaction.response.edit_message.call_args.kwargs["content"]
+    assert "<@&" not in body
+
+
+@pytest.mark.asyncio
+async def test_refresh_control_message_does_not_remention_roles(patched_db):
+    """refresh_match_views re-renders the SAME control message on every later
+    refresh; it must not re-add the mention line even when both teams have
+    roles (control_body_and_view's docstring explains why)."""
+    from match_control_view import refresh_match_views
+    from models.tournament import TournamentParticipant
+
+    async with patched_db() as session:
+        match = await seed_tournament_match(session, thread_id="900")
+        stored = await session.get(TournamentMatch, match.id)
+        stored.control_message_id = "777"
+        part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
+        part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
+        part_a.role_id = "111"
+        part_b.role_id = "222"
+        await session.commit()
+
+    control_message = MagicMock()
+    control_message.edit = AsyncMock()
+    thread = MagicMock()
+    thread.fetch_message = AsyncMock(return_value=control_message)
+    bot = MagicMock()
+    bot.get_channel.return_value = thread
+
+    await refresh_match_views(bot, match.id)
+
+    body = control_message.edit.call_args.kwargs["content"]
+    assert "<@&" not in body
+
+
+@pytest.mark.asyncio
 async def test_launch_block_for_is_none_when_match_is_free(patched_db):
     from match_control_view import launch_block_for
 
@@ -165,6 +224,37 @@ async def test_create_match_room_makes_a_long_lived_thread_and_pins_control(patc
         stored = await session.get(TournamentMatch, match.id)
         assert stored.thread_id == "900"
         assert stored.control_message_id == "777"
+
+
+@pytest.mark.asyncio
+async def test_create_match_room_mentions_both_team_roles(patched_db):
+    """The control message's first post is the only place a mention belongs
+    (see control_body_and_view's docstring), and it must actually reach
+    Discord as a real mention -- not just a pill nobody gets notified by."""
+    from match_control_view import create_match_room
+    from models.tournament import TournamentParticipant
+
+    async with patched_db() as session:
+        match = await seed_tournament_match(session)
+        part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
+        part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
+        part_a.role_id = "111"
+        part_b.role_id = "222"
+        await session.commit()
+
+    thread = make_thread()
+    message = MagicMock()
+    message.create_thread = AsyncMock(return_value=thread)
+
+    with patch("match_control_view.safe_pin", AsyncMock()):
+        await create_match_room(message, match.id)
+
+    body = thread.send.call_args.kwargs["content"]
+    assert "<@&111>" in body and "<@&222>" in body
+    # roles=True is what turns the pill into a real mention: it notifies both
+    # teams and adds their members to the thread.
+    allowed_mentions = thread.send.call_args.kwargs["allowed_mentions"]
+    assert allowed_mentions.roles is True
 
 
 @pytest.mark.asyncio
