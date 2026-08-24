@@ -98,7 +98,16 @@ class TournamentParticipant(Base):
 
     # No relationship existed on this model before this property was added; the
     # roster was always queried explicitly (see services/tournament_service.py).
-    team_members = relationship("TournamentTeamMember", back_populates="participant")
+    # lazy="selectin": this codebase's sessions are all AsyncSession
+    # (database/db_session.py), and the default lazy="select" issues its
+    # SELECT at attribute-access time -- there is no greenlet to run that IO
+    # in outside an explicit await, so a plain lazy load raises
+    # MissingGreenlet the first time something reads .team_members (or
+    # .roster_user_ids) on a participant that came back from a query.
+    # selectin issues its own eager SELECT while the loading query still has
+    # a greenlet, avoiding that.
+    team_members = relationship("TournamentTeamMember", back_populates="participant",
+                                 lazy="selectin")
 
     @property
     def roster_user_ids(self) -> list:

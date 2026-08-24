@@ -1,16 +1,48 @@
 """Tournament team roles: naming, creation with rollback, sync, deletion."""
+import os
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
+import pytest_asyncio
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
 
+from database.models_base import Base
+from models.tournament import Tournament, TournamentParticipant, TournamentTeamMember
 from services.tournament_roles import (
     create_team_roles,
     delete_team_roles,
     sync_member,
     team_role_name,
 )
+
+
+@pytest_asyncio.fixture
+async def test_db():
+    """A real aiosqlite-backed async session factory -- not a mock. This is
+    what the fixed-round-1 test below needs: SimpleNamespace-based
+    _participant() stubs cannot reproduce a lazy-loaded relationship raising
+    MissingGreenlet, since they never touch a session at all."""
+    temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+    temp_db.close()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{temp_db.name}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    test_session_factory = sessionmaker(
+        engine,
+        expire_on_commit=False,
+        class_=AsyncSession
+    )
+
+    yield test_session_factory
+
+    await engine.dispose()
+    os.unlink(temp_db.name)
 
 
 def _participant(pid, team_name, captain, roster=()):
@@ -103,3 +135,46 @@ async def test_delete_team_roles_treats_an_already_deleted_role_as_done():
 
     assert await delete_team_roles(guild, ["1", "2"]) == 1
     live.delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_roster_user_ids_loads_from_a_fresh_session_without_a_greenlet_error(test_db):
+    """A regression test for round 1 of review: team_members must be
+    lazy="selectin", not the SQLAlchemy default lazy="select".
+
+    This codebase's sessions are all AsyncSession (database/db_session.py).
+    A lazy="select" relationship issues its SELECT at attribute-access time,
+    which needs a greenlet that async code does not have outside an
+    explicit await -- so reading .roster_user_ids on a participant that came
+    back from a query would raise MissingGreenlet. That only shows up when
+    the participant is loaded through a real session and then read again
+    after the loading query's greenlet is gone -- which is why this uses a
+    FRESH session to read it back, rather than the session that created the
+    rows: reusing that session would leave the rows (and their loaded
+    relationship) sitting in the identity map, and the lazy load would never
+    actually fire.
+    """
+    async with test_db() as session:
+        tournament = Tournament(guild_id="g1", name="Cup", total_rounds=3)
+        session.add(tournament)
+        await session.flush()
+
+        participant = TournamentParticipant(
+            tournament_id=tournament.id, team_id=1, team_name="Alpha",
+            captain_user_id="10",
+        )
+        session.add(participant)
+        await session.flush()
+
+        session.add(TournamentTeamMember(
+            participant_id=participant.id, user_id="200", display_name="Roster Player",
+        ))
+        await session.commit()
+        participant_id = participant.id
+
+    async with test_db() as fresh_session:
+        result = await fresh_session.execute(
+            select(TournamentParticipant).where(TournamentParticipant.id == participant_id)
+        )
+        fresh_participant = result.scalar_one()
+        assert fresh_participant.roster_user_ids == ["200"]
