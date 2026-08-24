@@ -33,9 +33,39 @@ from services.tournament_service import (get_active_tournament, list_participant
 
 
 def escrow_source(tournament_id, participant_id) -> str:
-    """Stable per-participant tag on the entry transfer — its idempotency key and the
-    handle a refund reverses."""
+    """LEGACY entry key, kept for READING only — entries booked before the move to
+    entry_source() are tagged this way and must still be findable by a refund and by
+    the sweep's already-paid probe. Never write a new transfer under it."""
     return f"tourney:{tournament_id}:{participant_id}"
+
+
+def entry_source(tournament_id, team_id) -> str:
+    """Idempotency key for a team's entry fee, and the handle a refund reverses.
+
+    Keyed on the persistent Team identity, never on the participant row.
+    ``remove_team`` deletes the participant, and tournament_participants.id is a plain
+    SQLite rowid alias (no AUTOINCREMENT), so the next registrant inherits the freed
+    id. A participant-keyed source then collided with the dropped team's already-booked
+    transfer: the sweep saw "already paid", stamped the newcomer paid without charging
+    them, and left the pot one fee short. The Team row outlives a drop, so this key
+    cannot be recycled.
+    """
+    return f"tourney:{tournament_id}:team:{team_id}"
+
+
+async def _booked_entry(session, tournament_id: int, participant: TournamentParticipant):
+    """``(credit_leg, source)`` for this team's booked entry fee, or ``(None, None)``.
+
+    Tries the current Team-keyed source, then the legacy participant-keyed one. Both
+    readers need this: a refund has to find the leg to know what to return, and the
+    sweep has to recognise an entry it already charged so it doesn't bill twice.
+    """
+    for src in (entry_source(tournament_id, participant.team_id),
+                escrow_source(tournament_id, participant.id)):
+        leg = await wallet_service.transfer_credit(session, src)
+        if leg is not None:
+            return leg, src
+    return None, None
 
 
 # Prize-pool split presets (top-heavy, per MTG convention). Ratios need not sum to 100 —
@@ -135,7 +165,6 @@ async def secure_from_wallet(guild_id: str, captain_id: str, participant_id: int
     if fee <= 0:
         raise ValueError("secure_from_wallet needs a positive fee (free entries never pay)")
 
-    source = escrow_source(tournament_id, participant_id)
     prize_id = prize_wallet_id(tournament_id)
 
     async def _do():
@@ -144,7 +173,12 @@ async def secure_from_wallet(guild_id: str, captain_id: str, participant_id: int
             if p is None:
                 return {"ok": False, "error": "team no longer registered"}
 
-            if await wallet_service.transfer_credit(session, source):
+            # Derived from the participant we just loaded, not from participant_id:
+            # the key must name the Team, which a drop cannot free. See entry_source.
+            source = entry_source(tournament_id, p.team_id)
+
+            leg, _booked_under = await _booked_entry(session, tournament_id, p)
+            if leg is not None:
                 _mark_paid(p)
                 return {"ok": True, "done": True, "paid": fee, "reused": True}
 
@@ -168,8 +202,9 @@ async def refund_entry(session, guild_id: str, tournament_id: int,
     """Return a paid entry fee from the pot to its captain, inside the caller's session.
     Idempotent by the ``refund:`` source; returns the amount refunded (0 if the entry was
     never paid, e.g. a comp, or was already refunded)."""
-    source = escrow_source(tournament_id, participant.id)
-    leg = await wallet_service.transfer_credit(session, source)
+    # Reverses whichever key the entry was actually booked under, so a fee paid before
+    # the key changed still refunds — and stays idempotent against its own refund tag.
+    leg, source = await _booked_entry(session, tournament_id, participant)
     if leg is None:
         return 0  # comped or never funded
     refund_source = f"refund:{source}"

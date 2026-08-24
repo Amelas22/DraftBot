@@ -63,8 +63,10 @@ async def test_fee_transfers_into_the_prize_wallet_when_funds_arrive(test_db):  
     assert await wallet_service.get_balance(GUILD, CAPTAIN) == 1
     assert await escrow.prize_pool(GUILD, t_id) == 2
     async with db_session() as session:
+        # Keyed on the Team, not the participant row — see escrow.entry_source.
+        team_id = (await session.get(TournamentParticipant, p_id)).team_id
         rows = (await session.execute(
-            select(WalletTx).where(WalletTx.source == escrow.escrow_source(t_id, p_id))
+            select(WalletTx).where(WalletTx.source == escrow.entry_source(t_id, team_id))
         )).scalars().all()
     assert sorted(r.amount for r in rows) == [-2, 2]  # one transfer pair, nets to zero
 
