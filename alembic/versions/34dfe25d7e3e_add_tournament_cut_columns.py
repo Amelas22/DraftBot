@@ -1,5 +1,11 @@
 """add tournament cut columns
 
+Chained after 31793cd109c4 (the pools-destination columns), not after
+748aae6ae438 which was head when this was written. Both would otherwise
+branch off the same parent and alembic would report two heads -- and this
+project runs `alembic upgrade head` against production unguarded on every
+service restart, so two heads is a failed deploy, not a warning.
+
 Revision ID: 34dfe25d7e3e
 Revises: 748aae6ae438
 Create Date: 2026-08-23 15:57:07.539833
@@ -13,7 +19,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = '34dfe25d7e3e'
-down_revision: Union[str, Sequence[str], None] = '748aae6ae438'
+down_revision: Union[str, Sequence[str], None] = '31793cd109c4'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
