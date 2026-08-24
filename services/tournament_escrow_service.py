@@ -54,17 +54,28 @@ def entry_source(tournament_id, team_id) -> str:
 
 
 async def _booked_entry(session, tournament_id: int, participant: TournamentParticipant):
-    """``(credit_leg, source)`` for this team's booked entry fee, or ``(None, None)``.
+    """``(credit_leg, source)`` for this team's entry fee if it is still STANDING,
+    else ``(None, None)``.
 
     Tries the current Team-keyed source, then the legacy participant-keyed one. Both
     readers need this: a refund has to find the leg to know what to return, and the
     sweep has to recognise an entry it already charged so it doesn't bill twice.
+
+    "Still standing" is the load-bearing part. The ledger is append-only, so a refund
+    does not remove the entry leg — it books a compensating pair under ``refund:<src>``
+    and the original stays forever. An existence check would therefore read a refunded
+    entry as paid, and since a re-registered team keeps its Team identity, dropping and
+    re-registering would seat it for free every time. Netting the refund off is what
+    makes the key safe to reuse across registrations rather than merely unrecycled.
     """
     for src in (entry_source(tournament_id, participant.team_id),
                 escrow_source(tournament_id, participant.id)):
         leg = await wallet_service.transfer_credit(session, src)
-        if leg is not None:
-            return leg, src
+        if leg is None:
+            continue
+        if await wallet_service.transfer_legs(session, f"refund:{src}"):
+            continue  # paid once, then refunded — this entry no longer stands
+        return leg, src
     return None, None
 
 
@@ -173,11 +184,7 @@ async def secure_from_wallet(guild_id: str, captain_id: str, participant_id: int
             if p is None:
                 return {"ok": False, "error": "team no longer registered"}
 
-            # Derived from the participant we just loaded, not from participant_id:
-            # the key must name the Team, which a drop cannot free. See entry_source.
-            source = entry_source(tournament_id, p.team_id)
-
-            leg, _booked_under = await _booked_entry(session, tournament_id, p)
+            leg, _ = await _booked_entry(session, tournament_id, p)
             if leg is not None:
                 _mark_paid(p)
                 return {"ok": True, "done": True, "paid": fee, "reused": True}
@@ -187,7 +194,9 @@ async def secure_from_wallet(guild_id: str, captain_id: str, participant_id: int
                 return {"ok": True, "done": False, "deficit": fee - balance, "available": balance}
 
             await wallet_service.transfer_in(
-                session, guild_id, captain_id, prize_id, fee, source,
+                session, guild_id, captain_id, prize_id, fee,
+                # Names the Team, which a drop cannot free — see entry_source.
+                entry_source(tournament_id, p.team_id),
                 notes=f"tournament entry: {team_name}")  # funds checked just above
             _mark_paid(p)
             logger.info(f"escrow: participant {participant_id} paid {fee} into {prize_id}")

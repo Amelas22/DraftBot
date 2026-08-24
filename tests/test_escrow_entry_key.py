@@ -39,7 +39,7 @@ async def test_a_reused_participant_id_still_charges_the_new_team(test_db):  # n
         a_id = a.id
     await wallet_service.credit_done(GUILD, CAP_A, 150, job_id="j-a")
     await escrow.sweep_pending_entries()
-    pot_after_a = await escrow.prize_pool(GUILD, t_id)
+    assert await escrow.prize_pool(GUILD, t_id) == 150
 
     await escrow.drop_with_refund(t_id, "Team Alpha")
 
@@ -47,9 +47,9 @@ async def test_a_reused_participant_id_still_charges_the_new_team(test_db):  # n
         b, _ = await tsvc.register_team(s, t_id, "Team Beta", CAP_B)
         b_id = b.id
 
-    print(f"\n  Alpha participant id = {a_id}")
-    print(f"  Beta  participant id = {b_id}   REUSED = {a_id == b_id}")
-    print(f"  pot after Alpha paid = {pot_after_a}")
+    # The premise of the whole test: SQLite handed Beta the id Alpha just freed.
+    # If this ever stops holding the test still passes, but for the wrong reason.
+    assert b_id == a_id, "participant id was not reused; the collision can't occur"
 
     # Beta funds their wallet and the sweep runs. If the id was reused, the escrow
     # source 'tourney:<t>:<id>' already has a booked transfer from Alpha.
@@ -61,7 +61,6 @@ async def test_a_reused_participant_id_still_charges_the_new_team(test_db):  # n
         beta_status = beta.status
     beta_balance = await wallet_service.get_balance(GUILD, CAP_B)
     pot = await escrow.prize_pool(GUILD, t_id)
-    print(f"  Beta status={beta_status}  Beta wallet={beta_balance}  pot={pot}")
 
     # What SHOULD hold: Beta paid 150, so their wallet is empty and the pot holds it.
     assert beta_status == "paid"
@@ -115,3 +114,33 @@ async def test_a_legacy_paid_entry_is_not_charged_twice_by_a_later_sweep(test_db
 
     assert await wallet_service.get_balance(GUILD, CAP_A) == 150, "captain was billed twice"
     assert await escrow.prize_pool(GUILD, t_id) == 150
+
+
+@pytest.mark.asyncio
+async def test_a_team_that_drops_and_re_registers_pays_again(test_db):  # noqa: F811
+    """A refund does not delete the entry leg — it books a compensating one. So the
+    'has this team paid?' probe must ask whether the entry is still STANDING, not
+    whether it ever existed, or a team can drop, be refunded, re-register under the
+    same Team identity and be seated for free."""
+    t_id = await _tournament()
+    async with db_session() as s:
+        await tsvc.register_team(s, t_id, "Boomerang", CAP_A)
+    await wallet_service.credit_done(GUILD, CAP_A, 150, job_id="j-boom")
+    await escrow.sweep_pending_entries()
+    assert await escrow.prize_pool(GUILD, t_id) == 150
+
+    await escrow.drop_with_refund(t_id, "Boomerang")
+    assert await wallet_service.get_balance(GUILD, CAP_A) == 150
+    assert await escrow.prize_pool(GUILD, t_id) == 0
+
+    # Same team name -> same persistent Team row -> same team_id as before.
+    async with db_session() as s:
+        again, _ = await tsvc.register_team(s, t_id, "Boomerang", CAP_A)
+        again_id = again.id
+    await escrow.sweep_pending_entries()
+
+    async with db_session() as s:
+        status = (await s.get(TournamentParticipant, again_id)).status
+    assert status == "paid"
+    assert await wallet_service.get_balance(GUILD, CAP_A) == 0, "re-entry was not charged"
+    assert await escrow.prize_pool(GUILD, t_id) == 150, "pot did not receive the re-entry fee"

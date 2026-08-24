@@ -4,12 +4,14 @@ A pending registration survives a failed/absent trade window and completes whene
 tix arrive by any route; the fee then lives in the prize wallet (not a hold on the
 captain), and dropping the team transfers it back.
 """
+import random
+
 import pytest
 from sqlalchemy import select
 
 from conftest import test_db  # noqa: F401  (fixture)
 from database.db_session import db_session
-from models.tournament import Tournament, TournamentParticipant
+from models.tournament import Tournament, TournamentParticipant, TournamentRound
 from models.wallet_tx import WalletTx
 from services import tournament_escrow_service as escrow
 from services import wallet_service
@@ -312,7 +314,6 @@ async def _swiss_registration(fee=2):
 
 async def _round_count(t_id):
     async with db_session() as session:
-        from models.tournament import TournamentRound
         rows = (await session.execute(
             select(TournamentRound).where(TournamentRound.tournament_id == t_id))).scalars().all()
         return len(rows)
@@ -320,7 +321,6 @@ async def _round_count(t_id):
 
 @pytest.mark.asyncio
 async def test_start_refuses_while_a_team_has_not_paid(test_db):  # noqa: F811
-    import random
     t_id = await _swiss_registration()
 
     with pytest.raises(ValueError, match="Skint"):
@@ -334,7 +334,6 @@ async def test_start_refuses_while_a_team_has_not_paid(test_db):  # noqa: F811
 @pytest.mark.asyncio
 async def test_start_proceeds_once_the_unpaid_team_is_dropped(test_db):  # noqa: F811
     """The TO's actual workflow: told who is short, drop them, start again."""
-    import random
     t_id = await _swiss_registration()
     await escrow.drop_with_refund(t_id, "Skint")
 

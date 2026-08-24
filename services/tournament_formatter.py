@@ -59,20 +59,11 @@ def _add_chunked_field(embed, label, lines, cont_label=None):
     ``cont_label`` (default "<label> (cont.)") so the first field keeps the real
     heading and the rest read as overflow.
     """
+    from utils import split_content_for_embed  # module-level would cycle via utils
+
     cont = cont_label or f"{label} (cont.)"
-    chunks, current, current_len = [], [], 0
-    for line in lines:
-        added_len = len(line) + (1 if current else 0)  # + the newline joiner
-        if current and current_len + added_len > _FIELD_LIMIT:
-            chunks.append(current)
-            current, current_len = [line], len(line)
-        else:
-            current.append(line)
-            current_len += added_len
-    if current:
-        chunks.append(current)
-    for i, chunk in enumerate(chunks):
-        embed.add_field(name=label if i == 0 else cont, value="\n".join(chunk), inline=False)
+    for i, chunk in enumerate(split_content_for_embed(lines, max_length=_FIELD_LIMIT)):
+        embed.add_field(name=label if i == 0 else cont, value=chunk, inline=False)
 
 
 def create_standings_embed(tournament, participants, stage=STAGE_SWISS):
