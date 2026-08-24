@@ -69,7 +69,7 @@ from services.tournament_service import (
 from services.mtgo_tradebot_client import EVENT_TICKET
 from services import tournament_escrow_service as escrow
 from services import wallet_service
-from services.tournament_roles import create_team_roles, delete_team_roles
+from services.tournament_roles import create_team_roles, delete_team_roles, sync_member
 
 
 # Registering records only the captain, so every successful registration has to say
@@ -709,6 +709,7 @@ class TournamentCog(commands.Cog):
                 await ctx.followup.send(f"❌ {e}", ephemeral=True)
                 return
             p_name = participant.team_name
+            role_id = participant.role_id
             # Sharing a player between teams is allowed, but it should never happen
             # unnoticed — say so on the reply instead of blocking the add.
             others = await other_teams_for_user(
@@ -718,6 +719,9 @@ class TournamentCog(commands.Cog):
         # Outside the session: the board reads the roster back in its own session,
         # so refreshing before this one commits would render the pre-change state.
         await self._refresh_board(t_id)
+        # Unconditional: add_roles is idempotent, so re-syncing a player who was
+        # already on the roster repairs a role they somehow lack.
+        await sync_member(ctx.guild, role_id, str(player.id), add=True)
         shared = f"\nAlso on {also_on} in this tournament." if also_on else ""
         if created:
             logger.info(f"{player.id} added to team '{p_name}' in tournament {t_id} "
@@ -759,6 +763,14 @@ class TournamentCog(commands.Cog):
                 await ctx.followup.send(f"❌ {e}", ephemeral=True)
                 return
             p_name = participant.team_name
+            role_id = participant.role_id
+
+        # Gated on `removed`: the captain is deliberately never in the roster
+        # table, so remove_teammate returns False for them. Syncing
+        # unconditionally would strip the captain's team role, dropping them
+        # out of every match room for the rest of the event.
+        if removed:
+            await sync_member(ctx.guild, role_id, str(player.id), add=False)
 
         if not removed:
             await ctx.followup.send(

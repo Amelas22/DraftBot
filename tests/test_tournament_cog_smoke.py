@@ -316,6 +316,42 @@ def _ctx():
     return ctx
 
 
+def _player(user_id=4242):
+    """A discord.Member stand-in. `bot` must be explicitly False: a bare
+    MagicMock attribute is truthy, and add_teammate_cmd rejects bots.
+    `display_name` must be a real string too: get_display_name() passes it to
+    discord.utils.escape_markdown(), which needs a str, not a MagicMock."""
+    player = MagicMock()
+    player.id = user_id
+    player.bot = False
+    player.display_name = f"Player{user_id}"
+    return player
+
+
+def _roster_command_open(participant):
+    """Patch everything the roster commands touch before the role sync.
+
+    Without this they read the real drafts.db. `_refresh_board` and
+    `other_teams_for_user` are patched because both run with the mock session
+    and would otherwise await a MagicMock.
+    """
+    from cogs.tournament_commands import TournamentCog
+
+    stack = ExitStack()
+    stack.enter_context(patch("cogs.tournament_commands.tournament_enabled",
+                              return_value=True))
+    stack.enter_context(patch("cogs.tournament_commands.db_session",
+                              lambda: _NullSession()))
+    stack.enter_context(patch("cogs.tournament_commands.get_active_tournament",
+                              AsyncMock(return_value=MagicMock(id=1, name="Cup"))))
+    stack.enter_context(patch.object(TournamentCog, "_roster_target",
+                                     AsyncMock(return_value=participant)))
+    stack.enter_context(patch.object(TournamentCog, "_refresh_board", AsyncMock()))
+    stack.enter_context(patch("cogs.tournament_commands.other_teams_for_user",
+                              AsyncMock(return_value=[])))
+    return stack
+
+
 def _registration_open(paid_teams=2, pending_teams=0):
     """Patch what `start` reads before it touches Discord: the feature gate
     (`tournament_enabled`) and the two reads `_create_roles_for_start` makes
@@ -691,3 +727,70 @@ async def test_playoff_prompt_says_so_when_it_expires():
     assert "/tournament finish" in content
     assert view.message.edit.call_args.kwargs["view"] is None
     assert all(item.disabled for item in view.children)
+
+
+@pytest.mark.asyncio
+async def test_adding_a_teammate_gives_them_the_team_role():
+    """Rosters stay editable while a tournament runs -- _assert_roster_editable
+    only locks a COMPLETED one -- so a mid-event roster change must move the
+    role too, or the new player never gets pulled into their match room."""
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    ctx = _ctx()
+    participant = MagicMock()
+    participant.role_id = "555"
+    participant.team_name = "Alpha"
+    player = _player()
+
+    with _roster_command_open(participant), \
+         patch("cogs.tournament_commands.add_teammate",
+               AsyncMock(return_value=(MagicMock(), True))), \
+         patch("cogs.tournament_commands.sync_member", AsyncMock()) as sync:
+        await TournamentCog.add_teammate_cmd.callback(cog, ctx, player=player, team=None)
+
+    sync.assert_awaited_once()
+    assert sync.await_args.args[1] == "555"
+    assert sync.await_args.kwargs["add"] is True
+
+
+@pytest.mark.asyncio
+async def test_removing_a_teammate_takes_the_team_role_away():
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    ctx = _ctx()
+    participant = MagicMock()
+    participant.role_id = "555"
+    participant.team_name = "Alpha"
+    player = _player()
+
+    with _roster_command_open(participant), \
+         patch("cogs.tournament_commands.remove_teammate", AsyncMock(return_value=True)), \
+         patch("cogs.tournament_commands.sync_member", AsyncMock()) as sync:
+        await TournamentCog.remove_teammate_cmd.callback(cog, ctx, player=player, team=None)
+
+    sync.assert_awaited_once()
+    assert sync.await_args.kwargs["add"] is False
+
+
+@pytest.mark.asyncio
+async def test_removing_someone_who_was_not_on_the_roster_leaves_roles_alone():
+    """The captain holds the team role but is deliberately NOT in the roster
+    table, so remove_teammate returns False for them. Syncing regardless would
+    strip the captain's role and drop them out of every future match room."""
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    ctx = _ctx()
+    participant = MagicMock()
+    participant.role_id = "555"
+    participant.team_name = "Alpha"
+
+    with _roster_command_open(participant), \
+         patch("cogs.tournament_commands.remove_teammate", AsyncMock(return_value=False)), \
+         patch("cogs.tournament_commands.sync_member", AsyncMock()) as sync:
+        await TournamentCog.remove_teammate_cmd.callback(
+            cog, ctx, player=_player(), team=None)
+
+    sync.assert_not_awaited()
