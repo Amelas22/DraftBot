@@ -10,6 +10,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy.orm import relationship
 
 from database.models_base import Base
 
@@ -95,6 +96,17 @@ class TournamentParticipant(Base):
         UniqueConstraint('tournament_id', 'team_id', name='uq_tournament_team'),
     )
 
+    # No relationship existed on this model before this property was added; the
+    # roster was always queried explicitly (see services/tournament_service.py).
+    team_members = relationship("TournamentTeamMember", back_populates="participant")
+
+    @property
+    def roster_user_ids(self) -> list:
+        """Roster member ids as strings. The captain is NOT here --
+        captain_user_id is the single authority for who owns the team -- so
+        callers that want everyone must include the captain themselves."""
+        return [m.user_id for m in (self.team_members or [])]
+
     def __repr__(self):
         return f"<TournamentParticipant(tournament_id={self.tournament_id}, team={self.team_name!r})>"
 
@@ -129,6 +141,8 @@ class TournamentTeamMember(Base):
     __table_args__ = (
         UniqueConstraint('participant_id', 'user_id', name='uq_participant_member'),
     )
+
+    participant = relationship("TournamentParticipant", back_populates="team_members")
 
     def __repr__(self):
         return (f"<TournamentTeamMember(participant_id={self.participant_id}, "
