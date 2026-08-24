@@ -83,6 +83,13 @@ class TournamentParticipant(Base):
     # recomputed because it is the number players were told, and it is what
     # makes 3rd/4th well-defined between two semifinal losers.
     seed = Column(Integer, nullable=True)
+    # The team's Discord role for THIS tournament. NULL means no role: the
+    # tournament has not started, predates this feature, or has completed and
+    # had its roles deleted. Stored as an id rather than a name so cleanup
+    # deletes the role this team actually got, not whatever currently answers
+    # to its name -- Discord permits duplicate role names, and two concurrent
+    # tournaments may each have an "Alpha".
+    role_id = Column(String(64), nullable=True)
 
     __table_args__ = (
         UniqueConstraint('tournament_id', 'team_id', name='uq_tournament_team'),
