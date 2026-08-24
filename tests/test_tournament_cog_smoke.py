@@ -741,7 +741,7 @@ async def test_adding_a_teammate_gives_them_the_team_role():
     participant = MagicMock()
     participant.role_id = "555"
     participant.team_name = "Alpha"
-    player = _player()
+    player = _player(4242)
 
     with _roster_command_open(participant), \
          patch("cogs.tournament_commands.add_teammate",
@@ -750,8 +750,68 @@ async def test_adding_a_teammate_gives_them_the_team_role():
         await TournamentCog.add_teammate_cmd.callback(cog, ctx, player=player, team=None)
 
     sync.assert_awaited_once()
+    assert sync.await_args.args[0] is ctx.guild
     assert sync.await_args.args[1] == "555"
+    # The actual added PLAYER, never the captain running the command -- both
+    # are in scope on every line here, which is exactly the confusion a
+    # `player`/`ctx.author` mix-up would slip past unnoticed.
+    assert sync.await_args.args[2] == str(player.id)
     assert sync.await_args.kwargs["add"] is True
+    reply = ctx.followup.send.call_args.args[0]
+    assert "✅" in reply and "Alpha" in reply
+
+
+@pytest.mark.asyncio
+async def test_re_adding_an_existing_teammate_still_repairs_their_role():
+    """add_teammate returning created=False (they were already on the roster)
+    must not skip the sync: re-running the command is the documented way to
+    repair a role a player somehow lost, and that only works if the sync
+    fires on the "already on the roster" reply too, not just on a fresh add."""
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    ctx = _ctx()
+    participant = MagicMock()
+    participant.role_id = "555"
+    participant.team_name = "Alpha"
+    player = _player(4242)
+
+    with _roster_command_open(participant), \
+         patch("cogs.tournament_commands.add_teammate",
+               AsyncMock(return_value=(MagicMock(), False))), \
+         patch("cogs.tournament_commands.sync_member", AsyncMock()) as sync:
+        await TournamentCog.add_teammate_cmd.callback(cog, ctx, player=player, team=None)
+
+    sync.assert_awaited_once()
+    assert sync.await_args.kwargs["add"] is True
+    reply = ctx.followup.send.call_args.args[0]
+    assert "already on" in reply
+
+
+@pytest.mark.asyncio
+async def test_add_teammate_warns_when_the_role_could_not_be_given():
+    """sync_member returning False means Discord refused (most commonly:
+    the bot's own role sits below the team role). The reply must say so
+    instead of a bare '✅ ... roster' that claims a role landed when it
+    didn't -- Blocking 5 from round 1 review."""
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    ctx = _ctx()
+    participant = MagicMock()
+    participant.role_id = "555"
+    participant.team_name = "Alpha"
+    player = _player(4242)
+
+    with _roster_command_open(participant), \
+         patch("cogs.tournament_commands.add_teammate",
+               AsyncMock(return_value=(MagicMock(), True))), \
+         patch("cogs.tournament_commands.sync_member", AsyncMock(return_value=False)):
+        await TournamentCog.add_teammate_cmd.callback(cog, ctx, player=player, team=None)
+
+    reply = ctx.followup.send.call_args.args[0]
+    assert "✅" in reply           # the roster change itself did succeed
+    assert "⚠️" in reply and "Alpha" in reply
 
 
 @pytest.mark.asyncio
@@ -763,7 +823,7 @@ async def test_removing_a_teammate_takes_the_team_role_away():
     participant = MagicMock()
     participant.role_id = "555"
     participant.team_name = "Alpha"
-    player = _player()
+    player = _player(4242)
 
     with _roster_command_open(participant), \
          patch("cogs.tournament_commands.remove_teammate", AsyncMock(return_value=True)), \
@@ -771,7 +831,36 @@ async def test_removing_a_teammate_takes_the_team_role_away():
         await TournamentCog.remove_teammate_cmd.callback(cog, ctx, player=player, team=None)
 
     sync.assert_awaited_once()
+    assert sync.await_args.args[0] is ctx.guild
+    # role_id, not the team name or participant id -- passing either of
+    # those makes sync_member do int("Alpha") -> ValueError, after the
+    # roster row has already been deleted.
+    assert sync.await_args.args[1] == "555"
+    assert sync.await_args.args[2] == str(player.id)
     assert sync.await_args.kwargs["add"] is False
+    reply = ctx.followup.send.call_args.args[0]
+    assert "✅" in reply and "Alpha" in reply
+
+
+@pytest.mark.asyncio
+async def test_remove_teammate_warns_when_the_role_could_not_be_taken():
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    ctx = _ctx()
+    participant = MagicMock()
+    participant.role_id = "555"
+    participant.team_name = "Alpha"
+    player = _player(4242)
+
+    with _roster_command_open(participant), \
+         patch("cogs.tournament_commands.remove_teammate", AsyncMock(return_value=True)), \
+         patch("cogs.tournament_commands.sync_member", AsyncMock(return_value=False)):
+        await TournamentCog.remove_teammate_cmd.callback(cog, ctx, player=player, team=None)
+
+    reply = ctx.followup.send.call_args.args[0]
+    assert "✅" in reply
+    assert "⚠️" in reply and "Alpha" in reply
 
 
 @pytest.mark.asyncio
@@ -794,3 +883,5 @@ async def test_removing_someone_who_was_not_on_the_roster_leaves_roles_alone():
             cog, ctx, player=_player(), team=None)
 
     sync.assert_not_awaited()
+    reply = ctx.followup.send.call_args.args[0]
+    assert "isn't on" in reply

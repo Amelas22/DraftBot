@@ -719,19 +719,28 @@ class TournamentCog(commands.Cog):
         # Outside the session: the board reads the roster back in its own session,
         # so refreshing before this one commits would render the pre-change state.
         await self._refresh_board(t_id)
+        # Also outside the session, and load-bearing, not just tidy: a Discord
+        # round-trip here would otherwise hold this write session's SQLite
+        # connection open for its whole duration. Safe only because
+        # AsyncSessionLocal sets expire_on_commit=False, so the role_id
+        # captured above survives past the commit.
         # Unconditional: add_roles is idempotent, so re-syncing a player who was
         # already on the roster repairs a role they somehow lack.
-        await sync_member(ctx.guild, role_id, str(player.id), add=True)
+        synced = await sync_member(ctx.guild, role_id, str(player.id), add=True)
+        warning = ("" if synced else
+                   f"\n⚠️ Couldn't give them the **{p_name}** role — check that "
+                   f"the bot's own role sits above it.")
         shared = f"\nAlso on {also_on} in this tournament." if also_on else ""
         if created:
             logger.info(f"{player.id} added to team '{p_name}' in tournament {t_id} "
                         f"by {ctx.author.id}")
             await ctx.followup.send(
-                f"✅ {player.mention} is on **{p_name}**'s roster for **{t_name}**.{shared}",
+                f"✅ {player.mention} is on **{p_name}**'s roster for **{t_name}**."
+                f"{shared}{warning}",
                 ephemeral=True)
         else:
             await ctx.followup.send(
-                f"{player.mention} is already on **{p_name}**'s roster.{shared}",
+                f"{player.mention} is already on **{p_name}**'s roster.{shared}{warning}",
                 ephemeral=True)
 
     @tournament.command(name="remove_teammate",
@@ -765,22 +774,34 @@ class TournamentCog(commands.Cog):
             p_name = participant.team_name
             role_id = participant.role_id
 
-        # Gated on `removed`: the captain is deliberately never in the roster
-        # table, so remove_teammate returns False for them. Syncing
-        # unconditionally would strip the captain's team role, dropping them
-        # out of every match room for the rest of the event.
+        # Gated on `removed`, matching the reply below: the captain is
+        # deliberately never in the roster table, so remove_teammate returns
+        # False for them. Syncing unconditionally would strip the captain's
+        # team role, dropping them out of every match room for the rest of
+        # the event. Bundling _refresh_board here too keeps both roster
+        # commands syncing the role in the same position relative to the
+        # board refresh.
+        synced = True
         if removed:
-            await sync_member(ctx.guild, role_id, str(player.id), add=False)
+            await self._refresh_board(t_id)
+            # Outside the session and load-bearing, not just tidy: a Discord
+            # round-trip here would otherwise hold this write session's
+            # SQLite connection open for its whole duration. Safe only
+            # because AsyncSessionLocal sets expire_on_commit=False, so the
+            # role_id captured above survives past the commit.
+            synced = await sync_member(ctx.guild, role_id, str(player.id), add=False)
 
         if not removed:
             await ctx.followup.send(
                 f"{player.mention} isn't on **{p_name}**'s roster.", ephemeral=True)
             return
-        await self._refresh_board(t_id)
         logger.info(f"{player.id} removed from team '{p_name}' in tournament {t_id} "
                     f"by {ctx.author.id}")
+        warning = ("" if synced else
+                   f"\n⚠️ Couldn't remove the **{p_name}** role — check that "
+                   f"the bot's own role sits above it.")
         await ctx.followup.send(
-            f"✅ {player.mention} is off **{p_name}**'s roster.", ephemeral=True)
+            f"✅ {player.mention} is off **{p_name}**'s roster.{warning}", ephemeral=True)
 
     @tournament.command(name="add_team", description="Admin: register a team on a captain's behalf")
     @has_bot_manager_role()

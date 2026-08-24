@@ -164,14 +164,35 @@ async def test_create_team_roles_succeeds_when_one_roster_member_left_the_guild(
 
 
 @pytest.mark.asyncio
+async def test_create_team_roles_tolerates_one_member_discord_refuses():
+    """_assign now returns a bool that the roster commands act on, but the
+    bulk create path must keep discarding it -- a start still must not fail
+    because Discord (not just guild membership) refused one of 42 teams."""
+    guild = _guild(present_user_ids=["10", "20"])
+    guild.members[20].add_roles = AsyncMock(
+        side_effect=discord.Forbidden(MagicMock(status=403), "Missing Permissions"))
+    parts = [_participant(1, "Alpha", 10, roster=[20])]
+
+    out = await create_team_roles(guild, parts)
+
+    role = guild.created[0]
+    assert out == {1: str(role.id)}       # the start itself still succeeded
+    guild.members[10].add_roles.assert_awaited_once_with(role)
+    guild.members[20].add_roles.assert_awaited_once_with(role)  # attempted, just refused
+
+
+@pytest.mark.asyncio
 async def test_sync_member_add_gives_the_role():
     guild = _guild(present_user_ids=["12345"])
     role = MagicMock()
     guild.get_role = MagicMock(return_value=role)
 
-    await sync_member(guild, "1000", "12345", add=True)
+    result = await sync_member(guild, "1000", "12345", add=True)
 
     guild.members[12345].add_roles.assert_awaited_once_with(role)
+    # The roster commands in cogs/tournament_commands.py warn the operator
+    # when this comes back False; a success must not trip that warning.
+    assert result is True
 
 
 @pytest.mark.asyncio
@@ -182,17 +203,84 @@ async def test_sync_member_remove_takes_the_role():
     role = MagicMock()
     guild.get_role = MagicMock(return_value=role)
 
-    await sync_member(guild, "1000", "12345", add=False)
+    result = await sync_member(guild, "1000", "12345", add=False)
 
     guild.members[12345].remove_roles.assert_awaited_once_with(role)
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_sync_member_add_returns_false_when_discord_refuses():
+    """Round 1 review, Blocking 5: a Forbidden here used to be swallowed with
+    nothing but a log warning, so /tournament add_teammate replied with a
+    green tick while the player got no role at all. The bool return is what
+    lets the command tell the difference and warn instead."""
+    guild = _guild(present_user_ids=["12345"])
+    role = MagicMock()
+    guild.get_role = MagicMock(return_value=role)
+    guild.members[12345].add_roles = AsyncMock(
+        side_effect=discord.Forbidden(MagicMock(status=403), "Missing Permissions"))
+
+    result = await sync_member(guild, "1000", "12345", add=True)
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_sync_member_add_returns_false_and_does_not_raise_on_a_5xx():
+    """Non-blocking 1, round 1 review: the add branch used to catch only
+    NotFound/Forbidden, so an unrelated 5xx propagated out of the command
+    after the roster row had already committed. Widened to HTTPException,
+    matching the remove branch, so a server error behaves like any other
+    sync failure instead of an unhandled exception."""
+    guild = _guild(present_user_ids=["12345"])
+    role = MagicMock()
+    guild.get_role = MagicMock(return_value=role)
+    guild.members[12345].add_roles = AsyncMock(
+        side_effect=discord.HTTPException(MagicMock(status=503), "Service Unavailable"))
+
+    result = await sync_member(guild, "1000", "12345", add=True)  # must not raise
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_sync_member_remove_returns_false_when_discord_refuses():
+    guild = _guild(present_user_ids=["12345"])
+    role = MagicMock()
+    guild.get_role = MagicMock(return_value=role)
+    guild.members[12345].remove_roles = AsyncMock(
+        side_effect=discord.HTTPException(MagicMock(status=503), "Service Unavailable"))
+
+    result = await sync_member(guild, "1000", "12345", add=False)  # must not raise
+
+    assert result is False
 
 
 @pytest.mark.asyncio
 async def test_sync_member_skips_a_member_who_left_the_guild():
-    """One absent player must not fail an operation for everyone else."""
+    """One absent player must not fail an operation for everyone else. On the
+    add side this is the failure the caller should warn about (the player did
+    not get the role); the return value says so."""
     guild = _guild()
     guild.get_member.return_value = None
-    await sync_member(guild, "1000", "12345", add=True)   # must not raise
+
+    result = await sync_member(guild, "1000", "12345", add=True)   # must not raise
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_sync_member_remove_treats_a_member_who_already_left_as_synced():
+    """The opposite of the add case: someone no longer in the guild trivially
+    does not have the role any more, so there is nothing to warn the operator
+    about."""
+    guild = _guild()
+    guild.get_member.return_value = None
+
+    result = await sync_member(guild, "1000", "12345", add=False)  # must not raise
+
+    assert result is True
 
 
 @pytest.mark.asyncio

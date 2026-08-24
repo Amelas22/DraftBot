@@ -24,20 +24,31 @@ def team_role_name(team_name: str) -> str:
     return team_name[:DISCORD_ROLE_NAME_LIMIT]
 
 
-async def _assign(guild: discord.Guild, role: discord.Role, user_id: str) -> None:
+async def _assign(guild: discord.Guild, role: discord.Role, user_id: str) -> bool:
     """Give `role` to one member, tolerating a member who has left.
 
-    NotFound/Forbidden here is one player, not the operation: a 42-team start
-    must not fail because one person left the guild last week.
+    Returns True if the role was applied, False if it could not be (member
+    not in the guild, or Discord refused). create_team_roles ignores this --
+    one player is not the operation there: a 42-team start must not fail
+    because one person left the guild last week. The roster commands in
+    cogs/tournament_commands.py do look at it: for a single-target command
+    the one player IS the operation, so a swallowed failure there would
+    report success on a roster change that silently did nothing.
+
+    HTTPException (not just its NotFound/Forbidden subclasses) is caught so a
+    5xx behaves like any other failure -- returned, not propagated into the
+    caller after a database write has already committed.
     """
     member = guild.get_member(int(user_id))
     if member is None:
         logger.info(f"[team-roles] {user_id} is not in the guild; no role assigned")
-        return
+        return False
     try:
         await member.add_roles(role)
-    except (discord.NotFound, discord.Forbidden) as e:
+        return True
+    except discord.HTTPException as e:
         logger.warning(f"[team-roles] could not give {role} to {user_id}: {e}")
+        return False
 
 
 async def create_team_roles(guild: discord.Guild, participants: Iterable[Any]) -> dict[int, str]:
@@ -74,29 +85,41 @@ async def create_team_roles(guild: discord.Guild, participants: Iterable[Any]) -
     return role_ids
 
 
-async def sync_member(guild: discord.Guild, role_id: str | None, user_id: str, *, add: bool) -> None:
-    """Add or remove one member's team role. A no-op when the tournament has no
-    roles (role_id is None) or the role is gone."""
+async def sync_member(guild: discord.Guild, role_id: str | None, user_id: str, *, add: bool) -> bool:
+    """Add or remove one member's team role.
+
+    Returns True when the target state was reached, including the two cases
+    where there was nothing to do: the tournament has no roles (role_id is
+    None -- not started, or predates this feature) or the role itself is
+    gone. Returns False only when a role change was actually needed and
+    Discord would not make it, so the roster commands can warn the operator
+    instead of reporting a silent success.
+
+    On the remove side, a member who has already left the guild returns True
+    rather than False: they trivially do not have the role any more, so the
+    target state is already reached -- unlike the add side, where a member
+    not in the guild is exactly the failure to warn about.
+    """
     if not role_id:
-        return
+        return True
     role = guild.get_role(int(role_id))
     if role is None:
         logger.info(f"[team-roles] role {role_id} is gone; nothing to sync")
-        return
+        return True
     if add:
-        await _assign(guild, role, user_id)
-        return
+        return await _assign(guild, role, user_id)
     member = guild.get_member(int(user_id))
     if member is None:
-        return
+        return True
     try:
         await member.remove_roles(role)
+        return True
     except discord.HTTPException as e:
-        # Widened to match services/crown_roles.py's remove branch (:130-145):
-        # unlike create_team_roles, there is no all-or-nothing unwind here to
-        # justify letting an unexpected 5xx propagate into the caller (e.g.
-        # remove_teammate).
+        # Matches _assign's now-widened catch: unlike create_team_roles,
+        # there is no all-or-nothing unwind here to justify letting an
+        # unexpected 5xx propagate into the caller (e.g. remove_teammate).
         logger.warning(f"[team-roles] could not take {role} from {user_id}: {e}")
+        return False
 
 
 async def delete_team_roles(guild: discord.Guild, role_ids: Iterable[str | None]) -> int:
