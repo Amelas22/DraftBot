@@ -182,6 +182,43 @@ async def test_create_team_roles_tolerates_one_member_discord_refuses():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("add", [True, False])
+async def test_sync_member_is_a_true_no_op_when_the_tournament_has_no_role(add):
+    """role_id is None for every tournament that predates this feature, and
+    for every tournament before /tournament start runs -- this is the most
+    common path through the function, not an edge case. A mutation that
+    flipped this branch's return to False slipped past all 56 existing
+    tests: it made an ordinary /tournament add_teammate on a not-yet-started
+    tournament reply with a false "couldn't give them the role" warning
+    about a role that was never supposed to exist yet. True here must also
+    mean no Discord call was made at all -- there is nothing to sync."""
+    guild = _guild()
+
+    result = await sync_member(guild, None, "12345", add=add)
+
+    assert result is True
+    guild.get_role.assert_not_called()
+    guild.get_member.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("add", [True, False])
+async def test_sync_member_is_a_true_no_op_when_the_role_has_been_deleted(add):
+    """The sibling case to role_id=None: role_id is still set, but the role
+    itself is gone (deleted by hand). Same reasoning applies -- the target
+    state ("no role to hold") is already reached, so this must not be
+    reported to the roster commands as a failure to warn about."""
+    guild = _guild()
+    guild.get_role = MagicMock(return_value=None)
+
+    result = await sync_member(guild, "1000", "12345", add=add)
+
+    assert result is True
+    guild.get_role.assert_called_once_with(1000)
+    guild.get_member.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_sync_member_add_gives_the_role():
     guild = _guild(present_user_ids=["12345"])
     role = MagicMock()

@@ -789,6 +789,37 @@ async def test_re_adding_an_existing_teammate_still_repairs_their_role():
 
 
 @pytest.mark.asyncio
+async def test_add_teammate_on_a_not_yet_started_tournament_gets_no_warning():
+    """role_id is None for every tournament before /tournament start runs (and
+    every tournament that predates this feature) -- the ordinary path, not an
+    edge case. sync_member is NOT mocked here: the real
+    services.tournament_roles.sync_member must run and hit its
+    `if not role_id: return True` branch, or this test would just be
+    re-asserting the mock's own return value instead of the production
+    no-op logic. Regression for a mutation that flipped that branch to
+    False and slipped past every other test: it made this, the most-used
+    path through the command, reply with a false "couldn't give them the
+    role" warning about a role that isn't supposed to exist yet."""
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    ctx = _ctx()
+    participant = MagicMock()
+    participant.role_id = None
+    participant.team_name = "Alpha"
+    player = _player(4242)
+
+    with _roster_command_open(participant), \
+         patch("cogs.tournament_commands.add_teammate",
+               AsyncMock(return_value=(MagicMock(), True))):
+        await TournamentCog.add_teammate_cmd.callback(cog, ctx, player=player, team=None)
+
+    reply = ctx.followup.send.call_args.args[0]
+    assert "✅" in reply and "Alpha" in reply
+    assert "⚠️" not in reply
+
+
+@pytest.mark.asyncio
 async def test_add_teammate_warns_when_the_role_could_not_be_given():
     """sync_member returning False means Discord refused (most commonly:
     the bot's own role sits below the team role). The reply must say so
