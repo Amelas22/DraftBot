@@ -15,7 +15,9 @@ import discord
 from loguru import logger
 
 from helpers.substitutes import TEAM_A_CHANNEL_PREFIX, TEAM_B_CHANNEL_PREFIX
-from helpers.utils import DISCORD_THREAD_NAME_LIMIT, THREAD_ARCHIVE_MINUTES, mention_all
+from helpers.utils import (
+    DISCORD_THREAD_NAME_LIMIT, THREAD_ARCHIVE_MINUTES, mention_all, send_then_mention,
+)
 
 ARCHIVED_THREAD_LOOKUP_LIMIT = 100
 
@@ -105,21 +107,27 @@ async def _existing_thread_names(channel: discord.TextChannel) -> set[str]:
 
 
 def _starter(name: str, opponent_team_label: str, own_ids: list[str] | None = None) -> str:
-    """The thread's opening message, which also tags the team that owns this
-    channel.
+    """The thread's opening message, tagging the team that owns this channel.
 
     The mention is not decoration: Discord adds a mentioned member to the
-    thread, and a thread you belong to is the one that appears in your
-    sidebar rather than staying buried behind the channel. Carried inside the
-    starter that was already being posted, so tagging costs no extra message.
+    thread, and a thread you belong to is the one that appears in your sidebar
+    rather than staying buried behind the channel.
+
+    It is EDITED in rather than sent, so it never notifies -- see
+    send_then_mention, and _starter_plain for the form that is posted first.
 
     Tags the OWN team only. The player being scouted is on the other team and
     cannot see this channel; mentioning them would be both useless and rude.
     """
     mentions = mention_all(own_ids)
     lead = f"{mentions} " if mentions else ""
+    return f"{lead}{_starter_plain(name, opponent_team_label)}"
+
+
+def _starter_plain(name: str, opponent_team_label: str) -> str:
+    """The starter as first POSTED: identical, minus the mention."""
     return (
-        f"{lead}🔍 Scouting thread for **{name}** ({opponent_team_label}). "
+        f"🔍 Scouting thread for **{name}** ({opponent_team_label}). "
         "Share reads, matchup notes, and what you saw them pick."
     )
 
@@ -172,13 +180,13 @@ async def spawn_opponent_threads(
         existing.add(name)
         created += 1
         try:
-            # silent: one scouting thread per OPPONENT means a 4v4 draft would
-            # otherwise ping every player four times at room creation. A silent
-            # mention still adds them to the thread -- verified against Discord,
-            # with a loud send as the control -- so the sidebar entry survives
-            # while the notification storm does not. The pools thread stays
-            # loud: that is one message per draft and worth a ping.
-            await thread.send(_starter(name, label, own_ids), silent=True)
+            # Posted plain, then edited to carry the mention. One scouting thread
+            # per OPPONENT means a 4v4 draft would otherwise notify every player
+            # four times at room creation. silent=True was the previous attempt
+            # at this and is not enough: it drops the push but still leaves the
+            # mention badge.
+            await send_then_mention(
+                thread, _starter_plain(name, label), _starter(name, label, own_ids))
         except Exception as e:
             logger.warning(f"[opponent-threads] created '{name}' but its starter failed: {e}")
     return created

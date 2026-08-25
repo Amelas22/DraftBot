@@ -247,6 +247,14 @@ class _FakeThread:
             # delete, so a double-delete should surface here too.
             self._messages.remove(msg)
 
+        async def _edit(content=None, **_kwargs):
+            # The starter is posted plain and edited to carry the mention, so a
+            # double that could not be edited would hide the mention from every
+            # test -- and send_then_mention logs an edit failure rather than
+            # raising, so nothing else would notice either.
+            msg.content = content
+
+        msg.edit = AsyncMock(side_effect=_edit)
         msg.delete = AsyncMock(side_effect=_delete)
         self._messages.append(msg)
         return msg
@@ -735,9 +743,13 @@ async def test_post_pools_for_team_tags_the_whole_team_first_and_only_on_creatio
 
     assert first_ok is True
     tag = thread.send.await_args_list[0]
-    content = tag.kwargs.get("content") or tag.args[0]
-    assert "<@disc_a>" in content and "<@disc_b>" in content   # ...but is still tagged
-    assert "ABC" in content
+    posted = tag.kwargs.get("content") or tag.args[0]
+    # The POSTED message carries no mention: a mention that arrives with a new
+    # message notifies everyone named, while the same mention edited in does not.
+    assert "<@" not in posted, f"the created message would notify: {posted!r}"
+    tagged = thread.posted_contents()[0]
+    assert "<@disc_a>" in tagged and "<@disc_b>" in tagged      # ...but is still tagged
+    assert "ABC" in tagged
     assert not tag.kwargs.get("files")             # the tag carries no pool of its own
     assert _attachment_names(thread) == ["Alice.txt"]
 
