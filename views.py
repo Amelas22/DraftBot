@@ -1625,7 +1625,21 @@ class UserRemovalSelect(Select):
             if session.session_type != "premade":
                 await update_draft_message(bot, session_id=session.session_id)
             else:
-                await PersistentView.update_team_view(interaction)
+                # update_team_view is an INSTANCE method. Calling it off the class
+                # bound `interaction` to `self` and dropped the real argument, so
+                # this raised TypeError before the confirmation and the ready-check
+                # sync below could run -- the removal committed to the database
+                # while the message kept showing the player. Rebuild the view the
+                # same way from_metadata does; it needs the bot and the session id.
+                view = PersistentView(
+                    bot=bot,
+                    draft_session_id=session.session_id,
+                    session_type=session.session_type,
+                    team_a_name=session.team_a_name,
+                    team_b_name=session.team_b_name,
+                    session_stage=session.session_stage,
+                )
+                await view.update_team_view(interaction)
 
             await interaction.followup.send(f"Removed {removed_user_name} from the draft.")
             await ReadyCheckSession.sync_removed_player(self.session_id, user_id_to_remove, session, interaction)
