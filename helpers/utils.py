@@ -65,7 +65,17 @@ async def send_then_mention(
     message = await destination.send(plain)
     if mentioned and mentioned != plain:
         try:
-            await message.edit(content=mentioned)
+            # Explicit, though the bot sets no global policy today: py-cord falls
+            # back to Client.allowed_mentions when this is omitted, so a global
+            # policy added later would silently stop the mention being PARSED --
+            # and an unparsed mention adds nobody to the thread, which is the only
+            # reason this function exists. Notification is not a risk to weigh
+            # here: an edit does not notify whatever is allowed.
+            await message.edit(
+                content=mentioned,
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=False, users=True, roles=True),
+            )
         except Exception as e:
             logger.warning(f"could not edit mentions into message {message.id}: {e}")
     return message
