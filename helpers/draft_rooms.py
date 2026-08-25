@@ -14,10 +14,25 @@ accumulation of channel_ids, the commit, the threads.
 Nothing in this module changes behaviour relative to the code it came from. It
 is a move, so that the changes that follow it are small.
 """
+import asyncio
+from collections import defaultdict
 from typing import Any, Iterable
 
 import discord
 from loguru import logger
+
+# Discord caps a category at 50 channels. The refusal comes back as the generic
+# "Invalid Form Body" (50035); only the nested parent_id error identifies the cap,
+# which is why this keys on the code AND the field rather than the message text.
+CATEGORY_FULL_CODE = 50035
+CATEGORY_CHANNEL_LIMIT = 50
+
+# Serialises overflow-category creation, PER GUILD. ~20 drafts can hit a full
+# category in the same second; without this each would create its own
+# "Draft Channels 2" instead of the first creating it and the rest filling it.
+# Keyed by guild because it is held across an awaited category create: one process
+# serves several guilds, and a rate-limited create in one must not block another.
+_OVERFLOW_LOCKS: "defaultdict[int, asyncio.Lock]" = defaultdict(asyncio.Lock)
 
 # The shared draft chat is addressed by this team name. It is not a team: it has
 # no roster of its own, it is the one channel every player can see, and several
@@ -90,19 +105,86 @@ def team_overwrites(
     return overwrites
 
 
+def _category_is_full(error: "discord.HTTPException") -> bool:
+    return error.code == CATEGORY_FULL_CODE and "parent_id" in (error.text or "")
+
+
+async def overflow_category(guild: Any, base: Any) -> Any:
+    """A sibling of `base` with room in it -- reused if one exists, else created.
+
+    Named "<base> 2", "<base> 3", ... so the set is self-describing in the channel
+    list and recognisable on the next run. Empty ones are deliberately NOT deleted:
+    they are reused, so the number of them settles at whatever peak concurrency
+    needs rather than growing, and deleting one that a draft is about to fill would
+    just churn.
+
+    Permissions are copied from `base`, so a draft category with restricted
+    visibility cannot spawn an open one.
+    """
+    async with _OVERFLOW_LOCKS[guild.id]:
+        numbered: "dict[int, Any]" = {}
+        prefix = f"{base.name} "
+        for category in guild.categories:
+            suffix = category.name[len(prefix):] if category.name.startswith(prefix) else ""
+            if suffix.isdigit():
+                numbered[int(suffix)] = category
+        for n in sorted(numbered):
+            if len(numbered[n].channels) < CATEGORY_CHANNEL_LIMIT:
+                return numbered[n]
+        return await guild.create_category(
+            f"{base.name} {max(numbered, default=1) + 1}",
+            overwrites=dict(base.overwrites),
+            position=base.position + 1,
+        )
+
+
 async def ensure_channel(guild: Any, kind: str, name: str,
                          overwrites: "dict[Any, discord.PermissionOverwrite]",
                          category: Any) -> Any:
     """The draft's `kind` ("text" or "voice") channel called `name`.
 
-    One room, made once. The single place a draft channel comes into existence,
-    so that everything later changes about HOW -- surviving a full category,
-    recognising one an earlier run already made -- has exactly one home.
+    One room, made once, moving to a fresh category when the one it was aimed at
+    is full. A guild allows 500 channels but a category only 50, so a guild
+    running many drafts at once fills the draft category with room to spare
+    elsewhere. The order is: the category asked for, then a numbered sibling of
+    it, then no category. Uncategorised is untidy; a draft with no channel cannot
+    be played.
+
+    Only the full-category refusal moves on. Anything else -- no permission, a
+    5xx -- is raised, because a different category would not fix it.
     """
     create = guild.create_text_channel if kind == "text" else guild.create_voice_channel
-    channel = await create(name=name, overwrites=overwrites, category=category)
-    logger.info(
-        f"✅ Created {kind} channel '{name}' (ID: {channel.id}) in category "
-        f"'{getattr(category, 'name', None) or 'None'}'"
-    )
+    attempted = []
+    while True:
+        try:
+            channel = await create(name=name, overwrites=overwrites, category=category)
+            break
+        except discord.HTTPException as e:
+            if category is None or not _category_is_full(e):
+                raise
+            attempted.append(category)
+            try:
+                # attempted[0], not the last one: numbering always hangs off the
+                # category actually configured, so a full "Draft Channels 2" leads
+                # to "Draft Channels 3" rather than "Draft Channels 2 2".
+                nxt = await overflow_category(guild, attempted[0])
+            except discord.HTTPException as create_error:
+                logger.warning(
+                    f"Could not create an overflow category for "
+                    f"'{attempted[-1].name}': {create_error}")
+                nxt = None
+            # A category the cache still reported as roomy can be full in reality;
+            # not retrying one already refused is what guarantees this terminates.
+            category = nxt if nxt is not None and nxt not in attempted else None
+            logger.warning(
+                f"Category '{attempted[-1].name}' is full; creating {kind} channel "
+                + (f"'{name}' in '{category.name}' instead." if category else
+                   f"'{name}' outside any category. Permissions are unchanged, but "
+                   f"it will not be grouped.")
+            )
+    # Read off the CHANNEL, not the category asked for: with overflow the two
+    # differ exactly when it matters most, and a log that reports the intent
+    # rather than the result is how a placement bug hides.
+    landed = getattr(getattr(channel, "category", None), "name", None) or "None"
+    logger.info(f"✅ Created {kind} channel '{name}' (ID: {channel.id}) in category '{landed}'")
     return channel
