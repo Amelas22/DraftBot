@@ -41,6 +41,13 @@ class DraftSession(Base):
     team_a_name = Column(String(128))
     team_b_name = Column(String(128))
     are_rooms_processing = Column(Boolean, default=False)
+    # Set only once every room for this draft exists and the pairings work has been
+    # committed -- i.e. written AFTER the work, not before it. The old completeness
+    # check read draft_chat_channel, which create_team_channel commits in its own
+    # session while creating the FIRST of three channels: any failure after that
+    # left a flag saying "done" over a half-created draft, and every retry believed
+    # it. This column is the marker that a run actually finished.
+    rooms_created_at = Column(DateTime, nullable=True)
     premade_match_id = Column(String(128))
     tournament_match_id = Column(Integer, nullable=True)  # links result auto-recording to a TournamentMatch
     tracked_draft = Column(Boolean, default=False)

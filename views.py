@@ -1372,9 +1372,20 @@ class PersistentView(discord.ui.View):
             f"Channel '{channel_name}' will have {len(team_members)} team members: "
             + ", ".join(f"{m.display_name} ({m.id})" for m in team_members))
 
+        # Carry forward what previous runs recorded. self.channel_ids starts empty
+        # on every run and each call persists the WHOLE list, so without this the
+        # first channel of a retry would truncate the record to itself -- and the
+        # rooms an earlier run made would stop being recognised as this draft's a
+        # moment before we look for them.
+        for stored in (session.channel_ids or []):
+            if stored not in self.channel_ids:
+                self.channel_ids.append(stored)
+        owned_ids = {str(cid) for cid in self.channel_ids}
+
         channel = await ensure_channel(
-            guild, "text", channel_name, overwrites, draft_category)
-        self.channel_ids.append(channel.id)
+            guild, "text", channel_name, overwrites, draft_category, owned_ids)
+        if channel.id not in self.channel_ids:
+            self.channel_ids.append(channel.id)
 
         # "Draft" is excluded because team voice is for one team talking privately;
         # the shared chat has no team. That is the whole precondition: random,
@@ -1392,8 +1403,9 @@ class PersistentView(discord.ui.View):
             try:
                 voice_channel = await ensure_channel(
                     guild, "voice", team_voice_name(team_name, session.friendly_id),
-                    overwrites, category)
-                self.channel_ids.append(voice_channel.id)
+                    overwrites, category, owned_ids)
+                if voice_channel.id not in self.channel_ids:
+                    self.channel_ids.append(voice_channel.id)
             except Exception as e:
                 logger.warning(
                     f"Could not create a voice channel for '{team_name}': {e}. "
@@ -1444,13 +1456,26 @@ class PersistentView(discord.ui.View):
                             await interaction.followup.send("Draft session not found.", ephemeral=True)
                         return False
 
-                    if session.draft_chat_channel:
+                    # rooms_created_at, not draft_chat_channel. The latter is
+                    # committed by create_team_channel while creating the FIRST of
+                    # three channels, so it says "done" from the moment the run
+                    # starts producing anything -- and a failure after it left the
+                    # draft with a chat it could not be played in, permanently,
+                    # because every retry read that flag and stopped.
+                    if session.rooms_created_at:
                         logger.info("Rooms already exist for session_id={}, channel={}", session_id, session.draft_chat_channel)
                         if interaction:
                             await interaction.followup.send(
                                 "Rooms and pairings have already been created for this draft.", ephemeral=True)
                         return False
 
+                    # A previous run already got as far as creating the shared
+                    # chat, which happens AFTER the once-only work below. Making
+                    # retries possible also made that work re-runnable, and
+                    # update_player_stats_for_draft commits in its OWN session --
+                    # so a re-run would add a second drafts_participated to every
+                    # player. Nothing about this draft is new on a resume.
+                    resuming = session.draft_chat_channel is not None
                     session.are_rooms_processing = True
                     session.session_stage = 'pairings'
                     logger.debug("Set session_stage to 'pairings' and are_rooms_processing=True")
@@ -1465,7 +1490,7 @@ class PersistentView(discord.ui.View):
                         session.swiss_matches = state_to_save
                         logger.debug("Swiss pairings calculated: match_counter={}", match_counter)
 
-                    if session.session_type == "staked":
+                    if session.session_type == "staked" and not resuming:
                         logger.info("Calculating stakes for staked draft in create_rooms_pairings")
                         all_players = session.team_a + session.team_b
                         cap_info = await get_players_bet_capping_preferences(all_players, guild_id=str(guild.id))
@@ -1474,7 +1499,8 @@ class PersistentView(discord.ui.View):
                     # Update player stats
                     if session.session_type in ("random", "staked"):
                         logger.debug("Updating player stats for session_id={}", session_id)
-                        await update_player_stats_for_draft(session.session_id, guild)
+                        if not resuming:
+                            await update_player_stats_for_draft(session.session_id, guild)
 
                     if session.session_type in ("random", "staked", "premade"):
                         logger.debug("Updating last draft timestamp for session_id={}", session_id)
@@ -1593,6 +1619,10 @@ class PersistentView(discord.ui.View):
                         except discord.HTTPException as e:
                             logger.error("Failed to delete message {}: {}", original_message_id, e)
 
+                    # The run got here, so every room exists. Stamped inside the
+                    # transaction that is about to commit, so a failure anywhere
+                    # above leaves it NULL and the next attempt finishes the job.
+                    session.rooms_created_at = datetime.now()
                     session.deletion_time = datetime.now() + timedelta(days=7)
                     logger.debug("Scheduled deletion time {}", session.deletion_time)
                     await db_session.commit()

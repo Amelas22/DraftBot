@@ -196,9 +196,32 @@ async def overflow_category(guild: Any, base: Any, needed: int = 1) -> Any:
         )
 
 
+def existing_channel(channels: Iterable[Any], name: str, owned_ids: "set[str]") -> Any:
+    """A channel THIS draft already has, matched on its deterministic name.
+
+    Room creation must be safe to re-enter: a run that died partway leaves real
+    channels behind, and a retry that made second copies would be as bad as one
+    that made none.
+
+    The name alone is not enough to claim one. friendly_id is drawn at random and
+    is explicitly NOT unique -- DraftSession.get_by_friendly_id documents that
+    duplicates within a guild happen -- so two live drafts can want the same
+    channel name, and matching on name alone would hand one team the other team's
+    private channel. `owned_ids` is the session's own recorded channel_ids, which
+    can only contain channels a previous run of THIS draft created and committed.
+
+    Compared case-insensitively because Discord lowercases TEXT channel names but
+    leaves voice channel names as sent -- so an exact match would find the voice
+    channel and miss the text one.
+    """
+    target = name.lower()
+    return next((c for c in channels
+                 if c.name.lower() == target and str(c.id) in owned_ids), None)
+
+
 async def ensure_channel(guild: Any, kind: str, name: str,
                          overwrites: "dict[Any, discord.PermissionOverwrite]",
-                         category: Any) -> Any:
+                         category: Any, owned_ids: "set[str] | None" = None) -> Any:
     """The draft's `kind` ("text" or "voice") channel called `name`.
 
     One room, made once, moving to a fresh category when the one it was aimed at
@@ -211,6 +234,16 @@ async def ensure_channel(guild: Any, kind: str, name: str,
     Only the full-category refusal moves on. Anything else -- no permission, a
     5xx -- is raised, because a different category would not fix it.
     """
+    # Only when this draft has recorded channels at all: with nothing owned there
+    # is by definition nothing to reuse, and guild.text_channels rebuilds and
+    # sorts a list over every channel in the guild. A first run pays nothing.
+    pool = (guild.text_channels if kind == "text" else guild.voice_channels) if owned_ids else []
+    already = existing_channel(pool, name, owned_ids or set())
+    if already is not None:
+        logger.info(f"Reusing existing {kind} channel '{already.name}' (ID: {already.id}) "
+                    f"-- a previous run created it")
+        return already
+
     create = guild.create_text_channel if kind == "text" else guild.create_voice_channel
     attempted = []
     while True:
