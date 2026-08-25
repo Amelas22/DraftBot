@@ -298,9 +298,8 @@ class Config:
         
         # Prevent changing special features in non-special guilds
         if guild_id != SPECIAL_GUILD_ID and path.startswith("features.") and (
-            path == "features.winston_draft" or 
-            path == "features.voice_channels" or 
-            path == "features.bot_detection"  
+            path == "features.winston_draft" or
+            path == "features.bot_detection"
         ):
             return False
         
@@ -411,6 +410,13 @@ def get_bots_with_draft_access(guild_id):
     integration roles are honored at grant time."""
     config = get_config(guild_id)
     return config.get("roles", {}).get("bots_with_draft_access", list(DEFAULT_BOTS_WITH_DRAFT_ACCESS))
+
+def voice_channels_enabled(guild_id):
+    """Whether team text channels get a paired voice channel. Off by default, so a
+    guild that never asked for them does not find two extra channels per draft."""
+    config = get_config(guild_id)
+    return config.get("features", {}).get("voice_channels", False)
+
 
 def get_debt_warning_threshold(guild_id):
     """Tix of week-old outstanding debt above which (strictly) a staked signup

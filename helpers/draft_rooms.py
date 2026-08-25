@@ -29,6 +29,21 @@ CATEGORY_CHANNEL_LIMIT = 50
 
 # The shared chat plus one channel per team.
 DRAFT_ROOM_COUNT = 3
+TEAM_COUNT = 2
+
+
+def rooms_needed(voice: bool, teams: int = TEAM_COUNT) -> int:
+    """How many channels one draft will put in its category.
+
+    The shared chat plus one per team, and a voice channel per team when the
+    guild has voice on. Counted rather than assumed, because reserving fewer
+    than the draft creates splits it across two categories -- which is the exact
+    thing reserving capacity exists to prevent.
+
+    Voice only counts here when it lands in the SAME category. A guild with its
+    own voice category reserves nothing extra in the draft one.
+    """
+    return 1 + teams + (teams if voice else 0)
 
 # Serialises overflow-category creation, PER GUILD. ~20 drafts can hit a full
 # category in the same second; without this each would create its own

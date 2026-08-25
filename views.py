@@ -24,7 +24,7 @@ from helpers.debt_warning import format_staked_sign_ups, DEBT_WARNING_AGE_DAYS
 from helpers.draft_footer import apply_draft_footer_from_session
 from helpers.draft_rooms import (
     DRAFT_ROOM_COUNT, draft_category as resolve_draft_category, ensure_channel,
-    resolve_category, team_channel_name, team_overwrites, team_voice_name,
+    resolve_category, rooms_needed, team_channel_name, team_overwrites, team_voice_name,
 )
 from helpers.opponent_threads import spawn_opponent_threads
 from helpers.permissions import bot_manager_button
@@ -87,6 +87,19 @@ def queue_ping_text(player_count: int, cube: str, role_mention: str) -> str:
     Names the cube so readers can tell which of the channel's queues is filling.
     """
     return f"{player_count} Players in queue to play {cube}! {role_mention}"
+
+
+def _draft_rooms_needed(guild, config) -> int:
+    """Rooms one draft will put in the DRAFT category for this guild.
+
+    Voice channels only count when they land there too -- a guild with its own
+    voice category reserves nothing extra here for them.
+    """
+    from config import voice_channels_enabled
+
+    voice_here = (voice_channels_enabled(guild.id)
+                  and resolve_category(guild, config, "voice") is None)
+    return rooms_needed(voice_here)
 
 
 class PersistentView(discord.ui.View):
@@ -1336,17 +1349,14 @@ class PersistentView(discord.ui.View):
         rather than the channel: accumulating channel_ids, committing them, and
         spawning the scouting threads that hang off the channel once it exists.
         """
-        from config import get_config, get_bots_with_draft_access, is_special_guild
+        from config import get_config, get_bots_with_draft_access, voice_channels_enabled
 
         config = get_config(guild.id)
         # Chosen by the caller when it knows the whole set of rooms this draft
         # needs, so every one of them lands together. Resolved here only for
         # callers that make one room at a time.
         draft_category = rooms_category if rooms_category is not None else (
-            await resolve_draft_category(guild, config, DRAFT_ROOM_COUNT))
-        voice_category = None
-        if is_special_guild(guild.id):
-            voice_category = resolve_category(guild, config, "voice")
+            await resolve_draft_category(guild, config, _draft_rooms_needed(guild, config)))
 
         session = await get_draft_session(self.draft_session_id)
         if not session:
@@ -1366,11 +1376,28 @@ class PersistentView(discord.ui.View):
             guild, "text", channel_name, overwrites, draft_category)
         self.channel_ids.append(channel.id)
 
-        if session.premade_match_id and team_name != "Draft" and session.session_type == "premade":
-            voice_channel = await ensure_channel(
-                guild, "voice", team_voice_name(team_name, session.friendly_id),
-                overwrites, voice_category)
-            self.channel_ids.append(voice_channel.id)
+        # "Draft" is excluded because team voice is for one team talking privately;
+        # the shared chat has no team. That is the whole precondition: random,
+        # staked and premade drafts all arrive here with identical private team
+        # channels, so gating on session_type would make the guild's flag a
+        # half-truth. Cheap condition first -- the flag reads config.
+        if team_name != "Draft" and voice_channels_enabled(guild.id):
+            # Resolved here rather than up top: guild.categories rebuilds and
+            # sorts a list over every channel in the guild, and the majority of
+            # calls never reach this.
+            category = resolve_category(guild, config, "voice") or draft_category
+            # Voice is the convenience; the text channel is the draft. Exception,
+            # not HTTPException: an aiohttp connection error is not a discord.py
+            # exception and has taken out a whole run in this codebase before.
+            try:
+                voice_channel = await ensure_channel(
+                    guild, "voice", team_voice_name(team_name, session.friendly_id),
+                    overwrites, category)
+                self.channel_ids.append(voice_channel.id)
+            except Exception as e:
+                logger.warning(
+                    f"Could not create a voice channel for '{team_name}': {e}. "
+                    f"The team keeps its text channel.")
 
         if team_name == "Draft":
             self.draft_chat_channel = channel.id
@@ -1461,9 +1488,12 @@ class PersistentView(discord.ui.View):
                     # One category for the whole draft, chosen before any room is
                     # made. Swiss has only the shared chat; every other type has
                     # that plus one channel per team.
+                    guild_config = get_config(guild.id)
                     rooms_category = await resolve_draft_category(
-                        guild, get_config(guild.id),
-                        1 if session.session_type == "swiss" else DRAFT_ROOM_COUNT,
+                        guild, guild_config,
+                        # Swiss makes only the shared chat.
+                        1 if session.session_type == "swiss"
+                        else _draft_rooms_needed(guild, guild_config),
                     )
 
                     if session.session_type == "swiss":
