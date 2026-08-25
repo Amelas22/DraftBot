@@ -27,6 +27,9 @@ from loguru import logger
 CATEGORY_FULL_CODE = 50035
 CATEGORY_CHANNEL_LIMIT = 50
 
+# The shared chat plus one channel per team.
+DRAFT_ROOM_COUNT = 3
+
 # Serialises overflow-category creation, PER GUILD. ~20 drafts can hit a full
 # category in the same second; without this each would create its own
 # "Draft Channels 2" instead of the first creating it and the rest filling it.
@@ -109,8 +112,47 @@ def _category_is_full(error: "discord.HTTPException") -> bool:
     return error.code == CATEGORY_FULL_CODE and "parent_id" in (error.text or "")
 
 
-async def overflow_category(guild: Any, base: Any) -> Any:
-    """A sibling of `base` with room in it -- reused if one exists, else created.
+async def draft_category(guild: Any, config: "dict[str, Any]", needed: int) -> Any:
+    """The category ALL of this draft's rooms should go in, from config.
+
+    One home for the three steps -- read the config, find the category, check it
+    has room for the whole set -- so a caller cannot do two of the three.
+    """
+    return await category_with_room(guild, resolve_category(guild, config, "draft"), needed)
+
+
+async def category_with_room(guild: Any, base: Any, needed: int) -> Any:
+    """The category ALL of this draft's rooms should go in.
+
+    Resolved once per draft and passed to each room, rather than re-decided per
+    room: the answer has to be the same for every room of one draft, and a
+    per-room check gives different answers as the category fills.
+
+    None in, None out -- a guild that groups nothing does not get a category
+    invented for it.
+    """
+    if base is None:
+        return None
+    if len(base.channels) + needed <= CATEGORY_CHANNEL_LIMIT:
+        return base
+    return await overflow_category(guild, base, needed)
+
+
+def configured_base_name(name: str) -> str:
+    """The configured category's name, given either it or one of its siblings.
+
+    Overflow siblings are named "<base> 2", "<base> 3". Since a draft can now be
+    placed directly into a sibling, the thing handed to ensure_channel is not
+    always the configured category -- and numbering off it would produce
+    "Draft Channels 2 2" instead of "Draft Channels 3".
+    """
+    root, _, suffix = name.rpartition(" ")
+    return root if root and suffix.isdigit() else name
+
+
+async def overflow_category(guild: Any, base: Any, needed: int = 1) -> Any:
+    """A sibling of `base` with room for `needed` channels -- reused if one
+    exists, else created.
 
     Named "<base> 2", "<base> 3", ... so the set is self-describing in the channel
     list and recognisable on the next run. Empty ones are deliberately NOT deleted:
@@ -123,16 +165,17 @@ async def overflow_category(guild: Any, base: Any) -> Any:
     """
     async with _OVERFLOW_LOCKS[guild.id]:
         numbered: "dict[int, Any]" = {}
-        prefix = f"{base.name} "
+        root = configured_base_name(base.name)
+        prefix = f"{root} "
         for category in guild.categories:
             suffix = category.name[len(prefix):] if category.name.startswith(prefix) else ""
             if suffix.isdigit():
                 numbered[int(suffix)] = category
         for n in sorted(numbered):
-            if len(numbered[n].channels) < CATEGORY_CHANNEL_LIMIT:
+            if len(numbered[n].channels) + needed <= CATEGORY_CHANNEL_LIMIT:
                 return numbered[n]
         return await guild.create_category(
-            f"{base.name} {max(numbered, default=1) + 1}",
+            f"{root} {max(numbered, default=1) + 1}",
             overwrites=dict(base.overwrites),
             position=base.position + 1,
         )
@@ -164,9 +207,9 @@ async def ensure_channel(guild: Any, kind: str, name: str,
                 raise
             attempted.append(category)
             try:
-                # attempted[0], not the last one: numbering always hangs off the
-                # category actually configured, so a full "Draft Channels 2" leads
-                # to "Draft Channels 3" rather than "Draft Channels 2 2".
+                # Numbering hangs off the configured category, which attempted[0]
+                # is not necessarily -- a draft can be placed straight into a
+                # sibling. configured_base_name strips the suffix back off.
                 nxt = await overflow_category(guild, attempted[0])
             except discord.HTTPException as create_error:
                 logger.warning(

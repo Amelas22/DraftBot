@@ -481,11 +481,20 @@ async def recover_draft_channels(bot, guild, session_id):
 
     # create_team_channel persists channel_ids/draft_chat_channel and sets stage=pairings.
     temp_view = PersistentView(bot, session_id, session_type)
+    # One category for all three rooms, chosen before any is made. Resolved per
+    # room instead, a category with room for two of them would put the chat in it
+    # and the team channels in the overflow -- and a recovered draft is exactly
+    # when players are already hunting for their room.
+    from config import get_config
+    from helpers.draft_rooms import DRAFT_ROOM_COUNT, draft_category
+    rooms_category = await draft_category(guild, get_config(guild.id), DRAFT_ROOM_COUNT)
     draft_channel_id = await temp_view.create_team_channel(
-        guild, "Draft", all_members, team_a, team_b
+        guild, "Draft", all_members, team_a, team_b, rooms_category=rooms_category
     )
-    await temp_view.create_team_channel(guild, "Red-Team", team_a_members, team_a, team_b)
-    await temp_view.create_team_channel(guild, "Blue-Team", team_b_members, team_a, team_b)
+    await temp_view.create_team_channel(guild, "Red-Team", team_a_members, team_a, team_b,
+                                        rooms_category=rooms_category)
+    await temp_view.create_team_channel(guild, "Blue-Team", team_b_members, team_a, team_b,
+                                        rooms_category=rooms_category)
 
     # Re-post the pairing messages (now coloured by stored results) into the new chat.
     await post_pairings(bot, guild, session_id)

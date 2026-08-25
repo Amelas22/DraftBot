@@ -5,7 +5,10 @@ import pytz
 from datetime import datetime, timedelta
 from discord import SelectOption
 from discord.ui import Button, View, Select, select
-from config import is_test_mode, should_reset_on_signup, get_queue_inactivity_minutes, get_debt_warning_threshold
+from config import (
+    is_test_mode, should_reset_on_signup, get_queue_inactivity_minutes,
+    get_debt_warning_threshold, get_config,
+)
 from notification_service import send_ready_check_dms
 from ready_check import ReadyCheckView, ReadyCheckSession
 from draft_organization.stake_calculator import calculate_stakes_with_strategy
@@ -20,7 +23,8 @@ from helpers.display_names import get_display_name, get_display_name_by_id
 from helpers.debt_warning import format_staked_sign_ups, DEBT_WARNING_AGE_DAYS
 from helpers.draft_footer import apply_draft_footer_from_session
 from helpers.draft_rooms import (
-    ensure_channel, resolve_category, team_channel_name, team_overwrites, team_voice_name,
+    DRAFT_ROOM_COUNT, draft_category as resolve_draft_category, ensure_channel,
+    resolve_category, team_channel_name, team_overwrites, team_voice_name,
 )
 from helpers.opponent_threads import spawn_opponent_threads
 from helpers.permissions import bot_manager_button
@@ -1323,7 +1327,8 @@ class PersistentView(discord.ui.View):
 
     
 
-    async def create_team_channel(self, guild, team_name, team_members, team_a=None, team_b=None):
+    async def create_team_channel(self, guild, team_name, team_members, team_a=None,
+                                  team_b=None, rooms_category=None):
         """Make one of this draft's rooms and record it.
 
         The room itself -- its name, its permissions, its creation -- belongs to
@@ -1334,7 +1339,11 @@ class PersistentView(discord.ui.View):
         from config import get_config, get_bots_with_draft_access, is_special_guild
 
         config = get_config(guild.id)
-        draft_category = resolve_category(guild, config, "draft")
+        # Chosen by the caller when it knows the whole set of rooms this draft
+        # needs, so every one of them lands together. Resolved here only for
+        # callers that make one room at a time.
+        draft_category = rooms_category if rooms_category is not None else (
+            await resolve_draft_category(guild, config, DRAFT_ROOM_COUNT))
         voice_category = None
         if is_special_guild(guild.id):
             voice_category = resolve_category(guild, config, "voice")
@@ -1449,6 +1458,14 @@ class PersistentView(discord.ui.View):
 
                     # Create chat channels
                     draft_chat_channel = None
+                    # One category for the whole draft, chosen before any room is
+                    # made. Swiss has only the shared chat; every other type has
+                    # that plus one channel per team.
+                    rooms_category = await resolve_draft_category(
+                        guild, get_config(guild.id),
+                        1 if session.session_type == "swiss" else DRAFT_ROOM_COUNT,
+                    )
+
                     if session.session_type == "swiss":
                         sign_ups_list = list(session.sign_ups.keys())
                         logger.debug("Swiss sign-ups: {}", sign_ups_list)
@@ -1459,7 +1476,8 @@ class PersistentView(discord.ui.View):
                                 logger.warning("Member not found in guild for user_id={}", user_id)
                             else:
                                 all_members.append(member)
-                        channel = await temp_view.create_team_channel(guild, "Draft", all_members)
+                        channel = await temp_view.create_team_channel(
+                            guild, "Draft", all_members, rooms_category=rooms_category)
                         session.draft_chat_channel = str(channel)
                         draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
                         logger.info("Created swiss draft channel {}", session.draft_chat_channel)
@@ -1487,15 +1505,20 @@ class PersistentView(discord.ui.View):
                         all_members = team_a_members + team_b_members
                         logger.info("Creating main Draft chat channel with all {} members", len(all_members))
                         channel = await temp_view.create_team_channel(
-                            guild, "Draft", all_members, session.team_a, session.team_b
+                            guild, "Draft", all_members, session.team_a, session.team_b,
+                            rooms_category=rooms_category
                         )
                         session.draft_chat_channel = str(channel)
                         draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
                         logger.info("Created draft and team channels for session_id={}", session_id)
                         logger.info("Creating Red-Team channel with {} Team A members", len(team_a_members))
-                        await temp_view.create_team_channel(guild, "Red-Team", team_a_members, session.team_a, session.team_b)
+                        await temp_view.create_team_channel(
+                            guild, "Red-Team", team_a_members, session.team_a,
+                            session.team_b, rooms_category=rooms_category)
                         logger.info("Creating Blue-Team channel with {} Team B members", len(team_b_members))
-                        await temp_view.create_team_channel(guild, "Blue-Team", team_b_members, session.team_a, session.team_b)
+                        await temp_view.create_team_channel(
+                            guild, "Blue-Team", team_b_members, session.team_a,
+                            session.team_b, rooms_category=rooms_category)
 
                     else:
                         draft_chat_channel = guild.get_channel(int(session.draft_channel_id))
