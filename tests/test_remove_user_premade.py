@@ -32,6 +32,8 @@ def _interaction_and_message():
     import discord
 
     embed = discord.Embed(title="Premade Draft")
+    # Field names must start with the team names, which is how update_team_view
+    # locates them -- naming them anything else lets a broken matcher pass.
     embed.add_field(name="Alpha (1):", value="Ana", inline=True)
     embed.add_field(name="Bravo (1):", value="Bo", inline=True)
 
@@ -97,6 +99,20 @@ async def test_removing_from_a_premade_draft_refreshes_the_team_message():
     # commit while this edit never happened.
     message.edit.assert_awaited_once()
     generic.assert_not_awaited()
+
+    # Assert the CONTENT, not merely that an edit happened. Asserting the call
+    # alone let a mutation through: breaking the field matcher so no field is
+    # located still edits the message, leaving the removed player on display.
+    edited = message.edit.await_args.kwargs["embed"]
+    alpha = next(f for f in edited.fields if f.name.startswith("Alpha"))
+    assert "Ana" not in alpha.value, f"removed player still listed: {alpha.value}"
+    assert "Unknown User" not in alpha.value, (
+        "the player was dropped from sign_ups but left on the team, so the "
+        f"refresh redrew them as a ghost: {alpha.value}")
+    assert alpha.name.startswith("Alpha (0)"), alpha.name
+
+    bravo = next(f for f in edited.fields if f.name.startswith("Bravo"))
+    assert "Bo" in bravo.value, f"the other team should be untouched: {bravo.value}"
 
 
 @pytest.mark.asyncio
