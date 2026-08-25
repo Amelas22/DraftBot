@@ -19,6 +19,9 @@ from helpers.money_gate import wallet_howto
 from helpers.display_names import get_display_name, get_display_name_by_id
 from helpers.debt_warning import format_staked_sign_ups, DEBT_WARNING_AGE_DAYS
 from helpers.draft_footer import apply_draft_footer_from_session
+from helpers.draft_rooms import (
+    ensure_channel, resolve_category, team_channel_name, team_overwrites, team_voice_name,
+)
 from helpers.opponent_threads import spawn_opponent_threads
 from helpers.permissions import bot_manager_button
 from utils import (
@@ -1321,74 +1324,44 @@ class PersistentView(discord.ui.View):
     
 
     async def create_team_channel(self, guild, team_name, team_members, team_a=None, team_b=None):
+        """Make one of this draft's rooms and record it.
+
+        The room itself -- its name, its permissions, its creation -- belongs to
+        helpers/draft_rooms.py. What stays here is what is about the SESSION
+        rather than the channel: accumulating channel_ids, committing them, and
+        spawning the scouting threads that hang off the channel once it exists.
+        """
         from config import get_config, get_bots_with_draft_access, is_special_guild
 
         config = get_config(guild.id)
-        draft_category = discord.utils.get(guild.categories, name=config["categories"]["draft"])
+        draft_category = resolve_category(guild, config, "draft")
         voice_category = None
-        if is_special_guild(guild.id) and "voice" in config["categories"]:
-            voice_category = discord.utils.get(guild.categories, name=config["categories"]["voice"])
-        
+        if is_special_guild(guild.id):
+            voice_category = resolve_category(guild, config, "voice")
+
         session = await get_draft_session(self.draft_session_id)
         if not session:
             logger.error(f"Draft session not found for session_id={self.draft_session_id} in create_team_channel")
             return
-        channel_name = f"{team_name}-Chat-{session.friendly_id}"
+        channel_name = team_channel_name(team_name, session.friendly_id)
 
         logger.info(f"Creating team channel '{channel_name}' for session {self.draft_session_id}, team: {team_name}")
 
-        # Get the admin role from config instead of hardcoding role names
-        admin_role_name = config["roles"].get("admin")
-        admin_role = discord.utils.get(guild.roles, name=admin_role_name) if admin_role_name else None
+        overwrites = team_overwrites(
+            guild, config, team_name, team_members, get_bots_with_draft_access(guild.id))
+        logger.info(
+            f"Channel '{channel_name}' will have {len(team_members)} team members: "
+            + ", ".join(f"{m.display_name} ({m.id})" for m in team_members))
 
-        # Basic permissions overwrites for the channel
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            guild.me: discord.PermissionOverwrite(read_messages=True, manage_messages=True)
-        }
-
-        # Bots with draft access (e.g. the Scryfall card-lookup bot) get read+send in
-        # every draft channel, including team-specific ones and the premade voice
-        # channels created below. Only bot-managed integration roles (the role Discord
-        # creates when a bot is invited) are honored: they cannot be assigned to
-        # humans, so a same-named vanity role can't be used to read private team
-        # channels.
-        wanted_bots = set(get_bots_with_draft_access(guild.id))
-        bot_roles = [r for r in guild.roles if r.name in wanted_bots and r.tags and r.tags.bot_id]
-        for role in bot_roles:
-            overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        logger.info(f"Draft-access bot roles on '{channel_name}': {[r.name for r in bot_roles] or 'none'}")
-
-        # Only add admin roles to the Draft chat, not to team-specific channels
-        if team_name == "Draft":
-            # For the "Draft-chat" channel, add read permissions for admin role
-            if admin_role:
-                overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, manage_messages=True)
-                logger.info(f"Granting '{admin_role_name}' role permissions to channel '{channel_name}'")
-            else:
-                logger.warning(f"Admin role '{admin_role_name}' not found in guild {guild.name}")
-
-        # Add team members with read permission (this overrides any role-based permissions)
-        member_names = []
-        for member in team_members:
-            overwrites[member] = discord.PermissionOverwrite(read_messages=True, manage_messages=True)
-            member_names.append(f"{member.display_name} ({member.id})")
-
-        logger.info(f"Channel '{channel_name}' will have {len(team_members)} team members: {', '.join(member_names)}")
-        
-        # Create the channel with the specified overwrites
-        channel = await guild.create_text_channel(name=channel_name, overwrites=overwrites, category=draft_category)
+        channel = await ensure_channel(
+            guild, "text", channel_name, overwrites, draft_category)
         self.channel_ids.append(channel.id)
-        logger.info(f"✅ Created text channel '{channel_name}' (ID: {channel.id}) in category '{draft_category.name if draft_category else 'None'}'")
 
         if session.premade_match_id and team_name != "Draft" and session.session_type == "premade":
-            # Construct voice channel name
-            voice_channel_name = f"{team_name}-Voice-{session.friendly_id}"
-            # Create the voice channel with the same permissions as the text channel
-            voice_channel = await guild.create_voice_channel(name=voice_channel_name, overwrites=overwrites, category=voice_category)
-            # Store the voice channel ID
+            voice_channel = await ensure_channel(
+                guild, "voice", team_voice_name(team_name, session.friendly_id),
+                overwrites, voice_category)
             self.channel_ids.append(voice_channel.id)
-            logger.info(f"✅ Created voice channel '{voice_channel_name}' (ID: {voice_channel.id}) in category '{voice_category.name if voice_category else 'None'}'")
 
         if team_name == "Draft":
             self.draft_chat_channel = channel.id
