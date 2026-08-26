@@ -1,6 +1,7 @@
 from typing import Any, Callable, Iterable, TypeVar
 
 import discord
+from loguru import logger
 
 _T = TypeVar("_T")
 
@@ -40,6 +41,44 @@ def mention_all(user_ids: Iterable[object] | None, sep: str = " ") -> str:
     are twenty-odd of those.
     """
     return sep.join(f"<@{uid}>" for uid in user_ids or [])
+
+
+async def send_then_mention(
+    destination: "discord.abc.Messageable", plain: str, mentioned: str
+) -> "discord.Message":
+    """Post `plain`, then edit it into `mentioned` so nobody is notified.
+
+    Creating a message that contains a mention notifies everyone named. Editing
+    the same mention into a message that already exists does not. Threads want
+    the mention for what it does structurally -- Discord puts a thread you are
+    mentioned in into your sidebar -- rather than to interrupt anyone, and one
+    draft opens several of these at once.
+
+    ``silent=True`` is not an alternative: it suppresses the push notification
+    but the mention still arrives as an unread badge, which is the thing being
+    avoided here.
+
+    A failed edit leaves the plain message standing. That costs the sidebar
+    entry, not the message, so it is logged rather than raised -- these starters
+    are all best-effort by design.
+    """
+    message = await destination.send(plain)
+    if mentioned and mentioned != plain:
+        try:
+            # Explicit, though the bot sets no global policy today: py-cord falls
+            # back to Client.allowed_mentions when this is omitted, so a global
+            # policy added later would silently stop the mention being PARSED --
+            # and an unparsed mention adds nobody to the thread, which is the only
+            # reason this function exists. Notification is not a risk to weigh
+            # here: an edit does not notify whatever is allowed.
+            await message.edit(
+                content=mentioned,
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=False, users=True, roles=True),
+            )
+        except Exception as e:
+            logger.warning(f"could not edit mentions into message {message.id}: {e}")
+    return message
 
 
 # Discord's cap on a thread name. A platform limit, not a product choice, so

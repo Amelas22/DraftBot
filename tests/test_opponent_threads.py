@@ -6,6 +6,11 @@ import pytest
 from helpers.opponent_threads import spawn_opponent_threads, team_channel_rosters
 
 
+def _final_content(thread):
+    """What the starter says once the mention has been edited in."""
+    return thread.messages[-1].content
+
+
 def make_channel(existing_thread_names=(), archived_thread_names=(), starter_fails=False):
     """Fake TextChannel. create_thread returns a fresh fake thread each call and
     records it on `created_threads`, so tests can inspect what was sent into it.
@@ -16,8 +21,26 @@ def make_channel(existing_thread_names=(), archived_thread_names=(), starter_fai
     created_threads = []
 
     def new_thread(**kwargs):
-        send = AsyncMock(side_effect=RuntimeError("cannot post")) if starter_fails else AsyncMock()
-        thread = SimpleNamespace(name=kwargs.get("name"), send=send)
+        # send() returns a message whose edit() records the new content. The
+        # starter is posted plain and then edited to carry the mention, so a
+        # double that could not be edited would make the mention invisible to
+        # every test -- and the production helper logs edit failures rather than
+        # raising, so nothing else would notice either.
+        messages = []
+
+        def new_message(content, **_kwargs):
+            message = SimpleNamespace(id=1, content=content, posted=content)
+
+            async def edit(content=None, **_):
+                message.content = content
+
+            message.edit = edit
+            messages.append(message)
+            return message
+
+        send = (AsyncMock(side_effect=RuntimeError("cannot post")) if starter_fails
+                else AsyncMock(side_effect=new_message))
+        thread = SimpleNamespace(name=kwargs.get("name"), send=send, messages=messages)
         created_threads.append(thread)
         return thread
 
@@ -87,16 +110,18 @@ async def test_starter_tags_the_owning_team_and_never_the_opponent():
     channel = make_channel()
     await spawn_opponent_threads(channel, "Red-Team", ["a1", "a2"], ["b1"], SIGN_UPS)
     (thread,) = channel.created_threads
-    starter = thread.send.await_args.args[0]
-
-    assert "<@a1>" in starter and "<@a2>" in starter    # the whole owning team
-    assert "<@b1>" not in starter                       # never the scouted opponent
+    posted = thread.send.await_args.args[0]
+    final = _final_content(thread)
+    assert "<@a1>" in final and "<@a2>" in final        # the whole owning team
+    assert "<@b1>" not in final                         # never the scouted opponent
     # Mentions lead, so the tag is the first thing in the thread.
-    assert starter.startswith("<@a1> <@a2> ")
-    # Silent: one thread per opponent would otherwise ping the team once each.
-    # A silent mention still adds them to the thread (verified against Discord),
-    # so this must not regress to a loud send.
-    assert thread.send.await_args.kwargs.get("silent") is True
+    assert final.startswith("<@a1> <@a2> ")
+    # The POSTED message carries no mention at all: a mention that arrives with a
+    # new message notifies everyone named, and one scouting thread per opponent
+    # would do that several times per draft. It is edited in afterwards, which
+    # does not notify. silent=True was the previous attempt and is not enough --
+    # it drops the push but still leaves the mention badge.
+    assert "<@" not in posted, f"the created message would notify: {posted!r}"
 
 
 @pytest.mark.asyncio
@@ -104,10 +129,11 @@ async def test_starter_tags_blue_teams_own_roster_in_its_own_channel():
     channel = make_channel()
     await spawn_opponent_threads(channel, "Blue-Team", ["a1"], ["b1", "b2"], SIGN_UPS)
     (thread,) = channel.created_threads
-    starter = thread.send.await_args.args[0]
+    final = _final_content(thread)
 
-    assert "<@b1>" in starter and "<@b2>" in starter
-    assert "<@a1>" not in starter
+    assert "<@b1>" in final and "<@b2>" in final
+    assert "<@a1>" not in final
+    assert "<@" not in thread.send.await_args.args[0]
 
 
 @pytest.mark.asyncio

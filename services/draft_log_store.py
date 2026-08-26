@@ -17,7 +17,9 @@ from sqlalchemy import select
 from database.db_session import db_session
 from helpers.pile_compositor import PileImageBuilder
 from helpers.substitutes import TEAM_A_CHANNEL_PREFIX, TEAM_B_CHANNEL_PREFIX
-from helpers.utils import DISCORD_THREAD_NAME_LIMIT, THREAD_ARCHIVE_MAX_MINUTES, mention_all
+from helpers.utils import (
+    DISCORD_THREAD_NAME_LIMIT, THREAD_ARCHIVE_MAX_MINUTES, mention_all, send_then_mention,
+)
 from models.draft_session import DraftSession
 
 
@@ -366,6 +368,10 @@ async def _tag_team_in_thread(thread, member_discord_ids: list[str], friendly_id
     behind the summary message. So the mention is what makes this organised,
     not just polite.
 
+    Posted plain and then EDITED to carry the mention, so it never notifies:
+    a mention that arrives with a new message pings, the same mention edited
+    into an existing one does not.
+
     Mentions the whole team roster, not only the players whose pools are in
     here: a member without a mapped pool is still on the team and still wants
     the thread. Best-effort — the pools are the deliverable, and a failure to
@@ -377,8 +383,9 @@ async def _tag_team_in_thread(thread, member_discord_ids: list[str], friendly_id
     mentions = mention_all(member_discord_ids)
     if not mentions:
         return
+    plain = f"Your drafted pools for {friendly_id}:"
     try:
-        await thread.send(f"{mentions} — your drafted pools for {friendly_id}:")
+        await send_then_mention(thread, plain, f"{mentions} — your drafted pools for {friendly_id}:")
     except Exception as e:
         # Exception, not HTTPException: "must not cost anyone their pools" is
         # only true if it holds for every failure. The deck-image build and
