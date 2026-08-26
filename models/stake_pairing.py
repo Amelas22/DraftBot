@@ -19,6 +19,12 @@ class StakePairing(Base):
     player_a_id = Column(String(64), nullable=False)
     player_b_id = Column(String(64), nullable=False)
     amount = Column(Integer, nullable=False)
+    # Which side each party backed. Recorded when the pairing is written, where
+    # team_a/team_b are already in scope, rather than re-derived at settlement
+    # from roster membership -- an inference that cannot express a backer who is
+    # on neither roster.
+    side_a = Column(String(1), nullable=True)
+    side_b = Column(String(1), nullable=True)
 
     __table_args__ = (
         # Index for efficient queries by session
