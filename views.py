@@ -1660,6 +1660,13 @@ class UserRemovalSelect(Select):
         user_id_to_remove = self.values[0]  
         if user_id_to_remove in session.sign_ups:
             removed_user_name = session.sign_ups.pop(user_id_to_remove)
+            # A premade player sits on a team as well as in sign_ups, and
+            # update_team_view renders from team_a/team_b -- so leaving them
+            # there just redraws them as "Unknown User". The add-test-users path
+            # above already writes all three together; match it.
+            team_a = [uid for uid in (session.team_a or []) if uid != user_id_to_remove]
+            team_b = [uid for uid in (session.team_b or []) if uid != user_id_to_remove]
+            session.team_a, session.team_b = team_a, team_b
             
             # Record the leave event in history
             await SignUpHistory.record_signup_event(
@@ -1675,18 +1682,40 @@ class UserRemovalSelect(Select):
                     # Update the session in the database
                     await db_session.execute(update(DraftSession)
                                             .where(DraftSession.session_id == session.session_id)
-                                            .values(sign_ups=session.sign_ups))
+                                            .values(sign_ups=session.sign_ups,
+                                                    team_a=team_a, team_b=team_b))
                     await db_session.commit()
             # After removing a user, update the original message with the new sign-up list
             if session.session_type != "premade":
                 await update_draft_message(bot, session_id=session.session_id)
             else:
-                await PersistentView.update_team_view(interaction)
+                # update_team_view is an instance method, so it needs a view.
+                # Rebuilt here the way re_register_views does.
+                view = PersistentView(
+                    bot=bot,
+                    draft_session_id=session.session_id,
+                    session_type=session.session_type,
+                    team_a_name=session.team_a_name,
+                    team_b_name=session.team_b_name,
+                    session_stage=session.session_stage,
+                )
+                try:
+                    await view.update_team_view(interaction)
+                except Exception:
+                    # The removal is already committed. update_draft_message, the
+                    # other branch of this if, swallows its own Discord failures
+                    # for the same reason: whatever happens to the message, the
+                    # clicker still gets an answer and the ready check still syncs.
+                    logger.exception(
+                        f"Could not refresh the team message for {session.session_id} "
+                        f"after removing {user_id_to_remove}")
 
             await interaction.followup.send(f"Removed {removed_user_name} from the draft.")
             await ReadyCheckSession.sync_removed_player(self.session_id, user_id_to_remove, session, interaction)
         else:
-            await interaction.response.send_message("User not found in sign-ups.", ephemeral=True)
+            # defer() above already answered this interaction, so a second
+            # response would raise; the reply has to be a followup.
+            await interaction.followup.send("User not found in sign-ups.", ephemeral=True)
 
 
 async def update_last_draft_timestamp(session_id, guild, bot):
