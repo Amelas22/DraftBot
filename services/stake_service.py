@@ -48,6 +48,11 @@ async def calculate_and_store_stakes(guild_id, draft_session, cap_info=None):
                 delete(StakePairing).where(StakePairing.session_id == draft_session.session_id)
             )
 
+            # The side each player is on, so the pairing records it rather than
+            # leaving settlement to re-derive it from the roster later.
+            side_of = {str(p): "A" for p in (draft_session.team_a or [])}
+            side_of.update({str(p): "B" for p in (draft_session.team_b or [])})
+
             # Insert new pairings into stake_pairings table
             processed_pairs = set()  # Track which pairs we've handled to avoid duplicates
 
@@ -66,7 +71,9 @@ async def calculate_and_store_stakes(guild_id, draft_session, cap_info=None):
                     session_id=draft_session.session_id,
                     player_a_id=pair.player_a_id,
                     player_b_id=pair.player_b_id,
-                    amount=pair.amount
+                    amount=pair.amount,
+                    side_a=side_of.get(str(pair.player_a_id)),
+                    side_b=side_of.get(str(pair.player_b_id)),
                 )
                 db_session.add(pairing)
                 logger.debug(f"Added pairing: {pair.player_a_id} ↔ {pair.player_b_id}: {pair.amount} tix")
