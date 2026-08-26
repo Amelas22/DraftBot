@@ -11,6 +11,7 @@ preset = "strict"
 project-includes = [
     "cogs/server_draft_stats.py",
     "draft_organization/bracket.py",
+    "helpers/draft_rooms.py",
     "helpers/match_control.py",
     "helpers/opponent_threads.py",
     "helpers/utils.py",

@@ -28,6 +28,11 @@ seed_tournament_match: the one seeder for a started 2-team tournament's only
 match (Alpha vs Bravo) -- import it (``from conftest import
 seed_tournament_match``) instead of hand-writing another per-file variant.
 Takes the session to seed into (e.g. one opened via match_control_db).
+
+make_channel_harness: create_team_channel with its config, DB and Discord
+edges faked out -- import it (``from conftest import make_channel_harness``)
+instead of hand-writing another guild double. Returns (view, guild, db); the
+db records what was persisted, which is what session cleanup actually reads.
 """
 import os
 import random
@@ -238,3 +243,181 @@ def make_view_store():
     from discord.ui.view import ViewStore
 
     return ViewStore(state=SimpleNamespace())
+
+
+# --- create_team_channel harness ---------------------------------------------
+# Shared because more than one suite drives create_team_channel, and a third
+# file already hand-rolled the same fakes once. Every dependency that method
+# acquires has to be patched somewhere; one home means one place to update it.
+
+class _ACM:
+    """Minimal async context manager returning `value`."""
+
+    def __init__(self, value):
+        self.value = value
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class RecordingDB:
+    """Records the UPDATE create_team_channel issues, so a test can assert on what
+    is PERSISTED rather than on an in-memory list -- the cleanup sweep reads the
+    stored channel_ids and nothing else. `calls` records ordering, for the suite
+    that cares whether the commit preceded the opponent-thread spawn."""
+
+    def __init__(self):
+        self.persisted = {}
+        self.calls: list = []
+
+    def begin(self):
+        return _ACM(self)
+
+    async def execute(self, statement, *args, **kwargs):
+        self.calls.append("db-execute")
+        self.persisted.update(statement.compile().params)
+
+    async def commit(self):
+        self.calls.append("db-commit")
+
+
+class HarnessRole:
+    """Hashable stand-in -- overwrites is keyed by role/member objects, and
+    SimpleNamespace defines __eq__ so it cannot be a key."""
+
+    def __init__(self, name):
+        self.name = name
+        self.tags = None
+
+
+class HarnessCategory:
+    """A category with an occupancy, because capacity is what decides where a
+    draft's rooms go -- a double carrying only a name cannot express "nearly
+    full", which is the case that used to split a draft across two of them."""
+
+    def __init__(self, name, position=0, children=0):
+        self.name = name
+        self.position = position
+        self.overwrites = {}
+        self.channels = [object()] * children
+
+
+class HarnessChannel:
+    _next_id = 1000
+
+    def __init__(self, name, kind, category=None):
+        HarnessChannel._next_id += 1
+        self.id = HarnessChannel._next_id
+        self.name = name
+        self.kind = kind
+        self.category = category
+
+
+class HarnessGuild:
+    """A guild real enough for create_team_channel's channel creation."""
+
+    id = 4242
+    name = "Test Guild"
+    roles: list = []
+
+    def __init__(self, categories=(), voice_error=None):
+        self.me = HarnessRole("bot")
+        self.default_role = HarnessRole("everyone")
+        self.categories = list(categories)
+        self.text_calls = []
+        self.voice_calls = []
+        self.voice_error = voice_error
+        # What the guild actually holds. Room creation looks here to decide
+        # whether a previous run already made a channel, so a double that did not
+        # remember its own creations could never exercise the resume path.
+        self.existing = []
+
+    @property
+    def text_channels(self):
+        return [c for c in self.existing if c.kind == "text"]
+
+    @property
+    def voice_channels(self):
+        return [c for c in self.existing if c.kind == "voice"]
+
+    def seed(self, name, kind="text", category=None):
+        """Register a channel in the guild -- both for one left behind by a
+        previous run and for the ones this run creates."""
+        # Discord lowercases text channel names and leaves voice names alone.
+        stored = name.lower() if kind == "text" else name
+        channel = HarnessChannel(stored, kind, category)
+        self.existing.append(channel)
+        return channel
+
+    async def create_text_channel(self, **kwargs):
+        self.text_calls.append(kwargs)
+        return self.seed(kwargs["name"], "text", kwargs.get("category"))
+
+    async def create_voice_channel(self, **kwargs):
+        self.voice_calls.append(kwargs)
+        if self.voice_error:
+            raise self.voice_error
+        return self.seed(kwargs["name"], "voice", kwargs.get("category"))
+
+    async def create_category(self, name, overwrites=None, position=0):
+        # Room creation overflows into a NEW category when the configured one
+        # cannot hold the whole draft, so the double has to be able to make one.
+        made = HarnessCategory(name, position)
+        made.overwrites = overwrites or {}
+        self.categories.append(made)
+        return made
+
+
+def make_channel_harness(monkeypatch, *, categories=("Draft Channels",), features=None,
+                         extra_config=None, session_type="premade",
+                         seeded=(), strays=(), **guild_kwargs):
+    """create_team_channel with its config, DB and Discord edges faked out.
+
+    Returns (view, guild, db). `features` seeds the config's feature flags so the
+    real readers run against them rather than being stubbed out themselves.
+
+    `seeded` is [(name, kind)] left behind by an earlier run of THIS draft: they
+    go into the guild AND into the session's channel_ids, which is what makes
+    them reusable. `strays` go into the guild only -- same name, not this draft's
+    -- which is the case that must never be adopted.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    import views
+
+    cats = {"draft": "Draft Channels"}
+    cats.update(extra_config or {})
+    monkeypatch.setattr(
+        "config.get_config",
+        lambda gid: {"categories": cats, "roles": {"admin": "Admin"},
+                     "features": features or {}},
+    )
+    monkeypatch.setattr("config.get_bots_with_draft_access", lambda gid: [])
+
+    session = SimpleNamespace(
+        friendly_id="abc1",
+        channel_ids=[],
+        session_type=session_type,
+        sign_ups={"a1": "Alice", "b1": "Dave"},
+        team_a=["a1"],
+        team_b=["b1"],
+    )
+    monkeypatch.setattr(views, "get_draft_session", AsyncMock(return_value=session))
+    db = RecordingDB()
+    monkeypatch.setattr(views, "AsyncSessionLocal", lambda: _ACM(db))
+    monkeypatch.setattr(views, "spawn_opponent_threads", AsyncMock(return_value=0))
+
+    view = views.PersistentView(bot=None, draft_session_id="s1", session_type=session_type)
+    view.draft_chat_channel = None
+    guild = HarnessGuild(
+        [c if hasattr(c, "channels") else HarnessCategory(getattr(c, "name", c))
+         for c in categories],
+        **guild_kwargs)
+    session.channel_ids = [guild.seed(name, kind).id for name, kind in seeded]
+    for name, kind in strays:
+        guild.seed(name, kind)
+    return view, guild, db

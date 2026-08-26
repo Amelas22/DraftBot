@@ -5,7 +5,10 @@ import pytz
 from datetime import datetime, timedelta
 from discord import SelectOption
 from discord.ui import Button, View, Select, select
-from config import is_test_mode, should_reset_on_signup, get_queue_inactivity_minutes, get_debt_warning_threshold
+from config import (
+    is_test_mode, should_reset_on_signup, get_queue_inactivity_minutes,
+    get_debt_warning_threshold, get_config,
+)
 from notification_service import send_ready_check_dms
 from ready_check import ReadyCheckView, ReadyCheckSession
 from draft_organization.stake_calculator import calculate_stakes_with_strategy
@@ -19,6 +22,10 @@ from helpers.money_gate import wallet_howto
 from helpers.display_names import get_display_name, get_display_name_by_id
 from helpers.debt_warning import format_staked_sign_ups, DEBT_WARNING_AGE_DAYS
 from helpers.draft_footer import apply_draft_footer_from_session
+from helpers.draft_rooms import (
+    DRAFT_ROOM_COUNT, draft_category as resolve_draft_category, ensure_channel,
+    resolve_category, rooms_needed, team_channel_name, team_overwrites, team_voice_name,
+)
 from helpers.opponent_threads import spawn_opponent_threads
 from helpers.permissions import bot_manager_button
 from utils import (
@@ -80,6 +87,19 @@ def queue_ping_text(player_count: int, cube: str, role_mention: str) -> str:
     Names the cube so readers can tell which of the channel's queues is filling.
     """
     return f"{player_count} Players in queue to play {cube}! {role_mention}"
+
+
+def _draft_rooms_needed(guild, config) -> int:
+    """Rooms one draft will put in the DRAFT category for this guild.
+
+    Voice channels only count when they land there too -- a guild with its own
+    voice category reserves nothing extra here for them.
+    """
+    from config import voice_channels_enabled
+
+    voice_here = (voice_channels_enabled(guild.id)
+                  and resolve_category(guild, config, "voice") is None)
+    return rooms_needed(voice_here)
 
 
 class PersistentView(discord.ui.View):
@@ -1320,75 +1340,76 @@ class PersistentView(discord.ui.View):
 
     
 
-    async def create_team_channel(self, guild, team_name, team_members, team_a=None, team_b=None):
-        from config import get_config, get_bots_with_draft_access, is_special_guild
+    async def create_team_channel(self, guild, team_name, team_members, team_a=None,
+                                  team_b=None, rooms_category=None):
+        """Make one of this draft's rooms and record it.
+
+        The room itself -- its name, its permissions, its creation -- belongs to
+        helpers/draft_rooms.py. What stays here is what is about the SESSION
+        rather than the channel: accumulating channel_ids, committing them, and
+        spawning the scouting threads that hang off the channel once it exists.
+        """
+        from config import get_config, get_bots_with_draft_access, voice_channels_enabled
 
         config = get_config(guild.id)
-        draft_category = discord.utils.get(guild.categories, name=config["categories"]["draft"])
-        voice_category = None
-        if is_special_guild(guild.id) and "voice" in config["categories"]:
-            voice_category = discord.utils.get(guild.categories, name=config["categories"]["voice"])
-        
+        # Chosen by the caller when it knows the whole set of rooms this draft
+        # needs, so every one of them lands together. Resolved here only for
+        # callers that make one room at a time.
+        draft_category = rooms_category if rooms_category is not None else (
+            await resolve_draft_category(guild, config, _draft_rooms_needed(guild, config)))
+
         session = await get_draft_session(self.draft_session_id)
         if not session:
             logger.error(f"Draft session not found for session_id={self.draft_session_id} in create_team_channel")
             return
-        channel_name = f"{team_name}-Chat-{session.friendly_id}"
+        channel_name = team_channel_name(team_name, session.friendly_id)
 
         logger.info(f"Creating team channel '{channel_name}' for session {self.draft_session_id}, team: {team_name}")
 
-        # Get the admin role from config instead of hardcoding role names
-        admin_role_name = config["roles"].get("admin")
-        admin_role = discord.utils.get(guild.roles, name=admin_role_name) if admin_role_name else None
+        overwrites = team_overwrites(
+            guild, config, team_name, team_members, get_bots_with_draft_access(guild.id))
+        logger.info(
+            f"Channel '{channel_name}' will have {len(team_members)} team members: "
+            + ", ".join(f"{m.display_name} ({m.id})" for m in team_members))
 
-        # Basic permissions overwrites for the channel
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            guild.me: discord.PermissionOverwrite(read_messages=True, manage_messages=True)
-        }
+        # Carry forward what previous runs recorded. self.channel_ids starts empty
+        # on every run and each call persists the WHOLE list, so without this the
+        # first channel of a retry would truncate the record to itself -- and the
+        # rooms an earlier run made would stop being recognised as this draft's a
+        # moment before we look for them.
+        for stored in (session.channel_ids or []):
+            if stored not in self.channel_ids:
+                self.channel_ids.append(stored)
+        owned_ids = {str(cid) for cid in self.channel_ids}
 
-        # Bots with draft access (e.g. the Scryfall card-lookup bot) get read+send in
-        # every draft channel, including team-specific ones and the premade voice
-        # channels created below. Only bot-managed integration roles (the role Discord
-        # creates when a bot is invited) are honored: they cannot be assigned to
-        # humans, so a same-named vanity role can't be used to read private team
-        # channels.
-        wanted_bots = set(get_bots_with_draft_access(guild.id))
-        bot_roles = [r for r in guild.roles if r.name in wanted_bots and r.tags and r.tags.bot_id]
-        for role in bot_roles:
-            overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        logger.info(f"Draft-access bot roles on '{channel_name}': {[r.name for r in bot_roles] or 'none'}")
+        channel = await ensure_channel(
+            guild, "text", channel_name, overwrites, draft_category, owned_ids)
+        if channel.id not in self.channel_ids:
+            self.channel_ids.append(channel.id)
 
-        # Only add admin roles to the Draft chat, not to team-specific channels
-        if team_name == "Draft":
-            # For the "Draft-chat" channel, add read permissions for admin role
-            if admin_role:
-                overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, manage_messages=True)
-                logger.info(f"Granting '{admin_role_name}' role permissions to channel '{channel_name}'")
-            else:
-                logger.warning(f"Admin role '{admin_role_name}' not found in guild {guild.name}")
-
-        # Add team members with read permission (this overrides any role-based permissions)
-        member_names = []
-        for member in team_members:
-            overwrites[member] = discord.PermissionOverwrite(read_messages=True, manage_messages=True)
-            member_names.append(f"{member.display_name} ({member.id})")
-
-        logger.info(f"Channel '{channel_name}' will have {len(team_members)} team members: {', '.join(member_names)}")
-        
-        # Create the channel with the specified overwrites
-        channel = await guild.create_text_channel(name=channel_name, overwrites=overwrites, category=draft_category)
-        self.channel_ids.append(channel.id)
-        logger.info(f"✅ Created text channel '{channel_name}' (ID: {channel.id}) in category '{draft_category.name if draft_category else 'None'}'")
-
-        if session.premade_match_id and team_name != "Draft" and session.session_type == "premade":
-            # Construct voice channel name
-            voice_channel_name = f"{team_name}-Voice-{session.friendly_id}"
-            # Create the voice channel with the same permissions as the text channel
-            voice_channel = await guild.create_voice_channel(name=voice_channel_name, overwrites=overwrites, category=voice_category)
-            # Store the voice channel ID
-            self.channel_ids.append(voice_channel.id)
-            logger.info(f"✅ Created voice channel '{voice_channel_name}' (ID: {voice_channel.id}) in category '{voice_category.name if voice_category else 'None'}'")
+        # "Draft" is excluded because team voice is for one team talking privately;
+        # the shared chat has no team. That is the whole precondition: random,
+        # staked and premade drafts all arrive here with identical private team
+        # channels, so gating on session_type would make the guild's flag a
+        # half-truth. Cheap condition first -- the flag reads config.
+        if team_name != "Draft" and voice_channels_enabled(guild.id):
+            # Resolved here rather than up top: guild.categories rebuilds and
+            # sorts a list over every channel in the guild, and the majority of
+            # calls never reach this.
+            category = resolve_category(guild, config, "voice") or draft_category
+            # Voice is the convenience; the text channel is the draft. Exception,
+            # not HTTPException: an aiohttp connection error is not a discord.py
+            # exception and has taken out a whole run in this codebase before.
+            try:
+                voice_channel = await ensure_channel(
+                    guild, "voice", team_voice_name(team_name, session.friendly_id),
+                    overwrites, category, owned_ids)
+                if voice_channel.id not in self.channel_ids:
+                    self.channel_ids.append(voice_channel.id)
+            except Exception as e:
+                logger.warning(
+                    f"Could not create a voice channel for '{team_name}': {e}. "
+                    f"The team keeps its text channel.")
 
         if team_name == "Draft":
             self.draft_chat_channel = channel.id
@@ -1435,13 +1456,26 @@ class PersistentView(discord.ui.View):
                             await interaction.followup.send("Draft session not found.", ephemeral=True)
                         return False
 
-                    if session.draft_chat_channel:
+                    # rooms_created_at, not draft_chat_channel. The latter is
+                    # committed by create_team_channel while creating the FIRST of
+                    # three channels, so it says "done" from the moment the run
+                    # starts producing anything -- and a failure after it left the
+                    # draft with a chat it could not be played in, permanently,
+                    # because every retry read that flag and stopped.
+                    if session.rooms_created_at:
                         logger.info("Rooms already exist for session_id={}, channel={}", session_id, session.draft_chat_channel)
                         if interaction:
                             await interaction.followup.send(
                                 "Rooms and pairings have already been created for this draft.", ephemeral=True)
                         return False
 
+                    # A previous run already got as far as creating the shared
+                    # chat, which happens AFTER the once-only work below. Making
+                    # retries possible also made that work re-runnable, and
+                    # update_player_stats_for_draft commits in its OWN session --
+                    # so a re-run would add a second drafts_participated to every
+                    # player. Nothing about this draft is new on a resume.
+                    resuming = session.draft_chat_channel is not None
                     session.are_rooms_processing = True
                     session.session_stage = 'pairings'
                     logger.debug("Set session_stage to 'pairings' and are_rooms_processing=True")
@@ -1456,7 +1490,7 @@ class PersistentView(discord.ui.View):
                         session.swiss_matches = state_to_save
                         logger.debug("Swiss pairings calculated: match_counter={}", match_counter)
 
-                    if session.session_type == "staked":
+                    if session.session_type == "staked" and not resuming:
                         logger.info("Calculating stakes for staked draft in create_rooms_pairings")
                         all_players = session.team_a + session.team_b
                         cap_info = await get_players_bet_capping_preferences(all_players, guild_id=str(guild.id))
@@ -1465,7 +1499,8 @@ class PersistentView(discord.ui.View):
                     # Update player stats
                     if session.session_type in ("random", "staked"):
                         logger.debug("Updating player stats for session_id={}", session_id)
-                        await update_player_stats_for_draft(session.session_id, guild)
+                        if not resuming:
+                            await update_player_stats_for_draft(session.session_id, guild)
 
                     if session.session_type in ("random", "staked", "premade"):
                         logger.debug("Updating last draft timestamp for session_id={}", session_id)
@@ -1476,6 +1511,17 @@ class PersistentView(discord.ui.View):
 
                     # Create chat channels
                     draft_chat_channel = None
+                    # One category for the whole draft, chosen before any room is
+                    # made. Swiss has only the shared chat; every other type has
+                    # that plus one channel per team.
+                    guild_config = get_config(guild.id)
+                    rooms_category = await resolve_draft_category(
+                        guild, guild_config,
+                        # Swiss makes only the shared chat.
+                        1 if session.session_type == "swiss"
+                        else _draft_rooms_needed(guild, guild_config),
+                    )
+
                     if session.session_type == "swiss":
                         sign_ups_list = list(session.sign_ups.keys())
                         logger.debug("Swiss sign-ups: {}", sign_ups_list)
@@ -1486,7 +1532,8 @@ class PersistentView(discord.ui.View):
                                 logger.warning("Member not found in guild for user_id={}", user_id)
                             else:
                                 all_members.append(member)
-                        channel = await temp_view.create_team_channel(guild, "Draft", all_members)
+                        channel = await temp_view.create_team_channel(
+                            guild, "Draft", all_members, rooms_category=rooms_category)
                         session.draft_chat_channel = str(channel)
                         draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
                         logger.info("Created swiss draft channel {}", session.draft_chat_channel)
@@ -1514,15 +1561,20 @@ class PersistentView(discord.ui.View):
                         all_members = team_a_members + team_b_members
                         logger.info("Creating main Draft chat channel with all {} members", len(all_members))
                         channel = await temp_view.create_team_channel(
-                            guild, "Draft", all_members, session.team_a, session.team_b
+                            guild, "Draft", all_members, session.team_a, session.team_b,
+                            rooms_category=rooms_category
                         )
                         session.draft_chat_channel = str(channel)
                         draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
                         logger.info("Created draft and team channels for session_id={}", session_id)
                         logger.info("Creating Red-Team channel with {} Team A members", len(team_a_members))
-                        await temp_view.create_team_channel(guild, "Red-Team", team_a_members, session.team_a, session.team_b)
+                        await temp_view.create_team_channel(
+                            guild, "Red-Team", team_a_members, session.team_a,
+                            session.team_b, rooms_category=rooms_category)
                         logger.info("Creating Blue-Team channel with {} Team B members", len(team_b_members))
-                        await temp_view.create_team_channel(guild, "Blue-Team", team_b_members, session.team_a, session.team_b)
+                        await temp_view.create_team_channel(
+                            guild, "Blue-Team", team_b_members, session.team_a,
+                            session.team_b, rooms_category=rooms_category)
 
                     else:
                         draft_chat_channel = guild.get_channel(int(session.draft_channel_id))
@@ -1567,6 +1619,10 @@ class PersistentView(discord.ui.View):
                         except discord.HTTPException as e:
                             logger.error("Failed to delete message {}: {}", original_message_id, e)
 
+                    # The run got here, so every room exists. Stamped inside the
+                    # transaction that is about to commit, so a failure anywhere
+                    # above leaves it NULL and the next attempt finishes the job.
+                    session.rooms_created_at = datetime.now()
                     session.deletion_time = datetime.now() + timedelta(days=7)
                     logger.debug("Scheduled deletion time {}", session.deletion_time)
                     await db_session.commit()

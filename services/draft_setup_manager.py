@@ -334,7 +334,12 @@ class DraftSetupManager:
                         async with AsyncSessionLocal() as db_session:
                             stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
                             session = await db_session.scalar(stmt)
-                            if session and session.draft_chat_channel:
+                            # rooms_created_at, not draft_chat_channel: the latter
+                            # is set while creating the FIRST of three channels, so
+                            # a half-created draft would be reported as "already
+                            # existed" -- silently, for exactly the case the retry
+                            # now exists to finish.
+                            if session and session.rooms_created_at:
                                 self.logger.info(f"Rooms already existed for session {self.session_id} - skipping creation")
                             else:
                                 await channel.send("Failed to create rooms and pairings. Check logs for details.")
