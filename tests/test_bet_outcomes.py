@@ -638,3 +638,25 @@ class TestSettlementIsNotGatedOnTheDisplay:
         assert await self._draft_debts("spectator_summary") == {
             ("cyd", "dov", -25), ("dov", "cyd", 25)}
 
+    @pytest.mark.asyncio
+    async def test_debts_are_booked_even_when_the_embed_has_nothing_to_show(
+            self, test_db, monkeypatch):
+        """The decoupling itself, pinned independently of what the display happens
+        to render today: with the display producing no lines at all, the winner
+        still gets their ledger row (and no empty embed is posted)."""
+        import utils
+
+        await self._seed("silent_display", StakePairing(
+            session_id="silent_display", player_a_id="alice", player_b_id="bob",
+            amount=40, side_a="A", side_b="B"))
+
+        async def no_lines(*args, **kwargs):
+            return [], 0
+
+        monkeypatch.setattr(utils, "get_formatted_bet_outcomes", no_lines)
+
+        _, bet_embed = await generate_draft_summary_embed(_StubBot(), "silent_display")
+
+        assert bet_embed is None, "an empty bet-outcomes embed must not be posted"
+        assert await self._draft_debts("silent_display") == {
+            ("alice", "bob", -40), ("bob", "alice", 40)}
