@@ -53,3 +53,50 @@ async def test_calculate_and_store_stakes_records_sides(test_db, monkeypatch):
         backed = {r.player_a_id: r.side_a, r.player_b_id: r.side_b}
         assert backed.get("alice") == "A"
         assert backed.get("charlie") == "B"
+
+
+class TestResolve:
+    """`StakePairing.resolve(winning_side)` is the ONE answer to "who won this
+    wager". Settlement and the bet-outcomes display both call it, so they cannot
+    drift apart -- they used to hold two implementations ~30 lines apart, one
+    reading the recorded sides and the other still inferring from roster
+    membership.
+    """
+
+    def test_returns_winner_first_when_player_a_backed_the_winning_side(self):
+        pairing = StakePairing(player_a_id="alice", player_b_id="bob",
+                               side_a="A", side_b="B")
+        assert pairing.resolve("A") == ("alice", "bob")
+
+    def test_returns_winner_first_when_player_b_backed_the_winning_side(self):
+        pairing = StakePairing(player_a_id="alice", player_b_id="bob",
+                               side_a="A", side_b="B")
+        assert pairing.resolve("B") == ("bob", "alice")
+
+    def test_side_order_on_the_row_does_not_matter(self):
+        """player_a may have backed B; the pairing is not ordered by side."""
+        pairing = StakePairing(player_a_id="alice", player_b_id="bob",
+                               side_a="B", side_b="A")
+        assert pairing.resolve("A") == ("bob", "alice")
+        assert pairing.resolve("B") == ("alice", "bob")
+
+    def test_both_on_the_same_side_is_not_a_wager(self):
+        pairing = StakePairing(player_a_id="alice", player_b_id="bob",
+                               side_a="A", side_b="A")
+        assert pairing.resolve("A") is None
+        assert pairing.resolve("B") is None
+
+    def test_both_sides_missing_is_not_a_wager(self):
+        """The 35 legacy rows whose draft session was deleted: inert by design."""
+        pairing = StakePairing(player_a_id="alice", player_b_id="bob",
+                               side_a=None, side_b=None)
+        assert pairing.resolve("A") is None
+
+    def test_a_half_recorded_row_is_not_a_wager(self):
+        """side_a=None, side_b='B'. Equality alone would NOT catch this --
+        None != 'B' -- and would name player_b the winner unconditionally,
+        whichever side actually won."""
+        pairing = StakePairing(player_a_id="alice", player_b_id="bob",
+                               side_a=None, side_b="B")
+        assert pairing.resolve("A") is None
+        assert pairing.resolve("B") is None

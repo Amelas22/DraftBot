@@ -1107,8 +1107,10 @@ class TestCreateDebtEntriesFromStakes:
 
             # Create corresponding StakePairing records (output data queried by functions under test)
             pairings = [
-                StakePairing(session_id="session_123", player_a_id="alice", player_b_id="charlie", amount=30),
-                StakePairing(session_id="session_123", player_a_id="bob", player_b_id="dave", amount=20),
+                StakePairing(session_id="session_123", player_a_id="alice",
+                             player_b_id="charlie", amount=30, side_a="A", side_b="B"),
+                StakePairing(session_id="session_123", player_a_id="bob",
+                             player_b_id="dave", amount=20, side_a="A", side_b="B"),
             ]
             for pairing in pairings:
                 session.add(pairing)
@@ -1121,12 +1123,10 @@ class TestCreateDebtEntriesFromStakes:
     async def test_creates_debt_entries_for_stakes(self, setup_stakes):
         """Test that debt entries are created for stake outcomes"""
         # Team A wins (alice, bob)
-        winning_team = ["alice", "bob"]
-
         debts = await create_debt_entries_from_stakes(
             guild_id="guild_123",
             session_id="session_123",
-            winning_team_ids=winning_team
+            winning_side="A"
         )
 
         # Should create 2 debts: charlie owes alice 30, dave owes bob 20
@@ -1140,12 +1140,10 @@ class TestCreateDebtEntriesFromStakes:
     @pytest.mark.asyncio
     async def test_creates_correct_ledger_entries(self, setup_stakes):
         """Test that ledger entries have correct amounts"""
-        winning_team = ["alice", "bob"]
-
         await create_debt_entries_from_stakes(
             guild_id="guild_123",
             session_id="session_123",
-            winning_team_ids=winning_team
+            winning_side="A"
         )
 
         # Check Charlie's balance with Alice (should owe 30)
@@ -1189,28 +1187,98 @@ class TestCreateDebtEntriesFromStakes:
                 session.add(stake)
             await session.commit()
 
-        # Both on winning team
-        winning_team = ["alice", "bob"]
-
         debts = await create_debt_entries_from_stakes(
             guild_id="guild_123",
             session_id="session_456",
-            winning_team_ids=winning_team
+            winning_side="A"
         )
 
         # No debts should be created (same team)
         assert len(debts) == 0
 
     @pytest.mark.asyncio
+    async def test_skips_pairings_that_cannot_resolve_to_exactly_one_side_each(self, test_db):
+        """A wager needs exactly one player on each side. None of these three rows
+        qualify, so none may book a debt:
+          - both sides "A": teammates, not opponents -- no wager between them.
+          - both sides None: the 35 legacy rows whose draft session was deleted;
+            inert by design, never meant to settle.
+          - side_a=None, side_b="B": a half-recorded row. Equality alone
+            (side_a == side_b) would NOT catch this -- None != "B" -- and would
+            fall through to booking player_b as the winner unconditionally,
+            regardless of who actually won. This is the row the validity check
+            exists to close.
+        """
+        async with AsyncSessionLocal() as session:
+            pairings = [
+                StakePairing(session_id="session_789", player_a_id="alice",
+                             player_b_id="bob", amount=30, side_a="A", side_b="A"),
+                StakePairing(session_id="session_789", player_a_id="charlie",
+                             player_b_id="dave", amount=20, side_a=None, side_b=None),
+                StakePairing(session_id="session_789", player_a_id="erin",
+                             player_b_id="frank", amount=10, side_a=None, side_b="B"),
+            ]
+            for pairing in pairings:
+                session.add(pairing)
+            await session.commit()
+
+        debts = await create_debt_entries_from_stakes(
+            guild_id="guild_123",
+            session_id="session_789",
+            winning_side="A"
+        )
+
+        assert debts == []
+
+    @pytest.mark.asyncio
+    async def test_books_a_debt_for_backers_on_neither_roster(self, test_db):
+        """The property this whole branch exists for: a wager settles from the
+        sides RECORDED on the pairing, so two people who backed opposite sides
+        while sitting on neither team's roster still get paid. Roster inference
+        could not express this -- both would read as "not on the winning team"
+        and the row would book nothing."""
+        async with AsyncSessionLocal() as session:
+            session.add(StakePairing(
+                session_id="spectator_session", player_a_id="spectator_1",
+                player_b_id="spectator_2", amount=25, side_a="A", side_b="B"))
+            await session.commit()
+
+        debts = await create_debt_entries_from_stakes(
+            guild_id="guild_123", session_id="spectator_session", winning_side="B",
+        )
+
+        assert debts == [("spectator_1", "spectator_2", 25)]
+
+    @pytest.mark.asyncio
+    async def test_an_unsettleable_row_does_not_consume_a_valid_row_key(self, test_db):
+        """Duplicate suppression is keyed on (players, amount). If it ran before
+        the validity check, a row that cannot resolve would claim the key and
+        silently suppress the legitimate row behind it -- the pair would be
+        wagering for nothing."""
+        async with AsyncSessionLocal() as session:
+            # Same players, same amount: one half-recorded row, one real wager.
+            session.add(StakePairing(
+                session_id="dup_session", player_a_id="alice", player_b_id="bob",
+                amount=30, side_a=None, side_b=None))
+            session.add(StakePairing(
+                session_id="dup_session", player_a_id="alice", player_b_id="bob",
+                amount=30, side_a="A", side_b="B"))
+            await session.commit()
+
+        debts = await create_debt_entries_from_stakes(
+            guild_id="guild_123", session_id="dup_session", winning_side="A",
+        )
+
+        assert debts == [("bob", "alice", 30)]
+
+    @pytest.mark.asyncio
     async def test_is_idempotent(self, setup_stakes):
         """Test that calling twice doesn't create duplicate entries"""
-        winning_team = ["alice", "bob"]
-
         # First call
         debts1 = await create_debt_entries_from_stakes(
             guild_id="guild_123",
             session_id="session_123",
-            winning_team_ids=winning_team
+            winning_side="A"
         )
         assert len(debts1) == 2
 
@@ -1218,7 +1286,7 @@ class TestCreateDebtEntriesFromStakes:
         debts2 = await create_debt_entries_from_stakes(
             guild_id="guild_123",
             session_id="session_123",
-            winning_team_ids=winning_team
+            winning_side="A"
         )
         assert len(debts2) == 0
 
@@ -1235,7 +1303,7 @@ class TestCreateDebtEntriesFromStakes:
         debts = await create_debt_entries_from_stakes(
             guild_id="guild_123",
             session_id="nonexistent_session",
-            winning_team_ids=["alice", "bob"]
+            winning_side="A"
         )
 
         assert debts == []
@@ -1243,12 +1311,10 @@ class TestCreateDebtEntriesFromStakes:
     @pytest.mark.asyncio
     async def test_source_type_is_draft(self, setup_stakes):
         """Test that entries have source_type='draft'"""
-        winning_team = ["alice", "bob"]
-
         await create_debt_entries_from_stakes(
             guild_id="guild_123",
             session_id="session_123",
-            winning_team_ids=winning_team
+            winning_side="A"
         )
 
         async with AsyncSessionLocal() as session:

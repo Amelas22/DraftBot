@@ -228,11 +228,11 @@ async def test_stake_outcomes_are_debited_as_soon_as_they_are_created(test_db): 
 
     async with db_session() as session:
         session.add(StakePairing(session_id="s-1", player_a_id=PAYER,
-                                 player_b_id=CRED, amount=4))
+                                 player_b_id=CRED, amount=4, side_a="A", side_b="B"))
     await ws.credit_done(GUILD, PAYER, 10, job_id="j1")
 
     debts = await create_debt_entries_from_stakes(
-        guild_id=GUILD, session_id="s-1", winning_team_ids=[CRED])
+        guild_id=GUILD, session_id="s-1", winning_side="B")
     drawn = await resolution.settle_new_debts(GUILD, [debtor for debtor, _, _ in debts])
 
     assert debts == [(PAYER, CRED, 4)]
@@ -254,13 +254,13 @@ async def test_racing_renders_create_one_set_of_stake_debts(test_db):  # noqa: F
 
     async with db_session() as session:
         session.add(StakePairing(session_id="race-1", player_a_id=PAYER,
-                                 player_b_id=CRED, amount=4))
+                                 player_b_id=CRED, amount=4, side_a="A", side_b="B"))
 
     both = await asyncio.gather(
         create_debt_entries_from_stakes(guild_id=GUILD, session_id="race-1",
-                                        winning_team_ids=[CRED]),
+                                        winning_side="B"),
         create_debt_entries_from_stakes(guild_id=GUILD, session_id="race-1",
-                                        winning_team_ids=[CRED]),
+                                        winning_side="B"),
     )
 
     assert sorted(len(r) for r in both) == [0, 1], "exactly one call may create the debts"
@@ -281,17 +281,17 @@ async def test_an_uncollected_stake_debt_is_collected_on_a_later_pass(test_db): 
 
     async with db_session() as session:
         session.add(StakePairing(session_id="s-2", player_a_id=PAYER,
-                                 player_b_id=CRED, amount=4))
+                                 player_b_id=CRED, amount=4, side_a="A", side_b="B"))
 
     debts = await create_debt_entries_from_stakes(
-        guild_id=GUILD, session_id="s-2", winning_team_ids=[CRED])
+        guild_id=GUILD, session_id="s-2", winning_side="B")
     assert await resolution.settle_new_debts(
         GUILD, [d for d, _, _ in debts]) == [], "empty wallet: nothing to collect yet"
 
     await ws.credit_done(GUILD, PAYER, 10, job_id="j1")   # funded after the fact
 
     replay = await create_debt_entries_from_stakes(
-        guild_id=GUILD, session_id="s-2", winning_team_ids=[CRED])
+        guild_id=GUILD, session_id="s-2", winning_side="B")
     assert replay == [], "the creator is idempotent, so it can't name the debtors again"
 
     debtors = await debt_service.get_draft_debtors(GUILD, "s-2")

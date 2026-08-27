@@ -157,7 +157,7 @@ class TestSettlementDisplayWording:
             session.add(DraftSession(session_id=session_id, guild_id=guild))
             session.add(StakePairing(
                 session_id=session_id, player_a_id=loser, player_b_id=winner,
-                amount=amount,
+                amount=amount, side_a="A", side_b="B",
             ))
             await session.commit()
         # Book the stake debt so get_pair_position_around_draft has a cutoff
@@ -226,7 +226,7 @@ class TestSettlementDisplayWording:
             )
 
         lines, _ = await get_formatted_bet_outcomes(
-            "s1", {"alice": "Alice", "bob": "Bob"}, winning_team_ids=["bob"],
+            "s1", {"alice": "Alice", "bob": "Bob"}, winning_side="B",
         )
         text = self._text(lines)
 
@@ -260,7 +260,7 @@ class TestSettlementDisplayWording:
         assert settled_external == -20  # the split itself is NOT clamped
 
         lines, _ = await get_formatted_bet_outcomes(
-            "s1", {"alice": "Alice", "bob": "Bob"}, winning_team_ids=["bob"],
+            "s1", {"alice": "Alice", "bob": "Bob"}, winning_side="B",
         )
         text = self._text(lines)
 

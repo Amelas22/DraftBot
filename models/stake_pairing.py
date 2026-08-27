@@ -34,5 +34,21 @@ class StakePairing(Base):
         Index('ix_stake_pairings_player_b', 'player_b_id'),
     )
 
+    def resolve(self, winning_side: str) -> tuple[str, str] | None:
+        """(winner_id, loser_id) for this wager, or None if it is not settleable.
+
+        The single answer to "who won this wager": settlement and the bet-outcomes
+        display both read it here, so they cannot drift apart.
+
+        A wager needs exactly one party on each side. Everything else -- both parties
+        on the same side, or a half-recorded row with one side missing -- is not a
+        wager and resolves to None rather than defaulting a winner.
+        """
+        if {self.side_a, self.side_b} != {"A", "B"}:
+            return None
+        if self.side_a == winning_side:
+            return self.player_a_id, self.player_b_id
+        return self.player_b_id, self.player_a_id
+
     def __repr__(self):
         return f"<StakePairing(player_a={self.player_a_id}, player_b={self.player_b_id}, amount={self.amount})>"

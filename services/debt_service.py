@@ -567,13 +567,15 @@ async def create_settlement(
 async def create_debt_entries_from_stakes(
     guild_id: str,
     session_id: str,
-    winning_team_ids: list[str]
+    winning_side: str
 ) -> list[tuple[str, str, int]]:
     """
     Create debt ledger entries from stake outcomes when a draft completes.
 
-    For each stake pair where players are on opposite teams, creates debt entries
-    where the loser owes the winner.
+    For each stake pairing, reads the side each party backed -- recorded on the
+    pairing when it was written, not inferred from roster membership -- and books
+    a debt when exactly one of the two backed the winning side: the one who didn't
+    owes the one who did.
 
     This function is idempotent - if debt entries already exist for this session,
     it will skip creation and return an empty list.
@@ -587,12 +589,11 @@ async def create_debt_entries_from_stakes(
     Args:
         guild_id: The guild this draft belongs to
         session_id: The draft session ID
-        winning_team_ids: List of player IDs on the winning team
+        winning_side: 'A' or 'B' -- which side won the draft
 
     Returns:
         List of (loser_id, winner_id, amount) tuples for debts created
     """
-    winning_team_set = set(winning_team_ids)
     debts_created = []
 
     # Single session for everything: idempotency check, read stakes, create all entries.
@@ -621,30 +622,27 @@ async def create_debt_entries_from_stakes(
         processed = set()
 
         for pairing in all_pairings:
-            # Create unique identifier for this pair (sorted players + amount)
+            outcome = pairing.resolve(winning_side)
+            if outcome is None:
+                # Loud on purpose: idempotency is session-level, so if a sibling row
+                # books a debt this session never gets another pass and the draft stays
+                # half-settled forever. No raise -- this runs inside an embed render.
+                logger.warning(
+                    f"Skipping unsettleable stake pairing {pairing.id} in session "
+                    f"{session_id}: sides ({pairing.side_a}, {pairing.side_b}) are not "
+                    f"one player per side")
+                continue
+            winner_id, loser_id = outcome
+
+            # Duplicate suppression, keyed on (sorted players + amount) because the
+            # stake algorithm can emit the same pair twice. It has to come AFTER the
+            # resolve check: a row that cannot settle must not claim the key belonging
+            # to a legitimate one and silently suppress it.
             players = tuple(sorted([pairing.player_a_id, pairing.player_b_id]))
             pair_key = (players, pairing.amount)
-
-            # Skip if already processed
             if pair_key in processed:
                 continue
             processed.add(pair_key)
-
-            # Check if players are on opposite teams
-            player_a_on_winning = pairing.player_a_id in winning_team_set
-            player_b_on_winning = pairing.player_b_id in winning_team_set
-
-            if player_a_on_winning == player_b_on_winning:
-                # Both winners or both losers - no debt
-                continue
-
-            # Determine winner (creditor) and loser (debtor)
-            if player_a_on_winning:
-                winner_id = pairing.player_a_id
-                loser_id = pairing.player_b_id
-            else:
-                winner_id = pairing.player_b_id
-                loser_id = pairing.player_a_id
 
             amount = pairing.amount
 

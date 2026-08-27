@@ -609,14 +609,13 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                     
                     # Create bet outcomes embed if there's a winner
                     if team_a_wins > half_matches or team_b_wins > half_matches:
-                        # Determine the winning team
-                        winning_team = draft_session.team_a if team_a_wins > team_b_wins else draft_session.team_b
+                        winning_side = "A" if team_a_wins > team_b_wins else "B"
 
                         # Get bet outcome lines
                         outcome_lines, outcome_total = await get_formatted_bet_outcomes(
                             draft_session_id,
                             draft_session.sign_ups,
-                            winning_team
+                            winning_side
                         )
 
                         # Create separate bet outcomes embed
@@ -648,7 +647,7 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                                 await create_debt_entries_from_stakes(
                                     guild_id=draft_session.guild_id,
                                     session_id=draft_session_id,
-                                    winning_team_ids=winning_team
+                                    winning_side=winning_side
                                 )
                                 await settle_new_debts(
                                     draft_session.guild_id,
@@ -2834,15 +2833,15 @@ async def get_formatted_stake_pairs(session_id, sign_ups):
             
             return formatted_lines, total_stake
 
-async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
+async def get_formatted_bet_outcomes(session_id, sign_ups, winning_side):
     """
     Get formatted bet outcomes for a draft session.
-    
+
     Args:
         session_id: The draft session ID
         sign_ups: Dict mapping player IDs to display names
-        winning_team_ids: List of player IDs on the winning team
-        
+        winning_side: 'A' or 'B' -- which side won the draft
+
     Returns:
         tuple: (formatted_outcome_lines, total_stakes)
     """
@@ -2867,21 +2866,13 @@ async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
 
             # Process each pairing
             for pairing in all_pairings:
-                # Skip if both players are on the same team
-                player_a_on_winning_team = pairing.player_a_id in winning_team_ids
-                player_b_on_winning_team = pairing.player_b_id in winning_team_ids
-
-                if player_a_on_winning_team == player_b_on_winning_team:
-                    # Both are winners or both are losers, so no bet outcome
+                # Who won this wager is answered in exactly one place, shared with
+                # settlement (services.debt_service.create_debt_entries_from_stakes),
+                # so the embed and the ledger cannot tell different stories.
+                outcome = pairing.resolve(winning_side)
+                if outcome is None:
                     continue
-
-                # Determine winner and loser
-                if player_a_on_winning_team:
-                    winner_id = pairing.player_a_id
-                    loser_id = pairing.player_b_id
-                else:
-                    winner_id = pairing.player_b_id
-                    loser_id = pairing.player_a_id
+                winner_id, loser_id = outcome
 
                 amount = pairing.amount
 
