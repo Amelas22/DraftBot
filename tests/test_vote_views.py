@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock
 from cogs.draft_control import (
     ScrapVoteView,
     LogReleaseVoteView,
-    ReplaceWithBotsVoteView,
     AbandonVoteView,
 )
 
@@ -33,15 +32,6 @@ SPECS = [
         "no_label": "No, Keep Logs Private", "no_style": discord.ButtonStyle.secondary,
         "yes_status": "✅ Voted to Release", "no_status": "❌ Voted to Keep Private",
         "needed": "votes needed to release logs",
-    }),
-    (ReplaceWithBotsVoteView, {
-        "title": "Replace Disconnected Players Vote",
-        "desc": "Vote to replace disconnected players with bots.",
-        "color": discord.Color.blue(),
-        "yes_label": "Yes, Replace with Bots", "yes_style": discord.ButtonStyle.primary,
-        "no_label": "No, Wait for Players", "no_style": discord.ButtonStyle.secondary,
-        "yes_status": "✅ Replace with Bots", "no_status": "❌ Wait for Players",
-        "needed": "votes needed to replace",
     }),
     (AbandonVoteView, {
         "title": "Draft Abandonment Vote",

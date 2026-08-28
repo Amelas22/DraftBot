@@ -254,21 +254,7 @@ class LogReleaseVoteView(BaseVoteView):
     action_verb = "release logs"
     log_name = "Log release vote"
 
-ACTIVE_REPLACE_VOTES = {}
 
-class ReplaceWithBotsVoteView(BaseVoteView):
-    """Majority vote to replace disconnected players with bots."""
-    embed_title = "Replace Disconnected Players Vote"
-    embed_description = "Vote to replace disconnected players with bots."
-    embed_color = discord.Color.blue()
-    yes_label = "Yes, Replace with Bots"
-    yes_style = discord.ButtonStyle.primary
-    no_label = "No, Wait for Players"
-    no_style = discord.ButtonStyle.secondary
-    yes_status = "✅ Replace with Bots"
-    no_status = "❌ Wait for Players"
-    action_verb = "replace"
-    log_name = "Replace with bots vote"
 
 class DraftMancerReadyCheckView(View):
     def __init__(self, draft_session_id, participants, timeout=90.0):
@@ -453,126 +439,6 @@ class DraftControlCog(commands.Cog):
         
         return manager, draft_session
 
-    @discord.slash_command(name='replace_with_bots', description='Start a vote to replace disconnected players with bots')
-    async def replace_with_bots_command(self, ctx):
-        """Start a vote to replace disconnected players with bots"""
-        await ctx.defer(ephemeral=True)
-        
-        try:
-            result = await self._get_manager_for_channel(ctx)
-            if not result:
-                return
-                
-            manager, draft_session = result
-            
-            # Check if draft has started
-            if not manager.drafting:
-                await ctx.followup.send("Draft hasn't started yet.", ephemeral=True)
-                return
-                
-            # Check if draft is paused
-            if not manager.draftPaused:
-                await ctx.followup.send("The draft must be paused before disconnected players can be replaced. Use `/pause` first.", ephemeral=True)
-                return
-            
-            # Check if there's already an active replace vote
-            if draft_session.session_id in ACTIVE_REPLACE_VOTES:
-                await ctx.followup.send("There's already an active vote to replace disconnected players.", ephemeral=True)
-                return
-                
-            # Check if user is in sign_ups
-            user_id = str(ctx.author.id)
-            sign_ups = draft_session.sign_ups or {}
-            
-            is_participant = False
-            for discord_id, display_name in sign_ups.items():
-                if discord_id == user_id:
-                    is_participant = True
-                    break
-                    
-            if not is_participant:
-                await ctx.followup.send("Only draft participants can initiate a vote to replace disconnected players.", ephemeral=True)
-                return
-                
-            # Get all participants
-            participants = list(sign_ups.keys())
-            if not participants:
-                await ctx.followup.send("No draft participants found.", ephemeral=True)
-                return
-            
-            # Create replace vote view
-            view = ReplaceWithBotsVoteView(draft_session.session_id, participants)
-            
-            # Format the pings for the message
-            user_pings = []
-            for player_id in sign_ups:
-                try:
-                    member = ctx.guild.get_member(int(player_id))
-                    if member:
-                        user_pings.append(member.mention)
-                except:
-                    pass
-                    
-            ping_text = " ".join(user_pings) if user_pings else "No players to ping."
-            
-            # Generate initial status embed
-            embed = await view.generate_status_embed(ctx.guild)
-            
-            # Send message with pings and view
-            message = await ctx.channel.send(
-                f"🤖 **Vote to Replace Disconnected Players** initiated by {ctx.author.mention}\n\n"
-                f"{ping_text}\n\n"
-                f"Please vote on whether to replace disconnected players with bots.",
-                embed=embed,
-                view=view
-            )
-            
-            # Store message reference
-            view.message = message
-            
-            # Store in active votes
-            ACTIVE_REPLACE_VOTES[draft_session.session_id] = view
-            
-            # Start timeout timer
-            view.timer_task = asyncio.create_task(view.start_timer())
-            
-            # Acknowledge command
-            await ctx.followup.send("Vote to replace disconnected players initiated.", ephemeral=True)
-            
-            # Wait for completion
-            try:
-                await view.complete.wait()
-                
-                # Check if vote passed
-                passed, yes_votes, total_participants = view.get_vote_result()
-                if passed:
-                    # Vote passed, replace disconnected players
-                    final_message = await ctx.channel.send("✅ **Vote passed!** Replacing disconnected players with bots...")
-                    
-                    # Send replaceDisconnectedPlayers command to Draftmancer
-                    await manager.socket_client.emit('replaceDisconnectedPlayers')
-                    
-                    await final_message.edit(content="🤖 **Disconnected players replaced with bots!** The draft can now be resumed with `/unpause`.")
-                else:
-                    # Vote didn't pass
-                    await ctx.channel.send("❌ **Vote to replace disconnected players did not pass.**\nPlayers will need to reconnect before the draft can continue.")
-                
-                # Clean up
-                if draft_session.session_id in ACTIVE_REPLACE_VOTES:
-                    del ACTIVE_REPLACE_VOTES[draft_session.session_id]
-                    
-            except Exception as e:
-                logger.exception(f"Error while waiting for replace vote completion: {e}")
-                await ctx.channel.send("⚠️ An error occurred during the vote. Please try again.")
-                
-                # Clean up
-                if draft_session.session_id in ACTIVE_REPLACE_VOTES:
-                    del ACTIVE_REPLACE_VOTES[draft_session.session_id]
-                    
-        except Exception as e:
-            logger.exception(f"Error in replace_with_bots command: {e}")
-            await ctx.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
-            
     @discord.slash_command(name='ready', description='Start a ready check for the Draftmancer draft')
     async def ready_command(self, ctx):
         """Initiate a ready check for all players in the draft"""
