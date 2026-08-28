@@ -679,9 +679,21 @@ class DraftControlCog(commands.Cog):
                 final_message = await ctx.channel.send("⚠️ **Vote passed!** Canceling draft in 5 seconds...")
                 # Skip log collection for a draft nobody finished.
                 await manager.mark_draft_cancelled()
-                manager.drafting = False
                 await asyncio.sleep(5)
-                await manager.socket_client.emit('stopDraft')
+                # emit returns False on a disconnected or throwing socket. Announcing
+                # a cancellation that never reached Draftmancer is not cosmetic: the
+                # draft keeps running while players are told it stopped, and setting
+                # drafting=False regardless would then convince /abandon the draft is
+                # over and let it void the results of a draft still being played. So
+                # the local state only follows once Draftmancer has actually been told.
+                if not await manager.socket_client.emit('stopDraft'):
+                    await final_message.edit(content=
+                        "⚠️ **Could not reach Draftmancer to cancel the draft.** "
+                        "The vote passed, but the draft is still running there. "
+                        "Use `/mutiny` to take control of the session directly."
+                    )
+                    return
+                manager.drafting = False
                 await final_message.edit(content=
                                         "🛑 **Draft canceled!** \n" \
                                         "Use `/ready` to begin a ready check for a new draft.\n" \
@@ -983,11 +995,6 @@ class DraftControlCog(commands.Cog):
                 await ctx.followup.send("Only draft participants can unpause the draft.", ephemeral=True)
                 return
             
-            # Check if there's already an active unpause check
-            if draft_session.session_id in ACTIVE_UNPAUSE_CHECKS:
-                await ctx.followup.send("There's already an active unpause ready check.", ephemeral=True)
-                return
-                
             # Get all participants
             participants = list(sign_ups.keys())
             if not participants:
@@ -997,40 +1004,29 @@ class DraftControlCog(commands.Cog):
             # Create ready check view
             view = DraftMancerReadyCheckView(draft_session.session_id, participants)
             
-            # Format the pings for the message
-            user_pings = []
-            for player_id in sign_ups:
-                try:
-                    member = ctx.guild.get_member(int(player_id))
-                    if member:
-                        user_pings.append(member.mention)
-                except:
-                    pass
-                    
-            ping_text = " ".join(user_pings) if user_pings else "No players to ping."
-            
-            # Generate initial status embed
-            embed = await view.generate_status_embed(ctx.guild)
-            
-            # Send message with pings and view
-            message = await ctx.channel.send(
-                f"⚠️ **Draft Unpause Ready Check** initiated by {ctx.author.mention}\n\n{ping_text}\n\n"
-                f"Please click the Ready button below when you're ready to continue.",
-                embed=embed,
-                view=view
+            announcement = (
+                f"⚠️ **Draft Unpause Ready Check** initiated by {ctx.author.mention}\n\n"
+                f"{_ping_text(ctx.guild, sign_ups)}\n\n"
+                f"Please click the Ready button below when you're ready to continue."
             )
-            
-            # Store message reference
-            view.message = message
-            
-            # Claimed immediately before the try, so everything that can raise from
-            # here on is covered by the finally below. Putting the ack outside it --
-            # as this did -- reopens the exact window the finally exists to close:
-            # the ack fails, the entry stays, and because a Ready click cancels the
-            # timer, on_timeout never runs to heal it. The check is then wedged for
-            # the rest of the process and the draft never resumes.
+
+            # Test and claim with nothing awaited between them, the same way
+            # run_participant_vote does. Checking earlier -- before generating the
+            # embed and posting the message -- let two invocations both pass the
+            # check and both post a ready check, with the second overwriting the
+            # first and both able to emit resumeDraft.
+            if draft_session.session_id in ACTIVE_UNPAUSE_CHECKS:
+                await ctx.followup.send(
+                    "There's already an active unpause ready check.", ephemeral=True)
+                return
             ACTIVE_UNPAUSE_CHECKS[draft_session.session_id] = view
             try:
+                # Everything that can raise from here is covered by the finally
+                # below -- including the ack, whose failure used to leave the entry
+                # behind. A Ready click cancels the timer, so on_timeout never runs
+                # to heal it and the draft never resumes.
+                embed = await view.generate_status_embed(ctx.guild)
+                view.message = await ctx.channel.send(announcement, embed=embed, view=view)
                 view.timer_task = asyncio.create_task(view.start_timer())
                 await ctx.followup.send("Unpause ready check initiated.", ephemeral=True)
                 await view.complete.wait()
@@ -1038,16 +1034,7 @@ class DraftControlCog(commands.Cog):
                 # Check if everyone is ready
                 if view.is_everyone_ready():
                     # Format pings again for the resume notification
-                    user_pings = []
-                    for player_id in sign_ups:
-                        try:
-                            member = ctx.guild.get_member(int(player_id))
-                            if member:
-                                user_pings.append(member.mention)
-                        except:
-                            pass
-                            
-                    ping_text = " ".join(user_pings) if user_pings else "No players to ping."
+                    ping_text = _ping_text(ctx.guild, sign_ups)
                     
                     # Everyone is ready, resume the draft with pings
                     resume_message = await ctx.channel.send(
