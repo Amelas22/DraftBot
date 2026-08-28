@@ -5,6 +5,7 @@ from loguru import logger
 from models.draft_session import DraftSession
 from helpers.stale_drafts import is_finished_draft
 from models.match import MatchResult
+from helpers.permissions import is_bot_manager
 from discord.ui import View, Button
 from datetime import datetime, timedelta
 from sqlalchemy import select, and_, desc, update
@@ -725,16 +726,22 @@ class DraftControlCog(commands.Cog):
         description='Abandon this draft and void all matches (admins immediately; players by majority vote)'
     )
     async def abandon_command(self, ctx):
-        """Abandon a draft from its match channel. Admin = immediate (with
+        """Abandon a draft from any of its channels. Admin = immediate (with
         confirmation); a participant starts a majority vote."""
         await ctx.defer(ephemeral=True)
+        await self._do_abandon(ctx)
 
+    async def _do_abandon(self, ctx):
+        """The command body, minus the defer, so it can be driven from a test."""
         try:
-            channel_id = str(ctx.channel_id)
-            draft_session = await DraftSession.get_by_channel_id(channel_id)
+            # Any of the draft's channels, not just the shared chat: a stalled
+            # draft sits in the TEAM channels, which is where players are when a
+            # match never gets reported, and that is where they reach for this.
+            draft_session = await DraftSession.get_by_any_channel_id(ctx.channel_id)
             if not draft_session:
                 await ctx.followup.send(
-                    "Run `/abandon` in the draft's match channel (where pairings are posted).",
+                    "No draft here. Run `/abandon` in the draft chat or one of its "
+                    "team channels.",
                     ephemeral=True,
                 )
                 return
@@ -749,7 +756,6 @@ class DraftControlCog(commands.Cog):
                 return
 
             # Admin path: immediate (after a confirmation click).
-            from helpers.permissions import is_bot_manager
             if await is_bot_manager(ctx):
                 await ctx.followup.send(
                     "Abandon this draft? This voids **all** match results and can't be undone.",
