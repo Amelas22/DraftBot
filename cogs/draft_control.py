@@ -318,7 +318,15 @@ class AbandonConfirmView(View):
     @discord.ui.button(label="Yes, Abandon", style=discord.ButtonStyle.danger)
     async def confirm(self, button: discord.ui.Button, interaction: discord.Interaction):
         _disable_all(self)
-        await abandon_draft_session(self.session_id)
+        # Same race as the vote path: the draft can finish between offering this
+        # button and its being clicked, and abandon_draft_session refuses then.
+        if not await abandon_draft_session(self.session_id):
+            await interaction.response.edit_message(
+                content="✅ This draft finished before the abandon was confirmed. "
+                        "Nothing was voided — the results stand.",
+                view=self,
+            )
+            return
         await interaction.response.edit_message(
             content="🛑 Draft abandoned. All match results have been voided.", view=self
         )
@@ -849,10 +857,18 @@ class DraftControlCog(commands.Cog):
                 return
 
             async def _abandoned():
-                await abandon_draft_session(draft_session.session_id)
-                await vote_channel.send(
-                    "🛑 **Vote passed — draft abandoned.** All match results have been voided."
-                )
+                # The draft can finish while the vote runs, and abandon_draft_session
+                # refuses when it has. Saying "voided" anyway would send six players
+                # to re-report matches that were never touched.
+                if await abandon_draft_session(draft_session.session_id):
+                    await vote_channel.send(
+                        "🛑 **Vote passed — draft abandoned.** All match results have been voided."
+                    )
+                else:
+                    await vote_channel.send(
+                        "✅ **Vote passed, but this draft finished while it was running.** "
+                        "Nothing was voided — the results stand."
+                    )
 
             async def _kept():
                 await vote_channel.send("✅ **Vote to abandon the draft did not pass.**")

@@ -202,3 +202,37 @@ async def test_the_admin_notice_reaches_everyone_not_just_one_team(draft_control
     assert view.channel is ctx.shared_chat, (
         "the admin notice would go to the team channel the command was typed in, "
         "so the other team never hears the draft was voided")
+
+
+@pytest.mark.asyncio
+async def test_a_refused_abandon_is_not_announced_as_a_successful_one(draft_control_cog):
+    """abandon_draft_session refuses when the draft finished while the vote ran.
+    Announcing "all match results have been voided" anyway tells six players their
+    results are gone when they are not -- they will go and re-report matches that
+    never needed re-reporting."""
+    ctx = make_ctx(RED_TEAM_CHAT, invoker_id="1")
+    captured = {}
+
+    async def capture_vote(_ctx, **kw):
+        captured["on_pass"] = kw["on_pass"]
+        return True
+
+    with patch("cogs.draft_control.DraftSession.get_by_any_channel_id",
+               new=AsyncMock(return_value=make_draft_stub(
+                   draft_chat_channel=str(DRAFT_CHAT), channel_ids=[DRAFT_CHAT, RED_TEAM_CHAT]))), \
+         patch("cogs.draft_control.is_bot_manager", new=AsyncMock(return_value=False)), \
+         patch("cogs.draft_control.DraftSetupManager.is_drafting",
+               new=MagicMock(return_value=False)), \
+         patch("cogs.draft_control.run_participant_vote", new=capture_vote), \
+         patch("cogs.draft_control.abandon_draft_session",
+               new=AsyncMock(return_value=False)):          # it refused
+        await draft_control_cog._do_abandon(ctx)
+        await captured["on_pass"]()
+
+    said = " ".join(str(c.args[0]) for c in ctx.shared_chat.send.await_args_list if c.args)
+    assert said, "said nothing at all about the outcome"
+    # The false claim, not the word: "Nothing was voided" is the correct message.
+    assert "results have been voided" not in said.lower(), (
+        f"told players their results were voided when they were not: {said!r}")
+    assert "results stand" in said.lower(), (
+        f"did not tell players their results survived: {said!r}")
