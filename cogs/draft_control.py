@@ -6,6 +6,7 @@ from models.draft_session import DraftSession
 from helpers.stale_drafts import is_finished_draft
 from models.match import MatchResult
 from helpers.permissions import is_bot_manager
+from helpers.stale_drafts import is_finished_draft
 from discord.ui import View, Button
 from datetime import datetime, timedelta
 from sqlalchemy import select, and_, desc, update
@@ -81,6 +82,21 @@ def _ping_text(guild, sign_ups):
         if member:
             pings.append(member.mention)
     return " ".join(pings) if pings else "No players to ping."
+
+
+def _shared_draft_channel(ctx, draft_session):
+    """The one channel every participant of this draft can read, or None.
+
+    There is deliberately no fallback to the invoking channel. A vote only some
+    participants can see is not a weaker vote, it is a wrong one: team channels
+    deny @everyone read, so half the voters never see it, and on an uneven draft
+    the larger team could carry it unseen. With nowhere everyone can read, the
+    caller refuses instead of asking for a decision it cannot honestly collect.
+    """
+    chat_id = draft_session.draft_chat_channel
+    if not chat_id:
+        return None
+    return ctx.guild.get_channel(int(chat_id))
 
 
 async def abandon_draft_session(session_id, session_factory=None):
@@ -629,7 +645,10 @@ class DraftControlCog(commands.Cog):
     async def scrap_command(self, ctx):
         """Start a vote to completely cancel the draft"""
         await ctx.defer(ephemeral=True)
-        
+        await self._do_scrap(ctx)
+
+    async def _do_scrap(self, ctx):
+        """The command body, minus the defer, so it can be driven from a test."""
         try:
             result = await self._get_manager_for_channel(ctx)
             if not result:
@@ -637,7 +656,18 @@ class DraftControlCog(commands.Cog):
                 
             manager, draft_session = result
             
-            # Check if draft has started
+            # draft_finished rather than session_stage: _get_manager_for_channel
+            # already filters out NULL stages, so a not-yet-started draft reaching
+            # here still has stage 'teams' and the stage cannot tell the two apart.
+            if manager.draft_finished:
+                await ctx.followup.send(
+                    "This draft has finished drafting, so there's no session to "
+                    "cancel. Use `/abandon` from the draft chat or a team channel "
+                    "to void the draft and its results.",
+                    ephemeral=True,
+                )
+                return
+
             if not manager.drafting:
                 await ctx.followup.send("Draft hasn't started yet.", ephemeral=True)
                 return
@@ -746,7 +776,11 @@ class DraftControlCog(commands.Cog):
                 )
                 return
 
-            if draft_session.session_stage == "completed":
+            # is_finished_draft, not `session_stage == "completed"`: the stage
+            # rarely advances past 'pairings' even for a fully played draft, so the
+            # posted victory message is the reliable completion marker. Checking the
+            # stage alone let a finished draft have all its results voided.
+            if is_finished_draft(draft_session):
                 await ctx.followup.send(
                     "This draft is already completed and can't be abandoned.", ephemeral=True
                 )
@@ -755,11 +789,29 @@ class DraftControlCog(commands.Cog):
                 await ctx.followup.send("This draft has already been abandoned.", ephemeral=True)
                 return
 
+            # Still being drafted: that is /scrap's job. Voiding the record now
+            # would strand a session people are mid-pick in.
+            if DraftSetupManager.is_drafting(draft_session.session_id):
+                await ctx.followup.send(
+                    "This draft is still running in Draftmancer. Use `/pause` then "
+                    "`/scrap` **in the channel the draft was posted in**; `/abandon` "
+                    "is for after drafting ends.",
+                    ephemeral=True,
+                )
+                return
+
             # Admin path: immediate (after a confirmation click).
             if await is_bot_manager(ctx):
                 await ctx.followup.send(
                     "Abandon this draft? This voids **all** match results and can't be undone.",
-                    view=AbandonConfirmView(draft_session.session_id, ctx.channel),
+                    # The shared chat, like the vote: voiding every result is
+                    # draft-wide news, and from a team channel ctx.channel reaches
+                    # only half the players. The `or` fallback is fine here, unlike
+                    # for the vote -- this announces a decision already made rather
+                    # than collecting one, so a narrower audience beats silence.
+                    view=AbandonConfirmView(
+                        draft_session.session_id,
+                        _shared_draft_channel(ctx, draft_session) or ctx.channel),
                     ephemeral=True,
                 )
                 return
@@ -781,17 +833,32 @@ class DraftControlCog(commands.Cog):
                 "A majority of participants must agree to abandon this draft (voids all matches)."
             )
 
+            # The shared draft chat, NOT ctx.channel. Team channels deny @everyone
+            # read and grant it only to their own team, so a vote posted in one is
+            # invisible to the other side -- and a majority of six can never be
+            # reached from three voters. The command is reachable from anywhere;
+            # the vote it starts has to be visible to everyone it binds.
+            vote_channel = _shared_draft_channel(ctx, draft_session)
+            if vote_channel is None:
+                await ctx.followup.send(
+                    "This draft has no shared chat to hold a vote in, so every "
+                    "participant could not see it. Ask an admin to abandon the "
+                    "draft instead.",
+                    ephemeral=True,
+                )
+                return
+
             async def _abandoned():
                 await abandon_draft_session(draft_session.session_id)
-                await ctx.channel.send(
+                await vote_channel.send(
                     "🛑 **Vote passed — draft abandoned.** All match results have been voided."
                 )
 
             async def _kept():
-                await ctx.channel.send("✅ **Vote to abandon the draft did not pass.**")
+                await vote_channel.send("✅ **Vote to abandon the draft did not pass.**")
 
             started = await run_participant_vote(
-                ctx, channel=ctx.channel, view=view,
+                ctx, channel=vote_channel, view=view,
                 registry=ACTIVE_ABANDON_VOTES, key=draft_session.session_id,
                 announcement=announcement, ack="Abandonment vote initiated.",
                 on_pass=_abandoned, on_fail=_kept)

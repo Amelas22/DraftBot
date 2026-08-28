@@ -2169,6 +2169,23 @@ class DraftSetupManager:
             self.logger.exception(f"Error during disconnect: {e}")
             
     @classmethod
+    def is_drafting(cls, session_id) -> bool:
+        """True while Draftmancer is still drafting this session.
+
+        The line between the two cancel commands: while this holds, /scrap stops
+        the drafting session; once it does not, /abandon voids the record. Lives
+        here because it encodes the semantics of THIS class's flags -- a caller
+        outside the cogs (a service, the reaper, a future escrow release) must be
+        able to ask without importing a Discord cog.
+
+        Answers from this process's registry, so it cannot see a draft still
+        running after a restart. Adequate while the answer only picks a help
+        message; anything that moves money will need a persisted signal.
+        """
+        manager = cls.get_active_manager(session_id)
+        return bool(manager and manager.drafting)
+
+    @classmethod
     def get_active_manager(cls, session_id: str):
         """
         Get an active manager instance for a session if it exists
