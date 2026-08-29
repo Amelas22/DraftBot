@@ -6,7 +6,7 @@ a pack reaches the empty seat and the table waits — with no timer running out 
 end it. DraftBot sessions are not `managed`, so the 30-second replace-with-bots
 timeout in remUser never applies to us; the stall is open-ended.
 
-/pause, /unpause and /replace_with_bots already exist (cogs/draft_control.py) — what
+/pause, /unpause and /mutiny already exist (cogs/draft_control.py) — what
 was missing is that a human had to NOTICE the drop and run /pause. That is what
 these tests pin down: the bot pauses on the event Draftmancer already sends, and
 asks the player in Discord to come back.

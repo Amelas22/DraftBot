@@ -85,3 +85,37 @@ async def test_abandon_vote_majority_odd_participants():
     view.votes = {"1": True, "2": True, "3": False}
     passed, yes, total = view.get_vote_result()
     assert passed and yes == 2 and total == 3  # need 2 of 3
+
+
+@pytest.mark.asyncio
+async def test_a_draft_that_completed_during_the_vote_is_not_voided(test_db):
+    """The guard runs when the command is typed; the voiding happens up to 90
+    seconds later, after a vote or an admin's confirm click. In between, the last
+    match can be reported and the draft can finish. Re-checking at the mutation is
+    the only thing that stops a finished draft losing every result."""
+    async with test_db() as db:
+        async with db.begin():
+            db.add(DraftSession(
+                session_id="s_done", guild_id="g", session_stage="pairings",
+                # A played draft usually stays at 'pairings'; the victory message
+                # is what marks it finished.
+                victory_message_id_draft_chat="12345",
+                sign_ups={"1": "A", "2": "B"}))
+            db.add(MatchResult(
+                session_id="s_done", match_number=1, player1_id="1", player2_id="2",
+                player1_wins=2, player2_wins=1, winner_id="1",
+                result_submitted_at=datetime.now()))
+
+    voided = await abandon_draft_session("s_done", session_factory=test_db)
+
+    async with test_db() as db:
+        row = (await db.execute(
+            select(DraftSession).where(DraftSession.session_id == "s_done")
+        )).scalar_one()
+        match = (await db.execute(
+            select(MatchResult).where(MatchResult.session_id == "s_done")
+        )).scalar_one()
+
+    assert voided is False, "reported that it abandoned a finished draft"
+    assert row.session_stage == "pairings", "marked a finished draft abandoned"
+    assert match.winner_id == "1", "voided a finished draft's results"

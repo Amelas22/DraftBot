@@ -3,7 +3,10 @@ from discord.ext import commands
 import asyncio
 from loguru import logger
 from models.draft_session import DraftSession
+from helpers.stale_drafts import is_finished_draft
 from models.match import MatchResult
+from helpers.permissions import is_bot_manager
+from helpers.stale_drafts import is_finished_draft
 from discord.ui import View, Button
 from datetime import datetime, timedelta
 from sqlalchemy import select, and_, desc, update
@@ -24,13 +27,92 @@ ACTIVE_ABANDON_VOTES = {}
 ABANDON_CLEANUP_HOURS = 2
 
 
+async def run_participant_vote(ctx, *, channel, view, registry, key, announcement,
+                               ack, on_pass, on_fail):
+    """Run one participant vote end to end: claim the slot, post it, wait, act.
+
+    Returns False if a vote is already running for this key, so the caller can say
+    so; True once this one has finished.
+
+    Two things this shape buys that four hand-rolled copies did not:
+
+    The slot is claimed BEFORE anything is awaited. Each command used to check the
+    registry, then build a view, generate an embed and post a message -- three
+    awaits -- before claiming it, so two invocations could both pass the check and
+    both post a vote for the same draft. Check-then-set with no await between them
+    cannot interleave.
+
+    And the slot is released in a `finally`. Three of the callers deleted it in two
+    places, the happy path and an `except`, so anything raising in between -- the
+    acknowledgement most realistically, on an expired interaction or a lost gateway
+    -- skipped both and wedged that command for the rest of the process.
+
+    Exceptions still propagate: each caller keeps its own error handling and its own
+    wording, so what changes is when the slot is claimed and released, nothing else.
+    """
+    if key in registry:
+        return False
+    registry[key] = view
+    try:
+        # Acknowledge BEFORE posting. If the ack fails -- an expired interaction,
+        # a lost gateway -- the other order leaves an orphan: a vote visible in
+        # the channel that people can click and that can pass, with nothing
+        # awaiting its result, so it acts on nothing. Failing before anything is
+        # posted is a command that plainly did not run.
+        await ctx.followup.send(ack, ephemeral=True)
+        embed = await view.generate_status_embed(ctx.guild)
+        view.message = await channel.send(announcement, embed=embed, view=view)
+        view.timer_task = asyncio.create_task(view.start_timer())
+        await view.complete.wait()
+        passed, *_ = view.get_vote_result()
+        await (on_pass() if passed else on_fail())
+    finally:
+        registry.pop(key, None)
+    return True
+
+
+def _ping_text(guild, sign_ups):
+    """Mentions for everyone a vote binds, or a plain note when none resolve."""
+    pings = []
+    for player_id in sign_ups or {}:
+        try:
+            member = guild.get_member(int(player_id))
+        except (TypeError, ValueError):
+            continue
+        if member:
+            pings.append(member.mention)
+    return " ".join(pings) if pings else "No players to ping."
+
+
+def _shared_draft_channel(ctx, draft_session):
+    """The one channel every participant of this draft can read, or None.
+
+    There is deliberately no fallback to the invoking channel. A vote only some
+    participants can see is not a weaker vote, it is a wrong one: team channels
+    deny @everyone read, so half the voters never see it, and on an uneven draft
+    the larger team could carry it unseen. With nowhere everyone can read, the
+    caller refuses instead of asking for a decision it cannot honestly collect.
+    """
+    chat_id = draft_session.draft_chat_channel
+    if not chat_id:
+        return None
+    return ctx.guild.get_channel(int(chat_id))
+
+
 async def abandon_draft_session(session_id, session_factory=None):
     """Void all match results for a draft and mark it abandoned.
 
     Sets every MatchResult back to unplayed (no winner, zero game wins,
     no submission time) and flags the draft ``session_stage='abandoned'`` with a
-    ``deletion_time`` so the existing cleanup task removes its channels. Only
-    intended for not-yet-completed drafts (the caller enforces that).
+    ``deletion_time`` so the existing cleanup task removes its channels.
+
+    Returns True if it abandoned the draft, False if it refused because the draft
+    had finished. The callers check that too, but they check it when the command
+    is typed and this runs up to ninety seconds later -- after a vote, or after an
+    admin gets round to clicking confirm. The last match can be reported in that
+    window, and a finished draft losing every result is not recoverable by asking
+    people what the scores were. So the guard is re-run here, inside the same
+    transaction as the writes, where nothing can land between the two.
     """
     if session_factory is None:
         from session import AsyncSessionLocal
@@ -38,6 +120,15 @@ async def abandon_draft_session(session_id, session_factory=None):
 
     async with session_factory() as db:
         async with db.begin():
+            current = (await db.execute(
+                select(DraftSession).where(DraftSession.session_id == session_id)
+            )).scalar_one_or_none()
+            if current is None or is_finished_draft(current):
+                logger.info(
+                    f"Refusing to abandon {session_id}: it finished while the "
+                    f"decision to abandon it was pending")
+                return False
+
             await db.execute(
                 update(MatchResult)
                 .where(MatchResult.session_id == session_id)
@@ -51,6 +142,7 @@ async def abandon_draft_session(session_id, session_factory=None):
                     deletion_time=datetime.now() + timedelta(hours=ABANDON_CLEANUP_HOURS),
                 )
             )
+    return True
 
 
 def _disable_all(view):
@@ -226,7 +318,15 @@ class AbandonConfirmView(View):
     @discord.ui.button(label="Yes, Abandon", style=discord.ButtonStyle.danger)
     async def confirm(self, button: discord.ui.Button, interaction: discord.Interaction):
         _disable_all(self)
-        await abandon_draft_session(self.session_id)
+        # Same race as the vote path: the draft can finish between offering this
+        # button and its being clicked, and abandon_draft_session refuses then.
+        if not await abandon_draft_session(self.session_id):
+            await interaction.response.edit_message(
+                content="✅ This draft finished before the abandon was confirmed. "
+                        "Nothing was voided — the results stand.",
+                view=self,
+            )
+            return
         await interaction.response.edit_message(
             content="🛑 Draft abandoned. All match results have been voided.", view=self
         )
@@ -254,21 +354,7 @@ class LogReleaseVoteView(BaseVoteView):
     action_verb = "release logs"
     log_name = "Log release vote"
 
-ACTIVE_REPLACE_VOTES = {}
 
-class ReplaceWithBotsVoteView(BaseVoteView):
-    """Majority vote to replace disconnected players with bots."""
-    embed_title = "Replace Disconnected Players Vote"
-    embed_description = "Vote to replace disconnected players with bots."
-    embed_color = discord.Color.blue()
-    yes_label = "Yes, Replace with Bots"
-    yes_style = discord.ButtonStyle.primary
-    no_label = "No, Wait for Players"
-    no_style = discord.ButtonStyle.secondary
-    yes_status = "✅ Replace with Bots"
-    no_status = "❌ Wait for Players"
-    action_verb = "replace"
-    log_name = "Replace with bots vote"
 
 class DraftMancerReadyCheckView(View):
     def __init__(self, draft_session_id, participants, timeout=90.0):
@@ -453,126 +539,6 @@ class DraftControlCog(commands.Cog):
         
         return manager, draft_session
 
-    @discord.slash_command(name='replace_with_bots', description='Start a vote to replace disconnected players with bots')
-    async def replace_with_bots_command(self, ctx):
-        """Start a vote to replace disconnected players with bots"""
-        await ctx.defer(ephemeral=True)
-        
-        try:
-            result = await self._get_manager_for_channel(ctx)
-            if not result:
-                return
-                
-            manager, draft_session = result
-            
-            # Check if draft has started
-            if not manager.drafting:
-                await ctx.followup.send("Draft hasn't started yet.", ephemeral=True)
-                return
-                
-            # Check if draft is paused
-            if not manager.draftPaused:
-                await ctx.followup.send("The draft must be paused before disconnected players can be replaced. Use `/pause` first.", ephemeral=True)
-                return
-            
-            # Check if there's already an active replace vote
-            if draft_session.session_id in ACTIVE_REPLACE_VOTES:
-                await ctx.followup.send("There's already an active vote to replace disconnected players.", ephemeral=True)
-                return
-                
-            # Check if user is in sign_ups
-            user_id = str(ctx.author.id)
-            sign_ups = draft_session.sign_ups or {}
-            
-            is_participant = False
-            for discord_id, display_name in sign_ups.items():
-                if discord_id == user_id:
-                    is_participant = True
-                    break
-                    
-            if not is_participant:
-                await ctx.followup.send("Only draft participants can initiate a vote to replace disconnected players.", ephemeral=True)
-                return
-                
-            # Get all participants
-            participants = list(sign_ups.keys())
-            if not participants:
-                await ctx.followup.send("No draft participants found.", ephemeral=True)
-                return
-            
-            # Create replace vote view
-            view = ReplaceWithBotsVoteView(draft_session.session_id, participants)
-            
-            # Format the pings for the message
-            user_pings = []
-            for player_id in sign_ups:
-                try:
-                    member = ctx.guild.get_member(int(player_id))
-                    if member:
-                        user_pings.append(member.mention)
-                except:
-                    pass
-                    
-            ping_text = " ".join(user_pings) if user_pings else "No players to ping."
-            
-            # Generate initial status embed
-            embed = await view.generate_status_embed(ctx.guild)
-            
-            # Send message with pings and view
-            message = await ctx.channel.send(
-                f"🤖 **Vote to Replace Disconnected Players** initiated by {ctx.author.mention}\n\n"
-                f"{ping_text}\n\n"
-                f"Please vote on whether to replace disconnected players with bots.",
-                embed=embed,
-                view=view
-            )
-            
-            # Store message reference
-            view.message = message
-            
-            # Store in active votes
-            ACTIVE_REPLACE_VOTES[draft_session.session_id] = view
-            
-            # Start timeout timer
-            view.timer_task = asyncio.create_task(view.start_timer())
-            
-            # Acknowledge command
-            await ctx.followup.send("Vote to replace disconnected players initiated.", ephemeral=True)
-            
-            # Wait for completion
-            try:
-                await view.complete.wait()
-                
-                # Check if vote passed
-                passed, yes_votes, total_participants = view.get_vote_result()
-                if passed:
-                    # Vote passed, replace disconnected players
-                    final_message = await ctx.channel.send("✅ **Vote passed!** Replacing disconnected players with bots...")
-                    
-                    # Send replaceDisconnectedPlayers command to Draftmancer
-                    await manager.socket_client.emit('replaceDisconnectedPlayers')
-                    
-                    await final_message.edit(content="🤖 **Disconnected players replaced with bots!** The draft can now be resumed with `/unpause`.")
-                else:
-                    # Vote didn't pass
-                    await ctx.channel.send("❌ **Vote to replace disconnected players did not pass.**\nPlayers will need to reconnect before the draft can continue.")
-                
-                # Clean up
-                if draft_session.session_id in ACTIVE_REPLACE_VOTES:
-                    del ACTIVE_REPLACE_VOTES[draft_session.session_id]
-                    
-            except Exception as e:
-                logger.exception(f"Error while waiting for replace vote completion: {e}")
-                await ctx.channel.send("⚠️ An error occurred during the vote. Please try again.")
-                
-                # Clean up
-                if draft_session.session_id in ACTIVE_REPLACE_VOTES:
-                    del ACTIVE_REPLACE_VOTES[draft_session.session_id]
-                    
-        except Exception as e:
-            logger.exception(f"Error in replace_with_bots command: {e}")
-            await ctx.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
-            
     @discord.slash_command(name='ready', description='Start a ready check for the Draftmancer draft')
     async def ready_command(self, ctx):
         """Initiate a ready check for all players in the draft"""
@@ -635,11 +601,6 @@ class DraftControlCog(commands.Cog):
                 await ctx.followup.send("Draft manager is not active. Please wait a moment or contact an admin.", ephemeral=True)
                 return
                 
-            # Check if there's already an active log release vote
-            if session_id in ACTIVE_LOG_RELEASE_VOTES:
-                await ctx.followup.send("There's already an active vote to release logs for this draft.", ephemeral=True)
-                return
-                
             sign_ups = draft_session.sign_ups or {}
                 
             # Get all participants
@@ -651,74 +612,37 @@ class DraftControlCog(commands.Cog):
             # Create log release vote view
             view = LogReleaseVoteView(session_id, participants)
             
-            # Format the pings for the message
-            user_pings = []
-            for player_id in sign_ups:
-                try:
-                    member = ctx.guild.get_member(int(player_id))
-                    if member:
-                        user_pings.append(member.mention)
-                except:
-                    pass
-                    
-            ping_text = " ".join(user_pings) if user_pings else "No players to ping."
-            
-            # Generate initial status embed
-            embed = await view.generate_status_embed(ctx.guild)
-            
-            # Send message with pings and view
-            message = await ctx.channel.send(
-                f"📝 **Draft Log Release Vote** initiated by {ctx.author.mention}\n\n{ping_text}\n\n"
-                f"Please vote on whether to release the draft logs early.",
-                embed=embed,
-                view=view
+            announcement = (
+                f"📝 **Draft Log Release Vote** initiated by {ctx.author.mention}\n\n"
+                f"{_ping_text(ctx.guild, sign_ups)}\n\n"
+                f"Please vote on whether to release the draft logs early."
             )
-            
-            # Store message reference
-            view.message = message
-            
-            # Store in active votes
-            ACTIVE_LOG_RELEASE_VOTES[session_id] = view
-            
-            # Start timeout timer
-            view.timer_task = asyncio.create_task(view.start_timer())
-            
-            # Acknowledge command
-            await ctx.followup.send("Log release vote initiated.", ephemeral=True)
-            
-            # Wait for completion
-            try:
-                await view.complete.wait()
-                
-                # Check if vote passed
-                passed, yes_votes, total_participants = view.get_vote_result()
-                if passed:
-                    # Vote passed, release the logs
-                    final_message = await ctx.channel.send("✅ **Vote passed!** Releasing logs in 5 seconds...")
-                    await asyncio.sleep(5)
-                    
-                    # Call the method to unlock the logs
-                    success = await manager.manually_unlock_draft_logs()
-                    
-                    if success:
-                        await final_message.edit(content="🔓 **Logs have been made public!**")
-                    else:
-                        await final_message.edit(content="❌ **Failed to release logs.** Please try again later.")
+
+            async def _released():
+                final_message = await ctx.channel.send("✅ **Vote passed!** Releasing logs in 5 seconds...")
+                await asyncio.sleep(5)
+                success = await manager.manually_unlock_draft_logs()
+                if success:
+                    await final_message.edit(content="🔓 **Logs have been made public!**")
                 else:
-                    # Vote didn't pass
-                    await ctx.channel.send("❌ **Vote to release logs did not pass.** Logs will remain private until the end of the draft.")
-                
-                # Clean up
-                if session_id in ACTIVE_LOG_RELEASE_VOTES:
-                    del ACTIVE_LOG_RELEASE_VOTES[session_id]
-                    
+                    await final_message.edit(content="❌ **Failed to release logs.** Please try again later.")
+
+            async def _not_released():
+                await ctx.channel.send("❌ **Vote to release logs did not pass.** Logs will remain private until the end of the draft.")
+
+            try:
+                started = await run_participant_vote(
+                    ctx, channel=ctx.channel, view=view,
+                    registry=ACTIVE_LOG_RELEASE_VOTES, key=session_id,
+                    announcement=announcement, ack="Log release vote initiated.",
+                    on_pass=_released, on_fail=_not_released)
+                if not started:
+                    await ctx.followup.send(
+                        "There's already an active vote to release logs for this draft.",
+                        ephemeral=True)
             except Exception as e:
                 logger.exception(f"Error while waiting for log release vote completion: {e}")
                 await ctx.channel.send("⚠️ An error occurred during the log release vote. Please try again.")
-                
-                # Clean up
-                if session_id in ACTIVE_LOG_RELEASE_VOTES:
-                    del ACTIVE_LOG_RELEASE_VOTES[session_id]
                     
         except Exception as e:
             logger.exception(f"Error in releaselogs command: {e}")
@@ -729,7 +653,10 @@ class DraftControlCog(commands.Cog):
     async def scrap_command(self, ctx):
         """Start a vote to completely cancel the draft"""
         await ctx.defer(ephemeral=True)
-        
+        await self._do_scrap(ctx)
+
+    async def _do_scrap(self, ctx):
+        """The command body, minus the defer, so it can be driven from a test."""
         try:
             result = await self._get_manager_for_channel(ctx)
             if not result:
@@ -737,7 +664,18 @@ class DraftControlCog(commands.Cog):
                 
             manager, draft_session = result
             
-            # Check if draft has started
+            # draft_finished rather than session_stage: _get_manager_for_channel
+            # already filters out NULL stages, so a not-yet-started draft reaching
+            # here still has stage 'teams' and the stage cannot tell the two apart.
+            if manager.draft_finished:
+                await ctx.followup.send(
+                    "This draft has finished drafting, so there's no session to "
+                    "cancel. Use `/abandon` from the draft chat or a team channel "
+                    "to void the draft and its results.",
+                    ephemeral=True,
+                )
+                return
+
             if not manager.drafting:
                 await ctx.followup.send("Draft hasn't started yet.", ephemeral=True)
                 return
@@ -747,11 +685,6 @@ class DraftControlCog(commands.Cog):
                 await ctx.followup.send("The draft must be paused before it can be canceled. Use `/pause` first.", ephemeral=True)
                 return
             
-            # Check if there's already an active scrap vote
-            if draft_session.session_id in ACTIVE_SCRAP_VOTES:
-                await ctx.followup.send("There's already an active vote to cancel this draft.", ephemeral=True)
-                return
-                
             # Check if user is in sign_ups
             user_id = str(ctx.author.id)
             sign_ups = draft_session.sign_ups or {}
@@ -775,80 +708,52 @@ class DraftControlCog(commands.Cog):
             # Create scrap vote view
             view = ScrapVoteView(draft_session.session_id, participants)
             
-            # Format the pings for the message
-            user_pings = []
-            for player_id in sign_ups:
-                try:
-                    member = ctx.guild.get_member(int(player_id))
-                    if member:
-                        user_pings.append(member.mention)
-                except:
-                    pass
-                    
-            ping_text = " ".join(user_pings) if user_pings else "No players to ping."
-            
-            # Generate initial status embed
-            embed = await view.generate_status_embed(ctx.guild)
-            
-            # Send message with pings and view
-            message = await ctx.channel.send(
-                f"⚠️ **Draft Cancellation Vote** initiated by {ctx.author.mention}\n\n{ping_text}\n\n"
-                f"Please vote on whether to cancel the current draft.",
-                embed=embed,
-                view=view
+            announcement = (
+                f"⚠️ **Draft Cancellation Vote** initiated by {ctx.author.mention}\n\n"
+                f"{_ping_text(ctx.guild, sign_ups)}\n\n"
+                f"Please vote on whether to cancel the current draft."
             )
-            
-            # Store message reference
-            view.message = message
-            
-            # Store in active votes
-            ACTIVE_SCRAP_VOTES[draft_session.session_id] = view
-            
-            # Start timeout timer
-            view.timer_task = asyncio.create_task(view.start_timer())
-            
-            # Acknowledge command
-            await ctx.followup.send("Cancellation vote initiated.", ephemeral=True)
-            
-            # Wait for completion
-            try:
-                await view.complete.wait()
-                
-                # Check if vote passed
-                passed, yes_votes, total_participants = view.get_vote_result()
-                if passed:
-                    # Vote passed, cancel the draft
-                    final_message = await ctx.channel.send("⚠️ **Vote passed!** Canceling draft in 5 seconds...")
-                    
-                    # Mark the draft as cancelled to skip log collection
-                    await manager.mark_draft_cancelled()
-                    
-                    manager.drafting = False
-                    await asyncio.sleep(5)
-                    
-                    # Send stopDraft command to Draftmancer
-                    await manager.socket_client.emit('stopDraft')
-                    
+
+            async def _cancelled():
+                final_message = await ctx.channel.send("⚠️ **Vote passed!** Canceling draft in 5 seconds...")
+                # Skip log collection for a draft nobody finished.
+                await manager.mark_draft_cancelled()
+                await asyncio.sleep(5)
+                # emit returns False on a disconnected or throwing socket. Announcing
+                # a cancellation that never reached Draftmancer is not cosmetic: the
+                # draft keeps running while players are told it stopped, and setting
+                # drafting=False regardless would then convince /abandon the draft is
+                # over and let it void the results of a draft still being played. So
+                # the local state only follows once Draftmancer has actually been told.
+                if not await manager.socket_client.emit('stopDraft'):
                     await final_message.edit(content=
-                                            "🛑 **Draft canceled!** \n" \
-                                            "Use `/ready` to begin a ready check for a new draft.\n" \
-                                            "Use `/mutiny` to remove the bot and take control of the session."
+                        "⚠️ **Could not reach Draftmancer to cancel the draft.** "
+                        "The vote passed, but the draft is still running there. "
+                        "Use `/mutiny` to take control of the session directly."
                     )
-                else:
-                    # Vote didn't pass
-                    await ctx.channel.send("🛑 **Vote to cancel draft did not pass.**\n Use `/unpause` to continue the draft.")
-                
-                # Clean up
-                if draft_session.session_id in ACTIVE_SCRAP_VOTES:
-                    del ACTIVE_SCRAP_VOTES[draft_session.session_id]
-                    
+                    return
+                manager.drafting = False
+                await final_message.edit(content=
+                                        "🛑 **Draft canceled!** \n" \
+                                        "Use `/ready` to begin a ready check for a new draft.\n" \
+                                        "Use `/mutiny` to remove the bot and take control of the session."
+                )
+
+            async def _not_cancelled():
+                await ctx.channel.send("🛑 **Vote to cancel draft did not pass.**\n Use `/unpause` to continue the draft.")
+
+            try:
+                started = await run_participant_vote(
+                    ctx, channel=ctx.channel, view=view,
+                    registry=ACTIVE_SCRAP_VOTES, key=draft_session.session_id,
+                    announcement=announcement, ack="Cancellation vote initiated.",
+                    on_pass=_cancelled, on_fail=_not_cancelled)
+                if not started:
+                    await ctx.followup.send(
+                        "There's already an active vote to cancel this draft.", ephemeral=True)
             except Exception as e:
                 logger.exception(f"Error while waiting for scrap vote completion: {e}")
                 await ctx.channel.send("⚠️ An error occurred during the cancellation vote. Please try again.")
-                
-                # Clean up
-                if draft_session.session_id in ACTIVE_SCRAP_VOTES:
-                    del ACTIVE_SCRAP_VOTES[draft_session.session_id]
                     
         except Exception as e:
             logger.exception(f"Error in scrap command: {e}")
@@ -859,21 +764,31 @@ class DraftControlCog(commands.Cog):
         description='Abandon this draft and void all matches (admins immediately; players by majority vote)'
     )
     async def abandon_command(self, ctx):
-        """Abandon a draft from its match channel. Admin = immediate (with
+        """Abandon a draft from any of its channels. Admin = immediate (with
         confirmation); a participant starts a majority vote."""
         await ctx.defer(ephemeral=True)
+        await self._do_abandon(ctx)
 
+    async def _do_abandon(self, ctx):
+        """The command body, minus the defer, so it can be driven from a test."""
         try:
-            channel_id = str(ctx.channel_id)
-            draft_session = await DraftSession.get_by_channel_id(channel_id)
+            # Any of the draft's channels, not just the shared chat: a stalled
+            # draft sits in the TEAM channels, which is where players are when a
+            # match never gets reported, and that is where they reach for this.
+            draft_session = await DraftSession.get_by_any_channel_id(ctx.channel_id)
             if not draft_session:
                 await ctx.followup.send(
-                    "Run `/abandon` in the draft's match channel (where pairings are posted).",
+                    "No draft here. Run `/abandon` in the draft chat or one of its "
+                    "team channels.",
                     ephemeral=True,
                 )
                 return
 
-            if draft_session.session_stage == "completed":
+            # is_finished_draft, not `session_stage == "completed"`: the stage
+            # rarely advances past 'pairings' even for a fully played draft, so the
+            # posted victory message is the reliable completion marker. Checking the
+            # stage alone let a finished draft have all its results voided.
+            if is_finished_draft(draft_session):
                 await ctx.followup.send(
                     "This draft is already completed and can't be abandoned.", ephemeral=True
                 )
@@ -882,12 +797,29 @@ class DraftControlCog(commands.Cog):
                 await ctx.followup.send("This draft has already been abandoned.", ephemeral=True)
                 return
 
+            # Still being drafted: that is /scrap's job. Voiding the record now
+            # would strand a session people are mid-pick in.
+            if DraftSetupManager.is_drafting(draft_session.session_id):
+                await ctx.followup.send(
+                    "This draft is still running in Draftmancer. Use `/pause` then "
+                    "`/scrap` **in the channel the draft was posted in**; `/abandon` "
+                    "is for after drafting ends.",
+                    ephemeral=True,
+                )
+                return
+
             # Admin path: immediate (after a confirmation click).
-            from helpers.permissions import is_bot_manager
             if await is_bot_manager(ctx):
                 await ctx.followup.send(
                     "Abandon this draft? This voids **all** match results and can't be undone.",
-                    view=AbandonConfirmView(draft_session.session_id, ctx.channel),
+                    # The shared chat, like the vote: voiding every result is
+                    # draft-wide news, and from a team channel ctx.channel reaches
+                    # only half the players. The `or` fallback is fine here, unlike
+                    # for the vote -- this announces a decision already made rather
+                    # than collecting one, so a narrower audience beats silence.
+                    view=AbandonConfirmView(
+                        draft_session.session_id,
+                        _shared_draft_channel(ctx, draft_session) or ctx.channel),
                     ephemeral=True,
                 )
                 return
@@ -900,46 +832,55 @@ class DraftControlCog(commands.Cog):
                 )
                 return
 
-            if draft_session.session_id in ACTIVE_ABANDON_VOTES:
-                await ctx.followup.send(
-                    "There's already an active vote to abandon this draft.", ephemeral=True
-                )
-                return
-
             participants = list(sign_ups.keys())
             view = AbandonVoteView(draft_session.session_id, participants)
 
-            user_pings = []
-            for player_id in sign_ups:
-                member = ctx.guild.get_member(int(player_id))
-                if member:
-                    user_pings.append(member.mention)
-            ping_text = " ".join(user_pings) if user_pings else "No players to ping."
-
-            embed = await view.generate_status_embed(ctx.guild)
-            message = await ctx.channel.send(
-                f"⚠️ **Draft Abandonment Vote** initiated by {ctx.author.mention}\n\n{ping_text}\n\n"
-                "A majority of participants must agree to abandon this draft (voids all matches).",
-                embed=embed,
-                view=view,
+            announcement = (
+                f"⚠️ **Draft Abandonment Vote** initiated by {ctx.author.mention}\n\n"
+                f"{_ping_text(ctx.guild, sign_ups)}\n\n"
+                "A majority of participants must agree to abandon this draft (voids all matches)."
             )
-            view.message = message
-            ACTIVE_ABANDON_VOTES[draft_session.session_id] = view
-            view.timer_task = asyncio.create_task(view.start_timer())
-            await ctx.followup.send("Abandonment vote initiated.", ephemeral=True)
 
-            try:
-                await view.complete.wait()
-                passed, _, _ = view.get_vote_result()
-                if passed:
-                    await abandon_draft_session(draft_session.session_id)
-                    await ctx.channel.send(
+            # The shared draft chat, NOT ctx.channel. Team channels deny @everyone
+            # read and grant it only to their own team, so a vote posted in one is
+            # invisible to the other side -- and a majority of six can never be
+            # reached from three voters. The command is reachable from anywhere;
+            # the vote it starts has to be visible to everyone it binds.
+            vote_channel = _shared_draft_channel(ctx, draft_session)
+            if vote_channel is None:
+                await ctx.followup.send(
+                    "This draft has no shared chat to hold a vote in, so every "
+                    "participant could not see it. Ask an admin to abandon the "
+                    "draft instead.",
+                    ephemeral=True,
+                )
+                return
+
+            async def _abandoned():
+                # The draft can finish while the vote runs, and abandon_draft_session
+                # refuses when it has. Saying "voided" anyway would send six players
+                # to re-report matches that were never touched.
+                if await abandon_draft_session(draft_session.session_id):
+                    await vote_channel.send(
                         "🛑 **Vote passed — draft abandoned.** All match results have been voided."
                     )
                 else:
-                    await ctx.channel.send("✅ **Vote to abandon the draft did not pass.**")
-            finally:
-                ACTIVE_ABANDON_VOTES.pop(draft_session.session_id, None)
+                    await vote_channel.send(
+                        "✅ **Vote passed, but this draft finished while it was running.** "
+                        "Nothing was voided — the results stand."
+                    )
+
+            async def _kept():
+                await vote_channel.send("✅ **Vote to abandon the draft did not pass.**")
+
+            started = await run_participant_vote(
+                ctx, channel=vote_channel, view=view,
+                registry=ACTIVE_ABANDON_VOTES, key=draft_session.session_id,
+                announcement=announcement, ack="Abandonment vote initiated.",
+                on_pass=_abandoned, on_fail=_kept)
+            if not started:
+                await ctx.followup.send(
+                    "There's already an active vote to abandon this draft.", ephemeral=True)
 
         except Exception as e:
             logger.exception(f"Error in abandon command: {e}")
@@ -1143,11 +1084,6 @@ class DraftControlCog(commands.Cog):
                 await ctx.followup.send("Only draft participants can unpause the draft.", ephemeral=True)
                 return
             
-            # Check if there's already an active unpause check
-            if draft_session.session_id in ACTIVE_UNPAUSE_CHECKS:
-                await ctx.followup.send("There's already an active unpause ready check.", ephemeral=True)
-                return
-                
             # Get all participants
             participants = list(sign_ups.keys())
             if not participants:
@@ -1157,58 +1093,37 @@ class DraftControlCog(commands.Cog):
             # Create ready check view
             view = DraftMancerReadyCheckView(draft_session.session_id, participants)
             
-            # Format the pings for the message
-            user_pings = []
-            for player_id in sign_ups:
-                try:
-                    member = ctx.guild.get_member(int(player_id))
-                    if member:
-                        user_pings.append(member.mention)
-                except:
-                    pass
-                    
-            ping_text = " ".join(user_pings) if user_pings else "No players to ping."
-            
-            # Generate initial status embed
-            embed = await view.generate_status_embed(ctx.guild)
-            
-            # Send message with pings and view
-            message = await ctx.channel.send(
-                f"⚠️ **Draft Unpause Ready Check** initiated by {ctx.author.mention}\n\n{ping_text}\n\n"
-                f"Please click the Ready button below when you're ready to continue.",
-                embed=embed,
-                view=view
+            announcement = (
+                f"⚠️ **Draft Unpause Ready Check** initiated by {ctx.author.mention}\n\n"
+                f"{_ping_text(ctx.guild, sign_ups)}\n\n"
+                f"Please click the Ready button below when you're ready to continue."
             )
-            
-            # Store message reference
-            view.message = message
-            
-            # Store in active checks
+
+            # Test and claim with nothing awaited between them, the same way
+            # run_participant_vote does. Checking earlier -- before generating the
+            # embed and posting the message -- let two invocations both pass the
+            # check and both post a ready check, with the second overwriting the
+            # first and both able to emit resumeDraft.
+            if draft_session.session_id in ACTIVE_UNPAUSE_CHECKS:
+                await ctx.followup.send(
+                    "There's already an active unpause ready check.", ephemeral=True)
+                return
             ACTIVE_UNPAUSE_CHECKS[draft_session.session_id] = view
-            
-            # Start timeout timer
-            view.timer_task = asyncio.create_task(view.start_timer())
-            
-            # Acknowledge command
-            await ctx.followup.send("Unpause ready check initiated.", ephemeral=True)
-            
-            # Wait for completion
             try:
+                # Everything that can raise from here is covered by the finally
+                # below -- including the ack, whose failure used to leave the entry
+                # behind. A Ready click cancels the timer, so on_timeout never runs
+                # to heal it and the draft never resumes.
+                embed = await view.generate_status_embed(ctx.guild)
+                view.message = await ctx.channel.send(announcement, embed=embed, view=view)
+                view.timer_task = asyncio.create_task(view.start_timer())
+                await ctx.followup.send("Unpause ready check initiated.", ephemeral=True)
                 await view.complete.wait()
                 
                 # Check if everyone is ready
                 if view.is_everyone_ready():
                     # Format pings again for the resume notification
-                    user_pings = []
-                    for player_id in sign_ups:
-                        try:
-                            member = ctx.guild.get_member(int(player_id))
-                            if member:
-                                user_pings.append(member.mention)
-                        except:
-                            pass
-                            
-                    ping_text = " ".join(user_pings) if user_pings else "No players to ping."
+                    ping_text = _ping_text(ctx.guild, sign_ups)
                     
                     # Everyone is ready, resume the draft with pings
                     resume_message = await ctx.channel.send(
@@ -1225,17 +1140,15 @@ class DraftControlCog(commands.Cog):
                     # Not everyone was ready, send timeout message
                     await ctx.channel.send("⌛ The unpause ready check has expired. Please try again when everyone is ready.")
                 
-                # Clean up
-                if draft_session.session_id in ACTIVE_UNPAUSE_CHECKS:
-                    del ACTIVE_UNPAUSE_CHECKS[draft_session.session_id]
-                    
             except Exception as e:
                 logger.exception(f"Error while waiting for unpause ready check completion: {e}")
                 await ctx.channel.send("⚠️ An error occurred during the unpause ready check. Please try again.")
-                
-                # Clean up
-                if draft_session.session_id in ACTIVE_UNPAUSE_CHECKS:
-                    del ACTIVE_UNPAUSE_CHECKS[draft_session.session_id]
+            finally:
+                # Not run_participant_vote: this is a ready check, decided by
+                # is_everyone_ready() rather than a majority. Same leak though --
+                # deleting in two places left anything raising in between to skip
+                # both -- so it gets the same `finally`, in its own idiom.
+                ACTIVE_UNPAUSE_CHECKS.pop(draft_session.session_id, None)
                     
         except Exception as e:
             logger.exception(f"Error in unpause command: {e}")

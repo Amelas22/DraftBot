@@ -72,7 +72,7 @@ SHADOW = "[autopause-shadow]"
 # the bot-triggered and human-triggered pause messages cannot drift apart.
 PAUSED_DRAFT_OPTIONS = (
     "\u2022 Use `/unpause` to resume once everyone is ready.\n"
-    "\u2022 Use `/replace_with_bots` to replace disconnected users with bots.\n"
+    "\u2022 Use `/mutiny` to take the session over from the bot and carry on there.\n"
     "\u2022 Use `/scrap` to start a vote to cancel the draft."
 )
 SOCKET_OPERATION_DELAY = 0.5  # Seconds between socket operations
@@ -694,7 +694,7 @@ class DraftSetupManager:
             f"Draftmancer, which stalls the table.\n\n"
             f"Rejoin here to carry on: {session_url}\n\n"
             f"• Use `/unpause` to resume once everyone is back.\n"
-            f"• Use `/replace_with_bots` to replace disconnected users with bots.\n"
+            f"• Use `/mutiny` to take the session over from the bot and carry on there.\n"
             f"• Use `/scrap` to start a vote to cancel the draft."
         )
 
@@ -2168,6 +2168,23 @@ class DraftSetupManager:
         except Exception as e:
             self.logger.exception(f"Error during disconnect: {e}")
             
+    @classmethod
+    def is_drafting(cls, session_id) -> bool:
+        """True while Draftmancer is still drafting this session.
+
+        The line between the two cancel commands: while this holds, /scrap stops
+        the drafting session; once it does not, /abandon voids the record. Lives
+        here because it encodes the semantics of THIS class's flags -- a caller
+        outside the cogs (a service, the reaper, a future escrow release) must be
+        able to ask without importing a Discord cog.
+
+        Answers from this process's registry, so it cannot see a draft still
+        running after a restart. Adequate while the answer only picks a help
+        message; anything that moves money will need a persisted signal.
+        """
+        manager = cls.get_active_manager(session_id)
+        return bool(manager and manager.drafting)
+
     @classmethod
     def get_active_manager(cls, session_id: str):
         """

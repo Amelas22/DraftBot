@@ -38,7 +38,10 @@ import os
 import random
 import tempfile
 from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -114,11 +117,15 @@ async def seed_tournament_match(session, thread_id=None):
 async def seed_session(session_id="s1", guild="g", stype="staked",
                        stage="completed", victory=None, teams=None,
                        matches=(), start=None, sign_ups=None,
-                       cube="TestCube"):
+                       cube="TestCube", draft_chat_channel=None,
+                       channel_ids=None):
     """Seed one DraftSession plus its MatchResults.
 
     teams: (team_a_list, team_b_list) or None (legacy-style, no team JSON).
     matches: iterable of (player1, player2, winner, submitted_at_or_None).
+    draft_chat_channel / channel_ids: the draft's rooms, for tests that resolve a
+    session from a channel. Note the type asymmetry production stores them with --
+    the chat as a string, channel_ids as JSON ints.
     """
     when = start or datetime(2026, 1, 1)
     async with AsyncSessionLocal() as s:
@@ -129,6 +136,8 @@ async def seed_session(session_id="s1", guild="g", stype="staked",
             team_a=list(teams[0]) if teams else None,
             team_b=list(teams[1]) if teams else None,
             draft_start_time=when, teams_start_time=when,
+            draft_chat_channel=draft_chat_channel,
+            channel_ids=channel_ids,
             sign_ups=sign_ups, cube=cube))
         for i, (p1, p2, w, ts) in enumerate(matches):
             s.add(MatchResult(session_id=session_id, match_number=i + 1,
@@ -421,3 +430,40 @@ def make_channel_harness(monkeypatch, *, categories=("Draft Channels",), feature
     for name, kind in strays:
         guild.seed(name, kind)
     return view, guild, db
+
+
+def make_draft_stub(session_stage="pairings", sign_ups=None, **overrides):
+    """A DraftSession double carrying what /scrap, /abandon and is_finished_draft
+    read off a session.
+
+    The victory-message fields matter: a played draft usually still sits at
+    'pairings', so those are the real completion markers (helpers.stale_drafts.
+    is_finished_draft). A stub missing them cannot exercise the completion guard
+    at all -- it raises instead, which is how their absence was first noticed.
+    """
+    base = dict(
+        session_id="sess_123", session_stage=session_stage,
+        draft_chat_channel=None, channel_ids=[],
+        sign_ups=sign_ups or {"1": "One", "2": "Two"},
+        victory_message_id_draft_chat=None,
+        victory_message_id_results_channel=None,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def sent_to_invoker(ctx):
+    """Everything a command replied to the person who ran it, as one string.
+
+    Shared so that widening it -- to read embeds, or kwargs-passed content --
+    widens what BOTH command suites can see, rather than one of them silently
+    keeping the narrower notion of "what did it say".
+    """
+    return " ".join(str(c.args[0]) for c in ctx.followup.send.await_args_list if c.args)
+
+
+@pytest.fixture
+def draft_control_cog():
+    """The cog under test for /scrap and /abandon."""
+    from cogs.draft_control import DraftControlCog
+    return DraftControlCog(bot=MagicMock())
