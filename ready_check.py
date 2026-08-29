@@ -17,7 +17,14 @@ PlayerStatus = Literal['ready', 'not_ready', 'no_response']
 # Minimum gap between successive lobby ready checks on the same draft. The Ready
 # Check button stays enabled; this debounce (not a disabled button) is what
 # prevents spamming multiple checks in quick succession.
-READY_CHECK_DEBOUNCE_SECONDS = 120
+#
+# It is ping-spam protection, not correctness: every check @-mentions all eight
+# signed-up players, so the cost of firing one is eight notifications. Against
+# that sits the ordinary case -- a host fires a check, one player does not
+# respond, the host nudges them and wants to go again. Two minutes of eight
+# people waiting for a button to work is a long time; a minute still caps the
+# table at one ping per minute, which is the thing worth preventing.
+READY_CHECK_DEBOUNCE_SECONDS = 60
 
 # After this long with no response and no re-fire, a stalled lobby ready check is
 # auto-cleaned and a notice is posted.
