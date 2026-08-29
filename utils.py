@@ -15,6 +15,7 @@ from models import QuizSession, TrophyQuizSession
 from quiz_views_module.quiz_views import QuizPublicView
 from quiz_views_module.trophy_quiz_views import TrophyQuizView
 from helpers.draft_footer import apply_draft_footer_from_session
+from helpers.draft_outcome import decides_draft
 from services.draft_analysis import DraftAnalysis
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
@@ -607,8 +608,10 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                             inline=False
                         )
                     
-                    # Create bet outcomes embed if there's a winner
-                    if team_a_wins > half_matches or team_b_wins > half_matches:
+                    # Create bet outcomes embed if there's a winner.
+                    # Victory only: a draw pays nobody, so this is the line that
+                    # decides whether any money moves for this draft.
+                    if decides_draft(team_a_wins, team_b_wins, total_matches) in ("team_a", "team_b"):
                         # Determine the winning team
                         winning_team = draft_session.team_a if team_a_wins > team_b_wins else draft_session.team_b
 
@@ -979,10 +982,12 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
 
             team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
             total_matches = draft_session.match_counter - 1
-            half_matches = total_matches // 2
 
-            # Check victory or draw conditions
-            if team_a_wins > half_matches or team_b_wins > half_matches or (team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0):
+            # Check victory or draw conditions. Shared with the confirmation in
+            # views.MatchResultSelect, which asks the same question one moment
+            # earlier -- "would this report end the draft?" -- and must get the
+            # same answer, or it guards the wrong report.
+            if decides_draft(team_a_wins, team_b_wins, total_matches) is not None:
                 async with lock:
                     # Check if victory has already been processed (idempotency check)
                     # This prevents duplicate streak increments and leaderboard updates if this function

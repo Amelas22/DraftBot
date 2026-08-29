@@ -26,10 +26,12 @@ from helpers.draft_rooms import (
     DRAFT_ROOM_COUNT, draft_category as resolve_draft_category, ensure_channel,
     resolve_category, rooms_needed, team_channel_name, team_overwrites, team_voice_name,
 )
+from helpers.draft_outcome import decides_draft, standings_after
 from helpers.opponent_threads import spawn_opponent_threads
 from helpers.permissions import bot_manager_button
 from utils import (
     calculate_pairings,
+    calculate_team_wins,
     get_formatted_stake_pairs,
     generate_draft_summary_embed,
     post_pairings,
@@ -1857,11 +1859,106 @@ class MatchResultButton(Button):
             await interaction.followup.send("An error occurred while fetching match details.", ephemeral=True)
 
 
+_RESULT_REPORT_LOCKS = {}
+
+
+def report_lock(session_id):
+    """One lock per draft, so a report is projected and written as one step.
+
+    Check-then-set with no await between is atomic under asyncio, which is what
+    makes this safe to build lazily.
+    """
+    lock = _RESULT_REPORT_LOCKS.get(session_id)
+    if lock is None:
+        lock = _RESULT_REPORT_LOCKS[session_id] = asyncio.Lock()
+    return lock
+
+
+class ConfirmDecisiveResultView(View):
+    """The checkpoint in front of a result that ends the draft.
+
+    "Change result" matters as much as "Confirm": a dialog that can only be
+    dismissed leaves the reporter where they started, having to reopen the
+    match to fix a misclick. Backing out hands them a fresh select instead --
+    which also clears Discord's habit of leaving the wrong option looking
+    chosen.
+    """
+
+    def __init__(self, select, value, author_id, origin):
+        super().__init__(timeout=300)
+        self.select = select
+        self.value = value
+        self.author_id = author_id
+        self.origin = origin
+        self.processing = False
+
+    async def on_timeout(self):
+        """Say the dialog lapsed rather than letting it rot.
+
+        A stopped view keeps its buttons on screen, and Discord answers a click
+        on one with a bare "interaction failed" -- leaving the reporter unsure
+        whether the result went in. Nothing was recorded, so say that, and point
+        back at the way in.
+        """
+        try:
+            await self.origin.edit_original_response(
+                content="This confirmation expired, so nothing was recorded. "
+                        "Report the match again when you are ready.",
+                view=None)
+        except Exception:
+            pass
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "Only the person reporting this match can confirm it.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm result", style=discord.ButtonStyle.danger)
+    async def confirm_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if self.processing:
+            # Two fast clicks are both dispatched before the first finishes;
+            # each would see an unreported match and run first-report effects.
+            await interaction.response.send_message(
+                "That result is already being recorded.", ephemeral=True)
+            return
+        self.processing = True
+
+        await interaction.response.edit_message(content="Recording the result...", view=None)
+        async with report_lock(self.select.session_id):
+            recorded = await self.select._apply_result(interaction, self.value)
+        try:
+            await interaction.edit_original_response(
+                content="Result recorded." if recorded else
+                        "The result could not be recorded, so nothing was changed. "
+                        "Please try reporting the match again.")
+        except Exception:
+            pass
+        self.stop()
+
+    @discord.ui.button(label="Change result", style=discord.ButtonStyle.secondary)
+    async def change_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+        view = View(timeout=None)
+        view.add_item(MatchResultSelect(
+            bot=self.select.bot,
+            match_number=self.select.match_number,
+            session_id=self.select.session_id,
+            player1_name=self.select.player1_name,
+            player2_name=self.select.player2_name,
+        ))
+        await interaction.response.edit_message(
+            content="Nothing was recorded. Please select the match result:", view=view)
+        self.stop()
+
+
 class MatchResultSelect(Select):
     def __init__(self, bot, match_number, session_id, player1_name, player2_name, *args, **kwargs):
         self.bot = bot
         self.match_number = match_number
         self.session_id = session_id
+        self.player1_name = player1_name
+        self.player2_name = player2_name
 
         options = [
             SelectOption(label=f"{player1_name} wins: 2-0", value="2-0-1"),
@@ -1873,10 +1970,126 @@ class MatchResultSelect(Select):
         super().__init__(placeholder=f"{player1_name} v. {player2_name}", min_values=1, max_values=1, options=options, *args, **kwargs)
 
     async def callback(self, interaction):
-        # Splitting the selected value to get the result details
+        """Record the result -- unless recording it would end the draft.
+
+        A decisive report is one-way: the summary embed books the stake debts
+        and check_and_post_victory_or_draw then marks the session processed, so
+        a correction afterwards moves the record and never the money. Ask first,
+        write second. Every other report is written straight through, because
+        most matches decide nothing and a second click on all of them would be a
+        tax on the common case.
+        """
         await interaction.response.defer()
         try:
-            player1_wins, player2_wins, winner_indicator = self.values[0].split('-')
+            value = self.values[0]
+
+            # Project and write under one lock. Separately these two reports
+            # decide nothing -- 3-3 becoming 4-3 twice over -- so without the
+            # lock both skip the dialog, both write, and the draft finishes 5-3
+            # having never asked anyone.
+            async with report_lock(self.session_id):
+                outcome, projected_a, projected_b, draft_session = await self._projected(value)
+                if outcome is None or draft_session is None:
+                    await self._apply_result(interaction, value)
+                    return
+
+            await interaction.edit_original_response(
+                content=self._confirmation_text(outcome, projected_a, projected_b, draft_session),
+                view=ConfirmDecisiveResultView(self, value, interaction.user.id, interaction),
+            )
+        except Exception as e:
+            logger.exception(f"Error in match result selection: {e}")
+            await self._report_error(interaction)
+
+    async def _report_error(self, interaction):
+        message = "An error occurred while updating the match result."
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+        except Exception:
+            pass
+
+    async def _projected(self, value):
+        """Standings as they WOULD be if `value` were recorded, and what that
+        settles: (outcome, team_a_wins, team_b_wins, draft_session).
+
+        Read-only. `outcome` comes from the same helper
+        check_and_post_victory_or_draw uses after the write, so the question
+        asked here and the answer acted on there cannot drift apart.
+
+        This read is not held against the later write, so a second reporter
+        moving the score while the dialog is open can leave the projection on
+        screen stale. That costs a wrong sentence, never wrong money:
+        settlement recomputes from the rows as they actually stand, so a
+        confirmation shown as a win that has since become a draw still pays
+        nobody.
+        """
+        _, _, winner_indicator = value.split('-')
+
+        async with AsyncSessionLocal() as session:
+            stmt = select(MatchResult, DraftSession).join(DraftSession).where(
+                MatchResult.session_id == self.session_id,
+                MatchResult.match_number == self.match_number
+            )
+            row = (await session.execute(stmt)).first()
+
+        if not row:
+            return None, 0, 0, None
+        match_result, draft_session = row
+
+        team_a = set(draft_session.team_a or [])
+        team_b = set(draft_session.team_b or [])
+
+        def side_of(player_id):
+            if player_id and player_id in team_a:
+                return "a"
+            if player_id and player_id in team_b:
+                return "b"
+            return None
+
+        if winner_indicator == '1':
+            new_winner_id = match_result.player1_id
+        elif winner_indicator == '2':
+            new_winner_id = match_result.player2_id
+        else:
+            new_winner_id = None
+
+        team_a_wins, team_b_wins = await calculate_team_wins(self.session_id)
+        projected_a, projected_b = standings_after(
+            team_a_wins, team_b_wins,
+            previous_winner_side=side_of(match_result.winner_id),
+            new_winner_side=side_of(new_winner_id),
+        )
+        outcome = decides_draft(projected_a, projected_b,
+                                (draft_session.match_counter or 1) - 1)
+        return outcome, projected_a, projected_b, draft_session
+
+    def _confirmation_text(self, outcome, projected_a, projected_b, draft_session):
+        team_a_name = draft_session.team_a_name or "Team A"
+        team_b_name = draft_session.team_b_name or "Team B"
+        score = f"**{team_a_name} {projected_a} – {projected_b} {team_b_name}**"
+        staked = draft_session.session_type == "staked"
+
+        if outcome == "draw":
+            money = "\nA draw pays nobody, so no stakes are settled." if staked else ""
+            return (f"### This ends the draft in a draw\n"
+                    f"Recording this makes it {score}, and the draft is over.{money}\n"
+                    f"\nNothing has been recorded yet.")
+
+        winner = team_a_name if outcome == "team_a" else team_b_name
+        money = ("\nStakes settle the moment this is recorded, and cannot be undone "
+                 "from Discord.") if staked else ""
+        return (f"### This ends the draft\n"
+                f"Recording this makes it {score} — **{winner}** wins.{money}\n"
+                f"\nNothing has been recorded yet.")
+
+    async def _apply_result(self, interaction, value):
+        """Write the reported result. Returns whether it actually landed."""
+        recorded = False
+        try:
+            player1_wins, player2_wins, winner_indicator = value.split('-')
             player1_wins = int(player1_wins)
             player2_wins = int(player2_wins)
             winner_id = None  # Default to None in case of a draw
@@ -1895,7 +2108,7 @@ class MatchResultSelect(Select):
                     
                     if not row:
                         await interaction.followup.send("Error: Match result or session not found.", ephemeral=True)
-                        return
+                        return False
                         
                     match_result, draft_session = row
 
@@ -1941,6 +2154,7 @@ class MatchResultSelect(Select):
                                     )
             
             if draft_session:
+                recorded = True
                 await update_draft_summary_message(self.bot, self.session_id)
                 from livedrafts import update_live_draft_summary
                 await update_live_draft_summary(self.bot, self.session_id)
@@ -1950,13 +2164,12 @@ class MatchResultSelect(Select):
             else:
                  logger.error(f"Draft session data missing for session {self.session_id}")
                  await interaction.followup.send("Error: Could not retrieve draft session data.", ephemeral=True)
+            return recorded
 
         except Exception as e:
-            logger.exception(f"Error in match result selection: {e}")
-            try:
-                await interaction.followup.send("An error occurred while updating the match result.", ephemeral=True)
-            except:
-                pass 
+            logger.exception(f"Error applying match result: {e}")
+            await self._report_error(interaction)
+            return False
 
     async def update_pairings_posting(self, interaction, bot, draft_session_id, match_number):
         guild = bot.get_guild(int(interaction.guild_id))
