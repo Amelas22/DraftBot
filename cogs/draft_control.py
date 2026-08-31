@@ -900,8 +900,10 @@ class DraftControlCog(commands.Cog):
             
             # One definition of "this draft has committed", on the manager. This
             # was a second inline copy that read only 'teams', so /mutiny on an
-            # already-drafted session declined to create pairings.
-            should_advance_to_pairings = await manager.must_preserve_draft_room()
+            # already-drafted session declined to create pairings. /mutiny hands
+            # the room to a human rather than replacing it, so it only borrows the
+            # predicate's conservatism -- it never reaches the destructive branch.
+            room_is_committed = await manager.must_preserve_draft_room()
             
             if manager.drafting:
                 self.logger.info(f"Mutiny during active draft for session {manager.session_id}. Will advance to pairings.")
@@ -953,7 +955,7 @@ class DraftControlCog(commands.Cog):
                 
             await ctx.channel.send(f"✅ Ownership transferred to {requester_name}. Bot disconnected.")
 
-            if should_advance_to_pairings:
+            if room_is_committed:
                 # Advance to pairings stage
                 success = await create_rooms_and_pairings_with_fallback(
                     ctx.bot, ctx.guild, ctx.channel, session_id, logger=self.logger

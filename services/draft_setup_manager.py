@@ -18,7 +18,7 @@ from models.draft_session import DraftSession
 from models.match import MatchResult
 from bot_registry import get_bot
 from session import AsyncSessionLocal
-from sqlalchemy import select
+from sqlalchemy import select, update
 from helpers.digital_ocean_helper import DigitalOceanHelper
 from helpers.draft_footer import apply_draft_footer
 from helpers.magicprotools_helper import MagicProtoolsHelper
@@ -915,20 +915,28 @@ class DraftSetupManager:
 
             self.logger.info(f"Regenerating draft session: old={self.draft_id}, new={new_draft_id}")
 
-            # Update the database
+            # Compare-and-swap, not a blind write. The caller decided this room
+            # was replaceable in an earlier transaction, and there are network
+            # round trips in between -- team creation can commit
+            # `session_stage='teams'` in that gap. Re-check the two facts the
+            # decision rested on, in the same statement that does the write, so a
+            # decision that has gone stale cannot abandon a committed room.
             async with db_session() as session:
-                stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
-                result = await session.execute(stmt)
-                draft_session = result.scalar_one_or_none()
-
-                if not draft_session:
-                    self.logger.error(f"Could not find draft session {self.session_id} to update")
-                    return False
-
-                # Update the draft_id and draft_link
-                draft_session.draft_id = new_draft_id
-                draft_session.draft_link = new_draft_link
+                result = await session.execute(
+                    update(DraftSession)
+                    .where(DraftSession.session_id == self.session_id,
+                           DraftSession.draft_id == self.draft_id,
+                           DraftSession.session_stage.is_(None))
+                    .values(draft_id=new_draft_id, draft_link=new_draft_link)
+                )
                 await session.commit()
+
+                if result.rowcount == 0:
+                    self.logger.warning(
+                        f"Refusing to regenerate {self.session_id}: it is no longer the "
+                        f"queued session with draft_id={self.draft_id} that was checked. "
+                        f"Preserving the existing Draftmancer room.")
+                    return False
 
                 self.logger.info(f"Updated draft session in database with new draft_id: {new_draft_id}")
 
@@ -2372,10 +2380,6 @@ class DraftSetupManager:
             self.logger.error(f"Error updating pack settings: {e}")
             return False
 
-    # Stages at or past which a draft has committed: links are out, people may
-    # already have drafted, and the Draftmancer room is the only copy of the log.
-    COMMITTED_STAGES = (SESSION_STAGE_TEAMS, SESSION_STAGE_PAIRINGS)
-
     async def must_preserve_draft_room(self) -> bool:
         """Whether this session's Draftmancer room must be kept.
 
@@ -2385,16 +2389,17 @@ class DraftSetupManager:
         destroys the log outright.
 
         So the question is not "is keeping it safe" -- keeping is always safe --
-        but "is there positive evidence it can be replaced". Only a session that
-        has not yet reached `teams` qualifies: before then nobody holds a link,
-        and replacing a broken room is the repair rather than the damage.
+        but "is there positive evidence it can be replaced". Only a session still
+        in the queue qualifies: it has no stage, nobody holds a link, and
+        replacing a broken room is the repair rather than the damage. Every other
+        stage, and every stage this code has never heard of, preserves.
 
         Everything else preserves, INCLUDING a session we cannot read.
         eastern-paladin-84 (2026-08-28) lost its log because the ambiguous
         answers shared a return value with "replaceable", so a stage the guard
         did not recognise read as permission to destroy the room.
         """
-        if self.drafting:
+        if self.drafting or self.draft_finished:
             return True
 
         try:
@@ -2407,7 +2412,11 @@ class DraftSetupManager:
                         f"No draft session row for {self.session_id}; preserving the "
                         f"Draftmancer room rather than assuming it is replaceable")
                     return True
-                return draft_session.session_stage in self.COMMITTED_STAGES
+                # A blacklist of one. Listing the committed stages instead put
+                # every stage nobody thought of -- 'completed', 'abandoned',
+                # anything added later -- back on the replaceable side, which is
+                # this bug's exact shape one stage further along.
+                return draft_session.session_stage is not None
         except Exception as e:
             self.logger.warning(
                 f"Could not read the session stage ({e}); preserving the Draftmancer "
@@ -2431,12 +2440,33 @@ class DraftSetupManager:
         if not channel:
             channel = await self._get_draft_channel()
 
-        if guild:
+        # Rooms may already exist: this path now also runs for a draft that has
+        # reached 'pairings', which is exactly when they do. create_rooms_pairings
+        # refuses to run twice, so calling it again posts a "could not create
+        # rooms automatically, use the button" notice into a lobby whose button
+        # was deleted when the rooms were made. Hand over quietly instead.
+        if guild and not await self._rooms_already_exist():
             await create_rooms_and_pairings_with_fallback(
                 bot, guild, channel, self.session_id, self.session_type, self.logger
             )
 
         await self._cleanup_and_disconnect("ownership loss with pairings")
+
+    async def _rooms_already_exist(self) -> bool:
+        """Whether this draft's rooms have been created.
+
+        Errs towards True: a failed lookup here would only cause a redundant,
+        confusing second attempt at creating them.
+        """
+        try:
+            async with db_session() as session:
+                stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
+                result = await session.execute(stmt)
+                draft_session = result.scalar_one_or_none()
+                return draft_session is None or draft_session.rooms_created_at is not None
+        except Exception as e:
+            self.logger.warning(f"Could not check whether rooms exist ({e}); assuming they do")
+            return True
 
     async def _cleanup_and_disconnect(self, reason: str = "cleanup") -> None:
         """Disconnect from Draftmancer and remove from active managers registry.
