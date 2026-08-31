@@ -41,8 +41,6 @@ VICTORY_CHECK_INITIAL_DELAY = 10  # Initial delay for immediate victory detectio
 
 # Session stage constants (subset - full list in models/draft_session.py)
 # Valid stages: None (initial), "teams", "pairings", "completed"
-SESSION_STAGE_TEAMS = "teams"
-SESSION_STAGE_PAIRINGS = "pairings"
 
 # Connection and retry settings
 MAX_USER_ID_LOOKUP_ATTEMPTS = 5  # Max attempts to find bot's userID in session
@@ -119,6 +117,19 @@ async def create_rooms_and_pairings_with_fallback(
     Returns:
         True if successful, False otherwise
     """
+    # Rooms may already exist -- /mutiny and the ownership-loss handler both
+    # reach here for drafts that have already reached 'pairings'.
+    # create_rooms_pairings refuses to run twice and returns False, which is
+    # indistinguishable here from a real failure, so without this the caller
+    # announces "could not create rooms automatically, use the button" into a
+    # channel whose button was deleted when the rooms were made. Already-created
+    # is success, not failure, and belongs here rather than at each caller.
+    existing = await DraftSession.get_by_session_id(session_id)
+    if existing is not None and existing.rooms_created_at is not None:
+        if logger:
+            logger.info(f"Rooms already exist for session {session_id}; nothing to create")
+        return True
+
     if channel:
         await channel.send("⏭️ **Creating rooms and pairings...** Continue the draft manually on Draftmancer.")
 
@@ -2390,38 +2401,27 @@ class DraftSetupManager:
 
         So the question is not "is keeping it safe" -- keeping is always safe --
         but "is there positive evidence it can be replaced". Only a session still
-        in the queue qualifies: it has no stage, nobody holds a link, and
-        replacing a broken room is the repair rather than the damage. Every other
-        stage, and every stage this code has never heard of, preserves.
+        in the queue qualifies: nobody holds a link yet, so replacing a broken
+        room there is the repair rather than the damage.
 
-        Everything else preserves, INCLUDING a session we cannot read.
         eastern-paladin-84 (2026-08-28) lost its log because the ambiguous
-        answers shared a return value with "replaceable", so a stage the guard
-        did not recognise read as permission to destroy the room.
+        answers shared a return value with "replaceable".
         """
         if self.drafting or self.draft_finished:
             return True
 
-        try:
-            async with db_session() as session:
-                stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
-                result = await session.execute(stmt)
-                draft_session = result.scalar_one_or_none()
-                if draft_session is None:
-                    self.logger.warning(
-                        f"No draft session row for {self.session_id}; preserving the "
-                        f"Draftmancer room rather than assuming it is replaceable")
-                    return True
-                # A blacklist of one. Listing the committed stages instead put
-                # every stage nobody thought of -- 'completed', 'abandoned',
-                # anything added later -- back on the replaceable side, which is
-                # this bug's exact shape one stage further along.
-                return draft_session.session_stage is not None
-        except Exception as e:
+        # Missing and unreadable collapse to None here, and both must preserve.
+        draft_session = await self._get_draft_session_from_db()
+        if draft_session is None:
             self.logger.warning(
-                f"Could not read the session stage ({e}); preserving the Draftmancer "
-                f"room rather than assuming it is replaceable")
+                f"Could not read the session for {self.session_id}; preserving the "
+                f"Draftmancer room rather than assuming it is replaceable")
             return True
+        # A blacklist of one. Listing the committed stages instead put every
+        # stage nobody thought of -- 'completed', 'abandoned', anything added
+        # later -- back on the replaceable side, which is this bug's exact shape
+        # one stage further along.
+        return draft_session.session_stage is not None
 
     async def _handle_ownership_loss_with_pairings(self, channel=None) -> None:
         """Handle bot losing ownership when past point of no return.
@@ -2440,33 +2440,16 @@ class DraftSetupManager:
         if not channel:
             channel = await self._get_draft_channel()
 
-        # Rooms may already exist: this path now also runs for a draft that has
-        # reached 'pairings', which is exactly when they do. create_rooms_pairings
-        # refuses to run twice, so calling it again posts a "could not create
-        # rooms automatically, use the button" notice into a lobby whose button
-        # was deleted when the rooms were made. Hand over quietly instead.
-        if guild and not await self._rooms_already_exist():
+        # create_rooms_and_pairings_with_fallback is idempotent: it returns
+        # early when the rooms already exist, which they do for any draft that
+        # has reached 'pairings'.
+        if guild:
             await create_rooms_and_pairings_with_fallback(
                 bot, guild, channel, self.session_id, self.session_type, self.logger
             )
 
         await self._cleanup_and_disconnect("ownership loss with pairings")
 
-    async def _rooms_already_exist(self) -> bool:
-        """Whether this draft's rooms have been created.
-
-        Errs towards True: a failed lookup here would only cause a redundant,
-        confusing second attempt at creating them.
-        """
-        try:
-            async with db_session() as session:
-                stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
-                result = await session.execute(stmt)
-                draft_session = result.scalar_one_or_none()
-                return draft_session is None or draft_session.rooms_created_at is not None
-        except Exception as e:
-            self.logger.warning(f"Could not check whether rooms exist ({e}); assuming they do")
-            return True
 
     async def _cleanup_and_disconnect(self, reason: str = "cleanup") -> None:
         """Disconnect from Draftmancer and remove from active managers registry.

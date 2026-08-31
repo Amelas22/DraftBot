@@ -13,11 +13,10 @@ not recognise -- and regenerated, one second after seeing all eight players
 still sitting in the room it threw away.
 """
 import pytest
+from datetime import datetime as _dt
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from services.draft_setup_manager import (
-    SESSION_STAGE_PAIRINGS, SESSION_STAGE_TEAMS,
-)
+from models.draft_session import DraftSession
 from conftest import make_manager, seed_session
 
 pytestmark = pytest.mark.asyncio
@@ -42,12 +41,12 @@ async def test_a_drafted_session_preserves_its_room(test_db):
     A manager rebuilt after a restart has `drafting` False, so the stored stage
     is the only evidence left that anyone drafted.
     """
-    assert await _preserve(SESSION_STAGE_PAIRINGS) is True
+    assert await _preserve("pairings") is True
 
 
 async def test_a_session_with_teams_preserves_its_room(test_db):
     """Teams formed means personalised room links have gone out to players."""
-    assert await _preserve(SESSION_STAGE_TEAMS) is True
+    assert await _preserve("teams") is True
 
 
 async def test_an_active_draft_preserves_its_room(test_db):
@@ -73,15 +72,13 @@ async def test_a_missing_session_preserves_its_room(test_db):
     """
     manager = make_manager()
     manager.session_id = "nonexistent"
-    manager.drafting = False
     assert await manager.must_preserve_draft_room() is True
 
 
 async def test_a_failed_lookup_preserves_its_room_and_warns(test_db):
     """A database blip must not read as permission to destroy the room."""
-    await seed_session(session_id=SESSION_ID, stage=SESSION_STAGE_PAIRINGS)
+    await seed_session(session_id=SESSION_ID, stage="pairings")
     manager = make_manager()
-    manager.drafting = False
     manager.logger = MagicMock()
 
     with patch("services.draft_setup_manager.db_session",
@@ -95,13 +92,13 @@ async def test_a_failed_lookup_preserves_its_room_and_warns(test_db):
 
 # --- the call site that can destroy the room --------------------------------
 
-async def _import_cube_with_ownership_error(stage, users):
+async def _import_cube_with_ownership_error(stage):
     """Drive import_cube's ownership branch. Returns True if it regenerated."""
     await seed_session(session_id=SESSION_ID, stage=stage)
     manager = make_manager()
     manager.drafting = False
-    manager.session_users = users
-    manager.users_count = len(users)
+    manager.session_users = []
+    manager.users_count = 0
 
     # Only the first importCube fails: import_cube is wrapped in a backoff
     # retry, the decision under test is made on that first reply, and letting
@@ -120,7 +117,11 @@ async def _import_cube_with_ownership_error(stage, users):
 
     manager.socket_client.emit = AsyncMock(side_effect=emit)
     regenerate = AsyncMock(return_value=False)
-    with patch.object(type(manager), "regenerate_draft_session", regenerate), \
+    # import_cube is wrapped in an exponential backoff that sleeps for real
+    # before each retry -- ~2.4s per test, and the decision under test is made
+    # on the first reply.
+    with patch("services.draft_setup_manager.asyncio.sleep", AsyncMock()), \
+         patch.object(type(manager), "regenerate_draft_session", regenerate), \
          patch.object(type(manager), "_handle_ownership_loss_with_pairings", AsyncMock()), \
          patch.object(type(manager), "_get_draft_channel", AsyncMock(return_value=None)), \
          patch.object(type(manager), "_cleanup_and_disconnect", AsyncMock()):
@@ -142,12 +143,12 @@ async def test_a_drafted_session_is_preserved_even_before_its_users_arrive(test_
     committed draft -- the same destruction, reached without consulting the
     stage at all.
     """
-    assert await _import_cube_with_ownership_error(SESSION_STAGE_PAIRINGS, []) is False
+    assert await _import_cube_with_ownership_error("pairings") is False
 
 
 async def test_a_queued_session_with_no_users_is_still_replaced(test_db):
     """The permission survives at the call site too, not just in the predicate."""
-    assert await _import_cube_with_ownership_error(None, []) is True
+    assert await _import_cube_with_ownership_error(None) is True
 
 
 async def test_a_finished_draft_preserves_its_room(test_db):
@@ -198,32 +199,22 @@ async def test_a_manager_that_saw_the_draft_end_preserves_its_room(test_db):
 
 async def _regenerate_after(stage_changes_to):
     """Regenerate a queued session whose stage changes before the write lands."""
-    from models.draft_session import DraftSession
-    from database.db_session import db_session as real_db_session
     from sqlalchemy import update as sa_update
+    from database.db_session import db_session
 
-    await seed_session(session_id=SESSION_ID, stage=None)
-    async with real_db_session() as s:
-        await s.execute(sa_update(DraftSession)
-                        .where(DraftSession.session_id == SESSION_ID)
-                        .values(draft_id="OLDROOM"))
-
-    manager = make_manager()
-    manager.draft_id = "OLDROOM"
+    await seed_session(session_id=SESSION_ID, stage=None, draft_id="OLDROOM")
+    manager = make_manager(draft_id="OLDROOM")
     # make_manager's socket is a MagicMock; regeneration awaits disconnect().
     manager.socket_client.disconnect = AsyncMock()
-    if stage_changes_to is not None:
-        async with real_db_session() as s:
-            await s.execute(sa_update(DraftSession)
-                            .where(DraftSession.session_id == SESSION_ID)
-                            .values(session_stage=stage_changes_to))
+
+    # The stage moves after the decision was made and before the write lands.
+    async with db_session() as session:
+        await session.execute(sa_update(DraftSession)
+                              .where(DraftSession.session_id == SESSION_ID)
+                              .values(session_stage=stage_changes_to))
 
     ok = await manager.regenerate_draft_session()
-    async with real_db_session() as s:
-        row = (await s.execute(
-            __import__("sqlalchemy").select(DraftSession)
-            .where(DraftSession.session_id == SESSION_ID))).scalar_one()
-        return ok, row.draft_id
+    return ok, (await DraftSession.get_by_session_id(SESSION_ID)).draft_id
 
 
 async def test_regeneration_replaces_the_room_of_a_still_queued_session(test_db):
@@ -246,41 +237,45 @@ async def test_regeneration_aborts_if_the_draft_committed_first(test_db):
     assert draft_id == "OLDROOM", "the committed room's id was overwritten anyway"
 
 
-# --- handing over a draft whose rooms already exist -------------------------
+# --- creating rooms is idempotent ------------------------------------------
+#
+# Both callers -- the ownership-loss handler and /mutiny -- reach the shared
+# wrapper for drafts that have already reached 'pairings', which is exactly when
+# the rooms exist. create_rooms_pairings refuses to run twice and returns False,
+# which is indistinguishable from a real failure, so the wrapper used to announce
+# "could not create rooms automatically, use the button" into a channel whose
+# button was deleted when the rooms were made. Testing the wrapper rather than
+# one caller is what makes this cover both of them.
 
-async def test_ownership_loss_does_not_re_create_rooms_that_exist(test_db):
-    """Preserving a `pairings` session must not re-run room creation.
-
-    Routing 'pairings' to the pairings handler is new -- it used to regenerate
-    instead -- and it newly reaches drafts whose rooms are already made.
-    create_rooms_pairings bails on `rooms_created_at`, so the fallback posts two
-    failure notices into a lobby whose button was deleted when the rooms were
-    created. That is the incident's own scenario: the second manager arrives a
-    minute after the rooms exist.
-    """
-    from datetime import datetime
-    from sqlalchemy import update as sa_update
-    from database.db_session import db_session as real_db_session
-    from models.draft_session import DraftSession
+async def _fallback_with_rooms(rooms_created_at):
+    """Run the shared wrapper against a session with/without rooms."""
     import services.draft_setup_manager as dsm
 
-    await seed_session(session_id=SESSION_ID, stage=SESSION_STAGE_PAIRINGS)
-    async with real_db_session() as s:
-        await s.execute(sa_update(DraftSession)
-                        .where(DraftSession.session_id == SESSION_ID)
-                        .values(rooms_created_at=datetime.now()))
+    await seed_session(session_id=SESSION_ID, stage="pairings",
+                       rooms_created_at=rooms_created_at)
+    channel = AsyncMock()
+    inner = AsyncMock(return_value=False)   # what create_rooms_pairings does twice
+    view = MagicMock()
+    view.create_rooms_pairings = inner
+    with patch.dict("sys.modules", {"views": MagicMock(PersistentView=view)}):
+        ok = await dsm.create_rooms_and_pairings_with_fallback(
+            MagicMock(), MagicMock(), channel, SESSION_ID)
+    said = " ".join(str(c.args[0]) for c in channel.send.await_args_list)
+    return ok, inner.called, said
 
-    manager = make_manager()
-    manager.guild_id = "123"  # make_manager's "g" is not int-able
-    create = AsyncMock()
-    with patch.object(dsm, "create_rooms_and_pairings_with_fallback", create), \
-         patch.object(type(manager), "_notify_bot_no_longer_managing", AsyncMock()), \
-         patch.object(type(manager), "_cleanup_and_disconnect", AsyncMock()), \
-         patch.object(type(manager), "_get_draft_channel", AsyncMock(return_value=None)), \
-         patch.object(dsm, "get_bot", MagicMock()):
-        await manager._handle_ownership_loss_with_pairings()
 
-    assert not create.called, (
-        "rooms already exist, so re-running creation only posts failure notices "
-        "into a channel whose button is gone"
-    )
+async def test_existing_rooms_are_not_created_again(test_db):
+    """Already created is success, and says nothing."""
+    ok, tried, said = await _fallback_with_rooms(_dt.now())
+    assert ok is True
+    assert not tried, "create_rooms_pairings was called for rooms that already exist"
+    assert said == "", f"it announced something about rooms that already exist: {said!r}"
+
+
+async def test_rooms_are_still_created_when_they_do_not_exist(test_db):
+    """The wrapper must still do its job, or this trades a bug for a dead path."""
+    ok, tried, said = await _fallback_with_rooms(None)
+    assert tried, "create_rooms_pairings was never called for a draft with no rooms"
+    assert ok is False, "a genuine failure must still report failure"
+    assert "Could not create rooms" in said
+

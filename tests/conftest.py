@@ -118,7 +118,7 @@ async def seed_session(session_id="s1", guild="g", stype="staked",
                        stage="completed", victory=None, teams=None,
                        matches=(), start=None, sign_ups=None,
                        cube="TestCube", draft_chat_channel=None,
-                       channel_ids=None):
+                       channel_ids=None, draft_id=None, rooms_created_at=None):
     """Seed one DraftSession plus its MatchResults.
 
     teams: (team_a_list, team_b_list) or None (legacy-style, no team JSON).
@@ -138,6 +138,7 @@ async def seed_session(session_id="s1", guild="g", stype="staked",
             draft_start_time=when, teams_start_time=when,
             draft_chat_channel=draft_chat_channel,
             channel_ids=channel_ids,
+            draft_id=draft_id, rooms_created_at=rooms_created_at,
             sign_ups=sign_ups, cube=cube))
         for i, (p1, p2, w, ts) in enumerate(matches):
             s.add(MatchResult(session_id=session_id, match_number=i + 1,
@@ -210,7 +211,12 @@ def make_manager(**kwargs):
 
     from services.draft_setup_manager import DraftSetupManager
 
-    mgr = DraftSetupManager(session_id="s", draft_id="d", cube_id="c", guild_id="g", **kwargs)
+    # Defaults, not hardcoded arguments: the docstring promises callers can pass
+    # constructor kwargs, and passing session_id/draft_id/guild_id used to raise
+    # "got multiple values" instead of overriding.
+    args = {"session_id": "s", "draft_id": "d", "cube_id": "c", "guild_id": "g"}
+    args.update(kwargs)
+    mgr = DraftSetupManager(**args)
     mgr.socket_client = MagicMock()
     mgr.socket_client.connected = True
     mgr.socket_client.emit = AsyncMock(return_value=True)
