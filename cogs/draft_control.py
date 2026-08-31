@@ -910,10 +910,6 @@ class DraftControlCog(commands.Cog):
                 
             manager, draft_session = result
             
-            # Determine if we should automatically advance to pairings
-            # We do this if the draft has already started or if teams are already formed
-            should_advance_to_pairings = manager.drafting or draft_session.session_stage == 'teams'
-            
             if manager.drafting:
                 self.logger.info(f"Mutiny during active draft for session {manager.session_id}. Will advance to pairings.")
             
@@ -964,16 +960,22 @@ class DraftControlCog(commands.Cog):
                 
             await ctx.channel.send(f"✅ Ownership transferred to {requester_name}. Bot disconnected.")
 
-            if should_advance_to_pairings:
-                # Advance to pairings stage
-                success = await create_rooms_and_pairings_with_fallback(
-                    ctx.bot, ctx.guild, ctx.channel, session_id, logger=self.logger
-                )
-                if success:
-                    return  # create_rooms_pairings handles the rest (deletes original message, etc)
-                # If failed, fall through to update the view so the button is enabled
-            
-            # Update the view to enable the button (only if NOT advancing to pairings)
+            # No condition here. _get_manager_for_channel only returns sessions
+            # with a non-NULL session_stage, so every draft reaching this line
+            # has left the queue and its players already hold room links; asking
+            # a predicate that is constant True would only hide that. Whether
+            # there is anything left to create -- rooms already made, draft
+            # already over -- is create_rooms_and_pairings_with_fallback's
+            # question, answered once for both of its callers.
+            success = await create_rooms_and_pairings_with_fallback(
+                ctx.bot, ctx.guild, ctx.channel, session_id, logger=self.logger
+            )
+            if success:
+                return  # create_rooms_pairings handles the rest (deletes original message, etc)
+            # If failed, fall through to update the view so the button is enabled
+
+            # Room creation genuinely failed, so re-enable the button and let
+            # someone drive it by hand.
             try:
                 # Get the original draft message
                 from session import AsyncSessionLocal
