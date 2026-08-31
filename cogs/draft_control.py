@@ -898,9 +898,10 @@ class DraftControlCog(commands.Cog):
                 
             manager, draft_session = result
             
-            # Determine if we should automatically advance to pairings
-            # We do this if the draft has already started or if teams are already formed
-            should_advance_to_pairings = manager.drafting or draft_session.session_stage == 'teams'
+            # One definition of "this draft has committed", on the manager. This
+            # was a second inline copy that read only 'teams', so /mutiny on an
+            # already-drafted session declined to create pairings.
+            should_advance_to_pairings = await manager.must_preserve_draft_room()
             
             if manager.drafting:
                 self.logger.info(f"Mutiny during active draft for session {manager.session_id}. Will advance to pairings.")

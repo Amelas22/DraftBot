@@ -2372,15 +2372,27 @@ class DraftSetupManager:
             self.logger.error(f"Error updating pack settings: {e}")
             return False
 
-    async def _should_advance_to_pairings(self) -> bool:
-        """Determine if we should automatically advance to pairings stage.
+    # Stages at or past which a draft has committed: links are out, people may
+    # already have drafted, and the Draftmancer room is the only copy of the log.
+    COMMITTED_STAGES = (SESSION_STAGE_TEAMS, SESSION_STAGE_PAIRINGS)
 
-        Returns True if:
-        - Draft is currently active (self.drafting), OR
-        - Session stage is 'teams' (teams formed but draft not started yet)
+    async def must_preserve_draft_room(self) -> bool:
+        """Whether this session's Draftmancer room must be kept.
 
-        Returns:
-            bool: True if should advance to pairings, False otherwise
+        Replacing a room (`regenerate_draft_session`) abandons it and opens an
+        empty one. That room is the only copy of the draft log and Draftmancer
+        keeps it for about 28 minutes, so replacing a committed draft's room
+        destroys the log outright.
+
+        So the question is not "is keeping it safe" -- keeping is always safe --
+        but "is there positive evidence it can be replaced". Only a session that
+        has not yet reached `teams` qualifies: before then nobody holds a link,
+        and replacing a broken room is the repair rather than the damage.
+
+        Everything else preserves, INCLUDING a session we cannot read.
+        eastern-paladin-84 (2026-08-28) lost its log because the ambiguous
+        answers shared a return value with "replaceable", so a stage the guard
+        did not recognise read as permission to destroy the room.
         """
         if self.drafting:
             return True
@@ -2390,10 +2402,17 @@ class DraftSetupManager:
                 stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
                 result = await session.execute(stmt)
                 draft_session = result.scalar_one_or_none()
-                return draft_session and draft_session.session_stage == SESSION_STAGE_TEAMS
+                if draft_session is None:
+                    self.logger.warning(
+                        f"No draft session row for {self.session_id}; preserving the "
+                        f"Draftmancer room rather than assuming it is replaceable")
+                    return True
+                return draft_session.session_stage in self.COMMITTED_STAGES
         except Exception as e:
-            self.logger.error(f"Failed to check session stage: {e}")
-            return False
+            self.logger.warning(
+                f"Could not read the session stage ({e}); preserving the Draftmancer "
+                f"room rather than assuming it is replaceable")
+            return True
 
     async def _handle_ownership_loss_with_pairings(self, channel=None) -> None:
         """Handle bot losing ownership when past point of no return.
@@ -2509,25 +2528,27 @@ class DraftSetupManager:
 
             # Handle ownership error
             if not success and is_ownership_error:
-                # Check if users have joined Draftmancer
-                users_have_joined = self.users_count > 0 or len(self.session_users) > 0
+                # Who is visible in the room is not evidence either way:
+                # session_users is filled by a socket event that may not have
+                # arrived yet, so an empty room here can simply mean this
+                # manager is new. Only the durable record decides.
+                must_preserve = await self.must_preserve_draft_room()
+                self.logger.info(
+                    f"Lost session ownership; must_preserve_draft_room={must_preserve} "
+                    f"(users visible: {self.users_count})")
 
-                # Determine if we're past the point of no return
-                # Only advance to pairings if BOTH:
-                # 1. Users have joined Draftmancer (they're committed)
-                # 2. Draft is active OR teams are formed
-                should_advance_to_pairings = users_have_joined and await self._should_advance_to_pairings()
-
-                if should_advance_to_pairings:
-                    # Past point of no return - users committed, create pairings
-                    self.logger.warning("Bot lost ownership with users present and teams formed, creating pairings and disconnecting")
+                if must_preserve:
+                    # Committed draft: the room may hold the only copy of the
+                    # log, so hand over rather than replace it.
+                    self.logger.warning("Bot lost ownership of a committed draft, creating pairings and disconnecting")
                     channel = await self._get_draft_channel()
                     await self._handle_ownership_loss_with_pairings(channel)
-                    raise StopRetryException("Bot lost ownership with users present and teams formed")
+                    raise StopRetryException("Bot lost ownership of a committed draft")
 
                 elif allow_regeneration:
-                    # Either no users yet, or teams not formed - regenerate session
-                    self.logger.info("Bot lost ownership before point of no return, regenerating session...")
+                    # Not committed yet: nobody holds a link, so a new room is
+                    # the repair rather than the damage.
+                    self.logger.info("Bot lost ownership before the draft committed, regenerating session...")
 
                     if await self.regenerate_draft_session():
                         self.logger.info("Session regenerated successfully, reconnecting...")
@@ -2595,10 +2616,10 @@ class DraftSetupManager:
 
             # Check if links have been distributed (teams formed or draft active)
             # This is the ONLY thing that matters, not random users in Draftmancer
-            should_advance_to_pairings = await self._should_advance_to_pairings()
-            self.logger.info(f"[RECONNECT] Should advance to pairings: {should_advance_to_pairings}")
+            must_preserve = await self.must_preserve_draft_room()
+            self.logger.info(f"[RECONNECT] Must preserve draft room: {must_preserve}")
 
-            if should_advance_to_pairings:
+            if must_preserve:
                 # Links distributed - can't regenerate, create pairings
                 self.logger.warning(f"[RECONNECT] Links already distributed - creating pairings and disconnecting")
                 channel = await self._get_draft_channel()
