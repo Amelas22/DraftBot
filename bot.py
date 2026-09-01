@@ -5,7 +5,7 @@ import sys
 from discord.ext import commands
 from dotenv import load_dotenv
 from database.message_management import setup_sticky_handler
-from database.db_session import init_db, ensure_guild_id_in_tables
+from database.db_session import init_db
 from utils import cleanup_sessions_task, check_inactive_players_task
 from commands import core_commands, scheduled_posts
 from reconnect_drafts import reconnect_draft_setup_sessions
@@ -152,7 +152,6 @@ async def main():
     await scheduled_posts(bot)
     await load_extensions(bot)
     await init_db()
-    await ensure_guild_id_in_tables()
     await setup_sticky_handler(bot)
     logger.info("Database initialized")
     # Create a delayed task for leaderboard refresh
