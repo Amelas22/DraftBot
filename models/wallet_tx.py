@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Index
+from sqlalchemy import Column, Integer, String, DateTime, Index, text
 from datetime import datetime
 from database.models_base import Base
 
@@ -52,6 +52,18 @@ class WalletTx(Base):
 
     __table_args__ = (
         Index('ix_wallet_tx_balance_lookup', 'guild_id', 'player_id'),
+        # The two guards the docstring above promises. Created by
+        # walletsafety01 and mirrored here so a database built from the models
+        # -- every test database -- has them too, and so autogenerate stops
+        # proposing to drop them into every unrelated migration.
+        #
+        # Partial, because both keys are nullable: a boundary crossing is
+        # unique per (job_id, kind), and a transfer's legs are unique per
+        # (source, kind) -- one 'pay' and one 'receive' per source, no more.
+        Index('uq_wallet_tx_job_kind', 'job_id', 'kind', unique=True,
+              sqlite_where=text('job_id IS NOT NULL')),
+        Index('uq_wallet_tx_transfer_legs', 'source', 'kind', unique=True,
+              sqlite_where=text("kind IN ('pay', 'receive') AND source IS NOT NULL")),
     )
 
     def __repr__(self):

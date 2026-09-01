@@ -192,3 +192,61 @@ async def test_the_unpaid_refusal_stays_inside_discords_message_limit(test_db): 
     assert len(message) < 2000, f"refusal is {len(message)} chars"
     assert "60 teams haven't paid" in message
     assert "and 40 more" in message      # 20 named, the rest counted
+
+
+@pytest.mark.asyncio
+async def test_each_registration_books_under_its_own_key(test_db):  # noqa: F811
+    """The ledger keeps one 'pay' and one 'receive' per source.
+
+    A refund does not remove the first entry -- it books a compensating pair --
+    so a team that drops and registers again cannot write a second pair under
+    the same key. uq_wallet_tx_transfer_legs rejects it, the charge fails, and
+    the team is left unpaid on a tournament it thinks it entered. The key has
+    to move on with each registration.
+
+    Attempt 0 keeps the original string so every entry already on the books
+    stays findable by a refund.
+    """
+    from sqlalchemy import select as sa_select
+
+    from models.wallet_tx import WalletTx
+
+    t_id = await _tournament()
+    async with db_session() as s:
+        await tsvc.register_team(s, t_id, "Boomerang", CAP_A)
+    await wallet_service.credit_done(GUILD, CAP_A, 300, job_id="j-keys")
+    await escrow.sweep_pending_entries()
+    await escrow.drop_with_refund(t_id, "Boomerang")
+    async with db_session() as s:
+        await tsvc.register_team(s, t_id, "Boomerang", CAP_A)
+    await escrow.sweep_pending_entries()
+
+    async with db_session() as s:
+        sources = sorted((await s.execute(
+            sa_select(WalletTx.source).where(WalletTx.kind == "receive")
+        )).scalars().all())
+
+    entries = [x for x in sources if x and x.startswith("tourney:") and "#" not in x]
+    reentries = [x for x in sources if x and "#" in x]
+    assert len(entries) == 1, f"the first registration moved off its key: {sources}"
+    assert len(reentries) == 1, (
+        f"the re-registration did not get a key of its own: {sources}")
+    assert reentries[0].endswith("#1"), reentries
+
+
+def test_the_next_registration_number_tolerates_a_gap():
+    """One past the highest used, not the count.
+
+    Counting assumes the numbers are contiguous, and a single missing one would
+    hand back a key the ledger already holds -- where uq_wallet_tx_transfer_legs
+    rejects it and the team is left unpaid, which is the failure this numbering
+    exists to prevent.
+    """
+    from services.tournament_escrow_service import _next_attempt, entry_source
+
+    base = entry_source(7, 3)
+    assert _next_attempt(base, []) == 0
+    assert _next_attempt(base, [base]) == 1
+    assert _next_attempt(base, [base, f"{base}#1"]) == 2
+    # A gap: counting would say 2 and collide with the existing #2.
+    assert _next_attempt(base, [base, f"{base}#2"]) == 3
