@@ -252,7 +252,9 @@ async def test_cancel_reads_tournament_match_id_before_the_row_is_deleted():
     interaction.response.edit_message = AsyncMock()
     interaction.followup.send = AsyncMock()
 
-    with patch("views.get_draft_session", AsyncMock(return_value=session)), \
+    with patch.object(views, "release_draft_pool",
+                      AsyncMock(return_value={"refunded": {}})), \
+    patch("views.get_draft_session", AsyncMock(return_value=session)), \
          patch("views.AsyncSessionLocal", session_factory), \
          patch.dict(ACTIVE_MANAGERS, {}, clear=True), \
          patch.object(ReadyCheckSession, "cleanup", AsyncMock()), \

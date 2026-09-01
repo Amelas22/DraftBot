@@ -43,6 +43,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -129,6 +130,15 @@ async def seed_session(session_id="s1", guild="g", stype="staked",
     """
     when = start or datetime(2026, 1, 1)
     async with AsyncSessionLocal() as s:
+        # Re-seeding the same id replaces it. Tests that need a draft in a
+        # particular stage often sit alongside a fixture that put one there
+        # already, and a second insert of the same primary key would fail on
+        # commit rather than express the state the test asked for.
+        await s.execute(delete(MatchResult).where(
+            MatchResult.session_id == session_id))
+        await s.execute(delete(DraftSession).where(
+            DraftSession.session_id == session_id))
+        await s.flush()
         s.add(DraftSession(
             session_id=session_id, guild_id=guild, session_type=stype,
             session_stage=stage,

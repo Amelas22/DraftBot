@@ -6,6 +6,7 @@ from models.draft_session import DraftSession
 from helpers.stale_drafts import is_finished_draft
 from models.match import MatchResult
 from helpers.permissions import is_bot_manager
+from services.draft_pool_service import release_draft_pool
 from helpers.stale_drafts import is_finished_draft
 from discord.ui import View, Button
 from datetime import datetime, timedelta
@@ -128,6 +129,9 @@ async def abandon_draft_session(session_id, session_factory=None):
                     f"Refusing to abandon {session_id}: it finished while the "
                     f"decision to abandon it was pending")
                 return False
+            # Read inside the transaction; the pool release below runs after it
+            # closes, and the row object is not safe to touch by then.
+            guild_id = str(current.guild_id)
 
             await db.execute(
                 update(MatchResult)
@@ -142,6 +146,8 @@ async def abandon_draft_session(session_id, session_factory=None):
                     deletion_time=datetime.now() + timedelta(hours=ABANDON_CLEANUP_HOURS),
                 )
             )
+    # An abandoned draft pays nobody, so everything in the pool goes back.
+    await release_draft_pool(guild_id, session_id, "abandoned")
     return True
 
 
@@ -733,6 +739,12 @@ class DraftControlCog(commands.Cog):
                     )
                     return
                 manager.drafting = False
+                # The money follows Draftmancer, for the same reason the local
+                # state does. If the emit above had failed we would have told
+                # players the draft is still running -- refunding them at that
+                # point hands back the entries for a draft they are still in.
+                await release_draft_pool(str(draft_session.guild_id),
+                                         draft_session.session_id, "scrapped")
                 await final_message.edit(content=
                                         "🛑 **Draft canceled!** \n" \
                                         "Use `/ready` to begin a ready check for a new draft.\n" \

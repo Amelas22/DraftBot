@@ -126,6 +126,55 @@ async def balances_for(guild_id: str, player_ids) -> dict[str, int]:
     return {pid: found.get(pid, 0) for pid in ids}
 
 
+async def movements_in(session, guild_id: str, holder: str, party: str) -> int:
+    """How many transfers `holder` has exchanged with `party`, in the caller's
+    own session.
+
+    Keys a source string that must differ per movement rather than per state: a
+    player who joins, leaves and rejoins arrives back at the same balance, so a
+    key built from the balances alone would collide with the original join and
+    be swallowed as a retry.
+    """
+    return int((await session.execute(
+        select(func.count()).select_from(WalletTx)
+        .where(WalletTx.guild_id == guild_id,
+               WalletTx.player_id == holder,
+               WalletTx.counterparty_id == party)
+    )).scalar() or 0)
+
+
+async def contributions_to(guild_id: str, holder: str) -> dict[str, int]:
+    """Net tix each counterparty currently has sitting in `holder`.
+
+    A grouped SUM, deliberately -- not a page of get_history, which clamps to
+    100 rows and would silently under-report a holder that has seen more
+    movement than that. Zero-net counterparties are dropped, so a party fully
+    refunded out of a pool does not show up as holding nothing.
+    """
+    async with db_session() as session:
+        rows = (await session.execute(
+            select(WalletTx.counterparty_id, func.coalesce(func.sum(WalletTx.amount), 0))
+            .where(WalletTx.guild_id == guild_id,
+                   WalletTx.player_id == holder,
+                   WalletTx.counterparty_id.isnot(None))
+            .group_by(WalletTx.counterparty_id)
+            .having(func.coalesce(func.sum(WalletTx.amount), 0) != 0)
+        )).all()
+    return {str(party): int(total) for party, total in rows}
+
+
+async def net_between(session, guild_id: str, holder: str, party: str) -> int:
+    """What one counterparty currently has sitting in `holder`, inside an
+    existing session/transaction -- contributions_to for a single party, read
+    from the snapshot the caller is about to write into."""
+    return int((await session.execute(
+        select(func.coalesce(func.sum(WalletTx.amount), 0))
+        .where(WalletTx.guild_id == guild_id,
+               WalletTx.player_id == holder,
+               WalletTx.counterparty_id == party)
+    )).scalar() or 0)
+
+
 # ---------------------------------------------------------------------------
 # reads
 # ---------------------------------------------------------------------------

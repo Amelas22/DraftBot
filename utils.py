@@ -15,7 +15,10 @@ from models import QuizSession, TrophyQuizSession
 from quiz_views_module.quiz_views import QuizPublicView
 from quiz_views_module.trophy_quiz_views import TrophyQuizView
 from helpers.draft_footer import apply_draft_footer_from_session
-from helpers.draft_outcome import decides_draft
+from helpers.draft_outcome import decides_draft, total_matches_in
+from services.draft_pool_service import (format_entries, format_outcomes,
+                                         pool_balance, release_draft_pool,
+                                         settle_draw, settle_pool)
 from services.draft_analysis import DraftAnalysis
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
@@ -542,6 +545,73 @@ async def calculate_team_wins(draft_session_id):
         return team_a_wins, team_b_wins
 
 
+async def settle_decided_draft(draft_session_id):
+    """Move a decided draft's money. The only place that does.
+
+    Called from check_and_post_victory_or_draw, which is the one function in
+    the codebase that decides a draft is over, and called before it opens its
+    transaction: wallet_service takes its own connection and SQLite is
+    single-writer, so moving money under someone else's write lock deadlocks
+    the payment against its own caller.
+
+    This used to run from generate_draft_summary_embed instead, which has five
+    callers -- every match report, two victory re-renders, room creation, and
+    sticky-message repair in a subsystem that knows nothing about drafts
+    ending. Idempotence made that safe, not correct: the trigger for moving
+    real money was "someone re-rendered an embed".
+
+    Both settlement regimes live here, and neither has to ask which era the
+    draft belongs to. They discriminate themselves by the data they read: a
+    pre-conversion draft holds no pool, and a pool draft has no StakePairing
+    rows for the debt path to read.
+    """
+    draft_session = await get_draft_session(draft_session_id)
+    if not draft_session or draft_session.session_type != "staked":
+        return
+
+    team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
+    outcome = decides_draft(team_a_wins, team_b_wins,
+                            total_matches_in(draft_session.match_counter))
+    if outcome is None:
+        return
+
+    guild_id = str(draft_session.guild_id)
+    winners = (draft_session.team_a if team_a_wins > team_b_wins
+               else draft_session.team_b)
+
+    if await pool_balance(guild_id, draft_session_id) > 0:
+        if outcome == "draw":
+            # A draw pays nobody, which means everybody gets their entry back --
+            # otherwise the pool sits funded on a completed draft forever.
+            await settle_draw(guild_id, draft_session_id)
+        else:
+            await settle_pool(guild_id, draft_session_id, list(winners or []))
+        return
+
+    if outcome == "draw":
+        return
+
+    # A pre-conversion draft moves money as debts between the players the
+    # retired matcher paired. create_debt_entries_from_stakes reads those
+    # pairings, so for a pool draft it reads nothing and books nothing -- which
+    # is why no flag is needed to keep the two apart.
+    #
+    # The debtors come from the ledger rather than from what this call just
+    # created: creation is idempotent, so a replay returns [] while the debts
+    # are still there. Reading them back makes every later pass a free retry,
+    # which is what stops a settlement that failed once from being abandoned.
+    try:
+        await create_debt_entries_from_stakes(
+            guild_id=draft_session.guild_id,
+            session_id=draft_session_id,
+            winning_team_ids=list(winners or []))
+        await settle_new_debts(
+            draft_session.guild_id,
+            await get_draft_debtors(draft_session.guild_id, draft_session_id))
+    except Exception as e:
+        logger.error(f"Failed to settle stake debts for session {draft_session_id}: {e}")
+
+
 async def generate_draft_summary_embed(bot, draft_session_id):
     """
     Generate draft summary embed(s) for a completed or in-progress draft.
@@ -549,6 +619,10 @@ async def generate_draft_summary_embed(bot, draft_session_id):
     Returns:
         tuple: (main_embed, bet_embed) where bet_embed may be None if no bets
     """
+    # Reports a ledger; never moves one. Settlement belongs to
+    # settle_decided_draft, called once from the victory path -- this function
+    # is reached by sticky-message repair and by every match report, and none
+    # of those is a reason to move money.
     async with AsyncSessionLocal() as session:
         async with session.begin():
             draft_session = await get_draft_session(draft_session_id)
@@ -566,7 +640,7 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                     seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
 
                 team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
-                total_matches = draft_session.match_counter - 1
+                total_matches = total_matches_in(draft_session.match_counter)
                 half_matches = total_matches // 2
                 outcome_result = await determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, half_matches, total_matches)
                 if len(outcome_result) == 3:
@@ -594,11 +668,8 @@ async def generate_draft_summary_embed(bot, draft_session_id):
 
                 # Add stakes information if this is a staked draft
                 if draft_session.session_type == "staked":
-                    # Use the utility function to get formatted stake pairs
                     stake_lines, total_stakes = await get_formatted_stake_pairs(
-                        draft_session_id, 
-                        draft_session.sign_ups
-                    )
+                        draft_session_id, draft_session.sign_ups or {})
                     
                     # Add the stakes field to the embed
                     if stake_lines:
@@ -611,11 +682,17 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                     # Create bet outcomes embed if there's a winner.
                     # Victory only: a draw pays nobody, so this is the line that
                     # decides whether any money moves for this draft.
-                    if decides_draft(team_a_wins, team_b_wins, total_matches) in ("team_a", "team_b"):
+                    outcome = decides_draft(team_a_wins, team_b_wins, total_matches)
+
+                    if outcome in ("team_a", "team_b"):
                         # Determine the winning team
                         winning_team = draft_session.team_a if team_a_wins > team_b_wins else draft_session.team_b
 
-                        # Get bet outcome lines
+                        # Get bet outcome lines. The pool has already paid --
+                        # settle_draft_pool runs before this transaction opens.
+                        # Reports what moved, whichever way it moved: under
+                        # the pool nobody owes anybody, because the money
+                        # changed hands when the result was confirmed.
                         outcome_lines, outcome_total = await get_formatted_bet_outcomes(
                             draft_session_id,
                             draft_session.sign_ups,
@@ -633,32 +710,10 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                                 color=discord_color  # Match main embed color
                             )
                             bet_embed.set_footer(text=f"Total bets settled: {outcome_total} tix")
-                            # These outcomes become debt ledger entries just below, so
-                            # this is where a loser first learns they owe someone.
+                            # Where a loser first reads what this draft cost
+                            # them, so it is where the wallet is explained.
                             add_wallet_howto(bet_embed, draft_session.guild_id)
 
-                            # Create the debt ledger entries these outcomes imply, then
-                            # draw them against the losers' wallets: a debt landing on
-                            # someone who already holds tix is settled, not offered to them
-                            # to honour.
-                            # The debtors come from the ledger, not from what this call
-                            # just created: creation is idempotent, so on every later
-                            # render it returns [] while the debts are still there. Reading
-                            # them back makes each render retry anyone still owing, which
-                            # is what stops a settlement that failed once from being
-                            # abandoned for good.
-                            try:
-                                await create_debt_entries_from_stakes(
-                                    guild_id=draft_session.guild_id,
-                                    session_id=draft_session_id,
-                                    winning_team_ids=winning_team
-                                )
-                                await settle_new_debts(
-                                    draft_session.guild_id,
-                                    await get_draft_debtors(draft_session.guild_id,
-                                                            draft_session_id))
-                            except Exception as e:
-                                logger.error(f"Failed to settle stake debts for session {draft_session_id}: {e}")
 
             else:
                 # Code for Swiss drafts
@@ -824,6 +879,14 @@ def find_postable_results_channel(guild, name):
 
 
 async def check_and_post_victory_or_draw(bot, draft_session_id):
+    # Money first, and outside the transaction below. This is the one function
+    # that decides a draft is over, so it is the one place a draft's money
+    # moves; settle_decided_draft is idempotent and returns immediately for a
+    # draft that is not yet decided, so calling it on every report is free.
+    # It cannot go inside the transaction: wallet_service opens its own
+    # connection, and SQLite is single-writer.
+    await settle_decided_draft(draft_session_id)
+
     async with AsyncSessionLocal() as session:
         async with session.begin():
             draft_session = await get_draft_session(draft_session_id)
@@ -981,7 +1044,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
             flag = flags[draft_session_id]
 
             team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
-            total_matches = draft_session.match_counter - 1
+            total_matches = total_matches_in(draft_session.match_counter)
 
             # Check victory or draw conditions. Shared with the confirmation in
             # views.MatchResultSelect, which asks the same question one moment
@@ -1012,7 +1075,12 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                             )
 
                         settle_view = None
-                        if draft_session.session_type == "staked":
+                        # No debts exist under the pool -- the money moved when
+                        # the result was confirmed -- so offering to settle them
+                        # invites a player to pay something they do not owe.
+                        if (draft_session.session_type == "staked"
+                                and await get_draft_debtors(
+                                    draft_session.guild_id, draft_session_id)):
                             settle_view = SettleDebtsView(
                                 session_id=draft_session_id,
                                 guild_id=draft_session.guild_id
@@ -1072,7 +1140,13 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                         )
                     # Create settle debts view for staked drafts
                     settle_view = None
-                    if draft_session.session_type == "staked":
+                    # A button to settle debts, only where debts exist. Under
+                    # the pool the money moved when the result was confirmed,
+                    # so offering it would invite a player to pay a debt the
+                    # design means nobody ever incurs.
+                    if (draft_session.session_type == "staked"
+                            and await get_draft_debtors(
+                                draft_session.guild_id, draft_session_id)):
                         settle_view = SettleDebtsView(
                             session_id=draft_session_id,
                             guild_id=draft_session.guild_id
@@ -1629,6 +1703,14 @@ async def cleanup_sessions_task(bot):
                     # Skip queue cleanup for guilds marked as cleanup_exempt
                     if is_cleanup_exempt(session.guild_id):
                         continue
+
+                    # A queue that never filled is the COMMONEST end for a staked
+                    # draft -- 1,207 of 2,398 historically. The row is about to be
+                    # reaped, and the pool is keyed to its session_id, so anything
+                    # still held has to come back before that happens or it can
+                    # never be attributed to anyone again.
+                    await release_draft_pool(str(session.guild_id),
+                                             session.session_id, "expired")
                     
                     # Cancel the queue due to inactivity
                     if session.draft_channel_id and session.message_id:
@@ -2549,6 +2631,15 @@ async def re_register_views(bot):
         logger.info(f"Found {len(staked_sessions)} recent staked drafts to re-register settle views")
 
         for staked_session in staked_sessions:
+            # Only a pre-conversion draft settles by debts. The live victory
+            # path already gates the button this way; without the same gate
+            # here, every restart handed it back to pool drafts for the past
+            # week, inviting a player to pay something the pool means nobody
+            # ever owes.
+            if not await get_draft_debtors(staked_session.guild_id,
+                                           staked_session.session_id):
+                continue
+
             # Re-register view in draft chat channel
             if staked_session.draft_chat_channel and staked_session.victory_message_id_draft_chat:
                 channel = bot.get_channel(int(staked_session.draft_chat_channel))
@@ -2765,18 +2856,59 @@ async def get_missing_stake_players(session_id):
             
             return missing_players
         
-async def get_formatted_stake_pairs(session_id, sign_ups):
+async def _has_stake_pairings(session_id) -> bool:
+    """Was this draft paired by the retired tiered matcher?
+
+    This replaced a named `uses_legacy_stakes` predicate that four unrelated
+    subsystems consulted to decide which "regime" a draft belonged to. A
+    derived predicate silently inherits every writer of the thing it derives
+    from, and a second writer in views.create_rooms_pairings duly turned every
+    new draft legacy between team creation and settlement. Nothing needs the
+    cross-cutting concept: settlement discriminates on the money it finds, and
+    the two formatters below discriminate on the rows they are about to read,
+    which is this question, asked locally.
     """
-    Get all stake pairs for a draft session, formatted for display.
-    
+    async with AsyncSessionLocal() as db_session:
+        row = await db_session.execute(
+            select(StakePairing.id).where(
+                StakePairing.session_id == session_id).limit(1))
+        return row.scalars().first() is not None
+
+
+async def _guild_of(session_id):
+    async with AsyncSessionLocal() as db_session:
+        row = await db_session.execute(
+            select(DraftSession.guild_id).where(
+                DraftSession.session_id == session_id))
+        guild_id = row.scalars().first()
+    return str(guild_id) if guild_id is not None else None
+
+
+async def get_formatted_stake_pairs(session_id, sign_ups):
+    """What each player has at risk, for whichever regime this draft belongs to.
+
+    Every surface that shows a staked draft's money comes through here -- the
+    teams embed, the live-draft panel, the summary, the stake-breakdown button.
+    The pool and the retired tiered matcher describe that money differently, so
+    the choice between them belongs here rather than at each call site: three of
+    the four call sites never got the branch when the pool landed, and rendered
+    an empty pairings list for a pot that was already funded.
+
     Args:
         session_id: The draft session ID
         sign_ups: Dict mapping player IDs to display names
-        
+
     Returns:
         tuple: (formatted_stake_lines, total_stakes)
     """
-    # Fetch all stake information
+    if not await _has_stake_pairings(session_id):
+        guild_id = await _guild_of(session_id)
+        if guild_id is None:
+            return [], 0
+        return await format_entries(guild_id, session_id, sign_ups)
+
+    # A pre-conversion draft keeps its StakePairing rows and renders from them
+    # until it finishes.
     async with AsyncSessionLocal() as db_session:
         async with db_session.begin():
             # Get the draft session to access team assignments
@@ -2840,17 +2972,27 @@ async def get_formatted_stake_pairs(session_id, sign_ups):
             return formatted_lines, total_stake
 
 async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
-    """
-    Get formatted bet outcomes for a draft session.
-    
+    """What this draft's money did, for whichever regime it belongs to.
+
+    Like get_formatted_stake_pairs, the choice is made from the data rather
+    than from a flag: a draft with no StakePairing rows was never paired, so
+    there are no pair outcomes to report and the pool is what moved.
+
     Args:
         session_id: The draft session ID
         sign_ups: Dict mapping player IDs to display names
         winning_team_ids: List of player IDs on the winning team
-        
+
     Returns:
         tuple: (formatted_outcome_lines, total_stakes)
     """
+    if not await _has_stake_pairings(session_id):
+        guild_id = await _guild_of(session_id)
+        if guild_id is None:
+            return [], 0
+        return await format_outcomes(guild_id, session_id, sign_ups,
+                                     list(winning_team_ids or []))
+
     async with AsyncSessionLocal() as db_session:
         async with db_session.begin():
             # Get the draft session to access team assignments
