@@ -55,6 +55,8 @@ from cube_views.pack_options import (
 from loguru import logger
 
 from services.state_manager import state_manager
+from services import wallet_service
+from services import stake_funding
 from services.stake_service import calculate_and_store_stakes
 from preference_service import get_players_bet_capping_preferences
 # Debounce/timeout constants live in ready_check.py so the ordering invariant
@@ -2740,6 +2742,39 @@ class CancelConfirmationView(discord.ui.View):
         await interaction.response.edit_message(content="Draft cancellation aborted.", view=self)
 
 
+async def refuse_unfunded_stake(interaction, draft_session_id, guild_id,
+                                user_id, stake_amount) -> bool:
+    """Refuse a stake the player's wallet cannot cover. True when refused.
+
+    The invariant is that nobody takes on a draft's risk they cannot pay for:
+    a wallet has to cover what its owner already owes, the most they could
+    still lose in drafts they are already in, and the stake being declared now.
+
+    The player is told the gap rather than just "no", because the fix is a
+    deposit and they need the number to make it.
+    """
+    gap = await stake_funding.shortfall(guild_id, user_id, draft_session_id,
+                                        stake_amount)
+    if not gap:
+        return False
+
+    owed, at_risk = await stake_funding.obligations(
+        guild_id, user_id, exclude_session_id=draft_session_id)
+    holds = await wallet_service.get_balance(guild_id, user_id)
+    claims = []
+    if owed:
+        claims.append(f"{owed} tix of debt")
+    if at_risk:
+        claims.append(f"{at_risk} tix at risk in drafts you are already in")
+    because = (" Your wallet also has to cover " + " and ".join(claims) + "."
+               if claims else "")
+
+    await interaction.response.send_message(
+        f"You need {gap} more tix to stake {stake_amount}. You hold "
+        f"{holds}.{because} Deposit more, or stake less.", ephemeral=True)
+    return True
+
+
 class StakeOptionsSelect(discord.ui.Select):
     def __init__(self, draft_session_id, draft_link, user_display_name, min_stake, has_draftmancer_role=False):
         self.draft_session_id = draft_session_id
@@ -2796,7 +2831,11 @@ class StakeOptionsSelect(discord.ui.Select):
         user_id = str(interaction.user.id)
         guild_id = str(interaction.guild_id)
         display_name = str(interaction.user.display_name)
-        
+
+        if await refuse_unfunded_stake(interaction, self.draft_session_id,
+                                       guild_id, user_id, stake_amount):
+            return
+
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 # Get the draft session
@@ -2992,6 +3031,10 @@ class StakeModal(discord.ui.Modal):
         try:
             # Update the player's preference in the database for future drafts
             from preference_service import update_player_bet_capping_preference
+            if await refuse_unfunded_stake(interaction, self.draft_session_id,
+                                           guild_id, user_id, max_stake):
+                return
+
             await update_player_bet_capping_preference(user_id, guild_id, is_capped)
             
             async with AsyncSessionLocal() as session:
@@ -4052,7 +4095,11 @@ class CombinedStakeSelect(discord.ui.Select):
         if stake_amount == self.current_stake:
             await interaction.response.send_message(f"You already have a {stake_amount} tix stake set.", ephemeral=True)
             return
-            
+
+        if await refuse_unfunded_stake(interaction, self.draft_session_id,
+                                       guild_id, user_id, stake_amount):
+            return
+
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 # Get the draft session

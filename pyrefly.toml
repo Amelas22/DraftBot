@@ -20,6 +20,7 @@ project-includes = [
     "helpers/view_dispatch_guard.py",
     "match_control_view.py",
     "ready_check.py",
+    "services/stake_funding.py",
     "services/tournament_roles.py",
 ]
 
