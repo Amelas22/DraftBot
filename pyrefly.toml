@@ -15,6 +15,7 @@ project-includes = [
     "helpers/draft_rooms.py",
     "helpers/match_control.py",
     "helpers/opponent_threads.py",
+    "helpers/room_regeneration.py",
     "helpers/utils.py",
     "helpers/view_dispatch_guard.py",
     "match_control_view.py",
