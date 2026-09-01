@@ -36,6 +36,7 @@ async def test_premade_join_stores_plain_name_not_emoji_decorated():
     session = SimpleNamespace(
         session_id="s1", sign_ups={"99": "Bob"},
         team_a=[], team_b=[], team_a_name="Team A", team_b_name="Team B",
+        entry_fee=None,          # a free premade draft, as before
     )
     view = PersistentView(
         bot=MagicMock(), draft_session_id="s1", session_type="premade",

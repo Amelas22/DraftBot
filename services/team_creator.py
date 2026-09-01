@@ -114,7 +114,10 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                 # can only arrive through the staked signup UI, and settlement is
                 # inside a staked-only branch -- so matching any wider would level
                 # a pool that nothing would ever pay out, stranding it.
-                if session.session_type == "staked":
+                # Staked queues and premade drafts with a fixed entry fee: the
+                # two kinds of draft that hold a pool, and the same pair
+                # settlement pays out.
+                if session.session_type == "staked" or session.entry_fee:
                     pool_sides = (str(session.guild_id), session.session_id,
                                   list(session.team_a or []), list(session.team_b or []))
 

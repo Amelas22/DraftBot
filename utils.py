@@ -566,7 +566,12 @@ async def settle_decided_draft(draft_session_id):
     rows for the debt path to read.
     """
     draft_session = await get_draft_session(draft_session_id)
-    if not draft_session or draft_session.session_type != "staked":
+    if not draft_session:
+        return
+    # Any draft that took money, not just a staked queue. A premade draft with
+    # a fixed entry fee holds a pool too, and gating on session_type would
+    # collect those entries and never pay them out.
+    if draft_session.session_type != "staked" and not draft_session.entry_fee:
         return
 
     team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)

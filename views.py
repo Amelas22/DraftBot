@@ -955,7 +955,30 @@ class PersistentView(discord.ui.View):
                         ephemeral=True
                     )
                     return False, None
-                    
+
+                # A fixed entry fee only keeps the two sides level while the
+                # teams are the same size. Four players against three is 200
+                # against 150, and levelling would hand part of a fee back to
+                # players who were told the fee was fixed. Refusing is the
+                # honest answer: nobody is charged differently from what they
+                # agreed, and evening the teams up is something the players can
+                # simply do.
+                if session.entry_fee:
+                    # Counted over members still in sign_ups, the same rule the
+                    # balance check uses: the leave flow can leave a stale id on
+                    # a team, and that must not tip an even draft into refusal.
+                    signed = set(session.sign_ups or {})
+                    a = len([u for u in (session.team_a or []) if u in signed])
+                    b = len([u for u in (session.team_b or []) if u in signed])
+                    if a != b:
+                        await interaction.response.send_message(
+                            f"{session.team_a_name} has {a} "
+                            f"{'player' if a == 1 else 'players'} and "
+                            f"{session.team_b_name} has {b}. An entry-fee draft "
+                            "needs even teams so both sides are backing the same "
+                            "amount.", ephemeral=True)
+                        return False, None
+
                 return True, session
 
     async def _validate_staked_draft_requirements(self, interaction: discord.Interaction, session_id: str):
@@ -1200,15 +1223,49 @@ class PersistentView(discord.ui.View):
             action_message = f"You have been added to {getattr(session, primary_key + '_name', primary_key)}."
 
         # Update or add user in the sign-ups dictionary
-        sign_ups[user_id] = user_name
+        # Stepping off a team leaves the draft. sign_ups is what seating and
+        # the Draftmancer expected-user list read, so a player left in it after
+        # leaving is one the bot waits for and seats -- and with an entry fee
+        # they would be refunded and still listed as playing.
+        leaving = user_id not in primary_team
+        if leaving:
+            sign_ups.pop(user_id, None)
+        else:
+            sign_ups[user_id] = user_name
 
-        # Persist changes to the database
-        async with AsyncSessionLocal() as db_session:
-            async with db_session.begin():
-                await db_session.execute(update(DraftSession)
-                                        .where(DraftSession.session_id == session.session_id)
-                                        .values({primary_key: primary_team, secondary_key: secondary_team, 'sign_ups': sign_ups}))
-                await db_session.commit()
+        # A premade draft may charge a fixed entry fee, set when it was
+        # created. Everyone on either side pays the same, so the money and the
+        # team change commit together for the same reason they do on a staked
+        # signup: a failure between two commits would charge a player for a
+        # draft they are not in. Switching sides is not a second charge --
+        # entry_in moves the difference, and there is none. A draft with no fee
+        # asks for nothing and this is a no-op.
+        fee = session.entry_fee or 0
+        target = 0 if leaving else fee
+        charged: dict = {"ok": True, "deficit": 0}
+        async with wallet_service.MONEY_LOCK:
+            async with AsyncSessionLocal() as db_session:
+                async with db_session.begin():
+                    if fee:
+                        charged = await entry_in(
+                            db_session, str(session.guild_id), session.session_id,
+                            user_id, target, "left" if leaving else "joined")
+                    if charged["ok"]:
+                        await db_session.execute(update(DraftSession)
+                                                .where(DraftSession.session_id == session.session_id)
+                                                .values({primary_key: primary_team, secondary_key: secondary_team, 'sign_ups': sign_ups}))
+
+        if not charged["ok"]:
+            await interaction.response.send_message(
+                f"You need {charged['deficit']} more tix to join this draft — "
+                f"the entry fee is {fee}. Add funds and try again.",
+                ephemeral=True)
+            return
+
+        if fee and not leaving:
+            action_message += f" {fee} tix entry paid."
+        elif fee and leaving:
+            action_message += f" Your {fee} tix entry has been returned."
 
         await interaction.response.send_message(action_message, ephemeral=True)
 

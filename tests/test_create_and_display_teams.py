@@ -24,6 +24,10 @@ def _premade_session(sign_ups, team_a=None, team_b=None):
     session.team_b = team_b if team_b is not None else ids[len(ids) // 2:]
     session.tracked_draft = False
     session.premade_match_id = None
+    # A MagicMock answers any attribute with a truthy Mock, so every column the
+    # code reads has to be set here or the fake quietly disagrees with a real
+    # row. entry_fee absent means a free draft.
+    session.entry_fee = None
     return session
 
 
