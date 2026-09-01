@@ -445,3 +445,121 @@ async def test_the_bigger_of_two_large_bets_keeps_more_at_risk(test_db):
     assert held["a2"] > held["a1"], (
         f"the larger bet was levelled to the smaller one: {held}")
     assert held["a1"] + held["a2"] == 200
+
+
+# ---- max_pool: what the queue can honestly advertise -------------------------------
+#
+# The queue shows a ceiling before teams exist, so it cannot ask match_pool --
+# that needs the split. What it CAN say is how big the pot would be if the
+# sign-ups paired off as favourably as they could.
+#
+# This is the POT, not one side of it: when a 200 meets a 100 they meet at 100,
+# and both put that in, so 200 is played for. A winner takes their own back plus
+# an opponent's, which is why the pot is what "prize pool" names.
+
+
+def test_a_lone_bet_has_only_its_own_money_in_the_pot():
+    """First in the queue: 200 is in, and the joiner who covers it brings theirs
+    when they arrive. Until then the pot holds one player's money."""
+    assert pool.max_pool([200]) == 200
+
+
+def test_two_bets_that_meet_at_the_smaller_are_both_played_for():
+    """200 against 100 meets at 100 a side -- so 200 is the pot, not 300."""
+    assert pool.max_pool([200, 100]) == 200
+
+
+def test_a_roster_that_wastes_nothing_plays_for_every_tix():
+    """Two 200s and two 100s split evenly: nothing is unmatched, so the pot is
+    the whole sum."""
+    assert pool.max_pool([200, 200, 100, 100]) == 600
+
+
+def test_the_odd_player_out_adds_only_their_own_stake():
+    assert pool.max_pool([200, 100, 50]) == 250
+
+
+def test_the_pot_is_quoted_in_whole_tens():
+    """Matching happens in tens, so a 25 backs 20 and the pair is worth 40."""
+    assert pool.max_pool([25, 200]) == 40
+
+
+def test_an_empty_queue_has_no_pool():
+    assert pool.max_pool([]) == 0
+
+
+@pytest.mark.asyncio
+async def test_the_advertised_pot_is_the_pot_the_draft_actually_holds(test_db):
+    """The queue's promise and the fire's arithmetic must not drift apart.
+
+    max_pool is a claim about what the holder will contain once teams exist and
+    match_pool has refunded the unmatched. Nothing enforces that but this test.
+
+    The roster is deliberately lopsided: a symmetric one cannot catch a pairing
+    that takes the LARGER of each pair, because both readings agree there -- so
+    it would be a test that passes on broken code.
+    """
+    stakes = {"a1": 200, "a2": 100, "b1": 100, "b2": 100}
+    await _fund(stakes)
+
+    advertised = pool.max_pool(stakes.values())
+    assert advertised == 400, "the 200 can only be backed by the 100 facing it"
+
+    # No split does better: the side holding the 200 always outweighs the other.
+    result = await pool.match_pool("g", "s1", ["a1", "a2"], ["b1", "b2"])
+
+    assert await pool.pool_balance("g", "s1") == advertised, (
+        f"queue advertised {advertised}, holder actually has "
+        f"{await pool.pool_balance('g', 's1')}")
+    assert result["matched"] * 2 == advertised, "the pot is both sides, not one"
+    assert sum(result["refunded"].values()) == 100, (
+        f"the unmatchable 100 should have gone back: {result['refunded']}")
+
+
+def test_several_small_bets_together_can_back_one_big_one():
+    """match_pool compares SIDE TOTALS, not player against player.
+
+    100 and 20 on one team face 50 and 50 on the other: the sides meet at 100,
+    so 200 is played for. A model that pairs entries off one-to-one -- largest
+    against second largest -- says 140, because it never lets the two 50s add
+    up. Found by review; the queue was under-advertising drafts it could pay.
+    """
+    assert pool.max_pool([100, 20, 50, 50]) == 200
+
+
+def _best_pot_by_brute_force(stakes: list[int]) -> int:
+    """Oracle: try every legal split and take the biggest pot any of them makes.
+
+    Legal means equal-size teams, which is what team_creator enforces. After
+    match_pool the holder holds 2 x the smaller side's whole-ten total, so that
+    is the pot a given split produces.
+    """
+    from itertools import combinations
+    floored = [n // 10 * 10 for n in stakes]
+    n = len(floored)
+    if n % 2:
+        return 0        # cannot fire; no split to maximise over
+    best = 0
+    for idx in combinations(range(n), n // 2):
+        a = sum(floored[i] for i in idx)
+        b = sum(floored[i] for i in range(n) if i not in idx)
+        best = max(best, 2 * min(a, b))
+    return best
+
+
+@pytest.mark.parametrize("stakes", [
+    [200, 100],
+    [100, 20, 50, 50],
+    [200, 200, 100, 100],
+    [20, 20, 200, 200],
+    [25, 200],
+    [50] * 8,
+    [20, 170, 200, 60, 50, 110],
+    [10, 10, 10, 500],
+    [90, 80, 70, 60, 50, 40, 30, 20],
+    [200, 20, 20, 20, 20, 20, 20, 20],
+])
+def test_the_advertised_pot_is_the_best_any_legal_split_could_make(stakes):
+    """The ceiling must be exactly reachable -- not above (a promise the draft
+    cannot keep) and not below (a draft that pays more than it advertised)."""
+    assert pool.max_pool(stakes) == _best_pot_by_brute_force(stakes)

@@ -2594,6 +2594,15 @@ async def update_draft_message(bot, session_id):
                 except Exception as e:
                     logger.warning(f"[debt-warning] lookup failed for {session_id}: {e}; "
                                    "rendering without markers")
+            # What the table is playing for: the pot, both sides of it. Teams
+            # do not exist yet, so quote the best case -- every entry faced with
+            # the closest other entry it could meet. The total escrowed is the
+            # wrong number: it counts money refunded the moment the sides are
+            # capped to each other, so 200 against 100 would advertise 300 for
+            # a draft that plays for 200.
+            from services.draft_pool_service import contributions, max_pool
+            held = await contributions(str(draft_session.guild_id), session_id)
+            pool = max_pool(held.values())
             sign_ups_str = format_staked_sign_ups(
                 draft_session.sign_ups,
                 stake_info_by_player,
@@ -2602,6 +2611,7 @@ async def update_draft_message(bot, session_id):
                 threshold,
                 display_name_for=lambda uid, stored: get_display_name_by_id(uid, guild, stored),
                 session_id=session_id,
+                pool=pool,
             )
         else:
             if draft_session.sign_ups:

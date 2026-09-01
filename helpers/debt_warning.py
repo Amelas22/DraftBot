@@ -23,37 +23,35 @@ def debt_warning_suffix(total_owed, old_owed, threshold) -> str:
 
 
 def format_staked_sign_ups(sign_ups, stake_info_by_player, owed_map, old_owed_map,
-                           threshold, display_name_for, session_id: str = "") -> str:
-    """The staked draft message's Sign-Ups field text: one line per player with
-    stake, cap emoji, display name, and (players whose week-old debt exceeds
-    threshold only) the debt warning suffix. Identical to the historical format
-    when the maps are empty."""
-    entries = []
+                           threshold, display_name_for, session_id: str = "",
+                           pool: int = 0) -> str:
+    """The staked draft message's Sign-Ups field text: the players in JOIN
+    order, the pool they are collectively playing for, and (players whose
+    week-old debt exceeds threshold only) the debt warning suffix.
+
+    It used to print every player's own bet, sorted by size. That made signing
+    up a leaderboard: the largest bet sat at the top of every draft, and each
+    arrival could read what everyone else was in for before choosing their own.
+    The number that actually matters to the table is the pool, and a winner
+    takes double their matched stake -- so the most it can ever be worth is
+    what everyone has put in. The per-player figures are still shown once teams
+    form, where they are final and describe money already committed.
+
+    The cap emoji went with them: bet capping was read only by the tiered
+    matcher, which no longer runs.
+    """
+    lines = []
     for user_id, stored_name in sign_ups.items():
         display_name = display_name_for(user_id, stored_name)
-        if user_id in stake_info_by_player:
-            stake = stake_info_by_player[user_id]
-            emoji = "🧢" if stake["is_capped"] else "🏎️"
-            entries.append((user_id, display_name, stake["amount"], emoji))
-        else:
-            entries.append((user_id, display_name, "Not set", "❓"))
-
-    def sort_key(entry):
-        stake_amount = entry[2]
-        return -1 if stake_amount == "Not set" else stake_amount
-
-    entries.sort(key=sort_key, reverse=True)
-
-    lines = []
-    for user_id, display_name, stake_amount, emoji in entries:
         suffix = debt_warning_suffix(owed_map.get(user_id), old_owed_map.get(user_id), threshold)
-        if stake_amount == "Not set":
-            lines.append(f"❌ Not set: {display_name}{suffix}")
+        if user_id in stake_info_by_player:
+            lines.append(f"{display_name}{suffix}")
         else:
-            lines.append(f"{emoji} {stake_amount} tix: {display_name}{suffix}")
+            lines.append(f"❌ {display_name} has not set a bet{suffix}")
 
-    result = (f"**Players ({len(sign_ups)}):**\n"
-              + ("\n".join(lines) if lines else "No players yet."))
+    header = (f"**Players ({len(sign_ups)})** — prize pool: up to {pool} tix"
+              if pool else f"**Players ({len(sign_ups)}):**")
+    result = header + "\n" + ("\n".join(lines) if lines else "No players yet.")
     if len(result) > 1000:
         logger.warning(
             f"[debt-warning] Sign-Ups field for {session_id or 'unknown session'} "

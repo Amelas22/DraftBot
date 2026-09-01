@@ -22,7 +22,7 @@ once. A pool entry can be refunded repeatedly -- unmatched excess, then teardown
 -- so refunds here carry their own reason in the key.
 """
 from operator import itemgetter
-from typing import TypedDict
+from typing import Iterable, TypedDict
 
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -297,6 +297,55 @@ _STAKE_STEP = 10
 # shared out. It is the tier boundary the queue has always advertised: "allocate
 # all 20/50 bets, then proportionally distribute all remaining bets".
 _SMALL_BET = 50
+
+
+def max_pool(stakes: Iterable[int]) -> int:
+    """The biggest pot this queue could play for, over every legal split of it.
+
+    match_pool caps both sides at the smaller side's whole-ten TOTAL, so the
+    holder ends up with twice that. This asks which split of the current queue
+    makes that figure largest -- teams are random, so any of them can happen.
+
+    It has to reason about totals, not about players facing each other. Pairing
+    the entries off one-to-one -- largest against second largest -- is the
+    intuitive model and understates the pot: 100 and 20 against 50 and 50 meet
+    at 100 a side, because the two 50s add up, and a pairwise reading calls it
+    140 instead of 200.
+
+    Equal-size teams is the only constraint (team_creator refuses to fire an
+    uneven roster), so the answer is the size-n/2 subset whose total comes
+    closest to half the table without passing it: min(A, B) is then that subset,
+    and the pot is twice it. Found by subset sum over counts, which is cheap at
+    the sizes a draft comes in and exact, unlike a greedy pass.
+
+    An ODD queue cannot fire at all, so there is no split to maximise over. The
+    smallest entry stands aside at face value -- its own money is in, and the
+    joiner who evens the roster up brings theirs when they arrive.
+
+    Everything is floored to _STAKE_STEP first, because that is the unit the
+    sides meet at: an entry of 25 backs 20 and hands back the 5.
+    """
+    units = sorted((n // _STAKE_STEP for n in stakes if n > 0), reverse=True)
+    if not units:
+        return 0
+
+    # An odd roster cannot be split into two teams; hold the smallest back so
+    # the rest divides, and add it on unmatched.
+    odd = units.pop() if len(units) % 2 else 0
+    half = len(units) // 2
+    total = sum(units)
+
+    # reachable[k] = every total a k-entry team could hold.
+    reachable: list[set[int]] = [set() for _ in range(half + 1)]
+    reachable[0].add(0)
+    for u in units:
+        for k in range(half, 0, -1):
+            reachable[k] |= {s + u for s in reachable[k - 1]}
+
+    # The best team total that is still the SMALLER of the two; its complement
+    # is the other team, so this is min(A, B) and the pot is twice it.
+    smaller = max((s for s in reachable[half] if 2 * s <= total), default=0)
+    return (2 * smaller + odd) * _STAKE_STEP
 
 
 def level_side(held: dict[str, int], budget: int) -> dict[str, int]:
