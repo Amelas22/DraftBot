@@ -19,7 +19,7 @@ transfers net to zero, vault == SUM(wallets) holds at every instant by construct
 from datetime import datetime
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 
 from database.db_session import db_session
@@ -44,8 +44,9 @@ def escrow_source(tournament_id, participant_id) -> str:
     return f"tourney:{tournament_id}:{participant_id}"
 
 
-def entry_source(tournament_id, team_id) -> str:
-    """Idempotency key for a team's entry fee, and the handle a refund reverses.
+def entry_source(tournament_id, team_id, attempt: int = 0) -> str:
+    """Idempotency key for one of a team's entry fees, and the handle a refund
+    reverses.
 
     Keyed on the persistent Team identity, never on the participant row.
     ``remove_team`` deletes the participant, and tournament_participants.id is a plain
@@ -54,11 +55,50 @@ def entry_source(tournament_id, team_id) -> str:
     transfer: the sweep saw "already paid", stamped the newcomer paid without charging
     them, and left the pot one fee short. The Team row outlives a drop, so this key
     cannot be recycled.
+
+    ``attempt`` numbers the registrations. The ledger keeps one 'pay' and one
+    'receive' per source -- enforced by uq_wallet_tx_transfer_legs -- so a team
+    that drops and registers again cannot book a second pair under the same key:
+    the write is rejected and the team is left unpaid. A refund does not remove
+    the first entry, it books a compensating pair, so the key has to move on
+    with each registration rather than being reused.
+
+    Attempt 0 keeps the original string, so every entry already on the books
+    keeps the key it was written under and stays findable by a refund.
     """
-    return f"tourney:{tournament_id}:team:{team_id}"
+    base = f"tourney:{tournament_id}:team:{team_id}"
+    return base if not attempt else f"{base}#{attempt}"
 
 
-async def _booked_entry(session, tournament_id: int, participant: TournamentParticipant):
+def _attempt_of(base: str, source: str) -> int:
+    """Which registration a booked source belongs to. Attempt 0 is the bare key."""
+    return 0 if source == base else int(source.rsplit("#", 1)[1])
+
+
+async def _entry_sources(session, tournament_id: int, team_id) -> list[str]:
+    """Every source this team's entry has been booked under, oldest first."""
+    base = entry_source(tournament_id, team_id)
+    rows = (await session.execute(
+        select(WalletTx.source).where(
+            WalletTx.kind == "receive",
+            or_(WalletTx.source == base,
+                WalletTx.source.like(f"{base}#%")),
+        ).distinct())).scalars().all()
+    return sorted((str(r) for r in rows), key=lambda src: _attempt_of(base, src))
+
+
+def _next_attempt(base: str, booked: list[str]) -> int:
+    """The registration number to book the next entry under.
+
+    One past the highest already used, not the count: counting assumes the
+    numbers have no gaps, and a single missing one would send this back to a
+    key the ledger already holds, where the unique index rejects it.
+    """
+    return max((_attempt_of(base, src) for src in booked), default=-1) + 1
+
+
+async def _booked_entry(session, tournament_id: int, participant: TournamentParticipant,
+                        booked: list[str] | None = None):
     """``(credit_leg, source)`` for this team's entry fee if it is still STANDING,
     else ``(None, None)``.
 
@@ -73,8 +113,11 @@ async def _booked_entry(session, tournament_id: int, participant: TournamentPart
     re-registering would seat it for free every time. Netting the refund off is what
     makes the key safe to reuse across registrations rather than merely unrecycled.
     """
-    for src in (entry_source(tournament_id, participant.team_id),
-                escrow_source(tournament_id, participant.id)):
+    # Latest registration first: an older, refunded entry must not mask the one
+    # standing now.
+    if booked is None:
+        booked = await _entry_sources(session, tournament_id, participant.team_id)
+    for src in list(reversed(booked)) + [escrow_source(tournament_id, participant.id)]:
         leg = await wallet_service.transfer_credit(session, src)
         if leg is None:
             continue
@@ -189,7 +232,10 @@ async def secure_from_wallet(guild_id: str, captain_id: str, participant_id: int
             if p is None:
                 return {"ok": False, "error": "team no longer registered"}
 
-            leg, _ = await _booked_entry(session, tournament_id, p)
+            # Read once and reuse: the probe and the next-attempt number ask
+            # the same question of the ledger.
+            booked = await _entry_sources(session, tournament_id, p.team_id)
+            leg, _ = await _booked_entry(session, tournament_id, p, booked)
             if leg is not None:
                 _mark_paid(p)
                 return {"ok": True, "done": True, "paid": fee, "reused": True}
@@ -198,10 +244,13 @@ async def secure_from_wallet(guild_id: str, captain_id: str, participant_id: int
             if balance < fee:
                 return {"ok": True, "done": False, "deficit": fee - balance, "available": balance}
 
+            # Names the Team, which a drop cannot free, plus which registration
+            # this is — see entry_source. Re-using the key after a refund is
+            # rejected by the ledger's unique index and leaves the team unpaid.
+            attempt = _next_attempt(entry_source(tournament_id, p.team_id), booked)
             await wallet_service.transfer_in(
                 session, guild_id, captain_id, prize_id, fee,
-                # Names the Team, which a drop cannot free — see entry_source.
-                entry_source(tournament_id, p.team_id),
+                entry_source(tournament_id, p.team_id, attempt),
                 notes=f"tournament entry: {team_name}")  # funds checked just above
             _mark_paid(p)
             logger.info(f"escrow: participant {participant_id} paid {fee} into {prize_id}")

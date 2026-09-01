@@ -26,7 +26,7 @@ class MtgoJob(Base):
     player_id = Column(String(64), nullable=False)
     mtgo_user = Column(String(128), nullable=False)
     amount = Column(Integer, nullable=False)
-    status = Column(String(16), nullable=False, default='pending')  # pending | done | failed
+    status = Column(String(16), nullable=False, default='pending', index=True)  # pending | done | failed
     created_at = Column(DateTime, default=datetime.now)
     resolved_at = Column(DateTime, nullable=True)
 
