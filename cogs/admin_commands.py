@@ -9,6 +9,8 @@ from leaderboard_config import CROWN_ICONS, DEFAULT_CROWN_ROLE_NAMES
 from stats_display import get_stats_embed_for_player
 
 from helpers.permissions import has_bot_manager_role, ADMIN_ROLE_NAME
+from helpers.draft_rooms import SHARED_CHAT_TEAM
+from helpers.substitutes import TEAM_A_CHANNEL_PREFIX, TEAM_B_CHANNEL_PREFIX
 from cube_views.CubeListModal import CubeListModal
 
 
@@ -1281,6 +1283,61 @@ class AdminCommands(commands.Cog):
                 f"An error occurred while fetching stats for {player.display_name}. Please try again later.",
                 ephemeral=True
             )
+
+    @discord.slash_command(
+        name='regenerate_rooms',
+        description="Admin: rebuild a team's draft rooms when Discord has lost their access"
+    )
+    @has_bot_manager_role()
+    async def regenerate_rooms(
+        self,
+        ctx,
+        friendly_id: discord.Option(str, "The draft's friendly id, e.g. reckless-crew-92"),
+        team: discord.Option(
+            str, "Which rooms to rebuild",
+            choices=[
+                discord.OptionChoice(name="Team A's own rooms (red)",
+                                     value=TEAM_A_CHANNEL_PREFIX),
+                discord.OptionChoice(name="Team B's own rooms (blue)",
+                                     value=TEAM_B_CHANNEL_PREFIX),
+                discord.OptionChoice(name="The shared draft chat only",
+                                     value=SHARED_CHAT_TEAM),
+            ])
+    ):
+        """Delete one team's rooms and make them again.
+
+        The repair for the Discord bug where a player -- in practice a substitute
+        -- cannot see their team chat on any device while the API insists their
+        overwrite is present. See helpers/room_regeneration.py for why recreating
+        the room is the only thing that clears it.
+
+        Costs the room's messages and threads. The drafted pools come back.
+        """
+        from models.draft_session import DraftSession
+        from helpers.room_regeneration import regenerate_team_rooms
+
+        await ctx.defer(ephemeral=True)
+
+        session = await DraftSession.get_by_friendly_id(str(ctx.guild.id), friendly_id)
+        if session is None:
+            await ctx.followup.send(
+                f"❌ No draft `{friendly_id}` in this server.", ephemeral=True)
+            return
+
+        result, error = await regenerate_team_rooms(
+            self.bot, ctx.guild, session.session_id, team)
+        if result is None:
+            await ctx.followup.send(f"❌ {error}", ephemeral=True)
+            return
+
+        lines = [
+            f"✅ Rebuilt **{team}** for `{friendly_id}`: <#{result.new_channel_id}>",
+            f"Replaced {len(result.deleted_ids)} room(s). Everyone on the team gets a "
+            f"fresh channel-create, so it will appear for them without a client reload.",
+        ]
+        if not result.pools_reposted:
+            lines.append("⚠️ Its drafted pools were NOT reposted — check the logs.")
+        await ctx.followup.send("\n".join(lines), ephemeral=True)
 
 
 def setup(bot):
