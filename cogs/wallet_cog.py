@@ -1,13 +1,15 @@
 """
 Tix wallet slash commands — the player-facing face of the MTGO escrow/wallet system.
 
-Commands (all under /wallet):
+Player commands (all under /wallet):
 - /wallet show            your own balance + recent activity; no target to pass
 - /wallet deposit <n>     hand tix to the custodian (an MTGO trade) -> wallet +n
 - /wallet withdraw <n>    take tix out of the custodian (an MTGO trade) -> wallet -n
 - /wallet pay @player <n> send tix to another player's wallet (internal, no trade)
-- /wallet admin_show @p   (admin) read another player's wallet; logged
-- /wallet reconcile       (admin) audit: physical vault tix == SUM of all wallets
+
+Admin commands live in their own group, as /debt-admin does:
+- /wallet-admin show @p   read another player's wallet; logged
+- /wallet-admin reconcile audit: physical vault tix == SUM of all wallets
 
 Gating: enabled only on money servers with the TradeBot integration configured
 (MTGO_TRADEBOT_URL + _TOKEN). Deposits/withdraws require the caller to have linked their
@@ -71,6 +73,12 @@ class WalletCommands(commands.Cog):
         logger.info("Wallet commands cog loaded")
 
     wallet = SlashCommandGroup("wallet", "Manage your MTGO tix wallet")
+    # Admin actions get their own group, the way /debt-admin is separate from
+    # /debts. No command in this repo sets default_member_permissions, so a
+    # subcommand left in the player group stays visible in every player's picker
+    # and only fails at invoke time.
+    wallet_admin = SlashCommandGroup(
+        "wallet-admin", "Admin commands for managing tix wallets")
 
     # ----- /wallet show -----
     @wallet.command(name="show", description="Show your tix wallet balance and recent activity")
@@ -82,10 +90,10 @@ class WalletCommands(commands.Cog):
 
         await _send_wallet(ctx, ctx.author)
 
-    # ----- /wallet admin_show <player> -----
-    @wallet.command(
-        name="admin_show",
-        description="(Admin) Show another player's tix wallet balance and activity")
+    # ----- /wallet-admin show <player> -----
+    @wallet_admin.command(
+        name="show",
+        description="[Admin] Show another player's tix wallet balance and activity")
     @has_bot_manager_role()
     @option("player", discord.Member, description="Whose wallet to show")
     async def wallet_admin_show(self, ctx: discord.ApplicationContext,
@@ -258,7 +266,8 @@ class WalletCommands(commands.Cog):
             ephemeral=True)
 
     # ----- /wallet reconcile (admin) -----
-    @wallet.command(name="reconcile", description="(Admin) Audit: vault tix vs. total of all wallets")
+    @wallet_admin.command(
+        name="reconcile", description="[Admin] Audit: vault tix vs. total of all wallets")
     @has_bot_manager_role()
     async def wallet_reconcile(self, ctx: discord.ApplicationContext):
         await ctx.defer(ephemeral=True)

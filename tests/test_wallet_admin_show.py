@@ -93,6 +93,24 @@ async def test_admin_show_records_who_looked():
     assert str(ME) in logged and str(THEM) in logged
 
 
+def test_the_admin_lookup_lives_in_the_wallet_admin_group():
+    """Player commands and admin commands do not share a group, the way /debts
+    and /debt-admin do not. A player browsing /wallet should not be offered a
+    command that only fails at invoke time."""
+    assert WalletCommands.wallet_admin_show.parent.name == "wallet-admin"
+    assert WalletCommands.wallet_admin_show.name == "show"
+
+
+def test_the_audit_command_moved_too():
+    """reconcile was the other admin command sitting in the player group."""
+    assert WalletCommands.wallet_reconcile.parent.name == "wallet-admin"
+
+
+def test_no_admin_command_is_left_in_the_player_group():
+    player_cmds = sorted(c.name for c in WalletCommands.wallet.subcommands)
+    assert player_cmds == ["deposit", "pay", "show", "withdraw"], player_cmds
+
+
 def test_admin_show_is_restricted_to_bot_managers():
     """The whole point of moving it out of /wallet show.
 
