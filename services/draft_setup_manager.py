@@ -992,11 +992,66 @@ class DraftSetupManager:
                 await self.socket_client.disconnect()
                 self.logger.info(f"Disconnected from old session DB{old_draft_id}")
 
+            await self._announce_regenerated_session()
+
             return True
 
         except Exception as e:
             self.logger.error(f"Error regenerating draft session: {e}")
             return False
+
+    async def _announce_regenerated_session(self) -> None:
+        """Tell the room the draft moved, with a fresh link each.
+
+        Everything the bot renders from here on is already correct; this is for the
+        links people are ALREADY holding. The sign-up confirmation is an ephemeral
+        message sent at sign-up time -- it cannot be edited afterwards, and nothing
+        about it suggests the room has changed, so a player who signed up before the
+        swap has a URL to a room the bot has walked away from.
+
+        Reads the session itself rather than reusing the caller's row: the swap above
+        is a compare-and-swap that deliberately does not load one.
+
+        Never raises. The swap is committed by the time this runs, so a Discord
+        failure here must not report the regeneration as failed.
+        """
+        try:
+            draft_session = await self._get_draft_session_from_db()
+            sign_ups = (draft_session.sign_ups if draft_session else None) or {}
+            links = {}
+            for discord_id, name in sign_ups.items():
+                link = draft_session.get_draft_link_for_user(name)
+                if link:
+                    links[discord_id] = link
+            if not links:
+                # Regeneration in an empty queue is routine repair, not an incident.
+                return
+
+            channel = await self._get_draft_channel()
+            if not channel:
+                self.logger.warning("No draft channel; cannot announce the new session link")
+                return
+
+            lines = "\n".join(
+                f"<@{discord_id}> — [your new draft link]({link})"
+                for discord_id, link in links.items()
+            )
+            # Draftmancer takes any setUserName a client sends, and those names are
+            # interpolated above, so "@everyone" is a name somebody can pick. Only the
+            # ids resolved from sign_ups are allowed to ping.
+            await channel.send(
+                f"⚠️ **The Draftmancer session moved.** The bot could not hold the old "
+                f"room, so it opened a new one (`DB{self.draft_id}`). **Any link you were "
+                f"given before this message no longer works.**\n\n{lines}",
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=False, roles=False,
+                    users=[discord.Object(id=int(i)) for i in links],
+                ),
+            )
+            self.logger.info(
+                f"Announced regenerated session DB{self.draft_id} to {len(links)} players")
+        except Exception as e:
+            self.logger.error(f"Could not announce regenerated session: {e}")
 
     async def _reclaim_ownership_as_spectator(self) -> bool:
         """Reclaim session ownership and set bot as spectator after reconnection.
