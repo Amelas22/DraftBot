@@ -225,6 +225,35 @@ class DraftStickyStrategy(StickyStrategy):
             if not guild:
                 return None
 
+            draft_session_id = sticky_message.view_metadata.get("draft_session_id")
+            draft_session = await get_draft_session(draft_session_id)
+
+            # A tournament match is played by two teams that are already settled,
+            # so it does not belong in a feed whose whole job is helping people
+            # find a draft they can JOIN -- and the line below reads "Looking for
+            # Drafters", which is not true of it either.
+            #
+            # It reached that line because the mention keys only on session_type:
+            # a tournament match runs as 'premade', which no guild lists in
+            # session_roles, so find_session_role fell through to the default
+            # drafter role and pinged every cube drafter.
+            #
+            # This catches a match launched AGAINST a pairing -- the Start draft
+            # button and /premade_draft in a match thread, which is how matches
+            # are actually started. Both build session_details through
+            # match_control_view._picker_overrides, so tournament_match_id is
+            # committed with the row (sessions/base_session.py:91) before the
+            # message is made sticky, and is readable by the time we get here.
+            #
+            # It does NOT catch the retro-link nudge: an ordinary premade draft
+            # is announced first and only linked when someone presses the button
+            # (services/tournament_linking.py). That announcement has already
+            # gone out, and a mention cannot be recalled by editing the message
+            # afterwards -- so the leftover post is a cleanup problem, tracked
+            # separately, not something this check can prevent.
+            if draft_session and draft_session.tournament_match_id is not None:
+                return None
+
             notification_channel = await find_notification_channel(guild)
             if not notification_channel:
                 return None
@@ -234,13 +263,10 @@ class DraftStickyStrategy(StickyStrategy):
 
             # Add role mention only on first notification (not on updates)
             # This prevents spamming the role on every sticky message refresh
-            if not sticky_message.notification_message_id:
-                draft_session_id = sticky_message.view_metadata.get("draft_session_id")
-                draft_session = await get_draft_session(draft_session_id)
-                if draft_session:
-                    session_role = await find_session_role(guild, draft_session.session_type)
-                    if session_role:
-                        content = f"{session_role.mention} {content}"
+            if not sticky_message.notification_message_id and draft_session:
+                session_role = await find_session_role(guild, draft_session.session_type)
+                if session_role:
+                    content = f"{session_role.mention} {content}"
 
             if sticky_message.notification_message_id:
                 try:
