@@ -1,12 +1,15 @@
 """
 Tix wallet slash commands — the player-facing face of the MTGO escrow/wallet system.
 
-Commands (all under /wallet):
-- /wallet [player]        show a wallet: balance + recent activity
+Player commands (all under /wallet):
+- /wallet show            your own balance + recent activity; no target to pass
 - /wallet deposit <n>     hand tix to the custodian (an MTGO trade) -> wallet +n
 - /wallet withdraw <n>    take tix out of the custodian (an MTGO trade) -> wallet -n
 - /wallet pay @player <n> send tix to another player's wallet (internal, no trade)
-- /wallet reconcile       (admin) audit: physical vault tix == SUM of all wallets
+
+Admin commands live in their own group, as /debt-admin does:
+- /wallet-admin show @p   read another player's wallet; logged
+- /wallet-admin reconcile audit: physical vault tix == SUM of all wallets
 
 Gating: enabled only on money servers with the TradeBot integration configured
 (MTGO_TRADEBOT_URL + _TOKEN). Deposits/withdraws require the caller to have linked their
@@ -35,45 +38,78 @@ from helpers.money_gate import (
 from helpers.permissions import has_bot_manager_role
 
 
+async def _send_wallet(ctx, target) -> None:
+    """Render one player's wallet panel to the caller, privately.
+
+    One helper rather than a builder plus two identical fetch-and-send tails, so
+    the player's own view and the bot-manager lookup cannot drift apart.
+    """
+    guild_id = str(ctx.guild.id)
+    wallet = await wallet_service.get_wallet(guild_id, str(target.id))
+    history = await wallet_service.get_history(guild_id, str(target.id), limit=10)
+
+    embed = discord.Embed(
+        title=f"{target.display_name}'s Tix Wallet", color=discord.Color.gold())
+    embed.add_field(name="Balance", value=f"**{wallet.balance}** tix", inline=True)
+
+    if history:
+        lines = []
+        for tx in history:
+            sign = "+" if tx.amount >= 0 else "−"
+            # only @-mention a real person: the counterparty may be an MTGO
+            # username or a synthetic holder (in-flight, a prize pool)
+            cp = tx.counterparty_id
+            who = "" if not cp or wallet_service.is_system_account(cp) else f" ↔ <@{cp}>"
+            lines.append(f"`{sign}{abs(tx.amount)}` {tx.kind}{who}")
+        embed.add_field(name="Recent activity", value="\n".join(lines), inline=False)
+    else:
+        embed.set_footer(text="No wallet activity yet.")
+    await ctx.followup.send(embed=embed, ephemeral=True)
+
+
 class WalletCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         logger.info("Wallet commands cog loaded")
 
     wallet = SlashCommandGroup("wallet", "Manage your MTGO tix wallet")
+    # Admin actions get their own group, the way /debt-admin is separate from
+    # /debts. No command in this repo sets default_member_permissions, so a
+    # subcommand left in the player group stays visible in every player's picker
+    # and only fails at invoke time.
+    wallet_admin = SlashCommandGroup(
+        "wallet-admin", "Admin commands for managing tix wallets")
 
-    # ----- /wallet [player] -----
-    @wallet.command(name="show", description="Show a tix wallet balance and recent activity")
-    @option("player", discord.Member, description="Whose wallet to show (defaults to you)", required=False)
-    async def wallet_show(self, ctx: discord.ApplicationContext, player: discord.Member = None):
+    # ----- /wallet show -----
+    @wallet.command(name="show", description="Show your tix wallet balance and recent activity")
+    async def wallet_show(self, ctx: discord.ApplicationContext):
         await ctx.defer(ephemeral=True)
         err = gate_read(ctx)
         if err:
             return await ctx.followup.send(err, ephemeral=True)
 
-        guild_id = str(ctx.guild.id)
-        target = player or ctx.author
-        w = await wallet_service.get_wallet(guild_id, str(target.id))
-        history = await wallet_service.get_history(guild_id, str(target.id), limit=10)
+        await _send_wallet(ctx, ctx.author)
 
-        embed = discord.Embed(
-            title=f"{target.display_name}'s Tix Wallet", color=discord.Color.gold())
-        embed.add_field(name="Balance", value=f"**{w.balance}** tix", inline=True)
+    # ----- /wallet-admin show <player> -----
+    @wallet_admin.command(
+        name="show",
+        description="[Admin] Show another player's tix wallet balance and activity")
+    @has_bot_manager_role()
+    @option("player", discord.Member, description="Whose wallet to show")
+    async def wallet_admin_show(self, ctx: discord.ApplicationContext,
+                                player: discord.Member):
+        await ctx.defer(ephemeral=True)
+        err = gate_read(ctx)
+        if err:
+            return await ctx.followup.send(err, ephemeral=True)
 
-        if history:
-            lines = []
-            for tx in history:
-                sign = "+" if tx.amount >= 0 else "−"
-                # only @-mention a real person: the counterparty may be an MTGO
-                # username or a synthetic holder (in-flight, a prize pool)
-                cp = tx.counterparty_id
-                who = "" if not cp or wallet_service.is_system_account(cp) else f" ↔ <@{cp}>"
-                lines.append(f"`{sign}{abs(tx.amount)}` {tx.kind}{who}")
-            embed.add_field(name="Recent activity", value="\n".join(lines), inline=False)
-        else:
-            embed.set_footer(text="No wallet activity yet.")
-
-        await ctx.followup.send(embed=embed, ephemeral=True)
+        # A privileged read of someone else's money, recorded so "who looked at
+        # my wallet" has an answer. Deliberately not a DM to the player: a
+        # manager opening a support ticket is routine, and a notification every
+        # time would read as an accusation.
+        logger.info(f"wallet admin_show: {ctx.author.id} viewed "
+                    f"{player.id} in guild {ctx.guild.id}")
+        await _send_wallet(ctx, player)
 
     # ----- /wallet deposit <n> -----
     @wallet.command(name="deposit", description="Deposit tix into your wallet (trade them to the custodian)")
@@ -230,7 +266,8 @@ class WalletCommands(commands.Cog):
             ephemeral=True)
 
     # ----- /wallet reconcile (admin) -----
-    @wallet.command(name="reconcile", description="(Admin) Audit: vault tix vs. total of all wallets")
+    @wallet_admin.command(
+        name="reconcile", description="[Admin] Audit: vault tix vs. total of all wallets")
     @has_bot_manager_role()
     async def wallet_reconcile(self, ctx: discord.ApplicationContext):
         await ctx.defer(ephemeral=True)
