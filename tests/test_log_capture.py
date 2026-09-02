@@ -14,6 +14,7 @@ def _manager():
     m = DraftSetupManager.__new__(DraftSetupManager)
     m.session_id = "sid"
     m.draft_id = "ABC123"
+    m.bot_user_id = "DraftBot"  # normally set by __init__; used when connecting
     m.cube_id = "MyCube"
     m.session_type = "premade"
     m.guild_id = "42"

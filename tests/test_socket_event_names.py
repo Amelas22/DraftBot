@@ -18,10 +18,12 @@ from unittest.mock import MagicMock
 
 from services.draft_setup_manager import DraftSetupManager
 
-# What Draftmancer emits to connected users; see src/Session.ts.
+# What Draftmancer emits to connected users; see src/Session.ts, plus
+# "alreadyConnected" which comes from the connection handler in src/server.ts when
+# our userID was already in use and the server assigned us a new one.
 DRAFTMANCER_EMITS = {
     "sessionUsers", "userDisconnected", "resumeOnReconnection", "pauseDraft",
-    "resumeDraft", "endDraft", "draftLog", "setReady",
+    "resumeDraft", "endDraft", "draftLog", "setReady", "alreadyConnected",
 }
 # Events Draftmancer declares as `() => void` in src/SocketType.ts. A handler that
 # demands a payload for one of these raises TypeError on arrival, which fails exactly
