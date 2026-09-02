@@ -27,7 +27,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from conftest import make_manager
+from conftest import fake_db_session, make_manager
 # The subscription probe lives with the subscription-name contract it serves.
 from test_socket_event_names import _subscribed_events
 
@@ -148,16 +148,10 @@ async def test_regenerating_the_draft_moves_the_identity_with_it():
     mgr = make_manager(draft_id="OLDID000")
     mgr.socket_client.connected = False
 
-    result = MagicMock()
-    result.rowcount = 1
-    session = MagicMock()
-    session.execute = AsyncMock(return_value=result)
-    session.commit = AsyncMock()
-    ctx = MagicMock()
-    ctx.__aenter__ = AsyncMock(return_value=session)
-    ctx.__aexit__ = AsyncMock(return_value=None)
+    mgr._get_draft_channel = AsyncMock(return_value=None)
+    mgr._get_draft_session_from_db = AsyncMock(return_value=None)
 
-    with patch("services.draft_setup_manager.db_session", MagicMock(return_value=ctx)):
+    with patch("services.draft_setup_manager.db_session", fake_db_session(rowcount=1)):
         assert await mgr.regenerate_draft_session() is True
 
     assert mgr.bot_user_id == f"DraftBot-{mgr.draft_id}"
@@ -213,15 +207,10 @@ async def test_the_socket_log_tag_follows_a_regeneration():
     mgr.socket_client.resource_id = "DBOLDID000"
     mgr.socket_client.connected = False
 
-    result = MagicMock(rowcount=1)
-    session = MagicMock(execute=AsyncMock(return_value=result), commit=AsyncMock())
-    ctx = MagicMock()
-    ctx.__aenter__ = AsyncMock(return_value=session)
-    ctx.__aexit__ = AsyncMock(return_value=None)
     mgr._get_draft_channel = AsyncMock(return_value=None)
     mgr._get_draft_session_from_db = AsyncMock(return_value=None)
 
-    with patch("services.draft_setup_manager.db_session", MagicMock(return_value=ctx)):
+    with patch("services.draft_setup_manager.db_session", fake_db_session(rowcount=1)):
         assert await mgr.regenerate_draft_session() is True
 
     assert mgr.socket_client.resource_id == f"DB{mgr.draft_id}"

@@ -1013,6 +1013,18 @@ class DraftSetupManager:
             self.logger.error(f"Error regenerating draft session: {e}")
             return False
 
+    def _regenerated_notice_text(self, links: "dict[str, str]") -> str:
+        """What the room is told when the draft moves. Separated from sending, as
+        _disconnect_notice_text is, so the words can be asserted without reaching
+        into a mock's call args."""
+        lines = "\n".join(f"<@{discord_id}> — [your new draft link]({link})"
+                           for discord_id, link in links.items())
+        return (
+            f"⚠️ **The Draftmancer session moved.** The bot could not hold the old "
+            f"room, so it opened a new one (`DB{self.draft_id}`). **Any link you were "
+            f"given before this message no longer works.**\n\n{lines}"
+        )
+
     async def _announce_regenerated_session(self) -> None:
         """Tell the room the draft moved, with a fresh link each.
 
@@ -1023,39 +1035,37 @@ class DraftSetupManager:
         swap has a URL to a room the bot has walked away from.
 
         Reads the session itself rather than reusing the caller's row: the swap above
-        is a compare-and-swap that deliberately does not load one.
+        is a compare-and-swap that deliberately does not load one. That read also
+        supplies the channel id, because self.draft_channel_id is populated by other
+        paths a regenerating manager need not have taken -- without it the
+        announcement skips silently and everyone keeps a dead link.
 
         Never raises. The swap is committed by the time this runs, so a Discord
         failure here must not report the regeneration as failed.
         """
         try:
             draft_session = await self._get_draft_session_from_db()
-            sign_ups = (draft_session.sign_ups if draft_session else None) or {}
-            links = {}
-            for discord_id, name in sign_ups.items():
-                link = draft_session.get_draft_link_for_user(name)
-                if link:
-                    links[discord_id] = link
-            if not links:
+            if not draft_session or not draft_session.sign_ups:
                 # Regeneration in an empty queue is routine repair, not an incident.
                 return
+            links = {discord_id: link
+                     for discord_id, name in draft_session.sign_ups.items()
+                     if (link := draft_session.get_draft_link_for_user(name))}
+            if not links:
+                return
 
+            if not self.draft_channel_id and draft_session.draft_channel_id:
+                self.draft_channel_id = draft_session.draft_channel_id
             channel = await self._get_draft_channel()
             if not channel:
                 self.logger.warning("No draft channel; cannot announce the new session link")
                 return
 
-            lines = "\n".join(
-                f"<@{discord_id}> — [your new draft link]({link})"
-                for discord_id, link in links.items()
-            )
             # Draftmancer takes any setUserName a client sends, and those names are
-            # interpolated above, so "@everyone" is a name somebody can pick. Only the
-            # ids resolved from sign_ups are allowed to ping.
+            # interpolated into the notice, so "@everyone" is a name somebody can
+            # pick. Only the ids resolved from sign_ups are allowed to ping.
             await channel.send(
-                f"⚠️ **The Draftmancer session moved.** The bot could not hold the old "
-                f"room, so it opened a new one (`DB{self.draft_id}`). **Any link you were "
-                f"given before this message no longer works.**\n\n{lines}",
+                self._regenerated_notice_text(links),
                 allowed_mentions=discord.AllowedMentions(
                     everyone=False, roles=False,
                     users=[discord.Object(id=int(i)) for i in links],

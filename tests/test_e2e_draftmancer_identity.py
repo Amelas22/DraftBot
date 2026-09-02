@@ -94,7 +94,9 @@ async def test_a_second_disconnect_reconnects_to_where_the_draft_moved():
 
     The first drop regenerates; the second is the one that used to go backwards.
     """
-    from unittest.mock import AsyncMock, MagicMock, patch
+    from unittest.mock import AsyncMock, patch
+
+    from conftest import fake_db_session
 
     server = FakeDraftmancer()
     mgr = make_manager(session_id="s1", draft_id="OLDROOM0")
@@ -108,12 +110,7 @@ async def test_a_second_disconnect_reconnects_to_where_the_draft_moved():
     mgr._get_draft_channel = AsyncMock(return_value=None)
     mgr._get_draft_session_from_db = AsyncMock(return_value=None)
 
-    swap = MagicMock()
-    swap.return_value.__aenter__ = AsyncMock(return_value=MagicMock(
-        execute=AsyncMock(return_value=MagicMock(rowcount=1)), commit=AsyncMock()))
-    swap.return_value.__aexit__ = AsyncMock(return_value=None)
-
-    with patch("services.draft_setup_manager.db_session", swap):
+    with patch("services.draft_setup_manager.db_session", fake_db_session(rowcount=1)):
         assert await mgr._handle_reconnection() is True
     moved_to = f"DB{mgr.draft_id}"
     assert moved_to != "DBOLDROOM0"
