@@ -11,6 +11,8 @@ whole point of doing it first: once every player in a draft is known solvent,
 moving to real escrow cannot strand anyone, and until then the legacy debt path
 keeps working untouched.
 """
+from datetime import datetime, timedelta
+
 import pytest
 import pytest_asyncio
 from sqlalchemy import update
@@ -341,3 +343,49 @@ async def test_a_played_out_draft_left_at_pairings_is_not_a_potential_obligation
     await wallet_service.adjust("g", P, 100, "seed", "t")
 
     assert (await stake_funding.shortfall("g", P, "new", 100))["gap"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_draft_whose_rooms_were_reaped_is_not_a_potential_obligation(test_db):
+    """Once cleanup has deleted a draft's channels, no result can be reported
+    into it, so it can never charge anyone.
+
+    These are the drafts that fired and were simply never played out. They carry
+    no victory message, so completion alone does not release them, and in
+    production they had accumulated for well over a year -- one player was still
+    reserving 1550 tix against drafts whose rooms were deleted in 2025.
+    """
+    await seed_session("reaped", guild="g", stype="staked", stage="pairings",
+                       sign_ups={P: "Ada"})
+    await _declare("reaped", P, 60)
+    async with AsyncSessionLocal() as db:
+        async with db.begin():
+            await db.execute(update(DraftSession)
+                             .where(DraftSession.session_id == "reaped")
+                             .values(deletion_time=datetime(2025, 4, 20)))
+
+    await seed_session("new", guild="g", stype="staked", stage=None,
+                       sign_ups={P: "Ada"})
+    await wallet_service.adjust("g", P, 100, "seed", "t")
+
+    assert (await stake_funding.shortfall("g", P, "new", 100))["gap"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_live_draft_inside_its_deletion_window_still_reserves(test_db):
+    """The other side of the same rule: a draft whose rooms are still standing
+    can absolutely still cost the player, and must keep its claim."""
+    await seed_session("live", guild="g", stype="staked", stage="pairings",
+                       sign_ups={P: "Ada"})
+    await _declare("live", P, 60)
+    async with AsyncSessionLocal() as db:
+        async with db.begin():
+            await db.execute(update(DraftSession)
+                             .where(DraftSession.session_id == "live")
+                             .values(deletion_time=datetime.now() + timedelta(days=7)))
+
+    await seed_session("new", guild="g", stype="staked", stage=None,
+                       sign_ups={P: "Ada"})
+    await wallet_service.adjust("g", P, 100, "seed", "t")
+
+    assert (await stake_funding.shortfall("g", P, "new", 100))["gap"] == 60
