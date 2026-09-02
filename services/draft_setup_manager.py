@@ -45,6 +45,9 @@ VICTORY_CHECK_INITIAL_DELAY = 10  # Initial delay for immediate victory detectio
 
 # Connection and retry settings
 MAX_USER_ID_LOOKUP_ATTEMPTS = 5  # Max attempts to find bot's userID in session
+# The bot's Draftmancer userID. A starting value: Draftmancer may rename us on
+# connect (see _on_already_connected), which is why self.bot_user_id is state.
+DEFAULT_BOT_USER_ID = "DraftBot"
 USER_ID_LOOKUP_RETRY_DELAY = 0.5  # Seconds between userID lookup attempts
 DRAFT_LOG_WAIT_ATTEMPTS = 20    # Poll for the draftLog push after endDraft (10s total)
 DRAFT_LOG_WAIT_INTERVAL = 0.5   # Seconds between draftLog availability checks
@@ -214,6 +217,9 @@ class DraftSetupManager:
                  friendly_id: str = None):
         self.session_id = session_id
         self.draft_id = draft_id
+        # Who this manager is to Draftmancer. Held as state, not passed inline, so
+        # _on_already_connected can replace it when the server renames us.
+        self.bot_user_id = DEFAULT_BOT_USER_ID
         self.friendly_id = friendly_id
         self.cube_id = cube_id
         self.guild_id = guild_id
@@ -450,6 +456,21 @@ class DraftSetupManager:
         self.socket_client.sio.on('userDisconnected', self._on_user_disconnected)
         self.socket_client.sio.on('resumeOnReconnection', self._on_resume_on_reconnection)
         self.socket_client.sio.on('draftLog', self._on_draft_log)
+        self.socket_client.sio.on('alreadyConnected', self._on_already_connected)
+
+    async def _on_already_connected(self, new_user_id):
+        """Draftmancer renamed us because our userID was already connected.
+
+        Its duplicate-login path (src/server.ts) accepts the new socket under a
+        freshly generated UUID and announces it here. Adopting it matters: ownership
+        and seating are addressed by userID, so a bot still calling itself the old id
+        cannot find itself in sessionUsers and never reclaims the session.
+        """
+        self.logger.warning(
+            f"Draftmancer reassigned our userID {self.bot_user_id} -> {new_user_id}; "
+            "another connection was already using it"
+        )
+        self.bot_user_id = new_user_id
 
     # Listen for user changes in the session
     async def _on_session_users(self, users):
@@ -1099,7 +1120,7 @@ class DraftSetupManager:
     async def connect_to_new_session(self):
         """Connect to the new Draftmancer session after regeneration."""
         try:
-            websocket_url = get_draftmancer_websocket_url(self.draft_id)
+            websocket_url = get_draftmancer_websocket_url(self.draft_id, user_id=self.bot_user_id)
             self.logger.info(f"Connecting to new session at {websocket_url}")
 
             connection_successful = await self.socket_client.connect_with_retry(websocket_url)
@@ -2720,7 +2741,7 @@ class DraftSetupManager:
         self.logger.info(f"[LOOP] Starting connection management for draft {self.draft_id}")
 
         # Try initial connection
-        websocket_url = get_draftmancer_websocket_url(self.draft_id)
+        websocket_url = get_draftmancer_websocket_url(self.draft_id, user_id=self.bot_user_id)
 
         # First connection attempt
         if not await self.socket_client.connect_with_retry(websocket_url):
