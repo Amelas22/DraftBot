@@ -2,7 +2,7 @@
 Tix wallet slash commands — the player-facing face of the MTGO escrow/wallet system.
 
 Commands (all under /wallet):
-- /wallet show            YOUR balance + recent activity, and nobody else's
+- /wallet show            your own balance + recent activity; no target to pass
 - /wallet deposit <n>     hand tix to the custodian (an MTGO trade) -> wallet +n
 - /wallet withdraw <n>    take tix out of the custodian (an MTGO trade) -> wallet -n
 - /wallet pay @player <n> send tix to another player's wallet (internal, no trade)
@@ -36,15 +36,16 @@ from helpers.money_gate import (
 from helpers.permissions import has_bot_manager_role
 
 
-def _wallet_embed(target, wallet, history) -> discord.Embed:
-    """The wallet panel, rendered the same for whoever is allowed to see it.
+async def _send_wallet(ctx, target) -> None:
+    """Render one player's wallet panel to the caller, privately.
 
-    Shared so the player's own view and the bot-manager lookup cannot drift --
-    in particular the is_system_account rule below, which keeps a synthetic
-    holder (in-flight, a prize pool) from being @-mentioned as though it were a
-    person. Fixed in one copy and not the other, that reads as the bot naming
-    somebody who was never involved.
+    One helper rather than a builder plus two identical fetch-and-send tails, so
+    the player's own view and the bot-manager lookup cannot drift apart.
     """
+    guild_id = str(ctx.guild.id)
+    wallet = await wallet_service.get_wallet(guild_id, str(target.id))
+    history = await wallet_service.get_history(guild_id, str(target.id), limit=10)
+
     embed = discord.Embed(
         title=f"{target.display_name}'s Tix Wallet", color=discord.Color.gold())
     embed.add_field(name="Balance", value=f"**{wallet.balance}** tix", inline=True)
@@ -61,8 +62,7 @@ def _wallet_embed(target, wallet, history) -> discord.Embed:
         embed.add_field(name="Recent activity", value="\n".join(lines), inline=False)
     else:
         embed.set_footer(text="No wallet activity yet.")
-    return embed
-
+    await ctx.followup.send(embed=embed, ephemeral=True)
 
 
 class WalletCommands(commands.Cog):
@@ -80,12 +80,7 @@ class WalletCommands(commands.Cog):
         if err:
             return await ctx.followup.send(err, ephemeral=True)
 
-        guild_id = str(ctx.guild.id)
-        target = ctx.author
-        w = await wallet_service.get_wallet(guild_id, str(target.id))
-        history = await wallet_service.get_history(guild_id, str(target.id), limit=10)
-
-        await ctx.followup.send(embed=_wallet_embed(target, w, history), ephemeral=True)
+        await _send_wallet(ctx, ctx.author)
 
     # ----- /wallet admin_show <player> -----
     @wallet.command(
@@ -95,29 +90,18 @@ class WalletCommands(commands.Cog):
     @option("player", discord.Member, description="Whose wallet to show")
     async def wallet_admin_show(self, ctx: discord.ApplicationContext,
                                 player: discord.Member):
-        """Looking up someone else's wallet.
-
-        Split out of /wallet show, which took an optional player and so let
-        anyone read anyone's balance and last ten transactions -- including who
-        they had been paying. Support still needs the lookup; everyone else does
-        not.
-        """
         await ctx.defer(ephemeral=True)
         err = gate_read(ctx)
         if err:
             return await ctx.followup.send(err, ephemeral=True)
 
-        guild_id = str(ctx.guild.id)
         # A privileged read of someone else's money, recorded so "who looked at
         # my wallet" has an answer. Deliberately not a DM to the player: a
         # manager opening a support ticket is routine, and a notification every
         # time would read as an accusation.
         logger.info(f"wallet admin_show: {ctx.author.id} viewed "
-                    f"{player.id} in guild {guild_id}")
-
-        w = await wallet_service.get_wallet(guild_id, str(player.id))
-        history = await wallet_service.get_history(guild_id, str(player.id), limit=10)
-        await ctx.followup.send(embed=_wallet_embed(player, w, history), ephemeral=True)
+                    f"{player.id} in guild {ctx.guild.id}")
+        await _send_wallet(ctx, player)
 
     # ----- /wallet deposit <n> -----
     @wallet.command(name="deposit", description="Deposit tix into your wallet (trade them to the custodian)")
