@@ -156,3 +156,45 @@ async def test_ownership_survives_a_reconnect_after_the_bot_became_a_spectator()
 
     assert await mgr._reclaim_ownership_as_spectator() is True
     assert server.owners["DBAAAA1111"] == mgr.bot_user_id
+
+
+@pytest.mark.asyncio
+async def test_two_drafts_being_set_up_at_once_both_keep_their_connection():
+    """The production incident, reproduced.
+
+    frontier-guide-69 (2026-09-02) was queued while keldon-mantle-96 was already
+    connected. Sharing one userID made them a single duplicate-logging-in user, so
+    the server evicted whichever socket did not answer its liveness ping -- neither
+    of them, ever. Each manager's reconnect loop then took the identity back from
+    the other, and the newcomer never held a socket long enough for the 30s
+    importCube callback. Six players were sent to a session with no cube in it.
+
+    Nothing here is about drafting; it is entirely about whether two managers can
+    coexist, which is the thing that was untestable without a server.
+    """
+    server = FakeDraftmancer()
+    first = make_manager(session_id="s1", draft_id="KELDON96")
+    second = make_manager(session_id="s2", draft_id="FRONTIER")
+
+    assert await _connect(first, server) is True
+    assert await _connect(second, server) is True
+
+    assert first.socket_client.connected, "the older draft was evicted by the newer one"
+    assert second.socket_client.connected
+    assert server.users_in("DBKELDON96") == [first.bot_user_id]
+    assert server.users_in("DBFRONTIER") == [second.bot_user_id]
+    assert "evicted" not in " ".join(server.log)
+
+
+@pytest.mark.asyncio
+async def test_a_draft_starting_mid_setup_does_not_disturb_the_others():
+    """The eviction was not a two-party problem. Managers reconnect on a loop, so a
+    third draft opening is another chance to take everyone else's identity."""
+    server = FakeDraftmancer()
+    managers = [make_manager(session_id=f"s{i}", draft_id=f"DRAFT{i:03d}") for i in range(5)]
+
+    for mgr in managers:
+        assert await _connect(mgr, server) is True
+
+    assert all(m.socket_client.connected for m in managers)
+    assert len({m.bot_user_id for m in managers}) == len(managers)
