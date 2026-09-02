@@ -28,16 +28,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from conftest import make_manager
-from services.draft_setup_manager import DraftSetupManager
-
-
-def _subscriptions():
-    mgr = DraftSetupManager.__new__(DraftSetupManager)
-    mgr.socket_client = MagicMock()
-    seen = {}
-    mgr.socket_client.sio.on.side_effect = lambda name, handler: seen.__setitem__(name, handler)
-    DraftSetupManager._register_socket_handlers(mgr)
-    return seen
+# The subscription probe lives with the subscription-name contract it serves.
+from test_socket_event_names import _subscribed_events
 
 
 def test_the_manager_knows_its_own_draftmancer_identity():
@@ -47,13 +39,13 @@ def test_the_manager_knows_its_own_draftmancer_identity():
 
 def test_already_connected_is_subscribed():
     """Without this the bot never learns Draftmancer renamed it."""
-    assert "alreadyConnected" in _subscriptions()
+    assert "alreadyConnected" in _subscribed_events()
 
 
 def test_still_alive_is_not_subscribed():
     """Answering it keeps a half-open socket and demotes our new connection to a
     random UUID. Silence is what lets the server reap the dead socket."""
-    assert "stillAlive" not in _subscriptions()
+    assert "stillAlive" not in _subscribed_events()
 
 
 @pytest.mark.asyncio
@@ -82,11 +74,55 @@ async def test_connecting_uses_the_identity_the_manager_is_holding():
 
 
 def test_the_bot_is_still_named_DraftBot_on_the_wire():
-    """Every bot-vs-player filter in the manager compares userName, never userID
-    (draft_setup_manager.py:438, 445, 807, 974, ...), so the display name must not
-    move when the id does."""
+    """Every bot-vs-player filter in the manager compares userName, never userID, so
+    the display name must not move when the id does."""
     from config import get_draftmancer_websocket_url
 
     query = parse_qs(urlparse(get_draftmancer_websocket_url("AAAA1111")).query)
     assert query["userName"][0] == "DraftBot"
     assert query["sessionID"][0] == "DBAAAA1111"
+
+
+@pytest.mark.asyncio
+async def test_ownership_is_reclaimed_without_waiting_for_the_user_list():
+    """Reclaim used to discover its own userID by scanning sessionUsers for the name
+    "DraftBot", behind a retry-and-sleep loop, and gave up when that payload had not
+    arrived -- the production error was literally
+
+        Cannot reclaim ownership - bot userID not found in session_users
+
+    which is the state a flapping socket is in constantly. The manager now knows who
+    it is, so the answer needs no payload and no waiting.
+    """
+    from unittest.mock import AsyncMock
+
+    mgr = make_manager(draft_id="AAAA1111")
+    mgr.session_users = []                      # the payload never came
+    mgr.socket_client.emit = AsyncMock(return_value=True)
+
+    with patch("services.draft_setup_manager.asyncio.sleep", AsyncMock()):
+        assert await mgr._reclaim_ownership_as_spectator() is True
+
+    owner_calls = [c for c in mgr.socket_client.emit.await_args_list
+                   if c.args and c.args[0] == "setSessionOwner"]
+    assert owner_calls, "never tried to claim ownership"
+    assert owner_calls[0].args[1] == mgr.bot_user_id
+
+
+@pytest.mark.asyncio
+async def test_ownership_is_reclaimed_under_a_reassigned_identity():
+    """After Draftmancer renames us, ownership must be claimed under the new id --
+    claiming under the old one addresses a user the server no longer has."""
+    from unittest.mock import AsyncMock
+
+    mgr = make_manager(draft_id="AAAA1111")
+    mgr.session_users = [{"userID": "DraftBot-AAAA1111", "userName": "DraftBot"}]
+    mgr.socket_client.emit = AsyncMock(return_value=True)
+    await mgr._on_already_connected("uuid-reassigned")
+
+    with patch("services.draft_setup_manager.asyncio.sleep", AsyncMock()):
+        assert await mgr._reclaim_ownership_as_spectator() is True
+
+    owner_calls = [c for c in mgr.socket_client.emit.await_args_list
+                   if c.args and c.args[0] == "setSessionOwner"]
+    assert owner_calls[0].args[1] == "uuid-reassigned"

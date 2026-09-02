@@ -34,17 +34,15 @@ import uuid
 class FakeSocket:
     """One connected client. Handlers are whatever the owner registered via `on`."""
 
-    def __init__(self, server, user_id, session_id, user_name, handlers=None):
-        self._server = server
+    def __init__(self, user_id, session_id, user_name, handlers=None):
         self.user_id = user_id
         self.session_id = session_id
         self.user_name = user_name
         self.connected = True
-        # Bound before the socket exists, as socket.io does it -- otherwise events
-        # the server sends during the handshake ("alreadyConnected") are missed.
-        self.handlers = dict(handlers or {})
-        self.emitted = []          # (event, data) the client sent to the server
-        self.rejected = False      # server refused the connection outright
+        # The client's own dict, not a copy: socket.io keeps handlers on the client
+        # across reconnects, and they must already be bound when the server sends
+        # "alreadyConnected" during the handshake.
+        self.handlers = handlers if handlers is not None else {}
 
     def on(self, name, handler):
         self.handlers[name] = handler
@@ -68,12 +66,29 @@ class FakeDraftmancer:
 
     def __init__(self):
         self.connections = {}       # userID -> FakeSocket   (Draftmancer's `Connections`)
-        self.sessions = {}          # sessionID -> [userID]
         self.drafting = set()       # sessionIDs with a draft in progress
+        self.owners = {}            # sessionID -> userID
+        # Owners who declared themselves non-players. server.ts:585 deletes them
+        # from `sess.users`, and sessionUsers is built from users + disconnectedUsers
+        # (Session.ts:3747), so they are absent from that payload while still being
+        # connected. Modelling this matters: the bot makes itself one.
+        self.non_playing_owners = set()
         self.log = []               # what the server did, for assertions
 
     def users_in(self, session_id):
-        return list(self.sessions.get(session_id, []))
+        """Derived, not mirrored: a second map would need a guard to stay honest,
+        and this file has to read as an obviously correct transcription."""
+        return [uid for uid, s in self.connections.items() if s.session_id == session_id]
+
+    def session_user_payload(self, session_id):
+        """What Draftmancer puts in `sessionUsers`: human players only."""
+        return [{"userID": uid, "userName": self.connections[uid].user_name}
+                for uid in self.users_in(session_id)
+                if uid not in self.non_playing_owners]
+
+    def session_of(self, user_id):
+        socket = self.connections.get(user_id)
+        return socket.session_id if socket else None
 
     def socket_for(self, user_id):
         return self.connections.get(user_id)
@@ -81,7 +96,7 @@ class FakeDraftmancer:
     async def connect(self, user_id, session_id, user_name, handlers=None):
         """The connection handler from src/server.ts. Returns the accepted socket,
         or None when the server refuses the connection."""
-        socket = FakeSocket(self, user_id, session_id, user_name, handlers)
+        socket = FakeSocket(user_id, session_id, user_name, handlers)
 
         previous = self.connections.get(user_id)
         if previous is not None:
@@ -91,8 +106,6 @@ class FakeDraftmancer:
                 if previous.session_id in self.drafting:
                     # "previous connection still alive and in a game. Rejecting."
                     self.log.append(f"rejected {user_id}: previous connection is drafting")
-                    socket.connected = False
-                    socket.rejected = True
                     return None
                 # "assume the user simply opened a new tab" -- new identity for it.
                 new_id = f"uuid-{uuid.uuid4().hex[:8]}"
@@ -106,9 +119,6 @@ class FakeDraftmancer:
                 await self._drop(previous)
 
         self.connections[user_id] = socket
-        self.sessions.setdefault(session_id, [])
-        if user_id not in self.sessions[session_id]:
-            self.sessions[session_id].append(user_id)
         await socket.deliver("connect")
         await self._broadcast_users(session_id)
         return socket
@@ -116,9 +126,6 @@ class FakeDraftmancer:
     async def _drop(self, socket):
         socket.connected = False
         self.connections.pop(socket.user_id, None)
-        members = self.sessions.get(socket.session_id)
-        if members and socket.user_id in members:
-            members.remove(socket.user_id)
         await socket.deliver("disconnect")
         await self._broadcast_users(socket.session_id)
 
@@ -127,26 +134,36 @@ class FakeDraftmancer:
             await self._drop(socket)
 
     async def _broadcast_users(self, session_id):
-        payload = [
-            {"userID": uid, "userName": self.connections[uid].user_name}
-            for uid in self.sessions.get(session_id, [])
-            if uid in self.connections
-        ]
-        for uid in list(self.sessions.get(session_id, [])):
-            socket = self.connections.get(uid)
-            if socket:
-                await socket.deliver("sessionUsers", payload)
+        payload = self.session_user_payload(session_id)
+        for uid in self.users_in(session_id):
+            await self.connections[uid].deliver("sessionUsers", payload)
+
+    async def handle_emit(self, socket, event, data):
+        """The client->server calls the bot actually makes. Everything else is inert."""
+        if event == "setSessionOwner":
+            self.owners[socket.session_id] = data
+            self.log.append(f"owner of {socket.session_id} is {data}")
+        elif event == "setOwnerIsPlayer":
+            owner = self.owners.get(socket.session_id)
+            if owner is None:
+                return
+            if data:
+                self.non_playing_owners.discard(owner)
+            else:
+                # server.ts:585 -- the owner leaves `sess.users` and so vanishes
+                # from every subsequent sessionUsers payload.
+                self.non_playing_owners.add(owner)
+            await self._broadcast_users(socket.session_id)
 
     def add_squatter(self, user_id, session_id="DBSQUATTER", answers=True):
         """Someone else already holding `user_id`, e.g. a stale connection from a
         previous bot process. `answers=True` puts the server on its rename branch."""
-        socket = FakeSocket(self, user_id, session_id, user_id)
+        socket = FakeSocket(user_id, session_id, user_id)
         if answers:
             async def _ack():
                 return True
             socket.on("stillAlive", _ack)
         self.connections[user_id] = socket
-        self.sessions.setdefault(session_id, []).append(user_id)
         return socket
 
 
@@ -157,17 +174,14 @@ class FakeSocketClient:
     `connect_with_retry`, `disconnect`, `emit`.
     """
 
-    def __init__(self, server, resource_id=""):
+    def __init__(self, server):
         self._server = server
-        self.resource_id = resource_id
         self.socket = None
         self.sio = self                 # the manager registers via socket_client.sio.on
-        self._pending_handlers = {}
+        self.handlers = {}              # shared with the socket, as socket.io does it
 
     def on(self, name, handler):
-        self._pending_handlers[name] = handler
-        if self.socket:
-            self.socket.on(name, handler)
+        self.handlers[name] = handler
 
     @property
     def connected(self):
@@ -181,7 +195,7 @@ class FakeSocketClient:
             user_id=query["userID"][0],
             session_id=query["sessionID"][0],
             user_name=query["userName"][0],
-            handlers=self._pending_handlers,
+            handlers=self.handlers,
         )
         if socket is None:
             self.socket = None
@@ -196,12 +210,18 @@ class FakeSocketClient:
     async def emit(self, event, data=None, callback=None):
         if not self.connected:
             return False
-        self.socket.emitted.append((event, data))
+        await self._server.handle_emit(self.socket, event, data)
         return True
 
 
 def attach(manager, server):
     """Point a real DraftSetupManager at the fake server, handlers and all."""
-    manager.socket_client = FakeSocketClient(server, resource_id=f"DB{manager.draft_id}")
+    manager.socket_client = FakeSocketClient(server)
     manager._register_socket_handlers()
     return manager.socket_client
+
+
+async def connect(manager, server):
+    """Take a manager through its real connect path onto the fake server."""
+    attach(manager, server)
+    return await manager.connect_to_new_session()

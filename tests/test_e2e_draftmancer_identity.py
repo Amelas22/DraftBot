@@ -12,13 +12,7 @@ misbehaving; it was the bot losing an argument with the server about who it was.
 import pytest
 
 from conftest import make_manager
-from fake_draftmancer import FakeDraftmancer, attach
-
-
-async def _connect(manager, server):
-    """Take a manager through its real connect path onto the fake server."""
-    attach(manager, server)
-    return await manager.connect_to_new_session()
+from fake_draftmancer import FakeDraftmancer, attach, connect as _connect
 
 
 @pytest.mark.asyncio
@@ -85,3 +79,80 @@ async def test_a_reconnect_reclaims_an_identity_a_dead_socket_still_holds():
 
     assert stale.connected is False, "the dead socket was left holding the identity"
     assert server.users_in("DBAAAA1111") == [mgr.bot_user_id]
+
+
+@pytest.mark.asyncio
+async def test_a_second_disconnect_reconnects_to_where_the_draft_moved():
+    """After a regeneration the reconnect loop must follow the draft.
+
+    keep_connection_alive built the connect URL once, before the loop, and handed
+    that same string to every reconnect. But _handle_reconnection can itself move
+    the draft -- it calls regenerate_draft_session, which swaps draft_id and, now
+    that identity is state, bot_user_id too. The next drop therefore went back to
+    the room the bot had just abandoned, under an identity the server may have
+    taken away.
+
+    The first drop regenerates; the second is the one that used to go backwards.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    server = FakeDraftmancer()
+    mgr = make_manager(session_id="s1", draft_id="OLDROOM0")
+    attach(mgr, server)
+    await mgr.connect_to_new_session()
+
+    # Ownership is unrecoverable and the queue is still open: the path that
+    # regenerates rather than preserving.
+    mgr._reclaim_ownership_as_spectator = AsyncMock(return_value=False)
+    mgr.must_preserve_draft_room = AsyncMock(return_value=False)
+    mgr._get_draft_channel = AsyncMock(return_value=None)
+    mgr._get_draft_session_from_db = AsyncMock(return_value=None)
+
+    swap = MagicMock()
+    swap.return_value.__aenter__ = AsyncMock(return_value=MagicMock(
+        execute=AsyncMock(return_value=MagicMock(rowcount=1)), commit=AsyncMock()))
+    swap.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("services.draft_setup_manager.db_session", swap):
+        assert await mgr._handle_reconnection() is True
+    moved_to = f"DB{mgr.draft_id}"
+    assert moved_to != "DBOLDROOM0"
+
+    # Drop again. This reconnect must target the room the draft moved to.
+    await server.disconnect(mgr.socket_client.socket)
+    mgr._reclaim_ownership_as_spectator = AsyncMock(return_value=True)
+    assert await mgr._handle_reconnection() is True
+
+    assert mgr.socket_client.socket.session_id == moved_to, (
+        "the reconnect went back to the room the bot had abandoned")
+    assert mgr.socket_client.socket.user_id == mgr.bot_user_id
+
+
+@pytest.mark.asyncio
+async def test_ownership_survives_a_reconnect_after_the_bot_became_a_spectator():
+    """The bot removes itself from the payload it used to identify itself with.
+
+    Reclaiming ownership ends in setOwnerIsPlayer(False). Draftmancer's handler
+    deletes the owner from `sess.users` (src/server.ts:585) and sessionUsers is
+    built from users + disconnectedUsers (src/Session.ts:3747), so from that moment
+    the bot is absent from every sessionUsers payload while still being connected.
+
+    Discovering its own id by scanning that payload for "DraftBot" was therefore
+    not merely fragile -- it could never succeed again after the first reclaim.
+    Every later reconnect logged "bot userID not found in session_users".
+    """
+    server = FakeDraftmancer()
+    mgr = make_manager(session_id="s1", draft_id="AAAA1111")
+    await _connect(mgr, server)
+
+    assert await mgr._reclaim_ownership_as_spectator() is True
+    assert server.owners["DBAAAA1111"] == mgr.bot_user_id
+    assert [u["userID"] for u in server.session_user_payload("DBAAAA1111")] == [], (
+        "the harness is not modelling the owner leaving sess.users")
+
+    # Reconnect and reclaim again -- the state every later reconnect starts from.
+    await server.disconnect(mgr.socket_client.socket)
+    await _connect(mgr, server)
+
+    assert await mgr._reclaim_ownership_as_spectator() is True
+    assert server.owners["DBAAAA1111"] == mgr.bot_user_id
