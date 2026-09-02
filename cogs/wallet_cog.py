@@ -2,10 +2,11 @@
 Tix wallet slash commands — the player-facing face of the MTGO escrow/wallet system.
 
 Commands (all under /wallet):
-- /wallet [player]        show a wallet: balance + recent activity
+- /wallet show            YOUR balance + recent activity, and nobody else's
 - /wallet deposit <n>     hand tix to the custodian (an MTGO trade) -> wallet +n
 - /wallet withdraw <n>    take tix out of the custodian (an MTGO trade) -> wallet -n
 - /wallet pay @player <n> send tix to another player's wallet (internal, no trade)
+- /wallet admin_show @p   (admin) read another player's wallet; logged
 - /wallet reconcile       (admin) audit: physical vault tix == SUM of all wallets
 
 Gating: enabled only on money servers with the TradeBot integration configured
@@ -35,6 +36,35 @@ from helpers.money_gate import (
 from helpers.permissions import has_bot_manager_role
 
 
+def _wallet_embed(target, wallet, history) -> discord.Embed:
+    """The wallet panel, rendered the same for whoever is allowed to see it.
+
+    Shared so the player's own view and the bot-manager lookup cannot drift --
+    in particular the is_system_account rule below, which keeps a synthetic
+    holder (in-flight, a prize pool) from being @-mentioned as though it were a
+    person. Fixed in one copy and not the other, that reads as the bot naming
+    somebody who was never involved.
+    """
+    embed = discord.Embed(
+        title=f"{target.display_name}'s Tix Wallet", color=discord.Color.gold())
+    embed.add_field(name="Balance", value=f"**{wallet.balance}** tix", inline=True)
+
+    if history:
+        lines = []
+        for tx in history:
+            sign = "+" if tx.amount >= 0 else "−"
+            # only @-mention a real person: the counterparty may be an MTGO
+            # username or a synthetic holder (in-flight, a prize pool)
+            cp = tx.counterparty_id
+            who = "" if not cp or wallet_service.is_system_account(cp) else f" ↔ <@{cp}>"
+            lines.append(f"`{sign}{abs(tx.amount)}` {tx.kind}{who}")
+        embed.add_field(name="Recent activity", value="\n".join(lines), inline=False)
+    else:
+        embed.set_footer(text="No wallet activity yet.")
+    return embed
+
+
+
 class WalletCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -42,38 +72,52 @@ class WalletCommands(commands.Cog):
 
     wallet = SlashCommandGroup("wallet", "Manage your MTGO tix wallet")
 
-    # ----- /wallet [player] -----
-    @wallet.command(name="show", description="Show a tix wallet balance and recent activity")
-    @option("player", discord.Member, description="Whose wallet to show (defaults to you)", required=False)
-    async def wallet_show(self, ctx: discord.ApplicationContext, player: discord.Member = None):
+    # ----- /wallet show -----
+    @wallet.command(name="show", description="Show your tix wallet balance and recent activity")
+    async def wallet_show(self, ctx: discord.ApplicationContext):
         await ctx.defer(ephemeral=True)
         err = gate_read(ctx)
         if err:
             return await ctx.followup.send(err, ephemeral=True)
 
         guild_id = str(ctx.guild.id)
-        target = player or ctx.author
+        target = ctx.author
         w = await wallet_service.get_wallet(guild_id, str(target.id))
         history = await wallet_service.get_history(guild_id, str(target.id), limit=10)
 
-        embed = discord.Embed(
-            title=f"{target.display_name}'s Tix Wallet", color=discord.Color.gold())
-        embed.add_field(name="Balance", value=f"**{w.balance}** tix", inline=True)
+        await ctx.followup.send(embed=_wallet_embed(target, w, history), ephemeral=True)
 
-        if history:
-            lines = []
-            for tx in history:
-                sign = "+" if tx.amount >= 0 else "−"
-                # only @-mention a real person: the counterparty may be an MTGO
-                # username or a synthetic holder (in-flight, a prize pool)
-                cp = tx.counterparty_id
-                who = "" if not cp or wallet_service.is_system_account(cp) else f" ↔ <@{cp}>"
-                lines.append(f"`{sign}{abs(tx.amount)}` {tx.kind}{who}")
-            embed.add_field(name="Recent activity", value="\n".join(lines), inline=False)
-        else:
-            embed.set_footer(text="No wallet activity yet.")
+    # ----- /wallet admin_show <player> -----
+    @wallet.command(
+        name="admin_show",
+        description="(Admin) Show another player's tix wallet balance and activity")
+    @has_bot_manager_role()
+    @option("player", discord.Member, description="Whose wallet to show")
+    async def wallet_admin_show(self, ctx: discord.ApplicationContext,
+                                player: discord.Member):
+        """Looking up someone else's wallet.
 
-        await ctx.followup.send(embed=embed, ephemeral=True)
+        Split out of /wallet show, which took an optional player and so let
+        anyone read anyone's balance and last ten transactions -- including who
+        they had been paying. Support still needs the lookup; everyone else does
+        not.
+        """
+        await ctx.defer(ephemeral=True)
+        err = gate_read(ctx)
+        if err:
+            return await ctx.followup.send(err, ephemeral=True)
+
+        guild_id = str(ctx.guild.id)
+        # A privileged read of someone else's money, recorded so "who looked at
+        # my wallet" has an answer. Deliberately not a DM to the player: a
+        # manager opening a support ticket is routine, and a notification every
+        # time would read as an accusation.
+        logger.info(f"wallet admin_show: {ctx.author.id} viewed "
+                    f"{player.id} in guild {guild_id}")
+
+        w = await wallet_service.get_wallet(guild_id, str(player.id))
+        history = await wallet_service.get_history(guild_id, str(player.id), limit=10)
+        await ctx.followup.send(embed=_wallet_embed(player, w, history), ephemeral=True)
 
     # ----- /wallet deposit <n> -----
     @wallet.command(name="deposit", description="Deposit tix into your wallet (trade them to the custodian)")
