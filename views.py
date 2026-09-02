@@ -11,7 +11,6 @@ from config import (
 )
 from notification_service import send_ready_check_dms
 from ready_check import ReadyCheckView, ReadyCheckSession
-from draft_organization.stake_calculator import calculate_stakes_with_strategy
 from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
 from session import StakeInfo, AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
 from models import SignUpHistory
@@ -26,9 +25,10 @@ from helpers.draft_rooms import (
     DRAFT_ROOM_COUNT, draft_category as resolve_draft_category, ensure_channel,
     resolve_category, rooms_needed, team_channel_name, team_overwrites, team_voice_name,
 )
-from helpers.draft_outcome import decides_draft, standings_after
+from helpers.draft_outcome import decides_draft, standings_after, total_matches_in
 from helpers.opponent_threads import spawn_opponent_threads
 from helpers.permissions import bot_manager_button
+from services.draft_pool_service import entry_in, release_draft_pool, set_entry
 from utils import (
     calculate_pairings,
     calculate_team_wins,
@@ -55,8 +55,7 @@ from cube_views.pack_options import (
 from loguru import logger
 
 from services.state_manager import state_manager
-from services.stake_service import calculate_and_store_stakes
-from preference_service import get_players_bet_capping_preferences
+from services import stake_funding, wallet_service
 # Debounce/timeout constants live in ready_check.py so the ordering invariant
 # between them is asserted in one place; re-exported here for the cooldown logic.
 from ready_check import READY_CHECK_DEBOUNCE_SECONDS
@@ -337,6 +336,8 @@ class PersistentView(discord.ui.View):
             
         # Add our new users to existing sign-ups
         sign_ups.update(fake_users)
+        guild_id = str(interaction.guild_id)
+        test_stakes: dict[str, int] = {}
         logger.info(f"Updated sign_ups from {original_count} to {len(sign_ups)} users")
         
         # Database updates - handle stake info for staked drafts
@@ -354,6 +355,7 @@ class PersistentView(discord.ui.View):
                     logger.info(f"Adding stake info for {len(fake_users)} test users")
                     for user_id, name in fake_users.items():
                         stake_amount = random.randint(5, 20) * 10
+                        test_stakes[user_id] = stake_amount
                         stake_info = StakeInfo(
                             session_id=draft_session.session_id,
                             player_id=user_id,
@@ -363,8 +365,25 @@ class PersistentView(discord.ui.View):
                         )
                         db_session.add(stake_info)
                         logger.info(f"Added stake info for {name}: max stake {stake_amount}")
-                
+
                 await db_session.commit()
+
+        # A declared stake that was never paid is not in the pool, so a draft
+        # filled with test users levels to min(side, 0) and refunds everyone --
+        # there is no payout left to test. Fund them and charge the entry the
+        # same way a real signup does, AFTER the transaction above closes:
+        # set_entry takes MONEY_LOCK and opens its own session.
+        for user_id, stake_amount in test_stakes.items():
+            held = await wallet_service.get_balance(guild_id, user_id)
+            if held < stake_amount:
+                await wallet_service.adjust(
+                    guild_id, user_id, stake_amount - held,
+                    f"test user seed for {self.draft_session_id}", "test-mode")
+            charged = await set_entry(guild_id, self.draft_session_id,
+                                      user_id, stake_amount, "joined")
+            if not charged["ok"]:
+                logger.error(f"test user {user_id} could not enter for "
+                             f"{stake_amount}: {charged}")
         
         # Update the draft message to reflect the new list of sign-ups
         await update_draft_message(interaction.client, self.draft_session_id)
@@ -630,8 +649,40 @@ class PersistentView(discord.ui.View):
         else:
             # User is canceling their sign-up
             del sign_ups[user_id]
-            
-            # Record the leave event in history
+
+            guild_id = str(interaction.guild_id)
+
+            # Remove user from draftmancer_role_users if present
+            if display_name in draftmancer_role_users:
+                draftmancer_role_users.remove(display_name)
+
+            # The refund and the roster change in ONE transaction. Refunding
+            # first and updating second is two commits: a failure between them
+            # hands back the entry of a player still listed in the draft, who
+            # then plays for money that is no longer in the pool.
+            #
+            # The amount comes from what they actually hold, not from
+            # StakeInfo.max_stake: a stake revised downward has already had
+            # part of it returned, and refunding the declared figure would pay
+            # out money the pool never received.
+            async with wallet_service.MONEY_LOCK:
+                async with AsyncSessionLocal() as session:
+                    async with session.begin():
+                        await entry_in(session, guild_id, self.draft_session_id,
+                                       user_id, 0, "left")
+                        # Directly update the 'sign_ups' and 'draftmancer_role_users' of the draft session
+                        await session.execute(
+                            update(DraftSession).
+                            where(DraftSession.session_id == self.draft_session_id).
+                            values(
+                                sign_ups=sign_ups,
+                                draftmancer_role_users=draftmancer_role_users
+                            )
+                        )
+
+            # After the commit: this opens its own connection, and a second
+            # connection writing inside the transaction above would wait on a
+            # lock only that transaction can release.
             await SignUpHistory.record_signup_event(
                 session_id=self.draft_session_id,
                 user_id=user_id,
@@ -639,25 +690,8 @@ class PersistentView(discord.ui.View):
                 action="leave",
                 guild_id=str(interaction.guild_id)
             )
-            
-            # Remove user from draftmancer_role_users if present
-            if display_name in draftmancer_role_users:
-                draftmancer_role_users.remove(display_name)
 
-            # Start an asynchronous database session
-            async with AsyncSessionLocal() as session:
-                async with session.begin():
-                    # Directly update the 'sign_ups' and 'draftmancer_role_users' of the draft session
-                    await session.execute(
-                        update(DraftSession).
-                        where(DraftSession.session_id == self.draft_session_id).
-                        values(
-                            sign_ups=sign_ups,
-                            draftmancer_role_users=draftmancer_role_users
-                        )
-                    )
-                    await session.commit()
-                    
+            
             cancel_message = "Your sign up has been canceled!"
             await interaction.response.send_message(cancel_message, ephemeral=True)
 
@@ -921,7 +955,30 @@ class PersistentView(discord.ui.View):
                         ephemeral=True
                     )
                     return False, None
-                    
+
+                # A fixed entry fee only keeps the two sides level while the
+                # teams are the same size. Four players against three is 200
+                # against 150, and levelling would hand part of a fee back to
+                # players who were told the fee was fixed. Refusing is the
+                # honest answer: nobody is charged differently from what they
+                # agreed, and evening the teams up is something the players can
+                # simply do.
+                if session.entry_fee:
+                    # Counted over members still in sign_ups, the same rule the
+                    # balance check uses: the leave flow can leave a stale id on
+                    # a team, and that must not tip an even draft into refusal.
+                    signed = set(session.sign_ups or {})
+                    a = len([u for u in (session.team_a or []) if u in signed])
+                    b = len([u for u in (session.team_b or []) if u in signed])
+                    if a != b:
+                        await interaction.response.send_message(
+                            f"{session.team_a_name} has {a} "
+                            f"{'player' if a == 1 else 'players'} and "
+                            f"{session.team_b_name} has {b}. An entry-fee draft "
+                            "needs even teams so both sides are backing the same "
+                            "amount.", ephemeral=True)
+                        return False, None
+
                 return True, session
 
     async def _validate_staked_draft_requirements(self, interaction: discord.Interaction, session_id: str):
@@ -1166,15 +1223,49 @@ class PersistentView(discord.ui.View):
             action_message = f"You have been added to {getattr(session, primary_key + '_name', primary_key)}."
 
         # Update or add user in the sign-ups dictionary
-        sign_ups[user_id] = user_name
+        # Stepping off a team leaves the draft. sign_ups is what seating and
+        # the Draftmancer expected-user list read, so a player left in it after
+        # leaving is one the bot waits for and seats -- and with an entry fee
+        # they would be refunded and still listed as playing.
+        leaving = user_id not in primary_team
+        if leaving:
+            sign_ups.pop(user_id, None)
+        else:
+            sign_ups[user_id] = user_name
 
-        # Persist changes to the database
-        async with AsyncSessionLocal() as db_session:
-            async with db_session.begin():
-                await db_session.execute(update(DraftSession)
-                                        .where(DraftSession.session_id == session.session_id)
-                                        .values({primary_key: primary_team, secondary_key: secondary_team, 'sign_ups': sign_ups}))
-                await db_session.commit()
+        # A premade draft may charge a fixed entry fee, set when it was
+        # created. Everyone on either side pays the same, so the money and the
+        # team change commit together for the same reason they do on a staked
+        # signup: a failure between two commits would charge a player for a
+        # draft they are not in. Switching sides is not a second charge --
+        # entry_in moves the difference, and there is none. A draft with no fee
+        # asks for nothing and this is a no-op.
+        fee = session.entry_fee or 0
+        target = 0 if leaving else fee
+        charged: dict = {"ok": True, "deficit": 0}
+        async with wallet_service.MONEY_LOCK:
+            async with AsyncSessionLocal() as db_session:
+                async with db_session.begin():
+                    if fee:
+                        charged = await entry_in(
+                            db_session, str(session.guild_id), session.session_id,
+                            user_id, target, "left" if leaving else "joined")
+                    if charged["ok"]:
+                        await db_session.execute(update(DraftSession)
+                                                .where(DraftSession.session_id == session.session_id)
+                                                .values({primary_key: primary_team, secondary_key: secondary_team, 'sign_ups': sign_ups}))
+
+        if not charged["ok"]:
+            await interaction.response.send_message(
+                f"You need {charged['deficit']} more tix to join this draft — "
+                f"the entry fee is {fee}. Add funds and try again.",
+                ephemeral=True)
+            return
+
+        if fee and not leaving:
+            action_message += f" {fee} tix entry paid."
+        elif fee and leaving:
+            action_message += f" Your {fee} tix entry has been returned."
 
         await interaction.response.send_message(action_message, ephemeral=True)
 
@@ -1492,12 +1583,6 @@ class PersistentView(discord.ui.View):
                         session.swiss_matches = state_to_save
                         logger.debug("Swiss pairings calculated: match_counter={}", match_counter)
 
-                    if session.session_type == "staked" and not resuming:
-                        logger.info("Calculating stakes for staked draft in create_rooms_pairings")
-                        all_players = session.team_a + session.team_b
-                        cap_info = await get_players_bet_capping_preferences(all_players, guild_id=str(guild.id))
-                        await calculate_and_store_stakes(str(guild.id), session, cap_info)
-
                     # Update player stats
                     if session.session_type in ("random", "staked"):
                         logger.debug("Updating player stats for session_id={}", session_id)
@@ -1662,6 +1747,7 @@ class UserRemovalSelect(Select):
         user_id_to_remove = self.values[0]  
         if user_id_to_remove in session.sign_ups:
             removed_user_name = session.sign_ups.pop(user_id_to_remove)
+
             # A premade player sits on a team as well as in sign_ups, and
             # update_team_view renders from team_a/team_b -- so leaving them
             # there just redraws them as "Unknown User". The add-test-users path
@@ -1669,8 +1755,27 @@ class UserRemovalSelect(Select):
             team_a = [uid for uid in (session.team_a or []) if uid != user_id_to_remove]
             team_b = [uid for uid in (session.team_b or []) if uid != user_id_to_remove]
             session.team_a, session.team_b = team_a, team_b
-            
-            # Record the leave event in history
+
+            # Removing someone is still a leave: their entry has to come back,
+            # and it has to come back in the SAME transaction that drops them
+            # from the roster. Refunding first and updating second is two
+            # commits, and a failure between them pays out a player who is
+            # still in the draft -- who then plays for money the pool no longer
+            # holds. Without the refund at all, their tix sit in the pool with
+            # no owner and no path that ever attributes them.
+            async with wallet_service.MONEY_LOCK:
+                async with AsyncSessionLocal() as db_session:
+                    async with db_session.begin():
+                        await entry_in(db_session, str(session.guild_id),
+                                       self.session_id, user_id_to_remove, 0,
+                                       "removed")
+                        # Update the session in the database
+                        await db_session.execute(update(DraftSession)
+                                                .where(DraftSession.session_id == session.session_id)
+                                                .values(sign_ups=session.sign_ups,
+                                                        team_a=team_a, team_b=team_b))
+
+            # After the commit: record_signup_event opens its own connection.
             await SignUpHistory.record_signup_event(
                 session_id=self.session_id,
                 user_id=user_id_to_remove,
@@ -1678,15 +1783,6 @@ class UserRemovalSelect(Select):
                 action="leave",
                 guild_id=str(interaction.guild_id)
             )
-            
-            async with AsyncSessionLocal() as db_session:
-                async with db_session.begin():
-                    # Update the session in the database
-                    await db_session.execute(update(DraftSession)
-                                            .where(DraftSession.session_id == session.session_id)
-                                            .values(sign_ups=session.sign_ups,
-                                                    team_a=team_a, team_b=team_b))
-                    await db_session.commit()
             # After removing a user, update the original message with the new sign-up list
             if session.session_type != "premade":
                 await update_draft_message(bot, session_id=session.session_id)
@@ -2063,7 +2159,7 @@ class MatchResultSelect(Select):
             new_winner_side=side_of(new_winner_id),
         )
         outcome = decides_draft(projected_a, projected_b,
-                                (draft_session.match_counter or 1) - 1)
+                                total_matches_in(draft_session.match_counter))
         return outcome, projected_a, projected_b, draft_session
 
     def _confirmation_text(self, outcome, projected_a, projected_b, draft_session):
@@ -2555,6 +2651,15 @@ async def update_draft_message(bot, session_id):
                 except Exception as e:
                     logger.warning(f"[debt-warning] lookup failed for {session_id}: {e}; "
                                    "rendering without markers")
+            # What the table is playing for: the pot, both sides of it. Teams
+            # do not exist yet, so quote the best case -- every entry faced with
+            # the closest other entry it could meet. The total escrowed is the
+            # wrong number: it counts money refunded the moment the sides are
+            # capped to each other, so 200 against 100 would advertise 300 for
+            # a draft that plays for 200.
+            from services.draft_pool_service import contributions, max_pool
+            held = await contributions(str(draft_session.guild_id), session_id)
+            pool = max_pool(held.values())
             sign_ups_str = format_staked_sign_ups(
                 draft_session.sign_ups,
                 stake_info_by_player,
@@ -2563,6 +2668,7 @@ async def update_draft_message(bot, session_id):
                 threshold,
                 display_name_for=lambda uid, stored: get_display_name_by_id(uid, guild, stored),
                 session_id=session_id,
+                pool=pool,
             )
         else:
             if draft_session.sign_ups:
@@ -2712,6 +2818,11 @@ class CancelConfirmationView(discord.ui.View):
         tournament_match_id = session.tournament_match_id
         async with AsyncSessionLocal() as db_session:
             async with db_session.begin():
+                # BEFORE the delete. The pool is keyed to session_id and the
+                # row is about to go, so a refund that runs after this has
+                # nothing left to look up.
+                await release_draft_pool(str(session.guild_id),
+                                         self.draft_session_id, "cancelled")
                 await db_session.delete(session)
                 await db_session.commit()
                 logger.info(f"Removed draft session {self.draft_session_id} from database")
@@ -2738,6 +2849,54 @@ class CancelConfirmationView(discord.ui.View):
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(content="Draft cancellation aborted.", view=self)
+
+
+class _EntryAborted(Exception):
+    """Raised inside a signup transaction to roll it back and answer outside.
+
+    A plain `return` would leave the method before the player is told anything,
+    and replying inside the transaction would hold the SQLite write lock across
+    a Discord round trip. This unwinds to just past the commit, where both are
+    safe.
+    """
+
+
+async def refuse_unfunded_stake(interaction, draft_session_id, guild_id,
+                                user_id, stake_amount) -> bool:
+    """Refuse a stake the player's wallet cannot cover. True when refused.
+
+    The invariant is that nobody takes on a draft's risk they cannot pay for:
+    a wallet has to cover what its owner already owes, the most they could
+    still lose in drafts they are already in, and the stake being declared now.
+
+    The player is told the gap rather than just "no", because the fix is a
+    deposit and they need the number to make it.
+    """
+    funding = await stake_funding.shortfall(guild_id, user_id, draft_session_id,
+                                            stake_amount)
+    if not funding["gap"]:
+        return False
+
+    # Everything below comes out of that one read. Asking the ledger again to
+    # explain an answer it just gave is four more queries for figures already
+    # in hand -- and two chances for the explanation to disagree with the
+    # refusal it is explaining.
+    have = f"You hold {funding['balance']}"
+    if funding["already_in"]:
+        have += f", with {funding['already_in']} already in this draft"
+
+    claims = []
+    if funding["owed"]:
+        claims.append(f"{funding['owed']} tix of debt")
+    if funding["at_risk"]:
+        claims.append(f"{funding['at_risk']} tix at risk in drafts you are already in")
+    because = (" Your wallet also has to cover " + " and ".join(claims) + "."
+               if claims else "")
+
+    await interaction.response.send_message(
+        f"You need {funding['gap']} more tix to stake {stake_amount}. {have}."
+        f"{because} Deposit more, or stake less.", ephemeral=True)
+    return True
 
 
 class StakeOptionsSelect(discord.ui.Select):
@@ -2796,87 +2955,125 @@ class StakeOptionsSelect(discord.ui.Select):
         user_id = str(interaction.user.id)
         guild_id = str(interaction.guild_id)
         display_name = str(interaction.user.display_name)
-        
-        async with AsyncSessionLocal() as session:
-            async with session.begin():
-                # Get the draft session
-                draft_stmt = select(DraftSession).where(DraftSession.session_id == self.draft_session_id)
-                draft_result = await session.execute(draft_stmt)
-                draft_session = draft_result.scalars().first()
-                
-                if not draft_session:
-                    await interaction.response.send_message("Draft session not found.", ephemeral=True)
-                    return
-                
-                # Update sign_ups
-                sign_ups = draft_session.sign_ups or {}
-                sign_ups[user_id] = interaction.user.display_name
-                
-                # Record the signup event in history
-                await SignUpHistory.record_signup_event(
-                    session_id=self.draft_session_id,
-                    user_id=user_id,
-                    display_name=display_name,
-                    action="join",
-                    guild_id=str(interaction.guild_id)
-                )
-                
-                # Update draftmancer_role_users if user has the role
-                draftmancer_role_users = draft_session.draftmancer_role_users or []
-                if self.has_draftmancer_role and display_name not in draftmancer_role_users:
-                    draftmancer_role_users.append(display_name)
-                
-                # Check if this is the 5th person to sign up AND we haven't pinged yet
-                should_ping = False
-                now = datetime.now()
-                ping_cooldown = draft_session.draft_start_time + timedelta(minutes=30)
-                
-                if len(sign_ups) in (5, 7) and not draft_session.should_ping and now > ping_cooldown:
-                    should_ping = True
-                
-                # Update draft session with sign_ups, draftmancer_role_users, and should_ping flag if needed
-                values_to_update = {
-                    "sign_ups": sign_ups,
-                    "draftmancer_role_users": draftmancer_role_users
-                }
-                if should_ping:
-                    values_to_update["should_ping"] = True
 
-                # Reset the inactivity timer when a user signs up (if still in initial queue)
-                # Check guild config to see if deletion timer should reset on signup
-                if not draft_session.session_stage and should_reset_on_signup(draft_session.guild_id):
-                    queue_inactivity_minutes = get_queue_inactivity_minutes(draft_session.guild_id)
-                    values_to_update["deletion_time"] = datetime.now() + timedelta(minutes=queue_inactivity_minutes)
+        # The wallet has to cover this player's whole position, not just this
+        # entry: what they already owe, and what they could still lose in other
+        # drafts. The charge below only knows about this one.
+        if await refuse_unfunded_stake(interaction, self.draft_session_id,
+                                       guild_id, user_id, stake_amount):
+            return
 
-                await session.execute(
-                    update(DraftSession).
-                    where(DraftSession.session_id == self.draft_session_id).
-                    values(**values_to_update)
-                )
+        # The entry and the sign-up in ONE transaction, under the lock every
+        # transfer takes. Charging first and writing the roster second is two
+        # commits, and a failure between them leaves a player charged for a
+        # draft they are not in -- which nothing reconciles, because check_pool
+        # deliberately says nothing while the queue is open.
+        #
+        # Nothing inside may talk to Discord or open a second connection: it
+        # holds the SQLite write lock until it commits.
+        charged: dict = {"ok": False, "deficit": 0}
+        missing = False
+        should_ping = False
+        try:
+            async with wallet_service.MONEY_LOCK:
+                async with AsyncSessionLocal() as session:
+                    async with session.begin():
+                        # Get the draft session
+                        draft_stmt = select(DraftSession).where(DraftSession.session_id == self.draft_session_id)
+                        draft_result = await session.execute(draft_stmt)
+                        draft_session = draft_result.scalars().first()
                 
-                # Check if a stake record already exists for this player
-                stake_stmt = select(StakeInfo).where(and_(
-                    StakeInfo.session_id == self.draft_session_id,
-                    StakeInfo.player_id == user_id
-                ))
-                stake_result = await session.execute(stake_stmt)
-                stake_info = stake_result.scalars().first()
+                        if not draft_session:
+                            missing = True
+                            raise _EntryAborted
+
+                        charged = await entry_in(session, guild_id, self.draft_session_id,
+                                                 user_id, stake_amount, "joined")
+                        if not charged["ok"]:
+                            raise _EntryAborted
                 
-                if stake_info:
-                    # Update existing stake
-                    stake_info.max_stake = stake_amount
-                    stake_info.is_capped = is_capped
-                else:
-                    # Create new stake record
-                    stake_info = StakeInfo(
-                        session_id=self.draft_session_id,
-                        player_id=user_id,
-                        max_stake=stake_amount,
-                        is_capped=is_capped
-                    )
-                    session.add(stake_info)
+                        # Update sign_ups
+                        sign_ups = draft_session.sign_ups or {}
+                        sign_ups[user_id] = interaction.user.display_name
                 
-                await session.commit()
+                
+                        # Update draftmancer_role_users if user has the role
+                        draftmancer_role_users = draft_session.draftmancer_role_users or []
+                        if self.has_draftmancer_role and display_name not in draftmancer_role_users:
+                            draftmancer_role_users.append(display_name)
+                
+                        # Check if this is the 5th person to sign up AND we haven't pinged yet
+                        should_ping = False
+                        now = datetime.now()
+                        ping_cooldown = draft_session.draft_start_time + timedelta(minutes=30)
+                
+                        if len(sign_ups) in (5, 7) and not draft_session.should_ping and now > ping_cooldown:
+                            should_ping = True
+                
+                        # Update draft session with sign_ups, draftmancer_role_users, and should_ping flag if needed
+                        values_to_update = {
+                            "sign_ups": sign_ups,
+                            "draftmancer_role_users": draftmancer_role_users
+                        }
+                        if should_ping:
+                            values_to_update["should_ping"] = True
+
+                        # Reset the inactivity timer when a user signs up (if still in initial queue)
+                        # Check guild config to see if deletion timer should reset on signup
+                        if not draft_session.session_stage and should_reset_on_signup(draft_session.guild_id):
+                            queue_inactivity_minutes = get_queue_inactivity_minutes(draft_session.guild_id)
+                            values_to_update["deletion_time"] = datetime.now() + timedelta(minutes=queue_inactivity_minutes)
+
+                        await session.execute(
+                            update(DraftSession).
+                            where(DraftSession.session_id == self.draft_session_id).
+                            values(**values_to_update)
+                        )
+                
+                        # Check if a stake record already exists for this player
+                        stake_stmt = select(StakeInfo).where(and_(
+                            StakeInfo.session_id == self.draft_session_id,
+                            StakeInfo.player_id == user_id
+                        ))
+                        stake_result = await session.execute(stake_stmt)
+                        stake_info = stake_result.scalars().first()
+                
+                        if stake_info:
+                            # Update existing stake
+                            stake_info.max_stake = stake_amount
+                            stake_info.is_capped = is_capped
+                        else:
+                            # Create new stake record
+                            stake_info = StakeInfo(
+                                session_id=self.draft_session_id,
+                                player_id=user_id,
+                                max_stake=stake_amount,
+                                is_capped=is_capped
+                            )
+                            session.add(stake_info)
+                
+                        await session.commit()
+        except _EntryAborted:
+            pass
+
+        if missing:
+            await interaction.response.send_message(
+                "Draft session not found.", ephemeral=True)
+            return
+        if not charged["ok"]:
+            await interaction.response.send_message(
+                f"You need {charged['deficit']} more tix to enter for "
+                f"{stake_amount}. Add funds, or join for less.", ephemeral=True)
+            return
+
+        # After the commit: record_signup_event opens its own connection, and a
+        # second connection writing inside the transaction above would wait on a
+        # lock only that transaction can release.
+        await SignUpHistory.record_signup_event(
+            session_id=self.draft_session_id, user_id=user_id,
+            display_name=display_name, action="join",
+            guild_id=str(interaction.guild_id))
+
         
         # Re-fetch the draft session after commit to get the latest data
         async with AsyncSessionLocal() as session:
@@ -2989,17 +3186,38 @@ class StakeModal(discord.ui.Modal):
                 await interaction.response.send_message("Amount must be a multiple of 50 (e.g., 150, 200, 250).", ephemeral=True)
                 return
         
+        # Validate BEFORE taking the money. The minimum-stake check used to sit
+        # inside the sign-up transaction below, which only opens after the
+        # charge -- so a stake under the draft's minimum was refused with the
+        # tix already in the holder and the player still out of the queue. This
+        # is the modal behind "Over 100 TIX", so those were the largest amounts
+        # in the game.
+        draft_session = await get_draft_session(self.draft_session_id)
+        if not draft_session:
+            await interaction.response.send_message(
+                "Draft session not found.", ephemeral=True)
+            return
+        min_stake = draft_session.min_stake or 10
+        if max_stake < min_stake:
+            await interaction.response.send_message(
+                f"Minimum stake for this draft is {min_stake} tix.", ephemeral=True)
+            return
+
+        charged: dict = {"ok": False, "deficit": 0}
         try:
             # Update the player's preference in the database for future drafts
             from preference_service import update_player_bet_capping_preference
+            if await refuse_unfunded_stake(interaction, self.draft_session_id,
+                                           guild_id, user_id, max_stake):
+                return
+
             await update_player_bet_capping_preference(user_id, guild_id, is_capped)
             
             async with AsyncSessionLocal() as session:
                 async with session.begin():
                     # Check if draft_session_id is set properly
                     if not self.draft_session_id:
-                        await interaction.response.send_message("Error: Draft session ID is missing. Please try again.", ephemeral=True)
-                        return
+                        raise _EntryAborted
                     
                     # Get the draft session to check min stake
                     draft_stmt = select(DraftSession).where(DraftSession.session_id == self.draft_session_id)
@@ -3007,15 +3225,17 @@ class StakeModal(discord.ui.Modal):
                     draft_session = draft_result.scalars().first()
                     
                     if not draft_session:
-                        await interaction.response.send_message("Draft session not found.", ephemeral=True)
-                        return
-                    
-                    min_stake = draft_session.min_stake or 10
-                    if max_stake < min_stake:
-                        await interaction.response.send_message(f"Minimum stake for this draft is {min_stake} tix.", ephemeral=True)
-                        return
-                    
-                    # Only add to sign_ups if stake is valid
+                        raise _EntryAborted
+
+                    # The money and the sign-up in ONE commit: charging first
+                    # and seating second leaves a player paying for a draft
+                    # they are not in if the write below fails.
+                    charged = await entry_in(session, guild_id, self.draft_session_id,
+                                             user_id, max_stake, "joined")
+                    if not charged["ok"]:
+                        raise _EntryAborted
+
+                    # The minimum was checked before the charge, above.
                     sign_ups = draft_session.sign_ups or {}
                     display_name = self.user_display_name or interaction.user.display_name
                     sign_ups[user_id] = display_name
@@ -3078,7 +3298,19 @@ class StakeModal(discord.ui.Modal):
             
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
-            
+
+        except _EntryAborted:
+            # A refused entry, not a fault: the transaction rolled back, so
+            # answer here rather than inside it, where a Discord round trip
+            # would be made holding the write lock. Ahead of the generic
+            # handler below, which would report it as an error.
+            if not charged["ok"] and charged["deficit"]:
+                await interaction.response.send_message(
+                    f"You need {charged['deficit']} more tix to enter for "
+                    f"{max_stake}. Add funds, or enter for less.", ephemeral=True)
+            else:
+                await interaction.response.send_message(
+                    "Draft session not found.", ephemeral=True)
         except Exception as e:
             # Add detailed error handling to help diagnose the issue
             error_message = f"An error occurred: {str(e)}"
@@ -4052,51 +4284,81 @@ class CombinedStakeSelect(discord.ui.Select):
         if stake_amount == self.current_stake:
             await interaction.response.send_message(f"You already have a {stake_amount} tix stake set.", ephemeral=True)
             return
-            
-        async with AsyncSessionLocal() as session:
-            async with session.begin():
-                # Get the draft session
-                draft_stmt = select(DraftSession).where(DraftSession.session_id == self.draft_session_id)
-                draft_result = await session.execute(draft_stmt)
-                draft_session = draft_result.scalars().first()
+
+        if await refuse_unfunded_stake(interaction, self.draft_session_id,
+                                       guild_id, user_id, stake_amount):
+            return
+
+        # The revision and the money in ONE transaction. Charging the full new
+        # amount would double up on what they already hold, so entry_in moves
+        # only the gap -- and a raise they cannot afford leaves the original
+        # entry untouched, with the StakeInfo below never written.
+        changed: dict = {"ok": False, "deficit": 0}
+        missing = False
+        try:
+            async with wallet_service.MONEY_LOCK:
+                async with AsyncSessionLocal() as session:
+                    async with session.begin():
+                        # Get the draft session
+                        draft_stmt = select(DraftSession).where(DraftSession.session_id == self.draft_session_id)
+                        draft_result = await session.execute(draft_stmt)
+                        draft_session = draft_result.scalars().first()
+
+                        if not draft_session:
+                            missing = True
+                            raise _EntryAborted
+
+                        changed = await entry_in(session, guild_id,
+                                                 self.draft_session_id,
+                                                 user_id, stake_amount)
+                        if not changed["ok"]:
+                            raise _EntryAborted
+
+                        # Update sign_ups (ensure user is in the sign_ups)
+                        sign_ups = draft_session.sign_ups or {}
+                        sign_ups[user_id] = interaction.user.display_name
                 
-                if not draft_session:
-                    await interaction.response.send_message("Draft session not found.", ephemeral=True)
-                    return
+                        await session.execute(
+                            update(DraftSession).
+                            where(DraftSession.session_id == self.draft_session_id).
+                            values(sign_ups=sign_ups)
+                        )
                 
-                # Update sign_ups (ensure user is in the sign_ups)
-                sign_ups = draft_session.sign_ups or {}
-                sign_ups[user_id] = interaction.user.display_name
+                        # Check if a stake record already exists for this player
+                        stake_stmt = select(StakeInfo).where(and_(
+                            StakeInfo.session_id == self.draft_session_id,
+                            StakeInfo.player_id == user_id
+                        ))
+                        stake_result = await session.execute(stake_stmt)
+                        stake_info = stake_result.scalars().first()
                 
-                await session.execute(
-                    update(DraftSession).
-                    where(DraftSession.session_id == self.draft_session_id).
-                    values(sign_ups=sign_ups)
-                )
+                        if stake_info:
+                            # Update existing stake
+                            stake_info.max_stake = stake_amount
+                            stake_info.is_capped = is_capped
+                        else:
+                            # Create new stake record
+                            stake_info = StakeInfo(
+                                session_id=self.draft_session_id,
+                                player_id=user_id,
+                                max_stake=stake_amount,
+                                is_capped=is_capped
+                            )
+                            session.add(stake_info)
                 
-                # Check if a stake record already exists for this player
-                stake_stmt = select(StakeInfo).where(and_(
-                    StakeInfo.session_id == self.draft_session_id,
-                    StakeInfo.player_id == user_id
-                ))
-                stake_result = await session.execute(stake_stmt)
-                stake_info = stake_result.scalars().first()
-                
-                if stake_info:
-                    # Update existing stake
-                    stake_info.max_stake = stake_amount
-                    stake_info.is_capped = is_capped
-                else:
-                    # Create new stake record
-                    stake_info = StakeInfo(
-                        session_id=self.draft_session_id,
-                        player_id=user_id,
-                        max_stake=stake_amount,
-                        is_capped=is_capped
-                    )
-                    session.add(stake_info)
-                
-                await session.commit()
+                        await session.commit()
+        except _EntryAborted:
+            pass
+
+        if missing:
+            await interaction.response.send_message(
+                "Draft session not found.", ephemeral=True)
+            return
+        if not changed["ok"]:
+            await interaction.response.send_message(
+                f"You need {changed['deficit']} more tix to raise your stake to "
+                f"{stake_amount}. Your stake is unchanged.", ephemeral=True)
+            return
         
         # Confirm stake and provide draft link
         cap_status = "capped at the highest opponent bet" if is_capped else "NOT capped (full action)"

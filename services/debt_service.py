@@ -269,10 +269,15 @@ async def get_pair_position_around_draft(
             ))).scalar()
 
         if cutoff is None:
-            # The stake debt has not been written yet — this embed renders before
-            # create_debt_entries_from_stakes on the first pass. Everything on the
-            # books is therefore pre-existing, and nothing can have been paid against
-            # a debt that does not exist.
+            # This pair has no stake debt for this draft. Since settlement moved
+            # ahead of rendering — settle_decided_draft runs at the top of
+            # check_and_post_victory_or_draw, before any embed is built — the
+            # first render normally finds the debt already booked, so this
+            # branch no longer carries the ordinary first pass. It still covers
+            # a pair the matcher never paired, and stays correct for any caller
+            # that reaches an embed before the debt exists. Everything on the
+            # books is therefore pre-existing, and nothing can have been paid
+            # against a debt that does not exist.
             total = (await session.execute(
                 select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(*pair))).scalar()
             return int(total or 0), 0, 0
@@ -580,9 +585,10 @@ async def create_debt_entries_from_stakes(
 
     Settling those debts is the CALLER's job, not this one's: writing the ledger rows is
     a pure debt-layer operation, while drawing them against a wallet moves money and
-    belongs a layer up. The one caller (utils.generate_draft_summary_embed) hands the
-    returned debtors straight to mtgo_resolution_service.settle_new_debts — the empty
-    list on replay is what stops a re-render charging anyone twice.
+    belongs a layer up. The one caller (utils.settle_decided_draft) reads the debtors
+    back off the ledger rather than using the list returned here — the empty list on
+    replay is what stops a second pass charging anyone twice, and reading them back is
+    what lets a settlement that failed once be retried.
 
     Args:
         guild_id: The guild this draft belongs to

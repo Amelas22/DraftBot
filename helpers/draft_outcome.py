@@ -24,11 +24,19 @@ def decides_draft(team_a_wins: int, team_b_wins: int, total_matches: int) -> Out
     A side clinches by taking MORE than half the matches -- with nine matches
     that is five, because the other side can then reach at most four.
 
-    A draw needs both halves exactly, and only when the total is even. The
-    parity clause is not decoration: 4-4 of NINE is not a draw, it is a draft
+    A draw needs both halves exactly, and only when the total is even -- and
+    only when there are matches at all. The parity clause is not decoration:
+    4-4 of NINE is not a draw, it is a draft
     with one match still owed, and treating it as final would settle a pot
     before the deciding match is played.
     """
+    if total_matches <= 0:
+        # A draft with no matches is undecided, not level. Without this the draw
+        # clause below is satisfied by 0 == 0 with 0 % 2 == 0, so a draft nobody
+        # has played reads as a DRAW -- which refunds its prize pool at team
+        # creation and announces a result before the first pick.
+        return None
+
     half = total_matches // 2
     if team_a_wins > half:
         return "team_a"
@@ -68,3 +76,14 @@ def standings_after(
     elif new_winner_side == "b":
         team_b_wins += 1
     return team_a_wins, team_b_wins
+
+
+def total_matches_in(match_counter: Optional[int]) -> int:
+    """How many matches this draft has, from the counter that names the next one.
+
+    Both the money and the embed that reports it derive the outcome from this
+    number, and they used to spell the subtraction differently -- one guarding
+    against a counter that was never set and one not. A draft that settled
+    correctly could still crash the summary that announced it.
+    """
+    return max((match_counter or 1) - 1, 0)

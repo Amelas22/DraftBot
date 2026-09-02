@@ -18,6 +18,9 @@ def _session(session_type):
     return SimpleNamespace(
         session_id="s-1",
         session_type=session_type,
+        # A real DraftSession always carries this; removal now reads it to
+        # decide whether the player's prize-pool entry needs returning.
+        guild_id="g-1",
         sign_ups={"101": "Ana", "202": "Bo"},
         team_a=["101"], team_b=["202"],
         team_a_name="Alpha", team_b_name="Bravo",
@@ -78,6 +81,8 @@ async def _run(session_type):
     with patch.object(views.UserRemovalSelect, "values", new_callable=PropertyMock,
                       return_value=["101"], create=True), \
          patch.object(views, "get_draft_session", AsyncMock(return_value=session)), \
+         patch.object(views, "entry_in",
+                      AsyncMock(return_value={"ok": True, "deficit": 0})), \
          patch.object(views, "AsyncSessionLocal", _Db), \
          patch.object(views.SignUpHistory, "record_signup_event", AsyncMock()), \
          patch.object(views, "update_draft_message", AsyncMock()) as generic, \

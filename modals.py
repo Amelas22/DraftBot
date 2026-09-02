@@ -66,6 +66,13 @@ class CubeDraftModal(discord.ui.Modal):
                 placeholder="Enter Team B Name", 
                 custom_id="team_b_input"
             ))
+            # Optional, and blank means what it has always meant: a free draft.
+            self.add_item(discord.ui.InputText(
+                label="Entry Fee (tix, optional)",
+                placeholder="Leave blank for a free draft",
+                custom_id="entry_fee_input",
+                required=False,
+            ))
 
     async def callback(self, interaction: discord.Interaction) -> None:
         session_details: SessionDetails = self.configure_session_details(interaction)
@@ -89,10 +96,33 @@ class CubeDraftModal(discord.ui.Modal):
             details.team_a_name = team_inputs[0].value or "Team A"
             details.team_b_name = team_inputs[1].value or "Team B"
 
+        fee_input = next((c for c in self.children
+                          if c.custom_id == "entry_fee_input"), None)
+        if fee_input is not None:
+            details.entry_fee = _parse_entry_fee(fee_input.value)
+
         for attr, value in self.session_details_overrides.items():
             setattr(details, attr, value)
 
         return details
+
+def _parse_entry_fee(raw) -> int | None:
+    """A premade draft's fixed entry fee, or None for a free draft.
+
+    Anything that is not a positive whole number of tix reads as free rather
+    than raising: a typo in an optional field must not lose the draft the
+    organiser was in the middle of creating. They can see the fee on the queue
+    embed immediately and start again if it is wrong.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        fee = int(text)
+    except ValueError:
+        return None
+    return fee if fee > 0 else None
+
 
 class CubeDraftSelectionView(BaseCubeSelectionView):
     def __init__(self, session_type, guild_id, current_cube=None, session_details_overrides=None):

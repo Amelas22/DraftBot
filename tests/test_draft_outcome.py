@@ -74,3 +74,37 @@ def test_a_correction_can_undo_a_clinch():
     a, b = standings_after(5, 4, previous_winner_side="a", new_winner_side="b")
     assert (a, b) == (4, 5)
     assert decides_draft(a, b, 9) == "team_b"
+
+
+def test_a_draft_with_no_matches_is_not_a_draw():
+    """0-0 of nothing is undecided, not level.
+
+    A draft sits at match_counter=1 (total_matches=0) from creation until its
+    pairings exist. The draw clause -- both sides at half, total even -- is
+    satisfied by 0 == 0 with 0 % 2 == 0, so a brand-new draft read as a DRAW.
+    Anything acting on that decides a draft nobody has played: the prize pool
+    refunds every entry at team creation, and the victory embed announces a
+    result before the first pick.
+    """
+    assert decides_draft(0, 0, 0) is None
+
+
+def test_a_draw_still_requires_every_match_played():
+    """The guard above must not accidentally excuse a real draw."""
+    assert decides_draft(1, 1, 2) == "draw"
+    assert decides_draft(0, 0, 2) is None      # two matches owed, none played
+
+
+def test_total_matches_reads_a_counter_that_was_never_set():
+    """match_counter is the NEXT match number, so the count is one less.
+
+    That subtraction was spelled two ways: the settlement path guarded against
+    a null counter and the display path did not, so the same draft could settle
+    cleanly and then crash the embed that reports it. One definition, and the
+    guard is not optional.
+    """
+    from helpers.draft_outcome import total_matches_in
+
+    assert total_matches_in(4) == 3
+    assert total_matches_in(1) == 0
+    assert total_matches_in(None) == 0

@@ -8,6 +8,8 @@ and enable reuse across different team creation triggers.
 
 from loguru import logger
 from datetime import datetime, timedelta
+
+from services.draft_pool_service import match_pool
 import discord
 import random
 from sqlalchemy import update, select
@@ -19,8 +21,6 @@ from models.draft_session import DraftSession as DraftSessionModel
 from utils import split_into_teams, generate_seating_order, reorder_sign_ups, get_formatted_stake_pairs, check_weekly_limits, add_links_to_embed_safely
 from services.draft_setup_manager import DraftSetupManager
 from services.state_manager import state_manager
-from services.stake_service import calculate_and_store_stakes
-from preference_service import get_players_bet_capping_preferences
 from notification_service import send_teams_created_dms
 
 
@@ -101,22 +101,25 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                     await split_into_teams(bot, session.session_id)
                     updated_session = await DraftSessionModel.get_by_session_id(draft_session_id)
 
-                    # Calculate stakes for staked drafts
-                    if persistent_view.session_type == "staked" and updated_session and updated_session.team_a and updated_session.team_b:
-                        all_players = updated_session.team_a + updated_session.team_b
-
-                        cap_info = await get_players_bet_capping_preferences(all_players, guild_id=guild_id)
-
-                        await calculate_and_store_stakes(guild_id, updated_session, cap_info)
-
-                        stake_stmt = select(StakeInfo).where(StakeInfo.session_id == session_id)
-                        stake_results = await db_session.execute(stake_stmt)
-                        stake_infos = stake_results.scalars().all()
-
-                        for stake_info in stake_infos:
-                            stake_info_by_player[stake_info.player_id] = stake_info
 
                     session = updated_session
+
+                # Capture the sides now -- `session` carries team_a/team_b for
+                # BOTH paths here (premade had them from creation; random and
+                # staked have just had them written by split_into_teams). The
+                # money itself moves AFTER this transaction commits; see below.
+                staked_done = False
+                pool_sides = None
+                # STAKED only, matching utils.py's settlement gate exactly. Entries
+                # can only arrive through the staked signup UI, and settlement is
+                # inside a staked-only branch -- so matching any wider would level
+                # a pool that nothing would ever pay out, stranding it.
+                # Staked queues and premade drafts with a fixed entry fee: the
+                # two kinds of draft that hold a pool, and the same pair
+                # settlement pays out.
+                if session.session_type == "staked" or session.entry_fee:
+                    pool_sides = (str(session.guild_id), session.session_id,
+                                  list(session.team_a or []), list(session.team_b or []))
 
                 # Generate seating order based on session type
                 if session.session_type != "swiss":
@@ -164,10 +167,15 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                         interaction, db_session, session, embed, channel_embed,
                         persistent_view, draft_session_id, bot, guild_id
                     )
-                    return True
+                    # Do NOT return from inside the transaction: the pool has to
+                    # be matched, and that money cannot move while this
+                    # transaction holds the write lock. Fall out first.
+                    staked_done = True
 
-                # Update button states for non-staked drafts
-                for item in persistent_view.children:
+                # Update button states for non-staked drafts. Guarded because a
+                # staked draft used to return before reaching here; falling out
+                # of the transaction instead must not start running it.
+                for item in ([] if staked_done else persistent_view.children):
                     if isinstance(item, discord.ui.Button):
                         if item.custom_id == f"create_rooms_pairings_{draft_session_id}":
                             # Keep disabled for Winston drafts as per original logic
@@ -179,7 +187,26 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                             item.disabled = False
                         else:
                             item.disabled = True
-                await db_session.commit()
+                if not staked_done:
+                    # The staked completion handler commits internally, so the
+                    # transaction is already closed by the time we get here.
+                    await db_session.commit()
+
+        # The book closes here, OUTSIDE the transaction above.
+        #
+        # wallet_service.pay opens its own connection and SQLite is single-writer,
+        # so calling it while that transaction still holds the write lock makes
+        # the inner write wait on a lock only the outer transaction can release.
+        # It times out, the retry loop exhausts, and the whole team-creation
+        # transaction rolls back -- leaving teams written by split_into_teams
+        # (its own transaction) beside a session_stage that never advanced.
+        if pool_sides is not None:
+            await match_pool(*pool_sides)
+
+        if staked_done:
+            # A staked draft's own completion handler has already posted its
+            # embeds; everything below is the non-staked announcement path.
+            return True
 
         # Update message and send announcement
         try:

@@ -13,6 +13,7 @@ project-includes = [
     "draft_organization/bracket.py",
     "helpers/draft_outcome.py",
     "helpers/draft_rooms.py",
+    "services/draft_pool_service.py",
     "helpers/match_control.py",
     "helpers/opponent_threads.py",
     "helpers/room_regeneration.py",
@@ -20,6 +21,8 @@ project-includes = [
     "helpers/view_dispatch_guard.py",
     "match_control_view.py",
     "ready_check.py",
+    "database/retry.py",
+    "services/stake_funding.py",
     "services/tournament_roles.py",
 ]
 
