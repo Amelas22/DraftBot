@@ -16,12 +16,14 @@ Obligations do not net. Being owed money by one player does not pay a debt to
 another, and a draft you might win is not income you can stake elsewhere: both
 sides of that coin are already handled by counting only what could be LOST.
 """
-from typing import TypedDict
+from datetime import datetime
+from typing import Any, TypedDict
 
 from loguru import logger
 from sqlalchemy import select
 
 from database.db_session import db_session
+from helpers.stale_drafts import is_finished_draft
 from models.draft_session import DraftSession
 from models.stake import StakeInfo
 from services import debt_service, wallet_service
@@ -43,6 +45,31 @@ async def already_satisfied(guild_id: str, session_id: str, player_id: str) -> i
     return await held_by(guild_id, session_id, player_id)
 
 
+def _is_over(row: Any, now: datetime) -> bool:
+    """Whether this draft can no longer cost the player anything.
+
+    Two ways it cannot. It FINISHED -- a posted victory message, which is the
+    durable record where session_stage is not (see is_finished_draft). Or its
+    rooms have been REAPED: cleanup deletes a draft's channels at deletion_time,
+    and once they are gone no result can be reported into it, so whatever it
+    might have cost is never going to be charged.
+
+    The second rule is what releases the drafts that fired and were simply never
+    played out. They carry no victory message, so completion alone leaves them
+    claiming money for as long as the row exists -- in production, well over a
+    year, to the tune of 1550 tix for one player against rooms deleted in 2025.
+
+    Deliberately NOT folded into is_finished_draft: cleanup_stale_drafts has to
+    keep finding these to settle them as draws, and calling them finished would
+    hide them from it. "Over" and "finished" are different questions.
+
+    A row with no deletion_time keeps its claim -- nothing here says it is over.
+    """
+    if is_finished_draft(row):
+        return True
+    return row.deletion_time is not None and row.deletion_time < now
+
+
 async def potential_losses(guild_id: str, player_id: str,
                            exclude_session_id: str | None = None) -> dict[str, int]:
     """What this player still owes to unfinished drafts, per draft.
@@ -58,22 +85,40 @@ async def potential_losses(guild_id: str, player_id: str,
     async with db_session() as session:
         rows = (await session.execute(
             select(StakeInfo.session_id, StakeInfo.max_stake, DraftSession.sign_ups,
-                   DraftSession.session_stage)
+                   DraftSession.session_stage,
+                   DraftSession.victory_message_id_draft_chat,
+                   DraftSession.victory_message_id_results_channel,
+                   DraftSession.deletion_time)
             .join(DraftSession, DraftSession.session_id == StakeInfo.session_id)
             .where(
                 StakeInfo.player_id == player_id,
                 DraftSession.guild_id == guild_id,
                 DraftSession.session_type == "staked",
+                # A prefilter only. It can exclude a draft that is definitely
+                # over ('abandoned' has no victory message to find), never keep
+                # one -- is_finished_draft below is the authority.
                 DraftSession.session_stage.is_(None)
                 | DraftSession.session_stage.notin_(_RESOLVED),
             ))).all()
 
     at_risk: dict[str, int] = {}
-    for session_id, max_stake, sign_ups, stage in rows:
+    # One instant for the whole pass, so every row is judged against the same now.
+    now = datetime.now()
+    for row in rows:
+        session_id, max_stake, sign_ups = row.session_id, row.max_stake, row.sign_ups
+        stage = row.session_stage
         if session_id == exclude_session_id:
             continue        # the draft being declared for; the new figure replaces it
         if player_id not in (sign_ups or {}):
             continue        # a row left behind by leaving
+        if _is_over(row, now):
+            # The stage is not a record of completion. helpers/stale_drafts puts
+            # it plainly -- it "rarely advances past 'pairings' even for fully
+            # played drafts" -- and nothing wrote 'completed' at all before
+            # 2026-01, so every staked draft older than that still reads as live.
+            # Believing the stage alone reserved a player's whole staking
+            # history against their wallet forever.
+            continue
         # Only the UNSATISFIED part of a promise is still a claim on the wallet.
         # Escrowing an entry is not a reduction to net out, it is the obligation
         # being met: those tix have been handed over and the balance already
