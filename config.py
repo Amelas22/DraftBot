@@ -353,10 +353,27 @@ def get_draftmancer_draft_url(draft_id, guild_id=None):
     """Get full draft URL for a draft ID"""
     return f"{DRAFTMANCER_BASE_URL}/draft/DB{draft_id}"
 
-def get_draftmancer_websocket_url(draft_id, guild_id=None, user_id="DraftBot", user_name="DraftBot"):
-    """Get full websocket URL for a draft ID"""
+def get_draftmancer_bot_user_id(draft_id):
+    """The bot's Draftmancer identity for ONE draft.
+
+    Draftmancer keys live connections globally by userID (src/server.ts,
+    `Connections`), so a shared id makes concurrent drafts a single
+    duplicate-logging-in user and they evict each other. Derived from draft_id so
+    it is unique across drafts and stable across reconnects within one --
+    ownership is held per userID, so a per-connection id would drop ownership on
+    every network blip.
+    """
+    return f"DraftBot-{draft_id}"
+
+def get_draftmancer_websocket_url(draft_id, guild_id=None, user_id=None, user_name="DraftBot"):
+    """Get full websocket URL for a draft ID.
+
+    `user_name` stays "DraftBot": every bot-vs-player filter in DraftSetupManager
+    compares userName, never userID.
+    """
     # Convert https:// to wss://
     websocket_url = DRAFTMANCER_BASE_URL.replace('https://', 'wss://')
+    user_id = user_id or get_draftmancer_bot_user_id(draft_id)
     return f"{websocket_url}?userID={user_id}&sessionID=DB{draft_id}&userName={user_name}"
 
 def get_timeout_config(guild_id):

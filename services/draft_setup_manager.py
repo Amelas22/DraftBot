@@ -12,7 +12,8 @@ import discord
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from config import (get_draftmancer_websocket_url, get_draftmancer_base_url,
-                    get_draftmancer_session_url, is_disconnect_autopause_enabled, is_test_mode)
+                    get_draftmancer_bot_user_id, get_draftmancer_session_url,
+                    is_disconnect_autopause_enabled, is_test_mode)
 from database.db_session import db_session
 from models.draft_session import DraftSession
 from models.match import MatchResult
@@ -44,9 +45,6 @@ VICTORY_CHECK_INITIAL_DELAY = 10  # Initial delay for immediate victory detectio
 # Valid stages: None (initial), "teams", "pairings", "completed"
 
 # Connection and retry settings
-# The bot's Draftmancer userID. A starting value: Draftmancer may rename us on
-# connect (see _on_already_connected), which is why self.bot_user_id is state.
-DEFAULT_BOT_USER_ID = "DraftBot"
 DRAFT_LOG_WAIT_ATTEMPTS = 20    # Poll for the draftLog push after endDraft (10s total)
 DRAFT_LOG_WAIT_INTERVAL = 0.5   # Seconds between draftLog availability checks
 # Draft-setup timings. In test mode (TEST_MODE=true) these are shortened so an
@@ -217,7 +215,7 @@ class DraftSetupManager:
         self.draft_id = draft_id
         # Who this manager is to Draftmancer. Held as state, not passed inline, so
         # _on_already_connected can replace it when the server renames us.
-        self.bot_user_id = DEFAULT_BOT_USER_ID
+        self.bot_user_id = get_draftmancer_bot_user_id(draft_id)
         self.friendly_id = friendly_id
         self.cube_id = cube_id
         self.guild_id = guild_id
@@ -986,6 +984,9 @@ class DraftSetupManager:
             # Update local state
             old_draft_id = self.draft_id
             self.draft_id = new_draft_id
+            # The identity is derived from draft_id, so it has to move with it --
+            # otherwise we rejoin the NEW room under the OLD id and collide again.
+            self.bot_user_id = get_draftmancer_bot_user_id(new_draft_id)
             self.cube_imported = False  # Reset so we try to import again
 
             # Update the logger context
