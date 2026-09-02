@@ -162,3 +162,67 @@ async def test_regenerating_the_draft_moves_the_identity_with_it():
 
     assert mgr.bot_user_id == f"DraftBot-{mgr.draft_id}"
     assert mgr.bot_user_id != "DraftBot-OLDID000"
+
+
+def test_the_bot_is_never_a_mutiny_transfer_target():
+    """/mutiny hands the Draftmancer session to a human. It excluded the bot by
+    comparing userID against the literal "DraftBot", which a per-draft identity makes
+    permanently true -- a dead guard that reads as a live one.
+
+    It matters because Draftmancer takes any setUserName a client sends, so a player
+    called "DraftBot" collides with the name check that was carrying the exclusion,
+    and control would be handed back to the bot.
+    """
+    from cogs.draft_control import pick_mutiny_target
+
+    mgr = make_manager(draft_id="AAAA1111")
+    session_users = [
+        {"userID": mgr.bot_user_id, "userName": "DraftBot"},
+        {"userID": "id-human", "userName": "DraftBot"},   # a player who picked the name
+    ]
+
+    target = pick_mutiny_target(session_users, "DraftBot", mgr.bot_user_id)
+
+    assert target is not None
+    assert target["userID"] == "id-human"
+
+
+def test_the_draft_control_commands_are_still_registered():
+    """A module-level helper added inside the class body silently ends the class and
+    reparents every method after it as a nested function. Nothing else in the suite
+    notices -- the module still imports and every other test still passes, while
+    /mutiny, /pause and /unpause quietly stop existing.
+
+    Caught exactly that while adding pick_mutiny_target, hence this guard.
+    """
+    from cogs.draft_control import DraftControlCog
+
+    for command in ("mutiny_command", "pause_command", "unpause_command"):
+        assert hasattr(DraftControlCog, command), f"{command} fell out of the cog"
+
+
+@pytest.mark.asyncio
+async def test_the_socket_log_tag_follows_a_regeneration():
+    """Every socket-layer line is tagged with resource_id. Left on the old room, the
+    logs of a regenerated draft read as though the bot were still in the room it
+    abandoned -- which is how the frontier-guide-69 logs read, and why the first
+    diagnosis of that incident went looking in the wrong place."""
+    from unittest.mock import AsyncMock
+
+    mgr = make_manager(draft_id="OLDID000")
+    mgr.socket_client.resource_id = "DBOLDID000"
+    mgr.socket_client.connected = False
+
+    result = MagicMock(rowcount=1)
+    session = MagicMock(execute=AsyncMock(return_value=result), commit=AsyncMock())
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=session)
+    ctx.__aexit__ = AsyncMock(return_value=None)
+    mgr._get_draft_channel = AsyncMock(return_value=None)
+    mgr._get_draft_session_from_db = AsyncMock(return_value=None)
+
+    with patch("services.draft_setup_manager.db_session", MagicMock(return_value=ctx)):
+        assert await mgr.regenerate_draft_session() is True
+
+    assert mgr.socket_client.resource_id == f"DB{mgr.draft_id}"
+    assert mgr.socket_client.resource_id != "DBOLDID000"

@@ -987,6 +987,10 @@ class DraftSetupManager:
             # The identity is derived from draft_id, so it has to move with it --
             # otherwise we rejoin the NEW room under the OLD id and collide again.
             self.bot_user_id = get_draftmancer_bot_user_id(new_draft_id)
+            # Socket-layer log lines are tagged with this. Left behind, every line
+            # after a swap names the abandoned room -- which is exactly what made
+            # the frontier-guide-69 logs read as though the bot were still there.
+            self.socket_client.resource_id = f"DB{new_draft_id}"
             self.cube_imported = False  # Reset so we try to import again
 
             # Update the logger context
