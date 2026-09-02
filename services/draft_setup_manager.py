@@ -44,11 +44,9 @@ VICTORY_CHECK_INITIAL_DELAY = 10  # Initial delay for immediate victory detectio
 # Valid stages: None (initial), "teams", "pairings", "completed"
 
 # Connection and retry settings
-MAX_USER_ID_LOOKUP_ATTEMPTS = 5  # Max attempts to find bot's userID in session
 # The bot's Draftmancer userID. A starting value: Draftmancer may rename us on
 # connect (see _on_already_connected), which is why self.bot_user_id is state.
 DEFAULT_BOT_USER_ID = "DraftBot"
-USER_ID_LOOKUP_RETRY_DELAY = 0.5  # Seconds between userID lookup attempts
 DRAFT_LOG_WAIT_ATTEMPTS = 20    # Poll for the draftLog push after endDraft (10s total)
 DRAFT_LOG_WAIT_INTERVAL = 0.5   # Seconds between draftLog availability checks
 # Draft-setup timings. In test mode (TEST_MODE=true) these are shortened so an
@@ -1015,29 +1013,24 @@ class DraftSetupManager:
         (especially if other users are present). This method actively reclaims ownership
         using the bot's current userID and sets it as a spectator.
 
+        The id comes from self.bot_user_id, which is authoritative: it is derived when
+        the manager is built, moves with a regeneration, and is replaced by
+        _on_already_connected when Draftmancer renames us.
+
+        It used to be rediscovered here by scanning sessionUsers for the name
+        "DraftBot" behind a retry-and-sleep loop. That could not work: this method
+        ends by calling setOwnerIsPlayer(False), whose handler deletes the owner from
+        `sess.users` (Draftmancer src/server.ts:585), and sessionUsers is built from
+        users + disconnectedUsers (src/Session.ts:3747). So from the first successful
+        reclaim onwards the bot is absent from that payload while still connected,
+        and every later reconnect logged the production error
+        "Cannot reclaim ownership - bot userID not found in session_users".
+
         Returns:
             True if successful, False otherwise
         """
         try:
-            # Find our current userID from session_users
-            # Wait briefly for session_users to populate after reconnect
-            bot_user_id = None
-            for attempt in range(MAX_USER_ID_LOOKUP_ATTEMPTS):
-                for user in self.session_users:
-                    if user.get('userName') == 'DraftBot':
-                        bot_user_id = user.get('userID')
-                        break
-
-                if bot_user_id:
-                    break
-
-                if attempt < MAX_USER_ID_LOOKUP_ATTEMPTS - 1:
-                    self.logger.debug(f"Bot userID not found yet, waiting... (attempt {attempt + 1}/{MAX_USER_ID_LOOKUP_ATTEMPTS})")
-                    await asyncio.sleep(USER_ID_LOOKUP_RETRY_DELAY)
-
-            if not bot_user_id:
-                self.logger.error("Cannot reclaim ownership - bot userID not found in session_users after waiting")
-                return False
+            bot_user_id = self.bot_user_id
 
             # First, set ourselves as the session owner using our actual userID
             self.logger.debug(f"Setting session owner to bot userID: {bot_user_id}")
@@ -2622,11 +2615,13 @@ class DraftSetupManager:
             await self._cleanup_and_disconnect("fatal error during cube import")
             return False
 
-    async def _handle_reconnection(self, websocket_url: str) -> bool:
+    async def _handle_reconnection(self) -> bool:
         """Handle reconnection and ownership reclaim logic.
 
-        Args:
-            websocket_url: The websocket URL to reconnect to
+        Builds the URL here rather than taking one, because this method can move
+        the draft: regenerate_draft_session below swaps draft_id -- and with it the
+        bot's identity -- so a URL computed by the caller before the loop points at
+        the room the bot has just abandoned by the time the next drop arrives.
 
         Returns:
             bool: True if should continue the loop, False if should break
@@ -2634,6 +2629,7 @@ class DraftSetupManager:
         self.logger.info(f"[RECONNECT] === RECONNECTION START === Manager ID: {id(self)}")
         self.logger.info(f"[RECONNECT] Connection lost, attempting to reconnect...")
 
+        websocket_url = get_draftmancer_websocket_url(self.draft_id, user_id=self.bot_user_id)
         reconnected = await self.socket_client.connect_with_retry(websocket_url)
         self.logger.info(f"[RECONNECT] Reconnection result: {reconnected}")
 
@@ -2740,11 +2736,12 @@ class DraftSetupManager:
         self.logger.info(f"[LOOP] === KEEP_CONNECTION_ALIVE START === Manager ID: {id(self)}")
         self.logger.info(f"[LOOP] Starting connection management for draft {self.draft_id}")
 
-        # Try initial connection
-        websocket_url = get_draftmancer_websocket_url(self.draft_id, user_id=self.bot_user_id)
+        # Only the FIRST connection. Reconnects build their own URL, because a
+        # regeneration moves the draft and this value would not follow it.
+        initial_url = get_draftmancer_websocket_url(self.draft_id, user_id=self.bot_user_id)
 
         # First connection attempt
-        if not await self.socket_client.connect_with_retry(websocket_url):
+        if not await self.socket_client.connect_with_retry(initial_url):
             self.logger.error("Initial connection failed after retries. Aborting.")
             return
 
@@ -2770,7 +2767,7 @@ class DraftSetupManager:
                 # If disconnected, try to reconnect
                 if not self.socket_client.connected:
                     self.logger.info(f"[LOOP] Socket disconnected, calling _handle_reconnection")
-                    should_continue = await self._handle_reconnection(websocket_url)
+                    should_continue = await self._handle_reconnection()
                     self.logger.info(f"[LOOP] _handle_reconnection returned: {should_continue}")
                     if not should_continue:
                         self.logger.info(f"[LOOP] Breaking loop (reconnection returned False)")
