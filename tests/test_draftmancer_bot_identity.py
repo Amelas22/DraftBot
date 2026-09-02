@@ -34,7 +34,19 @@ from test_socket_event_names import _subscribed_events
 
 def test_the_manager_knows_its_own_draftmancer_identity():
     """Held as state rather than passed inline, which is what lets it be reassigned."""
-    assert make_manager(draft_id="AAAA1111").bot_user_id == "DraftBot"
+    assert make_manager(draft_id="AAAA1111").bot_user_id == "DraftBot-AAAA1111"
+
+
+def test_two_drafts_do_not_share_a_bot_user_id():
+    """The collision itself. Draftmancer's Connections map is global, so two managers
+    sharing an id are one duplicate-logging-in user and evict each other."""
+    assert make_manager(draft_id="AAAA1111").bot_user_id != make_manager(draft_id="BBBB2222").bot_user_id
+
+
+def test_one_draft_keeps_the_same_bot_user_id():
+    """Ownership is held per userID, so a reconnect must reuse the same one --
+    a per-connection random id would drop ownership on every network blip."""
+    assert make_manager(draft_id="AAAA1111").bot_user_id == make_manager(draft_id="AAAA1111").bot_user_id
 
 
 def test_already_connected_is_subscribed():
@@ -126,3 +138,27 @@ async def test_ownership_is_reclaimed_under_a_reassigned_identity():
     owner_calls = [c for c in mgr.socket_client.emit.await_args_list
                    if c.args and c.args[0] == "setSessionOwner"]
     assert owner_calls[0].args[1] == "uuid-reassigned"
+
+
+@pytest.mark.asyncio
+async def test_regenerating_the_draft_moves_the_identity_with_it():
+    """regenerate_draft_session swaps the Draftmancer room. The identity is derived
+    from draft_id, so leaving it behind would rejoin the NEW room under the OLD id --
+    re-colliding with whatever still holds it, which is the bug this prevents."""
+    mgr = make_manager(draft_id="OLDID000")
+    mgr.socket_client.connected = False
+
+    result = MagicMock()
+    result.rowcount = 1
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=result)
+    session.commit = AsyncMock()
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=session)
+    ctx.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("services.draft_setup_manager.db_session", MagicMock(return_value=ctx)):
+        assert await mgr.regenerate_draft_session() is True
+
+    assert mgr.bot_user_id == f"DraftBot-{mgr.draft_id}"
+    assert mgr.bot_user_id != "DraftBot-OLDID000"
