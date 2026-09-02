@@ -236,9 +236,21 @@ class DraftStickyStrategy(StickyStrategy):
             # It reached that line because the mention keys only on session_type:
             # a tournament match runs as 'premade', which no guild lists in
             # session_roles, so find_session_role fell through to the default
-            # drafter role and pinged every cube drafter. tournament_match_id is
-            # committed with the row before the message is made sticky
-            # (sessions/base_session.py), so it is reliably readable here.
+            # drafter role and pinged every cube drafter.
+            #
+            # This catches a match launched AGAINST a pairing -- the Start draft
+            # button and /premade_draft in a match thread, which is how matches
+            # are actually started. Both build session_details through
+            # match_control_view._picker_overrides, so tournament_match_id is
+            # committed with the row (sessions/base_session.py:91) before the
+            # message is made sticky, and is readable by the time we get here.
+            #
+            # It does NOT catch the retro-link nudge: an ordinary premade draft
+            # is announced first and only linked when someone presses the button
+            # (services/tournament_linking.py). That announcement has already
+            # gone out, and a mention cannot be recalled by editing the message
+            # afterwards -- so the leftover post is a cleanup problem, tracked
+            # separately, not something this check can prevent.
             if draft_session and draft_session.tournament_match_id is not None:
                 return None
 
