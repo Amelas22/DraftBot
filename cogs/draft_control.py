@@ -151,6 +151,22 @@ def _disable_all(view):
         child.disabled = True
 
 
+def pick_mutiny_target(session_users, requester_name, bot_user_id):
+    """Who /mutiny should hand the Draftmancer session to: the requester if they are
+    in the session, otherwise anyone who is not the bot.
+
+    Excludes the bot by userID, not by display name. Draftmancer takes any
+    setUserName a client sends, so "DraftBot" is a name a player can choose -- and
+    the bot's own userID is per-draft, which made the old `!= 'DraftBot'` literal
+    permanently true and left the name check carrying an exclusion it cannot bear.
+    """
+    candidates = [u for u in session_users if u.get('userID') != bot_user_id]
+    for user in candidates:
+        if user.get('userName') == requester_name:
+            return user
+    return candidates[0] if candidates else None
+
+
 class BaseVoteView(View):
     """A majority yes/no vote among draft participants.
 
@@ -902,23 +918,11 @@ class DraftControlCog(commands.Cog):
                 self.logger.info(f"Mutiny during active draft for session {manager.session_id}. Will advance to pairings.")
             
             # Find a suitable user to transfer to (preferably the requester)
-            target_user_id = None
-            requester_name = ctx.author.display_name
-            
-            # Try to find the requester's username in the session
-            for user in manager.session_users:
-                if user.get('userName') == requester_name and user.get('userID') != 'DraftBot':
-                    target_user_id = user.get('userID')
-                    break
-            
-            # If requester not found, use any non-bot user
-            if not target_user_id:
-                non_bot_users = [u for u in manager.session_users if u.get('userName') != 'DraftBot']
-                if non_bot_users:
-                    target_user = non_bot_users[0]
-                    target_user_id = target_user.get('userID')
-                    requester_name = target_user.get('userName')
-            
+            target = pick_mutiny_target(
+                manager.session_users, ctx.author.display_name, manager.bot_user_id)
+            target_user_id = target.get('userID') if target else None
+            requester_name = target.get('userName') if target else ctx.author.display_name
+
             if not target_user_id:
                 await ctx.followup.send("Could not find a user to transfer control to.", ephemeral=True)
                 return
