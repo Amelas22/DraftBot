@@ -223,6 +223,27 @@ def make_manager(**kwargs):
     return mgr
 
 
+def fake_db_session(*, rowcount=1, row=None):
+    """A `db_session()` double: an async context manager yielding a session whose
+    `execute()` reports `rowcount` and returns `row` from `scalar_one_or_none()`.
+
+    Three test files had grown their own copy of this in one change, so
+    regenerate_draft_session's persistence shape had three places to chase.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    result = MagicMock()
+    result.rowcount = rowcount
+    result.scalar_one_or_none.return_value = row
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=result)
+    session.commit = AsyncMock()
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=session)
+    ctx.__aexit__ = AsyncMock(return_value=None)
+    return MagicMock(return_value=ctx)
+
+
 @pytest_asyncio.fixture
 async def live_views():
     """Track discord.ui.View instances and stop them when the test ends.

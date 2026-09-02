@@ -19,27 +19,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from conftest import make_manager
+from conftest import fake_db_session, make_manager
 from fake_draftmancer import FakeDraftmancer, attach
 
 
 def _swap_succeeds():
-    """db_session() whose UPDATE reports one row changed."""
-    result = MagicMock()
-    result.rowcount = 1
-    session = MagicMock()
-    session.execute = AsyncMock(return_value=result)
-    session.commit = AsyncMock()
-    ctx = MagicMock()
-    ctx.__aenter__ = AsyncMock(return_value=session)
-    ctx.__aexit__ = AsyncMock(return_value=None)
-    return MagicMock(return_value=ctx)
+    """The UPDATE reports one row changed -- the room swap happened."""
+    return fake_db_session(rowcount=1)
 
 
 def _session_row(manager):
     """A DraftSession whose links track the manager's current draft_id, as the real
     row does -- regenerate_draft_session writes draft_link in the same statement."""
-    row = SimpleNamespace(sign_ups={"11": "Alice", "22": "Bob"})
+    row = SimpleNamespace(sign_ups={"11": "Alice", "22": "Bob"},
+                          draft_channel_id="1543769252744528028")
     row.get_draft_link_for_user = (
         lambda name: f"https://draftmancer.com/?session=DB{manager.draft_id}&userName={name}"
     )
@@ -65,7 +58,9 @@ async def test_the_announced_room_is_the_room_the_bot_joins():
 
     announced = set(re.findall(r"session=DB([A-Z0-9]{8})",
                                channel.send.await_args.args[0]))
-    joined = {s for s, members in server.sessions.items() if mgr.bot_user_id in members}
+    # Every room holding a bot connection, not just the current identity's -- a
+    # zombie left in the old room must fail this too.
+    joined = {s.session_id for s in server.connections.values() if s.user_name == "DraftBot"}
 
     assert announced == {mgr.draft_id}, "players were pointed at more than one room"
     assert joined == {f"DB{mgr.draft_id}"}, (
