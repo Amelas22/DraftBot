@@ -320,3 +320,24 @@ async def test_a_stake_levelled_down_stops_reserving_the_refunded_part(test_db):
     assert at_risk == 0, (
         f"the draft still reserves {at_risk} tix, but its entry is paid and "
         "the unmatched part is already back in the wallet")
+
+
+@pytest.mark.asyncio
+async def test_a_played_out_draft_left_at_pairings_is_not_a_potential_obligation(test_db):
+    """A posted victory message finishes a draft, whatever the stage says.
+
+    session_stage is not a reliable record of completion -- helpers/stale_drafts
+    says so in as many words ("the stage rarely advances past 'pairings' even for
+    fully played drafts"), and nothing wrote 'completed' AT ALL before 2026-01, so
+    every staked draft older than that still reads as live. Trusting the stage
+    alone held 410 tix of a real player's wallet hostage to drafts that had
+    finished up to seventeen months earlier.
+    """
+    await seed_session("played", guild="g", stype="staked", stage="pairings",
+                       victory=12345, sign_ups={P: "Ada"})
+    await _declare("played", P, 60)
+    await seed_session("new", guild="g", stype="staked", stage=None,
+                       sign_ups={P: "Ada"})
+    await wallet_service.adjust("g", P, 100, "seed", "t")
+
+    assert (await stake_funding.shortfall("g", P, "new", 100))["gap"] == 0

@@ -23,6 +23,7 @@ from sqlalchemy import select
 
 from database.db_session import db_session
 from models.draft_session import DraftSession
+from helpers.stale_drafts import is_finished_draft
 from models.stake import StakeInfo
 from services import debt_service, wallet_service
 
@@ -58,22 +59,38 @@ async def potential_losses(guild_id: str, player_id: str,
     async with db_session() as session:
         rows = (await session.execute(
             select(StakeInfo.session_id, StakeInfo.max_stake, DraftSession.sign_ups,
-                   DraftSession.session_stage)
+                   DraftSession.session_stage,
+                   DraftSession.victory_message_id_draft_chat,
+                   DraftSession.victory_message_id_results_channel)
             .join(DraftSession, DraftSession.session_id == StakeInfo.session_id)
             .where(
                 StakeInfo.player_id == player_id,
                 DraftSession.guild_id == guild_id,
                 DraftSession.session_type == "staked",
+                # A prefilter only. It can exclude a draft that is definitely
+                # over ('abandoned' has no victory message to find), never keep
+                # one -- is_finished_draft below is the authority.
                 DraftSession.session_stage.is_(None)
                 | DraftSession.session_stage.notin_(_RESOLVED),
             ))).all()
 
     at_risk: dict[str, int] = {}
-    for session_id, max_stake, sign_ups, stage in rows:
+    for row in rows:
+        session_id, max_stake, sign_ups = row.session_id, row.max_stake, row.sign_ups
+        stage = row.session_stage
         if session_id == exclude_session_id:
             continue        # the draft being declared for; the new figure replaces it
         if player_id not in (sign_ups or {}):
             continue        # a row left behind by leaving
+        if is_finished_draft(row):
+            # The stage is not a record of completion. helpers/stale_drafts puts
+            # it plainly -- it "rarely advances past 'pairings' even for fully
+            # played drafts" -- and nothing wrote 'completed' at all before
+            # 2026-01, so every staked draft older than that still reads as live.
+            # A posted victory message is the durable evidence, and ledger_stats
+            # already treats it that way. Believing the stage alone reserved a
+            # player's whole staking history against their wallet forever.
+            continue
         # Only the UNSATISFIED part of a promise is still a claim on the wallet.
         # Escrowing an entry is not a reduction to net out, it is the obligation
         # being met: those tix have been handed over and the balance already
