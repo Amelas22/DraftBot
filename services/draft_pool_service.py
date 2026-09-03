@@ -374,36 +374,36 @@ def level_side(held: dict[str, int], budget: int) -> dict[str, int]:
     caps = {p: n // _STAKE_STEP for p, n in held.items() if n >= _STAKE_STEP}
     remaining = budget // _STAKE_STEP
     alloc = {p: 0 for p in caps}
-    # Everyone still below the ceiling. A player leaves once their own bet is
-    # filled -- they cannot absorb any more, and the units they would have
-    # taken raise the ceiling for whoever is left.
-    rising = dict(caps)
 
-    while remaining > 0 and rising:
-        share, spare = divmod(remaining, len(rising))
+    while remaining > 0:
+        # Everyone still under the ceiling. A player drops out once their own
+        # bet is filled -- they cannot absorb any more, and the units they
+        # would have taken raise the ceiling for whoever is left.
+        rising = [p for p in caps if alloc[p] < caps[p]]
+        if not rising:
+            break
+
+        share = remaining // len(rising)
         if share == 0:
             # Fewer whole tens left than players under the ceiling, so the
             # ceiling falls between two steps. Hand the odd tens to the
             # largest bets: they are the ones carrying the shortfall, and it
             # keeps the split monotone at the last step rather than letting a
             # smaller bet finish above a larger one.
-            for player in sorted(rising, key=caps.__getitem__, reverse=True)[:spare]:
+            for player in sorted(rising, key=caps.__getitem__, reverse=True)[:remaining]:
                 alloc[player] += 1
-                remaining -= 1
             break
 
-        for player in list(rising):
+        for player in rising:
             take = min(share, caps[player] - alloc[player])
             alloc[player] += take
             remaining -= take
-            if alloc[player] >= caps[player]:
-                del rising[player]
 
     return {p: n * _STAKE_STEP for p, n in alloc.items() if n}
 
 
-async def _declared_bets(session_id: str) -> dict[str, tuple[int, bool]]:
-    """Each player's declared bet and whether they asked to be capped.
+async def _declared_bets(session_id: str) -> tuple[dict[str, int], set[str]]:
+    """Each player's declared bet, and which of them asked to be capped.
 
     A NULL is_capped reads as UNCAPPED, which is how the queue renders it: the
     toggle shows OFF for a row that never set the column, so the bot has to
@@ -416,65 +416,109 @@ async def _declared_bets(session_id: str) -> dict[str, tuple[int, bool]]:
         rows = (await session.execute(
             select(StakeInfo.player_id, StakeInfo.max_stake, StakeInfo.is_capped)
             .where(StakeInfo.session_id == session_id))).all()
-    return {player_id: (bet, capped is True) for player_id, bet, capped in rows}
+    return ({player_id: bet for player_id, bet, _ in rows},
+            {player_id for player_id, _, capped in rows if capped is True})
 
 
-async def _cap_bets(guild_id: str, session_id: str,
-                    sides: tuple[list[str], list[str]],
-                    held: dict[str, int]) -> dict[str, int]:
-    """Trim entries whose owner opted to be capped at the top opposing bet.
+async def _trim(guild_id: str, session_id: str, held: dict[str, int],
+                players: list[str], stays: dict[str, int],
+                reason: str) -> dict[str, int]:
+    """Refund whatever each of `players` holds above `stays`, and record it.
 
-    Runs BEFORE levelling and hands the excess straight back, so a player who
-    asked for less action never has money sitting in a pot they did not want
-    that much of.
+    Both ceilings a draft applies -- the player's own cap, and the one the two
+    sides meet at -- are the same operation against a different target map, so
+    they are the same code against a different `reason`. That reason keys the
+    refund for idempotency and names it in the ledger, so the two stay
+    distinguishable everywhere it matters.
 
-    The ceiling comes from the DECLARED bet -- StakeInfo.max_stake -- never
+    `players` is the scope rather than the keys of `stays`, because a player
+    levelled all the way to zero is absent from `stays` and still has an entry
+    to hand back.
+
+    `held` is updated in place: the second ceiling has to be computed from what
+    the first one left behind.
+    """
+    refunded: dict[str, int] = {}
+    for player_id in players:
+        excess = held[player_id] - stays.get(player_id, 0)
+        if excess > 0 and await refund_entry(guild_id, session_id, player_id,
+                                             excess, reason):
+            held[player_id] -= excess
+            refunded[player_id] = excess
+    return refunded
+
+
+def cap_targets(side: list[str], bets: dict[str, int], wants_cap: set[str],
+                opposing: list[str], held: dict[str, int]) -> dict[str, int]:
+    """What each player on `side` may keep once their own bet cap is applied.
+
+    "Cap my bet at the highest bet on the opposing team" is a personal ceiling
+    a player opts into at signup, and it only ever trims: opting in cannot cost
+    a player who is already at or below the top opposing bet.
+
+    The ceiling comes from the DECLARED bets -- StakeInfo.max_stake -- never
     from what the other side currently holds. match_pool is re-entrant, and a
     ceiling read from live holdings would ratchet down on every replay: the
     first call levels a side, the second sees that side's smaller top entry,
     caps the opponent harder, and levels again. The declared figure is what the
     player agreed to and levelling never writes to it, so every pass computes
     the same ceiling and the second finds nothing left to trim.
-
-    `held` is updated in place: the totals the caller matches on must be the
-    capped ones, not the entries these refunds have already undone.
     """
-    declared = await _declared_bets(session_id)
-    tops = [max((declared[p][0] for p in side if p in declared), default=0)
-            for side in sides]
+    ceiling = max((bets.get(p, 0) for p in opposing), default=0)
+    if ceiling <= 0:
+        # Nobody opposite declared a bet, so there is nothing to cap against.
+        # Treating that as a ceiling of zero would refund the whole side.
+        return {p: held[p] for p in side}
+    return {p: min(held[p], ceiling) if p in wants_cap else held[p] for p in side}
 
-    capped: dict[str, int] = {}
-    for index, side in enumerate(sides):
-        ceiling = tops[1 - index]
-        if ceiling <= 0:
-            # Nothing declared on the other side to cap against -- a premade
-            # entry fee, where every seat pays the same and there is no bet.
-            # Treating that as a ceiling of zero would refund the whole table.
-            continue
-        for player_id in side:
-            if not declared.get(player_id, (0, False))[1]:
-                continue
-            excess = held[player_id] - ceiling
-            if excess > 0 and await refund_entry(guild_id, session_id, player_id,
-                                                 excess, "capped"):
-                held[player_id] -= excess
-                capped[player_id] = excess
-    return capped
+
+class MatchResult(TypedDict):
+    matched: int                    # what each side ends up holding
+    refunded: dict[str, int]        # returned because the other side could not cover it
+    capped: dict[str, int]          # returned because the player asked to be capped
 
 
 async def match_pool(guild_id: str, session_id: str,
-                     team_a: list[str], team_b: list[str]) -> dict[str, object]:
+                     team_a: list[str], team_b: list[str]) -> MatchResult:
     """Cap both sides at the smaller side's total, returning the excess.
+
+    Two ceilings, in order: each player's own bet cap, then the one the two
+    sides meet at. Capping first is what makes it a cap -- applied afterwards
+    it would only ever duplicate what levelling had already done.
 
     Idempotent by construction rather than by a key: it refunds the difference
     between the sides, so once they are equal a second call finds nothing to
     refund. team_creator can be re-entered after a restart, and this has to be
     safe when it is.
+
+    That covers a SEQUENTIAL replay, not a concurrent one. `held` is read once
+    and the refunds commit one at a time, each under its own lock, so two
+    overlapping calls would both compute their trim from the same snapshot and
+    both book it -- taking a side down twice and leaving check_pool to raise on
+    an imbalance already committed. What rules that out is upstream: every
+    caller of create_and_display_teams (views.py's create-teams and start-draft
+    buttons, ready_check's auto-create) tests and sets
+    state_manager.is_creating_teams with no await in between, so the flag is a
+    real mutex on this whole function. Adding a caller that skips it reopens
+    the hole; a lock here would not, because the read is what goes stale.
+
+    A partial failure mid-refund is survivable but not exactly repeatable: the
+    retry recomputes level_side from what the first attempt left behind, which
+    can settle the odd ten on a different player. Both splits are valid, the
+    sides still balance and no tix are lost -- only who is exposed for the last
+    ten differs.
     """
     held = await contributions(guild_id, session_id)
     sides = ([p for p in team_a if held.get(p)], [p for p in team_b if held.get(p)])
-    # A player's own ceiling first, then the ceiling the two sides meet at.
-    capped = await _cap_bets(guild_id, session_id, sides, held)
+    side_a, side_b = sides
+
+    bets, wants_cap = await _declared_bets(session_id)
+    capped: dict[str, int] = {}
+    for side, opposing in ((side_a, side_b), (side_b, side_a)):
+        capped |= await _trim(guild_id, session_id, held, side,
+                              cap_targets(side, bets, wants_cap, opposing, held),
+                              "capped")
+
     # What each side can actually put up in whole tens. A stake is matched in
     # units of ten, so an entry of 25 backs 20 of the other side and hands back
     # the 5 -- and the figure the two sides meet at has to be one BOTH can
@@ -486,19 +530,17 @@ async def match_pool(guild_id: str, session_id: str,
     refunded: dict[str, int] = {}
     for side in sides:
         stays = level_side({p: held[p] for p in side}, matched)
-        for player_id in side:
-            excess = held[player_id] - stays.get(player_id, 0)
-            if excess > 0 and await refund_entry(guild_id, session_id, player_id,
-                                                 excess, "unmatched"):
-                refunded[player_id] = excess
+        refunded |= await _trim(guild_id, session_id, held, side,
+                                stays, "unmatched")
 
     logger.info(f"draft pool {session_id}: matched at {matched} a side, "
                 f"refunded {sum(capped.values())} over players' own caps and "
                 f"{sum(refunded.values())} unmatched")
     await check_pool(guild_id, session_id)
-    # `refunded` stays the unmatched share alone -- callers report the two
-    # reasons separately, because "you asked to be capped" and "the other side
-    # could not cover it" are different answers to "where did my tix go".
+    # The two reasons stay apart in the return value as well as in the ledger.
+    # No production caller reads either today -- team_creator discards the
+    # result -- but the tests assert on them, and a "where did my tix go" line
+    # would need the split rather than a single total.
     return {"matched": matched, "refunded": refunded, "capped": capped}
 
 

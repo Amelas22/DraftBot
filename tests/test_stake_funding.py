@@ -17,7 +17,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import update
 
-from conftest import seed_session
+from conftest import seed_session, seed_stakes
 from models.draft_session import DraftSession
 from models.stake import StakeInfo
 from services import stake_funding
@@ -27,12 +27,9 @@ from session import AsyncSessionLocal
 P = "p1"
 
 
-async def _declare(session_id, player, amount, guild="g"):
+async def _declare(session_id, player, amount):
     """A stake declared on a draft the player is signed up for."""
-    async with AsyncSessionLocal() as db:
-        async with db.begin():
-            db.add(StakeInfo(session_id=session_id, player_id=player,
-                             max_stake=amount, is_capped=False))
+    await seed_stakes(session_id, {player: (amount, False)})
 
 
 async def _owes(guild, debtor, creditor, amount):

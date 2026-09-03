@@ -362,7 +362,7 @@ async def _create_channel_announcement_embed(session, seating_order, stake_info_
 async def _handle_staked_draft_completion(interaction, db_session, session, embed, channel_embed,
                                          persistent_view, draft_session_id, bot, guild_id):
     """Handle special completion flow for staked drafts."""
-    from views import CallbackButton, StakeCalculationButton
+    from views import CallbackButton
 
     # Create view with stake calculation button
     stake_view = discord.ui.View(timeout=None)
@@ -384,8 +384,6 @@ async def _handle_staked_draft_completion(interaction, db_session, session, embe
                 button_copy.disabled = True
 
             stake_view.add_item(button_copy)
-
-    stake_view.add_item(StakeCalculationButton(session.session_id))
 
     try:
         await interaction.followup.edit_message(message_id=interaction.message.id, embed=embed, view=stake_view)

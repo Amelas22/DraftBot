@@ -14,6 +14,10 @@ seed_settlement: the one seeder for a paired settlement DebtLedger write --
 import it (``from conftest import seed_settlement``) instead of hand-writing
 another per-file variant.
 
+seed_stakes: the one seeder for the StakeInfo rows a staked signup writes --
+import it (``from conftest import seed_stakes``) instead of hand-writing
+another per-file variant.
+
 match_control_db: a DIFFERENT throwaway SQLite database from test_db above --
 this one yields the raw sessionmaker factory instead of rebinding the app's
 global AsyncSessionLocal. Use it for code that takes its own session/engine
@@ -52,6 +56,7 @@ from database.db_session import AsyncSessionLocal
 from models.debt_ledger import DebtLedger
 from models.draft_session import DraftSession
 from models.match import MatchResult
+from models.stake import StakeInfo
 from models.tournament import TournamentMatch
 from services.tournament_service import create_tournament, register_team, start_tournament
 
@@ -178,6 +183,21 @@ async def seed_settlement(guild, payer, payee, amount, method, source_id):
             settlement_method=method,
         ))
         await s.commit()
+
+
+async def seed_stakes(session_id, declared):
+    """Insert the StakeInfo rows a staked signup writes.
+
+    declared: {player_id: (max_stake, is_capped)}. The bet is what the player
+    committed to, which levelling never rewrites -- capping reads it back to
+    find the ceiling, so tests that exercise a cap need it seeded, not inferred
+    from what the pool currently holds.
+    """
+    async with AsyncSessionLocal() as s:
+        async with s.begin():
+            for player_id, (bet, capped) in declared.items():
+                s.add(StakeInfo(session_id=session_id, player_id=player_id,
+                                max_stake=bet, is_capped=capped))
 
 
 # --- create_stats_embed fixtures ------------------------------------------
