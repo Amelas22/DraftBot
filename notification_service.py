@@ -326,6 +326,59 @@ async def notify_auto_settlement(bot, guild_id: str, payer_id: str, creditor_id:
 
 
 @_best_effort
+async def notify_draft_winnings(bot, guild_id: str, player_id: str,
+                                credited: int, draft_name: str, balance: int):
+    """A draft's prize pool paid this player out.
+
+    Reports the amount that actually reached the wallet, which is what /wallet
+    and its history will agree with. Deliberately NOT itemised into stake-back
+    and winnings: the 💰 Bet Outcomes embed already carries the profit figure
+    for anyone who wants it, and a player reading a DM wants to know what they
+    got, not to reconcile a receipt.
+    """
+    await send_dm(
+        bot, player_id,
+        f"🏆 **{credited} tix** deposited as your prize for winning "
+        f"**{draft_name}**.\n"
+        f"Balance: **{balance} tix**",
+        label=f"draft winnings {player_id}")
+
+
+@_best_effort
+async def send_draft_winnings_dms(guild_id: str, paid: dict, draft_name: str) -> int:
+    """Tell each winner what the pool paid them. Returns the number told.
+
+    Honours the same dm_notifications opt-out as the ready-check and
+    teams-created DMs: this is a draft event, and a player who turned those off
+    should not be re-subscribed by the payout. The Bet Outcomes embed still
+    announces it in the channel either way.
+
+    @_best_effort covers the WHOLE function, not just the notifier it calls:
+    the preference lookup and the balance read happen before any notifier is
+    entered, and settle_decided_draft is awaited by check_and_post_victory_or_draw
+    -- so an exception raised here would take the victory post down with it,
+    after the tix had already moved.
+    """
+    if not paid:
+        return 0
+    # Lazy: notification_service is imported at migration time via the service
+    # chain, where wallet_service's engine must not be constructed.
+    from services import wallet_service
+
+    prefs = await get_players_dm_notification_preferences(list(paid), guild_id)
+    told = 0
+    for player_id, credited in paid.items():
+        if not prefs.get(player_id):
+            continue
+        balance = await wallet_service.get_balance(guild_id, player_id)
+        await notify_wallet(notify_draft_winnings, guild_id, player_id,
+                            credited, draft_name, balance)
+        told += 1
+    logger.info(f"draft winnings DMs: told {told} of {len(paid)} winner(s) for {draft_name}")
+    return told
+
+
+@_best_effort
 async def notify_tournament_payout(bot, guild_id: str, captain_id: str, amount: int,
                                    place=None, tournament_name: str = None,
                                    team_name: str = None):

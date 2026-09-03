@@ -174,7 +174,10 @@ async def test_the_pool_replaces_the_debt_path_rather_than_joining_it(test_db):
     bot = MagicMock()
     bot.get_guild.return_value = guild
 
-    with patch("utils.settle_pool", new=AsyncMock()) as settled, \
+    # settle_pool's return value is load-bearing now -- settle_decided_draft
+    # reads {"paid": ...} from it to DM the winners -- so the mock has to honour
+    # that contract or it stands in for a function this one never had.
+    with patch("utils.settle_pool", new=AsyncMock(return_value={"paid": {}})) as settled, \
          patch("utils.create_debt_entries_from_stakes", new=AsyncMock()) as booked:
         await settle_decided_draft("s1")
 
