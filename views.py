@@ -1073,109 +1073,97 @@ class PersistentView(discord.ui.View):
             state_manager.set_creating_teams(session_id, False)
 
     async def explain_stakes_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Explain how the stake system works"""
+        """Explain how the stake system works.
+
+        This describes the PRIZE POOL, which is what a staked draft has run on
+        since entry fees replaced settled debts. The embed it replaced still
+        described the old system -- player-to-player pairings, a tiered-versus-
+        proportional method choice, and a minimum-requirement fallback -- none
+        of which happens any more.
+        """
         embed = discord.Embed(
-            title="How the Dynamic Bet System Works",
+            title="How the Prize Pool Works",
             description=(
-                "The dynamic bet system allows players to bet different amounts based on their personal preferences "
-                "to ensure all players can bet what they are comfortable with."
+                "Everyone bets what they are comfortable with. Your tix go into the draft's "
+                "prize pool when you sign up, and the winners split it when the draft is decided. "
+                "Nobody ever owes anybody: the money is already there before a game is played."
             ),
             color=discord.Color.blue()
         )
-        
+
         embed.add_field(
             name="Core Principles",
             value=(
-                "• **Max Bet Protection**: You will never be allocated more than your maximum bet amount\n"
-                "• **Team Formation**: Teams are created randomly FIRST, then bets are allocated\n"
-                "• **Flexibility**: The system adapts to different betting situations using two methods"
+                "• **Max Bet Protection**: You are never at risk for more than you entered\n"
+                "• **Team Formation**: Teams are created randomly FIRST, then the sides are levelled\n"
+                "• **No Debts**: Your entry is paid up front, and anything not matched comes straight back"
             ),
             inline=False
         )
-        
+
         embed.add_field(
             name="Process Overview",
             value=(
-                "The betting process works in two phases:\n"
-                "1. **Allocation Phase**: Determine how much each player will bet\n"
-                "2. **Bet Matching Phase**: Create player-to-player betting pairs"
+                "1. **Entry**: your bet moves into the pool when you sign up\n"
+                "2. **Bet Cap**: if you opted in, your bet is trimmed first\n"
+                "3. **Levelling**: the two teams are brought to the same total\n"
+                "4. **Payout**: the winning team splits the pool"
             ),
             inline=False
         )
-        
+
         embed.add_field(
             name="Bet Capping Option",
             value=(
                 "• Players can choose \"capped\" (🧢) or \"uncapped\" (🏎️)\n"
-                "• Capped bets are limited to the highest bet on the opposing team\n"
-                "• This is applied before any calculations occur"
+                "• A capped bet is trimmed to the highest bet on the opposing team\n"
+                "• This is applied before anything else, and the excess is returned immediately\n"
+                "• Because it lowers your team's total, a large capped bet can also reduce "
+                "how much of your teammates' bets get matched"
             ),
             inline=False
         )
-        
+
         embed.add_field(
-            name="Determining Method Selection",
+            name="Levelling the Two Teams",
             value=(
-                "To decide which allocation method to use, the system:\n"
-                "• Calculates each team's minimum bet requirements:\n"
-                "  - For bets ≤50 tix: Uses the full bet amount for that drafter\n"
-                "  - For bets >50 tix: Uses 50 tix as the minimum for that drafter\n"
-                "• Compares each team's total bet capacity to the opposing team's minimum requirements\n"
-                "• If both teams pass, use the \"Tiered\" approach\n"
-                "• If either team fails this check, switches to \"Proportional\" Approach"
+                "A tix on one side has to be covered by a tix on the other, so both teams are "
+                "brought down to whichever team's total is smaller. Everything above that is "
+                "returned before the draft starts.\n\n"
+                "Within a team, every bet fills up to a **common ceiling**: you keep the lower "
+                "of your own bet and that ceiling, and the ceiling rises until the team's total "
+                "is spent. Whoever is above it carries the shortfall; whoever is below it is "
+                "untouched."
             ),
             inline=False
         )
-        
+
         embed.add_field(
-            name="The Allocation Phase",
+            name="What That Means For You",
             value=(
-                "**Initial Team Analysis (Common to Both Methods)**\n"
-                "• Identify Min Team (lower total bets) and Max Team (higher total bets)\n"
-                "• 100% of a drafter's max bet is allocated to Min Team players\n\n"
-                "**Max Team Allocation Methods:**"
+                "• A smaller bet is usually filled in full, because the ceiling clears it\n"
+                "• Betting more never leaves you holding less than someone who bet less\n"
+                "• One very large bet cannot squeeze the rest of its team: it is levelled to "
+                "the same ceiling as everyone else above it\n"
+                "• If the other team cannot cover even the small bets, the ceiling drops below "
+                "them and every bet is cut alike -- there is no floor under a small bet"
             ),
             inline=False
         )
-        
+
         embed.add_field(
-            name="Tiered Approach (Primary Method)",
+            name="Winning, Losing and Draws",
             value=(
-                "Used when both teams have sufficient capacity to meet minimum requirements:\n"
-                "• Players betting ≤50 tix get 100% bet allocation first\n"
-                "• Remaining capacity is distributed proportionally to higher bets\n"
-                "• Prioritizes filling all 10/20/50 bets first before filling bets >50 tix"
+                "• Both teams have the same amount in, so a winner takes exactly **double** "
+                "what they had at risk\n"
+                "• Every matched tix pays at the same rate, so a teammate's bet can change how "
+                "much of yours is matched, never what it pays\n"
+                "• On a draw, or if the draft is cancelled or abandoned, everyone gets their "
+                "entry back"
             ),
             inline=False
         )
-        
-        embed.add_field(
-            name="Proportional Approach (Fallback Method)",
-            value=(
-                "Used when minimum bet requirements cannot be met with the Tiered Approach:\n"
-                "• Players with minimum bets get 100% of their bet allocated\n"
-                "• Other players receive proportional allocations based on a bet score:\n"
-                "  - Bet score = remaining Min Team capacity ÷ remaining Max Team capacity\n"
-                "  - Allocation = individual bet × bet score (rounded to nearest 10)"
-            ),
-            inline=False
-        )
-        
-        embed.add_field(
-            name="The Bet Matching Phase",
-            value=(
-                "**1. Identical Allocation Matching (First Priority)**"
-                "• Groups players by their allocation amounts\n"
-                "• Matches players with identical allocations first\n"
-                "• Creates perfect 1:1 matches requiring only one transaction per pair\n"
-                "**2. Smart Matching Algorithm**"
-                "• Uses a scoring system to determine optimal pairings\n"
-                "• Prioritizes matches that completely fulfill a player's allocation\n"
-                "• Balances bet sizes to minimize the total number of transactions"
-            ),
-            inline=False
-        )
-        
+
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
                     

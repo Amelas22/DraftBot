@@ -293,11 +293,6 @@ async def entry_in(session: AsyncSession, guild_id: str, session_id: str,
 # above that -- so a matched stake of 96 is not a bet anyone placed.
 _STAKE_STEP = 10
 
-# A bet at or under this is a small bet, and is filled whole before anything is
-# shared out. It is the tier boundary the queue has always advertised: "allocate
-# all 20/50 bets, then proportionally distribute all remaining bets".
-_SMALL_BET = 50
-
 
 def max_pool(stakes: Iterable[int]) -> int:
     """The biggest pot this queue could play for, over every legal split of it.
@@ -351,17 +346,26 @@ def max_pool(stakes: Iterable[int]) -> int:
 def level_side(held: dict[str, int], budget: int) -> dict[str, int]:
     """How much of each entry stays at risk when a side must shrink to `budget`.
 
-    Small bets are filled whole, then the large ones share what is left in
-    proportion to their size. Scaling EVERY bet by the same ratio is the
-    intuitive answer and the wrong one: it shaves the player who bet the draft
-    minimum down below that minimum to pay for headroom on a bet ten times the
-    size. In one real draft, 20 against 170 and 200 came out as 12 / 96 / 112 --
-    the 20-tix player under the 20-tix floor, and nobody holding a figure they
-    would recognise as their bet. The same entries now come out 20 / 90 / 110.
+    Every entry fills to a common CEILING: a player holds min(their bet, the
+    ceiling), and the ceiling is raised until the budget is spent. Whoever is
+    over it carries the whole shortfall; whoever is under it is untouched.
 
-    Backing more still means carrying more of the shortfall, which is what
-    proportional buys over splitting the remainder equally: the 200 keeps more
-    on the table than the 170 rather than both being flattened to the same cap.
+    Scaling every bet by one ratio is the intuitive answer and the wrong one,
+    for the same reason at two different sizes. It shaves the player who bet
+    the draft minimum below that minimum to buy headroom for a bet ten times
+    the size: 20 against 170 and 200 came out 12 / 96 / 112, and nobody held a
+    figure they would recognise. Filling small bets whole and sharing the rest
+    pro rata fixes that case and leaves the same squeeze one tier up, where 60
+    and 400 against 100 grinds the 60 down to 10 to fund the 400. A ceiling
+    answers both: those entries come out 20 / 100 / 100 and 50 / 50.
+
+    It also makes the split monotone -- nobody who bet more can end up holding
+    less, because min(bet, ceiling) is non-decreasing in the bet. Pro rata
+    could not promise that once shares were rounded down to whole tens.
+
+    Small bets are therefore filled whole as a CONSEQUENCE of the ceiling
+    clearing them, not as a protected tier: when the other side cannot cover
+    even the small bets, the ceiling drops below them and they are cut too.
 
     Everything is computed in units of ten and never exceeds a player's own
     entry, so a levelled stake is always a round number and always a number
@@ -370,53 +374,92 @@ def level_side(held: dict[str, int], budget: int) -> dict[str, int]:
     caps = {p: n // _STAKE_STEP for p, n in held.items() if n >= _STAKE_STEP}
     remaining = budget // _STAKE_STEP
     alloc = {p: 0 for p in caps}
+    # Everyone still below the ceiling. A player leaves once their own bet is
+    # filled -- they cannot absorb any more, and the units they would have
+    # taken raise the ceiling for whoever is left.
+    rising = dict(caps)
 
-    small = {p: c for p, c in caps.items() if c * _STAKE_STEP <= _SMALL_BET}
-    large = {p: c for p, c in caps.items() if c * _STAKE_STEP > _SMALL_BET}
+    while remaining > 0 and rising:
+        share, spare = divmod(remaining, len(rising))
+        if share == 0:
+            # Fewer whole tens left than players under the ceiling, so the
+            # ceiling falls between two steps. Hand the odd tens to the
+            # largest bets: they are the ones carrying the shortfall, and it
+            # keeps the split monotone at the last step rather than letting a
+            # smaller bet finish above a larger one.
+            for player in sorted(rising, key=caps.__getitem__, reverse=True)[:spare]:
+                alloc[player] += 1
+                remaining -= 1
+            break
 
-    if sum(small.values()) <= remaining:
-        # Every small bet in full, then the rest is the large bets' to share.
-        for player, cap in small.items():
-            alloc[player] = cap
-            remaining -= cap
-        sharing = large
-    else:
-        # Not even the small bets fit. Nobody gets filled whole, so everyone
-        # shares on the same terms rather than the earliest-sorted winning.
-        sharing = caps
-
-    demand = sum(sharing.values())
-    if demand and remaining > 0:
-        # Largest remainder, not largest bet. Every share is rounded DOWN to a
-        # whole ten and the units that fall off are handed to whoever lost the
-        # most in the rounding. Awarding them by bet size instead lets the
-        # biggest bet round up to its full amount while the smallest rounds
-        # away to nothing -- which is the very squeeze this function exists to
-        # prevent, reappearing at the last step.
-        shortfall = []
-        for player, cap in sharing.items():
-            exact = remaining * cap
-            whole = min(exact // demand, cap)
-            alloc[player] += whole
-            shortfall.append((exact - whole * demand, player))
-        shortfall.sort(reverse=True)
-
-        # One unit each, in remainder order, until the budget is exactly spent.
-        # Handing a player every unit that fits would undo the split: the first
-        # name in the list would round all the way up to its full bet.
-        left = remaining - sum(alloc[p] for p in sharing)
-        while left > 0:
-            spent = left
-            for _, player in shortfall:
-                if left <= 0:
-                    break
-                if alloc[player] < caps[player]:
-                    alloc[player] += 1
-                    left -= 1
-            if left == spent:
-                break       # everyone is at their cap; the rest goes back
+        for player in list(rising):
+            take = min(share, caps[player] - alloc[player])
+            alloc[player] += take
+            remaining -= take
+            if alloc[player] >= caps[player]:
+                del rising[player]
 
     return {p: n * _STAKE_STEP for p, n in alloc.items() if n}
+
+
+async def _declared_bets(session_id: str) -> dict[str, tuple[int, bool]]:
+    """Each player's declared bet and whether they asked to be capped.
+
+    A NULL is_capped reads as UNCAPPED, which is how the queue renders it: the
+    toggle shows OFF for a row that never set the column, so the bot has to
+    behave the way the button the player is looking at says it will.
+    """
+    from models.stake import StakeInfo
+    from sqlalchemy import select
+
+    async with db_session() as session:
+        rows = (await session.execute(
+            select(StakeInfo.player_id, StakeInfo.max_stake, StakeInfo.is_capped)
+            .where(StakeInfo.session_id == session_id))).all()
+    return {player_id: (bet, capped is True) for player_id, bet, capped in rows}
+
+
+async def _cap_bets(guild_id: str, session_id: str,
+                    sides: tuple[list[str], list[str]],
+                    held: dict[str, int]) -> dict[str, int]:
+    """Trim entries whose owner opted to be capped at the top opposing bet.
+
+    Runs BEFORE levelling and hands the excess straight back, so a player who
+    asked for less action never has money sitting in a pot they did not want
+    that much of.
+
+    The ceiling comes from the DECLARED bet -- StakeInfo.max_stake -- never
+    from what the other side currently holds. match_pool is re-entrant, and a
+    ceiling read from live holdings would ratchet down on every replay: the
+    first call levels a side, the second sees that side's smaller top entry,
+    caps the opponent harder, and levels again. The declared figure is what the
+    player agreed to and levelling never writes to it, so every pass computes
+    the same ceiling and the second finds nothing left to trim.
+
+    `held` is updated in place: the totals the caller matches on must be the
+    capped ones, not the entries these refunds have already undone.
+    """
+    declared = await _declared_bets(session_id)
+    tops = [max((declared[p][0] for p in side if p in declared), default=0)
+            for side in sides]
+
+    capped: dict[str, int] = {}
+    for index, side in enumerate(sides):
+        ceiling = tops[1 - index]
+        if ceiling <= 0:
+            # Nothing declared on the other side to cap against -- a premade
+            # entry fee, where every seat pays the same and there is no bet.
+            # Treating that as a ceiling of zero would refund the whole table.
+            continue
+        for player_id in side:
+            if not declared.get(player_id, (0, False))[1]:
+                continue
+            excess = held[player_id] - ceiling
+            if excess > 0 and await refund_entry(guild_id, session_id, player_id,
+                                                 excess, "capped"):
+                held[player_id] -= excess
+                capped[player_id] = excess
+    return capped
 
 
 async def match_pool(guild_id: str, session_id: str,
@@ -430,6 +473,8 @@ async def match_pool(guild_id: str, session_id: str,
     """
     held = await contributions(guild_id, session_id)
     sides = ([p for p in team_a if held.get(p)], [p for p in team_b if held.get(p)])
+    # A player's own ceiling first, then the ceiling the two sides meet at.
+    capped = await _cap_bets(guild_id, session_id, sides, held)
     # What each side can actually put up in whole tens. A stake is matched in
     # units of ten, so an entry of 25 backs 20 of the other side and hands back
     # the 5 -- and the figure the two sides meet at has to be one BOTH can
@@ -448,9 +493,13 @@ async def match_pool(guild_id: str, session_id: str,
                 refunded[player_id] = excess
 
     logger.info(f"draft pool {session_id}: matched at {matched} a side, "
-                f"refunded {sum(refunded.values())} unmatched")
+                f"refunded {sum(capped.values())} over players' own caps and "
+                f"{sum(refunded.values())} unmatched")
     await check_pool(guild_id, session_id)
-    return {"matched": matched, "refunded": refunded}
+    # `refunded` stays the unmatched share alone -- callers report the two
+    # reasons separately, because "you asked to be capped" and "the other side
+    # could not cover it" are different answers to "where did my tix go".
+    return {"matched": matched, "refunded": refunded, "capped": capped}
 
 
 def _payout_source(session_id: str, player_id: str) -> str:
