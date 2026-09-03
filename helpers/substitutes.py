@@ -16,9 +16,18 @@ TEAM_B_CHANNEL_PREFIX = "Blue-Team"
 
 @dataclass
 class GrantDecision:
+    """Which channels a sub may see, and what to call the side they joined.
+
+    `team_key` is the internal A/B selector -- the same vocabulary as the
+    team_a/team_b columns and the /add_sub choice VALUES, none of which a
+    player ever reads. Nothing in production reads it back; it is kept because
+    it is the field that says which branch was taken, and the tests assert on
+    it. `team_display_name` is the only one of the three that reaches a person,
+    and it comes from team_labels so it agrees with every other surface.
+    """
     team_key: Optional[str]            # "A"/"B", or None for a team-less draft
     channel_prefix: Optional[str]      # "Red-Team"/"Blue-Team", or None (draft chat only)
-    team_display_name: str             # premade team name, "Red Team"/"Blue Team", or "this draft"
+    team_display_name: str             # a premade team's own name, else the colour
 
 
 def resolve_sub_grant(
