@@ -6,6 +6,13 @@ from dataclasses import dataclass
 import aiobotocore.session
 
 
+# Draft logs carry every player's picks and decklist, so nothing the bot uploads
+# is public by default. Articles and league pages share this bucket and ARE
+# published on purpose -- they pass acl="public-read" explicitly.
+PRIVATE = "private"
+PUBLIC = "public-read"
+
+
 @dataclass
 class UploadResult:
     """Result of an upload operation to Digital Ocean Spaces."""
@@ -72,7 +79,8 @@ class DigitalOceanHelper:
         self,
         data: Dict[str, Any],
         folder: str,
-        filename: str
+        filename: str,
+        acl: str = PRIVATE
     ) -> UploadResult:
         """
         Upload JSON data to Digital Ocean Spaces
@@ -81,6 +89,7 @@ class DigitalOceanHelper:
             data: The JSON data to upload
             folder: The folder path within the bucket
             filename: The filename to use
+            acl: PRIVATE unless the caller is deliberately publishing
 
         Returns:
             UploadResult with success status and object_path
@@ -102,7 +111,7 @@ class DigitalOceanHelper:
                     Key=object_path,
                     Body=json.dumps(data),
                     ContentType='application/json',
-                    ACL='public-read'
+                    ACL=acl
                 )
 
             self.logger.info(f"Data uploaded to DigitalOcean Space: {object_path}")
@@ -116,7 +125,8 @@ class DigitalOceanHelper:
         self,
         content: str,
         folder: str,
-        filename: str
+        filename: str,
+        acl: str = PRIVATE
     ) -> UploadResult:
         """
         Upload text content to Digital Ocean Spaces
@@ -125,6 +135,7 @@ class DigitalOceanHelper:
             content: The text content to upload
             folder: The folder path within the bucket
             filename: The filename to use
+            acl: PRIVATE unless the caller is deliberately publishing
 
         Returns:
             UploadResult with success status and object_path
@@ -146,7 +157,7 @@ class DigitalOceanHelper:
                     Key=object_path,
                     Body=content,
                     ContentType='text/plain',
-                    ACL='public-read'
+                    ACL=acl
                 )
 
             self.logger.info(f"Text uploaded to DigitalOcean Space: {object_path}")
