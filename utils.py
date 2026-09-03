@@ -599,11 +599,10 @@ async def settle_decided_draft(draft_session_id):
             # report: this branch is behind `pool_balance > 0`, and the holder
             # is empty afterwards, so every later replay skips it. That is what
             # keeps a winner from being DMed once per match report.
-            paid = result.get("paid") or {}
-            if paid:
-                from notification_service import send_draft_winnings_dms
-                await send_draft_winnings_dms(
-                    guild_id, paid, draft_session.friendly_id or draft_session_id)
+            from notification_service import send_draft_winnings_dms
+            await send_draft_winnings_dms(
+                guild_id, result["paid"],
+                draft_session.friendly_id or draft_session_id)
         return
 
     if outcome == "draw":

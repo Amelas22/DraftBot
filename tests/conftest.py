@@ -124,7 +124,8 @@ async def seed_session(session_id="s1", guild="g", stype="staked",
                        stage="completed", victory=None, teams=None,
                        matches=(), start=None, sign_ups=None,
                        cube="TestCube", draft_chat_channel=None,
-                       channel_ids=None, draft_id=None, rooms_created_at=None):
+                       channel_ids=None, draft_id=None, rooms_created_at=None,
+                       match_counter=1, friendly_id=None):
     """Seed one DraftSession plus its MatchResults.
 
     teams: (team_a_list, team_b_list) or None (legacy-style, no team JSON).
@@ -154,7 +155,10 @@ async def seed_session(session_id="s1", guild="g", stype="staked",
             draft_chat_channel=draft_chat_channel,
             channel_ids=channel_ids,
             draft_id=draft_id, rooms_created_at=rooms_created_at,
-            sign_ups=sign_ups, cube=cube))
+            sign_ups=sign_ups, cube=cube,
+            # A decided draft needs match_counter set, and every test that wanted
+            # one used to hand-patch the row afterwards with its own UPDATE.
+            match_counter=match_counter, friendly_id=friendly_id))
         for i, (p1, p2, w, ts) in enumerate(matches):
             s.add(MatchResult(session_id=session_id, match_number=i + 1,
                               player1_id=p1, player2_id=p2, winner_id=w,

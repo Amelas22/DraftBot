@@ -345,8 +345,8 @@ async def notify_draft_winnings(bot, guild_id: str, player_id: str,
 
 
 @_best_effort
-async def send_draft_winnings_dms(guild_id: str, paid: dict, draft_name: str) -> int:
-    """Tell each winner what the pool paid them. Returns the number told.
+async def send_draft_winnings_dms(guild_id: str, paid: dict, draft_name: str) -> None:
+    """Tell each winner what the pool paid them.
 
     Honours the same dm_notifications opt-out as the ready-check and
     teams-created DMs: this is a draft event, and a player who turned those off
@@ -360,22 +360,27 @@ async def send_draft_winnings_dms(guild_id: str, paid: dict, draft_name: str) ->
     after the tix had already moved.
     """
     if not paid:
-        return 0
+        return
     # Lazy: notification_service is imported at migration time via the service
     # chain, where wallet_service's engine must not be constructed.
     from services import wallet_service
 
     prefs = await get_players_dm_notification_preferences(list(paid), guild_id)
-    told = 0
-    for player_id, credited in paid.items():
-        if not prefs.get(player_id):
-            continue
-        balance = await wallet_service.get_balance(guild_id, player_id)
-        await notify_wallet(notify_draft_winnings, guild_id, player_id,
-                            credited, draft_name, balance)
-        told += 1
-    logger.info(f"draft winnings DMs: told {told} of {len(paid)} winner(s) for {draft_name}")
-    return told
+    telling = [player_id for player_id in paid if prefs.get(player_id)]
+    if not telling:
+        return
+
+    # One grouped read, then all the DMs at once -- the same shape settle_new_debts
+    # uses on this very path. It matters here because settle_decided_draft is the
+    # FIRST thing check_and_post_victory_or_draw awaits, so anything serialised
+    # here is dead time before the table sees its own results.
+    balances = await wallet_service.balances_for(guild_id, telling)
+    await asyncio.gather(*(
+        notify_wallet(notify_draft_winnings, guild_id, player_id,
+                      paid[player_id], draft_name, balances.get(player_id, 0))
+        for player_id in telling))
+    logger.info(f"draft winnings DMs: told {len(telling)} of {len(paid)} "
+                f"winner(s) for {draft_name}")
 
 
 @_best_effort
