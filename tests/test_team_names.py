@@ -66,48 +66,113 @@ def test_the_labels_are_the_constants_the_module_exports():
     assert red.name == RED.name and blue.name == BLUE.name
 
 
+def _production_sources():
+    """Every module the bot actually runs, as (path, text).
+
+    Scanning a hand-written list of files is what let this rule rot in the
+    first place: /add_sub offered a dropdown of "A" and "B" for months because
+    cogs/ was not on anybody's list. Tests and scripts are excluded because
+    they are not surfaces a player sees; .claude/worktrees because those are
+    other checkouts of this same repo.
+    """
+    from pathlib import Path
+
+    skip = ("tests/", "scripts/", ".claude/", "alembic/", "backfill_")
+    for path in sorted(Path(".").rglob("*.py")):
+        rel = path.as_posix()
+        if any(rel.startswith(s) or f"/{s}" in rel for s in skip):
+            continue
+        if rel == "helpers/team_names.py":
+            continue
+        yield rel, path.read_text()
+
+
+def _display_strings(path, text):
+    """Every string literal in a module that a player could actually read.
+
+    Parsed rather than grepped, because the line-based version could not tell a
+    label from prose about one: a trailing comment reading `# premade team
+    name` and a docstring reading "Team A Discord IDs from DB" both matched,
+    and both are documentation of the JSON column this change deliberately
+    keeps. The parser sees no comments at all, and a docstring is the one
+    string form that is never rendered to anybody.
+
+    Log calls are dropped for the same reason: a log naming team_a means the
+    column, and routing it through the helper would make the log worse rather
+    than the UI better.
+    """
+    import ast
+
+    tree = ast.parse(text, filename=path)
+    exempt = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef,
+                             ast.AsyncFunctionDef, ast.ClassDef)):
+            body = getattr(node, "body", None)
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                exempt.add(id(body[0].value))
+        if isinstance(node, ast.Call):
+            func = node.func
+            # Any *logger, because modules bind their own: stake_calculator
+            # logs through `stake_logger`, and a name-list would miss it.
+            if (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+                    and (func.value.id.endswith("logger")
+                         or func.value.id in ("logging", "log"))):
+                exempt.update(id(n) for n in ast.walk(node))
+
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in exempt):
+            yield node.lineno, node.value
+
+
 def test_no_surface_spells_a_team_label_for_itself():
     """The rule has to live in one place to stay consistent.
 
-    Before this helper, six surfaces each decided for themselves whether a
-    draft's sides were coloured, and they used three different conditions:
-    utils.py counted a "test" draft as anonymous, team_creator.py did not, and
-    livedrafts.py coloured every draft including premades with real names. The
-    visible result was one random draft whose teams embed said "Team Red" and
-    whose projected score, directly beneath it, said "Team A".
+    Before this helper, each surface decided for itself whether a draft's sides
+    were coloured, using three different conditions AND three different
+    spellings -- "Team A", "Team Red" and "Red Team" all shipped at once. One
+    random draft's teams embed said "Team Red" while the projected score
+    beneath it said "Team A", and the sub-grant confirmation said "Red Team".
 
-    Nothing about that was catchable by testing any one surface, so this checks
-    the property that actually failed: the strings exist in exactly one module.
+    No single-surface test could catch that, so this checks the property that
+    actually failed: the strings exist in exactly one module.
     """
     import re
-    from pathlib import Path
 
-    label = re.compile(r'["\']\s*(?:🔴|🔵)?\s*Team (?:A|B|Red|Blue)\b')
-
-    def is_player_facing(line):
-        """Comments and log lines are exempt, and honestly so.
-
-        A comment is prose about the code, and a log line names the code-side
-        A/B split -- session.team_a, the JSON column -- which this change
-        deliberately leaves alone. Neither reaches a player, and forcing them
-        through the helper would make the log harder to read, not the UI more
-        consistent.
-        """
-        stripped = line.strip()
-        return not stripped.startswith("#") and "logger." not in line
+    label = re.compile(
+        r'["\']\s*(?:🔴|🔵)?\s*(?:Team (?:A|B|Red|Blue)|(?:Red|Blue) Team)\b')
 
     offenders = {}
-    for path in ("utils.py", "views.py", "livedrafts.py", "modals.py",
-                 "services/team_creator.py", "sessions/premade_session.py",
-                 "helpers/test_users.py"):
-        hits = [
-            f"{path}:{n}"
-            for n, line in enumerate(Path(path).read_text().split("\n"), 1)
-            if label.search(line) and is_player_facing(line)
-        ]
+    for path, text in _production_sources():
+        hits = [f"{path}:{lineno} {value!r}"
+                for lineno, value in _display_strings(path, text)
+                if label.search(chr(34) + value + chr(34))]
         if hits:
             offenders[path] = hits
 
     assert not offenders, (
         "a team label is spelled out outside helpers/team_names.py; call "
         f"team_labels() instead so every surface agrees: {offenders}")
+
+
+def test_no_command_asks_a_player_to_pick_a_letter():
+    """/add_sub took `choices=["A", "B"]`, so the dropdown a player opened
+    showed two bare letters -- the one surface where the internal A/B split
+    leaked all the way out to a user picking from it.
+
+    The stored VALUES stay "A"/"B", because resolve_sub_grant keys on them and
+    a slash-command choice value is not persisted anywhere. Only the name a
+    player reads had to change, which is why this checks the names.
+    """
+    import re
+
+    bare = re.compile(r'choices\s*=\s*\[\s*["\'][AB]["\']')
+    offenders = [f"{path}:{n}" for path, text in _production_sources()
+                 for n, line in enumerate(text.split("\n"), 1)
+                 if bare.search(line)]
+
+    assert not offenders, (
+        f"a slash command offers a bare team letter as a choice: {offenders}")

@@ -6,6 +6,8 @@ and applies the permission overwrites this module decides on.
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+from helpers.team_names import BLUE, RED, team_labels
+
 # Team channels are created with these hardcoded prefixes (views.py):
 # team_a -> "Red-Team-Chat-{friendly_id}", team_b -> "Blue-Team-Chat-{friendly_id}".
 TEAM_A_CHANNEL_PREFIX = "Red-Team"
@@ -52,16 +54,16 @@ def resolve_sub_grant(
     elif is_admin:
         if team_choice not in ("A", "B"):
             return None, ("You're not on a team in this draft — pass the "
-                          "`team` option (A or B) to choose the sub's team.")
+                          f"`team` option ({RED.name} or {BLUE.name}) to "
+                          "choose the sub's team.")
         team_key = team_choice
     else:
         return None, "Only players in this draft (or bot managers) can add a sub."
 
+    red, blue = team_labels(session.team_a_name, session.team_b_name)
     if team_key == "A":
-        display = session.team_a_name or "Red Team"
-        return GrantDecision("A", TEAM_A_CHANNEL_PREFIX, display), None
-    display = session.team_b_name or "Blue Team"
-    return GrantDecision("B", TEAM_B_CHANNEL_PREFIX, display), None
+        return GrantDecision("A", TEAM_A_CHANNEL_PREFIX, red.name), None
+    return GrantDecision("B", TEAM_B_CHANNEL_PREFIX, blue.name), None
 
 
 def is_sub_target_channel(channel_name: str, friendly_id: str, channel_prefix: Optional[str]) -> bool:

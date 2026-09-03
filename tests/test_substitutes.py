@@ -10,6 +10,7 @@ from helpers.substitutes import (
     resolve_sub_grant,
 )
 from models.draft_session import DraftSession
+from helpers.team_names import RED
 
 
 def make_session(team_a=None, team_b=None, sign_ups=None,
@@ -32,7 +33,9 @@ def test_player_on_team_a_grants_red_team():
     assert error is None
     assert decision.team_key == "A"
     assert decision.channel_prefix == "Red-Team"
-    assert decision.team_display_name == "Red Team"  # fallback when name unset
+    # The label comes from team_labels now, so an unnamed side gets the
+    # same colour every other surface shows.
+    assert decision.team_display_name == RED.name
 
 
 def test_player_on_team_b_grants_blue_team():

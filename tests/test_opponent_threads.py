@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from helpers.opponent_threads import spawn_opponent_threads, team_channel_rosters
+from helpers.team_names import BLUE, RED
 
 
 def _final_content(thread):
@@ -62,8 +63,8 @@ def thread_names(channel):
 
 
 @pytest.mark.parametrize("team_name, own, opponents, label", [
-    ("Red-Team", ["a1", "a2"], ["b1"], "Blue Team"),
-    ("Blue-Team", ["b1"], ["a1", "a2"], "Red Team"),
+    ("Red-Team", ["a1", "a2"], ["b1"], BLUE.name),
+    ("Blue-Team", ["b1"], ["a1", "a2"], RED.name),
     # The shared "Draft" channel holds both teams, so nobody in it is an
     # opponent -- this row is what keeps swiss out of the feature entirely.
     ("Draft", [], [], ""),
@@ -75,7 +76,7 @@ def test_team_channel_rosters_dispatches_on_the_channel_name(team_name, own, opp
 
 def test_team_channel_rosters_tolerates_missing_rosters():
     """team_a/team_b default to None in create_team_channel's signature."""
-    assert team_channel_rosters("Red-Team", None, None) == ([], [], "Blue Team")
+    assert team_channel_rosters("Red-Team", None, None) == ([], [], BLUE.name)
 
 
 SIGN_UPS = {"a1": "Alice", "b1": "Dave", "b2": "Erin"}
@@ -99,7 +100,7 @@ async def test_thread_starter_names_the_opponent_and_their_team():
     (thread,) = channel.created_threads
     starter = thread.send.await_args.args[0]
     assert "Dave" in starter
-    assert "Blue Team" in starter
+    assert BLUE.name in starter
 
 
 @pytest.mark.asyncio

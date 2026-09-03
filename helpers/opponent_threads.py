@@ -15,6 +15,7 @@ import discord
 from loguru import logger
 
 from helpers.substitutes import TEAM_A_CHANNEL_PREFIX, TEAM_B_CHANNEL_PREFIX
+from helpers.team_names import BLUE, RED
 from helpers.utils import (
     DISCORD_THREAD_NAME_LIMIT, THREAD_ARCHIVE_MINUTES, mention_all, send_then_mention,
 )
@@ -33,8 +34,8 @@ ARCHIVED_THREAD_LOOKUP_LIMIT = 100
 # roster lookup had already returned empty and short-circuited the caller.
 _TeamChannel = namedtuple("_TeamChannel", "own_is_team_a opponent_label")
 _TEAM_CHANNELS = {
-    TEAM_A_CHANNEL_PREFIX: _TeamChannel(own_is_team_a=True, opponent_label="Blue Team"),
-    TEAM_B_CHANNEL_PREFIX: _TeamChannel(own_is_team_a=False, opponent_label="Red Team"),
+    TEAM_A_CHANNEL_PREFIX: _TeamChannel(own_is_team_a=True, opponent_label=BLUE.name),
+    TEAM_B_CHANNEL_PREFIX: _TeamChannel(own_is_team_a=False, opponent_label=RED.name),
 }
 
 
