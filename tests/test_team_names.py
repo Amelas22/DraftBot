@@ -66,27 +66,6 @@ def test_the_labels_are_the_constants_the_module_exports():
     assert red.name == RED.name and blue.name == BLUE.name
 
 
-def test_the_channel_prefixes_agree_with_the_colours():
-    """Two modules independently assert that the A side is the red one.
-
-    team_names orders RED first; substitutes names its channels "Red-Team".
-    Nothing derives one from the other -- the channel prefix cannot, because it
-    is a Discord channel name that has been hyphenated and word-swapped, and
-    renaming it would orphan the rooms of every draft already in flight.
-
-    So the coupling is real and permanent, and this is what makes it visible:
-    swap the colours in either module and the pair stops agreeing here.
-    """
-    from helpers.substitutes import TEAM_A_CHANNEL_PREFIX, TEAM_B_CHANNEL_PREFIX
-
-    assert TEAM_A_CHANNEL_PREFIX.lower().startswith(RED.color), (
-        f"the A side's channels are {TEAM_A_CHANNEL_PREFIX!r} but its label is "
-        f"{RED.name!r} -- a sub granted 'red' would land in the wrong rooms")
-    assert TEAM_B_CHANNEL_PREFIX.lower().startswith(BLUE.color), (
-        f"the B side's channels are {TEAM_B_CHANNEL_PREFIX!r} but its label is "
-        f"{BLUE.name!r}")
-
-
 def _production_sources():
     """Every module the bot actually runs, as (path, text).
 

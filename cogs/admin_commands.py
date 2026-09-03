@@ -10,7 +10,7 @@ from stats_display import get_stats_embed_for_player
 
 from helpers.permissions import has_bot_manager_role, ADMIN_ROLE_NAME
 from helpers.draft_rooms import SHARED_CHAT_TEAM
-from helpers.substitutes import TEAM_A_CHANNEL_PREFIX, TEAM_B_CHANNEL_PREFIX
+from helpers.draft_rooms import TEAM_A_CHANNEL_PREFIX, TEAM_B_CHANNEL_PREFIX
 from helpers.team_names import BLUE, RED
 from cube_views.CubeListModal import CubeListModal
 

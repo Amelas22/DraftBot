@@ -30,8 +30,8 @@ from sqlalchemy import update
 
 from helpers.draft_rooms import SHARED_CHAT_TEAM, team_channel_name, team_voice_name
 from helpers.substitutes import (
-    TEAM_A_CHANNEL_PREFIX,
-    TEAM_B_CHANNEL_PREFIX,
+    SHARED_SIDE,
+    side_by_prefix,
     channel_ids_contains,
 )
 from session import AsyncSessionLocal, DraftSession, get_draft_session
@@ -123,14 +123,8 @@ def team_plan(session: Any, team_name: str) -> TeamPlan:
     to team_a + team_b there would rebuild the room with NO members and lock the
     whole draft out of the only channel it has.
     """
-    team_a = list(session.team_a or [])
-    team_b = list(session.team_b or [])
-    if team_name == TEAM_A_CHANNEL_PREFIX:
-        return TeamPlan(team_a, "team_a_pools_destination_id")
-    if team_name == TEAM_B_CHANNEL_PREFIX:
-        return TeamPlan(team_b, "team_b_pools_destination_id")
-    everyone = team_a + team_b or list((session.sign_ups or {}).keys())
-    return TeamPlan(everyone, "open_pools_destination_id")
+    side = side_by_prefix(team_name) or SHARED_SIDE
+    return TeamPlan(side.roster(session), side.pools_column)
 
 
 @dataclass(frozen=True)

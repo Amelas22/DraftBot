@@ -16,7 +16,7 @@ from sqlalchemy import select
 
 from database.db_session import db_session
 from helpers.pile_compositor import PileImageBuilder
-from helpers.substitutes import TEAM_A_CHANNEL_PREFIX, TEAM_B_CHANNEL_PREFIX
+from helpers.draft_rooms import BLUE_SIDE, RED_SIDE, Side
 from helpers.utils import (
     DISCORD_THREAD_NAME_LIMIT, THREAD_ARCHIVE_MAX_MINUTES, mention_all, send_then_mention,
 )
@@ -81,14 +81,20 @@ def map_discord_to_draftmancer(draft_data: dict, sign_ups: dict) -> dict[str, st
 def _find_team_channel(
     guild: discord.Guild,
     channel_ids: Iterable[int | str],
-    prefix: str,
+    side: "Side",
 ) -> discord.abc.GuildChannel | None:
-    """Resolve the private team channel whose name starts with `prefix` (e.g.
-    'Red-Team') among the session's channel_ids."""
-    prefix_lower = prefix.lower()
+    """Resolve `side`'s private team channel among the session's channel_ids.
+
+    Matched through draft_rooms, which owns the room-name pattern, rather than
+    by a prefix test written here -- that was one of four copies of the same
+    mapping. The channel_ids are already this session's, so the prefix is all
+    that is left to decide, and claims_room is the test for exactly that case.
+    """
     for cid in channel_ids or []:
         channel = guild.get_channel(int(cid))
-        if channel is not None and getattr(channel, "name", "").lower().startswith(prefix_lower):
+        if channel is None:
+            continue
+        if side.claims_room(getattr(channel, "name", "")):
             return channel
     return None
 
@@ -547,8 +553,8 @@ async def _post_team_logs_locked(session_id: str, bot) -> bool:
         return False
 
     mapping = map_discord_to_draftmancer(draft_data, sign_ups)
-    red = _find_team_channel(guild, channel_ids, TEAM_A_CHANNEL_PREFIX)
-    blue = _find_team_channel(guild, channel_ids, TEAM_B_CHANNEL_PREFIX)
+    red = _find_team_channel(guild, channel_ids, RED_SIDE)
+    blue = _find_team_channel(guild, channel_ids, BLUE_SIDE)
 
     if red is None and blue is None:
         # Neither team channel resolved, so nothing could be posted. Leave

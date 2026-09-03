@@ -6,18 +6,8 @@ and applies the permission overwrites this module decides on.
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from helpers.team_names import BLUE, RED, labels_for
-
-# Team channels are created with these prefixes: team_a ->
-# "Red-Team-Chat-{friendly_id}", team_b -> "Blue-Team-Chat-{friendly_id}".
-# That the A side is the RED one is also asserted, separately, by
-# helpers/team_names; test_the_channel_prefixes_agree_with_the_colours
-# holds the two together. These cannot be derived from the labels -- a
-# channel name is hyphenated and word-swapped, and renaming them would
-# orphan the rooms of every draft already in flight.
-TEAM_A_CHANNEL_PREFIX = "Red-Team"
-TEAM_B_CHANNEL_PREFIX = "Blue-Team"
-
+from helpers.draft_rooms import SHARED_SIDE, side_by_key, side_by_prefix
+from helpers.team_names import BLUE, RED
 
 @dataclass
 class GrantDecision:
@@ -74,25 +64,25 @@ def resolve_sub_grant(
     else:
         return None, "Only players in this draft (or bot managers) can add a sub."
 
-    red, blue = labels_for(session)
-    if team_key == "A":
-        return GrantDecision("A", TEAM_A_CHANNEL_PREFIX, red.name), None
-    return GrantDecision("B", TEAM_B_CHANNEL_PREFIX, blue.name), None
+    side = side_by_key(team_key)
+    assert side is not None      # team_key is "A" or "B" on every path above
+    return GrantDecision(side.key, side.prefix, side.named(session).name), None
 
 
 def is_sub_target_channel(channel_name: str, friendly_id: str, channel_prefix: Optional[str]) -> bool:
     """True if channel_name is one of the channels a sub should be granted.
 
-    Case-insensitive: Discord lowercases text channel names on creation,
-    while voice channels keep their original casing.
+    A sub always gets the shared draft chat, plus their own side's rooms when
+    they have a side. channel_prefix is None for team-less drafts (swiss),
+    where the shared chat is the only room there is.
 
-    channel_prefix is None for team-less drafts, where only the shared
-    draft chat exists.
+    Which rooms a side owns is draft_rooms' answer now, so the name pattern is
+    written once rather than here and in three other modules.
     """
-    targets = {f"draft-chat-{friendly_id}".lower()}
-    if channel_prefix:
-        targets.add(f"{channel_prefix}-chat-{friendly_id}".lower())
-        targets.add(f"{channel_prefix}-voice-{friendly_id}".lower())
+    targets = SHARED_SIDE.room_names(friendly_id)
+    side = side_by_prefix(channel_prefix) if channel_prefix else None
+    if side is not None:
+        targets |= side.room_names(friendly_id)
     return channel_name.lower() in targets
 
 
