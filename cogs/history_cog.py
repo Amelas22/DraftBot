@@ -1,15 +1,44 @@
 import discord
 from discord import ButtonStyle
 from discord.ui import View
-from sqlalchemy import and_, or_, func, select
+from sqlalchemy import and_, func, select
 from datetime import datetime
 from discord.ext import commands
 from loguru import logger
 from session import AsyncSessionLocal, DraftSession
 from models.match import MatchResult
 from helpers.display_names import get_display_name
+from helpers.skill import RATING_SESSION_TYPES
 
 SEATING_ORDER_FIX = 1742144400
+
+async def history_drafts(guild_id: str, user_id: str):
+    """The finished drafts `user_id` played in this guild, newest first.
+
+    Session types come from RATING_SESSION_TYPES rather than a list written out
+    here. This used to say or_(random, staked), which quietly excluded premade --
+    and premade is how a league or tournament match is played. Those matches move
+    a player's rating and their leaderboard position through exactly this
+    constant (services/ledger_stats.py), so leaving them out meant a player's own
+    history disagreed with every other number the bot showed them.
+
+    Membership comes from sign_ups, and a draft counts as finished once it has a
+    draft-chat victory message.
+    """
+    async with AsyncSessionLocal() as db_session:
+        result = await db_session.execute(
+            select(DraftSession).where(
+                and_(
+                    DraftSession.guild_id == guild_id,
+                    DraftSession.victory_message_id_draft_chat.isnot(None),
+                    DraftSession.session_type.in_(RATING_SESSION_TYPES),
+                    func.json_extract(
+                        DraftSession.sign_ups, f'$."{user_id}"').isnot(None),
+                )
+            ).order_by(DraftSession.teams_start_time.desc())
+        )
+        return list(result.scalars().all())
+
 
 class HistoryView(View):
     def __init__(self, pages, author_id):
@@ -73,27 +102,23 @@ class HistoryCog(commands.Cog):
         guild_id = str(ctx.guild.id)
         limit = 5  # Hardcoded to show 5 per page
         
+        all_drafts = await history_drafts(guild_id, user_id)
+
+        if not all_drafts:
+            return await ctx.followup.send("No draft history found for you in this server.")
+
         async with AsyncSessionLocal() as db_session:
-            # Query for drafts where this user participated
-            query = select(DraftSession).where(
-                and_(
-                    DraftSession.guild_id == guild_id,
-                    DraftSession.victory_message_id_draft_chat.isnot(None),  # Has victory message
-                    or_(
-                        DraftSession.session_type == "random",
-                        DraftSession.session_type == "staked"
-                    ),
-                    # Check if user is in sign_ups
-                    func.json_extract(DraftSession.sign_ups, f'$."{user_id}"').isnot(None)
+            # Every draft's matches in one query rather than one query per draft.
+            # History counts premade now, so a regular's list runs long.
+            match_rows = (await db_session.execute(
+                select(MatchResult).where(
+                    MatchResult.session_id.in_([d.session_id for d in all_drafts])
                 )
-            ).order_by(DraftSession.teams_start_time.desc())
-            
-            result = await db_session.execute(query)
-            all_drafts = result.scalars().all()
-            
-            if not all_drafts:
-                return await ctx.followup.send("No draft history found for you in this server.")
-            
+            )).scalars().all()
+            matches_by_session = {}
+            for match in match_rows:
+                matches_by_session.setdefault(match.session_id, []).append(match)
+
             # Create pages for pagination
             pages = []
             total_pages = (len(all_drafts) + limit - 1) // limit  # Ceiling division for total pages
@@ -112,10 +137,7 @@ class HistoryCog(commands.Cog):
                 
                 for draft in page_drafts:
                     try:
-                        # Get match results for this draft
-                        match_results_stmt = select(MatchResult).filter(MatchResult.session_id == draft.session_id)
-                        match_results = await db_session.execute(match_results_stmt)
-                        match_results = match_results.scalars().all()
+                        match_results = matches_by_session.get(draft.session_id, [])
                         
                         # Calculate user's record
                         wins = 0

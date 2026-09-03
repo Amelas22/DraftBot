@@ -14,6 +14,7 @@ from helpers.display_names import get_display_name, get_display_name_by_id
 from models.match import MatchResult
 from helpers.trophy_deck_links import session_trophy_links, render_grouped_trophy_decks
 from helpers.permissions import has_bot_manager_role
+from helpers.skill import RATING_SESSION_TYPES
 
 
 async def core_commands(bot):
@@ -231,10 +232,9 @@ async def scheduled_posts(bot):
                     stmt = select(DraftSession).where(
                         DraftSession.teams_start_time.between(start_time, end_time),
                         not_(DraftSession.victory_message_id_draft_chat == None),
-                        or_(
-                            DraftSession.session_type == "random",
-                            DraftSession.session_type == "staked"
-                        ),
+                        # Same rule as /history and the leaderboard: a league or
+                        # tournament match is played as a premade draft.
+                        DraftSession.session_type.in_(RATING_SESSION_TYPES),
                         DraftSession.guild_id == str(guild.id)
                     )
                     result = await db_session.execute(stmt)
@@ -280,7 +280,7 @@ async def scheduled_posts(bot):
 
                     date_str = end_time.strftime("%B %d, %Y")
                     top_drafters_field_value = "\n".join([f"{index + 1}. **{name}:** {count} drafts" for index, (name, count) in enumerate(top_drafters)])
-                    embed = discord.Embed(title=f"Open Queue Weekly Summary - Week Ending {date_str}", description="", color=discord.Color.magenta())
+                    embed = discord.Embed(title=f"Weekly Draft Summary - Week Ending {date_str}", description="", color=discord.Color.magenta())
                     embed.add_field(name="**Completed Drafts**", value=total_drafts, inline=False)
                     embed.add_field(name="**Top 10 Drafters**\n", value=top_drafters_field_value, inline=False)
                     embed.add_field(name="**Multiple Weekly Trophies**", value=undefeated_drafters_field_value or "No trophies :(", inline=False)
@@ -306,10 +306,9 @@ async def scheduled_posts(bot):
                     stmt = select(DraftSession).where(
                         DraftSession.teams_start_time.between(start_time, end_time),
                         not_(DraftSession.victory_message_id_draft_chat == None),
-                        or_(
-                            DraftSession.session_type == "random",
-                            DraftSession.session_type == "staked"
-                        ),
+                        # Same rule as /history and the leaderboard: a league or
+                        # tournament match is played as a premade draft.
+                        DraftSession.session_type.in_(RATING_SESSION_TYPES),
                         DraftSession.guild_id == str(guild.id)
                     )
                     result = await db_session.execute(stmt)
@@ -355,7 +354,7 @@ async def scheduled_posts(bot):
 
                     date_str = start_time.strftime("%B %d, %Y")
                     top_drafters_field_value = "\n".join([f"**{name}:** {count} drafts" for name, count in top_five_drafters])
-                    embed = discord.Embed(title=f"Open Queue Daily Results - {date_str}", description="", color=discord.Color.dark_purple())
+                    embed = discord.Embed(title=f"Daily Draft Results - {date_str}", description="", color=discord.Color.dark_purple())
                     embed.add_field(name="**Completed Drafts**", value=total_drafts, inline=False)
                     embed.add_field(name="**Top 5 Drafters**\n", value=top_drafters_field_value, inline=False)
                     embed.add_field(name="**Trophy Drafters**", value=undefeated_drafters_field_value or "No trophies :(", inline=False)
