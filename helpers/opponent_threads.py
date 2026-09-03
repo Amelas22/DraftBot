@@ -24,12 +24,6 @@ ARCHIVED_THREAD_LOOKUP_LIMIT = 100
 # team they face. Keyed on the shared prefix constants -- the channel names
 # have been renamed once already, and a stale literal here would silently
 # produce no threads at all.
-#
-# One table, not three. The rosters and the label were previously three
-# separate dispatches on the same two keys, so "an unknown channel name
-# yields nothing" was an invariant spread across them -- and the label lookup
-# was an unguarded dict access that only happened to be safe because the
-# roster lookup had already returned empty and short-circuited the caller.
 def team_channel_rosters(
     team_name: str,
     team_a: list[str] | None,
@@ -47,10 +41,6 @@ def team_channel_rosters(
     """
     side = side_by_prefix(team_name)
     if side is None or side.key is None:
-        # The shared chat holds both teams, so nobody in it is an opponent --
-        # and an unknown name is not this draft's room at all. Both are the
-        # same answer, which is what keeps swiss (whose only room is the
-        # shared chat) out of this feature.
         return [], [], ""
     opposing = side.opposite
     assert opposing is not None      # a keyed side always faces the other one

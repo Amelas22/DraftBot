@@ -48,7 +48,7 @@ def resolve_sub_grant(
     if not team_a and not team_b:
         # Team-less draft (e.g. swiss): only the shared draft chat exists.
         if invoker_id in sign_ups or is_admin:
-            return GrantDecision(None, None, "this draft"), None
+            return GrantDecision(None, None, SHARED_SIDE.label.name), None
         return None, "Only players in this draft (or bot managers) can add a sub."
 
     if invoker_id in team_a:
@@ -80,7 +80,7 @@ def is_sub_target_channel(channel_name: str, friendly_id: str, channel_prefix: O
     written once rather than here and in three other modules.
     """
     targets = SHARED_SIDE.room_names(friendly_id)
-    side = side_by_prefix(channel_prefix) if channel_prefix else None
+    side = side_by_prefix(channel_prefix)
     if side is not None:
         targets |= side.room_names(friendly_id)
     return channel_name.lower() in targets

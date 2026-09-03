@@ -28,34 +28,10 @@ from typing import Any, Iterable
 from loguru import logger
 from sqlalchemy import update
 
-from helpers.draft_rooms import SHARED_CHAT_TEAM, team_channel_name, team_voice_name
-from helpers.substitutes import (
-    SHARED_SIDE,
-    side_by_prefix,
-    channel_ids_contains,
-)
+from helpers.draft_rooms import (SHARED_CHAT_TEAM, SHARED_SIDE, side_by_prefix,
+                                 team_channel_name)
+from helpers.substitutes import channel_ids_contains
 from session import AsyncSessionLocal, DraftSession, get_draft_session
-
-
-def team_room_names(team_name: str, friendly_id: str) -> set[str]:
-    """The lowercased names of the rooms belonging to `team_name` in this draft.
-
-    Built from the same helpers that MAKE the rooms, so the convention has one
-    owner. Re-deriving it here would fail silently if it ever changed: nothing
-    would match, and the admin would be told this team has no rooms -- which is
-    indistinguishable from the broken state being repaired.
-
-    Lowercased because Discord lowercases text channel names on creation but
-    leaves voice names as sent, so only a case-insensitive compare matches both.
-
-    Deliberately EXCLUDES the shared draft chat when `team_name` is a real team:
-    regenerating one team must not take down the room the other team and the
-    admins are using.
-    """
-    names = {team_channel_name(team_name, friendly_id).lower()}
-    if team_name != SHARED_CHAT_TEAM:
-        names.add(team_voice_name(team_name, friendly_id).lower())
-    return names
 
 
 def select_team_rooms(channels: Iterable[Any], team_name: str,
@@ -65,8 +41,15 @@ def select_team_rooms(channels: Iterable[Any], team_name: str,
     Matched on the deterministic room name rather than on position in
     channel_ids, because that list records every room of the draft with nothing
     to say which team each belongs to.
+
+    The names come from the Side row, which is the same table the sub grant and
+    the log store ask. This used to build them here from the same two helpers,
+    which is one copy too many for a rule whose failure is silent: nothing
+    matches, and the admin is told the team has no rooms -- indistinguishable
+    from the broken state /regenerate_rooms exists to repair.
     """
-    wanted = team_room_names(team_name, friendly_id)
+    side = side_by_prefix(team_name) or SHARED_SIDE
+    wanted = side.room_names(friendly_id)
     return [c for c in channels if c.name.lower() in wanted]
 
 

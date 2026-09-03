@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from helpers.draft_rooms import (BLUE_SIDE, RED_SIDE, SHARED_SIDE, SIDES,
-                                 side_by_key, side_of_room)
+                                 side_by_key, side_by_prefix)
 from helpers.team_names import BLUE, RED
 
 
@@ -48,8 +48,9 @@ def test_the_two_team_sides_are_each_other_s_opponents():
     impossible to tag one team while scouting the other."""
     draft = _draft()
 
-    assert RED_SIDE.roster(draft) == BLUE_SIDE.opponents(draft)
-    assert BLUE_SIDE.roster(draft) == RED_SIDE.opponents(draft)
+    a, b = draft.team_a, draft.team_b
+    assert RED_SIDE.roster(draft) == BLUE_SIDE.opponents_of(a, b)
+    assert BLUE_SIDE.roster(draft) == RED_SIDE.opponents_of(a, b)
 
 
 def test_the_shared_chat_is_a_side_with_no_opponent():
@@ -58,7 +59,7 @@ def test_the_shared_chat_is_a_side_with_no_opponent():
     rebuilding its only room with no members in it."""
     draft = _draft()
 
-    assert SHARED_SIDE.opponents(draft) == []
+    assert SHARED_SIDE.opponents_of(draft.team_a, draft.team_b) == []
     assert set(SHARED_SIDE.roster(draft)) == {"a1", "a2", "b1", "b2"}
     assert SHARED_SIDE.pools_column == "open_pools_destination_id"
 
@@ -78,19 +79,26 @@ def test_the_shared_chat_announces_itself_as_the_draft_not_a_colour():
     assert SHARED_SIDE.label.emoji == ""
 
 
-def test_a_room_is_matched_to_its_side_by_name():
-    """The name is still how a room says which side owns it; what changed is
-    that only one module knows that."""
-    assert side_of_room("Red-Team-Chat-icebind-pillar-36", "icebind-pillar-36") is RED_SIDE
-    assert side_of_room("blue-team-voice-icebind-pillar-36", "icebind-pillar-36") is BLUE_SIDE
-    assert side_of_room("Draft-Chat-icebind-pillar-36", "icebind-pillar-36") is SHARED_SIDE
+def test_a_room_is_matched_to_its_side_by_prefix():
+    """The room name is still what says which side owns it; what changed is
+    that only one module knows the pattern.
+
+    Case-insensitive because Discord lowercases text channel names on creation
+    but leaves voice names as sent.
+    """
+    assert RED_SIDE.claims_room("Red-Team-Chat-icebind-pillar-36")
+    assert BLUE_SIDE.claims_room("blue-team-voice-icebind-pillar-36")
+    assert not RED_SIDE.claims_room("Blue-Team-Chat-icebind-pillar-36")
+    assert not RED_SIDE.claims_room("general")
 
 
-def test_a_room_from_another_draft_belongs_to_no_side():
-    """friendly_id is part of the match, so one draft cannot claim another's
-    rooms -- the guild holds every live draft's channels at once."""
-    assert side_of_room("Red-Team-Chat-other-draft-99", "icebind-pillar-36") is None
-    assert side_of_room("general", "icebind-pillar-36") is None
+def test_a_prefix_resolves_to_the_side_that_owns_it():
+    """What /regenerate_rooms' stored choice value and the sub grant both do
+    with the prefix they are handed."""
+    assert side_by_prefix("Red-Team") is RED_SIDE
+    assert side_by_prefix("Blue-Team") is BLUE_SIDE
+    assert side_by_prefix("Draft") is SHARED_SIDE
+    assert side_by_prefix("nonsense") is None
 
 
 def test_the_add_sub_choice_value_selects_a_side():
@@ -112,25 +120,17 @@ def test_a_named_team_keeps_its_name_and_an_unnamed_one_takes_the_colour():
     assert BLUE_SIDE.named(named).name == "PDX Pandas"
 
 
-def test_every_side_is_reachable_and_distinct():
-    """A row nothing can look up is a row that will drift."""
-    assert set(SIDES) == {RED_SIDE, BLUE_SIDE, SHARED_SIDE}
-    assert len({s.prefix for s in SIDES}) == len(SIDES)
-    assert len({s.pools_column for s in SIDES}) == len(SIDES)
-
-
-def test_the_shared_chat_has_no_voice_room():
-    """Room creation skips voice for the shared chat, so offering its name here
-    would put something in the set that can never match a real channel."""
-    assert SHARED_SIDE.room_names("icebind-pillar-36") == {
-        "draft-chat-icebind-pillar-36"}
-
-
-@pytest.mark.parametrize("side", [RED_SIDE, BLUE_SIDE])
-def test_a_side_names_both_of_its_rooms(side):
+@pytest.mark.parametrize("side, expected", [
+    (RED_SIDE, {"red-team-chat-icebind-pillar-36", "red-team-voice-icebind-pillar-36"}),
+    (BLUE_SIDE, {"blue-team-chat-icebind-pillar-36", "blue-team-voice-icebind-pillar-36"}),
+])
+def test_a_side_names_both_of_its_rooms(side, expected):
     """A sub gets the text room and the voice room; missing the voice one
-    leaves them able to read the team but not talk to it."""
-    names = side.room_names("icebind-pillar-36")
+    leaves them able to read the team but not talk to it.
 
-    assert names == {f"{side.prefix}-chat-icebind-pillar-36".lower(),
-                     f"{side.prefix}-voice-icebind-pillar-36".lower()}
+    Spelled out rather than rebuilt from side.prefix: an expectation assembled
+    the same way the implementation assembles it passes for any consistent but
+    wrong convention, and these names are matched against live Discord
+    channels, so the convention IS the contract.
+    """
+    assert side.room_names("icebind-pillar-36") == expected

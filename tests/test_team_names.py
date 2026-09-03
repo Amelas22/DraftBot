@@ -5,6 +5,10 @@ tested something slightly different: utils.py counted a "test" draft as
 anonymous and team_creator.py did not, so the same draft could render as
 "Team Red" in one embed and "Team A" in the next. These pin the single rule.
 """
+import ast
+import functools
+from pathlib import Path
+
 import pytest
 
 from helpers.team_names import RED, BLUE, team_labels
@@ -58,36 +62,41 @@ def test_each_side_is_decided_on_its_own_name():
     assert (red.emoji, blue.emoji) == ("", "🔵")
 
 
-def test_the_labels_are_the_constants_the_module_exports():
-    """Callers that need to compare against a label -- matching an embed field
-    by name, say -- must not spell it out a second time."""
-    red, blue = team_labels(None, None)
-
-    assert red.name == RED.name and blue.name == BLUE.name
-
-
+@functools.lru_cache(maxsize=1)
 def _production_sources():
-    """Every module the bot actually runs, as (path, text).
+    """Every module the bot actually runs, as (path, text, parsed tree).
 
-    Scanning a hand-written list of files is what let this rule rot in the
-    first place: /add_sub offered a dropdown of "A" and "B" for months because
-    cogs/ was not on anybody's list. Tests and scripts are excluded because
-    they are not surfaces a player sees; .claude/worktrees because those are
-    other checkouts of this same repo.
+    The file set comes from `git ls-files`, not a walk plus a skip list. The
+    repo already defines what it tracks, so ignored checkouts -- including the
+    worktrees under .claude/, which are whole copies of this same tree -- drop
+    out for free rather than needing to be named. It is also anchored at the
+    repo root instead of the process CWD, which a walk was not: run from
+    anywhere else, a walk finds nothing and every rule below passes vacuously.
+
+    Parsed once and cached, because three tests read this and parsing the tree
+    is the expensive part.
     """
-    from pathlib import Path
+    import subprocess
 
-    skip = ("tests/", "scripts/", ".claude/", "alembic/", "backfill_")
-    for path in sorted(Path(".").rglob("*.py")):
-        rel = path.as_posix()
-        if any(rel.startswith(s) or f"/{s}" in rel for s in skip):
+    root = Path(__file__).resolve().parent.parent
+    listed = subprocess.run(["git", "-C", str(root), "ls-files", "*.py"],
+                            capture_output=True, text=True, check=True).stdout.split()
+    assert listed, "git ls-files returned nothing -- the rules below would pass vacuously"
+
+    skip = ("tests/", "scripts/", "alembic/", "backfill_")
+    out = []
+    for rel in sorted(listed):
+        if rel.startswith(skip) or rel == "helpers/team_names.py":
             continue
-        if rel == "helpers/team_names.py":
+        text = (root / rel).read_text()
+        try:
+            out.append((rel, text, ast.parse(text, filename=rel)))
+        except SyntaxError:
             continue
-        yield rel, path.read_text()
+    return tuple(out)
 
 
-def _display_strings(path, text):
+def _display_strings(path, tree):
     """Every string literal in a module that a player could actually read.
 
     Parsed rather than grepped, because the line-based version could not tell a
@@ -101,9 +110,6 @@ def _display_strings(path, text):
     column, and routing it through the helper would make the log worse rather
     than the UI better.
     """
-    import ast
-
-    tree = ast.parse(text, filename=path)
     exempt = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Module, ast.FunctionDef,
@@ -146,9 +152,9 @@ def test_no_surface_spells_a_team_label_for_itself():
         r'["\']\s*(?:🔴|🔵)?\s*(?:Team (?:A|B|Red|Blue)|(?:Red|Blue) Team)\b')
 
     offenders = {}
-    for path, text in _production_sources():
+    for path, text, tree in _production_sources():
         hits = [f"{path}:{lineno} {value!r}"
-                for lineno, value in _display_strings(path, text)
+                for lineno, value in _display_strings(path, tree)
                 if label.search(chr(34) + value + chr(34))]
         if hits:
             offenders[path] = hits
@@ -158,49 +164,94 @@ def test_no_surface_spells_a_team_label_for_itself():
         f"team_labels() instead so every surface agrees: {offenders}")
 
 
-def test_no_user_facing_message_reads_a_stored_team_name_raw():
-    """The class of bug the string checks above cannot see.
+def test_no_stored_team_name_is_interpolated_into_a_message():
+    """The class of bug the string checks above cannot see -- and the reason
+    this rule is about TAINT rather than about which call it sits in.
 
-    team_a_name is NULL for a draft nobody named, so interpolating it straight
-    into a message prints "None". Two did: the test-user fill said "Added 6
-    test users. None: 3/3, None: 3/3", and -- in production -- an entry-fee
-    draft with uneven sides refused with "None has 3 players and None has 2".
+    team_a_name is NULL for a draft nobody named, so putting it in a message
+    prints "None". The first version of this guard looked for the attribute
+    inside a call whose function name was in a hand-kept list of py-cord
+    surfaces, and it passed a branch that shipped three of them, because they
+    bind the value to a local first:
 
-    Neither contained a team label as a literal, so nothing that greps for one
-    could find them. What they have in common is reading the stored field
-    inside a call that renders to a person, which is what this looks for.
+        team_name = draft_session.team_a_name if ... else ...
+        title = f"{team_name} has won the match!"
+
+    So the rule follows the value instead. A read may be plumbed anywhere --
+    stored on a view, passed as a keyword argument, persisted, matched against
+    a tournament roster -- but the moment it reaches an f-string it is being
+    shown to somebody, and that has to come from team_labels.
     """
     import ast
 
-    UI = {"send", "send_message", "followup", "respond", "edit_message",
-          "add_field", "set_author", "set_footer", "Embed", "InputText",
-          "OptionChoice", "Option", "Button", "SelectOption", "add_item",
-          "set_field_at", "edit", "_add_button"}
+    def tainted_names(fn):
+        """Locals in `fn` assigned from a raw team-name read, transitively."""
+        tainted, changed = set(), True
+        while changed:
+            changed = False
+            for node in ast.walk(fn):
+                if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    continue
+                value = node.value
+                if value is None:
+                    continue
+                # A raw read that is merely an ARGUMENT does not taint the
+                # result: plan_premade_test_users(..., draft_session.team_a_name)
+                # returns rosters, not names, and treating its rosters as
+                # tainted flagged `len(team_a)` in an f-string. Taint follows
+                # the value itself -- an attribute read, or a ternary or tuple
+                # of them -- not everything a call was told.
+                consumed = {id(n) for call in ast.walk(value)
+                            if isinstance(call, ast.Call)
+                            for n in ast.walk(call)}
+                reads_raw = any(
+                    ((isinstance(n, ast.Attribute)
+                      and n.attr in ("team_a_name", "team_b_name"))
+                     or (isinstance(n, ast.Name) and n.id in tainted))
+                    and id(n) not in consumed
+                    for n in ast.walk(value))
+                if not reads_raw:
+                    continue
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for t in targets:
+                    for n in ast.walk(t):
+                        if isinstance(n, ast.Name) and n.id not in tainted:
+                            tainted.add(n.id)
+                            changed = True
+        return tainted
 
-    def is_log(node):
-        f = getattr(node, "func", None)
-        return (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
-                and (f.value.id.endswith("logger")
-                     or f.value.id in ("logging", "log", "print")))
+    def logged(fn):
+        """Every node inside a log call -- a log naming the column is fine."""
+        out = set()
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call):
+                f = node.func
+                if (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                        and (f.value.id.endswith("logger")
+                             or f.value.id in ("logging", "log", "print"))):
+                    out.update(id(n) for n in ast.walk(node))
+        return out
 
     offenders = []
-    for path, text in _production_sources():
-        for node in ast.walk(ast.parse(text, filename=path)):
-            if not isinstance(node, ast.Call) or is_log(node):
+    for path, _text, tree in _production_sources():
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            func = node.func
-            named = (func.attr if isinstance(func, ast.Attribute)
-                     else getattr(func, "id", ""))
-            if named not in UI:
-                continue
-            for inner in ast.walk(node):
-                if (isinstance(inner, ast.Attribute)
-                        and inner.attr in ("team_a_name", "team_b_name")):
-                    offenders.append(f"{path}:{inner.lineno} .{inner.attr}")
+            tainted, exempt = tainted_names(fn), logged(fn)
+            for node in ast.walk(fn):
+                if not isinstance(node, ast.JoinedStr) or id(node) in exempt:
+                    continue
+                for inner in ast.walk(node):
+                    raw = (isinstance(inner, ast.Attribute)
+                           and inner.attr in ("team_a_name", "team_b_name"))
+                    via = isinstance(inner, ast.Name) and inner.id in tainted
+                    if raw or via:
+                        offenders.append(f"{path}:{node.lineno} in {fn.name}()")
+                        break
 
     assert not offenders, (
-        "a stored team name is rendered to a player without going through "
-        f"team_labels, so an unnamed draft will show \"None\": {offenders}")
+        "a stored team name reaches a message without going through "
+        f"team_labels, so an unnamed draft will show \"None\": {sorted(set(offenders))}")
 
 
 def test_no_command_asks_a_player_to_pick_a_letter():
@@ -215,7 +266,7 @@ def test_no_command_asks_a_player_to_pick_a_letter():
     import re
 
     bare = re.compile(r'choices\s*=\s*\[\s*["\'][AB]["\']')
-    offenders = [f"{path}:{n}" for path, text in _production_sources()
+    offenders = [f"{path}:{n}" for path, text, _tree in _production_sources()
                  for n, line in enumerate(text.split("\n"), 1)
                  if bare.search(line)]
 

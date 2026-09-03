@@ -154,10 +154,6 @@ class Side:
         """roster_of for anything carrying the three roster fields."""
         return self.roster_of(draft.team_a, draft.team_b, draft.sign_ups)
 
-    def opponents(self, draft: HasRosters) -> list[str]:
-        """opponents_of for anything carrying the two team fields."""
-        return self.opponents_of(draft.team_a, draft.team_b)
-
     def named(self, draft: HasTeamNames) -> "TeamLabel":
         """This side's label for THIS draft: a premade team's own name if it
         has one, otherwise the colour."""
@@ -167,12 +163,11 @@ class Side:
     def claims_room(self, channel_name: str) -> bool:
         """Whether this room is one of this side's, by prefix alone.
 
-        For callers that already know WHICH draft they are looking at -- a
-        session's own channel_ids -- so the draft does not need proving again.
-        side_of_room is the version for when the name is the only evidence, and
-        it costs a friendly_id match that would be wrong here: friendly_id
-        falls back to draft_id or session_id on rows that lack one, and a room
-        named from the real value would stop being recognised.
+        Prefix alone, because every caller already knows WHICH draft it is
+        looking at -- it is searching that session's own channel_ids. Matching
+        the friendly_id too would be wrong here as well as redundant: it falls
+        back to draft_id or session_id on rows that lack one, so a room named
+        from the real value would stop being recognised.
         """
         return (channel_name or "").lower().startswith(f"{self.prefix.lower()}-")
 
@@ -214,22 +209,14 @@ def side_by_prefix(prefix: str | None) -> Side | None:
 
 
 def side_by_key(key: str | None) -> Side | None:
-    """The side /add_sub's stored choice value names. None for the shared chat,
-    which nobody chooses."""
-    return next((s for s in SIDES if s.key is not None and s.key == key), None)
+    """The side /add_sub's stored choice value names.
 
-
-def side_of_room(channel_name: str, friendly_id: str) -> Side | None:
-    """Which side owns this room, or None if it is not this draft's at all.
-
-    friendly_id is part of the match because a guild holds every live draft's
-    channels at once, and a bare prefix would let one draft claim another's.
+    A missing choice names no side: the shared chat is not something anybody
+    picks, so None in must not match SHARED_SIDE's None key.
     """
-    name = (channel_name or "").lower()
-    for candidate in SIDES:
-        if name in candidate.room_names(friendly_id):
-            return candidate
-    return None
+    if key is None:
+        return None
+    return next((s for s in SIDES if s.key == key), None)
 
 
 def resolve_category(guild: Any, config: dict[str, Any], key: str) -> Any:

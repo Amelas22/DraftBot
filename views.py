@@ -1605,7 +1605,7 @@ class PersistentView(discord.ui.View):
                             else:
                                 all_members.append(member)
                         channel = await temp_view.create_team_channel(
-                            guild, "Draft", all_members, rooms_category=rooms_category)
+                            guild, SHARED_CHAT_TEAM, all_members, rooms_category=rooms_category)
                         session.draft_chat_channel = str(channel)
                         draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
                         logger.info("Created swiss draft channel {}", session.draft_chat_channel)
@@ -1633,7 +1633,7 @@ class PersistentView(discord.ui.View):
                         all_members = team_a_members + team_b_members
                         logger.info("Creating main Draft chat channel with all {} members", len(all_members))
                         channel = await temp_view.create_team_channel(
-                            guild, "Draft", all_members, session.team_a, session.team_b,
+                            guild, SHARED_CHAT_TEAM, all_members, session.team_a, session.team_b,
                             rooms_category=rooms_category
                         )
                         session.draft_chat_channel = str(channel)
@@ -1641,11 +1641,11 @@ class PersistentView(discord.ui.View):
                         logger.info("Created draft and team channels for session_id={}", session_id)
                         logger.info("Creating Red-Team channel with {} Team A members", len(team_a_members))
                         await temp_view.create_team_channel(
-                            guild, "Red-Team", team_a_members, session.team_a,
+                            guild, RED_SIDE.prefix, team_a_members, session.team_a,
                             session.team_b, rooms_category=rooms_category)
                         logger.info("Creating Blue-Team channel with {} Team B members", len(team_b_members))
                         await temp_view.create_team_channel(
-                            guild, "Blue-Team", team_b_members, session.team_a,
+                            guild, BLUE_SIDE.prefix, team_b_members, session.team_a,
                             session.team_b, rooms_category=rooms_category)
 
                     else:
@@ -2279,6 +2279,7 @@ class MatchResultSelect(Select):
                 print("Draft session not found.")
                 return
 
+            red, blue = labels_for(draft_session)
             channel = guild.get_channel(int(draft_session.draft_chat_channel))
             if not channel:
                 print("Channel not found.")
@@ -2315,9 +2316,9 @@ class MatchResultSelect(Select):
                     if match_result.winner_id:
                         # Get draft session to check which team the winner belongs to
                         if match_result.winner_id in draft_session.team_a:
-                            winning_team_emoji = "🔴 "  # Red emoji for Team A
+                            winning_team_emoji = red.prefix
                         elif match_result.winner_id in draft_session.team_b:
-                            winning_team_emoji = "🔵 "  # Blue emoji for Team B
+                            winning_team_emoji = blue.prefix
                     
                     # Update the field with the appropriate emoji
                     updated_value = f"{winning_team_emoji}**Match {match_result.match_number}**\n{player1_name}: {match_result.player1_wins} wins\n{player2_name}: {match_result.player2_wins} wins"

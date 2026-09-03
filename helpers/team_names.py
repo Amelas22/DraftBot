@@ -90,9 +90,14 @@ def team_labels(team_a_name: str | None,
     over the only thing it depends on -- every caller already has them to hand,
     and it can be tested without a database.
     """
-    chosen_a, chosen_b = _chosen(team_a_name), _chosen(team_b_name)
-    return (RED._replace(name=chosen_a, emoji="", color="") if chosen_a else RED,
-            BLUE._replace(name=chosen_b, emoji="", color="") if chosen_b else BLUE)
+    def label(chosen: str | None, colour: TeamLabel) -> TeamLabel:
+        # A chosen name is not a colour: no emoji, no colour token. Built
+        # fresh rather than _replace'd off the colour, which replaced all
+        # three fields and read as though it inherited something.
+        return TeamLabel(chosen, "", "") if chosen else colour
+
+    return (label(_chosen(team_a_name), RED),
+            label(_chosen(team_b_name), BLUE))
 
 
 def labels_for(draft: HasTeamNames) -> tuple[TeamLabel, TeamLabel]:

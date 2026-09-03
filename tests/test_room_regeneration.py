@@ -10,7 +10,6 @@ from helpers.room_regeneration import (
     remaining_channel_ids,
     select_team_rooms,
     team_plan,
-    team_room_names,
 )
 
 FID = "reckless-crew-92"
@@ -137,13 +136,6 @@ async def _run(session, guild, team_name, create_error=None):
 
 def test_selects_only_the_named_teams_chat_and_voice():
     assert [c.id for c in select_team_rooms(_draft_rooms(), "Red-Team", FID)] == [2, 3]
-
-
-def test_team_room_names_covers_the_teams_chat_and_voice():
-    assert team_room_names("Red-Team", FID) == {
-        f"red-team-chat-{FID}",
-        f"red-team-voice-{FID}",
-    }
 
 
 def test_forgetting_the_stale_rooms_leaves_the_other_teams_rooms():

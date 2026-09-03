@@ -339,11 +339,11 @@ async def _create_channel_announcement_embed(session, seating_order, stake_info_
     red, blue = labels_for(session)
     if team_a_links:
         add_links_to_embed_safely(channel_embed, team_a_links,
-                                  f"{red.name} Draft Links", red.color)
+                                  f"{red.name} Draft Links", red.prefix)
 
     if team_b_links:
         add_links_to_embed_safely(channel_embed, team_b_links,
-                                  f"{blue.name} Draft Links", blue.color)
+                                  f"{blue.name} Draft Links", blue.prefix)
 
     channel_embed.add_field(name="Seating Order", value=format_seating_order(seating_order), inline=False)
 
