@@ -14,8 +14,10 @@ B = ["b1", "b2", "b3", "b4"]
 
 async def _matched():
     # Round tens, because that is all a queue can produce: 40/30/20/10 against
-    # 30/20/10/10. Team A cannot fit all four bets into 70, so they share it in
-    # proportion and land on 30/20/10/10 -- the same 70 team B already holds.
+    # 30/20/10/10. Team A cannot fit all four bets into 70, so it levels onto a
+    # common ceiling of 20 and lands on 20/20/20/10 -- the same 70 team B
+    # already holds. The 10 rides untouched under the ceiling; the 40 carries
+    # the whole shortfall.
     for player, amount in {"a1": 40, "a2": 30, "a3": 20, "a4": 10,
                            "b1": 30, "b2": 20, "b3": 10, "b4": 10}.items():
         await wallet_service.adjust("g", player, 1000, "seed", "test")
@@ -47,7 +49,7 @@ async def test_every_matched_tix_pays_at_the_same_rate(test_db):
 
     result = await pool.settle_pool("g", "s1", A)
 
-    assert result["paid"] == {"a1": 60, "a2": 40, "a3": 20, "a4": 20}
+    assert result["paid"] == {"a1": 40, "a2": 40, "a3": 40, "a4": 20}
     assert await pool.pool_balance("g", "s1") == 0
 
 
@@ -69,8 +71,8 @@ async def test_settling_twice_pays_once(test_db):
     await pool.settle_pool("g", "s1", A)
     await pool.settle_pool("g", "s1", A)
 
-    # entered 40, had 10 handed back as unmatched, then took 60 for the win
-    assert await wallet_service.get_balance("g", "a1") == 1000 - 40 + 10 + 60
+    # entered 40, had 20 handed back as unmatched, then took 40 for the win
+    assert await wallet_service.get_balance("g", "a1") == 1000 - 40 + 20 + 40
     assert await pool.pool_balance("g", "s1") == 0
 
 

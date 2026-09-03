@@ -16,7 +16,7 @@ import pytest_asyncio
 from services import draft_pool_service as pool
 from sqlalchemy import update
 
-from conftest import seed_session
+from conftest import seed_session, seed_stakes
 from session import AsyncSessionLocal, DraftSession
 from services import wallet_service
 
@@ -78,12 +78,15 @@ async def test_small_bets_are_filled_before_large_ones(test_db):
 
     Scaling every entry by the same ratio is the intuitive split and the wrong
     one: it shaves the player who bet the draft MINIMUM down below that
-    minimum, to pay for headroom on a bet three times the size. The queue embed
-    has always promised the opposite -- fill the small bets, then share what is
-    left -- and this is that promise.
+    minimum, to pay for headroom on a bet three times the size.
 
     These are the numbers from a real draft: 20 + 170 + 200 against 220. Pro
     rata gave 12 / 96 / 112, putting the 20-tix player under the 20-tix floor.
+
+    Levelling fills to a common ceiling instead, so the 20 clears it untouched
+    and the two big bets meet at 100 each. Note that the small bet is filled
+    whole as a CONSEQUENCE of the ceiling clearing it, not because it belongs
+    to a protected tier -- see test_a_small_bet_is_cut_when_the_pot_is_tight.
     """
     await _fund({"a1": 20, "a2": 170, "a3": 200,
                  "b1": 60, "b2": 50, "b3": 110})
@@ -93,10 +96,9 @@ async def test_small_bets_are_filled_before_large_ones(test_db):
     assert result["matched"] == 220
     held = await pool.contributions("g", "s1")
     assert held["a1"] == 20, "the smallest bet was cut to fund a larger one"
-    # 200 of room left between the two big bets, split in proportion to them:
-    # 170/370 and 200/370, rounded to tens.
-    assert held["a2"] == 90 and held["a3"] == 110, (
-        f"the remainder was not shared in proportion to the bets: {held}")
+    # 220 of room; the ceiling settles at 100, which the 20 clears outright.
+    assert held["a2"] == 100 and held["a3"] == 100, (
+        f"the two large bets were not levelled to a common ceiling: {held}")
     assert sum(held[p] for p in ("b1", "b2", "b3")) == 220
 
 
@@ -419,9 +421,8 @@ def test_a_pool_draft_is_not_offered_a_settle_debts_button():
 
 
 @pytest.mark.asyncio
-async def test_a_bet_at_or_below_the_tier_is_filled_before_the_big_ones(test_db):
-    """Everything up to 50 is a small bet and is paid in full first; only what
-    is left over is shared out among the bets above that."""
+async def test_a_bet_under_the_ceiling_is_left_whole(test_db):
+    """A bet the ceiling clears is paid in full; only bets above it are cut."""
     await _fund({"a1": 50, "a2": 20, "a3": 300,
                  "b1": 100, "b2": 100, "b3": 40})
 
@@ -429,22 +430,226 @@ async def test_a_bet_at_or_below_the_tier_is_filled_before_the_big_ones(test_db)
 
     held = await pool.contributions("g", "s1")
     assert held["a1"] == 50 and held["a2"] == 20, (
-        f"a bet inside the small tier was cut: {held}")
+        f"a bet below the ceiling was cut: {held}")
     assert held["a3"] == 170, f"the large bet did not take the remainder: {held}"
 
 
 @pytest.mark.asyncio
-async def test_the_bigger_of_two_large_bets_keeps_more_at_risk(test_db):
-    """Proportional, not equal: backing twice as much means carrying twice the
-    shortfall, and keeping more on the table for it."""
+async def test_two_large_bets_are_levelled_to_a_common_ceiling(test_db):
+    """Equal, not proportional: the shortfall is carried by whoever is ABOVE
+    the ceiling, and only down as far as the ceiling.
+
+    Proportional is the intuitive rule and it lets one large bet set everyone
+    else's divisor. In a real shape -- 60 and 400 against 50 and 50 -- pro rata
+    ground the 60-tix player down to 10 to buy headroom for the 400, which is
+    the same squeeze the small-bet case exists to prevent, one tier up.
+
+    Here 100 and 300 share 200: the ceiling settles at 100, so the smaller bet
+    rides untouched and the larger carries the whole shortfall.
+    """
     await _fund({"a1": 100, "a2": 300, "b1": 200})
 
     await pool.match_pool("g", "s1", A, B)
 
     held = await pool.contributions("g", "s1")
-    assert held["a2"] > held["a1"], (
-        f"the larger bet was levelled to the smaller one: {held}")
+    assert held["a1"] == 100 and held["a2"] == 100, (
+        f"the shortfall was shared pro rata instead of levelled: {held}")
     assert held["a1"] + held["a2"] == 200
+
+
+@pytest.mark.asyncio
+async def test_nobody_who_bet_more_ends_up_holding_less(test_db):
+    """The property the ceiling buys, and the one pro rata could not hold.
+
+    Rounding a proportional share DOWN to a whole ten can drop a larger bet
+    below a smaller one that happened to round up. A common ceiling cannot:
+    every allocation is min(own bet, ceiling), which is monotone in the bet.
+    """
+    await _fund({"a1": 100, "a2": 150, "a3": 200, "a4": 250,
+                 "b1": 130, "b2": 130, "b3": 130, "b4": 130})
+
+    await pool.match_pool("g", "s1", A, B)
+
+    held = await pool.contributions("g", "s1")
+    bets = {"a1": 100, "a2": 150, "a3": 200, "a4": 250}
+    by_bet = [held.get(p, 0) for p in sorted(bets, key=bets.__getitem__)]
+    assert by_bet == sorted(by_bet), (
+        f"holdings are not monotone in bet size: {by_bet} for {bets} in {held}")
+
+
+@pytest.mark.asyncio
+async def test_a_small_bet_is_cut_when_the_pot_is_tight(test_db):
+    """Small bets are filled whole because the ceiling usually clears them --
+    NOT because they are exempt. When the other side cannot cover even the
+    small bets, the ceiling drops below them and they are cut like any other.
+
+    This is the honest edge of the rule and it is worth pinning: the old tier
+    language implied a floor under every bet at or below 50, and there is none.
+    """
+    await _fund({"a1": 50, "a2": 50, "a3": 50, "a4": 50,
+                 "b1": 20, "b2": 20, "b3": 20, "b4": 20})
+
+    result = await pool.match_pool("g", "s1", A, B)
+
+    assert result["matched"] == 80
+    held = await pool.contributions("g", "s1")
+    assert [held[p] for p in A] == [20, 20, 20, 20], (
+        f"the side over the ceiling was not levelled onto it: {held}")
+
+
+def test_every_path_into_matching_holds_the_team_creation_flag():
+    """match_pool is safe to REPLAY but not to run twice at once.
+
+    It reads every holding once and commits the refunds one at a time, so two
+    overlapping calls would trim the same side from the same snapshot twice and
+    leave check_pool raising on an imbalance already booked. Nothing inside the
+    function can prevent that -- a lock there would not help, because it is the
+    READ that goes stale. The only thing standing between the pool and a double
+    trim is that every caller sets state_manager.is_creating_teams first.
+
+    So the invariant is about call sites, and this is what checks it. A new
+    entry point that forgets the flag is exactly the change that reopens the
+    hole, and it would otherwise look completely innocent in review.
+    """
+    import ast
+    from pathlib import Path
+
+    callers = []
+    for module in ("views.py", "ready_check.py", "services/team_creator.py"):
+        tree = ast.parse(Path(module).read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            names = {n.func.id for n in ast.walk(node)
+                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+            if "create_and_display_teams" not in names:
+                continue
+            callers.append(f"{module}:{node.name}")
+            guarded = {n.func.attr for n in ast.walk(node)
+                       if isinstance(n, ast.Call)
+                       and isinstance(n.func, ast.Attribute)}
+            assert "is_creating_teams" in guarded and "set_creating_teams" in guarded, (
+                f"{module}:{node.name} calls create_and_display_teams without "
+                f"taking state_manager.is_creating_teams first, so two of them "
+                f"can reach match_pool at once and trim a side twice")
+
+    assert len(callers) >= 3, (
+        f"expected the known entry points into team creation, found {callers}")
+
+
+def test_the_queue_explainer_does_not_describe_the_retired_matcher():
+    """The embed makes falsifiable claims about level_side, and prose cannot be
+    typechecked. This is the cheapest anchor: the vocabulary of the retired
+    tiered matcher must not reappear in the text a player reads.
+
+    It caught nothing when written -- the rewrite came first. It exists because
+    the explainer and the rule live in different files, and the last time they
+    drifted the embed described a system that had not run for months.
+    """
+    import inspect
+
+    from views import PersistentView
+
+    text = inspect.getsource(PersistentView.explain_stakes_callback).lower()
+    for retired in ("proportional", "tiered", "minimum requirement",
+                    "player-to-player", "betting pair", "bet score"):
+        assert retired not in text, (
+            f"the queue explainer still uses {retired!r}, which belongs to the "
+            f"retired tiered matcher, not the pool")
+
+
+# ---- bet capping: the 🧢 preference, applied before levelling ----------------------
+#
+# "Cap my bet at the highest bet on the opposing team" is a personal ceiling a
+# player opts into at signup. It runs BEFORE levelling and hands the excess
+# straight back, so a capped player never has money sitting in a pot they said
+# they did not want that much action in.
+
+
+async def _a_400_against_a_top_bet_of_100(b1_capped):
+    """The one scenario the cap tests turn on: b1 bets 400 into a side whose
+    biggest bet is 100. Only b1's own preference varies between them."""
+    await _fund({"a1": 100, "a2": 100, "b1": 400, "b2": 20})
+    await seed_stakes("s1", {"a1": (100, False), "a2": (100, False),
+                             "b1": (400, b1_capped), "b2": (20, False)})
+
+
+@pytest.mark.asyncio
+async def test_a_capped_bet_is_trimmed_to_the_top_opposing_bet(test_db):
+    """400 against a side whose biggest bet is 100 comes back to 100."""
+    await _a_400_against_a_top_bet_of_100(b1_capped=True)
+
+    result = await pool.match_pool("g", "s1", A, B)
+
+    assert result["capped"] == {"b1": 300}, (
+        f"the capped bet was not trimmed to the opposing top bet: {result}")
+    held = await pool.contributions("g", "s1")
+    assert held["b1"] == 100, f"the cap did not stick: {held}"
+
+
+@pytest.mark.asyncio
+async def test_an_uncapped_bet_is_left_for_levelling(test_db):
+    """🏎️ means the bet is not trimmed up front; it takes its chances with the
+    ceiling like everyone else, and keeps whatever the other side can cover."""
+    await _a_400_against_a_top_bet_of_100(b1_capped=False)
+
+    result = await pool.match_pool("g", "s1", A, B)
+
+    assert result["capped"] == {}, f"an uncapped bet was trimmed: {result}"
+    held = await pool.contributions("g", "s1")
+    assert held["b1"] == 180, (
+        f"the uncapped bet did not take what the other side could cover: {held}")
+
+
+@pytest.mark.asyncio
+async def test_a_capped_bet_under_the_ceiling_is_untouched(test_db):
+    """The cap only ever trims. Opting in cannot cost a player who is already
+    at or below the top opposing bet."""
+    await _fund({"a1": 100, "a2": 100, "b1": 50, "b2": 50})
+    await seed_stakes("s1", {"a1": (100, False), "a2": (100, False),
+                    "b1": (50, True), "b2": (50, True)})
+
+    result = await pool.match_pool("g", "s1", A, B)
+
+    assert result["capped"] == {}, f"a bet below the cap was trimmed: {result}"
+
+
+@pytest.mark.asyncio
+async def test_capping_does_not_ratchet_when_matching_is_replayed(test_db):
+    """The regression the declared-bet key exists to prevent.
+
+    team_creator replays match_pool after a restart. A ceiling read from what
+    the opposing side currently HOLDS would fall on every pass -- the first
+    call levels team A down to 60 apiece, so the second call would cap b1 at 60
+    instead of 100, level A again, and shrink the pot on every replay. Reading
+    StakeInfo.max_stake, which levelling never touches, makes the ceiling the
+    same figure every time.
+    """
+    await _a_400_against_a_top_bet_of_100(b1_capped=True)
+
+    first = await pool.match_pool("g", "s1", A, B)
+    after_one = await pool.contributions("g", "s1")
+    second = await pool.match_pool("g", "s1", A, B)
+    after_two = await pool.contributions("g", "s1")
+
+    assert second["capped"] == {}, f"the cap was charged twice: {second}"
+    assert second["matched"] == first["matched"], (
+        f"the pot shrank on a replay: {first['matched']} -> {second['matched']}")
+    assert after_two == after_one, f"a replay moved money: {after_one} -> {after_two}"
+
+
+@pytest.mark.asyncio
+async def test_a_draft_with_no_declared_bets_is_never_capped(test_db):
+    """A premade entry fee has no StakeInfo and nothing to cap against. Absent
+    rows must read as "no preference", not as a ceiling of zero -- which would
+    refund the whole table."""
+    await _fund({"a1": 100, "a2": 100, "b1": 100, "b2": 100})
+
+    result = await pool.match_pool("g", "s1", A, B)
+
+    assert result["capped"] == {}, f"a fee draft was capped: {result}"
+    held = await pool.contributions("g", "s1")
+    assert all(held[p] == 100 for p in ("a1", "a2", "b1", "b2")), held
 
 
 # ---- max_pool: what the queue can honestly advertise -------------------------------
