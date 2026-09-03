@@ -220,6 +220,14 @@ async def send_settlement_notification_dm(
 # they did NOT initiate, so it is reported regardless. If that judgement is wrong
 # it is a policy call to reverse here, not an oversight.
 #
+# ONE carve-out, made deliberately: notify_draft_winnings. A prize is reported to
+# someone who entered the draft, played it and is waiting on the result -- it is
+# news about an event they took part in, not tix moving on a stranger's
+# initiative, so opting out of draft notifications opts out of this too. The
+# money half is not optional: apply_draft_winnings settles every winner's debts
+# whether or not it tells them, and if the settlement moves anything the notice
+# for THAT is a wallet movement again, and goes out regardless.
+#
 # Every one of these is best-effort: the money has already moved by the time we
 # are called, so a failed DM must never turn a completed transfer into an error.
 # send_dm already swallows Discord errors; @_best_effort covers the name and guild
@@ -345,42 +353,55 @@ async def notify_draft_winnings(bot, guild_id: str, player_id: str,
 
 
 @_best_effort
-async def send_draft_winnings_dms(guild_id: str, paid: dict, draft_name: str) -> None:
-    """Tell each winner what the pool paid them.
+async def apply_draft_winnings(guild_id: str, paid: dict, draft_name: str) -> None:
+    """Land a draft's payouts on their winners: settle, and tell those who want telling.
 
-    Honours the same dm_notifications opt-out as the ready-check and
-    teams-created DMs: this is a draft event, and a player who turned those off
-    should not be re-subscribed by the payout. The Bet Outcomes embed still
-    announces it in the channel either way.
+    A prize is an INFLOW, so this goes through mtgo_resolution_service.on_inflow
+    rather than dispatching a DM directly. That is what draws a winner's debts
+    against their winnings instead of letting a debtor collect and withdraw while
+    their creditor is still owed -- the case settle_inflow names as its reason for
+    existing, and what the tournament prize payout already does.
 
-    @_best_effort covers the WHOLE function, not just the notifier it calls:
+    Settlement runs for EVERY winner; only the DM honours the dm_notifications
+    opt-out. Sharing one loop would put a notification preference in charge of
+    whether someone's winnings pay their creditors, which is exactly the coupling
+    on_inflow takes a notifier parameter to avoid.
+
+    Called AFTER settle_pool's MONEY_LOCK block, never inside it: on_inflow reaches
+    settle_debt_from_wallet, which takes that lock, and it is not reentrant.
+
+    @_best_effort covers the WHOLE function, not just the notifiers it dispatches:
     the preference lookup and the balance read happen before any notifier is
     entered, and settle_decided_draft is awaited by check_and_post_victory_or_draw
-    -- so an exception raised here would take the victory post down with it,
-    after the tix had already moved.
+    -- so an exception raised here would take the victory post down with it, after
+    the tix had already moved.
     """
     if not paid:
         return
     # Lazy: notification_service is imported at migration time via the service
-    # chain, where wallet_service's engine must not be constructed.
+    # chain, where these engines must not be constructed.
+    from services import mtgo_resolution_service as resolution
     from services import wallet_service
 
     prefs = await get_players_dm_notification_preferences(list(paid), guild_id)
-    telling = [player_id for player_id in paid if prefs.get(player_id)]
-    if not telling:
-        return
+    # Read before settling: this is the balance the prize produced, which is what
+    # the winner is being told about. Drawing debts out of it afterwards is
+    # reported separately, by the settlement's own DM.
+    balances = await wallet_service.balances_for(guild_id, list(paid))
 
-    # One grouped read, then all the DMs at once -- the same shape settle_new_debts
-    # uses on this very path. It matters here because settle_decided_draft is the
-    # FIRST thing check_and_post_victory_or_draw awaits, so anything serialised
-    # here is dead time before the table sees its own results.
-    balances = await wallet_service.balances_for(guild_id, telling)
+    # All winners at once -- the same shape settle_new_debts uses on this very
+    # path. It matters here because settle_decided_draft is the FIRST thing
+    # check_and_post_victory_or_draw awaits, so anything serialised here is dead
+    # time before the table sees its own results.
     await asyncio.gather(*(
-        notify_wallet(notify_draft_winnings, guild_id, player_id,
-                      paid[player_id], draft_name, balances.get(player_id, 0))
-        for player_id in telling))
-    logger.info(f"draft winnings DMs: told {len(telling)} of {len(paid)} "
-                f"winner(s) for {draft_name}")
+        resolution.on_inflow(
+            guild_id, player_id,
+            notify_draft_winnings if prefs.get(player_id) else None,
+            credited, draft_name, balances.get(player_id, 0))
+        for player_id, credited in paid.items()))
+    told = sum(1 for player_id in paid if prefs.get(player_id))
+    logger.info(f"draft winnings: settled {len(paid)} winner(s) for {draft_name}, "
+                f"told {told}")
 
 
 @_best_effort
