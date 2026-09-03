@@ -444,9 +444,10 @@ class PersistentView(discord.ui.View):
         logger.info(f"Added {len(new_users)} test users to premade draft {self.draft_session_id} "
                     f"({draft_session.team_a_name}: {len(team_a)}, {draft_session.team_b_name}: {len(team_b)})")
         await self.update_team_view(interaction)
+        red, blue = labels_for(draft_session)
         await interaction.followup.send(
             f"Added {len(new_users)} test users. "
-            f"**{draft_session.team_a_name}**: {len(team_a)}/3, **{draft_session.team_b_name}**: {len(team_b)}/3.",
+            f"**{red.name}**: {len(team_a)}/3, **{blue.name}**: {len(team_b)}/3.",
             ephemeral=True,
         )
 
@@ -972,10 +973,11 @@ class PersistentView(discord.ui.View):
                     a = len([u for u in (session.team_a or []) if u in signed])
                     b = len([u for u in (session.team_b or []) if u in signed])
                     if a != b:
+                        red, blue = labels_for(session)
                         await interaction.response.send_message(
-                            f"{session.team_a_name} has {a} "
+                            f"{red.name} has {a} "
                             f"{'player' if a == 1 else 'players'} and "
-                            f"{session.team_b_name} has {b}. An entry-fee draft "
+                            f"{blue.name} has {b}. An entry-fee draft "
                             "needs even teams so both sides are backing the same "
                             "amount.", ephemeral=True)
                         return False, None

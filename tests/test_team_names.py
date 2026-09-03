@@ -158,6 +158,51 @@ def test_no_surface_spells_a_team_label_for_itself():
         f"team_labels() instead so every surface agrees: {offenders}")
 
 
+def test_no_user_facing_message_reads_a_stored_team_name_raw():
+    """The class of bug the string checks above cannot see.
+
+    team_a_name is NULL for a draft nobody named, so interpolating it straight
+    into a message prints "None". Two did: the test-user fill said "Added 6
+    test users. None: 3/3, None: 3/3", and -- in production -- an entry-fee
+    draft with uneven sides refused with "None has 3 players and None has 2".
+
+    Neither contained a team label as a literal, so nothing that greps for one
+    could find them. What they have in common is reading the stored field
+    inside a call that renders to a person, which is what this looks for.
+    """
+    import ast
+
+    UI = {"send", "send_message", "followup", "respond", "edit_message",
+          "add_field", "set_author", "set_footer", "Embed", "InputText",
+          "OptionChoice", "Option", "Button", "SelectOption", "add_item",
+          "set_field_at", "edit", "_add_button"}
+
+    def is_log(node):
+        f = getattr(node, "func", None)
+        return (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                and (f.value.id.endswith("logger")
+                     or f.value.id in ("logging", "log", "print")))
+
+    offenders = []
+    for path, text in _production_sources():
+        for node in ast.walk(ast.parse(text, filename=path)):
+            if not isinstance(node, ast.Call) or is_log(node):
+                continue
+            func = node.func
+            named = (func.attr if isinstance(func, ast.Attribute)
+                     else getattr(func, "id", ""))
+            if named not in UI:
+                continue
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Attribute)
+                        and inner.attr in ("team_a_name", "team_b_name")):
+                    offenders.append(f"{path}:{inner.lineno} .{inner.attr}")
+
+    assert not offenders, (
+        "a stored team name is rendered to a player without going through "
+        f"team_labels, so an unnamed draft will show \"None\": {offenders}")
+
+
 def test_no_command_asks_a_player_to_pick_a_letter():
     """/add_sub took `choices=["A", "B"]`, so the dropdown a player opened
     showed two bare letters -- the one surface where the internal A/B split
