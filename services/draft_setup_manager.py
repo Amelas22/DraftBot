@@ -12,17 +12,19 @@ import discord
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from config import (get_draftmancer_websocket_url, get_draftmancer_base_url,
-                    get_draftmancer_session_url, is_disconnect_autopause_enabled, is_test_mode)
+                    get_draftmancer_bot_user_id, get_draftmancer_session_url,
+                    is_disconnect_autopause_enabled, is_test_mode)
 from database.db_session import db_session
 from models.draft_session import DraftSession
 from models.match import MatchResult
 from bot_registry import get_bot
 from session import AsyncSessionLocal
-from sqlalchemy import select
+from sqlalchemy import select, update
 from helpers.digital_ocean_helper import DigitalOceanHelper
 from helpers.draft_footer import apply_draft_footer
 from helpers.magicprotools_helper import MagicProtoolsHelper
 from helpers.seating import resolve_seating_ids
+from helpers.stale_drafts import is_finished_draft
 from notification_service import send_ready_check_dms
 from services.draft_socket_client import DraftSocketClient
 from services.draft_log_store import post_team_logs
@@ -41,12 +43,8 @@ VICTORY_CHECK_INITIAL_DELAY = 10  # Initial delay for immediate victory detectio
 
 # Session stage constants (subset - full list in models/draft_session.py)
 # Valid stages: None (initial), "teams", "pairings", "completed"
-SESSION_STAGE_TEAMS = "teams"
-SESSION_STAGE_PAIRINGS = "pairings"
 
 # Connection and retry settings
-MAX_USER_ID_LOOKUP_ATTEMPTS = 5  # Max attempts to find bot's userID in session
-USER_ID_LOOKUP_RETRY_DELAY = 0.5  # Seconds between userID lookup attempts
 DRAFT_LOG_WAIT_ATTEMPTS = 20    # Poll for the draftLog push after endDraft (10s total)
 DRAFT_LOG_WAIT_INTERVAL = 0.5   # Seconds between draftLog availability checks
 # Draft-setup timings. In test mode (TEST_MODE=true) these are shortened so an
@@ -119,6 +117,31 @@ async def create_rooms_and_pairings_with_fallback(
     Returns:
         True if successful, False otherwise
     """
+    # Rooms may already exist -- /mutiny and the ownership-loss handler both
+    # reach here for drafts that have already reached 'pairings'.
+    # create_rooms_pairings refuses to run twice and returns False, which is
+    # indistinguishable here from a real failure, so without this the caller
+    # announces "could not create rooms automatically, use the button" into a
+    # channel whose button was deleted when the rooms were made. Already-created
+    # is success, not failure, and belongs here rather than at each caller.
+    existing = await DraftSession.get_by_session_id(session_id)
+    if existing is not None:
+        if existing.rooms_created_at is not None:
+            if logger:
+                logger.info(f"Rooms already exist for session {session_id}; nothing to create")
+            return True
+        # A draft that is over does not want rooms either. Both callers reach
+        # here for any session that has left the queue, which includes drafts
+        # /abandon has just voided (results cleared, channels queued for
+        # deletion) and drafts that played to a result. is_finished_draft
+        # rather than `session_stage == 'completed'`: the stage rarely advances
+        # past 'pairings' even for a fully played draft, so the victory message
+        # is the load-bearing marker.
+        if existing.session_stage == "abandoned" or is_finished_draft(existing):
+            if logger:
+                logger.info(f"Draft {session_id} is over; not creating rooms for it")
+            return True
+
     if channel:
         await channel.send("⏭️ **Creating rooms and pairings...** Continue the draft manually on Draftmancer.")
 
@@ -190,6 +213,9 @@ class DraftSetupManager:
                  friendly_id: str = None):
         self.session_id = session_id
         self.draft_id = draft_id
+        # Who this manager is to Draftmancer. Held as state, not passed inline, so
+        # _on_already_connected can replace it when the server renames us.
+        self.bot_user_id = get_draftmancer_bot_user_id(draft_id)
         self.friendly_id = friendly_id
         self.cube_id = cube_id
         self.guild_id = guild_id
@@ -426,6 +452,21 @@ class DraftSetupManager:
         self.socket_client.sio.on('userDisconnected', self._on_user_disconnected)
         self.socket_client.sio.on('resumeOnReconnection', self._on_resume_on_reconnection)
         self.socket_client.sio.on('draftLog', self._on_draft_log)
+        self.socket_client.sio.on('alreadyConnected', self._on_already_connected)
+
+    async def _on_already_connected(self, new_user_id):
+        """Draftmancer renamed us because our userID was already connected.
+
+        Its duplicate-login path (src/server.ts) accepts the new socket under a
+        freshly generated UUID and announces it here. Adopting it matters: ownership
+        and seating are addressed by userID, so a bot still calling itself the old id
+        cannot find itself in sessionUsers and never reclaims the session.
+        """
+        self.logger.warning(
+            f"Draftmancer reassigned our userID {self.bot_user_id} -> {new_user_id}; "
+            "another connection was already using it"
+        )
+        self.bot_user_id = new_user_id
 
     # Listen for user changes in the session
     async def _on_session_users(self, users):
@@ -915,26 +956,41 @@ class DraftSetupManager:
 
             self.logger.info(f"Regenerating draft session: old={self.draft_id}, new={new_draft_id}")
 
-            # Update the database
+            # Compare-and-swap, not a blind write. The caller decided this room
+            # was replaceable in an earlier transaction, and there are network
+            # round trips in between -- team creation can commit
+            # `session_stage='teams'` in that gap. Re-check the two facts the
+            # decision rested on, in the same statement that does the write, so a
+            # decision that has gone stale cannot abandon a committed room.
             async with db_session() as session:
-                stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
-                result = await session.execute(stmt)
-                draft_session = result.scalar_one_or_none()
-
-                if not draft_session:
-                    self.logger.error(f"Could not find draft session {self.session_id} to update")
-                    return False
-
-                # Update the draft_id and draft_link
-                draft_session.draft_id = new_draft_id
-                draft_session.draft_link = new_draft_link
+                result = await session.execute(
+                    update(DraftSession)
+                    .where(DraftSession.session_id == self.session_id,
+                           DraftSession.draft_id == self.draft_id,
+                           DraftSession.session_stage.is_(None))
+                    .values(draft_id=new_draft_id, draft_link=new_draft_link)
+                )
                 await session.commit()
+
+                if result.rowcount == 0:
+                    self.logger.warning(
+                        f"Refusing to regenerate {self.session_id}: it is no longer the "
+                        f"queued session with draft_id={self.draft_id} that was checked. "
+                        f"Preserving the existing Draftmancer room.")
+                    return False
 
                 self.logger.info(f"Updated draft session in database with new draft_id: {new_draft_id}")
 
             # Update local state
             old_draft_id = self.draft_id
             self.draft_id = new_draft_id
+            # The identity is derived from draft_id, so it has to move with it --
+            # otherwise we rejoin the NEW room under the OLD id and collide again.
+            self.bot_user_id = get_draftmancer_bot_user_id(new_draft_id)
+            # Socket-layer log lines are tagged with this. Left behind, every line
+            # after a swap names the abandoned room -- which is exactly what made
+            # the frontier-guide-69 logs read as though the bot were still there.
+            self.socket_client.resource_id = f"DB{new_draft_id}"
             self.cube_imported = False  # Reset so we try to import again
 
             # Update the logger context
@@ -949,11 +1005,76 @@ class DraftSetupManager:
                 await self.socket_client.disconnect()
                 self.logger.info(f"Disconnected from old session DB{old_draft_id}")
 
+            await self._announce_regenerated_session()
+
             return True
 
         except Exception as e:
             self.logger.error(f"Error regenerating draft session: {e}")
             return False
+
+    def _regenerated_notice_text(self, links: "dict[str, str]") -> str:
+        """What the room is told when the draft moves. Separated from sending, as
+        _disconnect_notice_text is, so the words can be asserted without reaching
+        into a mock's call args."""
+        lines = "\n".join(f"<@{discord_id}> — [your new draft link]({link})"
+                           for discord_id, link in links.items())
+        return (
+            f"⚠️ **The Draftmancer session moved.** The bot could not hold the old "
+            f"room, so it opened a new one (`DB{self.draft_id}`). **Any link you were "
+            f"given before this message no longer works.**\n\n{lines}"
+        )
+
+    async def _announce_regenerated_session(self) -> None:
+        """Tell the room the draft moved, with a fresh link each.
+
+        Everything the bot renders from here on is already correct; this is for the
+        links people are ALREADY holding. The sign-up confirmation is an ephemeral
+        message sent at sign-up time -- it cannot be edited afterwards, and nothing
+        about it suggests the room has changed, so a player who signed up before the
+        swap has a URL to a room the bot has walked away from.
+
+        Reads the session itself rather than reusing the caller's row: the swap above
+        is a compare-and-swap that deliberately does not load one. That read also
+        supplies the channel id, because self.draft_channel_id is populated by other
+        paths a regenerating manager need not have taken -- without it the
+        announcement skips silently and everyone keeps a dead link.
+
+        Never raises. The swap is committed by the time this runs, so a Discord
+        failure here must not report the regeneration as failed.
+        """
+        try:
+            draft_session = await self._get_draft_session_from_db()
+            if not draft_session or not draft_session.sign_ups:
+                # Regeneration in an empty queue is routine repair, not an incident.
+                return
+            links = {discord_id: link
+                     for discord_id, name in draft_session.sign_ups.items()
+                     if (link := draft_session.get_draft_link_for_user(name))}
+            if not links:
+                return
+
+            if not self.draft_channel_id and draft_session.draft_channel_id:
+                self.draft_channel_id = draft_session.draft_channel_id
+            channel = await self._get_draft_channel()
+            if not channel:
+                self.logger.warning("No draft channel; cannot announce the new session link")
+                return
+
+            # Draftmancer takes any setUserName a client sends, and those names are
+            # interpolated into the notice, so "@everyone" is a name somebody can
+            # pick. Only the ids resolved from sign_ups are allowed to ping.
+            await channel.send(
+                self._regenerated_notice_text(links),
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=False, roles=False,
+                    users=[discord.Object(id=int(i)) for i in links],
+                ),
+            )
+            self.logger.info(
+                f"Announced regenerated session DB{self.draft_id} to {len(links)} players")
+        except Exception as e:
+            self.logger.error(f"Could not announce regenerated session: {e}")
 
     async def _reclaim_ownership_as_spectator(self) -> bool:
         """Reclaim session ownership and set bot as spectator after reconnection.
@@ -962,29 +1083,24 @@ class DraftSetupManager:
         (especially if other users are present). This method actively reclaims ownership
         using the bot's current userID and sets it as a spectator.
 
+        The id comes from self.bot_user_id, which is authoritative: it is derived when
+        the manager is built, moves with a regeneration, and is replaced by
+        _on_already_connected when Draftmancer renames us.
+
+        It used to be rediscovered here by scanning sessionUsers for the name
+        "DraftBot" behind a retry-and-sleep loop. That could not work: this method
+        ends by calling setOwnerIsPlayer(False), whose handler deletes the owner from
+        `sess.users` (Draftmancer src/server.ts:585), and sessionUsers is built from
+        users + disconnectedUsers (src/Session.ts:3747). So from the first successful
+        reclaim onwards the bot is absent from that payload while still connected,
+        and every later reconnect logged the production error
+        "Cannot reclaim ownership - bot userID not found in session_users".
+
         Returns:
             True if successful, False otherwise
         """
         try:
-            # Find our current userID from session_users
-            # Wait briefly for session_users to populate after reconnect
-            bot_user_id = None
-            for attempt in range(MAX_USER_ID_LOOKUP_ATTEMPTS):
-                for user in self.session_users:
-                    if user.get('userName') == 'DraftBot':
-                        bot_user_id = user.get('userID')
-                        break
-
-                if bot_user_id:
-                    break
-
-                if attempt < MAX_USER_ID_LOOKUP_ATTEMPTS - 1:
-                    self.logger.debug(f"Bot userID not found yet, waiting... (attempt {attempt + 1}/{MAX_USER_ID_LOOKUP_ATTEMPTS})")
-                    await asyncio.sleep(USER_ID_LOOKUP_RETRY_DELAY)
-
-            if not bot_user_id:
-                self.logger.error("Cannot reclaim ownership - bot userID not found in session_users after waiting")
-                return False
+            bot_user_id = self.bot_user_id
 
             # First, set ourselves as the session owner using our actual userID
             self.logger.debug(f"Setting session owner to bot userID: {bot_user_id}")
@@ -1067,7 +1183,7 @@ class DraftSetupManager:
     async def connect_to_new_session(self):
         """Connect to the new Draftmancer session after regeneration."""
         try:
-            websocket_url = get_draftmancer_websocket_url(self.draft_id)
+            websocket_url = get_draftmancer_websocket_url(self.draft_id, user_id=self.bot_user_id)
             self.logger.info(f"Connecting to new session at {websocket_url}")
 
             connection_successful = await self.socket_client.connect_with_retry(websocket_url)
@@ -2372,28 +2488,37 @@ class DraftSetupManager:
             self.logger.error(f"Error updating pack settings: {e}")
             return False
 
-    async def _should_advance_to_pairings(self) -> bool:
-        """Determine if we should automatically advance to pairings stage.
+    async def must_preserve_draft_room(self) -> bool:
+        """Whether this session's Draftmancer room must be kept.
 
-        Returns True if:
-        - Draft is currently active (self.drafting), OR
-        - Session stage is 'teams' (teams formed but draft not started yet)
+        Replacing a room (`regenerate_draft_session`) abandons it and opens an
+        empty one. That room is the only copy of the draft log and Draftmancer
+        keeps it for about 28 minutes, so replacing a committed draft's room
+        destroys the log outright.
 
-        Returns:
-            bool: True if should advance to pairings, False otherwise
+        So the question is not "is keeping it safe" -- keeping is always safe --
+        but "is there positive evidence it can be replaced". Only a session still
+        in the queue qualifies: nobody holds a link yet, so replacing a broken
+        room there is the repair rather than the damage.
+
+        eastern-paladin-84 (2026-08-28) lost its log because the ambiguous
+        answers shared a return value with "replaceable".
         """
-        if self.drafting:
+        if self.drafting or self.draft_finished:
             return True
 
-        try:
-            async with db_session() as session:
-                stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
-                result = await session.execute(stmt)
-                draft_session = result.scalar_one_or_none()
-                return draft_session and draft_session.session_stage == SESSION_STAGE_TEAMS
-        except Exception as e:
-            self.logger.error(f"Failed to check session stage: {e}")
-            return False
+        # Missing and unreadable collapse to None here, and both must preserve.
+        draft_session = await self._get_draft_session_from_db()
+        if draft_session is None:
+            self.logger.warning(
+                f"Could not read the session for {self.session_id}; preserving the "
+                f"Draftmancer room rather than assuming it is replaceable")
+            return True
+        # A blacklist of one. Listing the committed stages instead put every
+        # stage nobody thought of -- 'completed', 'abandoned', anything added
+        # later -- back on the replaceable side, which is this bug's exact shape
+        # one stage further along.
+        return draft_session.session_stage is not None
 
     async def _handle_ownership_loss_with_pairings(self, channel=None) -> None:
         """Handle bot losing ownership when past point of no return.
@@ -2412,12 +2537,16 @@ class DraftSetupManager:
         if not channel:
             channel = await self._get_draft_channel()
 
+        # create_rooms_and_pairings_with_fallback is idempotent: it returns
+        # early when the rooms already exist, which they do for any draft that
+        # has reached 'pairings'.
         if guild:
             await create_rooms_and_pairings_with_fallback(
                 bot, guild, channel, self.session_id, self.session_type, self.logger
             )
 
         await self._cleanup_and_disconnect("ownership loss with pairings")
+
 
     async def _cleanup_and_disconnect(self, reason: str = "cleanup") -> None:
         """Disconnect from Draftmancer and remove from active managers registry.
@@ -2509,25 +2638,27 @@ class DraftSetupManager:
 
             # Handle ownership error
             if not success and is_ownership_error:
-                # Check if users have joined Draftmancer
-                users_have_joined = self.users_count > 0 or len(self.session_users) > 0
+                # Who is visible in the room is not evidence either way:
+                # session_users is filled by a socket event that may not have
+                # arrived yet, so an empty room here can simply mean this
+                # manager is new. Only the durable record decides.
+                must_preserve = await self.must_preserve_draft_room()
+                self.logger.info(
+                    f"Lost session ownership; must_preserve_draft_room={must_preserve} "
+                    f"(users visible: {self.users_count})")
 
-                # Determine if we're past the point of no return
-                # Only advance to pairings if BOTH:
-                # 1. Users have joined Draftmancer (they're committed)
-                # 2. Draft is active OR teams are formed
-                should_advance_to_pairings = users_have_joined and await self._should_advance_to_pairings()
-
-                if should_advance_to_pairings:
-                    # Past point of no return - users committed, create pairings
-                    self.logger.warning("Bot lost ownership with users present and teams formed, creating pairings and disconnecting")
+                if must_preserve:
+                    # Committed draft: the room may hold the only copy of the
+                    # log, so hand over rather than replace it.
+                    self.logger.warning("Bot lost ownership of a committed draft, creating pairings and disconnecting")
                     channel = await self._get_draft_channel()
                     await self._handle_ownership_loss_with_pairings(channel)
-                    raise StopRetryException("Bot lost ownership with users present and teams formed")
+                    raise StopRetryException("Bot lost ownership of a committed draft")
 
                 elif allow_regeneration:
-                    # Either no users yet, or teams not formed - regenerate session
-                    self.logger.info("Bot lost ownership before point of no return, regenerating session...")
+                    # Not committed yet: nobody holds a link, so a new room is
+                    # the repair rather than the damage.
+                    self.logger.info("Bot lost ownership before the draft committed, regenerating session...")
 
                     if await self.regenerate_draft_session():
                         self.logger.info("Session regenerated successfully, reconnecting...")
@@ -2554,11 +2685,13 @@ class DraftSetupManager:
             await self._cleanup_and_disconnect("fatal error during cube import")
             return False
 
-    async def _handle_reconnection(self, websocket_url: str) -> bool:
+    async def _handle_reconnection(self) -> bool:
         """Handle reconnection and ownership reclaim logic.
 
-        Args:
-            websocket_url: The websocket URL to reconnect to
+        Builds the URL here rather than taking one, because this method can move
+        the draft: regenerate_draft_session below swaps draft_id -- and with it the
+        bot's identity -- so a URL computed by the caller before the loop points at
+        the room the bot has just abandoned by the time the next drop arrives.
 
         Returns:
             bool: True if should continue the loop, False if should break
@@ -2566,6 +2699,7 @@ class DraftSetupManager:
         self.logger.info(f"[RECONNECT] === RECONNECTION START === Manager ID: {id(self)}")
         self.logger.info(f"[RECONNECT] Connection lost, attempting to reconnect...")
 
+        websocket_url = get_draftmancer_websocket_url(self.draft_id, user_id=self.bot_user_id)
         reconnected = await self.socket_client.connect_with_retry(websocket_url)
         self.logger.info(f"[RECONNECT] Reconnection result: {reconnected}")
 
@@ -2595,10 +2729,10 @@ class DraftSetupManager:
 
             # Check if links have been distributed (teams formed or draft active)
             # This is the ONLY thing that matters, not random users in Draftmancer
-            should_advance_to_pairings = await self._should_advance_to_pairings()
-            self.logger.info(f"[RECONNECT] Should advance to pairings: {should_advance_to_pairings}")
+            must_preserve = await self.must_preserve_draft_room()
+            self.logger.info(f"[RECONNECT] Must preserve draft room: {must_preserve}")
 
-            if should_advance_to_pairings:
+            if must_preserve:
                 # Links distributed - can't regenerate, create pairings
                 self.logger.warning(f"[RECONNECT] Links already distributed - creating pairings and disconnecting")
                 channel = await self._get_draft_channel()
@@ -2672,11 +2806,12 @@ class DraftSetupManager:
         self.logger.info(f"[LOOP] === KEEP_CONNECTION_ALIVE START === Manager ID: {id(self)}")
         self.logger.info(f"[LOOP] Starting connection management for draft {self.draft_id}")
 
-        # Try initial connection
-        websocket_url = get_draftmancer_websocket_url(self.draft_id)
+        # Only the FIRST connection. Reconnects build their own URL, because a
+        # regeneration moves the draft and this value would not follow it.
+        initial_url = get_draftmancer_websocket_url(self.draft_id, user_id=self.bot_user_id)
 
         # First connection attempt
-        if not await self.socket_client.connect_with_retry(websocket_url):
+        if not await self.socket_client.connect_with_retry(initial_url):
             self.logger.error("Initial connection failed after retries. Aborting.")
             return
 
@@ -2702,7 +2837,7 @@ class DraftSetupManager:
                 # If disconnected, try to reconnect
                 if not self.socket_client.connected:
                     self.logger.info(f"[LOOP] Socket disconnected, calling _handle_reconnection")
-                    should_continue = await self._handle_reconnection(websocket_url)
+                    should_continue = await self._handle_reconnection()
                     self.logger.info(f"[LOOP] _handle_reconnection returned: {should_continue}")
                     if not should_continue:
                         self.logger.info(f"[LOOP] Breaking loop (reconnection returned False)")
