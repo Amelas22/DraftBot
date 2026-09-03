@@ -16,6 +16,7 @@ project-includes = [
     "services/draft_pool_service.py",
     "helpers/match_control.py",
     "helpers/opponent_threads.py",
+    "helpers/team_names.py",
     "helpers/room_regeneration.py",
     "helpers/utils.py",
     "helpers/view_dispatch_guard.py",

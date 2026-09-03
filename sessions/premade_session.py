@@ -2,6 +2,8 @@ from .base_session import BaseSession
 import discord
 from sqlalchemy.exc import IntegrityError
 
+from helpers.team_names import team_labels
+
 
 class PremadeSession(BaseSession):
     # Remove this method since it overrides the BaseSession.create_embed method
@@ -49,8 +51,6 @@ class PremadeSession(BaseSession):
             _match, current_a_name, current_b_name, _round_number, _draft = facts
             self.session_details.team_a_name = current_a_name
             self.session_details.team_b_name = current_b_name
-        self.session_details.team_a_name = self.session_details.team_a_name or "Team A"
-        self.session_details.team_b_name = self.session_details.team_b_name or "Team B"
         try:
             await super().create_draft_session(interaction, bot)
         except IntegrityError:
@@ -126,13 +126,15 @@ class PremadeSession(BaseSession):
 
     def _add_signup_fields(self, embed):
         """Add team-specific fields for premade drafts instead of generic sign-ups."""
+        red, blue = team_labels(self.session_details.team_a_name,
+                                self.session_details.team_b_name)
         embed.add_field(
-            name=self.session_details.team_a_name or "Team A",
+            name=red.labelled,
             value="No players yet.",
             inline=True,
         )
         embed.add_field(
-            name=self.session_details.team_b_name or "Team B",
+            name=blue.labelled,
             value="No players yet.",
             inline=True,
         )

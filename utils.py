@@ -16,6 +16,7 @@ from quiz_views_module.quiz_views import QuizPublicView
 from quiz_views_module.trophy_quiz_views import TrophyQuizView
 from helpers.draft_footer import apply_draft_footer_from_session
 from helpers.draft_outcome import decides_draft, total_matches_in
+from helpers.team_names import team_labels
 from services.draft_pool_service import (format_entries, format_outcomes,
                                          pool_balance, release_draft_pool,
                                          settle_draw, settle_pool)
@@ -659,14 +660,16 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                 bet_embed = None  # Initialize bet embed (will be populated for staked drafts)
 
                 # Add team fields and seating order
-                embed.add_field(name="🔴 Team Red" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_a_name}", 
+                red, blue = team_labels(draft_session.team_a_name,
+                                        draft_session.team_b_name)
+                embed.add_field(name=red.labelled,
                                 value="\n".join(team_a_names), inline=True)
-                embed.add_field(name="🔵 Team Blue" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_b_name}", 
+                embed.add_field(name=blue.labelled,
                                 value="\n".join(team_b_names), inline=True)
                 embed.add_field(
-                    name="**Draft Standings**", 
-                    value=("🔴 **Team Red Wins:** " + str(team_a_wins) if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"**{draft_session.team_a_name} Wins:** {team_a_wins}") + 
-                        ("\n🔵 **Team Blue Wins:** " + str(team_b_wins) if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"\n**{draft_session.team_b_name} Wins:** {team_b_wins}"), 
+                    name="**Draft Standings**",
+                    value=f"{red.labelled} **Wins:** {team_a_wins}\n"
+                          f"{blue.labelled} **Wins:** {team_b_wins}",
                     inline=False)
                 if draft_session.session_type != "premade":
                     embed.add_field(name="Seating Order", value=format_seating_order(seating_order), inline=False)

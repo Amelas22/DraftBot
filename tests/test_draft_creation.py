@@ -183,11 +183,13 @@ async def test_random_draft_has_signup_field(test_db):
     signup_field = next((f for f in embed.fields if f.name == "Sign-Ups:"), None)
     assert signup_field is not None, "Random drafts should have Sign-Ups field"
 
-    # Assert - Random drafts should NOT have team-specific fields
-    team_a_field = next((f for f in embed.fields if "Team A" in f.name), None)
-    team_b_field = next((f for f in embed.fields if "Team B" in f.name), None)
-    assert team_a_field is None, "Random drafts should not have Team A field"
-    assert team_b_field is None, "Random drafts should not have Team B field"
+    # Assert - Random drafts should NOT have team-specific fields. Teams do not
+    # exist until they are drawn, under either spelling of the label.
+    from helpers.team_names import BLUE, RED
+    for label in ("Team A", "Team B", RED.name, BLUE.name):
+        assert not any(label in f.name for f in embed.fields), (
+            f"a random draft's signup embed named {label} before teams exist: "
+            f"{[f.name for f in embed.fields]}")
 
 
 # ============================================================================
@@ -310,8 +312,11 @@ async def test_premade_draft_basic_creation(test_db):
 
     assert draft is not None, "DraftSession should be created"
     assert draft.session_type == "premade", "session_type should be 'premade'"
-    assert draft.team_a_name == "Team A", "team_a_name should default to 'Team A'"
-    assert draft.team_b_name == "Team B", "team_b_name should default to 'Team B'"
+    # A blank name stays blank in the database. Persisting "Team A" made an
+    # unnamed side look like a named one, which is why some surfaces showed the
+    # letter and others the colour; team_labels decides the label at render.
+    assert draft.team_a_name is None, "an unnamed side should not store a placeholder"
+    assert draft.team_b_name is None, "an unnamed side should not store a placeholder"
     assert draft.guild_id == str(interaction.guild_id), "guild_id should be stored"
     assert draft.tracked_draft is True, "tracked_draft should be True"
 
@@ -371,11 +376,13 @@ async def test_premade_draft_has_team_fields(test_db):
     with patch('sessions.base_session.get_cube_thumbnail_url', return_value='https://example.com/thumb.jpg'):
         embed = premade_session.create_embed()
 
-    # Assert - Premade drafts should have team-specific fields
-    team_a_field = next((f for f in embed.fields if "Team A" in f.name), None)
-    team_b_field = next((f for f in embed.fields if "Team B" in f.name), None)
-    assert team_a_field is not None, "Premade drafts should have Team A field"
-    assert team_b_field is not None, "Premade drafts should have Team B field"
+    # Assert - Premade drafts should have team-specific fields. Unnamed sides
+    # are labelled by team_labels, so this premade shows the colours.
+    from helpers.team_names import BLUE, RED
+    team_a_field = next((f for f in embed.fields if RED.name in f.name), None)
+    team_b_field = next((f for f in embed.fields if BLUE.name in f.name), None)
+    assert team_a_field is not None, f"no {RED.name} field: {[f.name for f in embed.fields]}"
+    assert team_b_field is not None, f"no {BLUE.name} field: {[f.name for f in embed.fields]}"
 
     # Assert - Premade drafts should NOT have generic Sign-Ups field
     signup_field = next((f for f in embed.fields if f.name == "Sign-Ups:"), None)

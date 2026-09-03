@@ -28,6 +28,7 @@ from helpers.draft_rooms import (
 from helpers.draft_outcome import decides_draft, standings_after, total_matches_in
 from helpers.opponent_threads import spawn_opponent_threads
 from helpers.permissions import bot_manager_button
+from helpers.team_names import team_labels
 from services.draft_pool_service import entry_in, release_draft_pool, set_entry
 from utils import (
     calculate_pairings,
@@ -183,8 +184,9 @@ class PersistentView(discord.ui.View):
 
 
     def _add_premade_buttons(self):
-        self._add_button(self.team_a_name, "green", "Team_A", self.team_assignment_callback)
-        self._add_button(self.team_b_name, "red", "Team_B", self.team_assignment_callback)
+        red, blue = team_labels(self.team_a_name, self.team_b_name)
+        self._add_button(red.name, "green", "Team_A", self.team_assignment_callback)
+        self._add_button(blue.name, "red", "Team_B", self.team_assignment_callback)
         self._add_button("Generate Seating Order", "primary", "generate_seating", self.randomize_teams_callback)
 
         # Add test button only if global test mode is enabled
@@ -1330,14 +1332,18 @@ class PersistentView(discord.ui.View):
         team_b_names = [get_display_name_by_id(str(user_id), guild, session.sign_ups.get(str(user_id), "Unknown User")) for user_id in (session.team_b or [])]
 
         # Find the index of the Team A and Team B fields in the embed
-        team_a_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith(session.team_a_name or "Team A")), None)
-        team_b_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith(session.team_b_name or "Team B")), None)
+        # Matched by the same label the field was written with -- these headings
+        # are produced by team_labels everywhere else, so re-deriving the name
+        # here is how the two spellings drifted apart in the first place.
+        red, blue = team_labels(session.team_a_name, session.team_b_name)
+        team_a_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith(red.labelled)), None)
+        team_b_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith(blue.labelled)), None)
 
         # Update the fields if found
         if team_a_index is not None:
-            embed.set_field_at(team_a_index, name=f"{session.team_a_name} ({len(session.team_a or [])}):", value="\n".join(team_a_names) if team_a_names else "No players yet.", inline=True)
+            embed.set_field_at(team_a_index, name=f"{red.labelled} ({len(session.team_a or [])}):", value="\n".join(team_a_names) if team_a_names else "No players yet.", inline=True)
         if team_b_index is not None:
-            embed.set_field_at(team_b_index, name=f"{session.team_b_name} ({len(session.team_b or [])}):", value="\n".join(team_b_names) if team_b_names else "No players yet.", inline=True)
+            embed.set_field_at(team_b_index, name=f"{blue.labelled} ({len(session.team_b or [])}):", value="\n".join(team_b_names) if team_b_names else "No players yet.", inline=True)
 
         # Edit the original message with the updated embed
         await message.edit(embed=embed)
@@ -2135,8 +2141,8 @@ class MatchResultSelect(Select):
         return outcome, projected_a, projected_b, draft_session
 
     def _confirmation_text(self, outcome, projected_a, projected_b, draft_session):
-        team_a_name = draft_session.team_a_name or "Team A"
-        team_b_name = draft_session.team_b_name or "Team B"
+        red, blue = team_labels(draft_session.team_a_name, draft_session.team_b_name)
+        team_a_name, team_b_name = red.name, blue.name
         score = f"**{team_a_name} {projected_a} – {projected_b} {team_b_name}**"
         staked = draft_session.session_type == "staked"
 

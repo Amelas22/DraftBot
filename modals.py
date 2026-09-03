@@ -5,6 +5,7 @@ from loguru import logger
 from typing import Optional
 from config import get_cube_options
 from models.session_details import SessionDetails
+from helpers.team_names import BLUE, RED
 
 from sessions import RandomSession, PremadeSession, SwissSession, BaseSession
 from sessions.staked_session import StakedSession
@@ -56,14 +57,18 @@ class CubeDraftModal(discord.ui.Modal):
         has_team_names = ("team_a_name" in self.session_details_overrides
                           and "team_b_name" in self.session_details_overrides)
         if self.session_type == "premade" and not has_team_names:
+            # Named after the side each input actually fills, and blank is a
+            # real answer: the draft then shows the colour instead.
             self.add_item(discord.ui.InputText(
-                label="Team A Name", 
-                placeholder="Enter Team A Name", 
+                label=f"{RED.name} Name",
+                placeholder=f"Leave blank for \"{RED.name}\"",
+                required=False,
                 custom_id="team_a_input"
             ))
             self.add_item(discord.ui.InputText(
-                label="Team B Name", 
-                placeholder="Enter Team B Name", 
+                label=f"{BLUE.name} Name",
+                placeholder=f"Leave blank for \"{BLUE.name}\"",
+                required=False,
                 custom_id="team_b_input"
             ))
             # Optional, and blank means what it has always meant: a free draft.
@@ -93,8 +98,12 @@ class CubeDraftModal(discord.ui.Modal):
 
         team_inputs = [c for c in self.children if c.custom_id in ("team_a_input", "team_b_input")]
         if self.session_type == "premade" and team_inputs:
-            details.team_a_name = team_inputs[0].value or "Team A"
-            details.team_b_name = team_inputs[1].value or "Team B"
+            # A blank input stays blank rather than persisting a placeholder.
+            # Storing one is what let a premade draft with no chosen name
+            # read as a chosen one, so half the surfaces showed the letter
+            # and the rest showed the colour. team_labels decides at render.
+            details.team_a_name = team_inputs[0].value or None
+            details.team_b_name = team_inputs[1].value or None
 
         fee_input = next((c for c in self.children
                           if c.custom_id == "entry_fee_input"), None)
