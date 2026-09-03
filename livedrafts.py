@@ -6,7 +6,7 @@ from session import AsyncSessionLocal, DraftSession, MatchResult, get_draft_sess
 from utils import calculate_team_wins
 from helpers.display_names import get_display_name, get_display_name_by_id
 from helpers.draft_footer import apply_draft_footer_from_session
-from helpers.team_names import team_labels
+from helpers.team_names import labels_for
 from loguru import logger
 
 async def manage_live_drafts_channel(bot, guild):
@@ -107,7 +107,7 @@ async def generate_live_draft_embed(bot, draft_session):
     )
     
     # Add team fields
-    red, blue = team_labels(draft_session.team_a_name, draft_session.team_b_name)
+    red, blue = labels_for(draft_session)
     embed.add_field(name=red.labelled, value="\n".join(team_a_names) or "No players", inline=True)
     embed.add_field(name=blue.labelled, value="\n".join(team_b_names) or "No players", inline=True)
 
@@ -138,9 +138,9 @@ async def generate_live_draft_embed(bot, draft_session):
                 # Determine which team won
                 winner_emoji = ""
                 if match.winner_id in draft_session.team_a:
-                    winner_emoji = f"{red.emoji} " if red.emoji else ""
+                    winner_emoji = red.prefix
                 elif match.winner_id in draft_session.team_b:
-                    winner_emoji = f"{blue.emoji} " if blue.emoji else ""
+                    winner_emoji = blue.prefix
                 
                 # Determine winner and loser names
                 if match.winner_id == match.player1_id:

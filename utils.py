@@ -16,7 +16,7 @@ from quiz_views_module.quiz_views import QuizPublicView
 from quiz_views_module.trophy_quiz_views import TrophyQuizView
 from helpers.draft_footer import apply_draft_footer_from_session
 from helpers.draft_outcome import decides_draft, total_matches_in
-from helpers.team_names import team_labels
+from helpers.team_names import labels_for
 from services.draft_pool_service import (format_entries, format_outcomes,
                                          pool_balance, release_draft_pool,
                                          settle_draw, settle_pool)
@@ -660,8 +660,7 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                 bet_embed = None  # Initialize bet embed (will be populated for staked drafts)
 
                 # Add team fields and seating order
-                red, blue = team_labels(draft_session.team_a_name,
-                                        draft_session.team_b_name)
+                red, blue = labels_for(draft_session)
                 embed.add_field(name=red.labelled,
                                 value="\n".join(team_a_names), inline=True)
                 embed.add_field(name=blue.labelled,

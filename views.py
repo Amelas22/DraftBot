@@ -28,7 +28,7 @@ from helpers.draft_rooms import (
 from helpers.draft_outcome import decides_draft, standings_after, total_matches_in
 from helpers.opponent_threads import spawn_opponent_threads
 from helpers.permissions import bot_manager_button
-from helpers.team_names import team_labels
+from helpers.team_names import labels_for
 from services.draft_pool_service import entry_in, release_draft_pool, set_entry
 from utils import (
     calculate_pairings,
@@ -184,7 +184,7 @@ class PersistentView(discord.ui.View):
 
 
     def _add_premade_buttons(self):
-        red, blue = team_labels(self.team_a_name, self.team_b_name)
+        red, blue = labels_for(self)
         self._add_button(red.name, "green", "Team_A", self.team_assignment_callback)
         self._add_button(blue.name, "red", "Team_B", self.team_assignment_callback)
         self._add_button("Generate Seating Order", "primary", "generate_seating", self.randomize_teams_callback)
@@ -1335,7 +1335,7 @@ class PersistentView(discord.ui.View):
         # Matched by the same label the field was written with -- these headings
         # are produced by team_labels everywhere else, so re-deriving the name
         # here is how the two spellings drifted apart in the first place.
-        red, blue = team_labels(session.team_a_name, session.team_b_name)
+        red, blue = labels_for(session)
         team_a_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith(red.labelled)), None)
         team_b_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith(blue.labelled)), None)
 
@@ -2141,9 +2141,8 @@ class MatchResultSelect(Select):
         return outcome, projected_a, projected_b, draft_session
 
     def _confirmation_text(self, outcome, projected_a, projected_b, draft_session):
-        red, blue = team_labels(draft_session.team_a_name, draft_session.team_b_name)
-        team_a_name, team_b_name = red.name, blue.name
-        score = f"**{team_a_name} {projected_a} – {projected_b} {team_b_name}**"
+        red, blue = labels_for(draft_session)
+        score = f"**{red.name} {projected_a} – {projected_b} {blue.name}**"
         staked = draft_session.session_type == "staked"
 
         if outcome == "draw":
@@ -2152,7 +2151,7 @@ class MatchResultSelect(Select):
                     f"Recording this makes it {score}, and the draft is over.{money}\n"
                     f"\nNothing has been recorded yet.")
 
-        winner = team_a_name if outcome == "team_a" else team_b_name
+        winner = red.name if outcome == "team_a" else blue.name
         money = ("\nStakes settle the moment this is recorded, and cannot be undone "
                  "from Discord.") if staked else ""
         return (f"### This ends the draft\n"

@@ -2,7 +2,7 @@ from .base_session import BaseSession
 import discord
 from sqlalchemy.exc import IntegrityError
 
-from helpers.team_names import team_labels
+from helpers.team_names import labels_for
 
 
 class PremadeSession(BaseSession):
@@ -126,8 +126,7 @@ class PremadeSession(BaseSession):
 
     def _add_signup_fields(self, embed):
         """Add team-specific fields for premade drafts instead of generic sign-ups."""
-        red, blue = team_labels(self.session_details.team_a_name,
-                                self.session_details.team_b_name)
+        red, blue = labels_for(self.session_details)
         embed.add_field(
             name=red.labelled,
             value="No players yet.",

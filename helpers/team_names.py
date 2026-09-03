@@ -16,7 +16,7 @@ It is decided per side. A creator can fill one input and not the other, and
 "Pack Rats vs Team Blue" is what they described; sending both back to colours
 would throw away a name somebody typed.
 """
-from typing import NamedTuple
+from typing import NamedTuple, Protocol
 
 
 class TeamLabel(NamedTuple):
@@ -34,9 +34,21 @@ class TeamLabel(NamedTuple):
     color: str
 
     @property
+    def prefix(self) -> str:
+        """The emoji and its separating space, or nothing for a named team."""
+        return f"{self.emoji} " if self.emoji else ""
+
+    @property
     def labelled(self) -> str:
-        """The name as an embed field heading: "🔴 Team Red", or "Pack Rats"."""
-        return f"{self.emoji} {self.name}" if self.emoji else self.name
+        """The name as an embed field heading: "🔴 Team Red", or "Pack Rats".
+
+        Use this wherever the label heads a block a reader scans -- an embed
+        field, a standings line. Use `name` where the emoji would be noise or
+        is added by something else: a button, a Draftmancer team name, a
+        sentence the label appears inside, or a caller that takes `color` and
+        renders the emoji itself.
+        """
+        return f"{self.prefix}{self.name}"
 
 
 RED = TeamLabel("Team Red", "🔴", "red")
@@ -58,6 +70,18 @@ def _chosen(name: str | None) -> str | None:
     return stripped
 
 
+class HasTeamNames(Protocol):
+    """Anything that carries the two stored names.
+
+    Three unrelated classes do -- a DraftSession row, a PersistentView, a
+    SessionDetails -- and they share no base. Stating the shape rather than
+    naming a type is what lets one function serve all three without either
+    importing the models or falling back to Any.
+    """
+    team_a_name: str | None
+    team_b_name: str | None
+
+
 def team_labels(team_a_name: str | None,
                 team_b_name: str | None) -> tuple[TeamLabel, TeamLabel]:
     """The two labels to show for a draft, given whatever names it stored.
@@ -69,3 +93,16 @@ def team_labels(team_a_name: str | None,
     chosen_a, chosen_b = _chosen(team_a_name), _chosen(team_b_name)
     return (RED._replace(name=chosen_a, emoji="", color="") if chosen_a else RED,
             BLUE._replace(name=chosen_b, emoji="", color="") if chosen_b else BLUE)
+
+
+def labels_for(draft: HasTeamNames) -> tuple[TeamLabel, TeamLabel]:
+    """The two labels for anything carrying team_a_name and team_b_name.
+
+    Every caller but one has such an object to hand -- a DraftSession, a view,
+    a SessionDetails -- and spelling the pair out at each of them invited the
+    one mistake this cannot recover from: passing the names the wrong way
+    round silently trades the colours over, and no test would fail because
+    both orders produce valid labels. Naming the object instead of its two
+    fields removes the chance.
+    """
+    return team_labels(draft.team_a_name, draft.team_b_name)

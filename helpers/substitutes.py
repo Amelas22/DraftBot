@@ -6,10 +6,15 @@ and applies the permission overwrites this module decides on.
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from helpers.team_names import BLUE, RED, team_labels
+from helpers.team_names import BLUE, RED, labels_for
 
-# Team channels are created with these hardcoded prefixes (views.py):
-# team_a -> "Red-Team-Chat-{friendly_id}", team_b -> "Blue-Team-Chat-{friendly_id}".
+# Team channels are created with these prefixes: team_a ->
+# "Red-Team-Chat-{friendly_id}", team_b -> "Blue-Team-Chat-{friendly_id}".
+# That the A side is the RED one is also asserted, separately, by
+# helpers/team_names; test_the_channel_prefixes_agree_with_the_colours
+# holds the two together. These cannot be derived from the labels -- a
+# channel name is hyphenated and word-swapped, and renaming them would
+# orphan the rooms of every draft already in flight.
 TEAM_A_CHANNEL_PREFIX = "Red-Team"
 TEAM_B_CHANNEL_PREFIX = "Blue-Team"
 
@@ -69,7 +74,7 @@ def resolve_sub_grant(
     else:
         return None, "Only players in this draft (or bot managers) can add a sub."
 
-    red, blue = team_labels(session.team_a_name, session.team_b_name)
+    red, blue = labels_for(session)
     if team_key == "A":
         return GrantDecision("A", TEAM_A_CHANNEL_PREFIX, red.name), None
     return GrantDecision("B", TEAM_B_CHANNEL_PREFIX, blue.name), None
