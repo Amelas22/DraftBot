@@ -3,7 +3,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from helpers.opponent_threads import spawn_opponent_threads, team_channel_rosters
+from helpers.opponent_threads import (spawn_opponent_threads, team_channel_rosters,
+                                      thread_named, threads_by_name)
 from helpers.team_names import BLUE, RED
 
 
@@ -292,3 +293,63 @@ async def test_archived_lookup_failure_degrades_to_the_active_thread_list():
     )
     assert created == 1
     assert thread_names(channel) == ["Erin"]
+
+
+# ---- finding a thread again, later ------------------------------------------------
+#
+# Pools arrive long after the threads are made -- the draft has to finish first --
+# so by then the scouting threads have auto-archived. Anything that wants to post
+# into one has to look past pycord's active-thread cache.
+
+
+@pytest.mark.asyncio
+async def test_a_thread_is_found_while_it_is_still_active():
+    channel = make_channel(existing_thread_names=("Dave", "Ana"))
+
+    found = await thread_named(channel, "Dave")
+
+    assert found is not None and found.name == "Dave"
+
+
+@pytest.mark.asyncio
+async def test_a_thread_is_found_after_it_has_archived():
+    """The case that actually happens: pools are posted after the draft, by
+    which point THREAD_ARCHIVE_MINUTES has long passed."""
+    channel = make_channel(existing_thread_names=(), archived_thread_names=("Dave",))
+
+    found = await thread_named(channel, "Dave")
+
+    assert found is not None and found.name == "Dave"
+
+
+@pytest.mark.asyncio
+async def test_an_absent_thread_is_none_rather_than_an_error():
+    """create_thread can be refused, so a player may simply have no thread.
+    The caller skips them; it must not create one here."""
+    channel = make_channel(existing_thread_names=("Ana",), archived_thread_names=("Bo",))
+
+    assert await thread_named(channel, "Dave") is None
+    channel.create_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_archived_lookup_is_made_once_for_many_names():
+    """One API call per channel, not per player. A six-a-side draft asks for
+    six names against the same channel, and paying for six archived scans is
+    the difference between one call and twelve across both teams.
+    """
+    calls = []
+
+    channel = make_channel(archived_thread_names=("Dave", "Ana", "Bo"))
+    original = channel.archived_threads
+
+    def counting(**kwargs):
+        calls.append(1)
+        return original(**kwargs)
+
+    channel.archived_threads = counting
+
+    found = await threads_by_name(channel)
+
+    assert set(found) >= {"Dave", "Ana", "Bo"}
+    assert len(calls) == 1, f"archived threads scanned {len(calls)} times"

@@ -76,22 +76,46 @@ def _thread_name(discord_id: str, sign_ups: dict[str, str] | None) -> str:
     return name[:DISCORD_THREAD_NAME_LIMIT - len(suffix)] + suffix
 
 
+async def threads_by_name(channel: discord.TextChannel) -> dict[str, object]:
+    """Every thread in `channel`, active and archived, keyed by name.
+
+    One archived scan per channel. A scouting thread auto-archives after
+    THREAD_ARCHIVE_MINUTES and pools are posted long after the draft finishes,
+    so by then almost every thread this looks for is archived -- and asking per
+    player would pay for that scan once per opponent instead of once per team.
+
+    Active threads win a name collision: if a name somehow exists twice, the
+    live one is the one people are reading.
+    """
+    found: dict[str, object] = {}
+    try:
+        async for thread in channel.archived_threads(limit=ARCHIVED_THREAD_LOOKUP_LIMIT):
+            found[thread.name] = thread
+    except Exception as e:
+        logger.warning(f"[opponent-threads] archived thread lookup failed: {e}")
+    for thread in getattr(channel, "threads", []) or []:
+        found[thread.name] = thread
+    return found
+
+
+async def thread_named(channel: discord.TextChannel, name: str):
+    """The thread called `name`, or None. Never creates one.
+
+    A player can legitimately have no thread -- create_thread is best-effort
+    and Discord refuses it often enough to matter -- and creating one here
+    would quietly overrule whatever made the create path skip them.
+    """
+    return (await threads_by_name(channel)).get(name)
+
+
 async def _existing_thread_names(channel: discord.TextChannel) -> set[str]:
     """Names of the threads already in `channel`, active and archived.
 
     `channel.threads` is pycord's cache of ACTIVE threads only, and scouting
     threads auto-archive after THREAD_ARCHIVE_MINUTES -- so a re-run days later
-    would not see its own earlier work and would duplicate every thread. The
-    archived lookup is a real API call; if it fails we keep the active names
-    rather than lose the whole run.
+    would not see its own earlier work and would duplicate every thread.
     """
-    names = {t.name for t in channel.threads}
-    try:
-        async for thread in channel.archived_threads(limit=ARCHIVED_THREAD_LOOKUP_LIMIT):
-            names.add(thread.name)
-    except Exception as e:
-        logger.warning(f"[opponent-threads] archived thread lookup failed: {e}")
-    return names
+    return set(await threads_by_name(channel))
 
 
 def _starter(name: str, opponent_team_label: str, own_ids: list[str] | None = None) -> str:
