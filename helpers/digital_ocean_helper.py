@@ -166,7 +166,60 @@ class DigitalOceanHelper:
         except Exception as e:
             self.logger.error(f"Error uploading to DigitalOcean Space: {e}")
             return UploadResult(success=False)
-    
+
+    async def upload_public_html(
+        self,
+        content: str,
+        folder: str,
+        filename: str,
+    ) -> UploadResult:
+        """Publish an HTML page anyone with the link can read.
+
+        Deliberately separate from upload_text, on two counts:
+
+        * It uses the RAW (region-level) client. The bucket-specific endpoint
+          prefixes the bucket onto the key -- every draft log is really at
+          `magic-draft-logs/team/...`, not `team/...` -- which is invisible for
+          a private object read back the same way, but fatal here: the URL
+          get_public_url advertises would 404.
+        * ACL is public-read with no parameter to make it otherwise. Everything
+          else this helper uploads is private by default because a draft log is
+          an opponent's whole pool; a page published on purpose is the
+          exception, and making that explicit in the method name keeps the two
+          from being confused at a call site.
+
+        CacheControl is no-cache so a rebuilt page under the same name is
+        actually seen.
+        """
+        if not self.config_valid:
+            self.logger.warning("Cannot publish: Missing Digital Ocean Spaces configuration")
+            return UploadResult(success=False)
+
+        try:
+            client = await self.create_raw_client()
+            if client is None:
+                self.logger.warning(
+                    "DO_SPACES_RAW_ENDPOINT is not set -- cannot publish a public page")
+                return UploadResult(success=False)
+
+            object_path = f'{folder}/{filename}'
+            async with client as s3:
+                await s3.put_object(
+                    Bucket=self.bucket,
+                    Key=object_path,
+                    Body=content.encode("utf-8"),
+                    ContentType='text/html; charset=utf-8',
+                    CacheControl='no-cache',
+                    ACL=PUBLIC,
+                )
+
+            self.logger.info(f"Published page to DigitalOcean Space: {object_path}")
+            return UploadResult(success=True, object_path=object_path)
+
+        except Exception as e:
+            self.logger.error(f"Error publishing to DigitalOcean Space: {e}")
+            return UploadResult(success=False)
+
     async def download_json(self, object_path: str) -> Optional[Dict[str, Any]]:
         """
         Download and parse JSON data from Digital Ocean Spaces

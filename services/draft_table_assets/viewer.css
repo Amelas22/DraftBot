@@ -1,0 +1,366 @@
+/* Single-theme by intent: this is a viewer whose content is card art, and a
+   dark ground is what keeps 90 thumbnails from becoming a glare sheet. Every
+   colour is painted explicitly so the page never borrows a host background. */
+:root {
+  --ground: #0E0F13;
+  --surface: #171921;
+  --surface-2: #1E212C;
+  --raised: #262A36;
+  --rule: #2C3140;
+  --ink: #E8EAF2;
+  --ink-2: #9BA1B4;
+  --ink-3: #6B7286;
+  --team-a: #3D93E0;
+  --team-b: #D4701F;
+  --live: #E8C547;      /* the card being taken right now */
+  --wheel: #7FD1A6;     /* survived a full circuit */
+  --card-w: 62px;
+  --card-h: 86px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font: 400 15px/1.55 Archivo, ui-sans-serif, system-ui, sans-serif,
+        "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji";
+  -webkit-font-smoothing: antialiased;
+}
+
+button { font: inherit; color: inherit; cursor: pointer; }
+button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--live); outline-offset: 2px; }
+
+.wrap { max-width: 1500px; margin: 0 auto; padding: 20px clamp(12px, 2.5vw, 28px) 90px; }
+
+/* ---------- masthead ---------- */
+.mast { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 18px; margin-bottom: 16px; }
+.mast h1 { margin: 0; font-size: clamp(1.3rem, 2.6vw, 1.75rem); font-weight: 700; letter-spacing: -.02em; }
+.mast .sub { font: 500 .78rem/1 "IBM Plex Mono", ui-monospace, monospace; color: var(--ink-3); letter-spacing: .04em; }
+.teamkey { display: flex; gap: 14px; margin-left: auto; font: 500 .8rem/1 "IBM Plex Mono", monospace; }
+.teamkey span { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); }
+.teamkey i { width: 10px; height: 10px; border-radius: 2px; }
+
+/* ---------- clock ---------- */
+.clock {
+  position: sticky; top: 0; z-index: 30;
+  background: color-mix(in srgb, var(--ground) 92%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--rule);
+  padding: 10px 0 12px; margin-bottom: 16px;
+  display: flex; flex-direction: column; gap: 9px;
+}
+.clockrow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.packbtns { display: flex; gap: 4px; }
+.packbtn {
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 3px;
+  padding: 6px 13px; font: 600 .8rem/1 "IBM Plex Mono", monospace; color: var(--ink-2);
+}
+.packbtn.on { background: var(--raised); color: var(--ink); border-color: var(--ink-3); }
+.step {
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 3px;
+  padding: 6px 12px; font: 600 .8rem/1 "IBM Plex Mono", monospace;
+}
+.step:disabled { opacity: .35; cursor: default; }
+.pos { font: 600 .95rem/1 "IBM Plex Mono", monospace; min-width: 108px; letter-spacing: .02em; }
+.pos b { color: var(--live); }
+.dirnote { font: 400 .74rem/1 "IBM Plex Mono", monospace; color: var(--ink-3); }
+.search {
+  margin-left: auto; background: var(--surface); border: 1px solid var(--rule);
+  border-radius: 3px; padding: 7px 11px; color: var(--ink); min-width: 210px;
+  font: 400 .82rem/1 "IBM Plex Mono", monospace;
+}
+.search::placeholder { color: var(--ink-3); }
+
+/* scrubber: one tick per pick, event picks marked */
+.scrub { display: flex; gap: 2px; align-items: stretch; height: 22px; }
+.tick { flex: 1; background: var(--surface-2); border: 0; border-radius: 1px; padding: 0; position: relative; }
+.tick:hover { background: var(--raised); }
+.tick.past { background: var(--raised); }
+.tick.now { background: var(--live); }
+.tick.event::after {
+  content: ""; position: absolute; left: 50%; top: -4px; width: 5px; height: 5px;
+  transform: translateX(-50%) rotate(45deg); background: var(--wheel);
+}
+
+/* ---------- seat rows ---------- */
+.seats { display: flex; flex-direction: column; gap: 8px; }
+.seat {
+  display: grid; grid-template-columns: 168px 78px auto minmax(0, 1fr);
+  gap: 12px; align-items: start;
+  background: var(--surface); border: 1px solid var(--rule);
+  border-left: 3px solid var(--team); border-radius: 3px; padding: 10px 12px;
+}
+.seat.pinned { background: var(--surface-2); border-color: var(--team); }
+.who { min-width: 0; }
+.who .nm { font-weight: 600; font-size: .92rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.who .tm { font: 500 .68rem/1.4 "IBM Plex Mono", monospace; color: var(--team); letter-spacing: .06em; text-transform: uppercase; }
+.chip {
+  background: var(--raised); border: 1px solid var(--rule); border-radius: 3px;
+  padding: 6px 8px; font: 600 .74rem/1.3 "IBM Plex Mono", monospace; color: var(--ink-2);
+  text-align: center; white-space: nowrap;
+}
+.chip.on { background: var(--live); color: #14150F; border-color: var(--live); }
+.chip .n { display: block; font-size: .95rem; color: inherit; }
+.taking { display: flex; flex-direction: column; gap: 4px; align-items: center; }
+.taking .lbl { font: 500 .64rem/1 "IBM Plex Mono", monospace; color: var(--ink-3); letter-spacing: .08em; text-transform: uppercase; }
+.rest { display: flex; flex-wrap: wrap; gap: 4px; align-content: flex-start; }
+.rest .empty { font: 400 .8rem/1.6 "IBM Plex Mono", monospace; color: var(--ink-3); }
+
+/* ---------- cards ---------- */
+.card {
+  width: var(--card-w); height: var(--card-h); border-radius: 4px; padding: 0; border: 0;
+  background: var(--surface-2); position: relative; display: block; overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,.5);
+}
+.card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.card.big { width: calc(var(--card-w) * 1.35); height: calc(var(--card-h) * 1.35); }
+.card.live { box-shadow: 0 0 0 2px var(--live), 0 3px 10px rgba(0,0,0,.6); }
+.card.ins { box-shadow: 0 0 0 2px var(--wheel); }
+.card.dim { opacity: .32; }
+.card.hit { box-shadow: 0 0 0 2px var(--ink); }
+/* The art is the label; the name is a hover affordance and the whole label
+   when an image fails to load, so it must not sit over readable art. */
+.card .fallback {
+  position: absolute; inset: 0; display: flex; align-items: flex-end; padding: 3px;
+  font: 500 .58rem/1.12 "IBM Plex Mono", monospace; color: var(--ink);
+  background: linear-gradient(transparent 40%, rgba(0,0,0,.9));
+  text-align: left; overflow: hidden; opacity: 0; transition: opacity .1s;
+}
+.card:hover .fallback, .card:focus-visible .fallback, .card.noimg .fallback { opacity: 1; }
+
+
+/* ---------- detail panel ---------- */
+.detail {
+  position: fixed; right: 16px; bottom: 16px; z-index: 40; width: 380px;
+  max-height: calc(100vh - 32px); overflow-y: auto;
+  background: var(--surface-2); border: 1px solid var(--rule); border-radius: 4px;
+  box-shadow: 0 18px 50px -18px rgba(0,0,0,.9); padding: 14px; display: flex; gap: 12px;
+  /* the image is a fixed-width thumbnail: without this the flex default
+     (align-items: stretch) pulls it to the text column's height and the art
+     is distorted, which is exactly what it used to do */
+  align-items: flex-start;
+}
+.detail img {
+  width: 116px; height: auto; aspect-ratio: 488 / 680;
+  border-radius: 5px; flex: none; align-self: flex-start;
+}
+.detail .body { min-width: 0; flex: 1; }
+.detail .cardhead { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; }
+.detail h3 { margin: 0; font-size: .95rem; font-weight: 600; }
+.detail .cost {
+  font: 500 .74rem/1 "IBM Plex Mono", monospace; color: var(--ink-2);
+  white-space: nowrap; flex: none;
+}
+.detail .typeline {
+  display: flex; gap: 8px; justify-content: space-between; align-items: baseline;
+  font-size: .78rem; color: var(--ink-2); margin: 2px 0 8px;
+}
+.detail .typeline .pt {
+  font: 600 .78rem/1 "IBM Plex Mono", monospace; color: var(--ink); flex: none;
+}
+.detail .oracle {
+  font-size: .8rem; line-height: 1.42; color: var(--ink);
+  border-top: 1px solid var(--rule); padding-top: 8px;
+}
+.detail .oracle p { margin: 0 0 5px; }
+.detail .oracle p:last-child { margin-bottom: 0; }
+.detail .facerule { border-top: 1px dashed var(--rule); margin: 10px 0; }
+.detail .journey {
+  margin-top: 10px; border-top: 1px solid var(--rule); padding-top: 8px;
+  display: flex; flex-wrap: wrap; gap: 4px 8px;
+  font: 400 .72rem/1.35 "IBM Plex Mono", monospace; color: var(--ink-3);
+}
+.detail .journey .mono { color: var(--ink-2); }
+.detail .journey .wheeled { color: var(--wheel); }
+.detail .journey .passed { color: var(--ink-3); }
+.detail .jump {
+  margin-top: 10px; background: var(--raised); border: 1px solid var(--rule);
+  border-radius: 3px; padding: 5px 10px; font: 500 .74rem/1 "IBM Plex Mono", monospace;
+  color: var(--ink-2);
+}
+.detail .jump:hover { color: var(--ink); border-color: var(--ink-3); }
+.detail .close { position: absolute; top: 6px; right: 8px; background: none; border: 0; color: var(--ink-3); font-size: 1.1rem; line-height: 1; }
+
+/* ---------- results ---------- */
+.results { margin-top: 14px; background: var(--surface); border: 1px solid var(--rule); border-radius: 3px; padding: 10px 12px; }
+.results .row { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 12px; padding: 5px 0; border-bottom: 1px solid var(--rule); font-size: .84rem; align-items: center; }
+.results .row:last-child { border-bottom: 0; }
+.results button.row { width: 100%; background: none; border-top: 0; border-left: 0; border-right: 0; text-align: left; }
+.results .row:hover { color: var(--live); }
+.results .mono { font: 400 .76rem/1 "IBM Plex Mono", monospace; color: var(--ink-3); white-space: nowrap; }
+
+.events { margin: 14px 0 0; padding: 10px 12px; background: var(--surface); border: 1px solid var(--wheel); border-radius: 3px; font-size: .84rem; color: var(--ink-2); }
+.events b { color: var(--wheel); font-weight: 600; }
+
+.hint { margin: 14px 0 0; font: 400 .78rem/1.5 "IBM Plex Mono", monospace; color: var(--ink-3); }
+
+@media (max-width: 900px) {
+  .seat { grid-template-columns: 1fr; gap: 8px; }
+  .taking { flex-direction: row; align-items: center; gap: 8px; }
+  .detail { left: 16px; right: 16px; width: auto; }
+  .detail img { width: 92px; }
+}
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+/* ---------- pool drawer ---------- */
+/* The seat name is the trigger, so it has to look pressable without turning
+   the row into a button-shaped block. */
+.who {
+  background: none; border: 0; padding: 0; text-align: left; min-width: 0;
+  border-radius: 3px;
+}
+.who:hover .nm { color: var(--live); }
+.who.open .nm { color: var(--live); }
+.who .nm::after { content: " ▾"; color: var(--ink-3); font-size: .8em; }
+.who.open .nm::after { content: " ▴"; color: var(--live); }
+
+.pool {
+  margin: -4px 0 4px; background: var(--surface-2);
+  border: 1px solid var(--rule); border-left: 3px solid var(--team);
+  border-radius: 3px; padding: 10px 12px;
+}
+.poolhead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 9px; }
+.poolhead strong { font-size: .88rem; font-weight: 600; }
+.poolhead .count { font: 400 .76rem/1 "IBM Plex Mono", monospace; color: var(--ink-3); }
+.pips { display: flex; gap: 4px; flex-wrap: wrap; }
+.pip {
+  font: 600 .68rem/1 "IBM Plex Mono", monospace; padding: 4px 6px;
+  border-radius: 2px; background: var(--raised); color: var(--ink-2);
+}
+/* Mana colours, adjusted for legibility on the dark surface rather than taken
+   straight from the card frames. */
+.pip-W { color: #E4CE87; } .pip-U { color: #6FB2EC; } .pip-B { color: #B08BD8; }
+.pip-R { color: #E97B6B; } .pip-G { color: #6FC79A; } .pip-C { color: var(--ink-3); }
+.poolsort, .poolclose {
+  background: var(--raised); border: 1px solid var(--rule); border-radius: 3px;
+  padding: 4px 9px; font: 500 .72rem/1 "IBM Plex Mono", monospace; color: var(--ink-2);
+}
+.poolsort { margin-left: auto; }
+.poolsort:hover, .poolclose:hover { color: var(--ink); border-color: var(--ink-3); }
+.poolgrid {
+  display: flex; flex-wrap: wrap; gap: 4px;
+  /* Six open drawers must not push the table off screen. */
+  max-height: 232px; overflow-y: auto;
+}
+.poolgrid .empty { font: 400 .8rem/1.6 "IBM Plex Mono", monospace; color: var(--ink-3); }
+
+/* ---------- traced pack: ordered + labelled in place ---------- */
+.rest.traced { gap: 6px 5px; }
+.tcard { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.tlab {
+  display: flex; align-items: baseline; gap: 4px; max-width: var(--card-w);
+  font: 600 .6rem/1 "IBM Plex Mono", monospace;
+}
+.tlab .tp { color: var(--live); }
+/* The seat is tinted by team, so a glance down the row shows which side is
+   eating the pack without reading a single name. */
+.tlab .tw { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- camera: first person -> over the shoulder -> overhead ----------
+   Three distances, and the styling has to make the distance legible. The
+   segmented control is ordered the way the camera pulls back, so left-to-right
+   reads as "step further away and learn more". */
+.camera {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  margin: 0 0 10px;
+}
+.modes { display: inline-flex; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+.modebtn {
+  background: var(--surface); border: 0; border-right: 1px solid var(--rule);
+  color: var(--ink-2); padding: 7px 13px;
+  font: 500 .78rem/1 Archivo, sans-serif; cursor: pointer;
+}
+.modebtn:last-child { border-right: 0; }
+.modebtn:hover { color: var(--ink); background: var(--raised); }
+.modebtn.on { background: var(--raised); color: var(--ink); box-shadow: inset 0 -2px 0 var(--live); }
+.seatpick { display: inline-flex; align-items: center; gap: 7px; font-size: .76rem; color: var(--ink-3); }
+.seatpick.off { opacity: .4; }
+.seatpick select {
+  background: var(--surface); color: var(--ink); border: 1px solid var(--rule);
+  border-radius: 3px; padding: 5px 7px; font: 400 .78rem/1 Archivo, sans-serif;
+}
+.camhint { font-size: .74rem; color: var(--ink-3); }
+
+/* ---------- over the shoulder: one lead, two supporting ----------
+   The neighbours are deliberately demoted -- smaller cards, dimmer, inset --
+   so a glance tells you who is being watched without reading a label. The
+   focus row keeps full size, so switching from overhead feels like the other
+   four seats stepped back rather than everything resizing. */
+.seat.role-side {
+  --card-w: 44px;
+  --card-h: 61px;
+  opacity: .62;
+  transform: scale(.985);
+  margin-left: 26px;
+}
+.seat.role-side:hover { opacity: .85; }
+.seat.role-focus {
+  --card-w: 76px;
+  --card-h: 105px;
+  border-width: 2px;
+  box-shadow: 0 0 0 1px var(--rule), 0 14px 34px -20px rgba(0,0,0,.95);
+}
+.seat .rolelab {
+  position: absolute; top: -8px; left: 14px; z-index: 2;
+  background: var(--ground); padding: 0 7px;
+  font: 500 9.5px/1 "IBM Plex Mono", monospace; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--ink-3);
+}
+.seat.role-focus .rolelab { color: var(--live); }
+.seat { position: relative; }
+
+/* ---------- first person ---------- */
+.fp { display: flex; flex-direction: column; gap: 16px; }
+.fphead {
+  display: flex; align-items: baseline; gap: 10px;
+  border-left: 3px solid var(--team); padding-left: 12px;
+}
+.fpwho { font: 600 1.15rem/1.2 Archivo, sans-serif; color: var(--ink); }
+.fptm { font: 500 .72rem/1 "IBM Plex Mono", monospace; letter-spacing: .08em;
+        text-transform: uppercase; color: var(--team); }
+.fpsec { background: var(--surface); border: 1px solid var(--rule); border-radius: 5px; padding: 13px 15px; }
+.fplbl {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  font: 500 .76rem/1 "IBM Plex Mono", monospace; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--ink-3); margin-bottom: 11px;
+}
+.fpn { color: var(--ink-2); text-transform: none; letter-spacing: 0; }
+.fpwheel { color: var(--wheel); text-transform: none; letter-spacing: 0; }
+/* first person stands closest, so its cards are the largest in the viewer */
+.fp .fpgrid { --card-w: 104px; --card-h: 145px; display: flex; flex-wrap: wrap; gap: 8px; }
+.fp .card.wheelback { outline: 1px solid var(--wheel); outline-offset: 1px; }
+.fp .pool.own { margin: 0; }
+
+@media (max-width: 900px) {
+  .seat.role-side { margin-left: 12px; }
+  .fp .fpgrid { --card-w: 76px; --card-h: 106px; }
+}
+
+/* cards this seat passed that never made it back round */
+.fp .fpsec.gone { background: transparent; border-style: dashed; }
+.fp .fpgrid.small { --card-w: 62px; --card-h: 86px; }
+.fp .card.lost { opacity: .48; filter: grayscale(.55); }
+.fp .card.lost:hover { opacity: .85; filter: none; }
+
+/* ---------- hide picks: call it yourself, then check ---------- */
+.hidepick { display: inline-flex; align-items: center; gap: 6px; font-size: .76rem; color: var(--ink-2); cursor: pointer; }
+.hidepick input { accent-color: var(--live); }
+.reveal {
+  background: var(--raised); border: 1px solid var(--rule); border-radius: 3px;
+  color: var(--live); padding: 5px 11px; cursor: pointer;
+  font: 500 .74rem/1 "IBM Plex Mono", monospace;
+}
+.reveal:hover { border-color: var(--live); }
+.reveal.done, .reveal:disabled { color: var(--ink-3); border-color: var(--rule); cursor: default; }
+/* a face-down card: same footprint as the card it covers, so nothing reflows
+   when the answer appears */
+.cardback {
+  width: var(--card-w); height: var(--card-h); border-radius: 4px;
+  border: 1px dashed var(--rule-2, var(--rule)); background: var(--surface);
+  display: grid; place-items: center; flex: none;
+}
+.cardback.big { width: calc(var(--card-w) * 1.35); height: calc(var(--card-h) * 1.35); }
+.cardback span { color: var(--ink-3); font: 600 1.1rem/1 "IBM Plex Mono", monospace; }
+.fp .fpgrid .reveal { align-self: center; margin-left: 10px; }

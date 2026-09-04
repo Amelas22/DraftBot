@@ -1337,6 +1337,13 @@ class DraftSetupManager:
                     self.logger.info(f"Draft log already published for {self.session_id}; skipping")
                     return True
                 draft_data = draft_session.draft_data
+                # getattr, not direct access: models/draft_session.py declares
+                # session_type = Column(String(64)) with no nullable=False, so
+                # the column is genuinely nullable -- absence just means "not
+                # premade", the same as any other non-premade type. The same
+                # nullable-coalesce shape already guards this attribute
+                # elsewhere in this file and in log_reconciler.py.
+                session_type = getattr(draft_session, "session_type", None)
 
             if not draft_data:
                 self.logger.warning(f"No captured draft_data for {self.session_id}; nothing to publish")
@@ -1352,10 +1359,35 @@ class DraftSetupManager:
                 except Exception as e:
                     self.logger.error(f"Failed to release Draftmancer log for {self.session_id}: {e}")
 
+            # Premade drafts get a full table page. Built before the embed
+            # because its URL goes inside; best-effort because the embed is
+            # the deliverable and the page is only an enhancement to it. The
+            # `draft_session` read above is detached once that `async with`
+            # block exits, so it's re-read here rather than reused detached --
+            # the publisher needs several of its fields (rosters, cube,
+            # friendly_id, ...) -- and the publish call is kept inside the
+            # fresh session's block so those attributes stay live for it.
+            #
+            # That deliberately holds a database connection open across the
+            # publish call (a Scryfall fetch, a render, a Spaces upload --
+            # seconds, not millis) -- the engine uses NullPool, so there is no
+            # pool for this to exhaust. Accepted: the only DB work before the
+            # call is one SELECT, SQLite is WAL-mode so no writer blocks on
+            # it, and this runs at most once per completed premade draft.
+            table_url = None
+            if session_type == "premade":
+                from services.draft_table_publisher import publish as publish_table
+                async with db_session() as session:
+                    draft_session = (await session.execute(
+                        select(DraftSession).filter(DraftSession.session_id == self.session_id)
+                    )).scalar_one_or_none()
+                    if draft_session:
+                        table_url = await publish_table(draft_data, draft_session)
+
             # Post the MagicProTools embed/links to Discord.
             sent = False
             if self.guild_id:
-                sent = await self.send_magicprotools_embed(draft_data)
+                sent = await self.send_magicprotools_embed(draft_data, table_url=table_url)
 
             if not sent:
                 self.logger.warning(
@@ -1370,6 +1402,8 @@ class DraftSetupManager:
                 )).scalar_one_or_none()
                 if draft_session:
                     draft_session.data_received = True
+                    if table_url:
+                        draft_session.drafttable_url = table_url
                     await session.commit()
 
             self.logger.info(f"Published draft log for {self.session_id} (release={release})")
@@ -1410,7 +1444,7 @@ class DraftSetupManager:
 
     # This method has been replaced by using the MagicProtoolsHelper.submit_to_api method
 
-    async def send_magicprotools_embed(self, draft_data) -> bool:
+    async def send_magicprotools_embed(self, draft_data, table_url=None) -> bool:
         """Find draft-logs channel and send the embed if found.
 
         Returns:
@@ -1436,7 +1470,7 @@ class DraftSetupManager:
 
             if draft_logs_channel:
                 # Generate the embed and send it
-                embed = await self.generate_magicprotools_embed(draft_data)
+                embed = await self.generate_magicprotools_embed(draft_data, table_url=table_url)
                 message = await draft_logs_channel.send(embed=embed)
                 self.logger.info(f"Sent MagicProTools links to #{draft_logs_channel.name} in {guild.name}")
 
@@ -1469,7 +1503,7 @@ class DraftSetupManager:
             self.logger.error(f"Error sending MagicProTools embed: {e}")
             return False
 
-    async def generate_magicprotools_embed(self, draft_data):
+    async def generate_magicprotools_embed(self, draft_data, table_url=None):
         """Generate a Discord embed with MagicProTools links for all drafters"""
         try:
             # Get the draft session to access sign_ups and start time
@@ -1523,7 +1557,15 @@ class DraftSetupManager:
                 color=0x3498db  # Blue color
             )
             apply_draft_footer(embed, self.friendly_id, self.cube_id)
-            
+
+            # Added before any per-player field so it reads as the headline.
+            if table_url:
+                embed.add_field(
+                    name="📊 Full draft table",
+                    value=f"[Replay every pack around the table]({table_url})",
+                    inline=False,
+                )
+
             # Get list of sign_ups keys (Discord user IDs) and values (display names or dictionaries)
             sign_up_discord_ids = list(sign_ups.keys())
             sign_up_display_names = list(sign_ups.values())

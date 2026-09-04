@@ -3,6 +3,7 @@ key
 *.pub
 *.json
 !.claude/settings.json
+!tests/fixtures/*.json
 *.db
 *.xlsx
 *.csv
