@@ -22,12 +22,10 @@ from typing import NamedTuple, Protocol
 class TeamLabel(NamedTuple):
     """One side's name, and the colour dressing that goes with it.
 
-    `emoji` and `color` are empty for a side that carries a chosen name: a
-    named team is not a colour, and prefixing "Pack Rats" with a red circle
-    reads as though it were one. They are separate fields rather than baked
-    into `name` because callers need them apart -- `add_links_to_embed_safely`
-    takes a bare "red"/"blue" token, and Draftmancer team names must not carry
-    an emoji at all.
+    Every side has a colour; only the `name` depends on what was stored. They
+    are separate fields rather than baked into `name` because callers need them
+    apart: a button label and a Draftmancer team name take the bare `name`,
+    while an embed heading takes `labelled`.
     """
     name: str
     emoji: str
@@ -35,19 +33,29 @@ class TeamLabel(NamedTuple):
 
     @property
     def prefix(self) -> str:
-        """The emoji and its separating space, or nothing for a named team."""
+        """The emoji and its separating space, or nothing for the shared chat.
+
+        Every side of a draft has a colour. The one label without an emoji is
+        the shared draft chat's, which is not a side.
+        """
         return f"{self.emoji} " if self.emoji else ""
 
     @property
     def labelled(self) -> str:
-        """The name as an embed field heading: "🔴 Team Red", or "Pack Rats".
+        """The name as an embed field heading: "🔴 Team Red", "🔴 Pack Rats".
 
         Use this wherever the label heads a block a reader scans -- an embed
-        field, a standings line. Use `name` where the emoji would be noise or
-        is added by something else: a button, a Draftmancer team name, a
-        sentence the label appears inside, or a caller that takes `color` and
-        renders the emoji itself.
+        field, a standings line. Use `name` where the emoji would be noise: a
+        button, a Draftmancer team name, or a sentence the label appears
+        inside.
         """
+        # Idempotent for THIS side's emoji: captains typed "🔴 Pack Rats" by
+        # hand while the heading carried no colour, and prepending again gives
+        # "🔴 🔴 Pack Rats". Only this side's emoji is absorbed -- a name
+        # starting with the other side's keeps both, because the heading must
+        # still say which side it is.
+        if self.emoji and self.name.startswith(self.emoji):
+            return self.name
         return f"{self.prefix}{self.name}"
 
 
@@ -91,13 +99,34 @@ def team_labels(team_a_name: str | None,
     and it can be tested without a database.
     """
     def label(chosen: str | None, colour: TeamLabel) -> TeamLabel:
-        # A chosen name is not a colour: no emoji, no colour token. Built
-        # fresh rather than _replace'd off the colour, which replaced all
-        # three fields and read as though it inherited something.
-        return TeamLabel(chosen, "", "") if chosen else colour
+        # The NAME is what a stored value can change. The colour is not: the
+        # side's rooms are red-team-chat-*, and Draftmancer puts a red dot
+        # beside its players, whether or not anybody named it. A label that
+        # reported no colour could only disagree with those.
+        return colour._replace(name=chosen) if chosen else colour
 
     return (label(_chosen(team_a_name), RED),
             label(_chosen(team_b_name), BLUE))
+
+
+def heads_field(label: TeamLabel, field_name: str) -> bool:
+    """Whether an existing embed field is this side's, by its heading.
+
+    Either spelling counts, because the heading was written by whichever
+    version of the bot created the draft. A named premade used to be headed
+    "Pack Rats" and is now headed "\U0001f534 Pack Rats"; a draft already in
+    flight when that shipped carries the old one, and matching only the new one
+    would leave its join buttons silently updating nothing.
+
+    The match is BOUNDED: a team's heading is the label exactly, as written at
+    creation, or the label followed by its count suffix once somebody has
+    joined. An open-ended prefix match is not enough, because the signup embed
+    puts "Cube:" and "Pack Format:" ahead of the team fields -- a team called
+    "Pack" matched "Pack Format:" first, and the join then overwrote the
+    draft's pack format with a roster.
+    """
+    return any(field_name == spelling or field_name.startswith(f"{spelling} (")
+               for spelling in (label.labelled, label.name))
 
 
 def labels_for(draft: HasTeamNames) -> tuple[TeamLabel, TeamLabel]:

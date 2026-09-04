@@ -9,9 +9,11 @@ import ast
 import functools
 from pathlib import Path
 
+from types import SimpleNamespace
+
 import pytest
 
-from helpers.team_names import RED, BLUE, team_labels
+from helpers.team_names import RED, BLUE, heads_field, team_labels
 
 
 def test_a_draft_with_no_team_names_is_red_and_blue():
@@ -23,15 +25,110 @@ def test_a_draft_with_no_team_names_is_red_and_blue():
     assert (red.color, blue.color) == ("red", "blue")
 
 
-def test_real_premade_names_are_left_alone():
-    """380 prod drafts carry names their captains chose. Colouring them would
-    be renaming somebody's team."""
+def test_a_named_team_keeps_its_name_and_its_side_s_colour():
+    """380 prod drafts carry names their captains chose. Those names win -- but
+    the colour is not a label the draft can opt out of.
+
+    A named side is still seated in red-team-chat and still shows a red dot
+    beside its players on Draftmancer. Dropping the emoji from the one surface
+    that NAMES the team meant a Pack Rats player sat in a red room with a red
+    dot and was never told which colour they were: the association was left
+    unstated rather than absent, which is worse than either.
+    """
     red, blue = team_labels("Pack Rats", "PDX Pandas")
 
-    assert (red.name, blue.name) == ("Pack Rats", "PDX Pandas")
-    assert (red.emoji, blue.emoji) == ("", ""), (
-        "a named team is not a colour, and an emoji in front of it reads as one")
-    assert (red.color, blue.color) == ("", "")
+    assert (red.name, blue.name) == ("Pack Rats", "PDX Pandas"), (
+        "a captain's chosen name is the identity and must survive intact")
+    assert (red.emoji, blue.emoji) == ("🔴", "🔵")
+    assert (red.color, blue.color) == ("red", "blue")
+    assert red.labelled == "🔴 Pack Rats"
+
+
+def test_a_draft_already_in_flight_keeps_updating_its_signup_embed():
+    """The deploy hazard this change creates.
+
+    A named premade's signup field used to be headed "Pack Rats" and is now
+    headed "\U0001f534 Pack Rats". A draft created before this shipped carries
+    the old heading, so matching only the new one would find no field -- the
+    join buttons would go on working while the embed silently stopped changing.
+    """
+    red, blue = team_labels("Pack Rats", "PDX Pandas")
+
+    # written by the version that shipped before this change
+    assert heads_field(red, "Pack Rats (3):")
+    assert heads_field(blue, "PDX Pandas (3):")
+    # and by this one
+    assert heads_field(red, "\U0001f534 Pack Rats (3):")
+    assert heads_field(blue, "\U0001f535 PDX Pandas (3):")
+
+    # an unnamed draft was already emoji'd before this change, and still matches
+    r, b = team_labels(None, None)
+    assert heads_field(r, "\U0001f534 Team Red (3):")
+    assert heads_field(b, "\U0001f535 Team Blue (3):")
+
+
+def test_a_captain_who_types_the_emoji_does_not_get_it_twice():
+    """Nothing stops a captain naming their team "\U0001f534 Pack Rats", and
+    some did exactly that while the colour was missing from the heading --
+    adding it by hand was the workaround. Prepending the side's emoji to a name
+    that already starts with it renders "\U0001f534 \U0001f534 Pack Rats".
+
+    `name` stays exactly what they typed; only the heading is normalised.
+    """
+    red, blue = team_labels("\U0001f534 Pack Rats", "\U0001f535 PDX Pandas")
+
+    assert red.name == "\U0001f534 Pack Rats", "the stored name is theirs, verbatim"
+    assert red.labelled == "\U0001f534 Pack Rats"
+    assert blue.labelled == "\U0001f535 PDX Pandas"
+
+    # the OTHER side's emoji is not theirs to keep -- it would say blue on red
+    odd, _ = team_labels("\U0001f535 Pack Rats", None)
+    assert odd.labelled == "\U0001f534 \U0001f535 Pack Rats"
+
+
+def test_a_team_name_cannot_claim_a_metadata_field():
+    """The signup embed puts "Cube:" and "Pack Format:" BEFORE the team fields.
+
+    An unbounded prefix match let a team called "Pack" match "Pack Format:",
+    which comes first -- so the join would overwrite the draft's pack format
+    with a roster and leave the real team field stale.
+
+    A team heading is the label exactly, or the label followed by its count
+    suffix. Nothing else is that team's field.
+    """
+    red, _ = team_labels("Pack", "PDX Pandas")
+
+    assert not heads_field(red, "Pack Format:")
+    assert not heads_field(red, "Packrat Alley (2):")
+    assert heads_field(red, "\U0001f534 Pack")            # freshly created
+    assert heads_field(red, "\U0001f534 Pack (2):")       # after a join
+    assert heads_field(red, "Pack (2):")                   # created before this shipped
+
+
+def test_two_teams_sharing_a_name_still_get_their_own_field():
+    """Nothing stops both captains typing the same name. Each side must still
+    resolve to a DIFFERENT field, or one join overwrites the other's roster."""
+    from views import PersistentView
+
+    red, blue = team_labels("Twins", "Twins")
+    fields = [SimpleNamespace(name="Cube:"),
+              SimpleNamespace(name="\U0001f534 Twins (1):"),
+              SimpleNamespace(name="\U0001f535 Twins (0):")]
+
+    a = PersistentView._team_field_index(fields, red)
+    b = PersistentView._team_field_index(fields, blue, skip=a)
+    assert a is not None and b is not None and a != b, (a, b)
+
+
+def test_one_team_cannot_claim_the_other_teams_field():
+    """The match is anchored at the start of the heading, so a name that
+    contains the other name -- "Rats" against "Pack Rats" -- cannot cross."""
+    short, long = team_labels("Rats", "Pack Rats")
+
+    assert heads_field(short, "Rats (3):")
+    assert not heads_field(short, "Pack Rats (3):")
+    assert heads_field(long, "Pack Rats (3):")
+    assert not heads_field(long, "Rats (3):")
 
 
 @pytest.mark.parametrize("stored", ["Team A", "team a", "  Team A  ", "", "   "])
@@ -59,7 +156,9 @@ def test_each_side_is_decided_on_its_own_name():
     red, blue = team_labels("Pack Rats", None)
 
     assert (red.name, blue.name) == ("Pack Rats", "Team Blue")
-    assert (red.emoji, blue.emoji) == ("", "🔵")
+    assert (red.emoji, blue.emoji) == ("🔴", "🔵"), (
+        "both sides carry their colour; only the NAME depends on what was stored")
+    assert (red.color, blue.color) == ("red", "blue")
 
 
 @functools.lru_cache(maxsize=1)
