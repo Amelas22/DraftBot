@@ -9,12 +9,11 @@ session to the 'pairings' stage, so nothing here may raise into that path.
 """
 from __future__ import annotations
 
-from collections import namedtuple
 
 import discord
 from loguru import logger
 
-from helpers.substitutes import TEAM_A_CHANNEL_PREFIX, TEAM_B_CHANNEL_PREFIX
+from helpers.draft_rooms import side_by_prefix
 from helpers.utils import (
     DISCORD_THREAD_NAME_LIMIT, THREAD_ARCHIVE_MINUTES, mention_all, send_then_mention,
 )
@@ -25,19 +24,6 @@ ARCHIVED_THREAD_LOOKUP_LIMIT = 100
 # team they face. Keyed on the shared prefix constants -- the channel names
 # have been renamed once already, and a stale literal here would silently
 # produce no threads at all.
-#
-# One table, not three. The rosters and the label were previously three
-# separate dispatches on the same two keys, so "an unknown channel name
-# yields nothing" was an invariant spread across them -- and the label lookup
-# was an unguarded dict access that only happened to be safe because the
-# roster lookup had already returned empty and short-circuited the caller.
-_TeamChannel = namedtuple("_TeamChannel", "own_is_team_a opponent_label")
-_TEAM_CHANNELS = {
-    TEAM_A_CHANNEL_PREFIX: _TeamChannel(own_is_team_a=True, opponent_label="Blue Team"),
-    TEAM_B_CHANNEL_PREFIX: _TeamChannel(own_is_team_a=False, opponent_label="Red Team"),
-}
-
-
 def team_channel_rosters(
     team_name: str,
     team_a: list[str] | None,
@@ -53,12 +39,14 @@ def team_channel_rosters(
     gets a thread. Returning both from one lookup is what makes it impossible
     to tag one team while scouting the wrong one.
     """
-    entry = _TEAM_CHANNELS.get(team_name)
-    if entry is None:
+    side = side_by_prefix(team_name)
+    if side is None or side.key is None:
         return [], [], ""
-    a, b = list(team_a or []), list(team_b or [])
-    own, opponents = (a, b) if entry.own_is_team_a else (b, a)
-    return own, opponents, entry.opponent_label
+    opposing = side.opposite
+    assert opposing is not None      # a keyed side always faces the other one
+    return (side.roster_of(team_a, team_b),
+            side.opponents_of(team_a, team_b),
+            opposing.label.name)
 
 
 def _thread_name(discord_id: str, sign_ups: dict[str, str] | None) -> str:

@@ -10,7 +10,8 @@ from stats_display import get_stats_embed_for_player
 
 from helpers.permissions import has_bot_manager_role, ADMIN_ROLE_NAME
 from helpers.draft_rooms import SHARED_CHAT_TEAM
-from helpers.substitutes import TEAM_A_CHANNEL_PREFIX, TEAM_B_CHANNEL_PREFIX
+from helpers.draft_rooms import (BLUE_SIDE, RED_SIDE, TEAM_A_CHANNEL_PREFIX,
+                                 TEAM_B_CHANNEL_PREFIX)
 from cube_views.CubeListModal import CubeListModal
 
 
@@ -1296,9 +1297,9 @@ class AdminCommands(commands.Cog):
         team: discord.Option(
             str, "Which rooms to rebuild",
             choices=[
-                discord.OptionChoice(name="Team A's own rooms (red)",
+                discord.OptionChoice(name=f"{RED_SIDE.label.name}'s own rooms",
                                      value=TEAM_A_CHANNEL_PREFIX),
-                discord.OptionChoice(name="Team B's own rooms (blue)",
+                discord.OptionChoice(name=f"{BLUE_SIDE.label.name}'s own rooms",
                                      value=TEAM_B_CHANNEL_PREFIX),
                 discord.OptionChoice(name="The shared draft chat only",
                                      value=SHARED_CHAT_TEAM),

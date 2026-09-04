@@ -18,7 +18,7 @@ Commands
 --------
 
 -   `/startdraft`: Initiates a new draft session with random teams. Provides a link to a Draftmancer session and instructions for participants.
--   `/premadedraft`: Initiates a new draft session with premade teams. Allows participants to join either Team A or Team B.
+-   `/premadedraft`: Initiates a new draft session with premade teams. Allows participants to join either side -- named teams if the creator supplies names, otherwise Team Red and Team Blue.
 
 How It Works
 ------------

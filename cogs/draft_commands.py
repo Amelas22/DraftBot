@@ -11,6 +11,7 @@ from preference_service import get_player_dm_notification_preference, update_pla
 from helpers.display_names import get_display_name
 from helpers.permissions import is_bot_manager
 from helpers.substitutes import is_sub_target_channel, resolve_sub_grant
+from helpers.team_names import BLUE, RED
 
 class DraftCommands(commands.Cog):
     def __init__(self, bot):
@@ -213,7 +214,9 @@ class DraftCommands(commands.Cog):
         ctx,
         user: discord.Option(discord.Member, "The substitute to grant access"),
         team: discord.Option(str, "Sub's team (only needed if you're not in this draft)",
-                             choices=["A", "B"], required=False, default=None),
+                             choices=[discord.OptionChoice(name=RED.name, value="A"),
+                                      discord.OptionChoice(name=BLUE.name, value="B")],
+                             required=False, default=None),
     ):
         """Grant a substitute channel access without changing draft data."""
         logger.info(f"Received add_sub from {ctx.author.id} for {user.id} "

@@ -6,17 +6,23 @@ and applies the permission overwrites this module decides on.
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-# Team channels are created with these hardcoded prefixes (views.py):
-# team_a -> "Red-Team-Chat-{friendly_id}", team_b -> "Blue-Team-Chat-{friendly_id}".
-TEAM_A_CHANNEL_PREFIX = "Red-Team"
-TEAM_B_CHANNEL_PREFIX = "Blue-Team"
-
+from helpers.draft_rooms import SHARED_SIDE, side_by_key, side_by_prefix
+from helpers.team_names import BLUE, RED
 
 @dataclass
 class GrantDecision:
+    """Which channels a sub may see, and what to call the side they joined.
+
+    `team_key` is the internal A/B selector -- the same vocabulary as the
+    team_a/team_b columns and the /add_sub choice VALUES, none of which a
+    player ever reads. Nothing in production reads it back; it is kept because
+    it is the field that says which branch was taken, and the tests assert on
+    it. `team_display_name` is the only one of the three that reaches a person,
+    and it comes from team_labels so it agrees with every other surface.
+    """
     team_key: Optional[str]            # "A"/"B", or None for a team-less draft
     channel_prefix: Optional[str]      # "Red-Team"/"Blue-Team", or None (draft chat only)
-    team_display_name: str             # premade team name, "Red Team"/"Blue Team", or "this draft"
+    team_display_name: str             # a premade team's own name, else the colour
 
 
 def resolve_sub_grant(
@@ -42,7 +48,7 @@ def resolve_sub_grant(
     if not team_a and not team_b:
         # Team-less draft (e.g. swiss): only the shared draft chat exists.
         if invoker_id in sign_ups or is_admin:
-            return GrantDecision(None, None, "this draft"), None
+            return GrantDecision(None, None, SHARED_SIDE.label.name), None
         return None, "Only players in this draft (or bot managers) can add a sub."
 
     if invoker_id in team_a:
@@ -52,31 +58,31 @@ def resolve_sub_grant(
     elif is_admin:
         if team_choice not in ("A", "B"):
             return None, ("You're not on a team in this draft — pass the "
-                          "`team` option (A or B) to choose the sub's team.")
+                          f"`team` option ({RED.name} or {BLUE.name}) to "
+                          "choose the sub's team.")
         team_key = team_choice
     else:
         return None, "Only players in this draft (or bot managers) can add a sub."
 
-    if team_key == "A":
-        display = session.team_a_name or "Red Team"
-        return GrantDecision("A", TEAM_A_CHANNEL_PREFIX, display), None
-    display = session.team_b_name or "Blue Team"
-    return GrantDecision("B", TEAM_B_CHANNEL_PREFIX, display), None
+    side = side_by_key(team_key)
+    assert side is not None      # team_key is "A" or "B" on every path above
+    return GrantDecision(side.key, side.prefix, side.named(session).name), None
 
 
 def is_sub_target_channel(channel_name: str, friendly_id: str, channel_prefix: Optional[str]) -> bool:
     """True if channel_name is one of the channels a sub should be granted.
 
-    Case-insensitive: Discord lowercases text channel names on creation,
-    while voice channels keep their original casing.
+    A sub always gets the shared draft chat, plus their own side's rooms when
+    they have a side. channel_prefix is None for team-less drafts (swiss),
+    where the shared chat is the only room there is.
 
-    channel_prefix is None for team-less drafts, where only the shared
-    draft chat exists.
+    Which rooms a side owns is draft_rooms' answer now, so the name pattern is
+    written once rather than here and in three other modules.
     """
-    targets = {f"draft-chat-{friendly_id}".lower()}
-    if channel_prefix:
-        targets.add(f"{channel_prefix}-chat-{friendly_id}".lower())
-        targets.add(f"{channel_prefix}-voice-{friendly_id}".lower())
+    targets = SHARED_SIDE.room_names(friendly_id)
+    side = side_by_prefix(channel_prefix)
+    if side is not None:
+        targets |= side.room_names(friendly_id)
     return channel_name.lower() in targets
 
 

@@ -16,10 +16,14 @@ is a move, so that the changes that follow it are small.
 """
 import asyncio
 from collections import defaultdict
-from typing import Any, Iterable
+from dataclasses import dataclass
+from typing import Any, Iterable, Protocol
 
 import discord
 from loguru import logger
+
+from helpers.team_names import (BLUE, RED, HasTeamNames, TeamLabel,
+                                labels_for)
 
 # Discord caps a category at 50 channels. The refusal comes back as the generic
 # "Invalid Form Body" (50035); only the nested parent_id error identifies the cap,
@@ -67,6 +71,152 @@ def team_channel_name(team_name: str, friendly_id: str) -> str:
 def team_voice_name(team_name: str, friendly_id: str) -> str:
     """The voice channel's name, paired with the text channel's above."""
     return f"{team_name}-Voice-{friendly_id}"
+
+
+# The two team channel prefixes, which lived in helpers/substitutes beside the
+# sub-grant logic while the shared one lived here. They are room NAMES, so they
+# belong with the other room names -- and having them apart is what let four
+# modules each build their own mapping from a prefix to the side that owns it.
+TEAM_A_CHANNEL_PREFIX = "Red-Team"
+TEAM_B_CHANNEL_PREFIX = "Blue-Team"
+
+
+class HasRosters(Protocol):
+    """Anything carrying a draft's two rosters and its sign-ups.
+
+    A DraftSession row is the real one; stating the shape keeps this module
+    free of the models, which is the seam the whole file is built on.
+    """
+    team_a: "list[str] | None"
+    team_b: "list[str] | None"
+    sign_ups: "dict[str, str] | None"
+
+
+@dataclass(frozen=True)
+class Side:
+    """One side of a draft, and everything that follows from being that side.
+
+    A room's name is still what says which side owns it -- there is no column
+    recording it, and the name survives the delete-and-recreate repair that
+    /regenerate_rooms performs, where an id would not. What changed is that
+    only this table knows it.
+
+    Before, four modules each held their own mapping from the prefix to one
+    fact: substitutes to the rooms a sub may see, draft_log_store to the
+    channel object, room_regeneration to the roster and the pools column,
+    opponent_threads to the rosters and the opposing label. Four tables on one
+    key, agreeing by convention. "The A side is the red one, its rooms are
+    Red-Team-*, its roster is team_a, its pools live in
+    team_a_pools_destination_id" is now a single row.
+    """
+    key: str | None            # "A"/"B" -- /add_sub's stored choice value
+    prefix: str                # the room-name prefix, e.g. "Red-Team"
+    pools_column: str          # where this side's pools thread id is kept
+    label: "TeamLabel"         # the colour; `named` prefers a premade name
+
+    @property
+    def opposite(self) -> "Side | None":
+        """The side facing this one, or None for the shared chat."""
+        if self.key is None:
+            return None
+        return BLUE_SIDE if self.key == "A" else RED_SIDE
+
+    def roster_of(self, team_a: "Iterable[str] | None",
+                  team_b: "Iterable[str] | None",
+                  sign_ups: "dict[str, str] | None" = None) -> list[str]:
+        """Who belongs to this side, from plain rosters.
+
+        Plain values rather than a session, because room creation works that
+        way throughout this module and the scouting threads are spawned from
+        inside it.
+
+        The shared chat's roster is everybody, and for a team-less draft
+        (swiss) that means the sign-ups: team_a + team_b is empty there, and
+        rebuilding the only room with an empty roster locks the draft out of
+        it.
+        """
+        a, b = list(team_a or []), list(team_b or [])
+        if self.key == "A":
+            return a
+        if self.key == "B":
+            return b
+        return a + b or list((sign_ups or {}).keys())
+
+    def opponents_of(self, team_a: "Iterable[str] | None",
+                     team_b: "Iterable[str] | None") -> list[str]:
+        """Who this side is scouting. Empty for the shared chat, which holds
+        both teams, so nobody in it is an opponent."""
+        if self.key is None:
+            return []
+        return list(team_b or []) if self.key == "A" else list(team_a or [])
+
+    def roster(self, draft: HasRosters) -> list[str]:
+        """roster_of for anything carrying the three roster fields."""
+        return self.roster_of(draft.team_a, draft.team_b, draft.sign_ups)
+
+    def named(self, draft: HasTeamNames) -> "TeamLabel":
+        """This side's label for THIS draft: a premade team's own name if it
+        has one, otherwise the colour."""
+        red, blue = labels_for(draft)
+        return red if self.key == "A" else blue if self.key == "B" else self.label
+
+    def claims_room(self, channel_name: str) -> bool:
+        """Whether this room is one of this side's, by prefix alone.
+
+        Prefix alone, because every caller already knows WHICH draft it is
+        looking at -- it is searching that session's own channel_ids. Matching
+        the friendly_id too would be wrong here as well as redundant: it falls
+        back to draft_id or session_id on rows that lack one, so a room named
+        from the real value would stop being recognised.
+        """
+        return (channel_name or "").lower().startswith(f"{self.prefix.lower()}-")
+
+    def room_names(self, friendly_id: str) -> set[str]:
+        """The rooms this side owns, lowercased for comparison.
+
+        Discord lowercases text channel names on creation while voice channels
+        keep their casing, so every comparison against a live channel has to be
+        case-insensitive.
+
+        A team gets a chat and (when the guild enables it) a voice room; the
+        shared chat gets only the chat, which is the same condition room
+        creation applies. Offering a voice name nothing ever creates would put
+        a name in the set that can never match.
+        """
+        names = {team_channel_name(self.prefix, friendly_id).lower()}
+        if self.key is not None:
+            names.add(team_voice_name(self.prefix, friendly_id).lower())
+        return names
+
+
+RED_SIDE = Side("A", TEAM_A_CHANNEL_PREFIX, "team_a_pools_destination_id", RED)
+BLUE_SIDE = Side("B", TEAM_B_CHANNEL_PREFIX, "team_b_pools_destination_id", BLUE)
+# Not a team: no roster of its own, no opponents, and the one room every player
+# can see. Several rules key off that -- admin access, no scouting threads, no
+# team voice -- so it is a row here rather than a None the callers each handle.
+# "this draft" is what the sub-grant confirmation has always called the shared
+# chat, and it is the honest label: the room has no colour because it has no
+# side. Borrowing RED here would have it announce itself as Team Red.
+SHARED_SIDE = Side(None, SHARED_CHAT_TEAM, "open_pools_destination_id",
+                   TeamLabel("this draft", "", ""))
+
+SIDES = (RED_SIDE, BLUE_SIDE, SHARED_SIDE)
+
+
+def side_by_prefix(prefix: str | None) -> Side | None:
+    """The side whose rooms carry this prefix."""
+    return next((s for s in SIDES if s.prefix == prefix), None)
+
+
+def side_by_key(key: str | None) -> Side | None:
+    """The side /add_sub's stored choice value names.
+
+    A missing choice names no side: the shared chat is not something anybody
+    picks, so None in must not match SHARED_SIDE's None key.
+    """
+    if key is None:
+        return None
+    return next((s for s in SIDES if s.key == key), None)
 
 
 def resolve_category(guild: Any, config: dict[str, Any], key: str) -> Any:

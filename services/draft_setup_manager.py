@@ -29,6 +29,7 @@ from notification_service import send_ready_check_dms
 from services.draft_socket_client import DraftSocketClient
 from services.draft_log_store import post_team_logs
 from cube_views.pack_options import DEFAULT_PACKS_PER_PLAYER, DEFAULT_CARDS_PER_PACK
+from helpers.team_names import BLUE, RED
 
 # Constants
 READY_CHECK_INSTRUCTIONS = (
@@ -1515,9 +1516,12 @@ class DraftSetupManager:
                 discord_name = discord_name_by_user_id.get(user_id)
                 discord_id = discord_id_by_user_id.get(user_id)
                 
-                # Add team color emoji based on player position
-                # Odd positions (0, 2, 4...) are red team, even positions (1, 3, 5...) are blue team
-                team_emoji = "🔴" if idx % 2 == 0 else "🔵"
+                # Add team color emoji based on player position. Seating
+                # alternates, so an even seat is on the same side as team_a --
+                # the emoji comes from the same constants every Discord surface
+                # uses, so the Draftmancer seat list and the teams embed cannot
+                # disagree about which colour a side is.
+                team_emoji = RED.emoji if idx % 2 == 0 else BLUE.emoji
                 
                 # Get win-loss record if available
                 record_str = ""

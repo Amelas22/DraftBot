@@ -16,6 +16,8 @@ from quiz_views_module.quiz_views import QuizPublicView
 from quiz_views_module.trophy_quiz_views import TrophyQuizView
 from helpers.draft_footer import apply_draft_footer_from_session
 from helpers.draft_outcome import decides_draft, total_matches_in
+from helpers.draft_rooms import BLUE_SIDE, RED_SIDE, SHARED_CHAT_TEAM
+from helpers.team_names import RED, labels_for
 from services.draft_pool_service import (format_entries, format_outcomes,
                                          pool_balance, release_draft_pool,
                                          settle_draw, settle_pool)
@@ -144,16 +146,20 @@ def split_content_for_embed(content, include_header=False, max_length=1000):
         
     return chunks
 
-def add_links_to_embed_safely(embed, links, base_name, team_color=""):
+def add_links_to_embed_safely(embed, links, base_name, emoji=""):
     """
     Helper function to add links to an embed, splitting them into multiple fields if needed
     to avoid exceeding Discord's 1024 character limit per field.
-    
+
     Args:
         embed: The discord.Embed object to add fields to
         links: List of link strings to add
         base_name: Base name for the embed field
-        team_color: Optional color indicator ('red', 'blue', or '') for emoji prefixing
+        emoji: Optional prefix, already spaced -- pass a TeamLabel's `prefix`.
+            This took a "red"/"blue" token and re-derived the emoji from its own
+            table, which meant a label's emoji was flattened to a colour name
+            and rebuilt two frames later from a second copy of the mapping
+            helpers/team_names.TeamLabel.prefix owns.
     """
     if not links:
         return
@@ -163,7 +169,6 @@ def add_links_to_embed_safely(embed, links, base_name, team_color=""):
     
     # If all links fit in one field, add them directly
     if len(content) <= 1000:
-        emoji = "🔴 " if team_color == "red" else "🔵 " if team_color == "blue" else ""
         embed.add_field(
             name=f"{emoji}{base_name}",
             value=content,
@@ -173,7 +178,6 @@ def add_links_to_embed_safely(embed, links, base_name, team_color=""):
     
     # Otherwise, split into chunks and add as multiple fields
     chunks = split_content_for_embed(links)
-    emoji = "🔴 " if team_color == "red" else "🔵 " if team_color == "blue" else ""
     
     for i, chunk in enumerate(chunks):
         suffix = "" if i == 0 else f" (part {i+1})"
@@ -493,11 +497,11 @@ async def recover_draft_channels(bot, guild, session_id):
     from helpers.draft_rooms import DRAFT_ROOM_COUNT, draft_category
     rooms_category = await draft_category(guild, get_config(guild.id), DRAFT_ROOM_COUNT)
     draft_channel_id = await temp_view.create_team_channel(
-        guild, "Draft", all_members, team_a, team_b, rooms_category=rooms_category
+        guild, SHARED_CHAT_TEAM, all_members, team_a, team_b, rooms_category=rooms_category
     )
-    await temp_view.create_team_channel(guild, "Red-Team", team_a_members, team_a, team_b,
+    await temp_view.create_team_channel(guild, RED_SIDE.prefix, team_a_members, team_a, team_b,
                                         rooms_category=rooms_category)
-    await temp_view.create_team_channel(guild, "Blue-Team", team_b_members, team_a, team_b,
+    await temp_view.create_team_channel(guild, BLUE_SIDE.prefix, team_b_members, team_a, team_b,
                                         rooms_category=rooms_category)
 
     # Re-post the pairing messages (now coloured by stored results) into the new chat.
@@ -659,14 +663,15 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                 bet_embed = None  # Initialize bet embed (will be populated for staked drafts)
 
                 # Add team fields and seating order
-                embed.add_field(name="🔴 Team Red" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_a_name}", 
+                red, blue = labels_for(draft_session)
+                embed.add_field(name=red.labelled,
                                 value="\n".join(team_a_names), inline=True)
-                embed.add_field(name="🔵 Team Blue" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_b_name}", 
+                embed.add_field(name=blue.labelled,
                                 value="\n".join(team_b_names), inline=True)
                 embed.add_field(
-                    name="**Draft Standings**", 
-                    value=("🔴 **Team Red Wins:** " + str(team_a_wins) if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"**{draft_session.team_a_name} Wins:** {team_a_wins}") + 
-                        ("\n🔵 **Team Blue Wins:** " + str(team_b_wins) if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"\n**{draft_session.team_b_name} Wins:** {team_b_wins}"), 
+                    name="**Draft Standings**",
+                    value=f"{red.labelled} **Wins:** {team_a_wins}\n"
+                          f"{blue.labelled} **Wins:** {team_b_wins}",
                     inline=False)
                 if draft_session.session_type != "premade":
                     embed.add_field(name="Seating Order", value=format_seating_order(seating_order), inline=False)
@@ -751,8 +756,9 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
             description = f"Draft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
             discord_color = discord.Color.gold()
         elif draft_session.session_type == "premade":
-            team_name = draft_session.team_a_name if winner_team_ids == draft_session.team_a else draft_session.team_b_name
-            title = f"{team_name} has won the match!"
+            red, blue = labels_for(draft_session)
+            winner_label = red if winner_team_ids == draft_session.team_a else blue
+            title = f"{winner_label.name} has won the match!"
             description = f"Congratulations to " + ", ".join(get_display_name(member, guild) for member in winner_team if member) + f" on winning the draft!\nDraft Start: <t:{int(draft_session.teams_start_time.timestamp())}:F>"
             discord_color = discord.Color.gold()
         elif draft_session.session_type == "staked":
@@ -783,7 +789,9 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
                 )
 
     elif team_a_wins == 0 and team_b_wins == 0:
-        title = "Draft Standings" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
+        red, blue = labels_for(draft_session)
+        title = ("Draft Standings" if red is RED
+                 else f"{red.name} vs. {blue.name}")
         description = "If a drafter is missing from this channel, they likely can still see the channel but have the Discord invisible setting on."
         discord_color = discord.Color.dark_blue()
     elif team_a_wins == half_matches and team_b_wins == half_matches and total_matches % 2 == 0:
@@ -791,7 +799,9 @@ async def determine_draft_outcome(bot, draft_session, team_a_wins, team_b_wins, 
         description = f"Draft Start: <t:{int(draft_session.draft_start_time.timestamp())}:F>"
         discord_color = discord.Color.light_grey()
     else:
-        title = "Draft Standings" if draft_session.session_type == "random" or draft_session.session_type == "test" or draft_session.session_type == "staked" else f"{draft_session.team_a_name} vs. {draft_session.team_b_name}"
+        red, blue = labels_for(draft_session)
+        title = ("Draft Standings" if red is RED
+                 else f"{red.name} vs. {blue.name}")
         description = "If a drafter is missing from this channel, they likely can still see the channel but have the Discord invisible setting on."
         discord_color = discord.Color.dark_blue()
     return title, description, discord_color

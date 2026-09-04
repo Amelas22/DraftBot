@@ -5,6 +5,8 @@ snowflakes; they are not guild members, so display paths must fall back to the
 draft session's sign_ups names (see utils.generate_seating_order).
 """
 
+from helpers.team_names import team_labels
+
 TEST_USER_ID_BASE = 900000000000000000
 
 # Synthetic ids are allocated sequentially from the base (see next_id below),
@@ -39,7 +41,8 @@ def plan_premade_test_users(team_a, team_b, team_a_name, team_b_name,
         taken.add(str(candidate))
         return str(candidate)
 
-    for team, label in ((team_a, team_a_name or "Team A"), (team_b, team_b_name or "Team B")):
+    red, blue = team_labels(team_a_name, team_b_name)
+    for team, label in ((team_a, red.name), (team_b, blue.name)):
         while len(team) < team_size:
             user_id = next_id()
             new_users[user_id] = f"[TEST] {label} User {len(team) + 1}"

@@ -28,6 +28,7 @@ from helpers.draft_rooms import (
 from helpers.draft_outcome import decides_draft, standings_after, total_matches_in
 from helpers.opponent_threads import spawn_opponent_threads
 from helpers.permissions import bot_manager_button
+from helpers.team_names import labels_for
 from services.draft_pool_service import entry_in, release_draft_pool, set_entry
 from utils import (
     calculate_pairings,
@@ -183,8 +184,9 @@ class PersistentView(discord.ui.View):
 
 
     def _add_premade_buttons(self):
-        self._add_button(self.team_a_name, "green", "Team_A", self.team_assignment_callback)
-        self._add_button(self.team_b_name, "red", "Team_B", self.team_assignment_callback)
+        red, blue = labels_for(self)
+        self._add_button(red.name, "green", "Team_A", self.team_assignment_callback)
+        self._add_button(blue.name, "red", "Team_B", self.team_assignment_callback)
         self._add_button("Generate Seating Order", "primary", "generate_seating", self.randomize_teams_callback)
 
         # Add test button only if global test mode is enabled
@@ -442,9 +444,10 @@ class PersistentView(discord.ui.View):
         logger.info(f"Added {len(new_users)} test users to premade draft {self.draft_session_id} "
                     f"({draft_session.team_a_name}: {len(team_a)}, {draft_session.team_b_name}: {len(team_b)})")
         await self.update_team_view(interaction)
+        red, blue = labels_for(draft_session)
         await interaction.followup.send(
             f"Added {len(new_users)} test users. "
-            f"**{draft_session.team_a_name}**: {len(team_a)}/3, **{draft_session.team_b_name}**: {len(team_b)}/3.",
+            f"**{red.name}**: {len(team_a)}/3, **{blue.name}**: {len(team_b)}/3.",
             ephemeral=True,
         )
 
@@ -970,10 +973,11 @@ class PersistentView(discord.ui.View):
                     a = len([u for u in (session.team_a or []) if u in signed])
                     b = len([u for u in (session.team_b or []) if u in signed])
                     if a != b:
+                        red, blue = labels_for(session)
                         await interaction.response.send_message(
-                            f"{session.team_a_name} has {a} "
+                            f"{red.name} has {a} "
                             f"{'player' if a == 1 else 'players'} and "
-                            f"{session.team_b_name} has {b}. An entry-fee draft "
+                            f"{blue.name} has {b}. An entry-fee draft "
                             "needs even teams so both sides are backing the same "
                             "amount.", ephemeral=True)
                         return False, None
@@ -1330,14 +1334,18 @@ class PersistentView(discord.ui.View):
         team_b_names = [get_display_name_by_id(str(user_id), guild, session.sign_ups.get(str(user_id), "Unknown User")) for user_id in (session.team_b or [])]
 
         # Find the index of the Team A and Team B fields in the embed
-        team_a_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith(session.team_a_name or "Team A")), None)
-        team_b_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith(session.team_b_name or "Team B")), None)
+        # Matched by the same label the field was written with -- these headings
+        # are produced by team_labels everywhere else, so re-deriving the name
+        # here is how the two spellings drifted apart in the first place.
+        red, blue = labels_for(session)
+        team_a_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith(red.labelled)), None)
+        team_b_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith(blue.labelled)), None)
 
         # Update the fields if found
         if team_a_index is not None:
-            embed.set_field_at(team_a_index, name=f"{session.team_a_name} ({len(session.team_a or [])}):", value="\n".join(team_a_names) if team_a_names else "No players yet.", inline=True)
+            embed.set_field_at(team_a_index, name=f"{red.labelled} ({len(session.team_a or [])}):", value="\n".join(team_a_names) if team_a_names else "No players yet.", inline=True)
         if team_b_index is not None:
-            embed.set_field_at(team_b_index, name=f"{session.team_b_name} ({len(session.team_b or [])}):", value="\n".join(team_b_names) if team_b_names else "No players yet.", inline=True)
+            embed.set_field_at(team_b_index, name=f"{blue.labelled} ({len(session.team_b or [])}):", value="\n".join(team_b_names) if team_b_names else "No players yet.", inline=True)
 
         # Edit the original message with the updated embed
         await message.edit(embed=embed)
@@ -1597,7 +1605,7 @@ class PersistentView(discord.ui.View):
                             else:
                                 all_members.append(member)
                         channel = await temp_view.create_team_channel(
-                            guild, "Draft", all_members, rooms_category=rooms_category)
+                            guild, SHARED_CHAT_TEAM, all_members, rooms_category=rooms_category)
                         session.draft_chat_channel = str(channel)
                         draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
                         logger.info("Created swiss draft channel {}", session.draft_chat_channel)
@@ -1625,7 +1633,7 @@ class PersistentView(discord.ui.View):
                         all_members = team_a_members + team_b_members
                         logger.info("Creating main Draft chat channel with all {} members", len(all_members))
                         channel = await temp_view.create_team_channel(
-                            guild, "Draft", all_members, session.team_a, session.team_b,
+                            guild, SHARED_CHAT_TEAM, all_members, session.team_a, session.team_b,
                             rooms_category=rooms_category
                         )
                         session.draft_chat_channel = str(channel)
@@ -1633,11 +1641,11 @@ class PersistentView(discord.ui.View):
                         logger.info("Created draft and team channels for session_id={}", session_id)
                         logger.info("Creating Red-Team channel with {} Team A members", len(team_a_members))
                         await temp_view.create_team_channel(
-                            guild, "Red-Team", team_a_members, session.team_a,
+                            guild, RED_SIDE.prefix, team_a_members, session.team_a,
                             session.team_b, rooms_category=rooms_category)
                         logger.info("Creating Blue-Team channel with {} Team B members", len(team_b_members))
                         await temp_view.create_team_channel(
-                            guild, "Blue-Team", team_b_members, session.team_a,
+                            guild, BLUE_SIDE.prefix, team_b_members, session.team_a,
                             session.team_b, rooms_category=rooms_category)
 
                     else:
@@ -2135,9 +2143,8 @@ class MatchResultSelect(Select):
         return outcome, projected_a, projected_b, draft_session
 
     def _confirmation_text(self, outcome, projected_a, projected_b, draft_session):
-        team_a_name = draft_session.team_a_name or "Team A"
-        team_b_name = draft_session.team_b_name or "Team B"
-        score = f"**{team_a_name} {projected_a} – {projected_b} {team_b_name}**"
+        red, blue = labels_for(draft_session)
+        score = f"**{red.name} {projected_a} – {projected_b} {blue.name}**"
         staked = draft_session.session_type == "staked"
 
         if outcome == "draw":
@@ -2146,7 +2153,7 @@ class MatchResultSelect(Select):
                     f"Recording this makes it {score}, and the draft is over.{money}\n"
                     f"\nNothing has been recorded yet.")
 
-        winner = team_a_name if outcome == "team_a" else team_b_name
+        winner = red.name if outcome == "team_a" else blue.name
         money = ("\nStakes settle the moment this is recorded, and cannot be undone "
                  "from Discord.") if staked else ""
         return (f"### This ends the draft\n"
@@ -2272,6 +2279,7 @@ class MatchResultSelect(Select):
                 print("Draft session not found.")
                 return
 
+            red, blue = labels_for(draft_session)
             channel = guild.get_channel(int(draft_session.draft_chat_channel))
             if not channel:
                 print("Channel not found.")
@@ -2308,9 +2316,9 @@ class MatchResultSelect(Select):
                     if match_result.winner_id:
                         # Get draft session to check which team the winner belongs to
                         if match_result.winner_id in draft_session.team_a:
-                            winning_team_emoji = "🔴 "  # Red emoji for Team A
+                            winning_team_emoji = red.prefix
                         elif match_result.winner_id in draft_session.team_b:
-                            winning_team_emoji = "🔵 "  # Blue emoji for Team B
+                            winning_team_emoji = blue.prefix
                     
                     # Update the field with the appropriate emoji
                     updated_value = f"{winning_team_emoji}**Match {match_result.match_number}**\n{player1_name}: {match_result.player1_wins} wins\n{player2_name}: {match_result.player2_wins} wins"

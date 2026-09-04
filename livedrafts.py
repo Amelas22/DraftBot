@@ -6,6 +6,7 @@ from session import AsyncSessionLocal, DraftSession, MatchResult, get_draft_sess
 from utils import calculate_team_wins
 from helpers.display_names import get_display_name, get_display_name_by_id
 from helpers.draft_footer import apply_draft_footer_from_session
+from helpers.team_names import labels_for
 from loguru import logger
 
 async def manage_live_drafts_channel(bot, guild):
@@ -106,13 +107,14 @@ async def generate_live_draft_embed(bot, draft_session):
     )
     
     # Add team fields
-    embed.add_field(name="🔴 Team Red", value="\n".join(team_a_names) or "No players", inline=True)
-    embed.add_field(name="🔵 Team Blue", value="\n".join(team_b_names) or "No players", inline=True)
-    
+    red, blue = labels_for(draft_session)
+    embed.add_field(name=red.labelled, value="\n".join(team_a_names) or "No players", inline=True)
+    embed.add_field(name=blue.labelled, value="\n".join(team_b_names) or "No players", inline=True)
+
     # Add scoreboard
     embed.add_field(
         name="**Current Score**",
-        value=f"🔴 Team Red: {team_a_wins}\n🔵 Team Blue: {team_b_wins}\n",
+        value=f"{red.labelled}: {team_a_wins}\n{blue.labelled}: {team_b_wins}\n",
         inline=False
     )
     
@@ -136,9 +138,9 @@ async def generate_live_draft_embed(bot, draft_session):
                 # Determine which team won
                 winner_emoji = ""
                 if match.winner_id in draft_session.team_a:
-                    winner_emoji = "🔴 "
+                    winner_emoji = red.prefix
                 elif match.winner_id in draft_session.team_b:
-                    winner_emoji = "🔵 "
+                    winner_emoji = blue.prefix
                 
                 # Determine winner and loser names
                 if match.winner_id == match.player1_id:
