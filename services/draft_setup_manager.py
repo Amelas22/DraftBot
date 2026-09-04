@@ -1030,10 +1030,17 @@ class DraftSetupManager:
         """Tell the room the draft moved, with a fresh link each.
 
         Everything the bot renders from here on is already correct; this is for the
-        links people are ALREADY holding. The sign-up confirmation is an ephemeral
-        message sent at sign-up time -- it cannot be edited afterwards, and nothing
-        about it suggests the room has changed, so a player who signed up before the
-        swap has a URL to a room the bot has walked away from.
+        links people are ALREADY holding. Those come from team creation, which posts
+        every personalised link in the teams embed and DMs the same link to anyone who
+        opted in. Neither can be usefully edited after a swap, so a player who saw
+        them before it has a URL to a room the bot has walked away from.
+
+        Which is also why this says nothing before teams exist, and why that is
+        the usual outcome. The sign-up confirmation deliberately carries no link --
+        it says "Your Draftmancer link will be provided once teams are created" --
+        and no other pre-teams surface renders one, so a draft still in sign-up has
+        handed out nothing to correct. Since the swap itself only commits while the
+        draft is in sign-up, what remains is the race described at the guard.
 
         Reads the session itself rather than reusing the caller's row: the swap above
         is a compare-and-swap that deliberately does not load one. That read also
@@ -1049,6 +1056,42 @@ class DraftSetupManager:
             if not draft_session or not draft_session.sign_ups:
                 # Regeneration in an empty queue is routine repair, not an incident.
                 return
+
+            if draft_session.teams_start_time is None:
+                # Nobody has been given a link, so there is nothing stale to
+                # replace. Saying otherwise is worse than silence: it reports the
+                # failure of links nobody received, and names a room nobody was in.
+                #
+                # Which is nearly always, and by design. The swap above only
+                # commits while session_stage IS NULL, so a regeneration that gets
+                # this far had to happen during sign-up. The narrow case this
+                # exists for is the one the compare-and-swap cannot close: team
+                # creation committing between that UPDATE and the read above --
+                # the disconnect sits in that gap. Then links really did just go
+                # out, and the room really did just move, so the notice is earned.
+                #
+                # Deliberately teams_start_time rather than the session_stage the
+                # swap tests. They answer different questions: session_stage is a
+                # lifecycle field many paths write ('completed', 'abandoned', an
+                # admin correction), while teams_start_time has exactly one writer
+                # -- the transaction in team_creator that posts everyone's link.
+                # "Were links handed out" is what this needs to know.
+                #
+                # One window this does not cover, found in review. The STAKED path
+                # posts its link embeds before committing (team_creator.py:385-392,
+                # commit at :393); the non-staked path commits first (:191). So a
+                # staked rollback after those sends leaves players holding links
+                # with teams_start_time still NULL, and this would suppress a
+                # notice they need. Left as is because that rollback also loses
+                # team_a/team_b and the stage, so the draft is already broken in a
+                # way one missing notice does not describe -- and the fix belongs
+                # in team_creator, committing before it tells anyone, not in a
+                # looser test here.
+                self.logger.info(
+                    f"Not announcing the move to DB{self.draft_id}: {self.session_id} "
+                    f"is still in sign-up, so no links have been handed out")
+                return
+
             links = {discord_id: link
                      for discord_id, name in draft_session.sign_ups.items()
                      if (link := draft_session.get_draft_link_for_user(name))}
