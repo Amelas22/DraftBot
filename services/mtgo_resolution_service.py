@@ -22,8 +22,9 @@ background task within Discord's interaction window.
 """
 import asyncio
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime
+from typing import Any
 
 from loguru import logger
 from sqlalchemy import select, func
@@ -98,7 +99,8 @@ async def _resolve_job(job_id: str, status: str):
     await with_db_retry(_do)
 
 
-async def _recover_lost_job(resp, job_type: str, mtgo_user: str, n: int):
+async def _recover_lost_job(resp: dict[str, Any] | None, job_type: str,
+                            mtgo_user: str, n: int) -> dict[str, Any] | None:
     """Recovery for a failed job POST. Runs the /jobs adoption scan ONLY when the client
     flagged the failure as ambiguous (delivered-but-response-lost is possible); a definite
     rejection or never-connected error returns None immediately — no job can exist, and
@@ -117,7 +119,7 @@ async def _recover_lost_job(resp, job_type: str, mtgo_user: str, n: int):
 # deposit (bot receives tix) — credit only on 'done'
 # ---------------------------------------------------------------------------
 async def start_deposit(guild_id: str, player_id: str, mtgo_user: str, n: int, *,
-                        commit: bool = True, wait_minutes: int = 0) -> dict:
+                        commit: bool = True, wait_minutes: int = 0) -> dict[str, Any]:
     """Enqueue a deposit (bot receives ``n`` tix from ``mtgo_user``). No wallet effect yet,
     but the job is durably recorded so it can't be stranded by a restart."""
     if n <= 0:
@@ -142,7 +144,7 @@ async def start_deposit(guild_id: str, player_id: str, mtgo_user: str, n: int, *
 
 
 async def finish_deposit(job_id: str, guild_id: str, player_id: str, n: int, mtgo_user: str,
-                         timeout_s: float = _DEFAULT_POLL_TIMEOUT_S) -> dict:
+                         timeout_s: float = _DEFAULT_POLL_TIMEOUT_S) -> dict[str, Any]:
     """Poll the deposit job; on 'done' credit the wallet (idempotent by job_id)."""
     outcome, job = await _poll_job(job_id, timeout_s)
     if outcome == "done":
@@ -172,7 +174,9 @@ async def _return_in_flight(guild_id: str, player_id: str, n: int, key: str):
     await on_inflow(guild_id, player_id)
 
 
-async def on_inflow(guild_id: str, player_id: str, notifier=None, *args, **kwargs) -> list:
+async def on_inflow(guild_id: str, player_id: str,
+                    notifier: Callable[..., Any] | None = None,
+                    *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
     """Call this from every path that puts tix into somebody's wallet. The only thing
     such a path should have to know.
 
@@ -218,7 +222,7 @@ async def settle_deposit_inflow(guild_id: str, player_id: str):
 
 
 async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, *,
-                         commit: bool = True, wait_minutes: int = 0) -> dict:
+                         commit: bool = True, wait_minutes: int = 0) -> dict[str, Any]:
     """Transfer ``n`` tix from the player to ``system:in-flight`` (atomic funds check),
     then enqueue the give. While the trade is open those tix belong to in-flight, so
     they're unspendable — no status, no special-casing in any balance query.
@@ -258,8 +262,8 @@ async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, 
 
 
 async def finish_withdraw(job_id: str, guild_id: str, player_id: str, n: int,
-                          mtgo_user: str = None,
-                          timeout_s: float = _DEFAULT_POLL_TIMEOUT_S) -> dict:
+                          mtgo_user: str | None = None,
+                          timeout_s: float = _DEFAULT_POLL_TIMEOUT_S) -> dict[str, Any]:
     """Poll the withdraw job. On 'done' the tix physically left the vault, so book the
     boundary debit against in-flight (idempotent by job_id). On 'failed' transfer them
     back to the player (idempotent by job_id too). On timeout they stay committed to
@@ -284,7 +288,7 @@ async def finish_withdraw(job_id: str, guild_id: str, player_id: str, n: int,
 # ---------------------------------------------------------------------------
 _RESCAN_INTERVAL_S = 10 * 60
 _watchdog_running = False   # on_ready refires on gateway reconnects; start one loop only
-_polling_jobs: set = set()  # job_ids with a live resumed poller — rescans skip them
+_polling_jobs: set[str] = set()  # job_ids with a live resumed poller — rescans skip them
 
 
 async def resume_pending_jobs() -> int:
@@ -323,7 +327,7 @@ async def resume_pending_jobs() -> int:
     return len(pending)
 
 
-async def pending_jobs_watchdog(bot=None):
+async def pending_jobs_watchdog(bot: Any = None) -> None:
     """Run resume_pending_jobs forever, every ``_RESCAN_INTERVAL_S``.
 
     A single startup pass isn't enough: each poll gives up after ~14 minutes
@@ -359,7 +363,7 @@ async def pending_jobs_watchdog(bot=None):
 # internal pay (no trade)
 # ---------------------------------------------------------------------------
 async def _settle_owed_portion(guild_id: str, payer_id: str, creditor_id: str,
-                               amount: int) -> dict | None:
+                               amount: int) -> dict[str, Any] | None:
     """Settle up to ``amount`` of what ``payer_id`` owes ``creditor_id``, or None if they
     owe nothing (or the settlement could not be applied).
 
@@ -381,7 +385,7 @@ async def _settle_owed_portion(guild_id: str, payer_id: str, creditor_id: str,
     return res
 
 
-async def pay(guild_id: str, from_player: str, to_player: str, amount: int, *, notes: str = None) -> dict:
+async def pay(guild_id: str, from_player: str, to_player: str, amount: int, *, notes: str | None = None) -> dict[str, Any]:
     """Move tix between two wallets with no MTGO trade (a plain claim transfer).
 
     Paying someone you OWE settles that debt (up to the amount owed) rather than landing
@@ -429,7 +433,7 @@ async def pay(guild_id: str, from_player: str, to_player: str, amount: int, *, n
 # debt settlement from wallet — wallet move + debt clear in ONE transaction
 # ---------------------------------------------------------------------------
 async def settle_debt_from_wallet(guild_id: str, payer_id: str, creditor_id: str, amount: int,
-                                  *, link_id: str = None) -> dict:
+                                  *, link_id: str | None = None) -> dict[str, Any]:
     """Settle a tix debt from the payer's wallet: move the claim (payer −N, creditor +N)
     AND clear the debt ledger, atomically in one transaction. No MTGO trade — the tix
     never leave the vault; only the claim on them changes hands.
@@ -502,7 +506,7 @@ async def settle_debt_from_wallet(guild_id: str, payer_id: str, creditor_id: str
 
 
 async def settle_inflow(guild_id: str, player_id: str,
-                        occasion: str = "an inflow") -> list[dict]:
+                        occasion: str = "an inflow") -> list[dict[str, Any]]:
     """Run ``auto_draw`` for a holder, guarded. Call this from every inflow path, not just
     deposits — and from ``settle_new_debts`` for the mirror case, a debt arriving at
     someone who already holds tix (``occasion`` only names the trigger in the error log).
@@ -533,7 +537,7 @@ async def settle_inflow(guild_id: str, player_id: str,
         return []
 
 
-async def settle_new_debts(guild_id: str, debtor_ids: Iterable[str]) -> list[dict]:
+async def settle_new_debts(guild_id: str, debtor_ids: Iterable[str]) -> list[dict[str, Any]]:
     """Draw brand-new debts against what their debtors ALREADY hold.
 
     The mirror of ``settle_inflow``: that fires when money reaches someone who owes, this
@@ -564,7 +568,7 @@ async def settle_new_debts(guild_id: str, debtor_ids: Iterable[str]) -> list[dic
     return [settlement for per_debtor in drawn for settlement in per_debtor]
 
 
-async def auto_draw(guild_id: str, player_id: str) -> list[dict]:
+async def auto_draw(guild_id: str, player_id: str) -> list[dict[str, Any]]:
     """Apply a player's wallet balance to their outstanding debts, oldest debt first,
     until the wallet is exhausted or the debts are cleared. Returns the settlements made.
 
@@ -590,11 +594,15 @@ async def auto_draw(guild_id: str, player_id: str) -> list[dict]:
     creditors = list(owed)
     entry_lists = await asyncio.gather(*(
         debt_service.get_active_debt_entries(guild_id, player_id, cp) for cp in creditors))
-    ordered = [
+    ordered: list[tuple[datetime | None, str]] = [
         (entries[-1].created_at if entries else None, cp)  # entries are newest-first
         for cp, entries in zip(creditors, entry_lists)
     ]
-    ordered.sort(key=lambda t: (t[0] is None, t[0]))
+    def _oldest_first(entry: tuple[datetime | None, str]):
+        # A creditor with no active entry has no age, and sorts last.
+        return (entry[0] is None, entry[0])
+
+    ordered.sort(key=_oldest_first)
 
     settlements = []
     for _, cp in ordered:
@@ -628,7 +636,7 @@ async def auto_draw(guild_id: str, player_id: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # reconciliation passthrough (physical vault tix == SUM settled wallets)
 # ---------------------------------------------------------------------------
-async def reconcile() -> dict:
+async def reconcile() -> dict[str, Any]:
     """Pull the vault's live tix from the serve and compare to the wallet claim total."""
     client = get_client()
     bot_tix = await client.bot_tix()
