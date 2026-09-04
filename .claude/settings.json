@@ -50,6 +50,12 @@
             "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/protect_env_file.py\"",
             "timeout": 10,
             "statusMessage": "Guarding .env against writes"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/require_pr_readiness.py\"",
+            "timeout": 10,
+            "statusMessage": "Checking PR-readiness receipt for HEAD"
           }
         ]
       }

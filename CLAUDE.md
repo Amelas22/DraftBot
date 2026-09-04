@@ -234,6 +234,39 @@ never re-asserted per use site:
 - `# pyrefly: ignore [error-kind]` as a very last resort, on the line above the
   error.
 
+### Before opening a PR
+
+`.claude/hooks/require_pr_readiness.py` refuses the commands that put work in
+front of a reviewer until the readiness passes have been run for the **exact**
+HEAD commit:
+
+| pass | what it is |
+|---|---|
+| `pytest` | the suite, run by the recorder |
+| `pyrefly` | the type checker, run by the recorder |
+| `simplify` | the cleanup review (reuse / simplification / efficiency / altitude) |
+| `review` | an adversarial review by a second model |
+| `e2e` | `scripts/e2e_draft_events.py` against the real test guild |
+
+Record them with:
+
+```bash
+pipenv run python scripts/pr_readiness.py \
+    --simplify "..." --review "..." --e2e "scenario: PASS"
+```
+
+It runs pytest and pyrefly itself, so those results are measured rather than
+claimed; the other three take a note saying what was actually done, because they
+need judgement, a second model, and a live Discord guild. The receipt is keyed by
+commit sha, so amending or adding a commit afterwards invalidates it.
+
+This exists because the suite does not cover what breaks in production: `views.py`
+is outside pyrefly's `project-includes`, `create_rooms_pairings` has no unit test,
+and the e2e harness is untracked. A green `pytest` means less than it looks like.
+
+For a production incident, `PR_READINESS_OVERRIDE="<why>"` on the command is
+allowed — the reason is typed, so it appears in the transcript.
+
 ### Security Considerations
 - Never commit secrets or tokens
 - Use environment variables for sensitive data

@@ -177,3 +177,4 @@ analysis_data/
 
 # Local analysis scratch (scripts + caches live outside version control)
 analysis/
+.claude/pr-readiness/
