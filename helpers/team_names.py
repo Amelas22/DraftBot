@@ -33,19 +33,29 @@ class TeamLabel(NamedTuple):
 
     @property
     def prefix(self) -> str:
-        """The emoji and its separating space, or nothing for a named team."""
+        """The emoji and its separating space, or nothing for the shared chat.
+
+        Every side of a draft has a colour. The one label without an emoji is
+        the shared draft chat's, which is not a side.
+        """
         return f"{self.emoji} " if self.emoji else ""
 
     @property
     def labelled(self) -> str:
-        """The name as an embed field heading: "🔴 Team Red", or "Pack Rats".
+        """The name as an embed field heading: "🔴 Team Red", "🔴 Pack Rats".
 
         Use this wherever the label heads a block a reader scans -- an embed
-        field, a standings line. Use `name` where the emoji would be noise or
-        is added by something else: a button, a Draftmancer team name, a
-        sentence the label appears inside, or a caller that takes `color` and
-        renders the emoji itself.
+        field, a standings line. Use `name` where the emoji would be noise: a
+        button, a Draftmancer team name, or a sentence the label appears
+        inside.
         """
+        # Idempotent for THIS side's emoji: captains typed "🔴 Pack Rats" by
+        # hand while the heading carried no colour, and prepending again gives
+        # "🔴 🔴 Pack Rats". Only this side's emoji is absorbed -- a name
+        # starting with the other side's keeps both, because the heading must
+        # still say which side it is.
+        if self.emoji and self.name.startswith(self.emoji):
+            return self.name
         return f"{self.prefix}{self.name}"
 
 
@@ -108,11 +118,15 @@ def heads_field(label: TeamLabel, field_name: str) -> bool:
     flight when that shipped carries the old one, and matching only the new one
     would leave its join buttons silently updating nothing.
 
-    Anchored at the start of the heading, so one team's name cannot claim the
-    other team's field even when one name contains the other.
+    The match is BOUNDED: a team's heading is the label exactly, as written at
+    creation, or the label followed by its count suffix once somebody has
+    joined. An open-ended prefix match is not enough, because the signup embed
+    puts "Cube:" and "Pack Format:" ahead of the team fields -- a team called
+    "Pack" matched "Pack Format:" first, and the join then overwrote the
+    draft's pack format with a roster.
     """
-    return (field_name.startswith(label.labelled)
-            or field_name.startswith(label.name))
+    return any(field_name == spelling or field_name.startswith(f"{spelling} (")
+               for spelling in (label.labelled, label.name))
 
 
 def labels_for(draft: HasTeamNames) -> tuple[TeamLabel, TeamLabel]:

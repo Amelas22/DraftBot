@@ -1314,6 +1314,17 @@ class PersistentView(discord.ui.View):
         finally:
             state_manager.set_creating_teams(session_id, False)
 
+    @staticmethod
+    def _team_field_index(fields, label, skip=None):
+        """Index of `label`'s field, never the one already claimed by the other side.
+
+        Nothing stops both captains typing the same name, and then both sides
+        match the same heading -- without `skip`, the second update overwrites
+        the first side's roster and the real field goes stale.
+        """
+        return next((i for i, f in enumerate(fields)
+                     if i != skip and heads_field(label, f.name)), None)
+
     async def update_team_view(self, interaction: discord.Interaction):
         session = await get_draft_session(self.draft_session_id)
         if not session:
@@ -1340,13 +1351,8 @@ class PersistentView(discord.ui.View):
         # heads_field owns which spellings count; see it for why old headings
         # still match.
         red, blue = labels_for(session)
-
-        def heading_for(label):
-            return next((i for i, e in enumerate(embed.fields)
-                         if heads_field(label, e.name)), None)
-
-        team_a_index = heading_for(red)
-        team_b_index = heading_for(blue)
+        team_a_index = self._team_field_index(embed.fields, red)
+        team_b_index = self._team_field_index(embed.fields, blue, skip=team_a_index)
 
         # Update the fields if found
         if team_a_index is not None:

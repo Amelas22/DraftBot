@@ -111,14 +111,14 @@ async def test_removing_from_a_premade_draft_refreshes_the_team_message():
     # A named team's heading now carries its side's colour -- the rooms and the
     # Draftmancer seat list colour it either way, so the heading says which.
     edited = message.edit.await_args.kwargs["embed"]
-    alpha = next(f for f in edited.fields if "Alpha" in f.name)
+    alpha = next(f for f in edited.fields if f.name.startswith("\U0001f534 Alpha"))
     assert "Ana" not in alpha.value, f"removed player still listed: {alpha.value}"
     assert "Unknown User" not in alpha.value, (
         "the player was dropped from sign_ups but left on the team, so the "
         f"refresh redrew them as a ghost: {alpha.value}")
     assert alpha.name == "\U0001f534 Alpha (0):", alpha.name
 
-    bravo = next(f for f in edited.fields if "Bravo" in f.name)
+    bravo = next(f for f in edited.fields if f.name.startswith("\U0001f535 Bravo"))
     assert "Bo" in bravo.value, f"the other team should be untouched: {bravo.value}"
 
 
