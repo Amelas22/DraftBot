@@ -49,7 +49,7 @@ def team_channel_rosters(
             opposing.label.name)
 
 
-def _thread_name(discord_id: str, sign_ups: dict[str, str] | None) -> str:
+def thread_name(discord_id: str, sign_ups: dict[str, str] | None) -> str:
     """Thread label for one opponent, derived from their sign-up display name.
 
     Must be a pure function of (discord_id, sign_ups): spawn_opponent_threads
@@ -92,30 +92,12 @@ async def threads_by_name(channel: discord.TextChannel) -> dict[str, object]:
         async for thread in channel.archived_threads(limit=ARCHIVED_THREAD_LOOKUP_LIMIT):
             found[thread.name] = thread
     except Exception as e:
+        # Keep the active names rather than lose the whole run: a failed
+        # archived lookup would otherwise make every thread look absent.
         logger.warning(f"[opponent-threads] archived thread lookup failed: {e}")
     for thread in getattr(channel, "threads", []) or []:
         found[thread.name] = thread
     return found
-
-
-async def thread_named(channel: discord.TextChannel, name: str):
-    """The thread called `name`, or None. Never creates one.
-
-    A player can legitimately have no thread -- create_thread is best-effort
-    and Discord refuses it often enough to matter -- and creating one here
-    would quietly overrule whatever made the create path skip them.
-    """
-    return (await threads_by_name(channel)).get(name)
-
-
-async def _existing_thread_names(channel: discord.TextChannel) -> set[str]:
-    """Names of the threads already in `channel`, active and archived.
-
-    `channel.threads` is pycord's cache of ACTIVE threads only, and scouting
-    threads auto-archive after THREAD_ARCHIVE_MINUTES -- so a re-run days later
-    would not see its own earlier work and would duplicate every thread.
-    """
-    return set(await threads_by_name(channel))
 
 
 def _starter(name: str, opponent_team_label: str, own_ids: list[str] | None = None) -> str:
@@ -164,7 +146,7 @@ async def spawn_opponent_threads(
         own_ids, ids, label = team_channel_rosters(team_name, team_a, team_b)
         if not ids:
             return 0
-        existing = await _existing_thread_names(channel)
+        existing = set(await threads_by_name(channel))
     except Exception as e:
         logger.warning(f"[opponent-threads] could not resolve opponents for '{team_name}': {e}")
         return 0
@@ -173,7 +155,7 @@ async def spawn_opponent_threads(
     for discord_id in ids:
         name = str(discord_id)
         try:
-            name = _thread_name(discord_id, sign_ups)
+            name = thread_name(discord_id, sign_ups)
             if name in existing:
                 continue
             thread = await channel.create_thread(

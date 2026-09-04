@@ -8,6 +8,7 @@ import discord
 import pytest
 
 from services.draft_log_store import (
+    post_pools_to_scouting_threads,
     _post_open_pools,
     _post_pools_for_team,
     map_discord_to_draftmancer,
@@ -1299,3 +1300,198 @@ async def test_open_pools_retry_does_not_repeat_a_team_header():
     assert first is False and second is True
     headers = [p for p in thread.posted_contents() if "__**gypsy caravan**__" in p]
     assert len(headers) == 1, f"the team header was posted again on the retry: {headers}"
+
+
+# ---- pools into the per-opponent scouting threads ---------------------------------
+#
+# Every team room already carries one scouting thread per player on the OTHER
+# team, made when the rooms were. They held notes only. This puts the pool of
+# the player being scouted where the people scouting them are already reading.
+#
+# Tournament matches only: those pools are already in the shared open thread, so
+# nothing moves into view that was not there. On an ordinary draft it would
+# disclose an opponent's pool for the first time.
+
+
+def _scouting_channel(threads):
+    """A team room whose scouting threads are all archived -- which is the real
+    case, since they auto-archive long before a draft finishes."""
+    ch = MagicMock()
+    ch.threads = []
+
+    async def archived(**_):
+        for t in threads:
+            yield t
+
+    ch.archived_threads = archived
+    return ch
+
+
+def _named_thread(name, tid):
+    thread = _FakeThread(tid)
+    thread.name = name
+    return thread
+
+
+_SCOUT_SIGN_UPS = {"disc_a": "Alice", "disc_b": "Bob"}
+_SCOUT_MAPPING = {"disc_a": "dm_a", "disc_b": "dm_b"}
+_SCOUT_A, _SCOUT_B = ["disc_a"], ["disc_b"]
+
+
+@pytest.mark.asyncio
+async def test_an_opponents_pool_lands_in_the_thread_named_for_them():
+    """Bob's pool goes into the RED room -- the room of the team scouting Bob --
+    and Alice's into the blue one."""
+    bob = _named_thread("Bob", 3001)
+    alice = _named_thread("Alice", 3002)
+
+    with _patched_discord():
+        await post_pools_to_scouting_threads(
+            _bot_for({}), _scouting_channel([bob]), _scouting_channel([alice]),
+            _SCOUT_A, _SCOUT_B, _SCOUT_MAPPING, _team_log(), _SCOUT_SIGN_UPS)
+
+    assert _attachment_names(bob) == ["Bob.txt"]
+    assert _attachment_names(alice) == ["Alice.txt"]
+
+
+@pytest.mark.asyncio
+async def test_a_pool_never_goes_to_its_owners_own_team():
+    """A scouting thread is about the OTHER side. Alice's pool in the red room
+    would hand her own team a thread about themselves, and leave the blue
+    player scouting her without it."""
+    alice_in_red = _named_thread("Alice", 3003)
+
+    with _patched_discord():
+        await post_pools_to_scouting_threads(
+            _bot_for({}), _scouting_channel([alice_in_red]), _scouting_channel([]),
+            _SCOUT_A, _SCOUT_B, _SCOUT_MAPPING, _team_log(), _SCOUT_SIGN_UPS)
+
+    assert _attachment_names(alice_in_red) == [], "a pool went to its owner's own team"
+
+
+@pytest.mark.asyncio
+async def test_a_second_run_posts_nothing_again():
+    """post_team_logs is reconciler-driven and re-runs freely. _FakeThread
+    replays its own history, so this really discovers what the first run left
+    rather than being told."""
+    bob = _named_thread("Bob", 3004)
+    red = _scouting_channel([bob])
+
+    with _patched_discord():
+        for _ in range(2):
+            await post_pools_to_scouting_threads(
+                _bot_for({}), red, _scouting_channel([]),
+                _SCOUT_A, _SCOUT_B, _SCOUT_MAPPING, _team_log(), _SCOUT_SIGN_UPS)
+
+    assert _attachment_names(bob) == ["Bob.txt"], "the pool was posted twice"
+
+
+@pytest.mark.asyncio
+async def test_a_player_without_a_thread_is_skipped_not_given_one():
+    """create_thread is best-effort and Discord refuses it often enough to
+    matter. Making one here would overrule that from the wrong place."""
+    red = _scouting_channel([])          # Bob has no thread
+
+    with _patched_discord():
+        await post_pools_to_scouting_threads(
+            _bot_for({}), red, _scouting_channel([]),
+            _SCOUT_A, _SCOUT_B, _SCOUT_MAPPING, _team_log(), _SCOUT_SIGN_UPS)
+
+    red.create_thread.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_one_failing_thread_does_not_cost_the_others_their_pools():
+    """Best-effort, like the threads themselves: this runs after the team and
+    open threads have delivered and must never raise into that path."""
+    log = _team_log()
+    log["users"]["dm_c"] = {"userName": "Cara", "seatNum": 2, "cards": ["c1"]}
+    sign_ups = dict(_SCOUT_SIGN_UPS, disc_c="Cara")
+    mapping = dict(_SCOUT_MAPPING, disc_c="dm_c")
+
+    bob = _named_thread("Bob", 3005)
+    bob.send = AsyncMock(side_effect=RuntimeError("Discord said no"))
+    cara = _named_thread("Cara", 3006)
+
+    with _patched_discord():
+        await post_pools_to_scouting_threads(
+            _bot_for({}), _scouting_channel([bob, cara]), _scouting_channel([]),
+            _SCOUT_A, ["disc_b", "disc_c"], mapping, log, sign_ups)
+
+    assert _attachment_names(cara) == ["Cara.txt"], "one bad thread stopped the rest"
+
+
+@pytest.mark.asyncio
+async def test_a_missing_channel_leaves_the_other_side_working():
+    """Room creation can leave one side unresolvable; the other side's scouting
+    should still get its pools."""
+    bob = _named_thread("Bob", 3007)
+
+    with _patched_discord():
+        await post_pools_to_scouting_threads(
+            _bot_for({}), _scouting_channel([bob]), None,
+            _SCOUT_A, _SCOUT_B, _SCOUT_MAPPING, _team_log(), _SCOUT_SIGN_UPS)
+
+    assert _attachment_names(bob) == ["Bob.txt"]
+
+
+@pytest.mark.asyncio
+async def test_the_archived_threads_are_listed_once_per_channel():
+    """Not once per opponent. Scouting threads are archived by the time pools
+    exist, and a per-player lookup is twelve API calls on a six-a-side draft."""
+    scans = []
+    threads = [_named_thread(n, 3100 + i) for i, n in enumerate(("Bob", "Cara"))]
+    red = _scouting_channel(threads)
+    original = red.archived_threads
+
+    def counting(**kwargs):
+        scans.append(1)
+        return original(**kwargs)
+
+    red.archived_threads = counting
+    log = _team_log()
+    log["users"]["dm_c"] = {"userName": "Cara", "seatNum": 2, "cards": ["c1"]}
+
+    with _patched_discord():
+        await post_pools_to_scouting_threads(
+            _bot_for({}), red, None, _SCOUT_A, ["disc_b", "disc_c"],
+            dict(_SCOUT_MAPPING, disc_c="dm_c"), log,
+            dict(_SCOUT_SIGN_UPS, disc_c="Cara"))
+
+    assert len(scans) == 1, f"archived threads listed {len(scans)} times for one channel"
+
+
+# ---- wiring -----------------------------------------------------------------------
+
+
+def test_scouting_pools_are_gated_on_the_tournament_and_posted_last():
+    """Two properties, one `if`.
+
+    The gate: these pools are only already-open on a tournament match. Outside
+    one, posting an opponent's pool into a team's room discloses something the
+    draft never showed -- a league decision, not this code's to make.
+
+    The order: the shared thread is the deliverable, and a scouting-thread
+    failure must not come before it.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from services.draft_log_store import _post_team_logs_locked
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(_post_team_logs_locked)))
+    guarded = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and "tournament_match_id" in ast.dump(node.test):
+            names = [n.func.id for n in ast.walk(node)
+                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+            if "post_pools_to_scouting_threads" in names:
+                guarded.append(names)
+
+    assert guarded, (
+        "post_pools_to_scouting_threads is not inside the tournament_match_id "
+        "guard -- it would post opponent pools on ordinary drafts")
+    names = guarded[0]
+    assert names.index("_post_open_pools") < names.index("post_pools_to_scouting_threads"), (
+        "scouting threads must be posted after the shared open-pools thread")

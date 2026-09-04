@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from helpers.opponent_threads import (spawn_opponent_threads, team_channel_rosters,
-                                      thread_named, threads_by_name)
+                                      threads_by_name)
 from helpers.team_names import BLUE, RED
 
 
@@ -303,53 +303,27 @@ async def test_archived_lookup_failure_degrades_to_the_active_thread_list():
 
 
 @pytest.mark.asyncio
-async def test_a_thread_is_found_while_it_is_still_active():
-    channel = make_channel(existing_thread_names=("Dave", "Ana"))
-
-    found = await thread_named(channel, "Dave")
-
-    assert found is not None and found.name == "Dave"
-
-
-@pytest.mark.asyncio
-async def test_a_thread_is_found_after_it_has_archived():
+async def test_threads_are_found_after_they_have_archived():
     """The case that actually happens: pools are posted after the draft, by
-    which point THREAD_ARCHIVE_MINUTES has long passed."""
-    channel = make_channel(existing_thread_names=(), archived_thread_names=("Dave",))
-
-    found = await thread_named(channel, "Dave")
-
-    assert found is not None and found.name == "Dave"
-
-
-@pytest.mark.asyncio
-async def test_an_absent_thread_is_none_rather_than_an_error():
-    """create_thread can be refused, so a player may simply have no thread.
-    The caller skips them; it must not create one here."""
-    channel = make_channel(existing_thread_names=("Ana",), archived_thread_names=("Bo",))
-
-    assert await thread_named(channel, "Dave") is None
-    channel.create_thread.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_the_archived_lookup_is_made_once_for_many_names():
-    """One API call per channel, not per player. A six-a-side draft asks for
-    six names against the same channel, and paying for six archived scans is
-    the difference between one call and twelve across both teams.
-    """
-    calls = []
-
-    channel = make_channel(archived_thread_names=("Dave", "Ana", "Bo"))
-    original = channel.archived_threads
-
-    def counting(**kwargs):
-        calls.append(1)
-        return original(**kwargs)
-
-    channel.archived_threads = counting
+    which point THREAD_ARCHIVE_MINUTES has long passed and pycord's cache of
+    ACTIVE threads no longer holds any of them."""
+    channel = make_channel(existing_thread_names=("Ana",), archived_thread_names=("Dave", "Bo"))
 
     found = await threads_by_name(channel)
 
-    assert set(found) >= {"Dave", "Ana", "Bo"}
-    assert len(calls) == 1, f"archived threads scanned {len(calls)} times"
+    assert set(found) == {"Ana", "Dave", "Bo"}
+    assert found["Dave"].name == "Dave"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_archive_lookup_keeps_the_active_threads():
+    """Losing the archived call must not make every thread look absent -- that
+    would have spawn_opponent_threads duplicate the lot."""
+    channel = make_channel(existing_thread_names=("Ana",))
+
+    def boom(**_):
+        raise RuntimeError("Discord said no")
+
+    channel.archived_threads = boom
+
+    assert set(await threads_by_name(channel)) == {"Ana"}

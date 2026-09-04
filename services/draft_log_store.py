@@ -17,6 +17,7 @@ from sqlalchemy import select
 from database.db_session import db_session
 from helpers.pile_compositor import PileImageBuilder
 from helpers.draft_rooms import BLUE_SIDE, RED_SIDE, Side
+from helpers.opponent_threads import thread_name, threads_by_name
 from helpers.utils import (
     DISCORD_THREAD_NAME_LIMIT, THREAD_ARCHIVE_MAX_MINUTES, mention_all, send_then_mention,
 )
@@ -519,8 +520,8 @@ async def post_pools_to_scouting_threads(
     scouted where the people scouting them are already reading.
 
     A side's pools go to the OTHER side's channel. That inversion is the whole
-    idea and the easiest thing to get backwards, so the rosters and channels
-    are paired once here rather than at each call.
+    idea and the easiest thing to get backwards, so it is asked of the Side row
+    that already owns it rather than spelled out again here.
 
     Idempotent per thread rather than by a stored destination, which is what
     lets this need no new column: the pools already carry the player's name as
@@ -534,9 +535,7 @@ async def post_pools_to_scouting_threads(
     not cost a draft its real pool posting or hold back team_logs_posted_at --
     the reconciler would re-post everything.
     """
-    from helpers.opponent_threads import _thread_name, threads_by_name
-
-    for channel, opponents in ((red_channel, team_b), (blue_channel, team_a)):
+    for channel, side in ((red_channel, RED_SIDE), (blue_channel, BLUE_SIDE)):
         if channel is None:
             continue
         try:
@@ -545,8 +544,9 @@ async def post_pools_to_scouting_threads(
             logger.warning(f"[scouting-pools] could not list threads: {e}")
             continue
 
+        opponents = side.opponents_of(team_a, team_b)
         for member in _postable_members(opponents, mapping, draft_data, sign_ups):
-            thread = threads.get(_thread_name(member.discord_id, sign_ups))
+            thread = threads.get(thread_name(member.discord_id, sign_ups))
             if thread is None:
                 # Discord refused this player a thread at creation. Making one
                 # now would overrule that decision from the wrong place.
