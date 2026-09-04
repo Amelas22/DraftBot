@@ -22,12 +22,10 @@ from typing import NamedTuple, Protocol
 class TeamLabel(NamedTuple):
     """One side's name, and the colour dressing that goes with it.
 
-    `emoji` and `color` are empty for a side that carries a chosen name: a
-    named team is not a colour, and prefixing "Pack Rats" with a red circle
-    reads as though it were one. They are separate fields rather than baked
-    into `name` because callers need them apart -- `add_links_to_embed_safely`
-    takes a bare "red"/"blue" token, and Draftmancer team names must not carry
-    an emoji at all.
+    Every side has a colour; only the `name` depends on what was stored. They
+    are separate fields rather than baked into `name` because callers need them
+    apart: a button label and a Draftmancer team name take the bare `name`,
+    while an embed heading takes `labelled`.
     """
     name: str
     emoji: str
@@ -91,13 +89,30 @@ def team_labels(team_a_name: str | None,
     and it can be tested without a database.
     """
     def label(chosen: str | None, colour: TeamLabel) -> TeamLabel:
-        # A chosen name is not a colour: no emoji, no colour token. Built
-        # fresh rather than _replace'd off the colour, which replaced all
-        # three fields and read as though it inherited something.
-        return TeamLabel(chosen, "", "") if chosen else colour
+        # The NAME is what a stored value can change. The colour is not: the
+        # side's rooms are red-team-chat-*, and Draftmancer puts a red dot
+        # beside its players, whether or not anybody named it. A label that
+        # reported no colour could only disagree with those.
+        return colour._replace(name=chosen) if chosen else colour
 
     return (label(_chosen(team_a_name), RED),
             label(_chosen(team_b_name), BLUE))
+
+
+def heads_field(label: TeamLabel, field_name: str) -> bool:
+    """Whether an existing embed field is this side's, by its heading.
+
+    Either spelling counts, because the heading was written by whichever
+    version of the bot created the draft. A named premade used to be headed
+    "Pack Rats" and is now headed "\U0001f534 Pack Rats"; a draft already in
+    flight when that shipped carries the old one, and matching only the new one
+    would leave its join buttons silently updating nothing.
+
+    Anchored at the start of the heading, so one team's name cannot claim the
+    other team's field even when one name contains the other.
+    """
+    return (field_name.startswith(label.labelled)
+            or field_name.startswith(label.name))
 
 
 def labels_for(draft: HasTeamNames) -> tuple[TeamLabel, TeamLabel]:

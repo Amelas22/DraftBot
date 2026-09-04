@@ -28,7 +28,7 @@ from helpers.draft_rooms import (
 from helpers.draft_outcome import decides_draft, standings_after, total_matches_in
 from helpers.opponent_threads import spawn_opponent_threads
 from helpers.permissions import bot_manager_button
-from helpers.team_names import labels_for
+from helpers.team_names import heads_field, labels_for
 from services.draft_pool_service import entry_in, release_draft_pool, set_entry
 from utils import (
     calculate_pairings,
@@ -1333,13 +1333,20 @@ class PersistentView(discord.ui.View):
         team_a_names = [get_display_name_by_id(str(user_id), guild, session.sign_ups.get(str(user_id), "Unknown User")) for user_id in (session.team_a or [])]
         team_b_names = [get_display_name_by_id(str(user_id), guild, session.sign_ups.get(str(user_id), "Unknown User")) for user_id in (session.team_b or [])]
 
-        # Find the index of the Team A and Team B fields in the embed
+        # Find the index of the Team A and Team B fields in the embed.
         # Matched by the same label the field was written with -- these headings
         # are produced by team_labels everywhere else, so re-deriving the name
         # here is how the two spellings drifted apart in the first place.
+        # heads_field owns which spellings count; see it for why old headings
+        # still match.
         red, blue = labels_for(session)
-        team_a_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith(red.labelled)), None)
-        team_b_index = next((i for i, e in enumerate(embed.fields) if e.name.startswith(blue.labelled)), None)
+
+        def heading_for(label):
+            return next((i for i, e in enumerate(embed.fields)
+                         if heads_field(label, e.name)), None)
+
+        team_a_index = heading_for(red)
+        team_b_index = heading_for(blue)
 
         # Update the fields if found
         if team_a_index is not None:
