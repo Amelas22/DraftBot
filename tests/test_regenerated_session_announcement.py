@@ -1,18 +1,28 @@
-"""When the bot moves a draft to a new Draftmancer room, it has to say so.
-
-regenerate_draft_session swaps draft_id and draft_link, and every link the bot
-renders afterwards is correct. The links already in people's hands are not: the
-sign-up confirmation is an ephemeral message sent at sign-up time, so it cannot be
-edited later, and nothing about it suggests the room has changed.
+"""When the bot moves a draft to a new Draftmancer room, it says so -- but only
+to people who were given a link to the old one.
 
 frontier-guide-69 (2026-09-02) regenerated five seconds after the queue opened.
 Twelve minutes later the bot's own session held zero non-bot users while six
 players sat in the abandoned room; the draft was given up on and re-run by hand in
-a session a player made themselves.
+a session a player made themselves. Links already in hands cannot be edited, so
+the response was an announcement carrying a fresh personalised link each.
 
-Editing the stale copies is impossible, so the fix is an announcement carrying a
-fresh personalised link for everyone signed up.
+What that response got wrong, and these tests now pin: it assumed players hold a
+link from sign-up. They do not. The sign-up confirmation says "Your Draftmancer
+link will be provided once teams are created" (views.py), and no other pre-teams
+surface renders one -- not the ready-check DM, not the sign-up embed. Links reach
+players in exactly one transaction, the one team creation commits.
+
+So the announcement fired only ever during sign-up -- regenerate_draft_session's
+compare-and-swap requires session_stage IS NULL -- which is precisely when it is
+false in both directions: nobody had a link, and nobody had been in the room it
+named. It did that in production on 2026-09-04.
+
+The case that survives is the race the swap cannot close: team creation committing
+between that UPDATE and the announcement's own read. There the notice is earned,
+and that is the case every test below except the sign-up one describes.
 """
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,9 +37,15 @@ def _swap_succeeds():
 
 
 def _draft_session():
-    """Two signed-up players, so the announcement has someone to address."""
+    """Two signed-up players, so the announcement has someone to address.
+
+    teams_start_time is set because that is the case the announcement is FOR:
+    teams are made and everyone's personalised link is posted in the same
+    commit, so from that moment there are links in hands that a swap invalidates.
+    """
     ds = SimpleNamespace(sign_ups={"11": "Alice", "22": "Bob"},
                          draft_channel_id="1543769252744528028",
+                         teams_start_time=datetime(2026, 9, 4, 11, 0),
                          draft_link="https://draftmancer.com/?session=DBNEWID11")
     ds.get_draft_link_for_user = lambda name: f"{ds.draft_link}&userName={name}"
     return ds
@@ -126,10 +142,33 @@ async def test_a_refused_swap_announces_nothing():
 @pytest.mark.asyncio
 async def test_a_draft_with_nobody_signed_up_announces_nothing():
     """Regeneration in an empty queue is routine repair, not an incident."""
-    _, channel = await _regenerate(
-        draft_session=SimpleNamespace(sign_ups={}, draft_link="x",
-                                      draft_channel_id="1543769252744528028",
-                                      get_draft_link_for_user=lambda n: "x"))
+    # Built from the shared row so the ONLY thing wrong with it is the empty
+    # queue. Hand-rolling a namespace here silently omitted teams_start_time,
+    # which left this passing on the order the guards happen to run in.
+    empty_queue = _draft_session()
+    empty_queue.sign_ups = {}
+
+    _, channel = await _regenerate(draft_session=empty_queue)
+    channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_draft_still_in_signup_announces_nothing():
+    """Before teams are created nobody has been handed a link, so there is
+    nothing stale to correct -- and the notice actively misinforms, telling
+    people that a link they were never given has stopped working.
+
+    The pre-existing guards cannot catch this. They ask whether a link can be
+    BUILT for each signed-up player, and get_draft_link_for_user just decorates
+    draft_link, which exists from session creation. So they were satisfied from
+    the moment the queue opened, which is why this fired in production on
+    2026-09-04 for a draft that had not started.
+    """
+    still_in_signup = _draft_session()
+    still_in_signup.teams_start_time = None
+
+    _, channel = await _regenerate(draft_session=still_in_signup)
+
     channel.send.assert_not_awaited()
 
 

@@ -14,6 +14,7 @@ cover that -- but that the room named in the announcement is the room the bot is
 actually connected to. Asserting them separately is what let them drift apart.
 """
 import re
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -32,7 +33,10 @@ def _session_row(manager):
     """A DraftSession whose links track the manager's current draft_id, as the real
     row does -- regenerate_draft_session writes draft_link in the same statement."""
     row = SimpleNamespace(sign_ups={"11": "Alice", "22": "Bob"},
-                          draft_channel_id="1543769252744528028")
+                          draft_channel_id="1543769252744528028",
+                          # Teams exist, so links are out and a swap invalidates
+                          # them. That is the only case that announces at all.
+                          teams_start_time=datetime(2026, 9, 4, 11, 0))
     row.get_draft_link_for_user = (
         lambda name: f"https://draftmancer.com/?session=DB{manager.draft_id}&userName={name}"
     )
