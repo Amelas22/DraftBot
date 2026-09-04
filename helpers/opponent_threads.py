@@ -66,13 +66,26 @@ def thread_name(discord_id: str, sign_ups: dict[str, str] | None) -> str:
     if not name:
         return str(discord_id)[:DISCORD_THREAD_NAME_LIMIT]
 
-    shared = sum(1 for other in sign_ups.values() if str(other or "").strip() == name)
-    if shared < 2:
+    sharing = [str(other_id) for other_id, other in sign_ups.items()
+               if str(other or "").strip() == name]
+    if len(sharing) < 2:
         return name[:DISCORD_THREAD_NAME_LIMIT]
 
+    # Shortest id suffix that separates this player from everyone else signed
+    # up under the same display name. Four digits reads better than a full
+    # snowflake and is enough unless two of them happen to end alike -- then it
+    # grows, rather than handing both players the same thread. Growing beats a
+    # fixed length because the caller posts INTO the thread this names: a
+    # collision would not just cost the second player a thread, it would file
+    # their pool under the other player's name.
+    mine = str(discord_id)
+    others = [other_id for other_id in sharing if other_id != mine]
+    size = 4
+    while size < len(mine) and any(o[-size:] == mine[-size:] for o in others):
+        size += 1
     # Clip the name *before* appending, so a very long name can't push the
     # discriminator past the limit and take uniqueness with it.
-    suffix = f" ({str(discord_id)[-4:]})"
+    suffix = f" ({mine[-size:]})"
     return name[:DISCORD_THREAD_NAME_LIMIT - len(suffix)] + suffix
 
 
