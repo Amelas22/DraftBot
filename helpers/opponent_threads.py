@@ -49,7 +49,7 @@ def team_channel_rosters(
             opposing.label.name)
 
 
-def _thread_name(discord_id: str, sign_ups: dict[str, str] | None) -> str:
+def thread_name(discord_id: str, sign_ups: dict[str, str] | None) -> str:
     """Thread label for one opponent, derived from their sign-up display name.
 
     Must be a pure function of (discord_id, sign_ups): spawn_opponent_threads
@@ -66,32 +66,51 @@ def _thread_name(discord_id: str, sign_ups: dict[str, str] | None) -> str:
     if not name:
         return str(discord_id)[:DISCORD_THREAD_NAME_LIMIT]
 
-    shared = sum(1 for other in sign_ups.values() if str(other or "").strip() == name)
-    if shared < 2:
+    sharing = [str(other_id) for other_id, other in sign_ups.items()
+               if str(other or "").strip() == name]
+    if len(sharing) < 2:
         return name[:DISCORD_THREAD_NAME_LIMIT]
 
+    # Shortest id suffix that separates this player from everyone else signed
+    # up under the same display name. Four digits reads better than a full
+    # snowflake and is enough unless two of them happen to end alike -- then it
+    # grows, rather than handing both players the same thread. Growing beats a
+    # fixed length because the caller posts INTO the thread this names: a
+    # collision would not just cost the second player a thread, it would file
+    # their pool under the other player's name.
+    mine = str(discord_id)
+    others = [other_id for other_id in sharing if other_id != mine]
+    size = 4
+    while size < len(mine) and any(o[-size:] == mine[-size:] for o in others):
+        size += 1
     # Clip the name *before* appending, so a very long name can't push the
     # discriminator past the limit and take uniqueness with it.
-    suffix = f" ({str(discord_id)[-4:]})"
+    suffix = f" ({mine[-size:]})"
     return name[:DISCORD_THREAD_NAME_LIMIT - len(suffix)] + suffix
 
 
-async def _existing_thread_names(channel: discord.TextChannel) -> set[str]:
-    """Names of the threads already in `channel`, active and archived.
+async def threads_by_name(channel: discord.TextChannel) -> dict[str, object]:
+    """Every thread in `channel`, active and archived, keyed by name.
 
-    `channel.threads` is pycord's cache of ACTIVE threads only, and scouting
-    threads auto-archive after THREAD_ARCHIVE_MINUTES -- so a re-run days later
-    would not see its own earlier work and would duplicate every thread. The
-    archived lookup is a real API call; if it fails we keep the active names
-    rather than lose the whole run.
+    One archived scan per channel. A scouting thread auto-archives after
+    THREAD_ARCHIVE_MINUTES and pools are posted long after the draft finishes,
+    so by then almost every thread this looks for is archived -- and asking per
+    player would pay for that scan once per opponent instead of once per team.
+
+    Active threads win a name collision: if a name somehow exists twice, the
+    live one is the one people are reading.
     """
-    names = {t.name for t in channel.threads}
+    found: dict[str, object] = {}
     try:
         async for thread in channel.archived_threads(limit=ARCHIVED_THREAD_LOOKUP_LIMIT):
-            names.add(thread.name)
+            found[thread.name] = thread
     except Exception as e:
+        # Keep the active names rather than lose the whole run: a failed
+        # archived lookup would otherwise make every thread look absent.
         logger.warning(f"[opponent-threads] archived thread lookup failed: {e}")
-    return names
+    for thread in getattr(channel, "threads", []) or []:
+        found[thread.name] = thread
+    return found
 
 
 def _starter(name: str, opponent_team_label: str, own_ids: list[str] | None = None) -> str:
@@ -140,7 +159,7 @@ async def spawn_opponent_threads(
         own_ids, ids, label = team_channel_rosters(team_name, team_a, team_b)
         if not ids:
             return 0
-        existing = await _existing_thread_names(channel)
+        existing = set(await threads_by_name(channel))
     except Exception as e:
         logger.warning(f"[opponent-threads] could not resolve opponents for '{team_name}': {e}")
         return 0
@@ -149,7 +168,7 @@ async def spawn_opponent_threads(
     for discord_id in ids:
         name = str(discord_id)
         try:
-            name = _thread_name(discord_id, sign_ups)
+            name = thread_name(discord_id, sign_ups)
             if name in existing:
                 continue
             thread = await channel.create_thread(

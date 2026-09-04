@@ -3,7 +3,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from helpers.opponent_threads import spawn_opponent_threads, team_channel_rosters
+from helpers.opponent_threads import (spawn_opponent_threads, team_channel_rosters,
+                                      thread_name, threads_by_name)
 from helpers.team_names import BLUE, RED
 
 
@@ -225,6 +226,48 @@ async def test_names_are_stable_so_a_rerun_creates_nothing():
     assert created == 0
 
 
+def test_same_name_players_whose_ids_end_alike_still_get_separate_threads():
+    """The four-digit discriminator is not unique by construction. Two players
+    on the same roster can share a display name AND end their snowflakes the
+    same way, which used to collapse them onto one thread name.
+
+    That is worse here than it looks: post_pools_to_scouting_threads posts INTO
+    the thread this names, so one name for two players files one player's pool
+    under the other player's heading.
+    """
+    sign_ups = {"111119999": "Mike", "222229999": "Mike"}
+
+    first = thread_name("111119999", sign_ups)
+    second = thread_name("222229999", sign_ups)
+
+    assert first != second, f"both players got {first!r}"
+    assert first.startswith("Mike") and second.startswith("Mike")
+
+
+def test_the_discriminator_stays_short_when_four_digits_already_separate():
+    """Growing it unconditionally would put a full snowflake in front of
+    readers for the ordinary duplicate-name case."""
+    sign_ups = {"111111234": "Mike", "222225678": "Mike"}
+
+    assert thread_name("111111234", sign_ups) == "Mike (1234)"
+    assert thread_name("222225678", sign_ups) == "Mike (5678)"
+
+
+def test_a_unique_display_name_carries_no_discriminator_at_all():
+    """Most players are the only one with their name; an id fragment on every
+    thread would be noise."""
+    assert thread_name("111111234", {"111111234": "Mike", "222225678": "Ana"}) == "Mike"
+
+
+def test_the_name_is_a_pure_function_of_the_sign_ups():
+    """spawn_opponent_threads skips names it already finds in the channel, so a
+    name that varied between runs would duplicate every thread on a re-run."""
+    sign_ups = {"111119999": "Mike", "222229999": "Mike", "333330000": "Ana"}
+    reordered = {k: sign_ups[k] for k in reversed(list(sign_ups))}
+
+    assert thread_name("111119999", sign_ups) == thread_name("111119999", reordered)
+
+
 @pytest.mark.asyncio
 async def test_blank_display_name_falls_back_to_a_usable_label():
     """Discord rejects an empty thread name; a whitespace-only nickname must not
@@ -292,3 +335,37 @@ async def test_archived_lookup_failure_degrades_to_the_active_thread_list():
     )
     assert created == 1
     assert thread_names(channel) == ["Erin"]
+
+
+# ---- finding a thread again, later ------------------------------------------------
+#
+# Pools arrive long after the threads are made -- the draft has to finish first --
+# so by then the scouting threads have auto-archived. Anything that wants to post
+# into one has to look past pycord's active-thread cache.
+
+
+@pytest.mark.asyncio
+async def test_threads_are_found_after_they_have_archived():
+    """The case that actually happens: pools are posted after the draft, by
+    which point THREAD_ARCHIVE_MINUTES has long passed and pycord's cache of
+    ACTIVE threads no longer holds any of them."""
+    channel = make_channel(existing_thread_names=("Ana",), archived_thread_names=("Dave", "Bo"))
+
+    found = await threads_by_name(channel)
+
+    assert set(found) == {"Ana", "Dave", "Bo"}
+    assert found["Dave"].name == "Dave"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_archive_lookup_keeps_the_active_threads():
+    """Losing the archived call must not make every thread look absent -- that
+    would have spawn_opponent_threads duplicate the lot."""
+    channel = make_channel(existing_thread_names=("Ana",))
+
+    def boom(**_):
+        raise RuntimeError("Discord said no")
+
+    channel.archived_threads = boom
+
+    assert set(await threads_by_name(channel)) == {"Ana"}

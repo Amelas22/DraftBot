@@ -17,6 +17,7 @@ from sqlalchemy import select
 from database.db_session import db_session
 from helpers.pile_compositor import PileImageBuilder
 from helpers.draft_rooms import BLUE_SIDE, RED_SIDE, Side
+from helpers.opponent_threads import thread_name, threads_by_name
 from helpers.utils import (
     DISCORD_THREAD_NAME_LIMIT, THREAD_ARCHIVE_MAX_MINUTES, mention_all, send_then_mention,
 )
@@ -502,6 +503,64 @@ async def _post_pools_for_team(
 _POSTS_IN_FLIGHT: set[str] = set()
 
 
+async def post_pools_to_scouting_threads(
+    bot,
+    red_channel,
+    blue_channel,
+    team_a: list[str],
+    team_b: list[str],
+    mapping: dict[str, str],
+    draft_data: dict,
+    sign_ups: dict,
+) -> None:
+    """Post each opponent's pool into the scouting thread named for them.
+
+    The threads already exist, one per player on the other team, made when the
+    rooms were. They held notes only; this puts the pool of the player being
+    scouted where the people scouting them are already reading.
+
+    A side's pools go to the OTHER side's channel. That inversion is the whole
+    idea and the easiest thing to get backwards, so it is asked of the Side row
+    that already owns it rather than spelled out again here.
+
+    Idempotent per thread rather than by a stored destination, which is what
+    lets this need no new column: the pools already carry the player's name as
+    their .txt filename, so a thread that has one has been posted. The team and
+    open threads persist a destination id instead because they choose between a
+    thread and a channel and must resume into the same one; here the thread is
+    named, so there is nothing to remember.
+
+    Best-effort throughout, like the threads themselves. This runs after the
+    team and open threads have delivered, and a scouting-thread failure must
+    not cost a draft its real pool posting or hold back team_logs_posted_at --
+    the reconciler would re-post everything.
+    """
+    for channel, side in ((red_channel, RED_SIDE), (blue_channel, BLUE_SIDE)):
+        if channel is None:
+            continue
+        try:
+            threads = await threads_by_name(channel)
+        except Exception as e:
+            logger.warning(f"[scouting-pools] could not list threads: {e}")
+            continue
+
+        opponents = side.opponents_of(team_a, team_b)
+        for member in _postable_members(opponents, mapping, draft_data, sign_ups):
+            thread = threads.get(thread_name(member.discord_id, sign_ups))
+            if thread is None:
+                # Discord refused this player a thread at creation. Making one
+                # now would overrule that decision from the wrong place.
+                logger.info(f"[scouting-pools] no thread for {member.name}; skipped")
+                continue
+            try:
+                if f"{member.safe}.txt" in await _posted_txt_filenames(bot, thread):
+                    continue
+                await _send_pool(thread, member, draft_data)
+            except Exception as e:
+                logger.warning(
+                    f"[scouting-pools] {member.name} into '{thread.name}': {e}")
+
+
 async def post_team_logs(session_id: str, bot) -> bool:
     """Post each team's own members' pools to its private team channel, then
     stamp team_logs_posted_at. Idempotent; safe to call before unlock_at.
@@ -614,6 +673,19 @@ async def _post_team_logs_locked(session_id: str, bot) -> bool:
             persist_destination_id=partial(_persist_destination_id,
                                            "open_pools_destination_id"),
         )
+
+        # And each opponent's pool into the scouting thread already named for
+        # them, so the people scouting that player have it where they are
+        # reading. Same gate as the shared thread above: these pools are
+        # already open on a tournament match, so this moves nothing into view
+        # that was not there -- on an ordinary draft it would be a disclosure.
+        #
+        # Its result is deliberately NOT folded into the retry decision below.
+        # The team and open threads are the deliverable a player imports from;
+        # a scouting thread that Discord refused would otherwise hold back
+        # team_logs_posted_at forever and re-post every pool on every tick.
+        await post_pools_to_scouting_threads(
+            bot, red, blue, team_a, team_b, mapping, draft_data, sign_ups)
 
     if not (red_all_posted and blue_all_posted and open_all_posted):
         # Some player(s) are still missing a pool (a send failure, or a
