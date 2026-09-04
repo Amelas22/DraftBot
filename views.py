@@ -22,7 +22,8 @@ from helpers.display_names import get_display_name, get_display_name_by_id
 from helpers.debt_warning import format_staked_sign_ups, DEBT_WARNING_AGE_DAYS
 from helpers.draft_footer import apply_draft_footer_from_session
 from helpers.draft_rooms import (
-    DRAFT_ROOM_COUNT, draft_category as resolve_draft_category, ensure_channel,
+    BLUE_SIDE, DRAFT_ROOM_COUNT, RED_SIDE, SHARED_CHAT_TEAM,
+    draft_category as resolve_draft_category, ensure_channel,
     resolve_category, rooms_needed, team_channel_name, team_overwrites, team_voice_name,
 )
 from helpers.draft_outcome import decides_draft, standings_after, total_matches_in
