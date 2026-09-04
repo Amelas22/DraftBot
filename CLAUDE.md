@@ -178,6 +178,19 @@ Claude can drive the test Discord server itself — run slash commands, click bo
   - [ ] Database migrations tested locally
   - [ ] `pipenv run pyrefly check` reports 0 errors
 
+### Before opening a pull request
+
+A green suite is the entry condition for review, not the finish line. Before
+you open a PR, push a branch for review, or mark a draft ready, follow the
+`pr-readiness` project skill (`.claude/skills/pr-readiness/SKILL.md`): a
+simplify pass, a Codex review, and an end-to-end run against the real bot,
+plus an evidence document when a player-visible surface changed.
+
+Each of those three has caught something in this repo the other two missed --
+most sharply, an e2e run found a message rendering "None: 3/3" that three
+separate rounds of static auditing had walked straight past, because the
+string it was looking for never appeared in the source.
+
 ### Type Checking
 
 The project is migrating to typed Python gradually. `pyrefly.toml` runs at
