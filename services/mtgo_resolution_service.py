@@ -571,7 +571,8 @@ async def settle_new_debts(guild_id: str, debtor_ids: Iterable[str]) -> list[dic
     return [settlement for per_debtor in drawn for settlement in per_debtor]
 
 
-async def settle_draft_winnings(guild_id: str, paid: dict, draft_name: str) -> None:
+async def settle_draft_winnings(guild_id: str, paid: dict[str, int],
+                                draft_name: str) -> None:
     """Land a draft's payouts on their winners: settle, and tell those who want telling.
 
     The inflow-side twin of ``settle_new_debts``: that one draws brand-new debts against
@@ -603,13 +604,17 @@ async def settle_draft_winnings(guild_id: str, paid: dict, draft_name: str) -> N
     # preference is to stay quiet: the money is what must not be skipped. Without this
     # the failure is unrecoverable -- settle_decided_draft skips the pool branch for
     # good once the holder is empty, so nothing ever retries the sweep.
+    # Empty is the safe starting value, so a read that fails -- or returns nothing,
+    # which the shared execute_db_operation wrapper does by handing back its default --
+    # leaves the loop below sending no DM rather than raising outside this guard.
+    prefs: dict[str, bool] = {}
+    balances: dict[str, int] = {}
     try:
-        prefs = await get_players_dm_notification_preferences(list(paid), guild_id)
-        balances = await wallet_service.balances_for(guild_id, list(paid))
+        prefs = await get_players_dm_notification_preferences(list(paid), guild_id) or {}
+        balances = await wallet_service.balances_for(guild_id, list(paid)) or {}
     except Exception as e:  # noqa: BLE001 - a DM must never break the money path
         logger.error(f"draft winnings: DM prep failed for {draft_name}, "
                      f"settling {len(paid)} winner(s) silently: {e}")
-        prefs, balances = {}, {}
 
     # All winners at once, the same shape settle_new_debts uses on this very path.
     # return_exceptions so one winner's settlement failing cannot abandon the rest --
