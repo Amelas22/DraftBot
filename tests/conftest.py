@@ -156,8 +156,9 @@ async def seed_session(session_id="s1", guild="g", stype="staked",
             channel_ids=channel_ids,
             draft_id=draft_id, rooms_created_at=rooms_created_at,
             sign_ups=sign_ups, cube=cube,
-            # A decided draft needs match_counter set, and every test that wanted
-            # one used to hand-patch the row afterwards with its own UPDATE.
+            # A decided draft needs match_counter set. Pass it here rather than
+            # hand-patching the row afterwards with an UPDATE, which is what the
+            # older pool tests still do.
             match_counter=match_counter, friendly_id=friendly_id))
         for i, (p1, p2, w, ts) in enumerate(matches):
             s.add(MatchResult(session_id=session_id, match_number=i + 1,

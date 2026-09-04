@@ -29,7 +29,7 @@ from services.debt_service import (
     get_draft_debtors,
     get_pair_position_around_draft,
 )
-from services.mtgo_resolution_service import settle_new_debts
+from services.mtgo_resolution_service import settle_new_debts, settle_draft_winnings
 from debt_views import SettleDebtsView
 from debt_views.settle_views import PublicSettleDebtsView
 from models.debt_summary_message import DebtSummaryMessage
@@ -596,13 +596,19 @@ async def settle_decided_draft(draft_session_id):
         else:
             result = await settle_pool(guild_id, draft_session_id, list(winners or []))
             # Only the call that actually settles gets here with anything to
-            # report: this branch is behind `pool_balance > 0`, and the holder
-            # is empty afterwards, so every later replay skips it. That is what
-            # keeps a winner from being DMed once per match report.
-            from notification_service import apply_draft_winnings
-            await apply_draft_winnings(
-                guild_id, result["paid"],
-                draft_session.friendly_id or draft_session_id)
+            # report. `pool_balance > 0` alone would not give that: two concurrent
+            # match reports can both pass it with a full set of shares. What makes
+            # `paid` mean "paid by THIS call" is settle_pool's per-winner
+            # transfer_legs source guard, taken inside MONEY_LOCK -- see the
+            # comment there. That is what keeps a winner from being DMed once per
+            # match report.
+            try:
+                await settle_draft_winnings(
+                    guild_id, result["paid"],
+                    draft_session.friendly_id or draft_session_id)
+            except Exception as e:
+                logger.error(f"Failed to settle draft winnings for session "
+                             f"{draft_session_id}: {e}")
         return
 
     if outcome == "draw":

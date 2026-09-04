@@ -165,6 +165,31 @@ async def test_an_opted_out_winner_still_has_their_debts_settled(_a_decided_stak
 
 
 @pytest.mark.asyncio
+async def test_a_failed_preference_lookup_still_settles_the_winners_debts(
+        _a_decided_staked_draft, sent):
+    """Deciding whether to DM is optional work. Sweeping the debt is not.
+
+    The prefs read happens before any on_inflow call, so if it throws, a
+    swallowed failure leaves the winner credited and their creditor unpaid --
+    with no replay path, because settle_decided_draft skips the pool branch
+    for good once the holder is empty. That is the exact case this whole
+    change exists to close, reachable through its own error handling.
+    """
+    from services.debt_service import create_ledger_entries, get_balance_with
+
+    await create_ledger_entries(guild_id=GUILD, debtor_id=A[0], creditor_id=B[0],
+                                amount=30, source_type="draft", source_id="older-draft")
+
+    with patch("services.mtgo_resolution_service"
+               ".get_players_dm_notification_preferences",
+               side_effect=RuntimeError("preference lookup is down")):
+        await settle_decided_draft(SID)
+
+    assert await get_balance_with(GUILD, A[0], B[0]) == 0, (
+        "a failed preference lookup cost the creditor their settlement")
+
+
+@pytest.mark.asyncio
 async def test_a_failing_dm_does_not_cost_anyone_their_winnings(_a_decided_staked_draft):
     """The tix have already moved by the time we try to talk about them.
 

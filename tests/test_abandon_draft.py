@@ -1,7 +1,7 @@
 from datetime import datetime
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from models.draft_session import DraftSession
 from models.match import MatchResult
@@ -139,12 +139,11 @@ async def test_abandoning_a_staked_draft_hands_the_pool_back(test_db):
         await pool.set_entry("g", "s_staked", player, 20)
     assert await pool.pool_balance("g", "s_staked") == 40
 
-    async with AsyncSessionLocal() as db:
-        async with db.begin():
-            await db.execute(
-                update(DraftSession)
-                .where(DraftSession.session_id == "s_staked")
-                .values(session_stage="pairings"))
+    # Re-seed rather than hand-patch the stage: seed_session replaces the row, and
+    # the pool lives in wallet_tx, so the funding above survives it.
+    await seed_session("s_staked", guild="g", stype="staked", stage="pairings",
+                       teams=(players[:1], players[1:]),
+                       sign_ups={p: p for p in players})
 
     await abandon_draft_session("s_staked", session_factory=AsyncSessionLocal)
 

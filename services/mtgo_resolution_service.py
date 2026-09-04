@@ -38,6 +38,9 @@ from helpers.money_gate import serve_busy_reason, spawn_followup
 from services.mtgo_tradebot_client import get_client
 from services import wallet_service
 from services import debt_service
+# Module scope, unlike the notifier below: preference_service reaches only config,
+# session and models, so it closes no cycle back into this module.
+from preference_service import get_players_dm_notification_preferences
 
 # Poll fast at first (a serve rejection surfaces in seconds), then back off — the human
 # step (accepting an MTGO trade) takes minutes, so terminal-detection latency is cheap.
@@ -566,6 +569,60 @@ async def settle_new_debts(guild_id: str, debtor_ids: Iterable[str]) -> list[dic
     drawn = await asyncio.gather(*(
         settle_inflow(guild_id, pid, "a new debt") for pid in funded))
     return [settlement for per_debtor in drawn for settlement in per_debtor]
+
+
+async def settle_draft_winnings(guild_id: str, paid: dict, draft_name: str) -> None:
+    """Land a draft's payouts on their winners: settle, and tell those who want telling.
+
+    The inflow-side twin of ``settle_new_debts``: that one draws brand-new debts against
+    money a player already holds, this one draws already-held debts against money that
+    just arrived. Both run from ``settle_decided_draft``, one per branch.
+
+    A prize is an INFLOW, so it goes through ``on_inflow`` rather than dispatching a DM
+    directly -- that is what stops a debtor collecting their winnings and withdrawing
+    them while their creditor is still owed, the case ``settle_inflow`` names as its
+    reason for existing, and what ``tournament_escrow_service.execute_payout`` already
+    does for the tournament prize.
+
+    Settlement runs for EVERY winner; only the DM honours the dm_notifications opt-out.
+    One loop does both, and what keeps them independent is the notifier ARGUMENT: an
+    opted-out winner is passed None, so ``on_inflow`` settles their debts and sends
+    nothing.
+
+    Call AFTER the caller's ``MONEY_LOCK`` block, never inside it: ``on_inflow`` reaches
+    ``settle_debt_from_wallet``, which takes that lock, and it is not reentrant.
+    """
+    if not paid:
+        return
+    # Deferred to keep the import cycle broken from both ends, the way on_inflow defers
+    # its notify_wallet import and execute_payout defers this same notifier.
+    from notification_service import notify_draft_winnings
+
+    # Both reads feed the DM ONLY, so neither may cost anyone their settlement. Losing
+    # prefs means we cannot tell who opted out, and the safe reading of an unknown
+    # preference is to stay quiet: the money is what must not be skipped. Without this
+    # the failure is unrecoverable -- settle_decided_draft skips the pool branch for
+    # good once the holder is empty, so nothing ever retries the sweep.
+    try:
+        prefs = await get_players_dm_notification_preferences(list(paid), guild_id)
+        balances = await wallet_service.balances_for(guild_id, list(paid))
+    except Exception as e:  # noqa: BLE001 - a DM must never break the money path
+        logger.error(f"draft winnings: DM prep failed for {draft_name}, "
+                     f"settling {len(paid)} winner(s) silently: {e}")
+        prefs, balances = {}, {}
+
+    # All winners at once, the same shape settle_new_debts uses on this very path.
+    # return_exceptions so one winner's settlement failing cannot abandon the rest --
+    # they are independent debts owed to different creditors.
+    results = await asyncio.gather(*(
+        on_inflow(guild_id, player_id,
+                  notify_draft_winnings if prefs.get(player_id) else None,
+                  credited, draft_name, balances.get(player_id, 0))
+        for player_id, credited in paid.items()), return_exceptions=True)
+    for player_id, result in zip(paid, results):
+        if isinstance(result, BaseException):
+            logger.error(f"draft winnings: settling {player_id} for {draft_name} "
+                         f"failed: {result}")
 
 
 async def auto_draw(guild_id: str, player_id: str) -> list[dict[str, Any]]:
