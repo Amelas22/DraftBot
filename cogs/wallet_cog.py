@@ -26,6 +26,7 @@ from discord.commands import SlashCommandGroup, option
 from loguru import logger
 
 from models.mtgo_account import MtgoAccount
+from services import wallet_history
 from services import wallet_service
 from services import mtgo_resolution_service as resolution
 from services import tournament_escrow_service as escrow
@@ -53,15 +54,9 @@ async def _send_wallet(ctx, target) -> None:
     embed.add_field(name="Balance", value=f"**{wallet.balance}** tix", inline=True)
 
     if history:
-        lines = []
-        for tx in history:
-            sign = "+" if tx.amount >= 0 else "−"
-            # only @-mention a real person: the counterparty may be an MTGO
-            # username or a synthetic holder (in-flight, a prize pool)
-            cp = tx.counterparty_id
-            who = "" if not cp or wallet_service.is_system_account(cp) else f" ↔ <@{cp}>"
-            lines.append(f"`{sign}{abs(tx.amount)}` {tx.kind}{who}")
-        embed.add_field(name="Recent activity", value="\n".join(lines), inline=False)
+        lines = await wallet_history.describe_rows(history)
+        embed.add_field(name="Recent activity",
+                        value=wallet_history.fit_field(lines), inline=False)
     else:
         embed.set_footer(text="No wallet activity yet.")
     await ctx.followup.send(embed=embed, ephemeral=True)
