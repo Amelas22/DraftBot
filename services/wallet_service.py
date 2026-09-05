@@ -212,8 +212,8 @@ async def get_history(guild_id: str, player_id: str, limit: int = 25) -> list[Wa
 # boundary crossings — the only entries that change the system total
 # ---------------------------------------------------------------------------
 async def _book_boundary(guild_id: str, player_id: str, amount: int, kind: str,
-                         *, job_id: str, counterparty_id: str = None,
-                         source: str = None, notes: str = None) -> WalletTx:
+                         *, job_id: str, counterparty_id: str | None = None,
+                         source: str | None = None, notes: str | None = None) -> WalletTx:
     """Write the lone row for a completed MTGO trade. Idempotent by ``job_id``: a replayed
     poll returns the existing row, and uq_wallet_tx_job_kind makes a concurrent duplicate
     impossible (these run lock-free, unlike transfers)."""
@@ -243,8 +243,8 @@ async def _book_boundary(guild_id: str, player_id: str, amount: int, kind: str,
 
 
 async def credit_done(guild_id: str, player_id: str, amount: int, *, job_id: str,
-                      counterparty_id: str = None, source: str = None,
-                      notes: str = None) -> WalletTx:
+                      counterparty_id: str | None = None, source: str | None = None,
+                      notes: str | None = None) -> WalletTx:
     """Book a completed deposit (+amount): value entered the vault."""
     if amount <= 0:
         raise ValueError("Credit amount must be positive")
@@ -253,8 +253,8 @@ async def credit_done(guild_id: str, player_id: str, amount: int, *, job_id: str
 
 
 async def debit_done(guild_id: str, player_id: str, amount: int, *, job_id: str,
-                     counterparty_id: str = None, source: str = None,
-                     notes: str = None) -> WalletTx:
+                     counterparty_id: str | None = None, source: str | None = None,
+                     notes: str | None = None) -> WalletTx:
     """Book a completed withdraw (-amount): value left the vault. The holder is normally
     SYSTEM_IN_FLIGHT — the tix were transferred there when the trade opened, so this
     consumes that committed claim rather than a player's balance."""
@@ -287,7 +287,7 @@ async def transfer_credit(session, source: str) -> WalletTx | None:
 
 
 async def transfer_in(session, guild_id: str, from_player: str, to_player: str,
-                      amount: int, source: str, notes: str = None):
+                      amount: int, source: str, notes: str | None = None):
     """Write a transfer inside the CALLER's session/transaction — a pure writer: the
     caller owns the funds check (under MONEY_LOCK) because only it knows whether this
     is a spend or the unwinding of a holder it just funded."""
@@ -311,8 +311,8 @@ async def pay(
     to_player: str,
     amount: int,
     *,
-    source: str = None,
-    notes: str = None,
+    source: str | None = None,
+    notes: str | None = None,
 ) -> tuple[WalletTx, WalletTx]:
     """Move ``amount`` tix between two holders — no MTGO trade, no change to the system
     total. Checks the payer's funds. Idempotent by ``source`` (a uuid is generated when

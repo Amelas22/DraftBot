@@ -25,6 +25,7 @@ def _money_movers(fn):
     """Calls in fn that move money, by name."""
     moves = ("settle_pool", "settle_draw", "settle_decided_draft", "settle_draft_pool",
              "create_debt_entries_from_stakes", "settle_new_debts",
+             "settle_draft_winnings",
              "release_draft_pool", "refund_entry", "set_entry")
     src = textwrap.dedent(inspect.getsource(fn))
     return sorted({

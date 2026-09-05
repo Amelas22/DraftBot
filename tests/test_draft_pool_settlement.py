@@ -77,6 +77,41 @@ async def test_settling_twice_pays_once(test_db):
 
 
 @pytest.mark.asyncio
+async def test_only_the_call_that_paid_reports_paying(test_db):
+    """`paid` must name who THIS call paid, not who is owed nothing any more.
+
+    Two match reports can reach settlement together: both read the pool before
+    either takes MONEY_LOCK, so both compute a full set of winners. The second
+    then finds every payout source already booked and correctly transfers
+    nothing -- but it used to report the winners as paid regardless, because the
+    source guard only covered the transfer and not the bookkeeping beside it.
+
+    Nothing downstream could tell the difference until settle_decided_draft
+    started DMing people from this dict, at which point the losing race sends a
+    second "deposited as your prize" to a table that was paid once.
+    """
+    import asyncio
+    from unittest.mock import patch
+
+    await _matched()
+
+    # A FRESH lock, not the module global. asyncio.Lock only binds itself to a
+    # running loop on the contended path, so a suite that never overlaps two
+    # money operations leaves the global unbound -- and this test, being the
+    # only one that genuinely contends it, would otherwise bind it to this
+    # test's loop and strand every later test with "bound to a different event
+    # loop". Contention against a real lock is all the test needs.
+    with patch.object(wallet_service, "MONEY_LOCK", asyncio.Lock()):
+        both = await asyncio.gather(pool.settle_pool("g", "s1", A),
+                                    pool.settle_pool("g", "s1", A))
+
+    assert await pool.pool_balance("g", "s1") == 0
+    assert sum(sum(r["paid"].values()) for r in both) == 140, (
+        f"the pool paid 140 but the calls between them reported "
+        f"{[r['paid'] for r in both]}")
+
+
+@pytest.mark.asyncio
 async def test_the_payout_is_exactly_double_and_never_divides(test_db):
     """There is no rounding here, and there cannot be.
 
@@ -174,7 +209,10 @@ async def test_the_pool_replaces_the_debt_path_rather_than_joining_it(test_db):
     bot = MagicMock()
     bot.get_guild.return_value = guild
 
-    with patch("utils.settle_pool", new=AsyncMock()) as settled, \
+    # settle_pool's return value is load-bearing now -- settle_decided_draft
+    # reads {"paid": ...} from it to DM the winners -- so the mock has to honour
+    # that contract or it stands in for a function this one never had.
+    with patch("utils.settle_pool", new=AsyncMock(return_value={"paid": {}})) as settled, \
          patch("utils.create_debt_entries_from_stakes", new=AsyncMock()) as booked:
         await settle_decided_draft("s1")
 

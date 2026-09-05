@@ -595,10 +595,18 @@ async def settle_pool(guild_id: str, session_id: str,
                 if amount <= 0:
                     continue
                 source = _payout_source(session_id, player_id)
-                if not await wallet_service.transfer_legs(session, source):
-                    await wallet_service.transfer_in(
-                        session, guild_id, holder, player_id, amount, source,
-                        notes=f"Draft winnings {session_id}")
+                if await wallet_service.transfer_legs(session, source):
+                    # Someone else already paid this winner. Two match reports
+                    # can both read the pool before either takes MONEY_LOCK, so
+                    # both arrive here with a full set of shares; only the one
+                    # that actually books the transfer may claim it. Recording
+                    # it either way made `paid` mean "is square with the pool"
+                    # rather than "was paid by this call" -- harmless until a
+                    # caller started announcing payouts from it.
+                    continue
+                await wallet_service.transfer_in(
+                    session, guild_id, holder, player_id, amount, source,
+                    notes=f"Draft winnings {session_id}")
                 settled[player_id] = amount
         return settled
 

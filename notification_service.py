@@ -220,6 +220,16 @@ async def send_settlement_notification_dm(
 # they did NOT initiate, so it is reported regardless. If that judgement is wrong
 # it is a policy call to reverse here, not an oversight.
 #
+# ONE carve-out, made deliberately: notify_draft_winnings. A prize is reported to
+# someone who entered the draft, played it and is waiting on the result -- it is
+# news about an event they took part in, not tix moving on a stranger's
+# initiative, so opting out of draft notifications opts out of this too. The
+# money half is not optional, and does not live here: settle_draft_winnings (in
+# services/mtgo_resolution_service.py) settles every winner's debts whether or
+# not it tells them -- this module only ever decides whether to speak. If the
+# settlement moves anything, the notice for THAT is a wallet movement again, and
+# goes out regardless.
+#
 # Every one of these is best-effort: the money has already moved by the time we
 # are called, so a failed DM must never turn a completed transfer into an error.
 # send_dm already swallows Discord errors; @_best_effort covers the name and guild
@@ -323,6 +333,25 @@ async def notify_auto_settlement(bot, guild_id: str, payer_id: str, creditor_id:
                   f"🤝 You received **{amount} tix** from {payer} — automatically "
                   f"applied from their wallet against what they owed you.{owed_c}",
                   label=f"auto-settle creditor {creditor_id}")
+
+
+@_best_effort
+async def notify_draft_winnings(bot, guild_id: str, player_id: str,
+                                credited: int, draft_name: str, balance: int):
+    """A draft's prize pool paid this player out.
+
+    Reports the amount that actually reached the wallet, which is what /wallet
+    and its history will agree with. Deliberately NOT itemised into stake-back
+    and winnings: the 💰 Bet Outcomes embed already carries the profit figure
+    for anyone who wants it, and a player reading a DM wants to know what they
+    got, not to reconcile a receipt.
+    """
+    await send_dm(
+        bot, player_id,
+        f"🏆 **{credited} tix** deposited as your prize for winning "
+        f"**{draft_name}**.\n"
+        f"Balance: **{balance} tix**",
+        label=f"draft winnings {player_id}")
 
 
 @_best_effort
