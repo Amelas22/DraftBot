@@ -26,7 +26,6 @@ from discord.commands import SlashCommandGroup, option
 from loguru import logger
 
 from models.mtgo_account import MtgoAccount
-from services import wallet_history
 from services import wallet_service
 from services import mtgo_resolution_service as resolution
 from services import tournament_escrow_service as escrow
@@ -37,6 +36,7 @@ from helpers.money_gate import (
     linked_username, mtgo_job_footer, mtgo_trade_prompt, spawn_followup,
 )
 from helpers.permissions import has_bot_manager_role
+from wallet_history_view import wallet_embed
 
 
 async def _send_wallet(ctx, target) -> None:
@@ -45,21 +45,9 @@ async def _send_wallet(ctx, target) -> None:
     One helper rather than a builder plus two identical fetch-and-send tails, so
     the player's own view and the bot-manager lookup cannot drift apart.
     """
-    guild_id = str(ctx.guild.id)
-    wallet = await wallet_service.get_wallet(guild_id, str(target.id))
-    history = await wallet_service.get_history(guild_id, str(target.id), limit=10)
-
-    embed = discord.Embed(
-        title=f"{target.display_name}'s Tix Wallet", color=discord.Color.gold())
-    embed.add_field(name="Balance", value=f"**{wallet.balance}** tix", inline=True)
-
-    if history:
-        lines = await wallet_history.describe_rows(history)
-        embed.add_field(name="Recent activity",
-                        value=wallet_history.fit_field(lines), inline=False)
-    else:
-        embed.set_footer(text="No wallet activity yet.")
-    await ctx.followup.send(embed=embed, ephemeral=True)
+    embed, view = await wallet_embed(str(ctx.guild.id), str(target.id),
+                                     target.display_name)
+    await ctx.followup.send(embed=embed, view=view, ephemeral=True)
 
 
 class WalletCommands(commands.Cog):

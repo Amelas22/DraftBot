@@ -103,6 +103,18 @@ def test_the_page_is_recoverable_from_the_footer():
     assert whv.page_from_footer(None) == 0
 
 
+@pytest.mark.asyncio
+async def test_the_panel_ships_with_its_buttons(test_db):  # noqa: F811
+    for i in range(12):
+        await ws.credit_done(GUILD, PLAYER, 1, job_id=f"j{i}")
+    ctx = _ctx()
+    await _show(ctx)
+    sent = ctx.followup.send.await_args.kwargs
+    assert isinstance(sent["view"], whv.WalletHistoryView)
+    assert sent["ephemeral"] is True
+    assert sent["embed"].footer.text.startswith("Page 1 of 2")
+
+
 # --- wiring: does a button rebuild the panel it was clicked on? -------------
 
 def _interaction(footer_text, clicker=PLAYER, clicker_name="Me"):

@@ -13,6 +13,7 @@ import pytest
 from conftest import embed_field
 from cogs.wallet_cog import WalletCommands
 from helpers.permissions import is_bot_manager
+from services.wallet_history import HistoryPage
 
 # The commands are called unbound, so the cog never needs its __init__ to run.
 COG = WalletCommands.__new__(WalletCommands)
@@ -45,9 +46,9 @@ def _patched_wallet(balance=120, history=()):
     """
     get_wallet = AsyncMock(return_value=MagicMock(balance=balance))
     with patch("cogs.wallet_cog.gate_read", return_value=None), \
-         patch("cogs.wallet_cog.wallet_service.get_wallet", new=get_wallet), \
-         patch("cogs.wallet_cog.wallet_service.get_history",
-               new=AsyncMock(return_value=list(history))):
+         patch("wallet_history_view.wallet_service.get_wallet", new=get_wallet), \
+         patch("wallet_history_view.wallet_history.get_history_page",
+               new=AsyncMock(return_value=HistoryPage(list(history), len(history), 0, 10))):
         yield get_wallet
 
 
