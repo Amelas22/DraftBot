@@ -16,8 +16,14 @@ Nothing here imports back into wallet_service's write path, and wallet_service
 imports nothing from here -- which is why the paged query lives in this module
 rather than beside get_history.
 """
+from collections.abc import Iterable
 from dataclasses import dataclass
 
+from sqlalchemy import select
+
+from database.db_session import db_session
+from models.draft_session import DraftSession
+from models.tournament import Tournament
 from models.wallet_tx import WalletTx
 
 DRAFT = "draft"
@@ -102,3 +108,37 @@ def _segment(remainder: str, index: int | None) -> str | None:
         return None
     parts = remainder.split(":")
     return parts[index] if len(parts) > index and parts[index] else None
+
+
+async def resolve_labels(origins: Iterable[Origin]) -> dict[tuple[str, str], str]:
+    """Names for the drafts and tournaments a page of rows points at.
+
+    Two queries for a whole page, not two per row, and keyed by (category, ref)
+    because a draft's ref is a session_id string while a tournament's is an
+    integer id -- they share a namespace otherwise.
+
+    A missing name is simply absent from the result. Cancelling a draft deletes
+    its DraftSession row while the refund it books stays in the ledger forever,
+    so absent is normal and the caller renders the event without a name.
+    """
+    origins = list(origins)
+    drafts = {o.ref for o in origins if o.category == DRAFT and o.ref}
+    tourneys = {o.ref for o in origins if o.category == TOURNAMENT and o.ref}
+    labels: dict[tuple[str, str], str] = {}
+    if not drafts and not tourneys:
+        return labels
+
+    async with db_session() as session:
+        if drafts:
+            rows = await session.execute(
+                select(DraftSession.session_id, DraftSession.friendly_id)
+                .where(DraftSession.session_id.in_(drafts)))
+            labels.update({(DRAFT, sid): friendly
+                           for sid, friendly in rows if friendly})
+        # Tournament ids are integers in the database and strings in the key.
+        ids = [int(t) for t in tourneys if t.isdigit()]
+        if ids:
+            rows = await session.execute(
+                select(Tournament.id, Tournament.name).where(Tournament.id.in_(ids)))
+            labels.update({(TOURNAMENT, str(tid)): name for tid, name in rows if name})
+    return labels

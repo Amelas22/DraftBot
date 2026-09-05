@@ -4,8 +4,13 @@ Every writer sets a structured `source` -- it is the transfer pair's idempotency
 key, so it is well-formed and unique per event. These tests pin the mapping from
 that key to something a player can read.
 """
+from datetime import datetime
+
 import pytest
 
+from conftest import seed_session, test_db  # noqa: F401  (fixture)
+from database.db_session import db_session
+from models.tournament import Tournament
 from models.wallet_tx import WalletTx
 from services import wallet_history as wh
 
@@ -54,3 +59,39 @@ def test_an_unknown_source_degrades_to_a_plain_transfer():
     produce a plainer line, never an exception in front of a player's money."""
     origin = wh.classify(_tx(source="some-future-thing:9", kind="pay"))
     assert origin.category == wh.TRANSFER
+
+
+async def _seed_tournament(tid=3, name="Summer Cube Cup"):
+    async with db_session() as session:
+        session.add(Tournament(id=tid, guild_id="g1", name=name,
+                               total_rounds=3, current_round=0))
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_labels_name_the_draft_and_the_tournament(test_db):  # noqa: F811
+    await seed_session(session_id="sid1", friendly_id="worthy-knight-72")
+    await _seed_tournament()
+
+    labels = await wh.resolve_labels([
+        wh.Origin(wh.DRAFT, "entry", "sid1"),
+        wh.Origin(wh.TOURNAMENT, "entry", "3"),
+    ])
+
+    assert labels == {(wh.DRAFT, "sid1"): "worthy-knight-72",
+                      (wh.TOURNAMENT, "3"): "Summer Cube Cup"}
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_draft_simply_has_no_label(test_db):  # noqa: F811
+    """Cancelling a draft deletes its row (views.py:2820) while the refund rows
+    that cancellation books live on, so this is a routine path, not an edge case."""
+    labels = await wh.resolve_labels([wh.Origin(wh.DRAFT, "refund", "gone", "cancelled")])
+    assert labels == {}
+
+
+@pytest.mark.asyncio
+async def test_rows_that_name_nothing_cost_no_queries(test_db):  # noqa: F811
+    labels = await wh.resolve_labels([wh.Origin(wh.MTGO, "deposit"),
+                                      wh.Origin(wh.TRANSFER, "pay")])
+    assert labels == {}
