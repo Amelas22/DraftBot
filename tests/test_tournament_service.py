@@ -19,6 +19,7 @@ from models.tournament import (
     TournamentTeamMember,
 )
 from services.tournament_service import (
+    _cut_eligible,
     add_match,
     add_teammate,
     advance_round,
@@ -982,3 +983,55 @@ async def test_add_teammate_survives_losing_the_insert_race(test_db):
         assert member.display_name == "Winner"  # the row that actually won
         rows = (await session.execute(select(TournamentTeamMember))).scalars().all()
         assert len(rows) == 1
+
+
+# ---- who a round pairs ---------------------------------------------------------
+
+
+async def _through_round_one(session, count=4):
+    """A started tournament with round 1 fully reported, ready to advance."""
+    tournament = await _tournament_with_teams(session, count)
+    matches = await start_tournament(session, tournament.id, random.Random(7))
+    await session.commit()
+    for match in matches:
+        if not match.is_bye:  # a bye is scored when it is paired
+            await set_result(session, match.id, 2, 0)
+    await session.commit()
+    return tournament
+
+
+async def _paired_ids(session, round_):
+    stmt = select(TournamentMatch).where(TournamentMatch.round_id == round_.id)
+    matches = (await session.execute(stmt)).scalars().all()
+    ids = {m.team_a_participant_id for m in matches} | {m.team_b_participant_id for m in matches}
+    return ids - {None}
+
+
+@pytest.mark.asyncio
+async def test_a_team_that_never_paid_is_not_paired_in_later_rounds(test_db):
+    """Every round asks the same question about who is paired.
+
+    Not a live bug: `/tournament start` refuses outright while any team is
+    unpaid, so this state cannot be reached through a command -- the seeding
+    below builds it directly. What it pins is that the predicate is the same
+    one at every round, rather than round one filtering and later rounds not.
+    """
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 4)
+        unpaid, _ = await register_team(session, tournament.id, "Latecomer", "99")
+        unpaid.status = "pending"
+        await session.commit()
+
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        assert unpaid.id not in {m.team_a_participant_id for m in matches} | {
+            m.team_b_participant_id for m in matches}, "round one already excludes them"
+        for match in matches:
+            if not match.is_bye:
+                await set_result(session, match.id, 2, 0)
+        await session.commit()
+
+        new_round = await advance_round(session, tournament.id, random.Random(7))
+        await session.commit()
+
+        assert unpaid.id not in await _paired_ids(session, new_round)

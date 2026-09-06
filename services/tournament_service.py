@@ -42,15 +42,26 @@ def is_playoff(round_):
     return round_ is not None and round_.stage == STAGE_PLAYOFF
 
 
+def _pairable(participants):
+    """The teams a round pairs: entry fee held, and still in the tournament.
+
+    The one definition of "in", because every round re-pairs from scratch and the
+    answer has to be the same each time. start_tournament asked it of the first
+    round and advance_round did not ask it at all, so a team that never completed
+    registration sat out round one and then joined the pairings for round two.
+    """
+    return [p for p in participants if p.status == "paid"]
+
+
 def _cut_eligible(standings):
-    """The teams a cut can seat: those that completed registration (escrow paid).
+    """The teams a cut can seat: those still in, with their entry fee held.
 
     One rule, because the end-of-swiss prompt disables its Start button on this
     count while start_playoff refuses on this list -- if the two drift, the
     prompt offers a button that then refuses, which is the failure the disabled
     state exists to prevent.
     """
-    return [p for p in standings if p.status == "paid"]
+    return _pairable(standings)
 
 
 class SwissComplete(Exception):
@@ -224,8 +235,6 @@ async def remove_team(session, tournament_id, team_name):
     await session.flush()
     return participant
 
-
-# ---- team rosters ---------------------------------------------------------------
 
 async def find_participants_for_captain(session, tournament_id, captain_user_id):
     """Every team this user captains in the tournament, in registration order.
@@ -921,7 +930,7 @@ async def advance_round(session, tournament_id, rng):
         if not m.is_bye
     }
 
-    participants = await list_participants(session, tournament_id)
+    participants = _pairable(await list_participants(session, tournament_id))
     new_round, _ = await _create_round_with_pairings(
         session, tournament, participants, history, rng
     )
