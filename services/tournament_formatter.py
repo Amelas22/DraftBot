@@ -84,6 +84,10 @@ def create_standings_embed(tournament, participants, stage=STAGE_SWISS):
         rows = [
             f"{i}. **{p.team_name}** — {p.points} pts "
             f"({p.match_wins}-{p.match_losses}-{p.match_draws})"
+            # A dropped team keeps its place and its record, because both still
+            # count towards the tiebreaks of everyone it played. Saying so is what
+            # stops the pairings quietly shrinking and reading as a bug.
+            f"{' *(dropped)*' if p.dropped_at else ''}"
             for i, p in enumerate(participants, start=1)
         ]
         _add_chunked_field(embed, "Standings", rows)

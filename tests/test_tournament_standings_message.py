@@ -259,3 +259,24 @@ def test_standings_embed_splits_across_fields_past_discords_cap():
         assert f"Team Number {i:02d}" in body, f"team {i} was dropped by the split"
     assert embed.fields[0].name == "Standings"
     assert embed.fields[1].name == "Standings (cont.)"
+
+
+def test_a_dropped_team_is_marked_but_keeps_its_place():
+    """The record still counts, so it still ranks -- but the organizer has to be
+    able to see who is still being paired."""
+    from datetime import datetime
+
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 2
+    gone = _participant("Bravo", 3, wins=1)
+    gone.dropped_at = datetime(2026, 9, 6, 12, 0)
+    participants = [_participant("Alpha", 6, wins=2), gone]
+
+    body = "\n".join(f.value for f in create_standings_embed(tournament, participants).fields)
+
+    assert "Bravo" in body, "a dropped team keeps its place in the standings"
+    bravo_line = next(line for line in body.splitlines() if "Bravo" in line)
+    alpha_line = next(line for line in body.splitlines() if "Alpha" in line)
+    assert "dropped" in bravo_line.lower()
+    assert "dropped" not in alpha_line.lower()
