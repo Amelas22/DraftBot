@@ -109,8 +109,13 @@ async def main():
         await re_register_premade_nudges(bot)
         from livedrafts import re_register_live_drafts
         await re_register_live_drafts(bot)
+        # As a task, not awaited: this one fetches a Discord message per recent
+        # quiz and per recent staked draft, so it is the only restoration whose
+        # cost grows with how busy the last week was, and every fetch can be
+        # rate limited. The views it attaches are the least urgent of the set,
+        # and holding on_ready open behind them delays everything after it.
         from utils import re_register_views
-        await re_register_views(bot)
+        bot.loop.create_task(re_register_views(bot))
         # Watchdog for MTGO serve jobs (deposits/withdraws): re-polls anything still
         # pending — at startup and every 10 min — so a trade that completes after a
         # poll timeout or across a restart always gets booked eventually.
