@@ -19,7 +19,8 @@ rather than beside get_history.
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import func, not_, or_, select
+from sqlalchemy.sql.elements import ColumnElement
 
 from database.db_session import db_session
 from models.draft_session import DraftSession
@@ -78,6 +79,70 @@ _EXACT = {
 # recognize it by, and anything else that has to find those rows must agree
 # with classify() about which kinds they are.
 _MTGO_BOUNDARY_KINDS = ("deposit", "withdraw")
+
+CATEGORIES = (DRAFT, TOURNAMENT, DEBT, MTGO, TRANSFER)
+
+# The category a prefix belongs to, read straight off the classifier's table so
+# the filter cannot drift from what the lines say. A prefix added there is
+# filtered here without a second edit.
+_PREFIX_CATEGORY = {prefix: category for prefix, category, *_ in KNOWN_PREFIXES}
+
+# And the same for the whole-key sources, off the classifier's other table.
+#
+# It maps "admin" to ADJUST, which is deliberately not one of CATEGORIES: an
+# adjustment belongs in the player-to-player residual, and it lands there
+# because _claimed() is never asked about ADJUST -- neither as a filter of its
+# own nor as one of the four the residual subtracts. Listing ADJUST in either
+# place would claim those rows out of TRANSFER, which is what the partition
+# test guards.
+_EXACT_CATEGORY = {source: category for source, (category, _) in _EXACT.items()}
+
+
+def _claimed(category: str) -> ColumnElement[bool]:
+    """What DRAFT/TOURNAMENT/DEBT/MTGO each own: their prefixes from
+    KNOWN_PREFIXES, their whole-key sources from _EXACT, and -- for MTGO alone
+    -- the boundary `kind`s, because a withdraw row carries no source at all.
+    This is the single definition of a category's ownership; TRANSFER's residual
+    is built by negating the union of these, never by restating what they match.
+
+    Compared against a coalesced source so the clause stays two-valued: a NULL
+    `source` makes a bare `LIKE`/`==` comparison NULL rather than false, which
+    would make `not_()` over it NULL too and silently drop the row from the
+    residual it's supposed to catch.
+    """
+    source = func.coalesce(WalletTx.source, "")
+    prefixes = [p for p, c in _PREFIX_CATEGORY.items() if c == category]
+    # autoescape: a prefix goes into a LIKE pattern, where `_` matches any one
+    # character. No prefix contains one today, so this changes nothing now and
+    # stops the first one that does from quietly claiming rows next door.
+    conds: list[ColumnElement[bool]] = [
+        source.startswith(p, autoescape=True) for p in prefixes]
+    conds += [source == e for e, c in _EXACT_CATEGORY.items() if c == category]
+    if category == MTGO:
+        conds.append(WalletTx.kind.in_(_MTGO_BOUNDARY_KINDS))
+    return or_(*conds)
+
+
+def category_conditions(category: str | None) -> list[ColumnElement[bool]]:
+    """SQL for one category, or [] for everything.
+
+    In the query, not applied to the page afterwards: a filter that ran after
+    the LIMIT would be slicing a list it had already truncated, and both the
+    total and every page boundary would be wrong.
+    """
+    if not category:
+        return []
+    if category == TRANSFER:
+        # The true residual, not a `kind` match: /wallet pay writes a bare
+        # uuid with nothing to match on, and an admin adjustment's "admin"
+        # source is claimed by no category either -- both belong here, along
+        # with any future writer that ships a source shape before this table
+        # learns it. A `kind IN ('pay', 'receive')` restriction would instead
+        # drop `adjust` rows (kind="adjust") out of every filter, which is
+        # exactly the bug this replaced.
+        claimed = [_claimed(c) for c in (DRAFT, TOURNAMENT, DEBT, MTGO)]
+        return [not_(or_(*claimed))]
+    return [_claimed(category)]
 
 
 def classify(tx: WalletTx) -> Origin:
@@ -287,6 +352,7 @@ class HistoryPage:
     total: int
     page: int
     size: int
+    category: str | None = None
 
     @property
     def pages(self) -> int:
@@ -294,7 +360,8 @@ class HistoryPage:
 
 
 async def get_history_page(guild_id: str, player_id: str, *,
-                           page: int = 0, size: int = PAGE_SIZE) -> HistoryPage:
+                           page: int = 0, size: int = PAGE_SIZE,
+                           category: str | None = None) -> HistoryPage:
     """A slice of one holder's ledger, newest first, with the unsliced total.
 
     The total is what the footer counts and what bounds the buttons, so it is
@@ -304,7 +371,8 @@ async def get_history_page(guild_id: str, player_id: str, *,
     should land on the last page, not on an empty one.
     """
     size = max(1, size)   # a page of nothing is a division by zero, not a page
-    where = (WalletTx.guild_id == guild_id, WalletTx.player_id == player_id)
+    where = (WalletTx.guild_id == guild_id, WalletTx.player_id == player_id,
+             *category_conditions(category))
     async with db_session() as session:
         total = int((await session.execute(
             select(func.count()).select_from(WalletTx).where(*where))).scalar() or 0)
@@ -313,4 +381,4 @@ async def get_history_page(guild_id: str, player_id: str, *,
             select(WalletTx).where(*where)
             .order_by(WalletTx.created_at.desc(), WalletTx.id.desc())
             .limit(size).offset(page * size))).scalars().all()
-    return HistoryPage(list(rows), total, page, size)
+    return HistoryPage(list(rows), total, page, size, category)

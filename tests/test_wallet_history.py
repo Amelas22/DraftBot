@@ -317,3 +317,146 @@ async def test_a_page_holds_only_this_holder_in_this_guild(test_db):  # noqa: F8
     await _seed_rows(2, player="p2")
     await _seed_rows(4, guild="g2")
     assert (await wh.get_history_page("g1", "p1")).total == 3
+
+
+async def _one_of_each(guild="g1", player="p1"):
+    """One row per category, booked the way production books them."""
+    await ws.credit_done(guild, player, 100, job_id="dep")                      # mtgo
+    await ws.pay(guild, player, "pool:draft:sid1", 10,
+                 source="draft-entry:sid1:p1:0:0-10")                           # draft
+    await ws.pay(guild, player, "prize:tourney:3", 5, source="tourney:3:18")    # tournament
+    await ws.pay(guild, player, "222", 4, source="debt:abc")                    # debt
+    await ws.pay(guild, player, "333", 3, source=None)                          # transfer (uuid)
+    await ws.pay(guild, player, "444", 2, source="some-future-thing:9")         # unknown
+
+
+@pytest.mark.parametrize("category, expected", [
+    (wh.DRAFT, ["draft-entry:sid1:p1:0:0-10"]),
+    (wh.TOURNAMENT, ["tourney:3:18"]),
+    (wh.DEBT, ["debt:abc"]),
+])
+@pytest.mark.asyncio
+async def test_each_category_selects_exactly_its_own_rows(test_db, category, expected):  # noqa: F811
+    await _one_of_each()
+    page = await wh.get_history_page("g1", "p1", category=category)
+    assert [r.source for r in page.rows] == expected
+    assert page.total == len(expected)
+
+
+@pytest.mark.asyncio
+async def test_mtgo_selects_the_boundary_row_that_has_no_source(test_db):  # noqa: F811
+    await _one_of_each()
+    page = await wh.get_history_page("g1", "p1", category=wh.MTGO)
+    assert [r.kind for r in page.rows] == ["deposit"]
+
+
+@pytest.mark.asyncio
+async def test_transfers_are_the_complement_of_the_known_prefixes(test_db):  # noqa: F811
+    """/wallet pay writes a bare uuid, so player-to-player cannot be a prefix
+    match -- it is everything the other categories did not claim."""
+    await _one_of_each()
+    page = await wh.get_history_page("g1", "p1", category=wh.TRANSFER)
+    sources = [r.source for r in page.rows]
+    # the bare-uuid pay (wallet_service.pay generates one when given none) and
+    # the unknown prefix -- nothing else claimed either
+    assert "some-future-thing:9" in sources
+    assert len(sources) == 2
+
+
+@pytest.mark.asyncio
+async def test_no_category_is_everything(test_db):  # noqa: F811
+    await _one_of_each()
+    assert (await wh.get_history_page("g1", "p1")).total == 6
+
+
+@pytest.mark.asyncio
+async def test_the_total_counts_the_filtered_rows_not_all_of_them(test_db):  # noqa: F811
+    """The filter must be in the query: a page filtered afterwards would be a
+    slice of a list it had already truncated, and every count would lie."""
+    await _seed_rows(9)  # 45 tix, and 9 rows the draft filter must not count
+    for i in range(15):
+        await ws.pay("g1", "p1", "pool:draft:sid1", 1,
+                     source=f"draft-entry:sid1:p1:{i}:0-1")
+    page = await wh.get_history_page("g1", "p1", category=wh.DRAFT, size=10)
+    assert page.total == 15 and page.pages == 2 and len(page.rows) == 10
+
+
+@pytest.mark.asyncio
+async def test_every_category_is_selectable(test_db):  # noqa: F811
+    """A category the UI offers but the query cannot express would silently show
+    everything."""
+    await _one_of_each()
+    for category in wh.CATEGORIES:
+        await wh.get_history_page("g1", "p1", category=category)
+
+
+@pytest.mark.asyncio
+async def test_categories_partition_the_ledger(test_db):  # noqa: F811
+    """Every row must land in exactly one category filter: none lost, none
+    double-counted. This is what would have caught `adjust` rows (kind="adjust",
+    source="admin") falling out of every filter -- TRANSFER used to require
+    kind IN ('pay', 'receive') and separately subtract the _EXACT sources,
+    which excluded "admin" from the residual along with "serve"."""
+    await _one_of_each()
+    async with db_session() as session:
+        # adjust has its own writer (wallet_service.adjust), not `pay` -- book
+        # it directly the way that writer does.
+        session.add(WalletTx(guild_id="g1", player_id="p1", kind="adjust",
+                             amount=7, source="admin", notes="test (by admin)"))
+        await session.commit()
+
+    all_ids = {r.id for r in (await wh.get_history_page("g1", "p1", size=100)).rows}
+    assert len(all_ids) == 7  # the six _one_of_each rows plus the adjust row
+
+    seen: set[int] = set()
+    for category in wh.CATEGORIES:
+        ids = {r.id for r in (await wh.get_history_page(
+            "g1", "p1", category=category, size=100)).rows}
+        assert not (ids & seen), f"{category} double-counts {ids & seen}"
+        seen |= ids
+
+    assert seen == all_ids, f"lost rows: {all_ids - seen}"
+
+
+@pytest.mark.asyncio
+async def test_a_prefix_is_matched_literally_not_as_a_like_pattern(test_db, monkeypatch):  # noqa: F811
+    """A prefix goes into a LIKE pattern, where `_` matches any one character.
+    No prefix contains one today, so this pins the escaping against the first
+    one that does rather than a live bug -- stood up with a prefix that has
+    one, which is the only way the difference is visible."""
+    monkeypatch.setitem(wh._PREFIX_CATEGORY, "debt_", wh.DEBT)
+    async with db_session() as session:
+        session.add(WalletTx(guild_id="g1", player_id="p1", kind="pay",
+                             amount=-1, source="debt_9c"))
+        session.add(WalletTx(guild_id="g1", player_id="p1", kind="pay",
+                             amount=-1, source="debtX9c"))
+        await session.commit()
+
+    page = await wh.get_history_page("g1", "p1", category=wh.DEBT, size=100)
+    assert [r.source for r in page.rows] == ["debt_9c"]
+
+
+@pytest.mark.asyncio
+async def test_a_null_source_row_still_lands_in_transfer(test_db):  # noqa: F811
+    """`wallet_service.pay` always generates a uuid when given no source, so a
+    kind="pay" row with a NULL source cannot happen through it today -- insert
+    one directly via the model, the way this shape would have to arrive.
+
+    It is still worth defending, because the residual is NOT(OR(...)): in SQL,
+    NULL LIKE 'x%' is NULL, not FALSE, so a NULL source would make the whole
+    OR -- and its negation -- NULL, dropping the row out of every filter. That
+    is the same failure kind="adjust" hit, reached a different way. The
+    `func.coalesce(WalletTx.source, "")` inside `_claimed` is what keeps this
+    row two-valued and inside TRANSFER; remove it and this test fails."""
+    async with db_session() as session:
+        session.add(WalletTx(guild_id="g1", player_id="p1", kind="pay",
+                             amount=-1, source=None))
+        await session.commit()
+
+    page = await wh.get_history_page("g1", "p1", category=wh.TRANSFER, size=100)
+    assert [r.source for r in page.rows] == [None]
+
+    for category in (wh.DRAFT, wh.TOURNAMENT, wh.DEBT, wh.MTGO):
+        ids = {r.id for r in (await wh.get_history_page(
+            "g1", "p1", category=category, size=100)).rows}
+        assert not ids, f"{category} unexpectedly claims the null-source row"
