@@ -20,6 +20,7 @@ from models.tournament import (
 )
 from services.tournament_service import (
     _cut_eligible,
+    drop_team,
     add_match,
     add_teammate,
     advance_round,
@@ -985,7 +986,7 @@ async def test_add_teammate_survives_losing_the_insert_race(test_db):
         assert len(rows) == 1
 
 
-# ---- who a round pairs ---------------------------------------------------------
+# ---- dropping mid-swiss --------------------------------------------------------
 
 
 async def _through_round_one(session, count=4):
@@ -1005,6 +1006,108 @@ async def _paired_ids(session, round_):
     matches = (await session.execute(stmt)).scalars().all()
     ids = {m.team_a_participant_id for m in matches} | {m.team_b_participant_id for m in matches}
     return ids - {None}
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_team_is_not_paired_in_the_next_round(test_db):
+    async with test_db() as session:
+        tournament = await _through_round_one(session)
+        gone = (await list_participants(session, tournament.id))[0]
+
+        await drop_team(session, tournament.id, gone.team_name)
+        await session.commit()
+
+        new_round = await advance_round(session, tournament.id, random.Random(7))
+        await session.commit()
+
+        assert gone.id not in await _paired_ids(session, new_round)
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_teams_results_still_count_for_its_opponents(test_db):
+    """The row outlives the drop on purpose: OMW% is computed from the match
+    graph, so removing a team would rewrite the tiebreaks of everyone it beat."""
+    async with test_db() as session:
+        tournament = await _through_round_one(session)
+        played = (await session.execute(select(TournamentMatch))).scalars().all()
+        winner_id = played[0].team_a_participant_id
+        loser = await session.get(TournamentParticipant, played[0].team_b_participant_id)
+
+        await drop_team(session, tournament.id, loser.team_name)
+        await session.commit()
+
+        standings = await get_standings_data(session, tournament.id)
+        by_id = {p.id: p for p in standings}
+        assert loser.id in by_id, "a dropped team keeps its place in the standings"
+        assert by_id[loser.id].match_losses == 1
+        assert by_id[winner_id].match_wins == 1
+
+
+@pytest.mark.asyncio
+async def test_dropping_to_an_odd_field_gives_someone_the_bye(test_db):
+    """Parity is recomputed from the pool that is left, so the round pairs
+    appropriately rather than pairing a team that is no longer there."""
+    async with test_db() as session:
+        tournament = await _through_round_one(session)
+        gone = (await list_participants(session, tournament.id))[0]
+
+        await drop_team(session, tournament.id, gone.team_name)
+        await session.commit()
+        new_round = await advance_round(session, tournament.id, random.Random(7))
+        await session.commit()
+
+        stmt = select(TournamentMatch).where(TournamentMatch.round_id == new_round.id)
+        matches = (await session.execute(stmt)).scalars().all()
+        assert len(await _paired_ids(session, new_round)) == 3
+        assert sum(1 for m in matches if m.is_bye) == 1
+
+
+@pytest.mark.asyncio
+async def test_dropping_below_two_teams_is_refused(test_db):
+    """Two teams left is a tournament; one is not. Finishing is the way out."""
+    async with test_db() as session:
+        tournament = await _through_round_one(session, count=3)
+        remaining = await list_participants(session, tournament.id)
+        await drop_team(session, tournament.id, remaining[0].team_name)
+        await session.commit()
+
+        with pytest.raises(ValueError, match="finish the tournament"):
+            await drop_team(session, tournament.id, remaining[1].team_name)
+
+
+@pytest.mark.asyncio
+async def test_a_team_cannot_drop_twice(test_db):
+    async with test_db() as session:
+        tournament = await _through_round_one(session)
+        gone = (await list_participants(session, tournament.id))[0]
+        await drop_team(session, tournament.id, gone.team_name)
+        await session.commit()
+
+        with pytest.raises(ValueError, match="already dropped"):
+            await drop_team(session, tournament.id, gone.team_name)
+
+
+@pytest.mark.asyncio
+async def test_dropping_before_the_tournament_starts_is_refused(test_db):
+    """remove_team owns that phase -- it deletes the row and refunds the fee."""
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 4)
+        await session.commit()
+
+        with pytest.raises(ValueError, match="remove_team"):
+            await drop_team(session, tournament.id, "Team0")
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_team_cannot_be_seated_in_the_cut(test_db):
+    async with test_db() as session:
+        tournament = await _through_round_one(session)
+        gone = (await list_participants(session, tournament.id))[0]
+        await drop_team(session, tournament.id, gone.team_name)
+        await session.commit()
+
+        standings = await get_standings_data(session, tournament.id)
+        assert gone.id not in {p.id for p in _cut_eligible(standings)}
 
 
 @pytest.mark.asyncio

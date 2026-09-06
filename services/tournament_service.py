@@ -6,6 +6,8 @@ standings.
 All functions take an AsyncSession so callers control the transaction and tests
 can point them at a temp database (mirrors the leaderboard_service convention).
 """
+from datetime import datetime
+
 from loguru import logger
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -50,7 +52,7 @@ def _pairable(participants):
     round and advance_round did not ask it at all, so a team that never completed
     registration sat out round one and then joined the pairings for round two.
     """
-    return [p for p in participants if p.status == "paid"]
+    return [p for p in participants if p.status == "paid" and p.dropped_at is None]
 
 
 def _cut_eligible(standings):
@@ -235,6 +237,51 @@ async def remove_team(session, tournament_id, team_name):
     await session.flush()
     return participant
 
+
+async def drop_team(session, tournament_id, team_name):
+    """Take a team out of the pairings for the rounds still to come.
+
+    The running counterpart to remove_team, which only serves registration: that
+    one deletes the row and refunds the fee, because nothing has been played yet.
+    Once a tournament is live the row has to stay -- other teams' tiebreaks are
+    computed from the matches this team played -- so the drop is a mark, not a
+    deletion, and the entry fee stays in the pot the way it does at a real event.
+
+    A match already paired is left alone. The team is simply not in the pool the
+    next time a round is paired, which is what a drop means; an open match from
+    the round in progress is still the organizer's to record.
+    """
+    tournament = await session.get(Tournament, tournament_id)
+    if tournament is None:
+        raise ValueError("Tournament not found.")
+    if tournament.status != "active":
+        raise ValueError(
+            f"'{tournament.name}' is not running — teams leave a tournament that "
+            f"has not started with remove_team, which also refunds the entry fee."
+        )
+
+    participant = await find_participant_by_name(session, tournament_id, team_name)
+    if participant is None:
+        raise ValueError(f"'{team_name}' is not in this tournament.")
+    if participant.dropped_at is not None:
+        raise ValueError(f"'{participant.team_name}' has already dropped.")
+
+    remaining = [p for p in _pairable(await list_participants(session, tournament_id))
+                 if p.id != participant.id]
+    if len(remaining) < 2:
+        raise ValueError(
+            f"Dropping '{participant.team_name}' would leave "
+            f"{len(remaining)} team(s) to pair — finish the tournament instead."
+        )
+
+    participant.dropped_at = datetime.now()
+    await session.flush()
+    logger.info(f"tournament {tournament_id}: '{participant.team_name}' dropped "
+                f"in round {tournament.current_round}")
+    return participant
+
+
+# ---- team rosters ---------------------------------------------------------------
 
 async def find_participants_for_captain(session, tournament_id, captain_user_id):
     """Every team this user captains in the tournament, in registration order.
