@@ -661,10 +661,13 @@ async def start_tournament(session, tournament_id, rng):
         raise ValueError("Tournament not found.")
     if tournament.status != "registration":
         raise ValueError(f"'{tournament.name}' is already {tournament.status}.")
-    participants = await list_participants(session, tournament_id)
     # Only teams that completed registration (escrow paid) are seeded. Free
-    # tournaments mark everyone 'paid', so this is a no-op there.
-    paid = [p for p in participants if p.status == "paid"]
+    # tournaments mark everyone 'paid', so this is a no-op there. Asked through
+    # _pairable, because one definition of who a round pairs is the whole point
+    # of having it -- nothing can have dropped before a tournament is active, so
+    # this is the same list either way, and it stays the same list if that ever
+    # changes.
+    paid = _pairable(await list_participants(session, tournament_id))
     if len(paid) < 2:
         raise ValueError(
             "At least 2 teams must have completed registration (entry fee paid) to start."
