@@ -89,17 +89,28 @@ async def main():
         from config import migrate_configs
         migrate_configs()
         print(f'Logged in as {bot.user}!')
-        from utils import re_register_views
-        await re_register_views(bot)
-        # Register persistent debt settlement view
+        # Persistent views first, and the cheapest of them before the rest. Until a
+        # view is registered, Discord still DELIVERS its clicks -- py-cord has no
+        # handler for the custom_id, so the player is told the bot did not respond
+        # and nothing is logged at all. Every restart is therefore a window in
+        # which live buttons lie, and the order here is what decides how long that
+        # window is for each of them.
+        #
+        # re_register_views goes last because it is the only one that is slow: it
+        # ends by walking every old quiz session to unpin it, which in production
+        # meant 959 messages at ~39 a minute -- and all of them failing on Manage
+        # Messages in one channel. A Start Draft button on a live tournament match
+        # spent that whole half hour dead behind it.
         from debt_views.settle_views import PublicSettleDebtsView
         bot.add_view(PublicSettleDebtsView())
-        from livedrafts import re_register_live_drafts
-        await re_register_live_drafts(bot)
         from cogs.tournament_commands import re_register_tournament_views
         await re_register_tournament_views(bot)
         from tournament_nudge import re_register_premade_nudges
         await re_register_premade_nudges(bot)
+        from livedrafts import re_register_live_drafts
+        await re_register_live_drafts(bot)
+        from utils import re_register_views
+        await re_register_views(bot)
         # Watchdog for MTGO serve jobs (deposits/withdraws): re-polls anything still
         # pending — at startup and every 10 min — so a trade that completes after a
         # poll timeout or across a restart always gets booked eventually.
