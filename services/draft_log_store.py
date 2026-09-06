@@ -181,30 +181,60 @@ def _dedupe_safe_names(members: list[_PostableMember]) -> list[_PostableMember]:
     return out
 
 
-async def _send_pool(destination, member: _PostableMember, draft_data: dict) -> None:
+def _pile_for(draft_data: dict, dm_user_id: str, *, show_deck: bool) -> tuple[list, list]:
+    """The (main, side) piles to picture for one player — the deck, or the pool.
+
+    The one place that answers "may this audience see what was PLAYED?", because
+    the answer is a property of who is reading, not of which helper a caller
+    reached for. Both readings are built from the same split, so they can only
+    ever disagree about grouping, never about which cards a player had.
+
+    `show_deck` puts the maindeck and the sideboard in separate piles: the built
+    deck, which is the story for the player's OWN team. Everyone else — an
+    opponent's scouting thread, the open thread a whole tournament match can
+    read — gets one pile of everything drafted. A pool being open is not the
+    decklist being open: the split says which cards were registered and which
+    were cut, and nothing ever opened that.
+    """
+    split = split_decklist(draft_data, dm_user_id)
+    main, side = list(split.get("main") or []), list(split.get("side") or [])
+    return (main, side) if show_deck else (main + side, [])
+
+
+async def _send_pool(destination, member: _PostableMember, draft_data: dict,
+                     *, show_deck: bool = False, label: str | None = None,
+                     header: str | None = None) -> None:
     """Send one player's pool (.txt, plus a best-effort .jpg pile image) to
     `destination` (a channel or thread), with exactly the content and
-    attachments the channel posts carried before threading."""
+    attachments the channel posts carried before threading.
+
+    `show_deck` is the audience's, not the caller's convenience: see _pile_for.
+    It defaults to hiding the deck so that a new caller has to say out loud that
+    its readers are the player's own team — the way this leaked once, by a
+    scouting thread reusing the team renderer and inheriting its audience.
+
+    `label` replaces the "drafted pool" wording (the open thread names the team
+    instead), and `header` heads a group. The header rides on this post rather
+    than going out as its own message so that it cannot be posted twice and
+    cannot fail on its own.
+    """
     files = [discord.File(io.BytesIO(member.pool.encode("utf-8")), filename=f"{member.safe}.txt")]
 
-    # Best-effort mana-value pile image (main deck + sideboard) alongside the
-    # .txt. The .txt is the deliverable and post_team_logs is reconciler-driven,
-    # so any image failure (Scryfall exhaustion -> build None, or an exception)
-    # is logged and skipped — never blocking the post.
+    # Best-effort mana-value pile image alongside the .txt. The .txt is the
+    # deliverable and post_team_logs is reconciler-driven, so any image failure
+    # (Scryfall exhaustion -> build None, or an exception) is logged and
+    # skipped — never blocking the post.
     try:
-        split = split_decklist(draft_data, member.dm_user_id)
-        image = await PileImageBuilder().build(
-            split["main"], split["side"], draft_data.get("carddata", {})
-        )
+        main, side = _pile_for(draft_data, member.dm_user_id, show_deck=show_deck)
+        image = await PileImageBuilder().build(main, side, draft_data.get("carddata", {}))
         if image:
             files.append(discord.File(io.BytesIO(image.getvalue()), filename=f"{member.safe}.jpg"))
     except Exception as e:
-        logger.warning(f"[team-logs] deck image failed for {member.name} ({member.dm_user_id}): {e}")
+        logger.warning(f"[team-logs] pool image failed for {member.name} ({member.dm_user_id}): {e}")
 
-    await destination.send(
-        content=f"**{member.name}** — drafted pool ({member.pool.count(chr(10)) + 1} cards):",
-        files=files,
-    )
+    what = label or f"drafted pool ({member.pool.count(chr(10)) + 1} cards)"
+    line = f"**{member.name}** — {what}:"
+    await destination.send(content=f"{header}\n{line}" if header else line, files=files)
 
 
 async def _resolve_destination(bot, destination_id: str):
@@ -282,9 +312,14 @@ async def _post_missing_players(
     Guards each send individually — one player's failure is logged and the
     loop continues rather than costing the others their pools.
 
-    `send` overrides how one pool is written (default `_send_pool`); the open-pools
-    path passes a partial that adds the team label and the combined pile. The skip
-    rule, the error policy and the filename convention stay here either way.
+    `send` overrides how one pool is written; the open-pools path passes a partial
+    that adds the team label. The skip rule, the error policy and the filename
+    convention stay here either way.
+
+    The default shows the built deck, because the only caller that does not
+    override `send` is a team posting into its own private channel -- the one
+    audience entitled to see what its own players registered. Every other caller
+    passes its own sender and gets _send_pool's pool-only default.
 
     Returns `(all_posted, sent)`: whether every postable member ended up
     posted, and how many pools this call actually delivered. The caller needs
@@ -296,7 +331,8 @@ async def _post_missing_players(
         if f"{member.safe}.txt" in already_posted:
             continue
         try:
-            await (send or _send_pool)(destination, member, draft_data)
+            await (send or partial(_send_pool, show_deck=True))(
+                destination, member, draft_data)
             sent += 1
         except Exception as e:
             logger.warning(
@@ -555,6 +591,9 @@ async def post_pools_to_scouting_threads(
             try:
                 if f"{member.safe}.txt" in await _posted_txt_filenames(bot, thread):
                     continue
+                # Not show_deck: this thread belongs to the OTHER side. The
+                # pools are open on a tournament match, which is what allows
+                # posting here at all -- the decklist never was.
                 await _send_pool(thread, member, draft_data)
             except Exception as e:
                 logger.warning(
@@ -752,31 +791,15 @@ def build_mtgo_deck_text(split: dict, carddata: dict) -> str:
 
 async def _send_open_pool(destination, member: _PostableMember, draft_data: dict,
                           *, team_label: str, header: str | None = None) -> None:
-    """One player's pool for an OPEN thread: same `.txt` deliverable as the private
-    posts, but labelled with the team and imaged as a single pile.
+    """One player's pool for an OPEN thread: the same post as everywhere else,
+    labelled with the team instead of the card count.
 
-    `header` heads the team's group. It rides on this post rather than going out as
-    its own message so that it cannot be posted twice (see _post_open_pools) and
-    cannot fail on its own.
-
-    The pile is built with the whole pool as `main` and an empty sideboard on purpose.
-    PileImageBuilder buckets main and side into separate groups, which is the right
-    read when a pool is private and the built deck is the story; with pools open the
-    split is noise — an opponent wants to see everything that was drafted, in one
-    screenshot.
+    No `show_deck`: a whole tournament match reads this thread, so it gets the
+    pool, which is what _send_pool already gives anyone who is not the player's
+    own team.
     """
-    files = [discord.File(io.BytesIO(member.pool.encode("utf-8")), filename=f"{member.safe}.txt")]
-    try:
-        split = split_decklist(draft_data, member.dm_user_id)
-        whole_pool = list(split.get("main") or []) + list(split.get("side") or [])
-        image = await PileImageBuilder().build(whole_pool, [], draft_data.get("carddata", {}))
-        if image:
-            files.append(discord.File(io.BytesIO(image.getvalue()), filename=f"{member.safe}.jpg"))
-    except Exception as e:
-        logger.warning(f"[open-pools] deck image failed for {member.name}: {e}")
-
-    line = f"**{member.name}** — {team_label} ({member.pool.count(chr(10)) + 1} cards):"
-    await destination.send(content=f"{header}\n{line}" if header else line, files=files)
+    await _send_pool(destination, member, draft_data,
+                     label=team_label, header=header)
 
 
 async def _post_open_pools(

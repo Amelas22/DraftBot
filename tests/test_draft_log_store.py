@@ -1495,3 +1495,78 @@ def test_scouting_pools_are_gated_on_the_tournament_and_posted_last():
     names = guarded[0]
     assert names.index("_post_open_pools") < names.index("post_pools_to_scouting_threads"), (
         "scouting threads must be posted after the shared open-pools thread")
+
+
+def _team_log_with_decks():
+    """A log where both players BUILT a deck, so the pool and the deck differ.
+
+    _team_log() has no decklist, and split_decklist then falls back to the whole
+    pool as main with an empty sideboard -- which is what a pool-only image looks
+    like anyway. A test for "pool, not deck" needs a log where the two are
+    telling apart.
+    """
+    return {
+        "carddata": {f"c{i}": {"name": f"Card {i}"} for i in range(1, 5)},
+        "users": {
+            "dm_a": {"userName": "Alice", "seatNum": 0, "cards": ["c1", "c2"],
+                     "decklist": {"main": ["c1"], "side": ["c2"], "lands": {}}},
+            "dm_b": {"userName": "Bob", "seatNum": 1, "cards": ["c3", "c4"],
+                     "decklist": {"main": ["c3"], "side": ["c4"], "lands": {}}},
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_scouting_thread_shows_the_pool_and_never_the_built_deck():
+    """An opponent may see what was drafted. What was PLAYED is not theirs.
+
+    A scouting thread only runs on a tournament match, where the pools are open
+    already -- which is the whole safety argument for posting there. It is an
+    argument about pools: a pile split into maindeck and sideboard hands the
+    opponent the exact 40 that was registered, which no gate ever opened.
+    """
+    bob = _named_thread("Bob", 3001)
+    seen = []
+
+    async def _spy(main_ids, side_ids, _carddata):
+        seen.append((list(main_ids), list(side_ids)))
+        return io.BytesIO(b"img")
+
+    with _patched_discord(build=AsyncMock(side_effect=_spy)):
+        await post_pools_to_scouting_threads(
+            _bot_for({}), _scouting_channel([bob]), _scouting_channel([]),
+            _SCOUT_A, _SCOUT_B, _SCOUT_MAPPING,
+            _team_log_with_decks(), _SCOUT_SIGN_UPS)
+
+    assert seen, "no image was built"
+    for main_ids, side_ids in seen:
+        assert side_ids == [], "a sideboard pile tells the opponent exactly what was cut"
+        assert sorted(main_ids) == ["c3", "c4"], "the pile must be the whole pool"
+
+
+@pytest.mark.asyncio
+async def test_a_teams_own_thread_still_shows_the_built_deck():
+    """The carve-out, pinned from the other side.
+
+    A team seeing what its own players registered is the point of the private
+    thread, and the pool-only default that protects opponents must not quietly
+    take that away. This fails if the team path stops asking for the deck.
+    """
+    thread = _FakeThread(4001)
+    channel = _FakeChannel("red-team", thread=thread, cid=77)
+    seen = []
+
+    async def _spy(main_ids, side_ids, _carddata):
+        seen.append((list(main_ids), list(side_ids)))
+        return io.BytesIO(b"img")
+
+    with _patched_discord(build=AsyncMock(side_effect=_spy)):
+        persist, _persisted = _persist_recorder()
+        await _post_pools(
+            _bot_for({77: channel}), channel, persist,
+            members=["disc_b"], draft_data=_team_log_with_decks())
+
+    assert seen, "no image was built"
+    main_ids, side_ids = seen[0]
+    assert main_ids == ["c3"], "the maindeck is its own pile for the player's own team"
+    assert side_ids == ["c4"], "and so is the sideboard"
