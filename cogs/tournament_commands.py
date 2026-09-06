@@ -43,6 +43,7 @@ from services.tournament_formatter import (
 from services.tournament_service import (
     advance_round,
     add_match,
+    drop_team as drop_team_service,
     add_teammate,
     count_unreported_matches,
     create_tournament,
@@ -921,6 +922,78 @@ class TournamentCog(commands.Cog):
         note = f" Entry fee ({refunded} tix) refunded to the captain's wallet." if refunded else ""
         await self._refresh_board(t_id)
         await ctx.followup.send(f"✅ **{res['team_name']}** removed.{note}", ephemeral=True)
+
+    @tournament.command(
+        name="drop_team",
+        description="Leave a running tournament — you will not be paired again")
+    async def drop_team(
+        self,
+        ctx,
+        team: discord.Option(str, "Admin: the team to drop (defaults to your own)",
+                             required=False) = None,
+    ):
+        """Take a team out of the pairings for the rounds still to come.
+
+        Open to everyone, because a captain dropping their own team is the
+        ordinary case. Naming somebody else's team is the admin one -- the team
+        that stopped showing up is by definition not running any commands -- so
+        the manager check guards the argument rather than the command.
+        """
+        if not await self._check_enabled(ctx):
+            return
+        await ctx.defer(ephemeral=True)
+
+        if team is not None and not await is_bot_manager(ctx):
+            await ctx.followup.send(
+                "❌ Only a bot manager can drop another team. Run "
+                "`/tournament drop_team` with no team to drop your own.",
+                ephemeral=True)
+            return
+
+        async with db_session() as session:
+            tournament = await get_active_tournament(session, ctx.guild.id)
+            if tournament is None:
+                await ctx.followup.send("There is no active tournament.", ephemeral=True)
+                return
+
+            target = team
+            if target is None:
+                mine = await find_participants_for_captain(
+                    session, tournament.id, str(ctx.author.id))
+                mine = [p for p in mine if p.dropped_at is None]
+                if not mine:
+                    await ctx.followup.send(
+                        "❌ You are not captaining a team in this tournament. A bot "
+                        "manager can drop a team by name.", ephemeral=True)
+                    return
+                if len(mine) > 1:
+                    names = ", ".join(f"`{p.team_name}`" for p in mine)
+                    await ctx.followup.send(
+                        f"❌ You captain more than one team here ({names}). "
+                        f"Name the one to drop: `/tournament drop_team team:<name>`.",
+                        ephemeral=True)
+                    return
+                target = mine[0].team_name
+
+            try:
+                participant = await drop_team_service(session, tournament.id, target)
+            except ValueError as e:
+                await ctx.followup.send(f"❌ {e}", ephemeral=True)
+                return
+            await session.commit()
+            t_id, name = tournament.id, participant.team_name
+            next_round = tournament.current_round + 1
+            open_match = await find_current_match(session, t_id, participant.id)
+
+        await self._refresh_board(t_id)
+        note = ""
+        if open_match is not None and open_match.team_a_wins is None:
+            note = (f" Their round {tournament.current_round} match still needs a "
+                    f"result — record it with `/tournament set_result`.")
+        await ctx.followup.send(
+            f"✅ **{name}** dropped. They will not be paired from round {next_round}. "
+            f"Their results stay in the standings.{note}",
+            ephemeral=True)
 
     @tournament.command(name="add_match", description="Admin: author a match for a manual-format tournament")
     @has_bot_manager_role()

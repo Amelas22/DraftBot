@@ -1328,3 +1328,42 @@ async def test_next_round_announces_the_champion_before_dropping_roles():
         await TournamentCog.next_round.callback(cog, ctx)
 
     assert order == ["announce", "cleanup"]
+
+
+# ---- drop_team --------------------------------------------------------------------
+
+def test_drop_team_is_open_to_everyone_and_gates_the_target_itself():
+    """A captain drops their own team, so the command cannot carry a blanket
+    manager check -- naming someone else's team is what needs the permission,
+    and that is checked in the body."""
+    from cogs.tournament_commands import TournamentCog
+
+    assert "drop_team" in {cmd.name for cmd in TournamentCog.tournament.subcommands}
+    assert is_bot_manager not in TournamentCog.drop_team.checks
+
+
+def _drop_ctx(author_id=1, guild_id=99):
+    ctx = MagicMock()
+    ctx.author.id = author_id
+    ctx.author.display_name = "Cap"
+    ctx.guild.id = guild_id
+    ctx.defer = AsyncMock()
+    ctx.followup.send = AsyncMock()
+    return ctx
+
+
+@pytest.mark.asyncio
+async def test_naming_another_team_requires_a_manager():
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog.__new__(TournamentCog)
+    ctx = _drop_ctx()
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(TournamentCog, "_check_enabled",
+                                         AsyncMock(return_value=True)))
+        stack.enter_context(patch("cogs.tournament_commands.is_bot_manager",
+                                  AsyncMock(return_value=False)))
+        await TournamentCog.drop_team.callback(cog, ctx, team="SomeoneElse")
+
+    sent = ctx.followup.send.await_args.args[0]
+    assert "manager" in sent.lower() or "permission" in sent.lower()
