@@ -30,6 +30,7 @@ project-includes = [
     "database/retry.py",
     "services/stake_funding.py",
     "services/tournament_roles.py",
+    "services/wallet_history.py",
 ]
 
 # SQLAlchemy 1.x-style Column() declarations type column attributes as Column[T]
