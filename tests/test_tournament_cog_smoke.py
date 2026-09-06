@@ -1342,28 +1342,178 @@ def test_drop_team_is_open_to_everyone_and_gates_the_target_itself():
     assert is_bot_manager not in TournamentCog.drop_team.checks
 
 
-def _drop_ctx(author_id=1, guild_id=99):
-    ctx = MagicMock()
-    ctx.author.id = author_id
-    ctx.author.display_name = "Cap"
-    ctx.guild.id = guild_id
-    ctx.defer = AsyncMock()
-    ctx.followup.send = AsyncMock()
-    return ctx
-
-
 @pytest.mark.asyncio
-async def test_naming_another_team_requires_a_manager():
+async def test_naming_someone_elses_team_requires_a_manager(test_db):  # noqa: F811
+    """Dropping is not a roster edit, but it draws the same line: your own team
+    either way, anyone else's only with the role."""
     from cogs.tournament_commands import TournamentCog
+    from database.db_session import db_session
+    from services.tournament_service import (
+        create_tournament, register_team, set_result, start_tournament,
+    )
+    import random
+
+    async with db_session() as session:
+        tournament = await create_tournament(session, "123", "Spring", 3)
+        await session.commit()
+        for i in range(4):
+            await register_team(session, tournament.id, f"Team{i}", str(900 + i))
+        await session.commit()
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        for match in matches:
+            if not match.is_bye:
+                await set_result(session, match.id, 2, 0)
+        await session.commit()
 
     cog = TournamentCog.__new__(TournamentCog)
-    ctx = _drop_ctx()
+    ctx = _ctx()  # author 456 captains none of them
     with ExitStack() as stack:
         stack.enter_context(patch.object(TournamentCog, "_check_enabled",
                                          AsyncMock(return_value=True)))
+        stack.enter_context(patch.object(TournamentCog, "_refresh_board", AsyncMock()))
         stack.enter_context(patch("cogs.tournament_commands.is_bot_manager",
                                   AsyncMock(return_value=False)))
-        await TournamentCog.drop_team.callback(cog, ctx, team="SomeoneElse")
+        await TournamentCog.drop_team.callback(cog, ctx, team="Team0")
 
-    sent = ctx.followup.send.await_args.args[0]
-    assert "manager" in sent.lower() or "permission" in sent.lower()
+    reply = ctx.followup.send.await_args.args[0]
+    assert "manager" in reply.lower(), reply
+
+    async with db_session() as session:
+        from services.tournament_service import find_participant_by_name
+        still_in = await find_participant_by_name(session, tournament.id, "Team0")
+        assert still_in.dropped_at is None, "a refused drop must not have dropped them"
+
+
+@pytest.mark.asyncio
+async def test_a_captain_dropping_their_own_team_gets_a_confirmation(test_db):  # noqa: F811
+    """The happy path all the way through the command. The gate tests above never
+    reach the body, so nothing until now drove a drop that actually succeeds."""
+    from cogs.tournament_commands import TournamentCog
+    from services.tournament_service import (
+        create_tournament, register_team, set_result, start_tournament,
+    )
+    import random
+    from database.db_session import db_session
+
+    async with db_session() as session:
+        tournament = await create_tournament(session, "123", "Spring", 3)
+        await session.commit()
+        for i in range(4):
+            await register_team(session, tournament.id, f"Team{i}", str(456 + i))
+        await session.commit()
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        for match in matches:
+            if not match.is_bye:
+                await set_result(session, match.id, 2, 0)
+        await session.commit()
+
+    cog = TournamentCog.__new__(TournamentCog)
+    cog.bot = MagicMock()
+    ctx = _ctx()  # author 456 captains Team0
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(TournamentCog, "_check_enabled",
+                                         AsyncMock(return_value=True)))
+        stack.enter_context(patch.object(TournamentCog, "_refresh_board", AsyncMock()))
+        await TournamentCog.drop_team.callback(cog, ctx, team=None)
+
+    reply = ctx.followup.send.await_args.args[0]
+    assert "Team0" in reply and "dropped" in reply.lower(), reply
+    assert "❌" not in reply, reply
+
+
+@pytest.mark.asyncio
+async def test_a_captain_of_two_teams_can_name_which_one_to_drop(test_db):  # noqa: F811
+    """Naming a team you captain is how you disambiguate -- the ambiguity message
+    tells you to, so it has to work without the bot-manager role."""
+    from cogs.tournament_commands import TournamentCog
+    from services.tournament_service import (
+        create_tournament, register_team, set_result, start_tournament,
+    )
+    import random
+    from database.db_session import db_session
+
+    async with db_session() as session:
+        tournament = await create_tournament(session, "123", "Spring", 3)
+        await session.commit()
+        for name in ("Alpha", "Bravo"):          # both captained by author 456
+            await register_team(session, tournament.id, name, "456")
+        for i in range(2):
+            await register_team(session, tournament.id, f"Other{i}", str(900 + i))
+        await session.commit()
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        for match in matches:
+            if not match.is_bye:
+                await set_result(session, match.id, 2, 0)
+        await session.commit()
+
+    cog = TournamentCog.__new__(TournamentCog)
+    cog.bot = MagicMock()
+    ctx = _ctx()
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(TournamentCog, "_check_enabled",
+                                         AsyncMock(return_value=True)))
+        stack.enter_context(patch.object(TournamentCog, "_refresh_board", AsyncMock()))
+        stack.enter_context(patch("cogs.tournament_commands.is_bot_manager",
+                                  AsyncMock(return_value=False)))
+        await TournamentCog.drop_team.callback(cog, ctx, team="Alpha")
+
+    reply = ctx.followup.send.await_args.args[0]
+    assert "Alpha" in reply and "dropped" in reply.lower(), reply
+    assert "❌" not in reply, reply
+
+
+async def _running_swiss(session, captains):
+    """A started swiss tournament with round one reported, ready for a drop.
+
+    ``captains`` gives one captain id per team, so a test can say which of
+    Team0..TeamN the invoking author owns.
+    """
+    import random
+
+    from services.tournament_service import (
+        create_tournament, register_team, set_result, start_tournament,
+    )
+
+    tournament = await create_tournament(session, "123", "Spring", 3)
+    await session.commit()
+    for i, captain in enumerate(captains):
+        await register_team(session, tournament.id, f"Team{i}", str(captain))
+    await session.commit()
+    matches = await start_tournament(session, tournament.id, random.Random(7))
+    await session.commit()
+    for match in matches:
+        if not match.is_bye:            # a bye is scored when it is paired
+            await set_result(session, match.id, 2, 0)
+    await session.commit()
+    return tournament
+
+
+@pytest.mark.asyncio
+async def test_dropping_refreshes_the_standings_and_not_only_the_board(test_db):  # noqa: F811
+    """The *(dropped)* marker lives in the standings embed. Refreshing only the
+    registration board leaves the pinned standings — the one display everyone
+    reads — listing the dropped team as an ordinary competitor."""
+    from cogs.tournament_commands import TournamentCog
+    from database.db_session import db_session
+
+    async with db_session() as session:
+        tournament = await _running_swiss(session, [456, 900, 901, 902])
+        t_id = tournament.id
+
+    cog = TournamentCog.__new__(TournamentCog)
+    cog.bot = MagicMock()
+    ctx = _ctx()                                  # author 456 captains Team0
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(TournamentCog, "_check_enabled",
+                                         AsyncMock(return_value=True)))
+        stack.enter_context(patch.object(TournamentCog, "_refresh_board", AsyncMock()))
+        standings = stack.enter_context(patch(
+            "cogs.tournament_commands.update_standings_message", AsyncMock()))
+        await TournamentCog.drop_team.callback(cog, ctx, team=None)
+
+    assert "❌" not in ctx.followup.send.await_args.args[0]
+    standings.assert_awaited_once()
+    assert standings.await_args.args[1] == t_id

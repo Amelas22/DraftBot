@@ -929,26 +929,20 @@ class TournamentCog(commands.Cog):
     async def drop_team(
         self,
         ctx,
-        team: discord.Option(str, "Admin: the team to drop (defaults to your own)",
+        team: discord.Option(str, "The team to drop (defaults to the one you captain)",
                              required=False) = None,
     ):
         """Take a team out of the pairings for the rounds still to come.
 
-        Open to everyone, because a captain dropping their own team is the
-        ordinary case. Naming somebody else's team is the admin one -- the team
-        that stopped showing up is by definition not running any commands -- so
-        the manager check guards the argument rather than the command.
+        Open to everyone: a captain leaving is the ordinary case, and the team
+        that stopped showing up is by definition not running any commands, so an
+        organizer needs to be able to name it. _roster_target draws that line the
+        same way the roster commands do -- your own team by name or by default,
+        anyone else's with the bot-manager role.
         """
         if not await self._check_enabled(ctx):
             return
         await ctx.defer(ephemeral=True)
-
-        if team is not None and not await is_bot_manager(ctx):
-            await ctx.followup.send(
-                "❌ Only a bot manager can drop another team. Run "
-                "`/tournament drop_team` with no team to drop your own.",
-                ephemeral=True)
-            return
 
         async with db_session() as session:
             tournament = await get_active_tournament(session, ctx.guild.id)
@@ -956,43 +950,37 @@ class TournamentCog(commands.Cog):
                 await ctx.followup.send("There is no active tournament.", ephemeral=True)
                 return
 
-            target = team
-            if target is None:
-                mine = await find_participants_for_captain(
-                    session, tournament.id, str(ctx.author.id))
-                mine = [p for p in mine if p.dropped_at is None]
-                if not mine:
-                    await ctx.followup.send(
-                        "❌ You are not captaining a team in this tournament. A bot "
-                        "manager can drop a team by name.", ephemeral=True)
-                    return
-                if len(mine) > 1:
-                    names = ", ".join(f"`{p.team_name}`" for p in mine)
-                    await ctx.followup.send(
-                        f"❌ You captain more than one team here ({names}). "
-                        f"Name the one to drop: `/tournament drop_team team:<name>`.",
-                        ephemeral=True)
-                    return
-                target = mine[0].team_name
+            participant = await self._roster_target(ctx, session, tournament, team)
+            if participant is None:
+                return  # _roster_target has already said why
 
             try:
-                participant = await drop_team_service(session, tournament.id, target)
+                await drop_team_service(session, tournament.id, participant.team_name)
             except ValueError as e:
                 await ctx.followup.send(f"❌ {e}", ephemeral=True)
                 return
-            await session.commit()
-            t_id, name = tournament.id, participant.team_name
-            next_round = tournament.current_round + 1
-            open_match = await find_current_match(session, t_id, participant.id)
 
+            t_id = tournament.id
+            name = participant.team_name
+            round_number = tournament.current_round
+            # Read it before the block closes and commits: the note below turns on
+            # whether this team's current-round match is still open, and the drop
+            # deliberately does not report it.
+            open_match = await find_current_match(session, t_id, name)
+            match_open = open_match is not None and open_match.team_a_wins is None
+
+        # Both displays, the way every other state-changing command here does it:
+        # the board carries the roster, but the *(dropped)* marker lives in the
+        # standings embed, and those are what the room is actually reading.
         await self._refresh_board(t_id)
+        await update_standings_message(self.bot, t_id)
         note = ""
-        if open_match is not None and open_match.team_a_wins is None:
-            note = (f" Their round {tournament.current_round} match still needs a "
-                    f"result — record it with `/tournament set_result`.")
+        if match_open:
+            note = (f" Their round {round_number} match still needs a result — "
+                    f"record it with `/tournament set_result`.")
         await ctx.followup.send(
-            f"✅ **{name}** dropped. They will not be paired from round {next_round}. "
-            f"Their results stay in the standings.{note}",
+            f"✅ **{name}** dropped. They will not be paired from round "
+            f"{round_number + 1}. Their results stay in the standings.{note}",
             ephemeral=True)
 
     @tournament.command(name="add_match", description="Admin: author a match for a manual-format tournament")
