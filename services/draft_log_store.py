@@ -232,7 +232,10 @@ async def _send_pool(destination, member: _PostableMember, draft_data: dict,
     except Exception as e:
         logger.warning(f"[team-logs] pool image failed for {member.name} ({member.dm_user_id}): {e}")
 
-    what = label or f"drafted pool ({member.pool.count(chr(10)) + 1} cards)"
+    # The count rides on every post; `label` only replaces what the pool is
+    # CALLED. Folding the count into the label made it a caller's option, and
+    # the open thread promptly stopped showing it.
+    what = f"{label or 'drafted pool'} ({member.pool.count(chr(10)) + 1} cards)"
     line = f"**{member.name}** — {what}:"
     await destination.send(content=f"{header}\n{line}" if header else line, files=files)
 
@@ -313,13 +316,13 @@ async def _post_missing_players(
     loop continues rather than costing the others their pools.
 
     `send` overrides how one pool is written; the open-pools path passes a partial
-    that adds the team label. The skip rule, the error policy and the filename
-    convention stay here either way.
+    that adds the team label, and the private team path one that shows the built
+    deck. The skip rule, the error policy and the filename convention stay here
+    either way.
 
-    The default shows the built deck, because the only caller that does not
-    override `send` is a team posting into its own private channel -- the one
-    audience entitled to see what its own players registered. Every other caller
-    passes its own sender and gets _send_pool's pool-only default.
+    The default is _send_pool's, which pictures the pool and not the deck. Every
+    audience is safe unless its caller says otherwise -- including a caller
+    written later that reaches for this helper without reading it.
 
     Returns `(all_posted, sent)`: whether every postable member ended up
     posted, and how many pools this call actually delivered. The caller needs
@@ -331,8 +334,7 @@ async def _post_missing_players(
         if f"{member.safe}.txt" in already_posted:
             continue
         try:
-            await (send or partial(_send_pool, show_deck=True))(
-                destination, member, draft_data)
+            await (send or _send_pool)(destination, member, draft_data)
             sent += 1
         except Exception as e:
             logger.warning(
@@ -523,7 +525,12 @@ async def _post_pools_for_team(
     already_posted = await _posted_txt_filenames(
         bot, destination, limit=CHANNEL_HISTORY_SCAN_LIMIT if in_channel else None
     )
-    all_posted, sent = await _post_missing_players(destination, postable, draft_data, already_posted)
+    # The one audience entitled to see what its own players registered, so the
+    # only call site that asks for the deck. Said here rather than inherited
+    # from a default, which is how a scouting thread once got it by accident.
+    all_posted, sent = await _post_missing_players(
+        destination, postable, draft_data, already_posted,
+        send=partial(_send_pool, show_deck=True))
 
     if in_channel and sent and destination_id is None:
         await persist_destination_id(str(channel.id))

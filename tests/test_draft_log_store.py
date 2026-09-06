@@ -1570,3 +1570,34 @@ async def test_a_teams_own_thread_still_shows_the_built_deck():
     main_ids, side_ids = seen[0]
     assert main_ids == ["c3"], "the maindeck is its own pile for the player's own team"
     assert side_ids == ["c4"], "and so is the sideboard"
+
+
+@pytest.mark.asyncio
+async def test_every_pool_post_says_how_many_cards_it_is():
+    """The count belongs to the post, not to one caller's wording.
+
+    The open thread labels the post with the team instead of "drafted pool", and
+    a renderer that treated the label as the WHOLE descriptor silently dropped
+    the count there while keeping it everywhere else -- a difference nothing
+    asserted, so nothing caught.
+    """
+    ds = _tournament_ds()
+    thread = _FakeThread(3009)
+    chat = _FakeChannel("draft-chat", thread=thread, cid=556)
+
+    with _patched_discord():
+        await _post_open_pools(
+            _bot_for({556: chat}), chat, None, ds.friendly_id,
+            [("Cosmos", ds.team_a), ("gypsy caravan", ds.team_b)],
+            _MAPPING_AB, ds.draft_data, ds.sign_ups,
+            persist_destination_id=lambda d: _record([], d),
+        )
+
+    lines = [c.kwargs.get("content") or (c.args[0] if c.args else None)
+             for c in thread.send.call_args_list]
+    lines = [l for l in lines if l]
+    assert lines, "the open thread got no posts"
+    for line in lines:
+        assert "cards):" in line, f"the card count is missing from: {line!r}"
+        assert "Cosmos" in line or "gypsy caravan" in line, (
+            f"the open thread labels a post with its team: {line!r}")
