@@ -1517,3 +1517,67 @@ async def test_dropping_refreshes_the_standings_and_not_only_the_board(test_db):
     assert "❌" not in ctx.followup.send.await_args.args[0]
     standings.assert_awaited_once()
     assert standings.await_args.args[1] == t_id
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_team_is_not_paid_from_the_pot(test_db):  # noqa: F811
+    """A dropped team is still 'paid' -- status answers whether the entry fee is
+    held, not whether the team is still competing -- so a status-only filter left
+    the team that walked away first in line for the prize pool."""
+    from cogs.tournament_commands import TournamentCog
+    from database.db_session import db_session
+    from services.tournament_service import drop_team, get_standings_data
+
+    async with db_session() as session:
+        tournament = await _running_swiss(session, [456, 900, 901, 902])
+        tournament.entry_fee = 10
+        leader = (await get_standings_data(session, tournament.id))[0]
+        await drop_team(session, tournament.id, leader.team_name)
+        tournament.status = "completed"
+        await session.commit()
+        gone_name = leader.team_name
+
+    cog = TournamentCog.__new__(TournamentCog)
+    cog.bot = MagicMock()
+    ctx = _ctx()
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(TournamentCog, "_check_enabled",
+                                         AsyncMock(return_value=True)))
+        stack.enter_context(patch("cogs.tournament_commands.escrow.is_paid_out",
+                                  AsyncMock(return_value=False)))
+        stack.enter_context(patch("cogs.tournament_commands.escrow.prize_pool",
+                                  AsyncMock(return_value=100)))
+        await TournamentCog.payout.callback(cog, ctx, tournament_id=None, structure=None)
+
+    embed = ctx.followup.send.await_args.kwargs["embed"]
+    assert "100 tix" in embed.description, embed.description
+    assert gone_name not in embed.description, embed.description
+
+
+@pytest.mark.asyncio
+async def test_the_drop_confirmation_says_the_prize_is_forfeit(test_db):  # noqa: F811
+    """The drop is irreversible and the money is real, so the one reply a captain
+    sees before it lands has to say what it costs. 'Their results stay in the
+    standings' reads as the opposite."""
+    from cogs.tournament_commands import TournamentCog
+    from database.db_session import db_session
+
+    async with db_session() as session:
+        await _running_swiss(session, [456, 900, 901, 902])
+
+    cog = TournamentCog.__new__(TournamentCog)
+    cog.bot = MagicMock()
+    ctx = _ctx()                                  # author 456 captains Team0
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(TournamentCog, "_check_enabled",
+                                         AsyncMock(return_value=True)))
+        stack.enter_context(patch.object(TournamentCog, "_refresh_board", AsyncMock()))
+        stack.enter_context(patch("cogs.tournament_commands.update_standings_message",
+                                  AsyncMock()))
+        await TournamentCog.drop_team.callback(cog, ctx, team=None)
+
+    reply = ctx.followup.send.await_args.args[0]
+    assert "❌" not in reply, reply
+    assert "forfeit" in reply.lower(), reply
+    # The command picker is the only place this is said BEFORE the drop lands.
+    assert "forfeit" in TournamentCog.drop_team.description.lower()

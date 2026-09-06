@@ -925,7 +925,7 @@ class TournamentCog(commands.Cog):
 
     @tournament.command(
         name="drop_team",
-        description="Leave a running tournament — you will not be paired again")
+        description="Leave a running tournament — no more pairings, and any prize is forfeit")
     async def drop_team(
         self,
         ctx,
@@ -980,7 +980,8 @@ class TournamentCog(commands.Cog):
                     f"record it with `/tournament set_result`.")
         await ctx.followup.send(
             f"✅ **{name}** dropped. They will not be paired from round "
-            f"{round_number + 1}. Their results stay in the standings.{note}",
+            f"{round_number + 1}. Their results stay in the standings, but they "
+            f"forfeit any prize — the entry fee stays in the pot.{note}",
             ephemeral=True)
 
     @tournament.command(name="add_match", description="Admin: author a match for a manual-format tournament")
@@ -1247,8 +1248,11 @@ class TournamentCog(commands.Cog):
             # Finishing order, not standings order: a cut tournament pays the
             # bracket winner, who may not be the swiss leader.
             placement = await get_final_placement(session, tournament.id)
-            # Only teams that actually completed registration can win the pot.
-            ranked = [(p.captain_user_id, p.team_name) for p in placement if p.status == "paid"]
+            # Only teams that actually completed registration can win the pot, and
+            # a team that dropped has forfeited its share of it -- 'paid' answers
+            # whether the entry fee is held, not whether the team is still in.
+            ranked = [(p.captain_user_id, p.team_name) for p in placement
+                      if p.status == "paid" and p.dropped_at is None]
             # A tournament can be finished early with results still missing — warn before paying.
             unreported = await count_unreported_matches(session, tournament.id)
 

@@ -761,7 +761,12 @@ async def _build_round_robin(session, tournament, participants, rng):
 async def finish_tournament(session, tournament_id):
     """End an active tournament now. Returns the champion participant (top of
     final placement — bracket order if a cut was played, standings otherwise),
-    or None if there are none."""
+    or None if there are none.
+
+    A team that dropped is skipped: it keeps its place in the placement, because
+    its record still counts for everyone it played, but a team that walked away
+    is not what the tournament announces as its winner. Payout draws the same
+    line, and the two must not disagree about who won."""
     tournament = await session.get(Tournament, tournament_id)
     if tournament is None:
         raise ValueError("Tournament not found.")
@@ -769,7 +774,8 @@ async def finish_tournament(session, tournament_id):
         raise ValueError(f"'{tournament.name}' is not active.")
     tournament.status = "completed"
     await session.flush()
-    placement = await get_final_placement(session, tournament_id)
+    placement = [p for p in await get_final_placement(session, tournament_id)
+                 if p.dropped_at is None]
     return placement[0] if placement else None
 
 

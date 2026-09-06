@@ -1138,3 +1138,22 @@ async def test_a_team_that_never_paid_is_not_paired_in_later_rounds(test_db):
         await session.commit()
 
         assert unpaid.id not in await _paired_ids(session, new_round)
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_team_is_not_crowned_champion(test_db):
+    """Dropping forfeits the title. The row stays at the top of the standings
+    because its record still counts for everyone it played -- but the team that
+    walked away is not the one the tournament announces as its winner."""
+    async with test_db() as session:
+        tournament = await _through_round_one(session)
+        leader = (await get_standings_data(session, tournament.id))[0]
+        await drop_team(session, tournament.id, leader.team_name)
+        await session.commit()
+
+        champion = await finish_tournament(session, tournament.id)
+        await session.commit()
+
+        assert champion is not None
+        assert champion.id != leader.id
+        assert champion.dropped_at is None
