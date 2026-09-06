@@ -19,7 +19,7 @@ rather than beside get_history.
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from database.db_session import db_session
 from models.draft_session import DraftSession
@@ -264,3 +264,53 @@ def fit_field(lines: Sequence[str]) -> str:
             return text if len(text) <= FIELD_LIMIT else f"{text[:FIELD_LIMIT - 1]}…"
         field = candidate
     return field
+
+
+PAGE_SIZE = 10
+
+
+def _page_count(total: int, size: int) -> int:
+    """How many pages `total` rows come to, never fewer than one -- an empty
+    wallet is page 1 of 1 rather than page 1 of 0.
+
+    The one place the paging arithmetic lives. The footer counts pages and the
+    clamp bounds the last index by the same rule, and a rule split across two
+    ceiling divisions is one that can be changed in one of them.
+    """
+    return max(1, -(-total // size))
+
+
+@dataclass(frozen=True)
+class HistoryPage:
+    """One page of a holder's ledger, plus how much there is in total."""
+    rows: list[WalletTx]
+    total: int
+    page: int
+    size: int
+
+    @property
+    def pages(self) -> int:
+        return _page_count(self.total, self.size)
+
+
+async def get_history_page(guild_id: str, player_id: str, *,
+                           page: int = 0, size: int = PAGE_SIZE) -> HistoryPage:
+    """A slice of one holder's ledger, newest first, with the unsliced total.
+
+    The total is what the footer counts and what bounds the buttons, so it is
+    counted in the database rather than inferred from the slice.
+
+    `page` is clamped into range: a stale button on a panel whose ledger shrank
+    should land on the last page, not on an empty one.
+    """
+    size = max(1, size)   # a page of nothing is a division by zero, not a page
+    where = (WalletTx.guild_id == guild_id, WalletTx.player_id == player_id)
+    async with db_session() as session:
+        total = int((await session.execute(
+            select(func.count()).select_from(WalletTx).where(*where))).scalar() or 0)
+        page = max(0, min(page, _page_count(total, size) - 1))
+        rows = (await session.execute(
+            select(WalletTx).where(*where)
+            .order_by(WalletTx.created_at.desc(), WalletTx.id.desc())
+            .limit(size).offset(page * size))).scalars().all()
+    return HistoryPage(list(rows), total, page, size)

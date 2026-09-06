@@ -259,3 +259,61 @@ async def test_describe_rows_renders_a_whole_page(test_db):  # noqa: F811
     lines = await wh.describe_rows(rows)
     assert all("worthy-knight-72" in text for text in lines)
     assert "Entry fee" in lines[0] and "Draft winnings" in lines[1]
+
+
+async def _seed_rows(n, guild="g1", player="p1"):
+    """n credits, oldest first, so page 0 holds the newest."""
+    for i in range(n):
+        await ws.credit_done(guild, player, i + 1, job_id=f"job-{i}")
+
+
+@pytest.mark.asyncio
+async def test_a_page_holds_its_slice_and_the_full_total(test_db):  # noqa: F811
+    await _seed_rows(23)
+    page = await wh.get_history_page("g1", "p1", page=0, size=10)
+    assert len(page.rows) == 10
+    assert page.total == 23
+    assert page.pages == 3
+
+
+@pytest.mark.asyncio
+async def test_the_last_page_is_the_remainder(test_db):  # noqa: F811
+    await _seed_rows(23)
+    page = await wh.get_history_page("g1", "p1", page=2, size=10)
+    assert len(page.rows) == 3
+
+
+@pytest.mark.asyncio
+async def test_an_exact_multiple_does_not_grow_an_empty_page(test_db):  # noqa: F811
+    await _seed_rows(20)
+    assert (await wh.get_history_page("g1", "p1", size=10)).pages == 2
+
+
+@pytest.mark.asyncio
+async def test_a_page_size_of_zero_is_not_a_division_by_zero(test_db):  # noqa: F811
+    """Nothing asks for one today, but a page of nothing would crash the panel
+    on the page count rather than render an empty one."""
+    await _seed_rows(3)
+    page = await wh.get_history_page("g1", "p1", size=0)
+    assert page.total == 3 and page.pages == 3
+
+
+@pytest.mark.asyncio
+async def test_a_page_past_the_end_clamps_to_the_last_one(test_db):  # noqa: F811
+    await _seed_rows(23)
+    page = await wh.get_history_page("g1", "p1", page=99, size=10)
+    assert page.page == 2 and len(page.rows) == 3
+
+
+@pytest.mark.asyncio
+async def test_an_empty_ledger_is_one_empty_page(test_db):  # noqa: F811
+    page = await wh.get_history_page("g1", "p1")
+    assert page.rows == [] and page.total == 0 and page.pages == 1
+
+
+@pytest.mark.asyncio
+async def test_a_page_holds_only_this_holder_in_this_guild(test_db):  # noqa: F811
+    await _seed_rows(3)
+    await _seed_rows(2, player="p2")
+    await _seed_rows(4, guild="g2")
+    assert (await wh.get_history_page("g1", "p1")).total == 3
