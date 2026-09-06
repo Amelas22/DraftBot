@@ -968,7 +968,11 @@ class TournamentCog(commands.Cog):
             # whether this team's current-round match is still open, and the drop
             # deliberately does not report it.
             open_match = await find_current_match(session, t_id, name)
-            match_open = open_match is not None and open_match.team_a_wins is None
+            # A bye records no game wins, so it is indistinguishable from an
+            # unreported match on team_a_wins alone -- and set_result refuses
+            # byes, so the note would send the organizer somewhere that says no.
+            match_open = (open_match is not None and not open_match.is_bye
+                          and open_match.team_a_wins is None)
 
         # Both displays, the way every other state-changing command here does it:
         # the board carries the roster, but the *(dropped)* marker lives in the

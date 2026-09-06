@@ -1612,3 +1612,43 @@ async def test_the_drop_reply_does_not_name_a_round_that_will_never_exist(test_d
     assert "❌" not in reply, reply
     assert "round 2" not in reply.lower(), reply
     assert "not be paired again" in reply.lower(), reply
+
+
+@pytest.mark.asyncio
+async def test_a_team_that_had_the_bye_is_not_told_to_report_it(test_db):  # noqa: F811
+    """A bye is scored the moment it is paired and records no game wins, so it
+    looks exactly like an unreported match. Telling the organizer to record it
+    sends them to /tournament set_result, which refuses byes outright -- and a
+    drop is what makes the field odd, so this is the common case, not the rare
+    one."""
+    from sqlalchemy import select
+
+    from cogs.tournament_commands import TournamentCog
+    from database.db_session import db_session
+    from models.tournament import TournamentMatch, TournamentParticipant
+
+    async with db_session() as session:
+        tournament = await _running_swiss(session, [900, 901, 902, 903, 904])
+        bye = (await session.execute(
+            select(TournamentMatch).where(TournamentMatch.is_bye.is_(True))
+        )).scalars().one()
+        assert bye.team_a_wins is None, "a bye records no game wins -- that is the trap"
+        rested = await session.get(TournamentParticipant, bye.team_a_participant_id)
+        bye_team = rested.team_name
+
+    cog = TournamentCog.__new__(TournamentCog)
+    cog.bot = MagicMock()
+    ctx = _ctx()
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(TournamentCog, "_check_enabled",
+                                         AsyncMock(return_value=True)))
+        stack.enter_context(patch.object(TournamentCog, "_refresh_board", AsyncMock()))
+        stack.enter_context(patch("cogs.tournament_commands.update_standings_message",
+                                  AsyncMock()))
+        stack.enter_context(patch("cogs.tournament_commands.is_bot_manager",
+                                  AsyncMock(return_value=True)))
+        await TournamentCog.drop_team.callback(cog, ctx, team=bye_team)
+
+    reply = ctx.followup.send.await_args.args[0]
+    assert "❌" not in reply, reply
+    assert "set_result" not in reply, reply
