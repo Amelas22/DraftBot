@@ -2567,38 +2567,19 @@ async def re_register_views(bot):
             except Exception as e:
                 logger.error(f"Failed to re-register trophy quiz view: {trophy_quiz.quiz_id}, error: {e}", exc_info=True)
 
-        # Cleanup: Unpin quiz messages older than the rejoin cutoff
-        logger.info("Cleaning up old quiz messages (unpinning messages older than rejoin cutoff)")
-        old_quiz_cutoff = current_time - timedelta(days=QUIZ_REREGISTER_DAYS)
-
-        async with db_session.begin():
-            # Find quiz messages older than the cutoff
-            stmt = select(QuizSession).where(
-                QuizSession.posted_at < old_quiz_cutoff
-            )
-            result = await db_session.execute(stmt)
-            old_quiz_sessions = result.scalars().all()
-
-        logger.info(f"Found {len(old_quiz_sessions)} old quiz sessions to potentially unpin")
-
-        for old_quiz in old_quiz_sessions:
-            if not old_quiz.message_id or not old_quiz.channel_id:
-                continue
-
-            channel = bot.get_channel(int(old_quiz.channel_id))
-            if not channel:
-                continue
-
-            try:
-                message = await channel.fetch_message(int(old_quiz.message_id))
-                if message.pinned:
-                    await safe_unpin(message)
-            except discord.NotFound:
-                logger.debug(f"Old quiz message {old_quiz.message_id} not found (already deleted)")
-            except discord.Forbidden:
-                logger.warning(f"Bot lacks permission to unpin message {old_quiz.message_id}")
-            except Exception as e:
-                logger.error(f"Error unpinning old quiz message {old_quiz.message_id}: {e}")
+        # No unpin sweep here. It walked every quiz session older than the
+        # re-register cutoff and tried to unpin each one: 959 messages in
+        # production, all failing on Manage Messages in a single channel, at
+        # roughly 39 a minute. Half an hour of calls that could not succeed,
+        # whose rate limiting slowed every other thing the bot was doing, and
+        # which held back every restoration queued behind it -- including the
+        # control view on a live tournament match, whose Start Draft button
+        # told players the bot had not responded for as long as it ran.
+        #
+        # An old pin is cosmetic. Nothing reads it, and it costs nothing to
+        # leave. If unpinning is ever wanted again it belongs somewhere that
+        # can fail cheaply and out of the startup path -- and it must stop
+        # asking a channel that has already refused it once.
 
         # Re-register SettleDebtsView for completed staked drafts (last 7 days)
         settle_cutoff = current_time - timedelta(days=7)
