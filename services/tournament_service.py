@@ -250,6 +250,13 @@ async def drop_team(session, tournament_id, team_name):
     A match already paired is left alone. The team is simply not in the pool the
     next time a round is paired, which is what a drop means; an open match from
     the round in progress is still the organizer's to record.
+
+    That is also why this is a swiss-only, pre-bracket operation. Swiss is the
+    only stage that re-pairs from the pool, so it is the only one a drop changes:
+    round_robin and manual build every round at the start, and the bracket
+    advances on results, never on who is pairable. Marking a team in either would
+    say it had left while it went on being paired -- and leave the abandoned
+    matches blocking the tournament exactly as before.
     """
     tournament = await session.get(Tournament, tournament_id)
     if tournament is None:
@@ -258,6 +265,20 @@ async def drop_team(session, tournament_id, team_name):
         raise ValueError(
             f"'{tournament.name}' is not running — teams leave a tournament that "
             f"has not started with remove_team, which also refunds the entry fee."
+        )
+    if tournament.format != "swiss":
+        raise ValueError(
+            f"'{tournament.name}' is a {tournament.format} tournament — its whole "
+            f"schedule was built when it started, so a drop would change no "
+            f"pairing. Record the abandoned matches with /tournament set_result, "
+            f"or end it with /tournament finish."
+        )
+    if await _playoff_rounds(session, tournament_id):
+        raise ValueError(
+            "The bracket has already been built, and it advances on results "
+            "rather than on who is pairable — a drop would not take "
+            f"'{team_name}' out of it. Record the result with /tournament "
+            "set_result, or end the tournament with /tournament finish."
         )
 
     participant = await find_participant_by_name(session, tournament_id, team_name)

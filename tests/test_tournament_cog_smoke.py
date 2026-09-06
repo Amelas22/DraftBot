@@ -1581,3 +1581,34 @@ async def test_the_drop_confirmation_says_the_prize_is_forfeit(test_db):  # noqa
     assert "forfeit" in reply.lower(), reply
     # The command picker is the only place this is said BEFORE the drop lands.
     assert "forfeit" in TournamentCog.drop_team.description.lower()
+
+
+@pytest.mark.asyncio
+async def test_the_drop_reply_does_not_name_a_round_that_will_never_exist(test_db):  # noqa: F811
+    """At the end of swiss the next swiss round is never paired -- a cut or the
+    finish comes instead -- so "from round N+1" points at a round nobody will
+    ever see."""
+    from cogs.tournament_commands import TournamentCog
+    from database.db_session import db_session
+
+    async with db_session() as session:
+        tournament = await _running_swiss(session, [456, 900, 901, 902])
+        tournament.total_rounds = 1               # round one WAS the last one
+        tournament.cut_to = 2
+        await session.commit()
+
+    cog = TournamentCog.__new__(TournamentCog)
+    cog.bot = MagicMock()
+    ctx = _ctx()                                  # author 456 captains Team0
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(TournamentCog, "_check_enabled",
+                                         AsyncMock(return_value=True)))
+        stack.enter_context(patch.object(TournamentCog, "_refresh_board", AsyncMock()))
+        stack.enter_context(patch("cogs.tournament_commands.update_standings_message",
+                                  AsyncMock()))
+        await TournamentCog.drop_team.callback(cog, ctx, team=None)
+
+    reply = ctx.followup.send.await_args.args[0]
+    assert "❌" not in reply, reply
+    assert "round 2" not in reply.lower(), reply
+    assert "not be paired again" in reply.lower(), reply

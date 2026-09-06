@@ -963,6 +963,7 @@ class TournamentCog(commands.Cog):
             t_id = tournament.id
             name = participant.team_name
             round_number = tournament.current_round
+            last_round = tournament.total_rounds
             # Read it before the block closes and commits: the note below turns on
             # whether this team's current-round match is still open, and the drop
             # deliberately does not report it.
@@ -978,10 +979,14 @@ class TournamentCog(commands.Cog):
         if match_open:
             note = (f" Their round {round_number} match still needs a result — "
                     f"record it with `/tournament set_result`.")
+        # Naming round N+1 past the last swiss round would point at a round nobody
+        # will ever see: what follows the final round is the cut, or the finish.
+        when = (f"They will not be paired from round {round_number + 1}."
+                if round_number < last_round
+                else "Swiss is over, so they will not be paired again.")
         await ctx.followup.send(
-            f"✅ **{name}** dropped. They will not be paired from round "
-            f"{round_number + 1}. Their results stay in the standings, but they "
-            f"forfeit any prize — the entry fee stays in the pot.{note}",
+            f"✅ **{name}** dropped. {when} Their results stay in the standings, "
+            f"but they forfeit any prize — the entry fee stays in the pot.{note}",
             ephemeral=True)
 
     @tournament.command(name="add_match", description="Admin: author a match for a manual-format tournament")

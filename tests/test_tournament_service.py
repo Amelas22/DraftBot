@@ -1157,3 +1157,33 @@ async def test_a_dropped_team_is_not_crowned_champion(test_db):
         assert champion is not None
         assert champion.id != leader.id
         assert champion.dropped_at is None
+
+
+@pytest.mark.asyncio
+async def test_dropping_from_an_all_open_format_is_refused(test_db):
+    """round_robin and manual build the whole schedule at the start, so there is
+    no future pairing for a drop to change -- it would mark the team and leave
+    every abandoned match still blocking the tournament, which is the one thing
+    the organizer needed fixing."""
+    async with test_db() as session:
+        tournament = await _round_robin_with_teams(session, 4)
+        await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+
+        with pytest.raises(ValueError, match="set_result"):
+            await drop_team(session, tournament.id, "Team0")
+
+
+@pytest.mark.asyncio
+async def test_dropping_once_the_bracket_exists_is_refused(test_db):
+    """The bracket advances on results, never on the pairable pool, so a dropped
+    team keeps winning its way up it. Marking one would say it had left while it
+    went on to be crowned."""
+    async with test_db() as session:
+        tournament = await _through_round_one(session)
+        session.add(TournamentRound(tournament_id=tournament.id, round_number=4,
+                                    stage="playoff"))
+        await session.commit()
+
+        with pytest.raises(ValueError, match="bracket"):
+            await drop_team(session, tournament.id, "Team0")
