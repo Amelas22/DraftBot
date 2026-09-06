@@ -136,3 +136,29 @@ def ui_button(
         label=label, custom_id=custom_id, disabled=disabled,
         style=style, emoji=emoji, row=row,
     )
+
+
+def ui_select(
+    *,
+    placeholder: "str | None" = None,
+    custom_id: "str | None" = None,
+    min_values: int = 1,
+    max_values: int = 1,
+    options: "list[discord.SelectOption]" = discord.utils.MISSING,
+    disabled: bool = False,
+    row: "int | None" = None,
+) -> "Callable[[Any], discord.ui.Select[Any]]":
+    """discord.ui.select, typed as what the attribute actually IS.
+
+    Same reasoning as `ui_button` above: py-cord's View.__init__ replaces the
+    decorated method attribute with its Select item, so for the whole life of
+    every instance the attribute's real type is Select, not the raw function
+    the class body sees. Declaring the swap HERE, once, lets
+    `self.my_select.options` typecheck at every use site with no casts.
+    """
+    # pyrefly: ignore  # bad-return — the deliberate, documented lie above
+    return discord.ui.select(
+        placeholder=placeholder, custom_id=custom_id,
+        min_values=min_values, max_values=max_values,
+        options=options, disabled=disabled, row=row,
+    )
