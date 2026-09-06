@@ -269,3 +269,189 @@ def backfill_skill_ratings(connection):
             {"mu": mu[key], "sig": sigma[key], "gw": games_won[key],
              "gl": games_lost[key], "g": guild_id, "p": player_id},
         )
+
+
+# The rated-ledger row set for the streak replay. Its FILTER matches
+# backfill_skill_ratings' query above and must stay that way, so the two never
+# disagree about which matches count. They are two queries rather than one
+# because the rating replay runs from an Alembic migration and must not
+# reference columns a historical schema may not have; streaks need the scores.
+#
+# The ORDER deliberately differs, and this is load-bearing. Ratings replay in
+# report order because TrueSkill is order-dependent and the live path applied
+# them as reports arrived. Streaks replay in PLAY order, because views.py
+# stamps result_submitted_at with the correction time on every report: order a
+# streak replay by that and correcting an old match sorts it after games that
+# were really played later, rebuilding the player's streaks around a sequence
+# that never happened. What a streak means -- how many in a row you actually
+# won -- depends on when the games were played, and fixing a score does not
+# change that. This also puts the replay in step with the three backfill
+# scripts, which have always used play order.
+_RATED_ROWS_SQL = (
+    "SELECT m.player1_id, m.player2_id, m.player1_wins, m.player2_wins, "
+    "m.winner_id, d.guild_id, "
+    "COALESCE(m.result_submitted_at, d.draft_start_time) AS happened_at "
+    "FROM match_results m JOIN draft_sessions d ON m.session_id = d.session_id "
+    "WHERE d.session_type IN ({types}) "
+    "AND m.winner_id IS NOT NULL "
+    "{scope}"
+    "ORDER BY COALESCE(d.teams_start_time, d.draft_start_time), "
+    "m.match_number, m.id"
+)
+
+
+def _scope_binds(player_ids, guild_id):
+    """Named binds for a (guild, players) scope.
+
+    Returns (placeholders, params) — the "IN (:p0, :p1)" text and the values to
+    go with it. Shared by the row SELECT and the player_stats/history writes so
+    the two cannot disagree about which players a scoped replay covers.
+    """
+    keys = [f"p{i}" for i in range(len(player_ids))]
+    params = dict(zip(keys, [str(p) for p in player_ids]), g=str(guild_id))
+    return ", ".join(f":{k}" for k in keys), params
+
+
+def rated_match_rows(connection, player_ids=None, guild_id=None):
+    """Rated, decided 1v1 results in the order they were PLAYED.
+
+    Pass player_ids (with their guild_id) to fetch only the matches those
+    players took part in — everything a per-player streak replay needs.
+    """
+    type_list = ", ".join(f"'{t}'" for t in RATING_SESSION_TYPES)
+    scope, params = "", {}
+    if player_ids is not None:
+        holders, params = _scope_binds(player_ids, guild_id)
+        scope = (f"AND d.guild_id = :g "
+                 f"AND (m.player1_id IN ({holders}) OR m.player2_id IN ({holders})) ")
+    sql = _RATED_ROWS_SQL.format(types=type_list, scope=scope)
+    return connection.execute(text(sql), params).fetchall()
+
+
+def backfill_streaks(connection, player_ids=None, guild_id=None):
+    """Recompute win streaks and perfect streaks from the match_results ledger.
+
+    Streaks are derived state, not an accumulator: the live path only maintains
+    them on a first report, so a corrected result (a 2-0 fixed to 2-1, or a
+    flipped winner) leaves a streak standing on a score that no longer exists.
+    Replaying the ledger is the only exact repair.
+
+    Scope it with player_ids + guild_id — a player's streaks depend only on
+    their own matches, so a correction can be healed for exactly the two players
+    involved. That matters: a whole-ledger rewrite would also restate the
+    longest-streak records of every player who ever had a result counted under
+    an older, wider session-type rule, which is not a correction's business.
+    Omit both to rebuild every player (a migration or an explicit repair).
+
+    Rewrites the streak-history rows in scope to match the ledger, so a streak
+    a misreport wrongly ended stops being reported as having ended.
+    Announcements are not replayed; they fire only on the live first-report path.
+
+    Takes a SQLAlchemy Connection so it works from an Alembic migration
+    (op.get_bind()) and from tests.
+    """
+    rows = rated_match_rows(connection, player_ids, guild_id)
+
+    win_len, win_start = defaultdict(int), {}
+    perfect_len, perfect_start = defaultdict(int), {}
+    longest_win, longest_perfect = defaultdict(int), defaultdict(int)
+    win_history, perfect_history = [], []
+    seen = set()
+
+    def close(history, key, length, started_at, ended_at, ended_by):
+        if length > 0:
+            guild, player = key
+            history.append({"p": player, "g": guild, "len": length,
+                            "start": started_at, "end": ended_at, "by": ended_by})
+
+    # Win streaks and perfect streaks are the same bookkeeping over different
+    # dicts, so they go through the same two helpers -- otherwise each of the
+    # three sites below has to keep a length, a start and a longest in step by
+    # hand, and only review catches the one that drifts.
+    def extend(lengths, starts, longest, key, when):
+        if lengths[key] == 0:
+            starts[key] = when
+        lengths[key] += 1
+        longest[key] = max(longest[key], lengths[key])
+
+    def reset(lengths, starts, key):
+        lengths[key] = 0
+        starts.pop(key, None)
+
+    for p1, p2, p1_wins, p2_wins, winner_id, guild, happened_at in rows:
+        if not is_valid_match(p1, p2, winner_id):
+            continue
+        loser_id = p2 if winner_id == p1 else p1
+        kw, kl = (guild, winner_id), (guild, loser_id)
+        seen.update((kw, kl))
+        swept = (p1_wins == 2 and p2_wins == 0) if winner_id == p1 else \
+                (p2_wins == 2 and p1_wins == 0)
+
+        # The loser's streaks both end here, whatever the score was.
+        close(win_history, kl, win_len[kl], win_start.get(kl), happened_at, winner_id)
+        close(perfect_history, kl, perfect_len[kl], perfect_start.get(kl), happened_at, winner_id)
+        reset(win_len, win_start, kl)
+        reset(perfect_len, perfect_start, kl)
+
+        extend(win_len, win_start, longest_win, kw, happened_at)
+        if swept:
+            extend(perfect_len, perfect_start, longest_perfect, kw, happened_at)
+        else:
+            # A 2-1 win keeps the win streak alive but ends the perfect one,
+            # ended by the opponent who took a game off them.
+            close(perfect_history, kw, perfect_len[kw], perfect_start.get(kw),
+                  happened_at, loser_id)
+            reset(perfect_len, perfect_start, kw)
+
+    # A scoped replay only sees its own players' matches, so it may only write
+    # its own players back; the opponents in those matches are incomplete here.
+    # Targets are taken from the row-derived keys rather than rebuilt from the
+    # arguments, so the streak state always looks up under the key it was
+    # stored against whatever types the columns hold.
+    if player_ids is None:
+        targets = seen
+    else:
+        wanted = {str(p) for p in player_ids}
+        targets = {key for key in seen if str(key[1]) in wanted}
+    where, params = "", {}
+    if player_ids is not None:
+        holders, params = _scope_binds(player_ids, guild_id)
+        where = f" WHERE guild_id = :g AND player_id IN ({holders})"
+
+    connection.execute(text(
+        "UPDATE player_stats SET current_win_streak = 0, longest_win_streak = 0, "
+        "current_win_streak_started_at = NULL, current_perfect_streak = 0, "
+        "longest_perfect_streak = 0, current_perfect_streak_started_at = NULL" + where),
+        params)
+    for table in ("win_streak_history", "perfect_streak_history"):
+        connection.execute(text(f"DELETE FROM {table}" + where), params)
+
+    for table, history in (("win_streak_history", win_history),
+                           ("perfect_streak_history", perfect_history)):
+        for row in history:
+            if (row["g"], row["p"]) not in targets:
+                continue
+            connection.execute(text(
+                f"INSERT INTO {table} "
+                "(player_id, guild_id, streak_length, started_at, ended_at, ended_by_player_id) "
+                "VALUES (:p, :g, :len, :start, :end, :by)"), row)
+
+    for key in targets:
+        guild, player_id = key
+        connection.execute(text(
+            "INSERT INTO player_stats "
+            "(player_id, guild_id, current_win_streak, longest_win_streak, "
+            "current_win_streak_started_at, current_perfect_streak, "
+            "longest_perfect_streak, current_perfect_streak_started_at) "
+            "VALUES (:p, :g, :cw, :lw, :cws, :cp, :lp, :cps) "
+            "ON CONFLICT(player_id, guild_id) DO UPDATE SET "
+            "current_win_streak = excluded.current_win_streak, "
+            "longest_win_streak = excluded.longest_win_streak, "
+            "current_win_streak_started_at = excluded.current_win_streak_started_at, "
+            "current_perfect_streak = excluded.current_perfect_streak, "
+            "longest_perfect_streak = excluded.longest_perfect_streak, "
+            "current_perfect_streak_started_at = excluded.current_perfect_streak_started_at"),
+            {"p": player_id, "g": guild,
+             "cw": win_len[key], "lw": longest_win[key], "cws": win_start.get(key),
+             "cp": perfect_len[key], "lp": longest_perfect[key],
+             "cps": perfect_start.get(key)})

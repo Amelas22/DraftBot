@@ -48,6 +48,7 @@ from helpers.skill import (
     PRIOR_SIGMA,
     apply_upset_decoration,
     backfill_skill_ratings,
+    backfill_streaks,
     new_ratings,
     rating_counts_for,
     rating_update_action,
@@ -2097,17 +2098,12 @@ def _new_player_stats_row(player_id, guild_id):
     )
 
 
-async def recompute_skill_ratings():
-    """Heal player_stats by replaying the full match_results ledger.
+async def _run_replay(backfill):
+    """Run one from-scratch ledger replay off the event loop.
 
-    Used when a reported winner is corrected: the wrong incremental update is
-    already baked into mu/sigma and TrueSkill updates are order-dependent, so
-    the only exact repair is a from-scratch replay. Streaks and
-    drafts_participated are left untouched (same contract as the backfill).
-
-    The replay is tens of thousands of pure-CPU TrueSkill updates, so it runs
-    in a worker thread on its own short-lived sync connection (to the same
-    database AsyncSessionLocal is bound to) instead of stalling the event loop.
+    A replay is tens of thousands of pure-CPU updates, so it runs in a worker
+    thread on its own short-lived sync connection (to the same database
+    AsyncSessionLocal is bound to) instead of stalling the event loop.
     """
     url = AsyncSessionLocal.kw["bind"].url.render_as_string(
         hide_password=False).replace("+aiosqlite", "")
@@ -2116,11 +2112,34 @@ async def recompute_skill_ratings():
         engine = create_engine(url)
         try:
             with engine.begin() as conn:
-                backfill_skill_ratings(conn)
+                backfill(conn)
         finally:
             engine.dispose()
 
     await asyncio.to_thread(_replay)
+
+
+async def recompute_skill_ratings():
+    """Heal player_stats ratings by replaying the full match_results ledger.
+
+    Used when a reported winner is corrected: the wrong incremental update is
+    already baked into mu/sigma and TrueSkill updates are order-dependent, so
+    the only exact repair is a from-scratch replay. Streaks are healed
+    separately by recompute_streaks; drafts_participated is left untouched
+    (same contract as the backfill).
+    """
+    await _run_replay(backfill_skill_ratings)
+
+
+async def recompute_streaks(player_ids=None, guild_id=None):
+    """Heal streaks in player_stats by replaying the match_results ledger.
+
+    The incremental streak update only runs on a first report, so any corrected
+    result leaves streaks describing scores that no longer exist. Pass the
+    players whose results changed: streaks depend only on a player's own
+    matches, so healing a correction never needs to touch anyone else.
+    """
+    await _run_replay(lambda conn: backfill_streaks(conn, player_ids, guild_id))
 
 
 async def apply_result_report(match_result, previous_winner_id):
@@ -2141,8 +2160,25 @@ async def apply_result_report(match_result, previous_winner_id):
     action = rating_update_action(previous_winner_id, match_result.winner_id)
     if action == "apply":
         return action, await update_player_stats_and_elo(match_result)
+    if match_result.winner_id is None:
+        # "none" also covers a report that names no winner at all. Nothing
+        # rateable happened and no streak can have moved, so healing one would
+        # replay the ledger to write back exactly what is already there.
+        return action, None
     if action == "recompute":
         await recompute_skill_ratings()
+    # Every correction reaches here ("apply" returned above). Ratings only need
+    # healing when the winner moved, but streaks depend on the scores too, so a
+    # same-winner 2-0 -> 2-1 fix has to replay them as well -- for the two
+    # players in this match, the only ones a single result can affect.
+    async with AsyncSessionLocal() as session:
+        guild_id = (await session.execute(
+            select(DraftSession.guild_id).where(
+                DraftSession.session_id == match_result.session_id)
+        )).scalars().first()
+    if guild_id:
+        await recompute_streaks(
+            [match_result.player1_id, match_result.player2_id], guild_id)
     return action, None
 
 
