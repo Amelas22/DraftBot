@@ -1,0 +1,13 @@
+#!/bin/bash
+# Refuse a commit that leaves a function defined with nobody calling it.
+#
+# See scripts/check_orphaned_functions.py for why: a commit that replaces a
+# mechanism can delete the now-unreachable chain behind it and take an effect
+# with it that the replacement never picked up. The leftover uncalled function
+# is the fingerprint, and it is the only part of that mistake a machine can see.
+#
+# Install (this file is not version-controlled):
+#   ln -sf ../../scripts/hooks/pre-commit .git/hooks/pre-commit
+# Bypass a deliberate orphan by naming it in ORPHANS_ALLOWED, not with
+# --no-verify: the next person needs the reason.
+exec "$(git rev-parse --show-toplevel)/scripts/hooks/run-orphan-check.sh"
