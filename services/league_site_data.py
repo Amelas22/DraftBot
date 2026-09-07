@@ -135,19 +135,6 @@ async def _rounds(session: Any, tournament_id: int) -> list[dict[str, Any]]:
     ]
 
 
-def _record(participant: Any) -> str:
-    """A team's record as W-L, or W-L-D if it somehow has a draw.
-
-    The league does not allow draws -- every team match has to produce a
-    winner -- so the third number is noise on every row. It is still appended
-    when it is non-zero, because the schema permits a draw even though the
-    rules do not, and a record that had one must not silently lose it.
-    """
-    if participant.match_draws:
-        return f"{participant.match_wins}-{participant.match_losses}-{participant.match_draws}"
-    return f"{participant.match_wins}-{participant.match_losses}"
-
-
 async def build_tournament_data(session: Any, tournament_id: int) -> dict[str, Any]:
     """The whole public payload for one tournament.
 
@@ -197,7 +184,7 @@ async def build_tournament_data(session: Any, tournament_id: int) -> dict[str, A
                 "rank": rank,
                 "team_id": p.id,
                 "points": p.points,
-                "record": _record(p),
+                "record": p.record,
                 "omw": round(omw[p.id], 4),
                 "game_wins": p.game_wins,
                 "game_losses": p.game_losses,

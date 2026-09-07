@@ -222,3 +222,17 @@ def test_participant_has_a_nullable_role_id():
     col = TournamentParticipant.__table__.columns["role_id"]
     assert col.nullable
     assert col.type.length == 64
+
+
+def test_record_omits_the_draw_count():
+    p = TournamentParticipant(tournament_id=1, team_id=1, team_name="Alpha",
+                              captain_user_id="1", match_wins=2, match_losses=1,
+                              match_draws=0)
+    assert p.record == "2-1"
+
+
+def test_record_keeps_a_non_zero_draw_count():
+    p = TournamentParticipant(tournament_id=1, team_id=1, team_name="Alpha",
+                              captain_user_id="1", match_wins=2, match_losses=1,
+                              match_draws=1)
+    assert p.record == "2-1-1"

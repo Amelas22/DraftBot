@@ -82,8 +82,7 @@ def create_standings_embed(tournament, participants, stage=STAGE_SWISS):
     )
     if participants:
         rows = [
-            f"{i}. **{p.team_name}** — {p.points} pts "
-            f"({p.match_wins}-{p.match_losses}-{p.match_draws})"
+            f"{i}. **{p.team_name}** — {p.points} pts ({p.record})"
             # A dropped team keeps its place and its record, because both still
             # count towards the tiebreaks of everyone it played. Saying so is what
             # stops the pairings quietly shrinking and reading as a bug.

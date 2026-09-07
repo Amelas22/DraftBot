@@ -280,3 +280,33 @@ def test_a_dropped_team_is_marked_but_keeps_its_place():
     alpha_line = next(line for line in body.splitlines() if "Alpha" in line)
     assert "dropped" in bravo_line.lower()
     assert "dropped" not in alpha_line.lower()
+
+
+# ---- records omit the draw count --------------------------------------------------
+
+def test_standings_embed_shows_a_win_loss_record():
+    # Every team match has to produce a winner, so the draw count is zero on
+    # every row and only makes the line harder to read.
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 2
+
+    embed = create_standings_embed(
+        tournament, [_participant("Alpha", 6, wins=2, losses=0)])
+
+    body = "\n".join(f.value for f in embed.fields)
+    assert "(2-0)" in body
+    assert "2-0-0" not in body
+
+
+def test_standings_embed_keeps_a_draw_that_was_actually_recorded():
+    # The schema permits a draw even though the rules do not; a record that
+    # had one must not silently lose it.
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 2
+
+    embed = create_standings_embed(
+        tournament, [_participant("Alpha", 4, wins=1, losses=0, draws=1)])
+
+    assert "(1-0-1)" in "\n".join(f.value for f in embed.fields)
