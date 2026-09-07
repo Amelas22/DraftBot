@@ -6,6 +6,8 @@ standings.
 All functions take an AsyncSession so callers control the transaction and tests
 can point them at a temp database (mirrors the leaderboard_service convention).
 """
+from datetime import datetime
+
 from loguru import logger
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -42,15 +44,26 @@ def is_playoff(round_):
     return round_ is not None and round_.stage == STAGE_PLAYOFF
 
 
+def _pairable(participants):
+    """The teams a round pairs: entry fee held, and still in the tournament.
+
+    The one definition of "in", because every round re-pairs from scratch and the
+    answer has to be the same each time. start_tournament asked it of the first
+    round and advance_round did not ask it at all, so a team that never completed
+    registration sat out round one and then joined the pairings for round two.
+    """
+    return [p for p in participants if p.status == "paid" and p.dropped_at is None]
+
+
 def _cut_eligible(standings):
-    """The teams a cut can seat: those that completed registration (escrow paid).
+    """The teams a cut can seat: those still in, with their entry fee held.
 
     One rule, because the end-of-swiss prompt disables its Start button on this
     count while start_playoff refuses on this list -- if the two drift, the
     prompt offers a button that then refuses, which is the failure the disabled
     state exists to prevent.
     """
-    return [p for p in standings if p.status == "paid"]
+    return _pairable(standings)
 
 
 class SwissComplete(Exception):
@@ -222,6 +235,70 @@ async def remove_team(session, tournament_id, team_name):
     )
     await session.delete(participant)
     await session.flush()
+    return participant
+
+
+async def drop_team(session, tournament_id, team_name):
+    """Take a team out of the pairings for the rounds still to come.
+
+    The running counterpart to remove_team, which only serves registration: that
+    one deletes the row and refunds the fee, because nothing has been played yet.
+    Once a tournament is live the row has to stay -- other teams' tiebreaks are
+    computed from the matches this team played -- so the drop is a mark, not a
+    deletion, and the entry fee stays in the pot the way it does at a real event.
+
+    A match already paired is left alone. The team is simply not in the pool the
+    next time a round is paired, which is what a drop means; an open match from
+    the round in progress is still the organizer's to record.
+
+    That is also why this is a swiss-only, pre-bracket operation. Swiss is the
+    only stage that re-pairs from the pool, so it is the only one a drop changes:
+    round_robin and manual build every round at the start, and the bracket
+    advances on results, never on who is pairable. Marking a team in either would
+    say it had left while it went on being paired -- and leave the abandoned
+    matches blocking the tournament exactly as before.
+    """
+    tournament = await session.get(Tournament, tournament_id)
+    if tournament is None:
+        raise ValueError("Tournament not found.")
+    if tournament.status != "active":
+        raise ValueError(
+            f"'{tournament.name}' is not running — teams leave a tournament that "
+            f"has not started with remove_team, which also refunds the entry fee."
+        )
+    if tournament.format != "swiss":
+        raise ValueError(
+            f"'{tournament.name}' is a {tournament.format} tournament — its whole "
+            f"schedule was built when it started, so a drop would change no "
+            f"pairing. Record the abandoned matches with /tournament set_result, "
+            f"or end it with /tournament finish."
+        )
+    if await _playoff_rounds(session, tournament_id):
+        raise ValueError(
+            "The bracket has already been built, and it advances on results "
+            "rather than on who is pairable — a drop would not take "
+            f"'{team_name}' out of it. Record the result with /tournament "
+            "set_result, or end the tournament with /tournament finish."
+        )
+
+    participant = await find_participant_by_name(session, tournament_id, team_name)
+    if participant is None:
+        raise ValueError(f"'{team_name}' is not in this tournament.")
+    if participant.dropped_at is not None:
+        raise ValueError(f"'{participant.team_name}' has already dropped.")
+
+    remaining = [p for p in _pairable(await list_participants(session, tournament_id))
+                 if p.id != participant.id]
+    if len(remaining) < 2:
+        raise ValueError(
+            f"Dropping '{participant.team_name}' would leave "
+            f"{len(remaining)} team(s) to pair — finish the tournament instead."
+        )
+
+    participant.dropped_at = datetime.now()
+    await session.flush()
+    logger.info(f"tournament {tournament_id}: '{participant.team_name}' dropped "
+                f"in round {tournament.current_round}")
     return participant
 
 
@@ -584,10 +661,13 @@ async def start_tournament(session, tournament_id, rng):
         raise ValueError("Tournament not found.")
     if tournament.status != "registration":
         raise ValueError(f"'{tournament.name}' is already {tournament.status}.")
-    participants = await list_participants(session, tournament_id)
     # Only teams that completed registration (escrow paid) are seeded. Free
-    # tournaments mark everyone 'paid', so this is a no-op there.
-    paid = [p for p in participants if p.status == "paid"]
+    # tournaments mark everyone 'paid', so this is a no-op there. Asked through
+    # _pairable, because one definition of who a round pairs is the whole point
+    # of having it -- nothing can have dropped before a tournament is active, so
+    # this is the same list either way, and it stays the same list if that ever
+    # changes.
+    paid = _pairable(await list_participants(session, tournament_id))
     if len(paid) < 2:
         raise ValueError(
             "At least 2 teams must have completed registration (entry fee paid) to start."
@@ -705,7 +785,12 @@ async def _build_round_robin(session, tournament, participants, rng):
 async def finish_tournament(session, tournament_id):
     """End an active tournament now. Returns the champion participant (top of
     final placement — bracket order if a cut was played, standings otherwise),
-    or None if there are none."""
+    or None if there are none.
+
+    A team that dropped is skipped: it keeps its place in the placement, because
+    its record still counts for everyone it played, but a team that walked away
+    is not what the tournament announces as its winner. Payout draws the same
+    line, and the two must not disagree about who won."""
     tournament = await session.get(Tournament, tournament_id)
     if tournament is None:
         raise ValueError("Tournament not found.")
@@ -713,7 +798,8 @@ async def finish_tournament(session, tournament_id):
         raise ValueError(f"'{tournament.name}' is not active.")
     tournament.status = "completed"
     await session.flush()
-    placement = await get_final_placement(session, tournament_id)
+    placement = [p for p in await get_final_placement(session, tournament_id)
+                 if p.dropped_at is None]
     return placement[0] if placement else None
 
 
@@ -921,7 +1007,7 @@ async def advance_round(session, tournament_id, rng):
         if not m.is_bye
     }
 
-    participants = await list_participants(session, tournament_id)
+    participants = _pairable(await list_participants(session, tournament_id))
     new_round, _ = await _create_round_with_pairings(
         session, tournament, participants, history, rng
     )

@@ -43,6 +43,7 @@ from services.tournament_formatter import (
 from services.tournament_service import (
     advance_round,
     add_match,
+    drop_team as drop_team_service,
     add_teammate,
     count_unreported_matches,
     create_tournament,
@@ -922,6 +923,76 @@ class TournamentCog(commands.Cog):
         await self._refresh_board(t_id)
         await ctx.followup.send(f"✅ **{res['team_name']}** removed.{note}", ephemeral=True)
 
+    @tournament.command(
+        name="drop_team",
+        description="Leave a running tournament — no more pairings, and any prize is forfeit")
+    async def drop_team(
+        self,
+        ctx,
+        team: discord.Option(str, "The team to drop (defaults to the one you captain)",
+                             required=False) = None,
+    ):
+        """Take a team out of the pairings for the rounds still to come.
+
+        Open to everyone: a captain leaving is the ordinary case, and the team
+        that stopped showing up is by definition not running any commands, so an
+        organizer needs to be able to name it. _roster_target draws that line the
+        same way the roster commands do -- your own team by name or by default,
+        anyone else's with the bot-manager role.
+        """
+        if not await self._check_enabled(ctx):
+            return
+        await ctx.defer(ephemeral=True)
+
+        async with db_session() as session:
+            tournament = await get_active_tournament(session, ctx.guild.id)
+            if tournament is None:
+                await ctx.followup.send("There is no active tournament.", ephemeral=True)
+                return
+
+            participant = await self._roster_target(ctx, session, tournament, team)
+            if participant is None:
+                return  # _roster_target has already said why
+
+            try:
+                await drop_team_service(session, tournament.id, participant.team_name)
+            except ValueError as e:
+                await ctx.followup.send(f"❌ {e}", ephemeral=True)
+                return
+
+            t_id = tournament.id
+            name = participant.team_name
+            round_number = tournament.current_round
+            last_round = tournament.total_rounds
+            # Read it before the block closes and commits: the note below turns on
+            # whether this team's current-round match is still open, and the drop
+            # deliberately does not report it.
+            open_match = await find_current_match(session, t_id, name)
+            # A bye records no game wins, so it is indistinguishable from an
+            # unreported match on team_a_wins alone -- and set_result refuses
+            # byes, so the note would send the organizer somewhere that says no.
+            match_open = (open_match is not None and not open_match.is_bye
+                          and open_match.team_a_wins is None)
+
+        # Both displays, the way every other state-changing command here does it:
+        # the board carries the roster, but the *(dropped)* marker lives in the
+        # standings embed, and those are what the room is actually reading.
+        await self._refresh_board(t_id)
+        await update_standings_message(self.bot, t_id)
+        note = ""
+        if match_open:
+            note = (f" Their round {round_number} match still needs a result — "
+                    f"record it with `/tournament set_result`.")
+        # Naming round N+1 past the last swiss round would point at a round nobody
+        # will ever see: what follows the final round is the cut, or the finish.
+        when = (f"They will not be paired from round {round_number + 1}."
+                if round_number < last_round
+                else "Swiss is over, so they will not be paired again.")
+        await ctx.followup.send(
+            f"✅ **{name}** dropped. {when} Their results stay in the standings, "
+            f"but they forfeit any prize — the entry fee stays in the pot.{note}",
+            ephemeral=True)
+
     @tournament.command(name="add_match", description="Admin: author a match for a manual-format tournament")
     @has_bot_manager_role()
     async def add_match(
@@ -1186,8 +1257,11 @@ class TournamentCog(commands.Cog):
             # Finishing order, not standings order: a cut tournament pays the
             # bracket winner, who may not be the swiss leader.
             placement = await get_final_placement(session, tournament.id)
-            # Only teams that actually completed registration can win the pot.
-            ranked = [(p.captain_user_id, p.team_name) for p in placement if p.status == "paid"]
+            # Only teams that actually completed registration can win the pot, and
+            # a team that dropped has forfeited its share of it -- 'paid' answers
+            # whether the entry fee is held, not whether the team is still in.
+            ranked = [(p.captain_user_id, p.team_name) for p in placement
+                      if p.status == "paid" and p.dropped_at is None]
             # A tournament can be finished early with results still missing — warn before paying.
             unreported = await count_unreported_matches(session, tournament.id)
 

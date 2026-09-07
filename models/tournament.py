@@ -70,6 +70,15 @@ class TournamentParticipant(Base):
     # start), or settled into the tournament's prize wallet when it starts. Null for
     # free / grandfathered / comped participants.
     paid_at = Column(DateTime, nullable=True)
+    # When this team left the tournament, or NULL while it is still in. Kept apart
+    # from `status`, which answers a different question — whether the entry fee is
+    # held — and is read by the escrow. A team that pays and then drops is still
+    # 'paid'; folding the two together would make it look unpaid to the money code.
+    #
+    # The row and its results deliberately outlive the drop: standings and OMW% are
+    # computed from the match graph, so removing a team that others already played
+    # would silently rewrite their tiebreaks.
+    dropped_at = Column(DateTime, nullable=True)
 
     # This tournament's standings (never written onto the global Team record)
     match_wins = Column(Integer, nullable=False, default=0, server_default=text('0'))
