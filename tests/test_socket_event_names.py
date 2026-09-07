@@ -14,7 +14,12 @@ seating, and it could not tell.
 
 These names are a contract with another codebase, so they are asserted literally.
 """
+import os
+import re
+from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 from services.draft_setup_manager import DraftSetupManager
 
@@ -24,6 +29,18 @@ from services.draft_setup_manager import DraftSetupManager
 DRAFTMANCER_EMITS = {
     "sessionUsers", "userDisconnected", "resumeOnReconnection", "pauseDraft",
     "resumeDraft", "endDraft", "draftLog", "setReady", "alreadyConnected",
+}
+
+# Events the CURRENT Draftmancer source no longer declares, which the DEPLOYED
+# draftmancer.com still emits. Subscribing to one is right until the site ships
+# the removal, and wrong after -- so each is listed with the evidence that it is
+# still needed, and the cross-check below reports it rather than failing.
+LEGACY_UNTIL_DEPLOYED = {
+    "resumeOnReconnection":
+        "removed upstream in Draftmancer 51d4ec1e (2026-08-31), but the deployed "
+        "draftmancer.com bundle still contains the name. Verified by driving both "
+        "builds locally: against the old server the bot only learns a player "
+        "returned from this event, and dropping it left a draft paused for ever.",
 }
 # Events Draftmancer declares as `() => void` in src/SocketType.ts. A handler that
 # demands a payload for one of these raises TypeError on arrival, which fails exactly
@@ -78,12 +95,18 @@ def test_a_mid_draft_disconnect_is_subscribed():
     assert "userDisconnected" in _subscribed_events()
 
 
-def test_the_last_player_returning_is_subscribed():
-    """Session.reconnectUser only calls broadcastDisconnectedUsers() while someone is
-    STILL missing; when the map empties it calls resumeOnReconnection instead. So an
-    empty userDisconnected payload never arrives, and without this subscription the
-    bot never learns that everyone is back."""
-    assert "resumeOnReconnection" in _subscribed_events()
+def test_the_last_player_returning_is_heard_on_both_draftmancer_versions():
+    """Two servers are in play, and the bot has to work on either.
+
+    The deployed draftmancer.com emits resumeOnReconnection when the last player
+    returns. Current Draftmancer removed that and broadcasts an empty
+    userDisconnected instead. Exactly one arrives per version -- the old server
+    never sends an empty payload, the new one has no other event -- so keeping
+    both subscriptions cannot double-resume.
+    """
+    events = _subscribed_events()
+    assert "userDisconnected" in events, "the current server's signal"
+    assert "resumeOnReconnection" in events, "the deployed server's signal"
 
 
 # ---- the handlers behind those names --------------------------------------------
@@ -136,13 +159,22 @@ async def test_the_no_payload_handlers_accept_no_payload():
 
 
 @pytest.mark.asyncio
-async def test_the_last_player_returning_clears_the_record():
+async def test_the_last_player_returning_resumes_the_draft():
+    """The empty payload is now the ONLY signal that everyone is back, so it has
+    to do what the removed resumeOnReconnection handler used to do."""
     mgr = _manager()
     mgr.disconnected_users = {"id-gregg": "gregg / keezles"}
+    resumed = []
+    mgr._resume_after_disconnect = lambda: resumed.append(True) or _noop()
 
-    await mgr._on_resume_on_reconnection({"title": "Player reconnected", "text": "..."})
+    await mgr._on_user_disconnected({"owner": "x", "disconnectedUsers": {}})
 
     assert mgr.disconnected_users == {}
+    assert resumed, "an empty payload must resume a draft that was paused for a drop"
+
+
+async def _noop():
+    return None
 
 
 @pytest.mark.asyncio
@@ -167,3 +199,80 @@ async def test_a_malformed_disconnect_payload_is_survivable():
     mgr = _manager()
     await mgr._on_user_disconnected(None)
     assert mgr.disconnected_users == {}
+
+
+# ---- the same contract, checked against Draftmancer itself ----------------------
+#
+# Everything above asserts the bot against DRAFTMANCER_EMITS -- a list maintained
+# by hand, which is only ever as current as the last person to read Draftmancer's
+# source. It cannot notice the other side REMOVING an event, which is exactly what
+# happened: Draftmancer 51d4ec1e deleted resumeOnReconnection, and the suite went
+# on passing while defending a handler that could never run again.
+#
+# So when a Draftmancer checkout is available, read the declarations instead of
+# trusting the copy. Skipped when it is not, since it is not part of this repo:
+# a developer without it loses this check, not the suite.
+
+DRAFTMANCER_SRC = Path(os.environ.get(
+    "DRAFTMANCER_SRC",
+    Path(__file__).resolve().parents[2] / "Draftmancer" / "src" / "SocketType.ts"))
+
+EVENT_DECL = re.compile(r"^\t(\w+)\s*:", re.M)
+
+
+def _declared_by_draftmancer():
+    """Event names in Draftmancer's ServerToClientEvents interface.
+
+    One tab of indentation is the interface's own members; a continuation line
+    inside a multi-line signature is indented further, so it is not mistaken for
+    an event of its own.
+    """
+    src = DRAFTMANCER_SRC.read_text()
+    body = src.split("export interface ServerToClientEvents {", 1)[1].split("\n}", 1)[0]
+    return set(EVENT_DECL.findall(body))
+
+
+needs_draftmancer = pytest.mark.skipif(
+    not DRAFTMANCER_SRC.exists(),
+    reason=f"no Draftmancer checkout at {DRAFTMANCER_SRC}; set DRAFTMANCER_SRC")
+
+
+@needs_draftmancer
+def test_draftmancer_still_declares_everything_the_bot_listens_for():
+    """The check the hand-maintained list cannot do: catch a REMOVAL upstream.
+
+    A subscription to an event Draftmancer no longer declares fails in the
+    quietest way there is -- the handler simply never runs again.
+    """
+    declared = _declared_by_draftmancer()
+    for name in _subscribed_events():
+        if name in TRANSPORT or name in LEGACY_UNTIL_DEPLOYED:
+            continue
+        assert name in declared, (
+            f"{name!r} is not in Draftmancer's ServerToClientEvents any more, so "
+            f"its handler can never run. Check what replaced it before deleting, "
+            f"and whether the DEPLOYED draftmancer.com still emits it -- if it "
+            f"does, the subscription stays and belongs in LEGACY_UNTIL_DEPLOYED."
+        )
+
+
+@needs_draftmancer
+def test_the_hand_written_list_still_matches_draftmancer():
+    """Keeps DRAFTMANCER_EMITS honest, so the tests above stay meaningful for
+    anyone without the checkout."""
+    declared = _declared_by_draftmancer()
+    stale = DRAFTMANCER_EMITS - declared - set(LEGACY_UNTIL_DEPLOYED)
+    assert not stale, f"DRAFTMANCER_EMITS lists events Draftmancer no longer has: {stale}"
+
+
+@needs_draftmancer
+def test_every_legacy_subscription_is_genuinely_legacy():
+    """Keeps the exemption list from outliving its reason.
+
+    A name here that upstream still declares is not legacy at all -- it is an
+    exemption hiding a subscription the strict check should be covering.
+    """
+    declared = _declared_by_draftmancer()
+    wrong = set(LEGACY_UNTIL_DEPLOYED) & declared
+    assert not wrong, (
+        f"{wrong} are still declared upstream, so they need no exemption")
