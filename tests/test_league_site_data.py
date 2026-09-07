@@ -119,7 +119,8 @@ async def test_standings_follow_the_ranked_order(match_control_db):
     assert [s["rank"] for s in data["standings"]] == [1, 2]
     assert data["standings"][0]["team_id"] == winner_id
     assert data["standings"][0]["points"] == 3
-    assert data["standings"][0]["record"] == "1-0-0"
+    # Draws are not allowed in this tournament, so the record is W-L.
+    assert data["standings"][0]["record"] == "1-0"
 
 
 @pytest.mark.asyncio
@@ -358,3 +359,19 @@ async def test_another_guilds_name_is_better_than_none(match_control_db):
         await add_signup(session, "1", "elsewhere", guild="other-guild")
 
         assert await captain_of(session, tournament.id, "Alpha") == "elsewhere"
+
+
+@pytest.mark.asyncio
+async def test_record_shows_a_draw_if_one_is_ever_recorded(match_control_db):
+    # The column is dropped because draws are not allowed, not because the
+    # schema forbids them -- a record that had one must not silently lose it.
+    async with match_control_db() as session:
+        tournament = await seed_league(session)
+        alpha = await find_participant_by_name(session, tournament.id, "Alpha")
+        alpha.match_wins, alpha.match_draws = 1, 1
+        await session.commit()
+
+        data = await build_tournament_data(session, tournament.id)
+
+    row = next(s for s in data["standings"] if s["team_id"] == alpha.id)
+    assert row["record"] == "1-0-1"
