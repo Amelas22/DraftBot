@@ -56,3 +56,16 @@ def test_every_cheap_view_registration_precedes_the_quiz_sweep():
                  "re_register_premade_nudges"):
         assert name in calls, f"{name} is no longer restored at startup: {calls}"
         assert calls.index(name) < sweep, f"{name} still waits on the quiz sweep"
+
+
+def test_the_slow_restoration_does_not_block_startup():
+    """re_register_views walks recent quiz sessions, fetching each message, and
+    every fetch can be rate limited. Awaiting it holds on_ready open for as long
+    as that takes; the views it attaches are the least urgent of the set, so it
+    runs as a task and the rest of startup carries on."""
+    source = Path("bot.py").read_text()
+    assert "await re_register_views(bot)" not in source, (
+        "re_register_views is awaited again; a slow restoration should not hold "
+        "on_ready open behind it"
+    )
+    assert "re_register_views" in source, "startup no longer restores those views at all"
