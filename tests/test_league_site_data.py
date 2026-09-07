@@ -282,6 +282,8 @@ def test_summarize_says_so_when_there_is_no_tournament():
 SITE = Path(__file__).resolve().parent.parent / "league_site" / "index.html"
 
 
+@pytest.mark.skipif(not SITE.exists(),
+                    reason="league_site/ is git-excluded; only present locally")
 def test_index_html_carries_an_injectable_placeholder():
     # inject() raises if the block is missing, and publishing is a manual step
     # run against production data -- so the failure has to surface here, not at
