@@ -59,6 +59,26 @@ else:
     PUBLISH_DELAY_SECONDS = 180 * 60      # post logs when Draftmancer auto-unlocks (matches setDraftLogUnlockTimer)
     DRAFT_PICK_TIMER_SECONDS = 60
     DRAFT_LOG_UNLOCK_TIMER_MINUTES = 180
+# The outer bound on ANY manager's life, measured from construction and needing
+# neither the database nor a socket event.
+#
+# Both of the tighter stop conditions below key off endDraft: it sets
+# draft_finished, and unlock_at only exists once a log capture ran. A manager
+# from spawn_for_existing_session joins a session that ended before it existed,
+# so it never receives that event and neither condition can ever fire for it.
+# A bound that depends on an event arriving is not a bound -- and unbounded
+# managers, each pinning a ~500 KB draft log, are what OOM-killed the bot.
+#
+# Generous on purpose (the unlock window plus room for a long or stalled draft),
+# because it is a backstop rather than the normal path, and `drafting` is
+# checked first so it can never take down a table mid-draft.
+MANAGER_MAX_LIFETIME_MINUTES = DRAFT_LOG_UNLOCK_TIMER_MINUTES + 240
+
+# How long a manager stays up after its draft ends. Its one remaining job is the
+# early-release vote, which needs a live socket before Draftmancer's own unlock
+# timer elapses; the grace is that timer plus a margin for a late log capture.
+POST_DRAFT_GRACE_MINUTES = DRAFT_LOG_UNLOCK_TIMER_MINUTES + 10
+
 OWNERSHIP_CLAIM_TIMEOUT = 3.0  # Seconds to wait for ownership claim confirmation
 # How long a mid-draft disconnect must last before the bot says anything in Discord.
 # Short drops are common and self-correcting; announcing every one of them would
@@ -276,6 +296,11 @@ class DraftSetupManager:
         # explicitly: set when Draftmancer reports the draft over, cleared if one
         # starts again, and consulted anywhere the answer must not be "not yet".
         self.draft_finished = False
+        # Shutdown clocks for _should_stop. In memory rather than on the row:
+        # they bound THIS loop's life, and a bound that can be lost to a failed
+        # write is not a bound.
+        self._created_at = datetime.now()
+        self._finished_at = None
         self.draftPaused = False
         self.draft_cancelled = False
         self.removing_unexpected_user = False
@@ -330,6 +355,8 @@ class DraftSetupManager:
         logger.info(f"Draft ended event received: {data}")
         self.drafting = False
         self.draft_finished = True
+        # Starts the post-draft clock in _should_stop.
+        self._finished_at = datetime.now()
         self.draftPaused = False
         # A draft can end with someone still disconnected — /scrap, or the rest of the
         # table replacing them with bots and playing on. "Please reconnect" after that
@@ -2335,6 +2362,61 @@ class DraftSetupManager:
             self.logger.exception("Full exception details:")
             return False, [str(e)]
         
+    async def _load_log_state(self):
+        """The row fields that say whether this manager still has a job.
+
+        Returns None when the row is gone OR unreadable. The caller treats a
+        transient failure as "keep going" rather than "stop", because the
+        absolute cap already guarantees termination -- a database blip must not
+        be able to disconnect a table.
+        """
+        try:
+            async with db_session() as session:
+                return (await session.execute(
+                    select(DraftSession.data_received, DraftSession.unlock_at)
+                    .filter(DraftSession.session_id == self.session_id)
+                )).first()
+        except Exception as e:
+            self.logger.warning(f"could not read log state for {self.session_id}: {e}")
+            return None
+
+    async def _should_stop(self) -> bool:
+        """True once this manager can no longer be needed by anything.
+
+        A finished draft's manager is not idle: the release-logs-early vote
+        (cogs/draft_control.py) calls shareDraftLog over THIS socket using THIS
+        in-memory log, and Draftmancer keeps the log locked for
+        DRAFT_LOG_UNLOCK_TIMER_MINUTES. So the manager legitimately outlives the
+        draft -- it just must not outlive that window, which is what it used to
+        do, for ever, until the box ran out of memory.
+
+        Ordered cheapest-first, and every branch before the query is pure
+        memory, so an in-progress or long-expired manager costs no I/O.
+        """
+        if self.drafting:
+            return False                     # never abandon a live table
+
+        now = datetime.now()
+        if now - self._created_at >= timedelta(minutes=MANAGER_MAX_LIFETIME_MINUTES):
+            return True                      # see MANAGER_MAX_LIFETIME_MINUTES
+
+        if not self.draft_finished:
+            return False
+        if now - self._finished_at >= timedelta(minutes=POST_DRAFT_GRACE_MINUTES):
+            return True
+
+        # Re-read rather than memoise the deadline. unlock_at really is
+        # write-once, so caching it looks free -- but then data_received is
+        # never consulted again, and a log published EARLY (the manual release
+        # vote, or the reconciler) stops waking this manager up. That costs one
+        # indexed lookup per manager per 10s, which is ~0.1 QPS each.
+        row = await self._load_log_state()
+        if row is None:
+            return False                     # gone or unreadable; the cap covers us
+        if row.data_received:
+            return True                      # log published, nothing left to do
+        return row.unlock_at is not None and row.unlock_at <= now
+
     async def disconnect_after_delay(self, delay_seconds):
         """
         Disconnects from the session after a delay to ensure commands have been processed.
@@ -2356,10 +2438,18 @@ class DraftSetupManager:
         2. Transfer ownership 
         3. Disconnect
         """
-        if not self.socket_client.connected:
-            return
-        
+        # Stopping the loop and leaving the registry are what "disconnect" means
+        # here; the socket emits below are only the polite half. Both used to sit
+        # BELOW the connectivity guard, so a manager whose socket had already
+        # dropped -- the normal state once players leave at the end of a draft --
+        # was asked to disconnect and did nothing at all. Its loop then saw a dead
+        # socket, reconnected, and ran for ever.
         self._should_disconnect = True
+
+        if not self.socket_client.connected:
+            await self._cleanup_and_disconnect("socket already disconnected")
+            return
+
         try:
             try:
                 self.logger.info("Setting owner as player before transferring ownership")
@@ -2667,6 +2757,11 @@ class DraftSetupManager:
         else:
             self.logger.info(f"[LIFECYCLE] Session already removed from ACTIVE_MANAGERS")
 
+        # The single biggest thing this object pins: the whole Draftmancer log,
+        # 450-750 KB. publish_draft_log reads draft_data back from the database,
+        # so nothing downstream needs the in-memory copy once we are done.
+        self.current_draft_log = None
+
         self.logger.info(f"[LIFECYCLE] Socket connected after cleanup: {self.socket_client.connected}")
         self.logger.info(f"[LIFECYCLE] Session in ACTIVE_MANAGERS after cleanup: {self.session_id in ACTIVE_MANAGERS}")
         self.logger.info(f"[LIFECYCLE] === CLEANUP END ===")
@@ -2901,7 +2996,11 @@ class DraftSetupManager:
 
         # First connection attempt
         if not await self.socket_client.connect_with_retry(initial_url):
+            # Cleanup, not a bare return: __init__ already registered this
+            # manager, so returning here left a registry entry with no loop
+            # behind it and nothing that would ever remove it.
             self.logger.error("Initial connection failed after retries. Aborting.")
+            await self._cleanup_and_disconnect("initial connection failed")
             return
 
         # Reclaim ownership as spectator right after the initial connect too,
@@ -2921,6 +3020,15 @@ class DraftSetupManager:
                 if self._should_disconnect:
                     self.logger.info(f"[LOOP] _should_disconnect is True, breaking loop")
                     await self.socket_client.disconnect()
+                    break
+
+                # Nothing can need this manager any more. The flag is set so the
+                # finally clause below runs the one shared cleanup path.
+                if await self._should_stop():
+                    self.logger.info(
+                        f"[LOOP] nothing left to do for {self.session_id}; "
+                        f"shutting this manager down")
+                    self._should_disconnect = True
                     break
 
                 # If disconnected, try to reconnect
@@ -2954,9 +3062,11 @@ class DraftSetupManager:
             self.logger.info(f"[LOOP] === KEEP_CONNECTION_ALIVE END === Manager ID: {id(self)}")
             self.logger.info(f"[LOOP] Final state - Socket connected: {self.socket_client.connected}")
             self.logger.info(f"[LOOP] Final state - In ACTIVE_MANAGERS: {self.session_id in ACTIVE_MANAGERS}")
-            # Only disconnect if requested
-            if self._should_disconnect:
-                await self.disconnect_safely()
+            # Unconditionally, not "only if requested": this loop is the whole
+            # of the manager's life, so once it is over the manager must not
+            # stay in the registry holding a draft log -- however it got here.
+            # An exception used to exit the task and leave exactly that behind.
+            await self.disconnect_safely()
 
     # NOTE: connect_with_retry is now handled by self.socket_client.connect_with_retry()
 
