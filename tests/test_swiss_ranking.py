@@ -3,7 +3,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from draft_organization.swiss import match_win_percentage, rank_standings
+from draft_organization.swiss import (
+    match_win_percentage,
+    omw_percentages,
+    rank_standings,
+)
 
 FLOOR = 1 / 3
 
@@ -86,3 +90,26 @@ def test_falls_through_to_game_diff_then_name():
     ranked = rank_standings([b, a, ob, oa], matches)
     # a and b: equal pts(3), equal OMW(0.33). a has better game diff(+2 vs +1).
     assert ranked.index(a) < ranked.index(b)
+
+
+# ---- omw_percentages: the same numbers, exposed for display ----------------------
+
+def test_omw_percentages_averages_real_opponents():
+    # T1 played one 1-0 opponent (MWP 1.0) and one 0-1 opponent (floored at 1/3).
+    p = participant(1, points=3, w=1, l=1)
+    strong = participant(2, points=3, w=1)
+    weak = participant(3, points=0, l=1)
+    matches = [match(1, 2), match(1, 3)]
+
+    omw = omw_percentages([p, strong, weak], matches)
+
+    assert omw[1] == pytest.approx((1.0 + FLOOR) / 2)
+
+
+def test_omw_percentages_ignores_byes():
+    # A bye is not an opponent, so a team whose only other game was a bye
+    # still sits at the floor rather than being credited with one.
+    p = participant(1, points=3, w=1)
+    matches = [match(1, None, is_bye=True)]
+
+    assert omw_percentages([p], matches)[1] == pytest.approx(FLOOR)

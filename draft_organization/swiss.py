@@ -53,12 +53,16 @@ def match_win_percentage(match_points, rounds_played, floor=MWP_FLOOR):
     return max(floor, match_points / (3 * rounds_played))
 
 
-def rank_standings(participants, matches):
-    """Sort participants by points, then OMW%, then game diff, then name.
+def omw_percentages(participants, matches):
+    """{participant id: OMW%} -- the average match-win percentage of each
+    participant's *real* opponents (byes excluded).
 
-    OMW% is the average match-win percentage of each participant's *real*
-    opponents (byes excluded). Participants with no real opponents get the
-    floor. Pure: ``participants`` and ``matches`` are read-only.
+    Participants with no real opponents get the floor. Pure: ``participants``
+    and ``matches`` are read-only.
+
+    Split out of rank_standings so a caller that has to *show* the tiebreak
+    (the public league page) reads the same numbers the sort used, instead of
+    reimplementing them and drifting.
     """
     by_id = {p.id: p for p in participants}
     opponents = {p.id: [] for p in participants}
@@ -74,15 +78,22 @@ def rank_standings(participants, matches):
         rounds = p.match_wins + p.match_losses + p.match_draws
         return match_win_percentage(p.points, rounds)
 
-    def omw(p):
-        opp_ids = opponents[p.id]
-        if not opp_ids:
-            return MWP_FLOOR
-        return sum(mwp(by_id[oid]) for oid in opp_ids) / len(opp_ids)
+    return {
+        p.id: (sum(mwp(by_id[oid]) for oid in opponents[p.id]) / len(opponents[p.id])
+               if opponents[p.id] else MWP_FLOOR)
+        for p in participants
+    }
 
+
+def rank_standings(participants, matches):
+    """Sort participants by points, then OMW%, then game diff, then name.
+
+    Pure: ``participants`` and ``matches`` are read-only.
+    """
+    omw = omw_percentages(participants, matches)
     return sorted(
         participants,
-        key=lambda p: (-p.points, -omw(p), -(p.game_wins - p.game_losses), p.team_name),
+        key=lambda p: (-p.points, -omw[p.id], -(p.game_wins - p.game_losses), p.team_name),
     )
 
 
