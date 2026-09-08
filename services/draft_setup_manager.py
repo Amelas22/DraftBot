@@ -635,6 +635,18 @@ class DraftSetupManager:
         own start-draft call — so a bot restarted mid-draft has it False, and gating
         on it would switch the pause off exactly when nobody is watching.
         """
+        # An empty payload means everyone is back, and on a current Draftmancer it
+        # is the ONLY thing that says so. That used to be impossible: reconnectUser
+        # called resumeOnReconnection when the map emptied and broadcast this event
+        # only while someone was still out. Draftmancer 51d4ec1e removed that method
+        # and now always broadcasts, empty map included.
+        #
+        # draftmancer.com has not deployed it yet -- its client bundle still carries
+        # resumeOnReconnection -- so BOTH paths are live and the bot keeps both
+        # subscriptions. Exactly one fires per server version: the old server never
+        # sends an empty payload, the new one has no other event to send. Drop
+        # _on_resume_on_reconnection once the deployed bundle loses the name;
+        # tests/test_socket_event_names.py tracks that.
         disconnected = (data or {}).get('disconnectedUsers') or {}
         previously_out = bool(self.disconnected_users)
         self.disconnected_users = {
