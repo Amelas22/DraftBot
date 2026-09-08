@@ -212,6 +212,27 @@ def exponential_backoff(max_retries=10, base_delay=1):
         return wrapper
     return decorator
 
+def is_ownership_error(response) -> bool:
+    """Whether a Draftmancer acknowledgement says we are not the session owner.
+
+    prepareSocketCallback (Draftmancer src/server.ts) rejects an owner-only event
+    with {'code': 401, 'error': {'title': 'Unautorized', 'text': 'Must be session
+    owner.'}} -- Draftmancer's own spelling of "Unautorized". Matched on the code
+    as well as on both spellings of the title, so a typo fix upstream cannot
+    silently switch this off.
+    """
+    if not isinstance(response, dict):
+        return False
+    if response.get("code") == 401:
+        return True
+    error = response.get("error")
+    if not isinstance(error, dict):
+        return False
+    title = str(error.get("title", "")).lower()
+    text = str(error.get("text", "")).lower()
+    return "session owner" in text or "unautorized" in title or "unauthorized" in title
+
+
 class DraftSetupManager:
     async def _on_connect(self):
         """Handler for 'connect' event."""
@@ -686,9 +707,14 @@ class DraftSetupManager:
         else:
             self._paused_for_disconnect = True
             if live:
-                await self.socket_client.emit('pauseDraft')
-                self.draftPaused = True
-                self.logger.info(f"Paused the draft: {who} dropped mid-draft")
+                if await self.emit_as_owner('pauseDraft',
+                                            confirmed=lambda: self.draftPaused):
+                    self.draftPaused = True
+                    self.logger.info(f"Paused the draft: {who} dropped mid-draft")
+                else:
+                    # Not ours to pause any more; emit_as_owner has stood us down.
+                    self._paused_for_disconnect = False
+                    return
             else:
                 self.logger.info(f"{SHADOW} would pause the draft: {who} dropped mid-draft")
 
@@ -804,7 +830,9 @@ class DraftSetupManager:
             return
 
         if is_disconnect_autopause_enabled():
-            await self.socket_client.emit('resumeDraft')
+            if not await self.emit_as_owner(
+                    'resumeDraft', confirmed=lambda: not self.draftPaused):
+                return
             self.draftPaused = False
             self._paused_for_disconnect = False
             self.logger.info(f"Resumed the draft: the disconnect lasted {lasted}s, inside the grace window")
@@ -1219,6 +1247,83 @@ class DraftSetupManager:
         except Exception as e:
             self.logger.error(f"Failed to reclaim ownership as spectator: {e}")
             return False
+
+    async def emit_as_owner(self, event, *args, confirmed=None,
+                            timeout: float = 3.0) -> bool:
+        """Emit an owner-only event; True once Draftmancer has visibly accepted it.
+
+        About forty of Draftmancer's events are registered owner-only
+        (prepareSocketCallback(fn, true)) and refuse a non-owner with a 401 that
+        ONLY an acknowledgement callback ever sees. Emitting without one throws
+        that away, which is how /pause came to tell a room a draft was paused
+        while it played on.
+
+        Two different things can come back, and only one of them is an ack:
+        Draftmancer acknowledges ONLY on error, so waiting for an ack would wait
+        out the whole timeout on every success. What arrives on success is the
+        BROADCAST -- pauseDraft goes back to the entire session and
+        _on_draft_paused sets the flag -- so `confirmed` is polled for that and
+        the two race. A refusal answers in milliseconds; so does acceptance.
+
+        `confirmed` also catches the failure no ack can see: pauseDraft on a
+        session that is not drafting returns early, sending neither ack nor
+        broadcast. Without a `confirmed` there is nothing to watch for, and
+        silence is taken as acceptance -- the best available answer for a
+        fire-and-forget setting.
+
+        A 401 stands the bot down: it is not running this draft any more.
+        """
+        got = asyncio.get_running_loop().create_future()
+
+        def ack(response=None):
+            if not got.done():
+                got.set_result(response)
+
+        sent = await self.socket_client.emit(event, *args, callback=ack)
+        if sent is False:
+            self.logger.warning(f"could not emit {event}: socket is down")
+            return False
+
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            if confirmed is not None and confirmed():
+                return True
+            if got.done():
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                # Nothing came back either way. With something to confirm, that is
+                # a failure (the server ignored us); without, it is the silence
+                # that means accepted.
+                if confirmed is None:
+                    return True
+                self.logger.warning(f"{event} was neither acknowledged nor broadcast")
+                return False
+            await asyncio.sleep(0.05)
+
+        response = got.result()
+        if is_ownership_error(response):
+            await self._stand_down(f"Draftmancer refused {event}: not the session owner")
+            return False
+        if isinstance(response, dict) and response.get("error"):
+            self.logger.error(f"Draftmancer refused {event}: {response['error']}")
+            return False
+        return True
+
+    async def _stand_down(self, reason: str) -> None:
+        """Stop managing this draft, the way /mutiny ends it.
+
+        Someone else owns the Draftmancer session, so every command this bot
+        sends is discarded. Continuing to issue them -- and to report them as
+        done -- is worse than leaving: the room is told things that did not
+        happen. Tell them once, hand back the session URL, and disconnect.
+        """
+        self.logger.warning(f"Standing down: {reason}")
+        await self._notify_bot_no_longer_managing(include_session_url=True)
+        # Set before cleanup, as the mutiny path does: the connection loop's only
+        # graceful exit is this flag, and without it the loop reconnects a draft
+        # the bot has just given up.
+        self._should_disconnect = True
+        await self._cleanup_and_disconnect(reason)
 
     async def _notify_bot_no_longer_managing(self, include_session_url: bool = True):
         """Send a notification that the bot can no longer manage this draft session.
@@ -3020,7 +3125,18 @@ class DraftSetupManager:
         # manager spawned by the capture-retry never re-asserts itself as
         # session owner, so on an inactive/ended Draftmancer session it won't
         # receive the owner log push and the capture-retry waits forever.
-        await self._reclaim_ownership_as_spectator()
+        #
+        # The result is acted on, because failing it does not merely mean the bot
+        # cannot manage the session -- it means the bot is SITTING IN it.
+        # setSessionOwner is owner-only, so joining a session someone else owns
+        # has it refused, and this method then returns before reaching
+        # setOwnerIsPlayer(False). An ordinary connected user in Draftmancer is a
+        # seat at the table, so the bot silently took one of the eight. Measured
+        # against a real server; _handle_reconnection has always checked this,
+        # and only the first connect threw it away.
+        if not await self._reclaim_ownership_as_spectator():
+            await self._stand_down("could not claim the Draftmancer session on connect")
+            return
 
         try:
             iteration = 0
