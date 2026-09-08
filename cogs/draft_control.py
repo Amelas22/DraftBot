@@ -1053,10 +1053,22 @@ class DraftControlCog(commands.Cog):
                 await ctx.followup.send("Only draft participants can pause the draft.", ephemeral=True)
                 return
                 
-            # Pause the draft
-            await manager.socket_client.emit('pauseDraft')
-            manager.draftPaused = True  # Set pause state to True
-            
+            # Confirmed, not fired and forgotten: pauseDraft is owner-only, and a
+            # non-owner is refused with a 401 that only an ack callback ever sees.
+            # Announcing a pause that Draftmancer discarded is worse than saying
+            # nothing -- the table plays on believing it has stopped.
+            if not await manager.emit_as_owner(
+                    'pauseDraft', confirmed=lambda: manager.draftPaused):
+                await ctx.followup.send(
+                    "Couldn't pause the draft — the bot is no longer running this "
+                    "Draftmancer session, so it has stepped away. Carry on in "
+                    "Draftmancer, or use `/mutiny` to take it over there.",
+                    ephemeral=True,
+                )
+                return
+
+            manager.draftPaused = True
+
             await ctx.followup.send(
                 f"⏸️ **Draft paused** by {ctx.author.mention}.\n\n"
                 f"{PAUSED_DRAFT_OPTIONS}"
@@ -1149,10 +1161,17 @@ class DraftControlCog(commands.Cog):
                     )
                     await asyncio.sleep(5)
                     
-                    # Emit the resumeDraft event
-                    await manager.socket_client.emit('resumeDraft')
-                    manager.draftPaused = False  # Reset pause state when resuming
-                    
+                    # Same contract as /pause: resumeDraft is owner-only.
+                    if not await manager.emit_as_owner(
+                            'resumeDraft', confirmed=lambda: not manager.draftPaused):
+                        await resume_message.edit(
+                            content="⚠️ Couldn't resume — the bot is no longer "
+                                    "running this Draftmancer session. Resume it "
+                                    "there directly.")
+                        return
+
+                    manager.draftPaused = False
+
                     await resume_message.edit(content="▶️ **Draft resumed!** Good luck and have fun!")
                 else:
                     # Not everyone was ready, send timeout message

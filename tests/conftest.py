@@ -254,7 +254,23 @@ def make_manager(**kwargs):
     mgr = DraftSetupManager(**args)
     mgr.socket_client = MagicMock()
     mgr.socket_client.connected = True
-    mgr.socket_client.emit = AsyncMock(return_value=True)
+
+    async def _emit(event, *a, callback=None, **kw):
+        """Echo pause/resume back, the way a real Draftmancer does.
+
+        Draftmancer re-emits an accepted pauseDraft/resumeDraft to the whole
+        session, and that broadcast -- not an acknowledgement -- is what
+        emit_as_owner treats as confirmation (it acks only on ERROR). A double
+        that stays silent is therefore a server that refused, and every pause in
+        the suite would read as a failure.
+        """
+        if event == "pauseDraft":
+            await mgr._on_draft_paused()
+        elif event == "resumeDraft":
+            await mgr._on_draft_resumed()
+        return True
+
+    mgr.socket_client.emit = AsyncMock(side_effect=_emit)
     return mgr
 
 
