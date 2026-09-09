@@ -878,6 +878,38 @@ async def record_linked_result(tournament_match_id, team_a_wins, team_b_wins):
         return await set_result(session, tournament_match_id, team_a_wins, team_b_wins)
 
 
+async def sync_linked_result(tournament_match_id, team_a_wins, team_b_wins):
+    """Keep a linked match's score equal to its draft's current score.
+
+    A draft clinches once, but its remaining games are still played and
+    reported afterwards, so the score at the clinch is usually not the final
+    one. The victory chokepoint runs on every report, so this runs there too
+    and writes only when the stored score actually moved -- a match that grew
+    past its clinch ends up holding the true score, without re-posting the
+    standings for the reports that changed nothing.
+
+    Returns the match when it wrote, or None when the score already matched.
+    """
+    async with db_session() as session:
+        match = await session.get(TournamentMatch, tournament_match_id)
+        if match is None:
+            raise ValueError("Match not found.")
+        if (match.team_a_wins, match.team_b_wins) == (team_a_wins, team_b_wins):
+            return None
+        # set_result guards a finished tournament for playoff rounds only. That
+        # was enough while this ran once, at the clinch: a swiss match could not
+        # be reached after the event closed. It can now, on any late-landing
+        # report, so refuse here too rather than restate a closed event. An
+        # organiser correcting a result by hand still goes through set_result
+        # and is still allowed to.
+        tournament_id = await get_tournament_id_for_match(session, tournament_match_id)
+        tournament = (await session.get(Tournament, tournament_id)
+                      if tournament_id is not None else None)
+        if tournament is not None and tournament.status != "active":
+            return None
+        return await set_result(session, tournament_match_id, team_a_wins, team_b_wins)
+
+
 async def get_tournament_id_for_match(session, match_id):
     """Resolve a match's tournament id (match -> round -> tournament), or None."""
     match = await session.get(TournamentMatch, match_id)
