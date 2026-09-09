@@ -7,16 +7,22 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from database.models_base import Base
 from models.session_details import SessionDetails
-from models.tournament import TournamentParticipant
+from models.tournament import (
+    Tournament,
+    TournamentMatch,
+    TournamentParticipant,
+)
 from services.tournament_service import (
     create_tournament,
     record_linked_result,
     register_team,
+    sync_linked_result,
     start_tournament,
 )
 
@@ -666,3 +672,96 @@ async def test_a_bracket_bye_is_not_posted_as_an_auto_win(test_db):
     bye_line = next(t for t in texts if "Alpha" in t)
     assert "auto win" not in bye_line
     assert "no match" in bye_line
+
+
+# ---- sync_linked_result -------------------------------------------------------------
+
+@asynccontextmanager
+async def _committing(test_db):
+    async with test_db() as inner:
+        yield inner
+        await inner.commit()
+
+
+async def _one_match(test_db):
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "Spring", 3)
+        await session.commit()
+        await register_team(session, tournament.id, "Alpha", "1")
+        await register_team(session, tournament.id, "Bravo", "2")
+        await session.commit()
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        return matches[0].id, matches[0].team_a_participant_id
+
+
+@pytest.mark.asyncio
+async def test_sync_updates_a_score_that_grew_after_the_clinch(test_db):
+    """The draft keeps playing after it is decided, and the match follows.
+
+    A 9-pairing match clinches at 5 wins, which is when the victory chokepoint
+    records it. The remaining games are still reported, so the true score ends
+    up higher -- and the tournament has to end up holding the true score, not
+    the one that happened to be on the board at the clinch.
+    """
+    match_id, part_a_id = await _one_match(test_db)
+
+    with patch("services.tournament_service.db_session", lambda: _committing(test_db)):
+        await record_linked_result(match_id, 5, 2)      # clinch
+        match = await sync_linked_result(match_id, 7, 2)  # final
+
+    assert match is not None, "a changed score must be written"
+    assert (match.team_a_wins, match.team_b_wins) == (7, 2)
+    async with test_db() as session:
+        part_a = await session.get(TournamentParticipant, part_a_id)
+        assert (part_a.game_wins, part_a.game_losses) == (7, 2)
+        # Still one win, not two: the correction replaced, it did not stack.
+        assert (part_a.match_wins, part_a.points) == (1, 3)
+
+
+@pytest.mark.asyncio
+async def test_sync_is_a_no_op_when_the_score_has_not_moved(test_db):
+    """Every result report reaches this path, so an unchanged score must not
+    write -- otherwise each report re-posts the standings for no reason."""
+    match_id, _ = await _one_match(test_db)
+
+    with patch("services.tournament_service.db_session", lambda: _committing(test_db)):
+        await record_linked_result(match_id, 5, 2)
+        assert await sync_linked_result(match_id, 5, 2) is None
+
+
+@pytest.mark.asyncio
+async def test_sync_records_a_match_that_has_no_result_yet(test_db):
+    match_id, _ = await _one_match(test_db)
+
+    with patch("services.tournament_service.db_session", lambda: _committing(test_db)):
+        match = await sync_linked_result(match_id, 5, 0)
+
+    assert match is not None
+    assert (match.team_a_wins, match.team_b_wins) == (5, 0)
+
+
+@pytest.mark.asyncio
+async def test_sync_refuses_to_restate_a_finished_tournament(test_db):
+    """A draft whose last games land after the event closed must not rewrite it.
+
+    set_result carries this guard for playoff rounds only, because until the
+    sync ran on every report a swiss match could not be reached once the
+    tournament was over. It can be now.
+    """
+    match_id, _ = await _one_match(test_db)
+
+    with patch("services.tournament_service.db_session", lambda: _committing(test_db)):
+        await record_linked_result(match_id, 5, 2)
+
+    async with test_db() as session:
+        tournament = (await session.execute(select(Tournament))).scalars().first()
+        tournament.status = "completed"
+        await session.commit()
+
+    with patch("services.tournament_service.db_session", lambda: _committing(test_db)):
+        assert await sync_linked_result(match_id, 7, 2) is None
+
+    async with test_db() as session:
+        match = await session.get(TournamentMatch, match_id)
+        assert (match.team_a_wins, match.team_b_wins) == (5, 2)
