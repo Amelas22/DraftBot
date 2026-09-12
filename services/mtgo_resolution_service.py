@@ -286,6 +286,148 @@ async def finish_withdraw(job_id: str, guild_id: str, player_id: str, n: int,
 
 
 # ---------------------------------------------------------------------------
+# house card lending (bot lends real cards and takes them back)
+#
+# Unlike tix there is nothing to commit up front: the cards are the house's, so a borrow
+# risks nothing of the player's and needs no in-flight holder. What the two share is the
+# rule that matters -- the CLAIM IS WRITTEN ONLY ON 'done'. A failed trade moved nothing
+# and must leave no obligation behind.
+#
+# No printing appears anywhere here. The serve records which printings it handed over and
+# pins them itself when they come back, so "return my Bolts" is expressible without
+# DraftBot ever having learned a catId.
+# ---------------------------------------------------------------------------
+async def _record_card_job(job_id: str, kind: str, guild_id: str, player_id: str,
+                           mtgo_user: str, card: str, qty: int):
+    async def _do():
+        async with db_session() as session:
+            if await session.get(MtgoJob, job_id):
+                return
+            session.add(MtgoJob(
+                job_id=job_id, kind=kind, guild_id=guild_id, player_id=player_id,
+                mtgo_user=mtgo_user, amount=qty, card_name=card, status="pending"))
+    await with_db_retry(_do)
+
+
+async def start_borrow(guild_id: str, player_id: str, mtgo_user: str, card: str, qty: int,
+                       *, commit: bool = True, wait_minutes: int = 0) -> dict[str, Any]:
+    """Enqueue a house loan of ``qty`` copies of ``card`` to the player.
+
+    Nothing is booked here. The obligation appears only when the trade reports done, so a
+    player who never accepts the trade ends up owing nothing.
+    """
+    if qty <= 0:
+        return {"ok": False, "error": "quantity must be positive"}
+    if not (card or "").strip():
+        return {"ok": False, "error": "card name is required"}
+    client = get_client()
+    if not client.enabled:
+        return {"ok": False, "error": "MTGO TradeBot integration is disabled"}
+    busy = await serve_busy_reason()
+    if busy:
+        return {"ok": False, "error": busy, "busy": True}
+
+    resp = await client.borrow(mtgo_user, card.strip(), qty, commit=commit,
+                               wait_minutes=wait_minutes)
+    if not resp or not resp.get("id"):
+        resp = await _recover_lost_job(resp, "borrow", mtgo_user, qty)
+        if not resp or not resp.get("id"):
+            return {"ok": False, "error": "serve did not accept the loan (unreachable or rejected)"}
+        logger.warning(f"start_borrow: adopted job {resp['id']} after lost POST response")
+    await _record_card_job(resp["id"], "borrow", guild_id, player_id, mtgo_user,
+                           card.strip(), qty)
+    return {"ok": True, "job_id": resp["id"]}
+
+
+async def finish_borrow(job_id: str, guild_id: str, player_id: str, card: str, qty: int,
+                        timeout_s: float = _DEFAULT_POLL_TIMEOUT_S) -> dict[str, Any]:
+    """Poll a loan. On 'done' the cards physically left the vault, so book the claim: the
+    house is owed them back. On 'failed' nothing moved and nothing is owed.
+    """
+    outcome, job = await _poll_job(job_id, timeout_s)
+    if outcome == "done":
+        await debt_service.create_card_loan(
+            guild_id=guild_id, lender_id=wallet_service.HOUSE_MTGO, borrower_id=player_id,
+            card_name=card, quantity=qty, created_by="mtgo")
+        await _resolve_job(job_id, "done")
+        return {"ok": True, "outcome": "done"}
+    if outcome == "failed":
+        await _resolve_job(job_id, "failed")
+        return {"ok": False, "outcome": "failed", "error": job.get("detail") or "trade failed"}
+    return {"ok": False, "outcome": "pending"}
+
+
+async def start_return(guild_id: str, player_id: str, mtgo_user: str, card: str,
+                       qty: int | None = None, *, commit: bool = True,
+                       wait_minutes: int = 0) -> dict[str, Any]:
+    """Enqueue the player handing borrowed copies back. Quantity is optional: without one
+    the serve returns every copy of that card it lent them.
+    """
+    if not (card or "").strip():
+        return {"ok": False, "error": "card name is required"}
+    if qty is not None and qty <= 0:
+        return {"ok": False, "error": "quantity must be positive"}
+    client = get_client()
+    if not client.enabled:
+        return {"ok": False, "error": "MTGO TradeBot integration is disabled"}
+    busy = await serve_busy_reason()
+    if busy:
+        return {"ok": False, "error": busy, "busy": True}
+
+    # Ask the serve what is actually out before trading, so "you have nothing to return" is
+    # answered here rather than as a trade that opens and finds nothing.
+    open_qty = await outstanding_with_house(mtgo_user, card.strip())
+    if open_qty <= 0:
+        return {"ok": False, "error": f"the vault has not lent you any {card.strip()}"}
+    want = min(qty, open_qty) if qty else open_qty
+
+    resp = await client.return_cards(mtgo_user, card.strip(), qty, commit=commit,
+                                     wait_minutes=wait_minutes)
+    if not resp or not resp.get("id"):
+        resp = await _recover_lost_job(resp, "return", mtgo_user, want)
+        if not resp or not resp.get("id"):
+            return {"ok": False, "error": "serve did not accept the return (unreachable or rejected)"}
+        logger.warning(f"start_return: adopted job {resp['id']} after lost POST response")
+    await _record_card_job(resp["id"], "return", guild_id, player_id, mtgo_user,
+                           card.strip(), want)
+    return {"ok": True, "job_id": resp["id"], "quantity": want}
+
+
+async def finish_return(job_id: str, guild_id: str, player_id: str, card: str, qty: int,
+                        timeout_s: float = _DEFAULT_POLL_TIMEOUT_S) -> dict[str, Any]:
+    """Poll a return. On 'done' the copies are back in the vault, so settle the claim."""
+    outcome, job = await _poll_job(job_id, timeout_s)
+    if outcome == "done":
+        await debt_service.create_card_return(
+            guild_id=guild_id, returner_id=player_id, owner_id=wallet_service.HOUSE_MTGO,
+            card_name=card, quantity=qty, created_by="mtgo")
+        await _resolve_job(job_id, "done")
+        return {"ok": True, "outcome": "done"}
+    if outcome == "failed":
+        await _resolve_job(job_id, "failed")
+        return {"ok": False, "outcome": "failed", "error": job.get("detail") or "trade failed"}
+    return {"ok": False, "outcome": "pending"}
+
+
+async def outstanding_with_house(mtgo_user: str, card: str | None = None) -> int:
+    """Copies of ``card`` the VAULT says are out with this MTGO user (all cards if None).
+
+    Deliberately the serve's number, not the debt ledger's: the serve watched the cards
+    cross and is the only record of which printings they were. Comparing the two is how a
+    divergence would be found, so they must not be derived from each other.
+    """
+    client = get_client()
+    pos = await client.positions(mtgo_user)
+    if not pos:
+        return 0
+    lent = pos.get("lent") or []
+    if card:
+        lent = [p for p in lent if (p.get("card") or "").lower() == card.lower()]
+    return sum(int(p.get("qty") or 0) for p in lent)
+
+
+
+# ---------------------------------------------------------------------------
 # pending-jobs watchdog — finish booking any job whose poller died
 # (poll timeout / bot restart / gateway reconnect)
 # ---------------------------------------------------------------------------
@@ -320,6 +462,14 @@ async def resume_pending_jobs() -> int:
             elif job.kind == "withdraw":
                 await finish_withdraw(job.job_id, job.guild_id, job.player_id,
                                       job.amount, job.mtgo_user)
+            # Card jobs resume the same way. Without these a bot restart mid-loan would
+            # leave a delivered card with no obligation recorded against it.
+            elif job.kind == "borrow" and job.card_name:
+                await finish_borrow(job.job_id, job.guild_id, job.player_id,
+                                    job.card_name, job.amount)
+            elif job.kind == "return" and job.card_name:
+                await finish_return(job.job_id, job.guild_id, job.player_id,
+                                    job.card_name, job.amount)
         finally:
             _polling_jobs.discard(job.job_id)
 

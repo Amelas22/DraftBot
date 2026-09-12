@@ -14,13 +14,28 @@ Mirrors the aiohttp idiom in helpers/magicprotools_helper.py, plus a Bearer head
 """
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import aiohttp
 from loguru import logger
 
 # On MTGO, event tickets are the currency. Depositing/withdrawing tix is just trading this "card".
 EVENT_TICKET = "Event Ticket"
+
+
+def _settle_body(user: str, card: str | None, qty: int | None,
+                 commit: bool, wait_minutes: int) -> dict[str, Any]:
+    """Request body shared by /return and /withdraw — the same settle in two directions.
+
+    Three shapes the serve understands: no card at all settles everything open; a bare name
+    settles every copy of it; name+qty settles part of a position, allocated oldest-first.
+    """
+    body: dict[str, Any] = {"user": user, "commit": commit, "waitMinutes": wait_minutes}
+    if card and qty:
+        body["items"] = [{"name": card, "qty": qty}]
+    elif card:
+        body["cards"] = [card]
+    return body
 
 
 class MtgoTradeBotClient:
@@ -149,6 +164,38 @@ class MtgoTradeBotClient:
         return await self._call("POST", "/request", json={
             "user": user, "cards": [card], "qty": qty, "commit": commit, "waitMinutes": wait_minutes},
             mark_ambiguous=True)
+
+    # ---- house card lending -------------------------------------------------------
+    # These differ from give()/deposit() in one way that matters: the serve records WHICH
+    # PRINTING crossed, and borrow/return/withdraw are the endpoints that read it back. We
+    # send card NAMES and never a catId — the printing is the serve's to remember, which is
+    # exactly why a caller here cannot get it wrong.
+
+    async def borrow(self, user: str, card: str, qty: int = 1, commit: bool = True,
+                     wait_minutes: int = 0):
+        """Bot LENDS qty of a card to the user, expecting it back. The serve picks printings
+        it owns and records them, so return() can ask for those exact copies."""
+        return await self._call("POST", "/borrow", json={
+            "user": user, "cards": [card], "qty": qty, "commit": commit,
+            "waitMinutes": wait_minutes}, mark_ambiguous=True)
+
+    async def return_cards(self, user: str, card: str | None = None, qty: int | None = None,
+                           commit: bool = True, wait_minutes: int = 0):
+        """User RETURNS previously borrowed cards. The serve pins the exact printings it lent
+        from its own movement record. Omit `card` to settle everything they hold of ours."""
+        return await self._call("POST", "/return", json=_settle_body(user, card, qty, commit, wait_minutes),
+                                mark_ambiguous=True)
+
+    async def withdraw_cards(self, user: str, card: str | None = None, qty: int | None = None,
+                             commit: bool = True, wait_minutes: int = 0):
+        """Give back cards the user DEPOSITED, as the exact printings they handed over."""
+        return await self._call("POST", "/withdraw", json=_settle_body(user, card, qty, commit, wait_minutes),
+                                mark_ambiguous=True)
+
+    async def positions(self, user: str | None = None):
+        """What is on the far side of the boundary. With a user: {held[], lent[]}, each entry
+        {card, catId, qty, since}. Without: {users[]}. Read-only."""
+        return await self._call("GET", "/positions", params={"user": user} if user else None)
 
     # ---- tix convenience (currency == Event Ticket) ----
     async def deposit_tix(self, user: str, n: int, commit: bool = True, wait_minutes: int = 0):

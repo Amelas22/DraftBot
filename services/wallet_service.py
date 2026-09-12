@@ -46,6 +46,13 @@ from models.wallet_tx import WalletTx
 # resolution take the guild from the same MtgoJob, so a cross-guild withdraw can't arise.
 SYSTEM_IN_FLIGHT = "system:in-flight"   # tix committed to an open MTGO withdraw trade
 
+# The vault itself, as a counterparty for CARD obligations. Cards never enter the wallet
+# (it is tix-only), but a card lent out of the vault is owed back to someone, and that
+# someone is the house. Defined here so it sits beside the other synthetic holders and is
+# covered by is_system_account below -- every renderer that skips non-people already does
+# the right thing with it, with no change.
+HOUSE_MTGO = "house:mtgo"
+
 
 def prize_wallet_id(tournament_id) -> str:
     """The holder that owns a tournament's pot."""
