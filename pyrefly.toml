@@ -9,6 +9,7 @@
 preset = "strict"
 
 project-includes = [
+    "cogs/cards_cog.py",
     "cogs/server_draft_stats.py",
     "draft_organization/bracket.py",
     "helpers/draft_outcome.py",

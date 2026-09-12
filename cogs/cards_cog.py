@@ -34,7 +34,7 @@ def _copies(card: str, qty: int) -> str:
 class CardsCog(commands.Cog):
     """Borrowing real cards from the house vault."""
 
-    def __init__(self, bot):
+    def __init__(self, bot: discord.Bot) -> None:
         self.bot = bot
 
     cards = SlashCommandGroup("cards", "Borrow cards from the vault and return them")
@@ -88,7 +88,8 @@ class CardsCog(commands.Cog):
                 msg = (f"⏳ Loan `{job_id}` is still running. Nothing is owed until it "
                        f"completes; it will be booked automatically when it does.")
             else:
-                msg = (f"❌ Loan `{job_id}` failed: {explain_trade_failure(res.get('error'))}\n"
+                msg = (f"❌ Loan `{job_id}` failed: "
+                       f"{explain_trade_failure(res.get('error') or 'trade failed')}\n"
                        f"No cards moved and nothing is owed.")
             await followup.send(msg, ephemeral=True)
 
@@ -101,7 +102,7 @@ class CardsCog(commands.Cog):
     @option("quantity", int, description="How many copies (default: all of them)",
             default=None, min_value=1, required=False)
     async def cards_return(self, ctx: discord.ApplicationContext, card: str,
-                           quantity: int = None):
+                           quantity: int | None = None):
         await ctx.defer(ephemeral=True)
         err = gate_serve(ctx)
         if err:
@@ -137,7 +138,8 @@ class CardsCog(commands.Cog):
                 msg = (f"⏳ Return `{job_id}` is still running; the loan stays open until "
                        f"it completes.")
             else:
-                msg = (f"❌ Return `{job_id}` failed: {explain_trade_failure(res.get('error'))}\n"
+                msg = (f"❌ Return `{job_id}` failed: "
+                       f"{explain_trade_failure(res.get('error') or 'trade failed')}\n"
                        f"You still have those copies and still owe them back.")
             await followup.send(msg, ephemeral=True)
 
@@ -191,5 +193,5 @@ class CardsCog(commands.Cog):
         await ctx.followup.send(embed=embed, ephemeral=True)
 
 
-def setup(bot):
+def setup(bot: discord.Bot) -> None:
     bot.add_cog(CardsCog(bot))
