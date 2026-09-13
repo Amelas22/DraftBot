@@ -13,6 +13,7 @@ from typing import Awaitable, Callable, Iterable
 import discord
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy.orm import undefer
 
 from database.db_session import db_session
 from helpers.pile_compositor import PileImageBuilder
@@ -623,8 +624,12 @@ async def post_team_logs(session_id: str, bot) -> bool:
 
 async def _post_team_logs_locked(session_id: str, bot) -> bool:
     async with db_session() as session:
+        # undefer: draft_data is deferred at the mapper; this is one of the two
+        # places that genuinely needs the log.
         ds = (await session.execute(
-            select(DraftSession).filter(DraftSession.session_id == session_id)
+            select(DraftSession)
+            .options(undefer(DraftSession.draft_data))
+            .filter(DraftSession.session_id == session_id)
         )).scalar_one_or_none()
         if ds is None:
             logger.warning(f"post_team_logs: no session row for {session_id}")

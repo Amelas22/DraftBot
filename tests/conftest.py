@@ -125,7 +125,8 @@ async def seed_session(session_id="s1", guild="g", stype="staked",
                        matches=(), start=None, sign_ups=None,
                        cube="TestCube", draft_chat_channel=None,
                        channel_ids=None, draft_id=None, rooms_created_at=None,
-                       match_counter=1, friendly_id=None):
+                       match_counter=1, friendly_id=None,
+                       draft_data=None, spaces_object_key=None):
     """Seed one DraftSession plus its MatchResults.
 
     teams: (team_a_list, team_b_list) or None (legacy-style, no team JSON).
@@ -133,6 +134,9 @@ async def seed_session(session_id="s1", guild="g", stype="staked",
     draft_chat_channel / channel_ids: the draft's rooms, for tests that resolve a
     session from a channel. Note the type asymmetry production stores them with --
     the chat as a string, channel_ids as JSON ints.
+    draft_data / spaces_object_key: the draft's Draftmancer log and its Spaces
+    path. spaces_object_key is what makes a row quiz-eligible; draft_data is the
+    fat JSON column the quiz paths must never load.
     """
     when = start or datetime(2026, 1, 1)
     async with AsyncSessionLocal() as s:
@@ -156,6 +160,7 @@ async def seed_session(session_id="s1", guild="g", stype="staked",
             channel_ids=channel_ids,
             draft_id=draft_id, rooms_created_at=rooms_created_at,
             sign_ups=sign_ups, cube=cube,
+            draft_data=draft_data, spaces_object_key=spaces_object_key,
             # A decided draft needs match_counter set. Pass it here rather than
             # hand-patching the row afterwards with an UPDATE, which is what the
             # older pool tests still do.

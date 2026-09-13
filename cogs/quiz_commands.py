@@ -107,7 +107,9 @@ class QuizCommands(commands.Cog):
             used_result = await session.execute(used_combos_stmt)
             used_combos: Set[Tuple[str, Optional[int]]] = {(row[0], row[1]) for row in used_result.fetchall()}
 
-            # Get all eligible drafts (last year, has spaces_object_key)
+            # Get all eligible drafts (last year, has spaces_object_key).
+            # The log itself is NOT loaded here -- draft_data is deferred at the
+            # mapper, and this loop reads the log from Spaces instead.
             stmt = select(DraftSession).where(
                 and_(
                     DraftSession.guild_id == str(guild_id),

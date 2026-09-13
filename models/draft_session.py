@@ -1,5 +1,5 @@
 from sqlalchemy import Column, Integer, String, DateTime, JSON, Boolean, text, Index
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import deferred, relationship
 from sqlalchemy import select, desc
 from datetime import datetime
 from urllib.parse import quote
@@ -52,7 +52,21 @@ class DraftSession(Base):
     tournament_match_id = Column(Integer, nullable=True)  # links result auto-recording to a TournamentMatch
     tracked_draft = Column(Boolean, default=False)
     swiss_matches = Column(JSON)
-    draft_data = Column(JSON)
+    # Deferred at the mapper, not per query. This column holds a whole
+    # Draftmancer log (~0.59 MB average, 309 MB across the widest query in the
+    # codebase) and almost nothing reads it: of ~128 select(DraftSession) sites,
+    # exactly two do. Loading it by default made the bulk queries fatal on a
+    # 2 GB box -- the quiz selector materialized 487 MB per tick and OOM-killed
+    # the bot daily. A reader must now ask: .options(undefer(DraftSession.draft_data)).
+    # Note a deferred column does NOT lazy-load on attribute access here. Which
+    # error you get depends on where you touch it: MissingGreenlet while the row
+    # is still attached to a live async session (implicit IO is not allowed), and
+    # DetachedInstanceError once its session block has exited -- which is the
+    # common case, since most callers use the row after the `async with`. Both
+    # are loud, which is the point: a silent half-gigabyte becomes a local error.
+    # The exception is a caller that swallows broadly; publish_draft_log does,
+    # which is why tests/test_draft_data_deferred.py drives it against a real DB.
+    draft_data = deferred(Column(JSON))
     data_received = Column(Boolean, default=False)
     logs_captured_at = Column(DateTime)  # set when the log is captured to DB/Spaces (pre-publish)
     spaces_object_key = Column(String(256), nullable=True)  # DigitalOcean Spaces object path

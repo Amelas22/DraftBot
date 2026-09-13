@@ -412,7 +412,11 @@ class QuizPublicView(discord.ui.View):
             # Store starting_seat for pack tracing
             starting_seat = quiz_session.starting_seat
 
-            stmt = select(DraftSession).where(DraftSession.session_id == quiz_session.draft_session_id)
+            # This view is persistent (timeout=None), so whatever this row
+            # carries is retained for the life of the process. draft_data is
+            # deferred at the mapper, so the log is not part of that.
+            stmt = select(DraftSession).where(
+                DraftSession.session_id == quiz_session.draft_session_id)
             result = await session.execute(stmt)
             draft_session = result.scalar_one_or_none()
 
