@@ -907,6 +907,59 @@ def find_postable_results_channel(guild, name):
     return matches[0]
 
 
+async def _sync_linked_tournament_match(bot, match_id, team_a_wins, team_b_wins,
+                                        draft_session_id):
+    """Push a draft's current score onto the tournament match it was launched
+    for, and refresh what displays it. See sync_linked_result for why this runs
+    on every report rather than once."""
+    from services.tournament_service import sync_linked_result
+    from services.tournament_formatter import update_standings_message_for_match
+    try:
+        if await sync_linked_result(match_id, team_a_wins, team_b_wins) is None:
+            return
+        logger.info(f"Tournament match {match_id} auto-recorded "
+                    f"{team_a_wins}-{team_b_wins} from draft {draft_session_id}")
+        await update_standings_message_for_match(bot, match_id)
+        from match_control_view import safe_refresh_match_views
+        await safe_refresh_match_views(bot, match_id)
+    except ValueError as e:
+        logger.error(f"Failed to auto-record tournament match {match_id}: {e}")
+
+
+async def sync_decided_draft_to_tournament(bot, draft_session_id):
+    """Level a decided draft's linked tournament match with its current score.
+
+    Sits beside settle_decided_draft, and outside the transaction below, for
+    exactly the same reason: it opens its own connection and SQLite is
+    single-writer. Idempotent and cheap -- it returns immediately for a draft
+    that is not decided, not linked, or abandoned, and sync_linked_result
+    writes only when the score actually moved, so the common report costs one
+    read.
+
+    It has to run out here rather than with the rest of the victory work
+    because that work sits behind an idempotency gate that fires once, when the
+    draft first clinches. These matches clinch before they finish, so the score
+    on the board at the clinch is usually not the final one.
+    """
+    draft_session = await get_draft_session(draft_session_id)
+    if (not draft_session
+            or draft_session.tournament_match_id is None
+            or draft_session.session_stage == "abandoned"):
+        return
+    # The score is read INSIDE the same per-draft lock that writes it. Read it
+    # outside and two reports landing together can invert: the slower one
+    # computes an older score, waits for the lock, and then writes the match
+    # back down over the newer one that got there first.
+    async with locks.setdefault(draft_session_id, asyncio.Lock()):
+        team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
+        if decides_draft(team_a_wins, team_b_wins,
+                         total_matches_in(draft_session.match_counter)) is None:
+            return
+        await _sync_linked_tournament_match(
+            bot, draft_session.tournament_match_id,
+            team_a_wins, team_b_wins, draft_session_id)
+
+
 async def check_and_post_victory_or_draw(bot, draft_session_id):
     # Money first, and outside the transaction below. This is the one function
     # that decides a draft is over, so it is the one place a draft's money
@@ -915,6 +968,8 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
     # It cannot go inside the transaction: wallet_service opens its own
     # connection, and SQLite is single-writer.
     await settle_decided_draft(draft_session_id)
+    # Same rule, same reason: its own connection, so it cannot go inside.
+    await sync_decided_draft_to_tournament(bot, draft_session_id)
 
     async with AsyncSessionLocal() as session:
         async with session.begin():
@@ -1137,19 +1192,6 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
 
                     if draft_session.tracked_draft and draft_session.premade_match_id is not None:
                         await update_match_db_with_wins_winner(draft_session.premade_match_id, team_a_wins, team_b_wins)
-                    if draft_session.tournament_match_id is not None:
-                        from services.tournament_service import record_linked_result
-                        from services.tournament_formatter import update_standings_message_for_match
-                        try:
-                            await record_linked_result(draft_session.tournament_match_id, team_a_wins, team_b_wins)
-                            logger.info(f"Tournament match {draft_session.tournament_match_id} auto-recorded "
-                                        f"{team_a_wins}-{team_b_wins} from draft {draft_session_id}")
-                            await update_standings_message_for_match(bot, draft_session.tournament_match_id)
-                            from match_control_view import safe_refresh_match_views
-                            await safe_refresh_match_views(bot, draft_session.tournament_match_id)
-                        except ValueError as e:
-                            logger.error(f"Failed to auto-record tournament match "
-                                         f"{draft_session.tournament_match_id}: {e}")
                     gap = abs(team_a_wins - team_b_wins)
 
                     # Mark as completed so it's removed from live drafts
