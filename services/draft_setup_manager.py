@@ -5,6 +5,7 @@ from loguru import logger
 from functools import wraps
 import random
 import aiohttp
+from sqlalchemy.orm import undefer
 import json
 import os
 import pytz
@@ -1471,8 +1472,13 @@ class DraftSetupManager:
         """
         try:
             async with db_session() as session:
+                # undefer: draft_data is deferred at the mapper (it is dead
+                # weight for ~128 other queries), and this is one of the two
+                # places that genuinely needs the log.
                 draft_session = (await session.execute(
-                    select(DraftSession).filter(DraftSession.session_id == self.session_id)
+                    select(DraftSession)
+                    .options(undefer(DraftSession.draft_data))
+                    .filter(DraftSession.session_id == self.session_id)
                 )).scalar_one_or_none()
                 if not draft_session:
                     self.logger.warning(f"No draft session for {self.session_id}; cannot publish")

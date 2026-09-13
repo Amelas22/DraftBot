@@ -65,6 +65,8 @@ async def _select_eligible_draft(
         used_result = await session.execute(used_stmt)
         used_draft_ids = {row[0] for row in used_result.fetchall()} | set(exclude_draft_ids)
 
+        # The log itself is NOT loaded here -- draft_data is deferred at the
+        # mapper, and this loop reads the log from Spaces instead.
         stmt = select(DraftSession).where(
             and_(
                 DraftSession.guild_id == str(guild_id),
