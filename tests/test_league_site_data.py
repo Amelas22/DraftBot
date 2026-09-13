@@ -19,6 +19,7 @@ from services.league_site_data import (
 from services.tournament_service import (
     add_teammate,
     create_tournament,
+    drop_team,
     find_participant_by_name,
     register_team,
     set_result,
@@ -100,6 +101,31 @@ async def test_captain_with_no_recorded_name_falls_back(match_control_db):
 
     assert all(t["captain"] for t in data["teams"])
     assert not any(t["captain"] == "1" for t in data["teams"])
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_team_is_flagged_so_the_page_can_mark_it(match_control_db):
+    """A dropped team keeps its place and its record -- both still count towards
+    the tiebreaks of everyone it played -- so the payload has to say it has gone.
+    Unmarked, it reads as a team the pairings have quietly stopped including.
+
+    The flag rides on the team rather than the standings row because the pairings
+    resolve a team through the same id, and a marker the pairings cannot see
+    would leave a dropped team unmarked in half the places it appears.
+    """
+    async with match_control_db() as session:
+        tournament = await seed_league(
+            session, teams=("Alpha", "Bravo", "Charlie", "Delta"))
+        await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        await drop_team(session, tournament.id, "Bravo")
+        await session.commit()
+
+        data = await build_tournament_data(session, tournament.id)
+
+    teams = {t["name"]: t for t in data["teams"]}
+    assert teams["Bravo"]["dropped"] is True
+    assert teams["Alpha"]["dropped"] is False
 
 
 # ---- standings --------------------------------------------------------------

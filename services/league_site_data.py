@@ -176,6 +176,10 @@ async def build_tournament_data(session: Any, tournament_id: int) -> dict[str, A
                 "captain": captains.get(p.captain_user_id, UNKNOWN_CAPTAIN),
                 "members": [m.display_name for m in rosters.get(p.id, [])],
                 "seed": p.seed,
+                # On the team, not the standings row: the pairings resolve a
+                # team through this same id, so a marker kept on the standings
+                # row would leave a dropped team unmarked in the pairings.
+                "dropped": p.dropped_at is not None,
             }
             for p in standings
         ],
