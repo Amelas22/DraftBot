@@ -8,9 +8,11 @@ from pathlib import Path
 import pytest
 
 from models.player import PlayerStats
+from models.tournament import TournamentParticipant
 from models.sign_up_history import SignUpHistory
 from services.league_site_data import (
     PLACEHOLDER_JSON,
+    _cut_after_rank,
     build_for_guild,
     build_tournament_data,
     inject,
@@ -126,6 +128,69 @@ async def test_a_dropped_team_is_flagged_so_the_page_can_mark_it(match_control_d
     teams = {t["name"]: t for t in data["teams"]}
     assert teams["Bravo"]["dropped"] is True
     assert teams["Alpha"]["dropped"] is False
+
+
+# ---- where the cut line falls -----------------------------------------------
+
+def _ranked(*specs):
+    """Participants in rank order; a spec of (name, dropped) builds one."""
+    out = []
+    for i, (name, dropped) in enumerate(specs, start=1):
+        p = TournamentParticipant(
+            tournament_id=1, team_id=i, team_name=name, captain_user_id=str(i),
+            points=0, match_wins=0, match_losses=0, match_draws=0)
+        p.status = "paid"
+        p.dropped_at = datetime(2026, 9, 10, 12, 0) if dropped else None
+        out.append(p)
+    return out
+
+
+def test_cut_line_sits_at_the_cut_size_when_nobody_has_dropped():
+    standings = _ranked(("A", False), ("B", False), ("C", False), ("D", False))
+    assert _cut_after_rank(standings, 2) == 2
+
+
+def test_cut_line_moves_past_a_dropped_team_inside_the_cut():
+    """A dropped team keeps its rank but cannot be seated, so a line drawn at
+    rank N would promise the last seat to a team that will not take it."""
+    standings = _ranked(("A", False), ("B", True), ("C", False), ("D", False))
+    assert _cut_after_rank(standings, 2) == 3
+
+
+def test_no_cut_line_without_a_declared_cut():
+    assert _cut_after_rank(_ranked(("A", False)), None) is None
+    assert _cut_after_rank(_ranked(("A", False)), 0) is None
+
+
+def test_no_cut_line_when_too_few_teams_remain_to_fill_it():
+    """start_playoff refuses this cut outright, so the page must not draw a
+    line implying it will happen."""
+    standings = _ranked(("A", False), ("B", True), ("C", True))
+    assert _cut_after_rank(standings, 2) is None
+
+
+@pytest.mark.asyncio
+async def test_payload_cut_line_moves_when_a_seated_team_drops(match_control_db):
+    """End to end: the page is handed the rank the bracket will really fall at,
+    not the cut size."""
+    async with match_control_db() as session:
+        tournament = await seed_league(
+            session, teams=("Alpha", "Bravo", "Charlie", "Delta"), cut_to=2)
+        await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+
+        before = await build_tournament_data(session, tournament.id)
+        assert before["cut_after_rank"] == 2
+
+        seated_second = next(t for t in before["teams"]
+                             if t["id"] == before["standings"][1]["team_id"])
+        await drop_team(session, tournament.id, seated_second["name"])
+        await session.commit()
+
+        after = await build_tournament_data(session, tournament.id)
+
+    assert after["cut_to"] == 2, "the declared cut size does not change"
+    assert after["cut_after_rank"] == 3, "the line moves past the dropped team"
 
 
 # ---- standings --------------------------------------------------------------
