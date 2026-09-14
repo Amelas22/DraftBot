@@ -56,8 +56,8 @@ def calculate_team_draft_win_percentage(wins, losses, tied=0):
     """
     Calculate team draft win percentage.
 
-    A tie counts as half a win: 5-0-1 (91.7%) beats 5-1-0 (83.3%)
-    instead of tying it, but never beats 6-0-0.
+    A tied draft is the draft-level draw, so this is calculate_win_percentage
+    under the name every caller reads in: won/lost/tied.
 
     Args:
         wins: Number of draft wins
@@ -67,7 +67,4 @@ def calculate_team_draft_win_percentage(wins, losses, tied=0):
     Returns:
         float: Win percentage (0-100), or 0 if no drafts played
     """
-    total_drafts = wins + losses + tied
-    if total_drafts == 0:
-        return 0.0
-    return ((wins + 0.5 * tied) / total_drafts) * 100
+    return calculate_win_percentage(wins, losses, tied)
