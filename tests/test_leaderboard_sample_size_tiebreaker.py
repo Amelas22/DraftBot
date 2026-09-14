@@ -68,3 +68,57 @@ async def test_draft_record_ties_rank_larger_sample_first(test_db):
     assert len(ids) == 4
     assert set(ids[:2]) == {"5", "6"}
     assert set(ids[2:]) == {"1", "2"}
+
+
+async def _seed_equal_pairs_with_staggered_debuts():
+    """Two 3-0-0 partnerships -- identical percentage AND identical sample
+    size -- that differ only in when the PAIR first drafted together:
+    ('5','6') five days ago, ('1','2') two days ago.
+
+    Player '1' also has a much older draft (ten days ago) with a different
+    partner, so the pair's debut and the owning player's debut disagree:
+    ('1','2') is the younger partnership but hangs off the older player.
+    """
+    now = datetime.now()
+    await _swept_2v2("solo", ("1", "7"), ("8", "9"),
+                     now - timedelta(days=10))
+    for i in range(3):
+        await _swept_2v2(f"five{i}", ("5", "6"), ("8", "9"),
+                         now - timedelta(days=5, hours=i))
+    for i in range(3):
+        await _swept_2v2(f"two{i}", ("1", "2"), ("8", "9"),
+                         now - timedelta(days=2, hours=i))
+
+
+@pytest.mark.asyncio
+async def test_vault_key_ties_rank_earlier_partnership_first(test_db):
+    """Equal percentage and equal sample size fall through to the date the
+    PAIR debuted, not the date either partner did."""
+    from services.leaderboard_service import get_leaderboard_data
+    await _seed_equal_pairs_with_staggered_debuts()
+
+    data = await get_leaderboard_data("g", category="time_vault_and_key",
+                                      limit=10, timeframe="14d")
+    pairs = [tuple(sorted((p["player_id"], p["teammate_id"]))) for p in data]
+    assert pairs == [("5", "6"), ("1", "2")]
+
+
+@pytest.mark.asyncio
+async def test_draft_record_ties_rank_earlier_debut_first(test_db):
+    """Equal percentage and equal sample size fall through to the player's
+    first counted draft."""
+    from services.leaderboard_service import get_leaderboard_data
+    now = datetime.now()
+    for i in range(5):
+        await _swept_2v2(f"early{i}", ("1", "2"), ("8", "9"),
+                         now - timedelta(days=6, hours=i))
+    for i in range(5):
+        await _swept_2v2(f"late{i}", ("5", "6"), ("8", "9"),
+                         now - timedelta(days=2, hours=i))
+
+    data = await get_leaderboard_data("g", category="draft_record",
+                                      limit=10, timeframe="14d")
+    ids = [p["player_id"] for p in data]
+    # Both pairs are 5-0-0 over 5 team drafts; '1'/'2' debuted first.
+    assert set(ids[:2]) == {"1", "2"}
+    assert set(ids[2:]) == {"5", "6"}
