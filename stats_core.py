@@ -35,6 +35,9 @@ def calculate_win_percentage(wins, losses, draws=0):
     """
     Calculate win percentage from wins, losses, and draws.
 
+    A draw counts as half a win: 5-0-1 (91.7%) beats 5-1-0 (83.3%)
+    instead of tying it, but never beats 6-0-0.
+
     Args:
         wins: Number of wins
         losses: Number of losses
@@ -46,12 +49,15 @@ def calculate_win_percentage(wins, losses, draws=0):
     total_games = wins + losses + draws
     if total_games == 0:
         return 0.0
-    return (wins / total_games) * 100
+    return ((wins + 0.5 * draws) / total_games) * 100
 
 
 def calculate_team_draft_win_percentage(wins, losses, tied=0):
     """
     Calculate team draft win percentage.
+
+    A tie counts as half a win: 5-0-1 (91.7%) beats 5-1-0 (83.3%)
+    instead of tying it, but never beats 6-0-0.
 
     Args:
         wins: Number of draft wins
@@ -64,4 +70,4 @@ def calculate_team_draft_win_percentage(wins, losses, tied=0):
     total_drafts = wins + losses + tied
     if total_drafts == 0:
         return 0.0
-    return (wins / total_drafts) * 100
+    return ((wins + 0.5 * tied) / total_drafts) * 100

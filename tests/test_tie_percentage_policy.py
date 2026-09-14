@@ -1,5 +1,6 @@
 """One tie policy everywhere: percentages count tied team drafts in the
-denominator (stats_core's contract, same as /record's draws handling).
+denominator and credit each tie as half a win (stats_core's contract,
+same as /record's draws handling).
 
 Fixtures are complete sessions (teams, victory message, reported matches)
 so the test holds across both the session-metadata and ledger-fold
@@ -28,7 +29,8 @@ async def _team_session(session_id, winners_a, start):
 async def test_leaderboard_percentages_count_ties(test_db):
     from services.leaderboard_service import get_leaderboard_data
     # 19 side-A wins + 1 tie: clears the lifetime minimums (20 drafts, >=50%)
-    # and splits the policies: tie-inclusive = 19/20 = 95%, tie-exclusive = 100%.
+    # and splits the policies: half-win = 19.5/20 = 97.5%, tie-as-loss =
+    # 19/20 = 95%, tie-exclusive = 100%.
     for i in range(19):
         await _team_session(f"w{i}", winners_a=2, start=(i % 27) + 1)
     await _team_session("t", winners_a=1, start=28)
@@ -37,4 +39,4 @@ async def test_leaderboard_percentages_count_ties(test_db):
                                       limit=5, timeframe="lifetime")
     p1 = next(p for p in data if p["player_id"] == "1")
     assert p1["team_drafts_won"] == 19 and p1["team_drafts_tied"] == 1
-    assert round(p1["team_draft_win_percentage"], 1) == 95.0
+    assert round(p1["team_draft_win_percentage"], 1) == 97.5
