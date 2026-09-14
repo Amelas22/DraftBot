@@ -1,5 +1,11 @@
-"""Tests for utils.find_postable_results_channel — duplicate-named channel handling."""
-from utils import find_postable_results_channel
+"""Tests for the results-channel helpers in utils.
+
+Which channel a draft belongs in (results_channel_name_for), and resolving
+that name against a guild that has duplicates of it (find_postable_results_channel).
+"""
+from types import SimpleNamespace
+
+from utils import find_postable_results_channel, results_channel_name_for
 
 
 class _Perms:
@@ -56,3 +62,21 @@ def test_falls_back_to_first_match_when_none_postable():
     guild = _Guild([a, b])
     # No postable channel exists; preserve prior behavior (first match).
     assert find_postable_results_channel(guild, "league-draft-results") is a
+
+
+# ---- results_channel_name_for -------------------------------------------------------
+# The rule is "did this draft record into a tournament", which is exactly
+# tournament_match_id. These drafts deliberately carry NO session_type: the
+# routing used to read it, and leaving the attribute off entirely means any
+# return to that habit raises AttributeError here instead of passing silently.
+
+def test_a_linked_draft_posts_to_the_league_channel():
+    assert results_channel_name_for(
+        SimpleNamespace(tournament_match_id=81)) == "league-draft-results"
+
+
+def test_an_unlinked_draft_posts_to_the_normal_channel():
+    # The case that used to land in the league channel: a premade draft played
+    # outside the season -- named teams, no tournament match.
+    assert results_channel_name_for(
+        SimpleNamespace(tournament_match_id=None)) == "team-draft-results"
