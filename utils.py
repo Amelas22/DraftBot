@@ -876,6 +876,37 @@ async def update_draft_summary_message(bot, draft_session_id):
             print(f"Failed to update draft summary message: {e}")
 
 
+def results_channel_name_for(draft_session) -> str:
+    """Which results channel a finished draft's victory embed belongs in.
+
+    A draft belongs in the league channel when it actually records into a
+    tournament, and tournament_match_id is the only thing that makes that true
+    -- the same signal sync_decided_draft_to_tournament gates on. Keying the
+    two off one fact means the channel cannot disagree with the recording: a
+    league match in the ordinary channel is now a visible sign that it is not
+    recording, where before that failure was silent.
+
+    This used to enumerate session types, written when tournament_match_id did
+    not exist yet, and could not tell a league match from a pickup game between
+    friends who happened to name their teams. Swiss drafts move under the new
+    rule too, from the league channel to the ordinary one -- they record into
+    no tournament either. That path has been dormant since 2024, so the move is
+    intended rather than merely tolerated.
+
+    One thing that enumeration did give for free: session_type is fixed at
+    creation, so the channel it chose could never move. This key can. The link
+    nudge stays clickable for 24h, and a draft clinches at five of nine
+    pairings -- so a draft linked after it has already posted re-renders into
+    the league channel on the next report, does not find its message there, and
+    post_or_update_victory_message sends a second embed, orphaning the first.
+    Storing the channel id beside victory_message_id_results_channel (rather
+    than a bare message id, re-resolved by name every time) is what would end
+    that for good.
+    """
+    return ("league-draft-results" if draft_session.tournament_match_id is not None
+            else "team-draft-results")
+
+
 def find_postable_results_channel(guild, name):
     """Resolve a results channel by name, tolerating duplicate-named channels.
 
@@ -1045,7 +1076,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                                                 await post_or_update_victory_message(bot, session, draft_chat_channel, embed, draft_session, 'victory_message_id_draft_chat')
 
                                             # Determine the correct results channel
-                                            results_channel_name = "team-draft-results" if draft_session.session_type == "random" or draft_session.session_type == "staked" else "league-draft-results"
+                                            results_channel_name = results_channel_name_for(draft_session)
                                             results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
                                             if results_channel:
                                                 await post_or_update_victory_message(bot, session, results_channel, embed, draft_session, 'victory_message_id_results_channel')
@@ -1181,7 +1212,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                         if draft_chat_channel:
                             await post_or_update_victory_message(bot, session, draft_chat_channel, embeds, draft_session, 'victory_message_id_draft_chat', view=settle_view)
 
-                        results_channel_name = "team-draft-results" if draft_session.session_type == "random" or draft_session.session_type == "staked" else "league-draft-results"
+                        results_channel_name = results_channel_name_for(draft_session)
                         results_channel = find_postable_results_channel(guild, results_channel_name)
                         if results_channel:
                             await post_or_update_victory_message(bot, session, results_channel, embeds, draft_session, 'victory_message_id_results_channel', view=settle_view)
@@ -1235,7 +1266,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                         await post_or_update_victory_message(bot, session, draft_chat_channel, embeds, draft_session, 'victory_message_id_draft_chat', view=settle_view)
 
                     # Determine the correct results channel
-                    results_channel_name = "team-draft-results" if draft_session.session_type == "random" or draft_session.session_type == "staked" else "league-draft-results"
+                    results_channel_name = results_channel_name_for(draft_session)
                     results_channel = find_postable_results_channel(guild, results_channel_name)
                     if results_channel:
                         await post_or_update_victory_message(bot, session, results_channel, embeds, draft_session, 'victory_message_id_results_channel', view=settle_view)
@@ -2701,7 +2732,13 @@ async def re_register_views(bot):
 
             # Re-register view in results channel (if different message)
             if staked_session.victory_message_id_results_channel:
-                results_channel_name = "team-draft-results"
+                # The same rule that put the message there. Hardcoding the team
+                # channel was safe only while session_type decided the routing,
+                # which guaranteed staked drafts landed there; now a linked
+                # staked draft posts to the league channel, and a hardcode would
+                # look for its message in the wrong one and quietly not restore
+                # the settle button after a restart.
+                results_channel_name = results_channel_name_for(staked_session)
                 guild = bot.get_guild(int(staked_session.guild_id))
                 if guild:
                     results_channel = discord.utils.get(guild.text_channels, name=results_channel_name)
