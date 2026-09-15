@@ -173,6 +173,19 @@ async def create_rooms_and_pairings_with_fallback(
             bot, guild, session_id, session_type=session_type
         )
         if not result:
+            # Look again rather than trust the reading taken before the call.
+            # Creation is serialised per draft, so a caller that lost the race
+            # spent the call waiting while the winner built the draft and
+            # committed: by the time False comes back, the check above is stale.
+            # False here means "someone else already did it", not "it did not
+            # happen" -- and the pre-call check cannot tell the difference,
+            # because when it ran the rooms genuinely did not exist yet.
+            after = await DraftSession.get_by_session_id(session_id)
+            if after is not None and after.rooms_created_at is not None:
+                if logger:
+                    logger.info(f"Rooms for session {session_id} were created by a "
+                                f"concurrent run; nothing left to do")
+                return True
             if logger:
                 logger.warning(f"create_rooms_pairings returned False for session {session_id}")
             if channel:

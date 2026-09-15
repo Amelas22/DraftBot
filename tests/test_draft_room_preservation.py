@@ -305,3 +305,42 @@ async def test_a_played_out_draft_is_not_given_rooms(test_db):
     assert not tried, "created rooms for a draft that had already finished"
     assert ok is True, "nothing left to do is not a failure to report"
     assert said == "", f"it announced something about a finished draft: {said!r}"
+
+
+# The pre-call check above is not enough once creation is serialised. A caller
+# that loses the race reads "no rooms yet", then BLOCKS on the creation lock
+# while the winner builds the draft, and is handed False only after the winner
+# has committed. Its pre-call reading is stale by then, so the wrapper has to
+# look again before calling it a failure -- which is what _on_end_draft already
+# does at its own call site.
+
+async def test_the_loser_of_a_creation_race_is_not_reported_as_a_failure(test_db):
+    """Losing the race is success: the draft it wanted does exist."""
+    import services.draft_setup_manager as dsm
+    from database.db_session import AsyncSessionLocal
+    from sqlalchemy import select as _select
+
+    await seed_session(session_id=SESSION_ID, stage="pairings",
+                       rooms_created_at=None)
+    channel = AsyncMock()
+
+    async def wins_elsewhere_then_returns_false(*a, **k):
+        """What the loser observes: the winner committed while it waited."""
+        async with AsyncSessionLocal() as s:
+            row = await s.scalar(
+                _select(DraftSession).filter_by(session_id=SESSION_ID))
+            row.rooms_created_at = _dt.now()
+            await s.commit()
+        return False
+
+    view = MagicMock()
+    view.create_rooms_pairings = AsyncMock(
+        side_effect=wins_elsewhere_then_returns_false)
+    with patch.dict("sys.modules", {"views": MagicMock(PersistentView=view)}):
+        ok = await dsm.create_rooms_and_pairings_with_fallback(
+            MagicMock(), MagicMock(), channel, SESSION_ID)
+
+    said = " ".join(str(c.args[0]) for c in channel.send.await_args_list)
+    assert "Could not create rooms" not in said, (
+        f"told players creation failed for a draft that exists: {said!r}")
+    assert ok is True, "the rooms exist, so the wrapper's job is done"
