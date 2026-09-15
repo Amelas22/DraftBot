@@ -215,6 +215,7 @@ def _gate_the_first_run(monkeypatch):
     real = views.calculate_pairings
     gate = asyncio.Event()
     parked = asyncio.Event()
+    contended = asyncio.Event()
     first = {"seen": False}
 
     async def gated(session, db_session):
@@ -222,10 +223,16 @@ def _gate_the_first_run(monkeypatch):
             first["seen"] = True
             parked.set()
             await gate.wait()
+        else:
+            # A second run got past the read AND the rooms_created_at check
+            # while the first is parked and uncommitted -- the exact overlap
+            # this test exists to create. Only reachable when nothing is
+            # serialising the two, so the caller waits on it with a timeout.
+            contended.set()
         return await real(session, db_session)
 
     monkeypatch.setattr(views, "calculate_pairings", gated)
-    return gate, parked
+    return gate, parked, contended
 
 
 @pytest.mark.asyncio
@@ -238,7 +245,7 @@ async def test_two_overlapping_runs_build_the_draft_once(monkeypatch, test_db):
     """
     await _seed_race_draft()
     posted = _stub_everything_but_the_race(monkeypatch)
-    gate, parked = _gate_the_first_run(monkeypatch)
+    gate, parked, contended = _gate_the_first_run(monkeypatch)
 
     guild = SimpleNamespace(id=1, get_member=lambda uid: SimpleNamespace(
         id=uid, display_name=str(uid)), get_channel=lambda cid: _Chan())
@@ -250,12 +257,17 @@ async def test_two_overlapping_runs_build_the_draft_once(monkeypatch, test_db):
 
     second = asyncio.create_task(
         views.PersistentView.create_rooms_pairings(bot, guild, RACE_ID))
-    # Let the second run get as far as it can -- through its read on broken
-    # code, or up to the lock once one exists -- before releasing the first.
-    for _ in range(20):
-        await asyncio.sleep(0)
+    # Wait for the second run to prove it is past its own read -- not a fixed
+    # number of event-loop turns, which only LOOKS deterministic and would let
+    # this pass on unserialised code whenever that read happened to land after
+    # the first run committed. Timing out is the serialised outcome: the second
+    # run cannot get past its read, because it is still waiting for the lock.
+    try:
+        await asyncio.wait_for(contended.wait(), timeout=2)
+    except asyncio.TimeoutError:
+        pass
     gate.set()
-    await asyncio.wait_for(asyncio.gather(first, second), timeout=15)
+    outcomes = await asyncio.wait_for(asyncio.gather(first, second), timeout=15)
 
     async with AsyncSessionLocal() as s:
         rows = (await s.scalars(select(MatchResult).where(
@@ -267,3 +279,8 @@ async def test_two_overlapping_runs_build_the_draft_once(monkeypatch, test_db):
     assert posted.await_count == 1, (
         f"pairings were posted {posted.await_count} times; every extra post is "
         f"a second set of buttons players can click")
+    # Exactly one run built the draft and exactly one declined. Without this a
+    # pair of swallowed exceptions -- create_rooms_pairings turns any exception
+    # into False -- would leave no rows and satisfy the count assertions.
+    assert sorted(outcomes, key=bool) == [False, True], (
+        f"expected one run to build the draft and one to decline, got {outcomes}")
