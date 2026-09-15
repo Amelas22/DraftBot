@@ -421,8 +421,8 @@ async def get_head_to_head_stats(user1_id, user2_id, user1_display_name=None, us
                 "wins": won,
                 "losses": losses,
                 "draws": drawn,
-                # Team-draft outcome: ties count in the denominator
-                # (stats_core owns the formula, same as /stats).
+                # Team-draft outcome: ties count in the denominator and
+                # as half a win (stats_core owns the formula, same as /stats).
                 "win_percentage": calculate_team_draft_win_percentage(won, losses, drawn),
             }
 

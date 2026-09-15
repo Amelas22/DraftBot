@@ -57,6 +57,14 @@ class SessionRecord:
     participants: frozenset
     teammates: frozenset
 
+    @property
+    def sort_time(self) -> datetime:
+        """THE chronological key for a record. An undated session sorts
+        earliest rather than last, so `fetch_session_records` and every
+        consumer that leans on fold order agree on one convention instead
+        of each restating it."""
+        return self.started_at or datetime.min
+
 
 def _is_completed(session_row) -> bool:
     """Draft-level completion predicate (spec, verbatim policy)."""
@@ -339,7 +347,7 @@ def _fold_grouped(by_session: dict, player_id: str = None, since=None) -> list[S
                 teammates=frozenset(_compute_teammates(
                     pid, participants, sides, rec["opponents"])),
             ))
-    records.sort(key=lambda r: (r.started_at or datetime.min, r.session_id))
+    records.sort(key=lambda r: (r.sort_time, r.session_id))
     return records
 
 

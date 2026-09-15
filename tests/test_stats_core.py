@@ -63,10 +63,10 @@ class TestCalculateWinPercentage:
         assert result == 50.0
 
     def test_with_draws(self):
-        """Test win percentage with draws included"""
-        # 5 wins, 3 losses, 2 draws = 5/10 = 50%
+        """Test win percentage with draws counted as half a win"""
+        # 5 wins, 3 losses, 2 draws = (5 + 1)/10 = 60%
         result = calculate_win_percentage(wins=5, losses=3, draws=2)
-        assert result == 50.0
+        assert result == 60.0
 
     def test_no_games_played(self):
         """Test that 0 games returns 0%"""
@@ -80,9 +80,9 @@ class TestCalculateWinPercentage:
         assert abs(result - 21.875) < 0.001
 
     def test_only_draws(self):
-        """Test that only draws returns 0%"""
+        """Test that only draws returns 50% (each draw is half a win)"""
         result = calculate_win_percentage(wins=0, losses=0, draws=5)
-        assert result == 0.0
+        assert result == 50.0
 
     def test_one_win_many_losses(self):
         """Test asymmetric record"""
@@ -110,10 +110,19 @@ class TestCalculateTeamDraftWinPercentage:
         assert result == 50.0
 
     def test_with_ties(self):
-        """Test win percentage with tied drafts"""
-        # 3 wins, 2 losses, 1 tie = 3/6 = 50%
+        """Test win percentage with tied drafts counted as half a win"""
+        # 3 wins, 2 losses, 1 tie = 3.5/6 = 58.33%
         result = calculate_team_draft_win_percentage(wins=3, losses=2, tied=1)
-        assert result == 50.0
+        expected = (3.5 / 6) * 100
+        assert abs(result - expected) < 0.001
+
+    def test_tie_ranks_between_loss_and_win(self):
+        """5-0-1 beats 5-1-0 (a draw is better than a loss) but loses
+        to 6-0-0 (a draw is worse than a win)."""
+        five_oh_one = calculate_team_draft_win_percentage(wins=5, losses=0, tied=1)
+        five_one_oh = calculate_team_draft_win_percentage(wins=5, losses=1, tied=0)
+        six_oh_oh = calculate_team_draft_win_percentage(wins=6, losses=0, tied=0)
+        assert five_one_oh < five_oh_one < six_oh_oh
 
     def test_no_drafts_played(self):
         """Test that 0 drafts returns 0%"""
@@ -121,9 +130,9 @@ class TestCalculateTeamDraftWinPercentage:
         assert result == 0.0
 
     def test_only_ties(self):
-        """Test that only ties returns 0%"""
+        """Test that only ties returns 50% (each tie is half a win)"""
         result = calculate_team_draft_win_percentage(wins=0, losses=0, tied=5)
-        assert result == 0.0
+        assert result == 50.0
 
     def test_tinylegs_actual_stats(self):
         """Test with TinyLegs' actual stats: 3 wins, 11 losses, 0 ties"""
@@ -134,9 +143,9 @@ class TestCalculateTeamDraftWinPercentage:
 
     def test_fractional_percentage_with_ties(self):
         """Test fractional percentage with ties"""
-        # 7 wins, 8 losses, 2 ties = 7/17 = 41.176...%
+        # 7 wins, 8 losses, 2 ties = (7 + 1)/17 = 47.058...%
         result = calculate_team_draft_win_percentage(wins=7, losses=8, tied=2)
-        expected = (7 / 17) * 100
+        expected = (8 / 17) * 100
         assert abs(result - expected) < 0.001
 
 

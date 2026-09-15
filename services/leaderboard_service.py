@@ -133,6 +133,20 @@ def get_minimum_requirements(timeframe):
             "partnership_drafts": 8
         }
 
+def _ranked_by_rate(entries, rate_key, sample_key):
+    """THE ranking rule for the percentage boards: rate desc, then the
+    better-evidenced rate (larger sample), then the earlier debut.
+
+    The rate is what the board is about; the sample says which of two equal
+    rates is better evidenced; the debut settles the rest, so equal records
+    keep a fixed order instead of reshuffling as unrelated drafts land.
+    Entries that debuted in the same draft still tie -- no date separates
+    them. Same shape as the SR ladder's sort below.
+    """
+    return sorted(entries, key=lambda e: (-e[rate_key], -e[sample_key],
+                                          e["first_draft_at"]))
+
+
 def _assemble_players_data(snapshot, start_date) -> dict:
     """Pure fold + aggregation for one (guild, timeframe) view: per-player
     match/draft/team tallies plus the teammate (Vault/Key) pass. Runs in a
@@ -172,10 +186,14 @@ def _assemble_players_data(snapshot, start_date) -> dict:
             "team_drafts_won": team["won"],
             "team_drafts_tied": team["tied"],
             "team_drafts_lost": team["lost"],
-            # Tie-inclusive denominator, same policy as /stats and /record
-            # (stats_core owns the formula).
+            # Ties count as half a win over a tie-inclusive denominator,
+            # same policy as /stats and /record (stats_core owns the formula).
             "team_draft_win_percentage": calculate_team_draft_win_percentage(
                 team["won"], team["lost"], team["tied"]),
+            # Debut within this window -- the percentage boards' final
+            # tiebreak. player_records is in fold order (see above), so the
+            # first one is the earliest.
+            "first_draft_at": player_records[0].sort_time,
             "teammate_win_rates": {}
         }
 
@@ -197,6 +215,11 @@ def _assemble_players_data(snapshot, start_date) -> dict:
                     "drafts_tied": 0,
                     "win_percentage": 0,
                     "teammate_name": None,  # filled by build_players_data
+                    # When this PAIR first drafted together -- not either
+                    # partner's own debut, which is the irrelevant fact
+                    # iteration order would otherwise rank them by. The
+                    # record that creates the entry is the earliest one.
+                    "first_draft_at": r.sort_time,
                 })
                 entry["drafts_played"] += 1
                 entry[f"drafts_{outcome}"] += 1
@@ -314,14 +337,15 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20,
     if category == "draft_record":
         filtered_players = [p for p in players_list if p["drafts_played"] >= min_drafts and p["team_draft_win_percentage"] >= 50]
         logger.info(f"Found {len(filtered_players)} players with at least {min_drafts} drafts for draft_record")
-        # Sort by team draft win percentage (descending)
-        sorted_players = sorted(filtered_players, key=lambda p: p["team_draft_win_percentage"], reverse=True)
+        # A 20-0 record beats a 10-0 record.
+        sorted_players = _ranked_by_rate(
+            filtered_players, "team_draft_win_percentage", "team_drafts_played")
     
     elif category == "match_win":
         filtered_players = [p for p in players_list if p["completed_matches"] >= min_matches and p["match_win_percentage"] >= 50]
         logger.info(f"Found {len(filtered_players)} players with at least {min_matches} completed matches for match_win")
-        # Sort by match win percentage (descending)
-        sorted_players = sorted(filtered_players, key=lambda p: p["match_win_percentage"], reverse=True)
+        sorted_players = _ranked_by_rate(
+            filtered_players, "match_win_percentage", "completed_matches")
     
     elif category == "drafts_played":
         # Sort by number of drafts played (descending)
@@ -344,8 +368,9 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20,
                 seen_pairs.add(pair_key)
 
                 # Ties are drafts played together: they count toward the
-                # sample-size gate and the denominator (one tie policy,
-                # already applied where win_percentage was stored above).
+                # sample-size gate and the denominator, and as half a win
+                # in the percentage (one tie policy, already applied where
+                # win_percentage was stored above).
                 if teammate_data["drafts_played"] >= min_partnership_drafts:
                     win_percentage = teammate_data["win_percentage"]
                     if win_percentage >= 50:
@@ -358,7 +383,8 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20,
                             "drafts_won": teammate_data["drafts_won"],
                             "drafts_lost": teammate_data["drafts_lost"],
                             "drafts_tied": teammate_data["drafts_tied"],
-                            "win_percentage": win_percentage
+                            "win_percentage": win_percentage,
+                            "first_draft_at": teammate_data["first_draft_at"],
                         }
 
                         best_partnerships.append(partnership)
@@ -366,16 +392,17 @@ async def get_leaderboard_data(guild_id, category="draft_record", limit=20,
         logger.info(f"Found {total_relationships} total teammate relationships")
         logger.info(f"Found {len(best_partnerships)} partnerships with at least {min_partnership_drafts} drafts together")
         
-        # Sort partnerships by win percentage
-        sorted_players = sorted(best_partnerships, key=lambda p: p["win_percentage"], reverse=True)
+        # 5-0-0 beats 3-0-0; equal records rank the longer-standing pair.
+        sorted_players = _ranked_by_rate(
+            best_partnerships, "win_percentage", "drafts_played")
     
     elif category == "hot_streak":
         # The 7-day window is already applied: PINNED_TIMEFRAMES pinned it at
         # the top of this function, so players_list is the 7d fold.
         filtered_players = [p for p in players_list if p["completed_matches"] >= 9 and p["match_win_percentage"] > 50]
         logger.info(f"Found {len(filtered_players)} players with at least 9 completed matches for hot_streak")
-        # Sort by match win percentage
-        sorted_players = sorted(filtered_players, key=lambda p: p["match_win_percentage"], reverse=True)
+        sorted_players = _ranked_by_rate(
+            filtered_players, "match_win_percentage", "completed_matches")
 
     # longest_win_streak / perfect_streak / quiz_points / trophy_quiz_points /
     # draft_win_streak are handled by the dedicated_query_categories dispatch
