@@ -15,9 +15,19 @@ alone:
   2. Creation is re-enterable, so the retry that follows completes the draft
      instead of building a second copy of it beside the first.
 """
-import pytest
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
-from conftest import make_channel_harness
+import pytest
+from sqlalchemy import select
+
+import views
+from database.db_session import AsyncSessionLocal
+from models.draft_session import DraftSession
+from models.match import MatchResult
+
+from conftest import make_channel_harness, seed_session
 
 VOICE_ON = {"voice_channels": True}
 
@@ -116,3 +126,198 @@ async def test_an_identically_named_channel_this_draft_does_not_own_is_not_adopt
 
     assert [c["name"] for c in guild.text_calls] == ["Red-Team-Chat-abc1"], (
         "the other draft's channel was adopted instead of creating our own")
+
+
+# --- Property 3: one run at a time -----------------------------------------
+#
+# The two properties above concern a retry that follows a FAILED run: they are
+# about time passing between attempts. Neither says anything about two attempts
+# overlapping, and property 1 is what makes that possible -- writing the marker
+# after the work means a run in progress is, by construction, indistinguishable
+# from one that never started.
+#
+# Production has two callers that can both fire within seconds: _on_end_draft
+# when the draft finishes, and _handle_ownership_loss_with_pairings when a
+# reconnecting manager finds links already distributed. Both entered for the
+# same draft on 2026-09-15 and each built the draft in full -- two sets of
+# match_results, two sets of pairing messages.
+
+RACE_ID = "race-1"
+
+
+class _Chan:
+    id = 111
+
+    async def send(self, *a, **k):
+        return SimpleNamespace(id=222)
+
+
+async def _seed_race_draft():
+    await seed_session(session_id=RACE_ID, guild="1", stype="random",
+                       stage="teams",
+                       teams=(["10", "11", "12"], ["20", "21", "22"]),
+                       sign_ups={str(i): f"p{i}" for i in
+                                 (10, 11, 12, 20, 21, 22)})
+    async with AsyncSessionLocal() as s:
+        row = await s.scalar(select(DraftSession).filter_by(session_id=RACE_ID))
+        row.draft_channel_id = "999"
+        row.message_id = "888"
+        await s.commit()
+
+
+def _stub_everything_but_the_race(monkeypatch):
+    """Fake every edge except the database, whose visibility IS the subject.
+
+    Channel creation is stubbed rather than harnessed: the tests above already
+    cover it, and what this one asserts -- how many times the draft got built --
+    is counted in rows and pairing posts, not channels.
+    """
+    import livedrafts
+
+    async def fake_create_team_channel(self, guild, team_name, *a, **k):
+        if team_name == views.SHARED_CHAT_TEAM:
+            self.draft_chat_channel = _Chan.id
+        return _Chan.id
+
+    monkeypatch.setattr(views.PersistentView, "create_team_channel",
+                        fake_create_team_channel)
+    monkeypatch.setattr(views, "get_config",
+                        lambda gid: {"categories": {}, "roles": {}, "features": {}})
+    monkeypatch.setattr(views, "resolve_draft_category", AsyncMock(return_value=None))
+    monkeypatch.setattr(views, "_draft_rooms_needed", lambda *a, **k: 3)
+    monkeypatch.setattr(views, "generate_draft_summary_embed",
+                        AsyncMock(return_value=(SimpleNamespace(), None)))
+    monkeypatch.setattr(views, "safe_pin", AsyncMock())
+    monkeypatch.setattr(views, "update_player_stats_for_draft", AsyncMock())
+    monkeypatch.setattr(views, "update_last_draft_timestamp", AsyncMock())
+    monkeypatch.setattr(livedrafts, "create_live_draft_summary", AsyncMock())
+
+    posted = AsyncMock()
+    monkeypatch.setattr(views, "post_pairings", posted)
+    return posted
+
+
+def _gate_the_first_run(monkeypatch):
+    """Park the FIRST run inside its transaction, before it writes anything.
+
+    A plain asyncio.gather would leave the interleaving to chance, so the test
+    could pass on broken code and be flaky forever after. Parking the first run
+    at a known point makes the overlap the test's own doing: run two reads the
+    session while run one is provably mid-transaction and uncommitted.
+
+    The park is BEFORE calculate_pairings rather than during channel creation on
+    purpose -- a run holding SQLite's write lock while parked would make the
+    second run block on the database rather than on the bug under test.
+    """
+    real = views.calculate_pairings
+    gate = asyncio.Event()
+    parked = asyncio.Event()
+    contended = asyncio.Event()
+    first = {"seen": False}
+
+    async def gated(session, db_session):
+        if not first["seen"]:
+            first["seen"] = True
+            parked.set()
+            await gate.wait()
+        else:
+            # A second run got past the read AND the rooms_created_at check
+            # while the first is parked and uncommitted -- the exact overlap
+            # this test exists to create. Only reachable when nothing is
+            # serialising the two, so the caller waits on it with a timeout.
+            contended.set()
+        return await real(session, db_session)
+
+    monkeypatch.setattr(views, "calculate_pairings", gated)
+    return gate, parked, contended
+
+
+def _count_concurrent_builders(monkeypatch):
+    """Record the most runs that were ever inside the build at once.
+
+    Counting beats inferring the answer from rows and post counts. Those are
+    downstream of serialisation, so they can come out right for reasons that
+    have nothing to do with it -- a second run that arrives late and is turned
+    away by the marker, or one that overlaps and then throws, both leave the
+    tidy numbers of a draft built once. This watches the thing the lock is
+    supposed to guarantee, and nothing else.
+    """
+    real = views.PersistentView._create_rooms_pairings_unlocked.__func__
+    seen = {"now": 0, "most": 0, "total": 0}
+
+    async def counted(cls, *a, **k):
+        seen["now"] += 1
+        seen["total"] += 1
+        seen["most"] = max(seen["most"], seen["now"])
+        try:
+            return await real(cls, *a, **k)
+        finally:
+            seen["now"] -= 1
+
+    monkeypatch.setattr(views.PersistentView, "_create_rooms_pairings_unlocked",
+                        classmethod(counted))
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_two_overlapping_runs_build_the_draft_once(monkeypatch, test_db):
+    """Two callers entering together must produce ONE draft, not two.
+
+    Fails without a lock with 18 match_results and two pairing posts: every
+    match exists twice, which is what makes update_pairings_posting's
+    scalar_one_or_none raise MultipleResultsFound on every reported result.
+    """
+    await _seed_race_draft()
+    posted = _stub_everything_but_the_race(monkeypatch)
+    gate, parked, contended = _gate_the_first_run(monkeypatch)
+    builders = _count_concurrent_builders(monkeypatch)
+
+    guild = SimpleNamespace(id=1, get_member=lambda uid: SimpleNamespace(
+        id=uid, display_name=str(uid)), get_channel=lambda cid: _Chan())
+    bot = SimpleNamespace(get_channel=lambda cid: None)
+
+    first = asyncio.create_task(
+        views.PersistentView.create_rooms_pairings(bot, guild, RACE_ID))
+    await asyncio.wait_for(parked.wait(), timeout=5)
+
+    second = asyncio.create_task(
+        views.PersistentView.create_rooms_pairings(bot, guild, RACE_ID))
+    # Wait for the second run to prove it is past its own read -- not a fixed
+    # number of event-loop turns, which only LOOKS deterministic and would let
+    # this pass on unserialised code whenever that read happened to land after
+    # the first run committed. Timing out is the serialised outcome: the second
+    # run cannot get past its read, because it is still waiting for the lock.
+    try:
+        await asyncio.wait_for(contended.wait(), timeout=2)
+    except asyncio.TimeoutError:
+        pass
+    gate.set()
+    outcomes = await asyncio.wait_for(asyncio.gather(first, second), timeout=15)
+
+    async with AsyncSessionLocal() as s:
+        rows = (await s.scalars(select(MatchResult).where(
+            MatchResult.session_id == RACE_ID))).all()
+
+    # The invariant itself, asserted rather than inferred. The three checks
+    # below describe a draft that was built once; only this one says the two
+    # runs were actually kept apart, which is what the lock is for.
+    assert builders["most"] == 1, (
+        f"{builders['most']} runs were inside the build at the same time")
+    # ...and that both runs really did get in, one after the other. A second run
+    # that never arrived would satisfy every other check here while testing
+    # nothing at all, and would look identical to a second run held off properly.
+    assert builders["total"] == 2, (
+        f"only {builders['total']} run(s) reached the build; the overlap this "
+        f"test exists to create did not happen")
+
+    numbers = sorted(r.match_number for r in rows)
+    assert numbers == [1, 2, 3, 4, 5, 6, 7, 8, 9], (
+        f"the draft was built more than once: match numbers {numbers}")
+    assert posted.await_count == 1, (
+        f"pairings were posted {posted.await_count} times; every extra post is "
+        f"a second set of buttons players can click")
+    # One run built the draft and one declined. create_rooms_pairings turns any
+    # exception into False, so without this a run that overlapped and then threw
+    # would look the same from here as one that was turned away.
+    assert sorted(outcomes, key=bool) == [False, True], (
+        f"expected one run to build the draft and one to decline, got {outcomes}")

@@ -104,6 +104,33 @@ def _draft_rooms_needed(guild, config) -> int:
     return rooms_needed(voice_here)
 
 
+_ROOMS_CREATION_LOCKS = {}
+
+
+def rooms_creation_lock(session_id):
+    """One lock per draft, so its rooms and pairings are built exactly once.
+
+    rooms_created_at is written at the END of the creating transaction, so that
+    a run which dies partway leaves it NULL and the next attempt finishes the
+    draft. That is what makes a half-created draft recoverable, and it is why
+    the marker cannot also keep two SIMULTANEOUS runs apart: nothing is
+    committed while the rooms are being made, so a second caller reads a
+    session that looks untouched. Two callers do arrive together -- see
+    _on_end_draft and _handle_ownership_loss_with_pairings.
+
+    Serialising them in memory is enough for one bot process, and it keeps the
+    recovery above intact: a restart leaves no lock and no marker, so the retry
+    still runs. A second process would need a durable claim instead.
+
+    Check-then-set with no await between is atomic under asyncio, which is what
+    makes this safe to build lazily (report_lock, same pattern).
+    """
+    lock = _ROOMS_CREATION_LOCKS.get(session_id)
+    if lock is None:
+        lock = _ROOMS_CREATION_LOCKS[session_id] = asyncio.Lock()
+    return lock
+
+
 class PersistentView(discord.ui.View):
 
     # AUTO_PAIRINGS_TASKS = {}  # session_id -> task
@@ -1534,6 +1561,15 @@ class PersistentView(discord.ui.View):
     async def create_rooms_pairings(cls, bot, guild, session_id, interaction=None, session_type=None):
         """Class method version of creating rooms and posting pairings"""
         logger.info("Starting create_rooms_pairings for session_id={}, session_type={}", session_id, session_type)
+        async with rooms_creation_lock(session_id):
+            return await cls._create_rooms_pairings_unlocked(
+                bot, guild, session_id, interaction, session_type)
+
+    @classmethod
+    async def _create_rooms_pairings_unlocked(cls, bot, guild, session_id, interaction=None, session_type=None):
+        """The body of create_rooms_pairings. Call that one, never this: it is
+        only safe to run one at a time per draft, and the lock is there.
+        """
         try:
             async with AsyncSessionLocal() as db_session:
                 async with db_session.begin():

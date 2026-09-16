@@ -173,6 +173,17 @@ async def create_rooms_and_pairings_with_fallback(
             bot, guild, session_id, session_type=session_type
         )
         if not result:
+            # A caller that lost the creation race also lands here, because
+            # False conflates "someone else already built it" with "it failed",
+            # and the pre-call check above is stale by then -- it ran before a
+            # call that spent ten seconds waiting for the lock. Re-reading the
+            # session here does NOT separate the two: create_rooms_pairings
+            # commits rooms_created_at BEFORE posting the pairings, so a run
+            # whose post_pairings threw also returns False with the marker set,
+            # and treating that as success would hide missing pairings. Telling
+            # the loser of a race to press the button is the milder mistake.
+            # Distinguishing them properly needs a return value that says which
+            # happened rather than a bare bool.
             if logger:
                 logger.warning(f"create_rooms_pairings returned False for session {session_id}")
             if channel:
