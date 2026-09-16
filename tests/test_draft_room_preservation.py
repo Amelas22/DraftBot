@@ -247,20 +247,14 @@ async def test_regeneration_aborts_if_the_draft_committed_first(test_db):
 # button was deleted when the rooms were made. Testing the wrapper rather than
 # one caller is what makes this cover both of them.
 
-async def _fallback_with_rooms(rooms_created_at, stage="pairings", victory=None,
-                               inner=None):
-    """Run the shared wrapper against a session with/without rooms.
-
-    `inner` stands in for create_rooms_pairings; the default is what it does
-    when asked to build a draft twice. Pass one with a side effect to model a
-    run that loses the creation race.
-    """
+async def _fallback_with_rooms(rooms_created_at, stage="pairings", victory=None):
+    """Run the shared wrapper against a session with/without rooms."""
     import services.draft_setup_manager as dsm
 
     await seed_session(session_id=SESSION_ID, stage=stage, victory=victory,
                        rooms_created_at=rooms_created_at)
     channel = AsyncMock()
-    inner = inner or AsyncMock(return_value=False)
+    inner = AsyncMock(return_value=False)   # what create_rooms_pairings does twice
     view = MagicMock()
     view.create_rooms_pairings = inner
     with patch.dict("sys.modules", {"views": MagicMock(PersistentView=view)}):
@@ -311,33 +305,3 @@ async def test_a_played_out_draft_is_not_given_rooms(test_db):
     assert not tried, "created rooms for a draft that had already finished"
     assert ok is True, "nothing left to do is not a failure to report"
     assert said == "", f"it announced something about a finished draft: {said!r}"
-
-
-# The pre-call check above is not enough once creation is serialised. A caller
-# that loses the race reads "no rooms yet", then BLOCKS on the creation lock
-# while the winner builds the draft, and is handed False only after the winner
-# has committed. Its pre-call reading is stale by then, so the wrapper has to
-# look again before calling it a failure -- which is what _on_end_draft already
-# does at its own call site.
-
-async def test_the_loser_of_a_creation_race_is_not_reported_as_a_failure(test_db):
-    """Losing the race is success: the draft it wanted does exist."""
-    from database.db_session import AsyncSessionLocal
-    from sqlalchemy import select
-
-    async def wins_elsewhere_then_returns_false(*a, **k):
-        """What the loser observes: the winner committed while it waited."""
-        async with AsyncSessionLocal() as s:
-            row = await s.scalar(
-                select(DraftSession).filter_by(session_id=SESSION_ID))
-            row.rooms_created_at = _dt.now()
-            await s.commit()
-        return False
-
-    ok, tried, said = await _fallback_with_rooms(
-        None, inner=AsyncMock(side_effect=wins_elsewhere_then_returns_false))
-
-    assert tried, "the wrapper never even attempted creation"
-    assert "Could not create rooms" not in said, (
-        f"told players creation failed for a draft that exists: {said!r}")
-    assert ok is True, "the rooms exist, so the wrapper's job is done"

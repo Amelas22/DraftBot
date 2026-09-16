@@ -173,19 +173,17 @@ async def create_rooms_and_pairings_with_fallback(
             bot, guild, session_id, session_type=session_type
         )
         if not result:
-            # Look again rather than trust the reading taken before the call.
-            # Creation is serialised per draft, so a caller that lost the race
-            # spent the call waiting while the winner built the draft and
-            # committed: by the time False comes back, the check above is stale.
-            # False here means "someone else already did it", not "it did not
-            # happen" -- and the pre-call check cannot tell the difference,
-            # because when it ran the rooms genuinely did not exist yet.
-            after = await DraftSession.get_by_session_id(session_id)
-            if after is not None and after.rooms_created_at is not None:
-                if logger:
-                    logger.info(f"Rooms for session {session_id} were created by a "
-                                f"concurrent run; nothing left to do")
-                return True
+            # A caller that lost the creation race also lands here, because
+            # False conflates "someone else already built it" with "it failed",
+            # and the pre-call check above is stale by then -- it ran before a
+            # call that spent ten seconds waiting for the lock. Re-reading the
+            # session here does NOT separate the two: create_rooms_pairings
+            # commits rooms_created_at BEFORE posting the pairings, so a run
+            # whose post_pairings threw also returns False with the marker set,
+            # and treating that as success would hide missing pairings. Telling
+            # the loser of a race to press the button is the milder mistake.
+            # Distinguishing them properly needs a return value that says which
+            # happened rather than a bare bool.
             if logger:
                 logger.warning(f"create_rooms_pairings returned False for session {session_id}")
             if channel:
