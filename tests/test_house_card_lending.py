@@ -280,3 +280,75 @@ async def test_an_unreachable_serve_reports_nothing_outstanding_not_a_crash():
     client = _client(positions=AsyncMock(return_value=None))
     with patch.object(mrs, "get_client", return_value=client):
         assert await mrs.outstanding_with_house(MTGO_USER, CARD) == 0
+
+
+# ---------------------------------------------------------------------------
+# batched orders — MTGO caps a trade at a few hundred cards, so an order above
+# the serve's limit comes back as several jobs instead of one
+#
+# The invariant these guard: every card of the order is recorded against SOME job.
+# A batch booked against no job is a player credited for less than they handed over
+# (deposit) or tix stranded in in-flight with nothing able to resolve them (withdraw).
+# ---------------------------------------------------------------------------
+def _batched(*sizes, kind="receive"):
+    """A serve batched response: no top-level id, one entry per trade."""
+    return {"batched": True, "batchCount": len(sizes),
+            "batches": [{"id": f"b{i}", "give": [] if kind == "receive" else [{"qty": n}],
+                         "receive": [{"qty": n}] if kind == "receive" else []}
+                        for i, n in enumerate(sizes)]}
+
+
+def test_a_single_job_books_the_amount_the_caller_asked_for():
+    """Not re-derived from the response: a thin body must not book zero."""
+    assert mrs._jobs_from({"id": "job-1"}, 4) == [("job-1", 4)]
+
+
+def test_a_batched_response_yields_every_job_with_its_own_share():
+    assert mrs._jobs_from(_batched(300, 300, 100), 700) == [("b0", 300), ("b1", 300), ("b2", 100)]
+
+
+def test_a_split_that_loses_cards_is_refused_outright():
+    """700 asked, 600 across the batches -> 100 would be recorded against no job at all."""
+    assert mrs._jobs_from(_batched(300, 300), 700) == []
+
+
+def test_a_response_with_no_id_and_no_batches_is_refused():
+    """The serve omits the top-level id when it splits; anything unrecognised must not
+    silently become 'one job for the whole order'."""
+    assert mrs._jobs_from({"batched": True, "batches": []}, 700) == []
+    assert mrs._jobs_from({}, 700) == []
+    assert mrs._jobs_from(None, 700) == []
+
+
+def test_started_hides_job_id_once_an_order_splits():
+    """A caller still written against one id must break loudly, not book one batch and
+    silently drop the rest."""
+    one = mrs._started([("j1", 4)])
+    assert one["job_id"] == "j1" and one["jobs"] == [{"id": "j1", "n": 4}]
+    many = mrs._started([("b0", 300), ("b1", 100)])
+    assert "job_id" not in many
+    assert many["jobs"] == [{"id": "b0", "n": 300}, {"id": "b1", "n": 100}]
+
+
+@pytest.mark.asyncio
+async def test_a_batched_borrow_records_one_job_per_batch(test_db):
+    client = _client(borrow=AsyncMock(return_value=_batched(300, 120, kind="give")))
+    p1, p2 = _serve(client)
+    with p1, p2:
+        started = await mrs.start_borrow(GUILD, PLAYER, MTGO_USER, CARD, 420)
+    assert started["ok"] and "job_id" not in started
+    assert started["jobs"] == [{"id": "b0", "n": 300}, {"id": "b1", "n": 120}]
+    async with AsyncSessionLocal() as s:
+        rows = {j.job_id: j.amount for j in (await s.execute(select(MtgoJob))).scalars()}
+    assert rows == {"b0": 300, "b1": 120}, "every batch needs its own durable row"
+
+
+@pytest.mark.asyncio
+async def test_a_borrow_whose_batches_lose_cards_records_nothing(test_db):
+    client = _client(borrow=AsyncMock(return_value=_batched(300, 100, kind="give")))
+    p1, p2 = _serve(client)
+    with p1, p2:
+        started = await mrs.start_borrow(GUILD, PLAYER, MTGO_USER, CARD, 420)
+    assert not started["ok"]
+    async with AsyncSessionLocal() as s:
+        assert (await s.execute(select(MtgoJob))).scalars().all() == []

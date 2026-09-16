@@ -67,7 +67,8 @@ class CardsCog(commands.Cog):
             prefix = "⏳" if started.get("busy") else "Couldn't start the loan:"
             return await ctx.followup.send(f"{prefix} {started.get('error')}", ephemeral=True)
 
-        job_id = started["job_id"]
+        jobs = started["jobs"]          # several when the serve split it across trades
+        job_id = jobs[0]["id"]
         custodian = await custodian_name()
         label = _copies(card, quantity)
         await ctx.followup.send(
@@ -80,9 +81,20 @@ class CardsCog(commands.Cog):
         async def _finish():
             # The obligation is booked inside finish_borrow, and ONLY if the trade
             # completed — a declined trade leaves the player owing nothing.
-            res = await resolution.finish_borrow(job_id, guild_id, player_id, card, quantity)
+            # Book each batch as it lands: the obligation written is the number of copies
+            # that actually crossed, so a part-delivered loan owes only what was delivered.
+            lent, pending, failures = 0, [], []
+            for j in jobs:
+                r = await resolution.finish_borrow(j["id"], guild_id, player_id, card, j["n"])
+                if r.get("ok"):
+                    lent += j["n"]
+                elif r.get("outcome") == "pending":
+                    pending.append(j["id"])
+                else:
+                    failures.append(explain_trade_failure(r.get("error") or "trade failed"))
+            res = {"ok": lent > 0, "outcome": "pending" if pending and not failures else None}
             if res.get("ok"):
-                msg = (f"✅ Loan delivered: **{label}** to {player.display_name}. "
+                msg = (f"✅ Loan delivered: **{_copies(card, lent)}** to {player.display_name}. "
                        f"They owe the vault those copies back — `/cards return` settles it.")
             elif res.get("outcome") == "pending":
                 msg = (f"⏳ Loan `{job_id}` is still running. Nothing is owed until it "
@@ -120,7 +132,8 @@ class CardsCog(commands.Cog):
             prefix = "⏳" if started.get("busy") else "Couldn't start the return:"
             return await ctx.followup.send(f"{prefix} {started.get('error')}", ephemeral=True)
 
-        job_id, qty = started["job_id"], started["quantity"]
+        jobs = started["jobs"]          # several when the serve split it across trades
+        job_id, qty = jobs[0]["id"], started["quantity"]
         custodian = await custodian_name()
         label = _copies(card, qty)
         await ctx.followup.send(
@@ -131,9 +144,20 @@ class CardsCog(commands.Cog):
         followup = ctx.followup
 
         async def _finish():
-            res = await resolution.finish_return(job_id, guild_id, player_id, card, qty)
+            back, pending, failures = 0, [], []
+            for j in jobs:
+                r = await resolution.finish_return(j["id"], guild_id, player_id, card, j["n"])
+                if r.get("ok"):
+                    back += j["n"]
+                elif r.get("outcome") == "pending":
+                    pending.append(j["id"])
+                else:
+                    failures.append(explain_trade_failure(r.get("error") or "trade failed"))
+            res = {"ok": back > 0, "outcome": "pending" if pending and not failures else None}
             if res.get("ok"):
-                msg = f"✅ Returned **{label}**. That loan is settled."
+                msg = f"✅ Returned **{_copies(card, back)}**."
+                msg += (" That loan is settled." if back == qty
+                        else f" ⚠️ {qty - back} of {qty} did not come back and are still owed.")
             elif res.get("outcome") == "pending":
                 msg = (f"⏳ Return `{job_id}` is still running; the loan stays open until "
                        f"it completes.")

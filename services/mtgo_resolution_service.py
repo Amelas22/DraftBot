@@ -80,6 +80,60 @@ async def _poll_job(job_id: str, timeout_s: float):
 # durable job records — every started serve job is persisted so a startup
 # resumer can finish booking trades that outlive their in-memory poller
 # ---------------------------------------------------------------------------
+def _started(jobs: list[tuple[str, int]]) -> dict[str, Any]:
+    """The success shape every ``start_*`` returns.
+
+    ``jobs`` is always the full list and is what callers should iterate. ``job_id`` appears
+    ONLY when the order is a single job — deliberately absent once it splits, so a caller
+    still written against one id breaks loudly instead of booking the first batch and
+    silently abandoning the rest. That mirrors the serve, which omits its top-level ``id``
+    for exactly the same reason.
+    """
+    out: dict[str, Any] = {"ok": True, "jobs": [{"id": j, "n": n} for j, n in jobs]}
+    if len(jobs) == 1:
+        out["job_id"] = jobs[0][0]
+    return out
+
+
+def _jobs_from(resp, total: int) -> list[tuple[str, int]]:
+    """``[(job_id, amount)]`` for a serve response — one entry normally, several when the
+    serve split the order across trades. ``total`` is what the caller asked for.
+
+    MTGO caps a trade at a few hundred cards, so an order above the serve's limit comes
+    back as ``{"batched": true, "batches": [...]}`` with **no top-level id**. That omission
+    is deliberate on both sides: a caller that reads only ``id`` would poll one batch, book
+    its share, and silently drop the rest — under-crediting a player with no error anywhere.
+    Returning [] for any shape we don't recognise keeps that failure loud.
+
+    A single job books ``total``: the caller's number is the authority for the whole order,
+    and re-deriving it from the response would make a thin or unexpected body book zero.
+    Only a split needs per-batch numbers, because only then does one job move less than the
+    whole order.
+
+    A split whose parts don't sum to ``total`` is REFUSED (``[]``). Some of the order would
+    otherwise be recorded against no job at all — for a withdraw that means tix sitting in
+    in-flight with nothing able to resolve them, which is the one way this stranding a
+    player's money.
+    """
+    if not resp:
+        return []
+
+    if resp.get("batched"):
+        jobs = [(b["id"],
+                 sum(int(i.get("qty") or 0)
+                     for i in (b.get("give") or []) + (b.get("receive") or [])))
+                for b in (resp.get("batches") or []) if b.get("id")]
+        booked = sum(n for _, n in jobs)
+        if not jobs or booked != total:
+            logger.error(f"serve split {total} into {len(jobs)} batch(es) totalling {booked}"
+                         f" — refusing rather than booking a partial order")
+            return []
+        return jobs
+    if resp.get("id"):
+        return [(resp["id"], total)]
+    return []
+
+
 async def _record_job(job_id: str, kind: str, guild_id: str, player_id: str, mtgo_user: str,
                       amount: int):
     async def _do():
@@ -134,16 +188,19 @@ async def start_deposit(guild_id: str, player_id: str, mtgo_user: str, n: int, *
     if busy:
         return {"ok": False, "error": busy, "busy": True}
     resp = await client.deposit_tix(mtgo_user, n, commit=commit, wait_minutes=wait_minutes)
-    if not resp or not resp.get("id"):
+    jobs = _jobs_from(resp, n)
+    if not jobs:
         # If the POST may have reached the serve with only the response lost, the trade
         # can still fire — adopt the job rather than orphan it. Definite failures skip
         # the scan and fail fast.
         resp = await _recover_lost_job(resp, "deposit", mtgo_user, n)
-        if not resp or not resp.get("id"):
+        jobs = _jobs_from(resp, n)
+        if not jobs:
             return {"ok": False, "error": "serve did not accept the deposit (unreachable or rejected)"}
-        logger.warning(f"start_deposit: adopted job {resp['id']} after lost POST response")
-    await _record_job(resp["id"], "deposit", guild_id, player_id, mtgo_user, n)
-    return {"ok": True, "job_id": resp["id"]}
+        logger.warning(f"start_deposit: adopted job {jobs[0][0]} after lost POST response")
+    for jid, cards in jobs:
+        await _record_job(jid, "deposit", guild_id, player_id, mtgo_user, cards)
+    return _started(jobs)
 
 
 async def finish_deposit(job_id: str, guild_id: str, player_id: str, n: int, mtgo_user: str,
@@ -252,16 +309,24 @@ async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, 
         return {"ok": False, "error": str(e)}
 
     resp = await client.withdraw_tix(mtgo_user, n, commit=commit, wait_minutes=wait_minutes)
-    if not resp or not resp.get("id"):
+    jobs = _jobs_from(resp, n)
+    if not jobs:
         resp = await _recover_lost_job(resp, "request", mtgo_user, n)
-        if not resp or not resp.get("id"):
+        jobs = _jobs_from(resp, n)
+        if not jobs:
             # Definite rejection, or an ambiguous failure whose job-list scan shows no
             # job — either way no trade can have been opened; give the tix back.
             await _return_in_flight(guild_id, player_id, n, f"wd:{commit_key}")
             return {"ok": False, "error": "serve did not accept the withdraw (unreachable or rejected)"}
-        logger.warning(f"start_withdraw: adopted job {resp['id']} after lost POST response")
-    await _record_job(resp["id"], "withdraw", guild_id, player_id, mtgo_user, n)
-    return {"ok": True, "job_id": resp["id"]}
+        logger.warning(f"start_withdraw: adopted job {jobs[0][0]} after lost POST response")
+
+    # The WHOLE amount is committed to in-flight above and each batch books its own share as
+    # it lands, so the shares have to add up to n or tix would sit in in-flight with no job
+    # able to resolve them. _jobs_from enforces that and returns [] otherwise, which lands in
+    # the refund branch above — so by here the split is known to account for every tix.
+    for jid, cards in jobs:
+        await _record_job(jid, "withdraw", guild_id, player_id, mtgo_user, cards)
+    return _started(jobs)
 
 
 async def finish_withdraw(job_id: str, guild_id: str, player_id: str, n: int,
@@ -329,14 +394,18 @@ async def start_borrow(guild_id: str, player_id: str, mtgo_user: str, card: str,
 
     resp = await client.borrow(mtgo_user, card.strip(), qty, commit=commit,
                                wait_minutes=wait_minutes)
-    if not resp or not resp.get("id"):
+    jobs = _jobs_from(resp, qty)
+    if not jobs:
         resp = await _recover_lost_job(resp, "borrow", mtgo_user, qty)
-        if not resp or not resp.get("id"):
+        jobs = _jobs_from(resp, qty)
+        if not jobs:
             return {"ok": False, "error": "serve did not accept the loan (unreachable or rejected)"}
-        logger.warning(f"start_borrow: adopted job {resp['id']} after lost POST response")
-    await _record_card_job(resp["id"], "borrow", guild_id, player_id, mtgo_user,
-                           card.strip(), qty)
-    return {"ok": True, "job_id": resp["id"]}
+        logger.warning(f"start_borrow: adopted job {jobs[0][0]} after lost POST response")
+    # Each batch records the quantity IT lends, so the claim written on 'done' is the number
+    # of copies that actually crossed in that trade rather than the whole order.
+    for jid, cards in jobs:
+        await _record_card_job(jid, "borrow", guild_id, player_id, mtgo_user, card.strip(), cards)
+    return _started(jobs)
 
 
 async def finish_borrow(job_id: str, guild_id: str, player_id: str, card: str, qty: int,
@@ -383,14 +452,18 @@ async def start_return(guild_id: str, player_id: str, mtgo_user: str, card: str,
 
     resp = await client.return_cards(mtgo_user, card.strip(), qty, commit=commit,
                                      wait_minutes=wait_minutes)
-    if not resp or not resp.get("id"):
+    jobs = _jobs_from(resp, want)
+    if not jobs:
         resp = await _recover_lost_job(resp, "return", mtgo_user, want)
-        if not resp or not resp.get("id"):
+        jobs = _jobs_from(resp, want)
+        if not jobs:
             return {"ok": False, "error": "serve did not accept the return (unreachable or rejected)"}
-        logger.warning(f"start_return: adopted job {resp['id']} after lost POST response")
-    await _record_card_job(resp["id"], "return", guild_id, player_id, mtgo_user,
-                           card.strip(), want)
-    return {"ok": True, "job_id": resp["id"], "quantity": want}
+        logger.warning(f"start_return: adopted job {jobs[0][0]} after lost POST response")
+    for jid, cards in jobs:
+        await _record_card_job(jid, "return", guild_id, player_id, mtgo_user, card.strip(), cards)
+    out = _started(jobs)
+    out["quantity"] = want
+    return out
 
 
 async def finish_return(job_id: str, guild_id: str, player_id: str, card: str, qty: int,

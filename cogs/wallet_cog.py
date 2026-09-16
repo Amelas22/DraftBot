@@ -115,11 +115,18 @@ class WalletCommands(commands.Cog):
             prefix = "⏳" if started.get("busy") else "Couldn't start the deposit:"
             return await ctx.followup.send(f"{prefix} {started.get('error')}", ephemeral=True)
 
-        job_id = started["job_id"]
+        # One entry normally; several when the order was too big for a single MTGO trade and
+        # the serve split it. Each batch is its own trade and books its own share, so they
+        # are polled in turn rather than as one.
+        jobs = started["jobs"]
+        job_id = jobs[0]["id"]
         custodian = await custodian_name()
+        batch_note = ("" if len(jobs) == 1 else
+                      f"\nToo many for one MTGO trade, so this is **{len(jobs)} trades** "
+                      f"({', '.join(str(j['n']) for j in jobs)} tix) — expect one invite each.")
         await ctx.followup.send(
             f"**Deposit started** — **{amount} {EVENT_TICKET}(s)**. "
-            f"{mtgo_trade_prompt(custodian)}"
+            f"{mtgo_trade_prompt(custodian)}{batch_note}"
             f"{mtgo_job_footer(job_id)}", ephemeral=True)
 
         # capture only what the poller needs (not ctx) — this task can live for ~14 min
@@ -127,7 +134,18 @@ class WalletCommands(commands.Cog):
         bot = self.bot
 
         async def _finish():
-            res = await resolution.finish_deposit(job_id, guild_id, player_id, amount, username)
+            # Book each batch as it lands. Credited is what actually crossed, which is the
+            # number the closing message must quote — a partial run credits a partial amount.
+            credited, pending, failures = 0, [], []
+            for j in jobs:
+                r = await resolution.finish_deposit(j["id"], guild_id, player_id, j["n"], username)
+                if r.get("ok"):
+                    credited += j["n"]
+                elif r.get("outcome") == "pending":
+                    pending.append(j["id"])
+                else:
+                    failures.append(explain_trade_failure(r.get("error")))
+            res = {"ok": credited > 0, "outcome": "pending" if pending and not failures else None}
             if res.get("ok"):
                 # Entry before debts, and never raising past this point: both rules
                 # live in settle_deposit_inflow, which the watchdog's late-job path
@@ -140,7 +158,12 @@ class WalletCommands(commands.Cog):
                 # escrow.open_boards_for_captain.
                 await refresh_boards(
                     bot, set(completed) | set(await escrow.open_boards_for_captain(player_id)))
-                msg = f"✅ Deposit confirmed: **+{amount} tix**. Balance: **{bal} tix**."
+                msg = f"✅ Deposit confirmed: **+{credited} tix**. Balance: **{bal} tix**."
+                if credited != amount:
+                    # Say so rather than letting the balance quietly disagree with the ask.
+                    msg += (f" ⚠️ {amount - credited} of the {amount} did not cross"
+                            + (f" ({len(pending)} trade(s) still running)" if pending else "")
+                            + (f": {'; '.join(failures)}" if failures else "") + ".")
                 if completed:
                     msg += f" Completed **{len(completed)}** pending tournament registration(s)."
                 if drawn:
@@ -150,7 +173,7 @@ class WalletCommands(commands.Cog):
                 msg = (f"⏳ Deposit `{job_id}` is still pending — it'll credit automatically "
                        f"once the trade completes.")
             else:
-                msg = f"❌ Deposit `{job_id}` failed: {explain_trade_failure(res.get('error'))}"
+                msg = f"❌ Deposit `{job_id}` failed: {'; '.join(failures) or 'trade failed'}"
             await followup.send(msg, ephemeral=True)
 
         spawn_followup("wallet deposit", _finish())
@@ -177,27 +200,48 @@ class WalletCommands(commands.Cog):
             prefix = "⏳" if started.get("busy") else "Couldn't start the withdraw:"
             return await ctx.followup.send(f"{prefix} {started.get('error')}", ephemeral=True)
 
-        job_id = started["job_id"]
+        # One entry normally; several when the serve split the order across trades. The whole
+        # amount is already committed to in-flight — each batch books its own share out of it
+        # as it lands, and a batch that fails returns only its own share.
+        jobs = started["jobs"]
+        job_id = jobs[0]["id"]
         custodian = await custodian_name()
+        batch_note = ("" if len(jobs) == 1 else
+                      f"\nToo many for one MTGO trade, so this is **{len(jobs)} trades** "
+                      f"({', '.join(str(j['n']) for j in jobs)} tix) — expect one invite each.")
         await ctx.followup.send(
             f"**Withdraw started** — **{amount} tix** committed. "
-            f"{mtgo_trade_prompt(custodian)}"
+            f"{mtgo_trade_prompt(custodian)}{batch_note}"
             f"{mtgo_job_footer(job_id)}", ephemeral=True)
 
         followup = ctx.followup
 
         async def _finish():
-            res = await resolution.finish_withdraw(
-                job_id, guild_id, player_id, amount, username)
+            delivered, returned, pending, failures = 0, 0, [], []
+            for j in jobs:
+                r = await resolution.finish_withdraw(
+                    j["id"], guild_id, player_id, j["n"], username)
+                if r.get("ok"):
+                    delivered += j["n"]
+                elif r.get("outcome") == "pending":
+                    pending.append(j["id"])
+                else:
+                    returned += j["n"]      # finish_withdraw already returned this share
+                    failures.append(explain_trade_failure(r.get("error")))
+            res = {"ok": delivered > 0, "outcome": "pending" if pending and not failures else None}
             if res.get("ok"):
                 bal = await wallet_service.get_balance(guild_id, player_id)
-                msg = f"✅ Withdraw confirmed: **−{amount} tix**. Balance: **{bal} tix**."
+                msg = f"✅ Withdraw confirmed: **−{delivered} tix**. Balance: **{bal} tix**."
+                if returned:
+                    msg += f" ⚠️ {returned} tix could not be delivered and are back in your wallet."
+                if pending:
+                    msg += f" {len(pending)} trade(s) still running."
             elif res.get("outcome") == "pending":
                 msg = (f"⏳ Withdraw `{job_id}` is still running; your {amount} tix stay "
                        f"committed to it until it resolves.")
             else:
-                msg = (f"❌ Withdraw `{job_id}` failed: {explain_trade_failure(res.get('error'))}\n"
-                       f"Your {amount} tix have been returned to your wallet.")
+                msg = (f"❌ Withdraw failed: {'; '.join(failures) or 'trade failed'}\n"
+                       f"Your {returned or amount} tix have been returned to your wallet.")
             await followup.send(msg, ephemeral=True)
 
         spawn_followup("wallet withdraw", _finish())
