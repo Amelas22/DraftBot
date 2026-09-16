@@ -110,23 +110,17 @@ _ROOMS_CREATION_LOCKS = {}
 def rooms_creation_lock(session_id):
     """One lock per draft, so its rooms and pairings are built exactly once.
 
-    The completeness marker (rooms_created_at) is deliberately written at the
-    END of the creating transaction, so a run that dies partway leaves it NULL
-    and the next attempt finishes the draft instead of refusing to. That is what
-    makes a half-created draft recoverable -- and it is also why the marker
-    cannot keep two SIMULTANEOUS runs apart: for the ten-odd seconds it takes to
-    make the rooms nothing is committed, so a second caller reads a session that
-    looks untouched and builds the whole draft again beside the first.
+    rooms_created_at is written at the END of the creating transaction, so that
+    a run which dies partway leaves it NULL and the next attempt finishes the
+    draft. That is what makes a half-created draft recoverable, and it is why
+    the marker cannot also keep two SIMULTANEOUS runs apart: nothing is
+    committed while the rooms are being made, so a second caller reads a
+    session that looks untouched. Two callers do arrive together -- see
+    _on_end_draft and _handle_ownership_loss_with_pairings.
 
-    Two callers really do arrive together: _on_end_draft when the draft
-    finishes, and _handle_ownership_loss_with_pairings when a reconnecting
-    manager finds the links already distributed. Seconds apart, same draft.
-
-    Serialising them is enough because they are the same process -- the loser
-    re-reads the session under the lock, sees rooms_created_at set, and returns
-    False, which its caller already treats as "rooms already existed". A restart
-    mid-creation is not this problem: nothing else is running then, and the
-    retry described above is what covers it.
+    Serialising them in memory is enough for one bot process, and it keeps the
+    recovery above intact: a restart leaves no lock and no marker, so the retry
+    still runs. A second process would need a durable claim instead.
 
     Check-then-set with no await between is atomic under asyncio, which is what
     makes this safe to build lazily (report_lock, same pattern).
@@ -1568,199 +1562,207 @@ class PersistentView(discord.ui.View):
         """Class method version of creating rooms and posting pairings"""
         logger.info("Starting create_rooms_pairings for session_id={}, session_type={}", session_id, session_type)
         async with rooms_creation_lock(session_id):
-            try:
-                async with AsyncSessionLocal() as db_session:
-                    async with db_session.begin():
-                        logger.debug("Querying DraftSession from DB")
-                        stmt = select(DraftSession).options(selectinload(DraftSession.match_results))\
-                               .filter(DraftSession.session_id == session_id)
-                        session = await db_session.scalar(stmt)
+            return await cls._create_rooms_pairings_unlocked(
+                bot, guild, session_id, interaction, session_type)
 
-                        if not session:
-                            logger.warning("Draft session not found for session_id={}", session_id)
-                            if interaction:
-                                await interaction.followup.send("Draft session not found.", ephemeral=True)
-                            return False
+    @classmethod
+    async def _create_rooms_pairings_unlocked(cls, bot, guild, session_id, interaction=None, session_type=None):
+        """The body of create_rooms_pairings. Call that one, never this: it is
+        only safe to run one at a time per draft, and the lock is there.
+        """
+        try:
+            async with AsyncSessionLocal() as db_session:
+                async with db_session.begin():
+                    logger.debug("Querying DraftSession from DB")
+                    stmt = select(DraftSession).options(selectinload(DraftSession.match_results))\
+                           .filter(DraftSession.session_id == session_id)
+                    session = await db_session.scalar(stmt)
 
-                        # rooms_created_at, not draft_chat_channel. The latter is
-                        # committed by create_team_channel while creating the FIRST of
-                        # three channels, so it says "done" from the moment the run
-                        # starts producing anything -- and a failure after it left the
-                        # draft with a chat it could not be played in, permanently,
-                        # because every retry read that flag and stopped.
-                        if session.rooms_created_at:
-                            logger.info("Rooms already exist for session_id={}, channel={}", session_id, session.draft_chat_channel)
-                            if interaction:
-                                await interaction.followup.send(
-                                    "Rooms and pairings have already been created for this draft.", ephemeral=True)
-                            return False
+                    if not session:
+                        logger.warning("Draft session not found for session_id={}", session_id)
+                        if interaction:
+                            await interaction.followup.send("Draft session not found.", ephemeral=True)
+                        return False
 
-                        # A previous run already got as far as creating the shared
-                        # chat, which happens AFTER the once-only work below. Making
-                        # retries possible also made that work re-runnable, and
-                        # update_player_stats_for_draft commits in its OWN session --
-                        # so a re-run would add a second drafts_participated to every
-                        # player. Nothing about this draft is new on a resume.
-                        resuming = session.draft_chat_channel is not None
-                        session.are_rooms_processing = True
-                        session.session_stage = 'pairings'
-                        logger.debug("Set session_stage to 'pairings' and are_rooms_processing=True")
+                    # rooms_created_at, not draft_chat_channel. The latter is
+                    # committed by create_team_channel while creating the FIRST of
+                    # three channels, so it says "done" from the moment the run
+                    # starts producing anything -- and a failure after it left the
+                    # draft with a chat it could not be played in, permanently,
+                    # because every retry read that flag and stopped.
+                    if session.rooms_created_at:
+                        logger.info("Rooms already exist for session_id={}, channel={}", session_id, session.draft_chat_channel)
+                        if interaction:
+                            await interaction.followup.send(
+                                "Rooms and pairings have already been created for this draft.", ephemeral=True)
+                        return False
 
-                        # Calculate pairings
-                        logger.debug("Calculating pairings for session_type={}", session.session_type)
-                        if session.session_type != "swiss":
-                            await calculate_pairings(session, db_session)
-                        else:
-                            state_to_save, match_counter = await calculate_pairings(session, db_session)
-                            session.match_counter = match_counter
-                            session.swiss_matches = state_to_save
-                            logger.debug("Swiss pairings calculated: match_counter={}", match_counter)
+                    # A previous run already got as far as creating the shared
+                    # chat, which happens AFTER the once-only work below. Making
+                    # retries possible also made that work re-runnable, and
+                    # update_player_stats_for_draft commits in its OWN session --
+                    # so a re-run would add a second drafts_participated to every
+                    # player. Nothing about this draft is new on a resume.
+                    resuming = session.draft_chat_channel is not None
+                    session.are_rooms_processing = True
+                    session.session_stage = 'pairings'
+                    logger.debug("Set session_stage to 'pairings' and are_rooms_processing=True")
 
-                        # Update player stats
-                        if session.session_type in ("random", "staked"):
-                            logger.debug("Updating player stats for session_id={}", session_id)
-                            if not resuming:
-                                await update_player_stats_for_draft(session.session_id, guild)
+                    # Calculate pairings
+                    logger.debug("Calculating pairings for session_type={}", session.session_type)
+                    if session.session_type != "swiss":
+                        await calculate_pairings(session, db_session)
+                    else:
+                        state_to_save, match_counter = await calculate_pairings(session, db_session)
+                        session.match_counter = match_counter
+                        session.swiss_matches = state_to_save
+                        logger.debug("Swiss pairings calculated: match_counter={}", match_counter)
 
-                        if session.session_type in ("random", "staked", "premade"):
-                            logger.debug("Updating last draft timestamp for session_id={}", session_id)
-                            await update_last_draft_timestamp(session.session_id, guild, bot)
+                    # Update player stats
+                    if session.session_type in ("random", "staked"):
+                        logger.debug("Updating player stats for session_id={}", session_id)
+                        if not resuming:
+                            await update_player_stats_for_draft(session.session_id, guild)
 
-                        # Prepare view for channel creation
-                        temp_view = cls(bot, session_id, session_type or session.session_type)
+                    if session.session_type in ("random", "staked", "premade"):
+                        logger.debug("Updating last draft timestamp for session_id={}", session_id)
+                        await update_last_draft_timestamp(session.session_id, guild, bot)
 
-                        # Create chat channels
-                        draft_chat_channel = None
-                        # One category for the whole draft, chosen before any room is
-                        # made. Swiss has only the shared chat; every other type has
-                        # that plus one channel per team.
-                        guild_config = get_config(guild.id)
-                        rooms_category = await resolve_draft_category(
-                            guild, guild_config,
-                            # Swiss makes only the shared chat.
-                            1 if session.session_type == "swiss"
-                            else _draft_rooms_needed(guild, guild_config),
+                    # Prepare view for channel creation
+                    temp_view = cls(bot, session_id, session_type or session.session_type)
+
+                    # Create chat channels
+                    draft_chat_channel = None
+                    # One category for the whole draft, chosen before any room is
+                    # made. Swiss has only the shared chat; every other type has
+                    # that plus one channel per team.
+                    guild_config = get_config(guild.id)
+                    rooms_category = await resolve_draft_category(
+                        guild, guild_config,
+                        # Swiss makes only the shared chat.
+                        1 if session.session_type == "swiss"
+                        else _draft_rooms_needed(guild, guild_config),
+                    )
+
+                    if session.session_type == "swiss":
+                        sign_ups_list = list(session.sign_ups.keys())
+                        logger.debug("Swiss sign-ups: {}", sign_ups_list)
+                        all_members = []
+                        for user_id in sign_ups_list:
+                            member = guild.get_member(int(user_id))
+                            if not member:
+                                logger.warning("Member not found in guild for user_id={}", user_id)
+                            else:
+                                all_members.append(member)
+                        channel = await temp_view.create_team_channel(
+                            guild, SHARED_CHAT_TEAM, all_members, rooms_category=rooms_category)
+                        session.draft_chat_channel = str(channel)
+                        draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
+                        logger.info("Created swiss draft channel {}", session.draft_chat_channel)
+
+                    elif session.session_type != "test":
+                        logger.info("Creating team channels for session_id={}, session_type={}", session_id, session.session_type)
+                        logger.debug("Team A: {}, Team B: {}", session.team_a, session.team_b)
+                        team_a_members, team_b_members = [], []
+                        for user_id in session.team_a:
+                            member = guild.get_member(int(user_id))
+                            if member:
+                                team_a_members.append(member)
+                                logger.debug(f"Team A member found: {member.display_name} ({user_id})")
+                            else:
+                                logger.warning("Team A member not found for user_id={}", user_id)
+                        for user_id in session.team_b:
+                            member = guild.get_member(int(user_id))
+                            if member:
+                                team_b_members.append(member)
+                                logger.debug(f"Team B member found: {member.display_name} ({user_id})")
+                            else:
+                                logger.warning("Team B member not found for user_id={}", user_id)
+
+                        logger.info(f"Team A has {len(team_a_members)} members, Team B has {len(team_b_members)} members")
+                        all_members = team_a_members + team_b_members
+                        logger.info("Creating main Draft chat channel with all {} members", len(all_members))
+                        channel = await temp_view.create_team_channel(
+                            guild, SHARED_CHAT_TEAM, all_members, session.team_a, session.team_b,
+                            rooms_category=rooms_category
                         )
+                        session.draft_chat_channel = str(channel)
+                        draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
+                        logger.info("Created draft and team channels for session_id={}", session_id)
+                        logger.info("Creating Red-Team channel with {} Team A members", len(team_a_members))
+                        await temp_view.create_team_channel(
+                            guild, RED_SIDE.prefix, team_a_members, session.team_a,
+                            session.team_b, rooms_category=rooms_category)
+                        logger.info("Creating Blue-Team channel with {} Team B members", len(team_b_members))
+                        await temp_view.create_team_channel(
+                            guild, BLUE_SIDE.prefix, team_b_members, session.team_a,
+                            session.team_b, rooms_category=rooms_category)
 
-                        if session.session_type == "swiss":
-                            sign_ups_list = list(session.sign_ups.keys())
-                            logger.debug("Swiss sign-ups: {}", sign_ups_list)
-                            all_members = []
-                            for user_id in sign_ups_list:
-                                member = guild.get_member(int(user_id))
-                                if not member:
-                                    logger.warning("Member not found in guild for user_id={}", user_id)
-                                else:
-                                    all_members.append(member)
-                            channel = await temp_view.create_team_channel(
-                                guild, SHARED_CHAT_TEAM, all_members, rooms_category=rooms_category)
-                            session.draft_chat_channel = str(channel)
-                            draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
-                            logger.info("Created swiss draft channel {}", session.draft_chat_channel)
+                    else:
+                        draft_chat_channel = guild.get_channel(int(session.draft_channel_id))
+                        session.draft_chat_channel = session.draft_channel_id
+                        logger.debug("Using test channel {}", session.draft_channel_id)
 
-                        elif session.session_type != "test":
-                            logger.info("Creating team channels for session_id={}, session_type={}", session_id, session.session_type)
-                            logger.debug("Team A: {}, Team B: {}", session.team_a, session.team_b)
-                            team_a_members, team_b_members = [], []
-                            for user_id in session.team_a:
-                                member = guild.get_member(int(user_id))
-                                if member:
-                                    team_a_members.append(member)
-                                    logger.debug(f"Team A member found: {member.display_name} ({user_id})")
-                                else:
-                                    logger.warning("Team A member not found for user_id={}", user_id)
-                            for user_id in session.team_b:
-                                member = guild.get_member(int(user_id))
-                                if member:
-                                    team_b_members.append(member)
-                                    logger.debug(f"Team B member found: {member.display_name} ({user_id})")
-                                else:
-                                    logger.warning("Team B member not found for user_id={}", user_id)
+                    # Generate and send summary
+                    main_embed, bet_embed = await generate_draft_summary_embed(bot, session.session_id)
+                    embeds = [main_embed]
+                    if bet_embed:
+                        embeds.append(bet_embed)
 
-                            logger.info(f"Team A has {len(team_a_members)} members, Team B has {len(team_b_members)} members")
-                            all_members = team_a_members + team_b_members
-                            logger.info("Creating main Draft chat channel with all {} members", len(all_members))
-                            channel = await temp_view.create_team_channel(
-                                guild, SHARED_CHAT_TEAM, all_members, session.team_a, session.team_b,
-                                rooms_category=rooms_category
-                            )
-                            session.draft_chat_channel = str(channel)
-                            draft_chat_channel = guild.get_channel(int(session.draft_chat_channel))
-                            logger.info("Created draft and team channels for session_id={}", session_id)
-                            logger.info("Creating Red-Team channel with {} Team A members", len(team_a_members))
-                            await temp_view.create_team_channel(
-                                guild, RED_SIDE.prefix, team_a_members, session.team_a,
-                                session.team_b, rooms_category=rooms_category)
-                            logger.info("Creating Blue-Team channel with {} Team B members", len(team_b_members))
-                            await temp_view.create_team_channel(
-                                guild, BLUE_SIDE.prefix, team_b_members, session.team_a,
-                                session.team_b, rooms_category=rooms_category)
+                    sign_up_tags = ' '.join(f"<@{user_id}>" for user_id in session.sign_ups.keys())
+                    auto_text = " (Auto-created)" if interaction is None else ""
+                    logger.debug("Sending pairing announcement")
+                    await draft_chat_channel.send(
+                        f"Pairings posted below{auto_text}. Good luck in your matches! {sign_up_tags}"
+                    )
 
-                        else:
-                            draft_chat_channel = guild.get_channel(int(session.draft_channel_id))
-                            session.draft_chat_channel = session.draft_channel_id
-                            logger.debug("Using test channel {}", session.draft_channel_id)
+                    draft_summary_message = await draft_chat_channel.send(embeds=embeds)
 
-                        # Generate and send summary
-                        main_embed, bet_embed = await generate_draft_summary_embed(bot, session.session_id)
-                        embeds = [main_embed]
-                        if bet_embed:
-                            embeds.append(bet_embed)
+                    if session.session_type != "test":
+                        await safe_pin(draft_summary_message)
+                    session.draft_summary_message_id = str(draft_summary_message.id)
 
-                        sign_up_tags = ' '.join(f"<@{user_id}>" for user_id in session.sign_ups.keys())
-                        auto_text = " (Auto-created)" if interaction is None else ""
-                        logger.debug("Sending pairing announcement")
-                        await draft_chat_channel.send(
-                            f"Pairings posted below{auto_text}. Good luck in your matches! {sign_up_tags}"
-                        )
+                    # Delete original message
+                    draft_channel_id = int(session.draft_channel_id)
+                    original_message_id = int(session.message_id)
+                    draft_channel = bot.get_channel(draft_channel_id)
+                    if draft_channel:
+                        try:
+                            orig = await draft_channel.fetch_message(original_message_id)
+                            await orig.delete()
+                            logger.debug("Deleted original message {} in channel {}", original_message_id, draft_channel_id)
+                        except discord.NotFound:
+                            logger.warning("Original message {} not found in channel {}", original_message_id, draft_channel_id)
+                        except discord.HTTPException as e:
+                            logger.error("Failed to delete message {}: {}", original_message_id, e)
 
-                        draft_summary_message = await draft_chat_channel.send(embeds=embeds)
+                    # The run got here, so every room exists. Stamped inside the
+                    # transaction that is about to commit, so a failure anywhere
+                    # above leaves it NULL and the next attempt finishes the job.
+                    session.rooms_created_at = datetime.now()
+                    session.deletion_time = datetime.now() + timedelta(days=7)
+                    logger.debug("Scheduled deletion time {}", session.deletion_time)
+                    await db_session.commit()
+                    logger.info("Database commit complete for session_id={}", session_id)
 
-                        if session.session_type != "test":
-                            await safe_pin(draft_summary_message)
-                        session.draft_summary_message_id = str(draft_summary_message.id)
+                # Post-commit
+                logger.debug("Running post_pairings tasks")
+                await post_pairings(bot, guild, session.session_id)
+                from livedrafts import create_live_draft_summary
+                await create_live_draft_summary(bot, session.session_id)
 
-                        # Delete original message
-                        draft_channel_id = int(session.draft_channel_id)
-                        original_message_id = int(session.message_id)
-                        draft_channel = bot.get_channel(draft_channel_id)
-                        if draft_channel:
-                            try:
-                                orig = await draft_channel.fetch_message(original_message_id)
-                                await orig.delete()
-                                logger.debug("Deleted original message {} in channel {}", original_message_id, draft_channel_id)
-                            except discord.NotFound:
-                                logger.warning("Original message {} not found in channel {}", original_message_id, draft_channel_id)
-                            except discord.HTTPException as e:
-                                logger.error("Failed to delete message {}: {}", original_message_id, e)
-
-                        # The run got here, so every room exists. Stamped inside the
-                        # transaction that is about to commit, so a failure anywhere
-                        # above leaves it NULL and the next attempt finishes the job.
-                        session.rooms_created_at = datetime.now()
-                        session.deletion_time = datetime.now() + timedelta(days=7)
-                        logger.debug("Scheduled deletion time {}", session.deletion_time)
-                        await db_session.commit()
-                        logger.info("Database commit complete for session_id={}", session_id)
-
-                    # Post-commit
-                    logger.debug("Running post_pairings tasks")
-                    await post_pairings(bot, guild, session.session_id)
-                    from livedrafts import create_live_draft_summary
-                    await create_live_draft_summary(bot, session.session_id)
-
-                    if interaction:
-                        await interaction.followup.send("Pairings posted.", ephemeral=True)
-                        logger.debug("Sent confirmation to interaction")
-
-                    logger.info("create_rooms_pairings completed successfully for session_id={}", session_id)
-                    return True
-
-            except Exception:
-                logger.exception("Unhandled exception in create_rooms_pairings for session_id={}", session_id)
                 if interaction:
-                    await interaction.followup.send("An error occurred.", ephemeral=True)
-                return False
+                    await interaction.followup.send("Pairings posted.", ephemeral=True)
+                    logger.debug("Sent confirmation to interaction")
+
+                logger.info("create_rooms_pairings completed successfully for session_id={}", session_id)
+                return True
+
+        except Exception:
+            logger.exception("Unhandled exception in create_rooms_pairings for session_id={}", session_id)
+            if interaction:
+                await interaction.followup.send("An error occurred.", ephemeral=True)
+            return False
 
 class UserRemovalSelect(Select):
     def __init__(self, options: list[SelectOption], session_id: str, *args, **kwargs):

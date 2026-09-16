@@ -15,9 +15,19 @@ alone:
   2. Creation is re-enterable, so the retry that follows completes the draft
      instead of building a second copy of it beside the first.
 """
-import pytest
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
-from conftest import make_channel_harness
+import pytest
+from sqlalchemy import select
+
+import views
+from database.db_session import AsyncSessionLocal
+from models.draft_session import DraftSession
+from models.match import MatchResult
+
+from conftest import make_channel_harness, seed_session
 
 VOICE_ON = {"voice_channels": True}
 
@@ -131,19 +141,6 @@ async def test_an_identically_named_channel_this_draft_does_not_own_is_not_adopt
 # reconnecting manager finds links already distributed. Both entered for the
 # same draft on 2026-09-15 and each built the draft in full -- two sets of
 # match_results, two sets of pairing messages.
-
-import asyncio  # noqa: E402
-from types import SimpleNamespace  # noqa: E402
-from unittest.mock import AsyncMock  # noqa: E402
-
-from sqlalchemy import select  # noqa: E402
-
-import views  # noqa: E402
-from database.db_session import AsyncSessionLocal  # noqa: E402
-from models.draft_session import DraftSession  # noqa: E402
-from models.match import MatchResult  # noqa: E402
-
-from conftest import seed_session  # noqa: E402
 
 RACE_ID = "race-1"
 
