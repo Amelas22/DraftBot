@@ -232,6 +232,33 @@ def _gate_the_first_run(monkeypatch):
     return gate, parked, contended
 
 
+def _count_concurrent_builders(monkeypatch):
+    """Record the most runs that were ever inside the build at once.
+
+    Counting beats inferring the answer from rows and post counts. Those are
+    downstream of serialisation, so they can come out right for reasons that
+    have nothing to do with it -- a second run that arrives late and is turned
+    away by the marker, or one that overlaps and then throws, both leave the
+    tidy numbers of a draft built once. This watches the thing the lock is
+    supposed to guarantee, and nothing else.
+    """
+    real = views.PersistentView._create_rooms_pairings_unlocked.__func__
+    seen = {"now": 0, "most": 0, "total": 0}
+
+    async def counted(cls, *a, **k):
+        seen["now"] += 1
+        seen["total"] += 1
+        seen["most"] = max(seen["most"], seen["now"])
+        try:
+            return await real(cls, *a, **k)
+        finally:
+            seen["now"] -= 1
+
+    monkeypatch.setattr(views.PersistentView, "_create_rooms_pairings_unlocked",
+                        classmethod(counted))
+    return seen
+
+
 @pytest.mark.asyncio
 async def test_two_overlapping_runs_build_the_draft_once(monkeypatch, test_db):
     """Two callers entering together must produce ONE draft, not two.
@@ -243,6 +270,7 @@ async def test_two_overlapping_runs_build_the_draft_once(monkeypatch, test_db):
     await _seed_race_draft()
     posted = _stub_everything_but_the_race(monkeypatch)
     gate, parked, contended = _gate_the_first_run(monkeypatch)
+    builders = _count_concurrent_builders(monkeypatch)
 
     guild = SimpleNamespace(id=1, get_member=lambda uid: SimpleNamespace(
         id=uid, display_name=str(uid)), get_channel=lambda cid: _Chan())
@@ -270,14 +298,26 @@ async def test_two_overlapping_runs_build_the_draft_once(monkeypatch, test_db):
         rows = (await s.scalars(select(MatchResult).where(
             MatchResult.session_id == RACE_ID))).all()
 
+    # The invariant itself, asserted rather than inferred. The three checks
+    # below describe a draft that was built once; only this one says the two
+    # runs were actually kept apart, which is what the lock is for.
+    assert builders["most"] == 1, (
+        f"{builders['most']} runs were inside the build at the same time")
+    # ...and that both runs really did get in, one after the other. A second run
+    # that never arrived would satisfy every other check here while testing
+    # nothing at all, and would look identical to a second run held off properly.
+    assert builders["total"] == 2, (
+        f"only {builders['total']} run(s) reached the build; the overlap this "
+        f"test exists to create did not happen")
+
     numbers = sorted(r.match_number for r in rows)
     assert numbers == [1, 2, 3, 4, 5, 6, 7, 8, 9], (
         f"the draft was built more than once: match numbers {numbers}")
     assert posted.await_count == 1, (
         f"pairings were posted {posted.await_count} times; every extra post is "
         f"a second set of buttons players can click")
-    # Exactly one run built the draft and exactly one declined. Without this a
-    # pair of swallowed exceptions -- create_rooms_pairings turns any exception
-    # into False -- would leave no rows and satisfy the count assertions.
+    # One run built the draft and one declined. create_rooms_pairings turns any
+    # exception into False, so without this a run that overlapped and then threw
+    # would look the same from here as one that was turned away.
     assert sorted(outcomes, key=bool) == [False, True], (
         f"expected one run to build the draft and one to decline, got {outcomes}")
