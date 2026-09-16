@@ -153,11 +153,29 @@ class MtgoTradeBotClient:
         return await self._call("GET", f"/jobs/{job_id}")
 
     # ---- jobs (each returns the 202 job dict, whose ``id`` you then poll) ----
-    async def deposit(self, user: str, card: str, qty: int = 1, commit: bool = True, wait_minutes: int = 0):
-        """Bot RECEIVES qty of a card FROM the user (a deposit into custody)."""
-        return await self._call("POST", "/deposit", json={
-            "user": user, "cards": [card], "qty": qty, "commit": commit, "waitMinutes": wait_minutes},
-            mark_ambiguous=True)
+    async def deposit(self, user: str, cards, qty: int = 1, commit: bool = True, wait_minutes: int = 0):
+        """Bot RECEIVES cards FROM the user (a deposit into custody).
+
+        ``cards`` takes three shapes, so handing in a deck is ONE job and therefore one
+        MTGO trade — the serve works a single job at a time, so a card-per-job deposit
+        would be a sequence of separate trades, each with its own invite and handshake:
+
+          * ``"Swamp"``                      — one name, ``qty`` copies
+          * ``["Swamp", "Island"]``          — several names, ``qty`` copies of EACH
+          * ``[{"name": "Swamp", "qty": 4}]`` — per-card amounts (the serve's items[])
+
+        The third shape sends ``items[]`` and NO ``qty``: the serve rejects both together
+        because they disagree about what qty means, and being refused is better than
+        depositing a different number of cards than intended.
+        """
+        body: dict[str, Any] = {"user": user, "commit": commit, "waitMinutes": wait_minutes}
+        if isinstance(cards, str):
+            body["cards"], body["qty"] = [cards], qty
+        elif cards and isinstance(cards[0], dict):
+            body["items"] = [{"name": c["name"], "qty": int(c.get("qty") or 1)} for c in cards]
+        else:
+            body["cards"], body["qty"] = list(cards), qty
+        return await self._call("POST", "/deposit", json=body, mark_ambiguous=True)
 
     async def give(self, user: str, card: str, qty: int = 1, commit: bool = True, wait_minutes: int = 0):
         """Bot GIVES qty of a card TO the user (a withdrawal, or a lend)."""
