@@ -49,6 +49,41 @@ JOB_KIND = "card-deposit"
 WITHDRAW_KIND = "card-withdraw"
 
 
+def chunk_cards(cards: "list[dict[str, Any]]",
+                limit: int) -> "list[list[dict[str, Any]]]":
+    """Split a card list into orders no bigger than one MTGO trade.
+
+    The split happens HERE rather than at the serve, and that is the whole
+    point. A serve-side split is one order across several jobs with nothing
+    tying them back together, so a scan that sees some of the jobs concludes
+    the rest failed -- which is why that path was taken out. These are separate
+    orders, one trade and one job each, settled by the machinery that already
+    settles a single deposit. Nothing has to be reassembled afterwards.
+
+    A card whose own quantity exceeds a trade is split across chunks, because a
+    stack of one name cannot go any other way, and refusing it would make a
+    cube undepositable for a reason its owner cannot act on.
+    """
+    chunks: "list[list[dict[str, Any]]]" = []
+    current: "list[dict[str, Any]]" = []
+    room = limit
+    for card in cards:
+        left = int(card.get("qty") or 0)
+        while left > 0:
+            take = min(left, room)
+            if take > 0:
+                current.append({"name": card["name"], "qty": take})
+                left -= take
+                room -= take
+            if room == 0:
+                chunks.append(current)
+                current = []
+                room = limit
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 async def start_deposit(guild_id: Any, owner_id: Any,
                         cards: "list[dict[str, Any]]") -> "tuple[str, Optional[str]]":
     """Ask the serve to take these cards into the library. Returns (status, detail).

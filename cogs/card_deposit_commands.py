@@ -21,7 +21,7 @@ from helpers.money_gate import (
     spawn_followup,
 )
 from services.card_deposit_service import (
-    held_for, poll_until_settled, start_deposit, start_withdrawal,
+    chunk_cards, held_for, poll_until_settled, start_deposit, start_withdrawal,
 )
 from services.mtgo_tradebot_client import get_lending_client, max_cards_per_trade
 
@@ -40,6 +40,13 @@ _MESSAGES = {
                         "library bot before trying again — nothing has been recorded.",
     "nothing_held": "📭 The library isn't holding any of your cards.",
 }
+
+
+def _said(status: str, fallback: str) -> str:
+    """The line for one status, resolving the entries that depend on
+    configuration read at call time rather than at import."""
+    text = _MESSAGES.get(status, fallback)
+    return str(text() if callable(text) else text)
 
 
 def describe_cube(cards: "list[dict[str, Any]]") -> str:
@@ -74,59 +81,83 @@ class CardDepositCommands(commands.Cog):
                 ephemeral=True)
             return
 
-        total = sum(int(c.get("qty") or 0) for c in cards)
-        limit = max_cards_per_trade()
-        if total > limit:
-            # Refused rather than split: the serve would run several trades and
-            # settling those correctly is a materially harder problem.
-            await ctx.followup.send(
-                f"📦 `{cube}` is {describe_cube(cards)}, and MTGO only moves "
-                f"**{limit}** in one trade. Depositing a cube this size isn't "
-                f"supported yet.", ephemeral=True)
-            return
-
+        chunks = chunk_cards(cards, max_cards_per_trade())
+        run = ("" if len(chunks) == 1 else
+               f" MTGO only moves **{max_cards_per_trade()}** in one trade, so this "
+               f"is **{len(chunks)} trades** — accept each one as it comes.")
         await ctx.followup.send(
-            f"📦 Depositing `{cube}` — {describe_cube(cards)}.\n"
-            f"_Setting up the trade…_", ephemeral=True)
-        spawn_followup("card-library deposit", self._deposit_and_watch(ctx, cards))
+            f"📦 Depositing `{cube}` — {describe_cube(cards)}.{run}\n"
+            f"_Setting up…_", ephemeral=True)
+        spawn_followup("card-library deposit", self._deposit_and_watch(ctx, chunks))
 
-    async def _deposit_and_watch(self, ctx: Any, cards: "list[dict[str, Any]]") -> None:
-        """Dispatch, then see the trade through.
+    async def _deposit_and_watch(self, ctx: Any,
+                                 chunks: "list[list[dict[str, Any]]]") -> None:
+        """Walk the depositor through one trade per chunk.
 
         Detached so the interaction is not held open for the wait: Discord gives
         a command 15 minutes of followups, but a player staring at a spinner for
         several of them will assume it broke.
+
+        Each chunk is a COMPLETE order -- its own trade, its own job, settled on
+        its own -- so a run that stops halfway leaves the cards that did cross
+        recorded and the rest untouched. Stopping is the right response to a
+        failure here: the later chunks would only fail the same way, and a
+        depositor watching trades fail one after another learns nothing.
         """
-        status, detail = await start_deposit(ctx.guild_id, ctx.author.id, cards)
-        if status != "dispatched":
+        who = await custodian_name(get_lending_client())
+        landed = 0
+        for n, chunk in enumerate(chunks, start=1):
+            of = "" if len(chunks) == 1 else f" ({n} of {len(chunks)})"
+            status, detail = await start_deposit(ctx.guild_id, ctx.author.id, chunk)
+            if status != "dispatched":
+                fallback = f"⚠️ Couldn't deposit those cards ({status})."
+                await ctx.followup.send(
+                    f"{_said(status, fallback)}"
+                    f"{self._so_far(landed, n, chunks)}", ephemeral=True)
+                return
+
             await ctx.followup.send(
-                _MESSAGES.get(status, f"⚠️ Couldn't deposit those cards ({status})."),
+                f"🤝 **Ready to hand over{of}.** {mtgo_trade_prompt(who)}\n"
+                f"{mtgo_job_footer(detail) if detail else ''}\n"
+                f"⚠️ Move the cards into your **MTGO trade binder** first — the bot "
+                f"can only take what's in your binder.",
                 ephemeral=True)
+
+            outcome: "dict[str, Any]" = (
+                await poll_until_settled(ctx.guild_id, detail) if detail else {})
+            if outcome.get("state") == "done":
+                landed += sum(int(c["qty"]) for c in chunk)
+                continue
+            if outcome.get("state") == "failed":
+                why = explain_trade_failure(
+                    outcome.get("detail") or "the trade didn't complete")
+                await ctx.followup.send(
+                    f"❌ That trade didn't complete.\n\n{why}"
+                    f"{self._so_far(landed, n, chunks)}", ephemeral=True)
+                return
+            # Still running: the watchdog settles it. Starting the next trade now
+            # would queue a second one behind a trade they have not accepted yet.
+            await ctx.followup.send(
+                f"🕑 That trade is still open in MTGO. I'll record it when it "
+                f"lands — run `/deposit` again afterwards for the rest."
+                f"{self._so_far(landed, n, chunks)}", ephemeral=True)
             return
 
-        who = await custodian_name(get_lending_client())
+        held = await held_for(ctx.guild_id, ctx.author.id)
         await ctx.followup.send(
-            f"🤝 **Ready to hand over.** {mtgo_trade_prompt(who)}\n"
-            f"{mtgo_job_footer(detail) if detail else ''}\n"
-            f"⚠️ Move the cards into your **MTGO trade binder** first — the bot can "
-            f"only take what's in your binder.",
-            ephemeral=True)
+            f"✅ Deposited. The library is now holding **{sum(c['qty'] for c in held)}** "
+            f"of your cards — `/mydeposits` to see them, and they'll come back to you "
+            f"as the same printings.", ephemeral=True)
 
-        outcome: "dict[str, Any]" = (
-            await poll_until_settled(ctx.guild_id, detail) if detail else {})
-        if outcome.get("state") == "done":
-            held = await held_for(ctx.guild_id, ctx.author.id)
-            await ctx.followup.send(
-                f"✅ Deposited. The library is now holding **{sum(c['qty'] for c in held)}** "
-                f"of your cards — `/mydeposits` to see them, and they'll come back to you "
-                f"as the same printings.", ephemeral=True)
-        elif outcome.get("state") == "failed":
-            why = explain_trade_failure(outcome.get("detail") or "the trade didn't complete")
-            await ctx.followup.send(
-                f"❌ The deposit didn't complete, so nothing moved and nothing is "
-                f"recorded.\n\n{why}\n\nRun `/deposit` again when it's sorted.",
-                ephemeral=True)
-        # still running: the watchdog settles it; saying nothing is correct
+    @staticmethod
+    def _so_far(landed: int, at: int, chunks: "list[list[dict[str, Any]]]") -> str:
+        """What actually crossed before this stopped. A run of several trades
+        that ends early has moved real cards, and saying nothing about them
+        reads as though the whole thing failed."""
+        if len(chunks) == 1 or not landed:
+            return ""
+        return (f"\n\n**{landed}** cards went in before this "
+                f"(trade {at} of {len(chunks)}) — `/mydeposits` to see them.")
 
     @discord.slash_command(name="withdraw",
                            description="Take back the cards the card library is holding for you")
