@@ -177,7 +177,7 @@ async def start_withdrawal(guild_id: Any, owner_id: Any) -> "tuple[str, Optional
     and fail on a short binder -- better to say which cards are out than to
     make somebody watch that happen in MTGO.
     """
-    held = await held_for(guild_id, owner_id)
+    held = await held_for(owner_id)
     if not held:
         return ("nothing_held", None)
 
@@ -295,7 +295,7 @@ async def settle_deposits(guild_id: Any = None) -> "dict[str, Any]":
             # function refuses a kind it does not know, and guessing the side
             # reads an empty trade, which settles as "nothing crossed".
             moved = await _items_moved(job or {}, job_row.kind)
-            await _book_movement(job_row.guild_id, job_row.player_id, moved,
+            await _book_movement(job_row.player_id, moved,
                                  job_row.job_id, job_row.kind)
         await _resolve(job_row.job_id, state)
         settled[job_row.job_id] = {"state": state, "detail": (job or {}).get("detail")}
@@ -343,33 +343,39 @@ async def _resolved(job_id: str) -> "Optional[dict[str, Any]]":
     return {"state": row.status, "detail": None}
 
 
-async def _book_movement(guild_id: Any, owner_id: Any, items: "list[dict[str, Any]]",
+async def _book_movement(owner_id: Any, items: "list[dict[str, Any]]",
                          job_id: str, kind: str) -> None:
     """Move the claim for one finished trade, card by card.
 
     A deposit creates the obligation and a withdrawal retires it -- the same
     mirrored pair a loan writes, with the roles swapped both times. Keyed by
     the trade, so several settlers reading one finished trade book it once.
+
+    Booked under LIBRARY_SCOPE and not under the server the trade was started
+    in: the library is one MTGO account, so what it holds for someone is theirs
+    wherever they are standing. The job row still records which server asked,
+    which is what a support question needs; the CLAIM belongs to no server.
     """
     from services.card_lending_service import _already_booked, _CLAIM_LOCK
     from services import debt_service
     async with _CLAIM_LOCK:
         for item in items:
             source_id = f"mtgojob:{job_id}:{item['name']}"
-            if await _already_booked(guild_id, source_id):
+            if await _already_booked(wallet_service.LIBRARY_SCOPE, source_id):
                 continue
             match kind:
                 case "card-deposit":
                     # The depositor is owed the copies back.
                     await debt_service.create_card_loan(
-                        guild_id=str(guild_id), lender_id=str(owner_id),
+                        guild_id=wallet_service.LIBRARY_SCOPE, lender_id=str(owner_id),
                         borrower_id=wallet_service.HOUSE_LIBRARY, card_name=item["name"],
                         quantity=item["qty"], created_by="card-library",
                         source_id=source_id)
                 case "card-withdraw":
                     # ...and the library has now given them back.
                     await debt_service.create_card_return(
-                        guild_id=str(guild_id), returner_id=wallet_service.HOUSE_LIBRARY,
+                        guild_id=wallet_service.LIBRARY_SCOPE,
+                        returner_id=wallet_service.HOUSE_LIBRARY,
                         owner_id=str(owner_id), card_name=item["name"],
                         quantity=item["qty"], created_by="card-library",
                         source_id=source_id)
@@ -385,9 +391,14 @@ async def _resolve(job_id: str, status: str) -> None:
             await session.commit()
 
 
-async def held_for(guild_id: Any, owner_id: Any) -> "list[dict[str, Any]]":
-    """What the library is holding for this depositor, from the claim ledger."""
+async def held_for(owner_id: Any) -> "list[dict[str, Any]]":
+    """What the library is holding for this depositor, from the claim ledger.
+
+    Takes no guild: custody is not a per-server obligation. Someone who
+    deposited in one server has those cards in every server they draft in,
+    because there is one library and one shelf.
+    """
     from services import debt_service
     rows = await debt_service.get_open_card_positions(
-        str(guild_id), str(owner_id), wallet_service.HOUSE_LIBRARY)
+        wallet_service.LIBRARY_SCOPE, str(owner_id), wallet_service.HOUSE_LIBRARY)
     return [{"name": r["card_name"], "qty": r["net"]} for r in rows if r["net"] > 0]

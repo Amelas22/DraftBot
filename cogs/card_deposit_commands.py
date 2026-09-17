@@ -116,7 +116,7 @@ class CardDepositCommands(commands.Cog):
         who = await custodian_name(get_lending_client())
         # Read once, before anything moves. What lands is measured against it
         # rather than counted up from the chunks -- see _so_far.
-        before = _count(await held_for(ctx.guild_id, ctx.author.id))
+        before = _count(await held_for(ctx.author.id))
 
         async def stop(message: str, at: int) -> None:
             """Every early exit says the same two things: why it stopped, and
@@ -160,7 +160,7 @@ class CardDepositCommands(commands.Cog):
 
         await ctx.followup.send(
             f"✅ Deposited. The library is now holding "
-            f"**{_count(await held_for(ctx.guild_id, ctx.author.id))}** of your cards "
+            f"**{_count(await held_for(ctx.author.id))}** of your cards "
             f"— `/mydeposits` to see them, and they'll come back to you as the same "
             f"printings.", ephemeral=True)
 
@@ -178,7 +178,7 @@ class CardDepositCommands(commands.Cog):
         and re-offers the whole cube: there is nothing in the command that knows
         which part already landed.
         """
-        landed = _count(await held_for(ctx.guild_id, ctx.author.id)) - before
+        landed = _count(await held_for(ctx.author.id)) - before
         if landed <= 0:
             return ""
         return (f"\n\n**{landed}** of your cards went in before this "
@@ -221,7 +221,7 @@ class CardDepositCommands(commands.Cog):
         outcome: "dict[str, Any]" = (
             await poll_until_settled(ctx.guild_id, detail) if detail else {})
         if outcome.get("state") == "done":
-            left = await held_for(ctx.guild_id, ctx.author.id)
+            left = await held_for(ctx.author.id)
             tail = ("" if not left else
                     f"\nThe library still holds **{_count(left)}** "
                     f"of yours — `/mydeposits`.")
@@ -238,7 +238,7 @@ class CardDepositCommands(commands.Cog):
                            description="What the card library is holding for you")
     async def mydeposits(self, ctx: discord.ApplicationContext) -> None:
         await ctx.defer(ephemeral=True)
-        held = await held_for(ctx.guild_id, ctx.author.id)
+        held = await held_for(ctx.author.id)
         if not held:
             await ctx.followup.send(
                 "📭 The library isn't holding any of your cards.", ephemeral=True)

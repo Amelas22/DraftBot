@@ -50,7 +50,7 @@ def _stock(stock):
 async def _owed_to(player):
     """What the library holds of theirs -- custody, not the loan counterparty."""
     rows = await debt_service.get_open_card_positions(
-        GUILD, player, wallet_service.HOUSE_LIBRARY)
+        wallet_service.LIBRARY_SCOPE, player, wallet_service.HOUSE_LIBRARY)
     return {r["card_name"]: r["net"] for r in rows}
 
 
@@ -290,7 +290,7 @@ async def test_a_deposit_and_a_loan_do_not_cancel_each_other(test_db, rig):
     # ...and separately holds 2 of their own
     await _deposit_and_settle(rig, [{"name": "Auramancer", "qty": 2}])
 
-    assert await svc.held_for(GUILD, OWNER) == [{"name": "Auramancer", "qty": 2}], \
+    assert await svc.held_for(OWNER) == [{"name": "Auramancer", "qty": 2}], \
         "their deposit is still theirs"
     assert await lending._still_owed(GUILD, OWNER) == [{"name": "Auramancer", "qty": 2}], \
         "and they still owe the deck they borrowed"
@@ -428,3 +428,60 @@ async def test_one_name_listed_twice_in_a_trade_is_not_half_lost(test_db, rig):
     await svc.settle_deposits(GUILD)
 
     assert await _owed_to(OWNER) == {"Auramancer": 5}
+
+
+# --- one library, many servers ---------------------------------------------
+
+OTHER_GUILD = "g2"
+
+
+async def test_cards_deposited_in_one_server_are_held_in_every_server(test_db, rig):
+    """There is one library and one shelf.
+
+    Custody used to be booked under the server the trade was started in, so the
+    same person standing in another server was told the library held nothing of
+    theirs -- while their cards sat on the shelf the whole time.
+    """
+    rig.jobs["job-1"] = {"state": "done", "receive": CARDS}
+    await svc.start_deposit(GUILD, OWNER, CARDS)
+    await svc.settle_deposits(GUILD)
+
+    assert await svc.held_for(OWNER) == [{"name": "Adarkar Valkyrie", "qty": 1},
+                                         {"name": "Auramancer", "qty": 2}]
+
+    # Directly: the rows carry the reserved scope, not the server the trade was
+    # started in. Asserting on the ledger rather than on held_for's signature,
+    # because a reader wants to know WHERE the claim went.
+    from sqlalchemy import select as _select
+    from models.debt_ledger import DebtLedger
+    async with AsyncSessionLocal() as session:
+        scopes = {r for r in (await session.scalars(
+            _select(DebtLedger.guild_id).where(
+                DebtLedger.counterparty_id == wallet_service.HOUSE_LIBRARY))).all()}
+    assert scopes == {wallet_service.LIBRARY_SCOPE}, scopes
+    assert GUILD not in scopes, "custody must not be booked under a server"
+
+
+async def test_a_withdrawal_from_another_server_settles_the_same_position(
+        test_db, rig, monkeypatch):
+    """The reproduction that made this a bug rather than an inconvenience.
+
+    Deposit in server A, withdraw in server B: the return was booked against
+    B's claim, which had nothing in it. B went to -1, A still claimed +1, and
+    the shelf was empty -- three different answers to "where are the cards".
+    One scope means the withdrawal retires the deposit it actually undoes.
+    """
+    rig.jobs["job-1"] = {"state": "done", "receive": CARDS}
+    await svc.start_deposit(GUILD, OWNER, CARDS)
+    await svc.settle_deposits(GUILD)
+
+    monkeypatch.setattr(svc, "available_now",
+                        _stock({"Adarkar Valkyrie": 1, "Auramancer": 2}))
+    rig.job_id = "job-2"
+    rig.jobs["job-2"] = {"state": "done", "give": CARDS}
+
+    assert (await svc.start_withdrawal(OTHER_GUILD, OWNER))[0] == "dispatched"
+    await svc.settle_deposits(OTHER_GUILD)
+
+    assert await svc.held_for(OWNER) == [], "the position is closed, not doubled"
+    assert await _owed_to(OWNER) == {}, "and nothing is owed in either direction"
