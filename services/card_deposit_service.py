@@ -28,23 +28,23 @@ from database.db_session import AsyncSessionLocal
 from models.mtgo_job import MtgoJob
 from services import wallet_service
 from services.card_lending_service import (
-    _mtgo_handle, available_now, library_busy_reason, _DISPATCH_LOCK,
+    _mtgo_handle, _items_moved, available_now, library_busy_reason, _DISPATCH_LOCK,
 )
 from services.mtgo_tradebot_client import (
     DEFAULT_WAIT_MINUTES, get_lending_client, jobs_from, max_cards_per_trade,
     too_large,
 )
 
-# Its OWN kind, not the wallet's 'deposit'. That one is a TIX deposit with no
-# card name, and the wallet's resumer picks up every pending row it recognises
-# -- a card deposit filed under it would be polled against the wrong serve, get
-# a 404, and be recorded as a failure. That exact collision cost a live loan its
-# deposit on the lending side before it was found.
 # How long a command waits on its own trade before handing over to the
 # watchdog. The serve's offer stands ~10 min; this is only about answering the
 # person who ran the command.
 DEFAULT_POLL_S = 90
 
+# Their OWN kinds, not the wallet's 'deposit'. That one is a TIX deposit with no
+# card name, and the wallet's resumer picks up every pending row it recognises
+# -- a card deposit filed under it would be polled against the wrong serve, get
+# a 404, and be recorded as a failure. That exact collision cost a live loan its
+# deposit on the lending side before it was found.
 JOB_KIND = "card-deposit"
 WITHDRAW_KIND = "card-withdraw"
 
@@ -64,6 +64,11 @@ def chunk_cards(cards: "list[dict[str, Any]]",
     stack of one name cannot go any other way, and refusing it would make a
     cube undepositable for a reason its owner cannot act on.
     """
+    if limit < 1:
+        # MTGO_MAX_CARDS_PER_TRADE=0 reads back as 0, and a zero-sized chunk
+        # never empties the list -- the loop below would spin on the first card
+        # and hang the command's task rather than failing it.
+        raise ValueError(f"a trade has to hold at least one card, not {limit}")
     chunks: "list[list[dict[str, Any]]]" = []
     current: "list[dict[str, Any]]" = []
     room = limit
@@ -96,9 +101,11 @@ async def start_deposit(guild_id: Any, owner_id: Any,
 
     total = sum(int(c.get("qty") or 0) for c in cards)
     if too_large(total):
-        # Refused rather than split, on the same terms as a loan: the serve
-        # would run several trades and settling those correctly is a materially
-        # harder problem than settling one.
+        # A backstop, not the product: /deposit runs chunk_cards first, so every
+        # order that arrives here already fits. It stays because the split is
+        # the CALLER's job, and a caller that forgets would otherwise hand the
+        # serve an order it answers by running several trades of its own -- the
+        # unattributable-jobs shape that was taken out of the lending side.
         return ("too_large", f"{total} cards, and MTGO moves "
                              f"{max_cards_per_trade()} in one trade")
 
@@ -131,9 +138,19 @@ async def start_deposit(guild_id: Any, owner_id: Any,
             logger.error("deposit for {} may or may not have opened and no matching "
                          "job was found -- needs a look", owner_id)
             return ("dispatch_unknown", None)
+        try:
+            await _record_jobs(guild_id, owner_id, handle, [(str(adopted_id), total)],
+                               adopting=True)
+        except ValueError as e:
+            # The scan matched a trade that is not this attempt's -- an earlier
+            # chunk of the same cube looks identical to it. Reporting that
+            # trade's outcome as this one's is the failure to avoid; say we
+            # cannot tell instead.
+            logger.error("deposit for {} matched job {} that is not ours: {}",
+                         owner_id, adopted_id, e)
+            return ("dispatch_unknown", None)
         logger.warning("library adopted orphaned deposit job {} for {}",
                        adopted_id, owner_id)
-        await _record_jobs(guild_id, owner_id, handle, [(str(adopted_id), total)])
         return ("dispatched", str(adopted_id))
 
     jobs = jobs_from(resp, total)
@@ -175,9 +192,12 @@ async def start_withdrawal(guild_id: Any, owner_id: Any) -> "tuple[str, Optional
     # runs off the end of it. Refusing on unknown would turn the normal case
     # into "your cards are out on loan" when they are sitting right there. If
     # we are wrong the trade says so, which is the same answer a minute later.
-    out = [f"{int(c['qty']) - stock.get(c['name'], int(c['qty']))}x {c['name']}"
-           for c in held
-           if stock.get(c["name"], int(c["qty"])) < int(c["qty"])]
+    out = []
+    for card in held:
+        want = int(card["qty"])
+        have = stock.get(card["name"], want)
+        if have < want:
+            out.append(f"{want - have}× {card['name']}")
     if out:
         return ("some_on_loan", ", ".join(sorted(out)))
 
@@ -212,13 +232,34 @@ async def start_withdrawal(guild_id: Any, owner_id: Any) -> "tuple[str, Optional
 
 
 async def _record_jobs(guild_id: Any, owner_id: Any, handle: str,
-                       jobs: "list[tuple[str, int]]", kind: str = JOB_KIND) -> None:
+                       jobs: "list[tuple[str, int]]", kind: str = JOB_KIND,
+                       adopting: bool = False) -> None:
+    """File one row per trade, so something will look for it if we stop.
+
+    A row may already exist: adoption hands back a job the serve created before
+    its answer was lost, which may be one we recorded and then lost track of.
+    Waiting on it again is the point, so an existing pending row is left alone.
+
+    `adopting` is what makes a stale match an error rather than a shrug. An id
+    from a POST's own response is this attempt's trade by definition. An id
+    from the /jobs scan is only a GUESS at it, matched on type, handle and card
+    list -- and two chunks of one cube can be identical, so the scan can offer
+    back the trade an earlier chunk already finished. Adopting that would
+    report its outcome as this one's. Refused, and so is another player's row,
+    which should be impossible and is worth hearing about.
+    """
     async with AsyncSessionLocal() as session:
         for job_id, n in jobs:
-            if await session.get(MtgoJob, job_id) is None:
+            row = await session.get(MtgoJob, job_id)
+            if row is None:
                 session.add(MtgoJob(job_id=job_id, kind=kind, guild_id=str(guild_id),
                                     player_id=str(owner_id), mtgo_user=handle,
                                     amount=n, card_name=None, status="pending"))
+            elif adopting and (row.player_id != str(owner_id)
+                               or row.status != "pending"):
+                raise ValueError(
+                    f"job {job_id} is already {row.status} for {row.player_id}; "
+                    f"it is not {owner_id}'s trade to adopt")
         await session.commit()
 
 
@@ -249,11 +290,11 @@ async def settle_deposits(guild_id: Any = None) -> "dict[str, Any]":
             else:
                 continue
         if state == "done":
-            # Off the serve's own record of the trade, and from the side the
-            # BOT was on: it receives a deposit and gives a withdrawal back.
-            side = "receive" if job_row.kind == JOB_KIND else "give"
-            moved = [{"name": i.get("name"), "qty": int(i.get("qty") or 0)}
-                     for i in ((job or {}).get(side) or []) if i.get("name")]
+            # Off the serve's own record of the trade, and from the side the BOT
+            # was on. Shared with the lending half rather than re-derived: that
+            # function refuses a kind it does not know, and guessing the side
+            # reads an empty trade, which settles as "nothing crossed".
+            moved = await _items_moved(job or {}, job_row.kind)
             await _book_movement(job_row.guild_id, job_row.player_id, moved,
                                  job_row.job_id, job_row.kind)
         await _resolve(job_row.job_id, state)
@@ -278,9 +319,28 @@ async def poll_until_settled(guild_id: Any, job_id: str, timeout_s: float = DEFA
         settled = await settle_deposits(guild_id)
         if job_id in settled:
             return settled[job_id]
+        # settle_deposits only reports what IT resolved, and the watchdog is
+        # scanning the same jobs on its own schedule. Whichever gets there first
+        # takes the row out of "pending", so the other one sees nothing and
+        # would wait out the timeout on a trade that has already finished --
+        # telling the depositor their trade is still open, and stopping a
+        # multi-trade run that could have carried on. The row is the answer.
+        done = await _resolved(job_id)
+        if done is not None:
+            return done
         if time.monotonic() >= deadline:
             return {"state": "running", "detail": None}
         await asyncio.sleep(interval_s)
+
+
+async def _resolved(job_id: str) -> "Optional[dict[str, Any]]":
+    """This trade's outcome if it has one, from the durable row rather than
+    from whoever happened to settle it."""
+    async with AsyncSessionLocal() as session:
+        row = await session.get(MtgoJob, job_id)
+    if row is None or row.status == "pending":
+        return None
+    return {"state": row.status, "detail": None}
 
 
 async def _book_movement(guild_id: Any, owner_id: Any, items: "list[dict[str, Any]]",

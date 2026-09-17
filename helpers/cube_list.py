@@ -28,10 +28,6 @@ _TIMEOUT = aiohttp.ClientTimeout(total=30)
 async def fetch_cube(cube: str) -> "Optional[list[dict[str, Any]]]":
     """`[{"name": str, "qty": int}]` for a cube, or None if it cannot be read.
 
-    Repeats are counted rather than listed: a cube that runs four Lightning
-    Bolt sends them as one item with a quantity, which is what the serve's
-    items[] wants and what stops a deck of four becoming four line items.
-
     None rather than an empty list for a failure, because "the cube is empty"
     and "CubeCobra did not answer" lead to different messages -- one is a cube
     to fix, the other is a thing to retry.
@@ -48,8 +44,18 @@ async def fetch_cube(cube: str) -> "Optional[list[dict[str, Any]]]":
         logger.warning("cube list {} could not be read: {}", cube, e)
         return None
 
+    return parse_cube_list(text)
+
+
+def parse_cube_list(text: str) -> "list[dict[str, Any]]":
+    """The response body, as items the serve will take.
+
+    Repeats are counted rather than listed: a cube that runs four Lightning
+    Bolt sends them as one item with a quantity, which is what the serve's
+    items[] wants and what stops a deck of four becoming four line items.
+
+    Separate from the fetch so it can be read and tested without a network:
+    the counting is the part with a decision in it.
+    """
     names = [line.strip() for line in text.splitlines() if line.strip()]
-    if not names:
-        return []
-    counted = Counter(names)
-    return [{"name": n, "qty": q} for n, q in counted.items()]
+    return [{"name": n, "qty": q} for n, q in Counter(names).items()]

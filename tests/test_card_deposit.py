@@ -9,6 +9,8 @@ The claim moves only when the trade reports done, for the same reason it does
 on the way out: a deposit booked on dispatch would have the ledger owing cards
 to someone who never sent them.
 """
+import asyncio
+
 import pytest
 
 from database.db_session import AsyncSessionLocal
@@ -97,10 +99,60 @@ async def test_what_arrived_is_what_is_owed(test_db, rig):
     assert await _owed_to(OWNER) == {"Auramancer": 1}
 
 
-async def test_a_deposit_too_big_for_one_trade_is_refused(test_db, rig):
+async def test_settling_the_same_trade_twice_books_it_once(test_db, rig):
+    """The watchdog and the command's own poller both settle, and they overlap
+    by design -- the poller calls settle_deposits in a loop while the watchdog
+    is doing its rounds. The ledger is append-only, so a second booking is not
+    an overwrite; it is a second claim on the same cards that nothing removes.
+    """
+    rig.jobs["job-1"] = {"state": "done", "receive": CARDS}
+    await svc.start_deposit(GUILD, OWNER, CARDS)
+
+    await svc.settle_deposits(GUILD)
+    once = await _owed_to(OWNER)
+    await svc.settle_deposits(GUILD)
+
+    assert once == {"Adarkar Valkyrie": 1, "Auramancer": 2}
+    assert await _owed_to(OWNER) == once, "settling again must not re-book"
+
+
+async def test_a_trade_the_serve_has_forgotten_is_failed_not_left_pending(test_db, rig):
+    """The serve restarted and lost its job list, so this job can never report.
+    Left pending it would be polled forever; booked it would invent cards. It
+    fails, and nothing was booked on dispatch, so nothing has to unwind."""
+    await svc.start_deposit(GUILD, OWNER, CARDS)
+    rig.jobs["job-1"] = {"_missing": True}
+
+    settled = await svc.settle_deposits(GUILD)
+
+    assert settled["job-1"]["state"] == "failed"
+    assert await _owed_to(OWNER) == {}
+
+    async with AsyncSessionLocal() as session:
+        assert (await session.get(MtgoJob, "job-1")).status == "failed"
+
+
+async def test_a_cube_too_big_for_one_trade_becomes_several(test_db, rig):
+    """What /deposit actually does with a big cube. The service refuses an
+    oversized ORDER (below); the command never hands it one, because splitting
+    is the caller's job -- so this is the behaviour a depositor sees."""
+    from cogs.card_deposit_commands import chunk_cards
+
+    big = [{"name": "Swamp", "qty": 25}]
+
+    for chunk in chunk_cards(big, 10):
+        assert (await svc.start_deposit(GUILD, OWNER, chunk))[0] == "dispatched"
+
+    assert [sum(c["qty"] for c in cards) for _, cards in rig.deposited] == [10, 10, 5]
+
+
+async def test_an_order_too_big_for_one_trade_is_refused(test_db, rig):
+    """The backstop under that: an order that arrives unsplit is refused rather
+    than handed to the serve, which would answer it by running several trades
+    of its own with nothing tying them back to the order."""
     big = [{"name": "Swamp", "qty": 9999}]
 
-    status, detail = await svc.start_deposit(GUILD, OWNER, big)
+    status, _ = await svc.start_deposit(GUILD, OWNER, big)
 
     assert status == "too_large"
     assert rig.deposited == [], "nothing may reach the serve"
@@ -129,16 +181,24 @@ async def test_the_library_watchdog_settles_deposits_too(test_db, rig, monkeypat
     await svc.start_deposit(GUILD, OWNER, CARDS)
     monkeypatch.setattr(lending, "get_lending_client", lambda: rig)
 
-    seen = {}
-    real = svc.settle_deposits
-
-    async def watched(guild_id=None):
-        seen["ran"] = True
-        return await real(guild_id)
-    monkeypatch.setattr(svc, "settle_deposits", watched)
-
-    await lending.settle_in_flight()          # the loan half
-    await svc.settle_deposits()               # what the watchdog calls next
+    # The real loop, not a stand-in for it: the line under test is the
+    # watchdog's own call into the deposit half, and calling settle_deposits
+    # by hand here would pass just as well with that line deleted. It runs
+    # forever and refuses to start twice, so the guard is cleared and the task
+    # cancelled once it has done its round.
+    monkeypatch.setattr(lending, "_watchdog_running", False)
+    task = asyncio.create_task(lending.lending_jobs_watchdog(interval_s=0.01))
+    try:
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            # Waits on the JOB, not on the ledger: the claim is written card by
+            # card and the row is resolved after the last one, so a poll that
+            # stopped at "something is owed" would read a half-booked trade.
+            async with AsyncSessionLocal() as session:
+                if (await session.get(MtgoJob, "job-1")).status != "pending":
+                    break
+    finally:
+        task.cancel()
 
     assert await _owed_to(OWNER) == {"Adarkar Valkyrie": 1, "Auramancer": 2}
 
@@ -146,10 +206,13 @@ async def test_the_library_watchdog_settles_deposits_too(test_db, rig, monkeypat
 # --- taking them back out ---------------------------------------------------
 
 async def _deposit_and_settle(rig, cards, job="job-1"):
+    """Leaves the serve handing out a FRESH id, the way a real one does -- a
+    withdrawal that reused the deposit's job id would be adopting its trade."""
     rig.job_id = job
     rig.jobs[job] = {"state": "done", "receive": cards}
     await svc.start_deposit(GUILD, OWNER, cards)
     await svc.settle_deposits(GUILD)
+    rig.job_id = f"{job}-next"
 
 
 async def test_withdrawing_asks_for_everything_without_naming_it(test_db, rig, monkeypatch):
@@ -287,3 +350,81 @@ async def test_a_lost_response_with_no_trade_says_nothing_was_recorded(test_db, 
     status, _ = await svc.start_deposit(GUILD, OWNER, CARDS)
 
     assert status == "dispatch_unknown"
+
+
+# --- which side of the trade a kind reads -----------------------------------
+
+async def test_each_kind_reads_the_side_the_bot_was_on():
+    """One table for all four kinds, because they pair off into opposite sides
+    and a second copy is a second chance to get a pair backwards. A kind read
+    off the wrong side reports an empty trade, which settles as "nothing
+    crossed" -- the ledger then says the cards never moved and nobody looks
+    for them again.
+    """
+    from services.card_lending_service import _items_moved
+
+    job = {"give": [{"name": "Swamp", "qty": 2}],
+           "receive": [{"name": "Island", "qty": 3}]}
+
+    assert await _items_moved(job, "borrow") == [{"name": "Swamp", "qty": 2}]
+    assert await _items_moved(job, "card-withdraw") == [{"name": "Swamp", "qty": 2}]
+    assert await _items_moved(job, "return") == [{"name": "Island", "qty": 3}]
+    assert await _items_moved(job, "card-deposit") == [{"name": "Island", "qty": 3}]
+
+
+async def test_an_unknown_kind_is_refused_rather_than_guessed():
+    from services.card_lending_service import _items_moved
+
+    with pytest.raises(ValueError):
+        await _items_moved({"give": [], "receive": []}, "card-donate")
+
+
+# --- who gets there first --------------------------------------------------
+
+async def test_a_trade_the_watchdog_settled_is_still_reported_to_the_depositor(
+        test_db, rig):
+    """settle_deposits reports only what IT resolved, and the watchdog is
+    scanning the same rows on its own schedule. Whichever wins takes the row
+    out of "pending", so the loser sees nothing -- and the command's poller
+    would wait out its whole timeout on a trade that had already finished,
+    tell the depositor it was still open, and stop a multi-trade run that
+    could have carried on.
+    """
+    rig.jobs["job-1"] = {"state": "done", "receive": CARDS}
+    await svc.start_deposit(GUILD, OWNER, CARDS)
+
+    await svc.settle_deposits(GUILD)          # the watchdog gets there first
+    outcome = await svc.poll_until_settled(GUILD, "job-1", timeout_s=0)
+
+    assert outcome["state"] == "done", "the row is the answer, not who settled it"
+
+
+async def test_adoption_refuses_an_earlier_attempt_s_finished_trade(test_db, rig):
+    """Two chunks of one cube can be identical, and the /jobs scan matches on
+    type, handle and card list -- so a lost response on chunk two can match the
+    trade chunk one already completed. Adopting it would report that trade's
+    outcome as this one's, crediting cards twice over for one movement."""
+    rig.jobs["job-1"] = {"state": "done", "receive": CARDS}
+    await svc.start_deposit(GUILD, OWNER, CARDS)
+    await svc.settle_deposits(GUILD)
+
+    rig.response = {"_ambiguous": True}
+    rig.orphan = {"id": "job-1"}
+    status, _ = await svc.start_deposit(GUILD, OWNER, CARDS)
+
+    assert status == "dispatch_unknown"
+    assert await _owed_to(OWNER) == {"Adarkar Valkyrie": 1, "Auramancer": 2}
+
+
+async def test_one_name_listed_twice_in_a_trade_is_not_half_lost(test_db, rig):
+    """The claim for a trade is keyed by job and card name, so a serve that
+    reports a name in two entries would have the second read as the same
+    movement and dropped as already booked -- quietly losing those copies."""
+    rig.jobs["job-1"] = {"state": "done",
+                         "receive": [{"name": "Auramancer", "qty": 2},
+                                     {"name": "Auramancer", "qty": 3}]}
+    await svc.start_deposit(GUILD, OWNER, [{"name": "Auramancer", "qty": 5}])
+
+    await svc.settle_deposits(GUILD)
+
+    assert await _owed_to(OWNER) == {"Auramancer": 5}

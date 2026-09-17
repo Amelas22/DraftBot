@@ -151,6 +151,22 @@ def _deck_lines(loan: Any) -> str:
     return "\n".join(f"• {c['qty']}× {c['name']}" for c in cards)
 
 
+async def defer_if_usable(ctx: Any) -> bool:
+    """Answer the interaction and say whether the library is usable here.
+
+    Every card-library command opens this way, in both cogs. Shared so a guild
+    that is not set up is told so in one voice -- and so the defer cannot be
+    forgotten in one command, which turns a clear refusal into a silent
+    "application did not respond".
+    """
+    await ctx.defer(ephemeral=True)
+    blocked = library_gate(ctx)
+    if blocked:
+        await ctx.followup.send(blocked, ephemeral=True)
+        return False
+    return True
+
+
 class TakeWhatIsThereView(discord.ui.View):
     """Offer the partial deck when the library cannot cover all of it.
 
@@ -193,15 +209,6 @@ class TakeWhatIsThereView(discord.ui.View):
 class CardLendingCommands(commands.Cog):
     def __init__(self, bot: Any) -> None:
         self.bot = bot
-
-    async def _usable(self, ctx: Any) -> bool:
-        """Answer the interaction and say whether the library is usable here."""
-        await ctx.defer(ephemeral=True)
-        blocked = library_gate(ctx)
-        if blocked:
-            await ctx.followup.send(blocked, ephemeral=True)
-            return False
-        return True
 
     async def _warn_if_busy(self, ctx: Any) -> None:
         """The library trades with one person at a time. Say so up front rather
@@ -263,7 +270,7 @@ class CardLendingCommands(commands.Cog):
                            description="Collect the deck the card library is holding for you")
     async def borrow(self, ctx: discord.ApplicationContext) -> None:
         logger.info("/borrow by {} in guild {}", ctx.author.id, ctx.guild_id)
-        if not await self._usable(ctx):
+        if not await defer_if_usable(ctx):
             return
 
         # Can the library actually cover this deck? Asked before queueing, so a
@@ -329,7 +336,7 @@ class CardLendingCommands(commands.Cog):
                            description="Return the deck you borrowed from the card library")
     async def return_cards(self, ctx: discord.ApplicationContext) -> None:
         logger.info("/return by {} in guild {}", ctx.author.id, ctx.guild_id)
-        if not await self._usable(ctx):
+        if not await defer_if_usable(ctx):
             return
         await self._warn_if_busy(ctx)
         spawn_followup("card-library return", self._trade_when_ready(

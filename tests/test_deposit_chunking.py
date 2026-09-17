@@ -65,3 +65,11 @@ def test_quantities_are_merged_not_fragmented():
 
 def test_nothing_in_nothing_out():
     assert chunk_cards([], LIMIT) == []
+
+
+def test_a_limit_below_one_is_refused_rather_than_looping():
+    """MTGO_MAX_CARDS_PER_TRADE=0 reads back as 0, and a zero-sized chunk never
+    empties the list -- the split would spin on the first card. That hangs the
+    command's task rather than failing it, so nothing ever tells the depositor."""
+    with pytest.raises(ValueError):
+        chunk_cards([{"name": "Swamp", "qty": 4}], 0)
