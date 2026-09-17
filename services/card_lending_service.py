@@ -581,7 +581,8 @@ async def poll_until_settled(guild_id: Any, borrower_id: Any, expect: str,
 
 async def lending_jobs_watchdog(bot: Any = None, interval_s: float = RESCAN_INTERVAL_S) -> None:
     """Settle library trades whose command poller died -- timeout, restart, or a
-    gateway reconnect. Started once from bot.py's on_ready.
+    gateway reconnect. Covers both directions: decks going out on loan and cards
+    coming in on deposit. Started once from bot.py's on_ready.
 
     on_ready refires on every reconnect, so the guard matters: without it each
     reconnect would add another loop, and they would poll the serve in chorus.
@@ -596,6 +597,19 @@ async def lending_jobs_watchdog(bot: Any = None, interval_s: float = RESCAN_INTE
             settled = await settle_in_flight()
             if settled:
                 logger.info("Card-library watchdog settled {} loan(s)", len(settled))
+        except Exception as e:
+            logger.exception("Card-library watchdog (loans) failed: {}", e)
+        try:
+            # Deposits run against the same serve and are settled here rather
+            # than by a second loop: two watchdogs polling one serve would just
+            # take turns waiting for each other. Its own try: the two scans share
+            # nothing but the serve, and a loan that raises used to mean deposits
+            # were not settled at all until the next round -- or ever, if it
+            # raised every time.
+            from services.card_deposit_service import settle_deposits
+            deposited = await settle_deposits()
+            if deposited:
+                logger.info("Card-library watchdog settled {} deposit(s)", len(deposited))
         except Exception:
             # Never let one bad scan kill the loop; the next one may well work.
             logger.exception("Card-library watchdog scan failed")
@@ -690,22 +704,34 @@ async def _resolve_batch(job_id: str, status: str) -> None:
 async def _items_moved(job: "dict[str, Any]", kind: str) -> "list[dict[str, Any]]":
     """What a finished trade actually carried, off the serve's own record.
 
-    A borrow is what the bot GAVE; a return is what it RECEIVED. Read rather
-    than assumed: a batch is the unit that succeeds or fails, so the only
-    honest account of what a borrower now holds is the list the serve booked.
+    Always the side the BOT was on. A borrow and a withdrawal are what it GAVE;
+    a return and a deposit are what it RECEIVED. Read rather than assumed: a
+    trade is the unit that succeeds or fails, so the only honest account of what
+    changed hands is the list the serve booked.
+
+    All four kinds live in one table on purpose. They pair off into opposite
+    sides, so a second copy of this elsewhere is a second chance to get a pair
+    backwards -- and a kind read off the wrong side reports an empty trade,
+    which settles as "nothing crossed" and loses somebody's cards. An unknown
+    kind is refused for the same reason: guessing a side is the failure.
     """
     match kind:
-        case "borrow":
+        case "borrow" | "card-withdraw":
             side = "give"
-        case "return":
+        case "return" | "card-deposit":
             side = "receive"
         case _:
-            # deposit and withdraw move cards too, and read the opposite sides.
-            # Refusing beats guessing: a kind read off the wrong side reports an
-            # empty trade, which settles as "nothing crossed" and loses cards.
             raise ValueError(f"not a library job kind: {kind!r}")
-    return [{"name": i.get("name"), "qty": int(i.get("qty") or 0)}
-            for i in (job.get(side) or []) if i.get("name")]
+    # Summed by name, not listed as they come. The claim for a trade is keyed
+    # by job and card name, so two entries for one name would read as the same
+    # movement and the second would be dropped as already booked -- quietly
+    # losing whichever copies came in the second entry.
+    totals: "dict[str, int]" = {}
+    for i in (job.get(side) or []):
+        name = i.get("name")
+        if name:
+            totals[name] = totals.get(name, 0) + int(i.get("qty") or 0)
+    return [{"name": n, "qty": q} for n, q in totals.items()]
 
 
 async def _already_booked(guild_id: Any, source_id: str) -> bool:

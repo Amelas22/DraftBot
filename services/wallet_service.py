@@ -53,6 +53,32 @@ SYSTEM_IN_FLIGHT = "system:in-flight"   # tix committed to an open MTGO withdraw
 # the right thing with it, with no change.
 HOUSE_MTGO = "house:mtgo"
 
+# Cards a player has DEPOSITED and the library is holding for them -- custody,
+# not a loan, and a separate counterparty because the two obligations run in
+# opposite directions against the same people. Netted together, a deposit of
+# four Bolts would cancel a loan of four: the depositor's cards would vanish
+# from /mydeposits, and worse, a live loan would read as settled and free its
+# borrower for another deck while the cards were still out. The serve tracks
+# and honours the two separately -- it returns the printings it was given and
+# expects back the ones it lent -- so the ledger has to as well.
+HOUSE_LIBRARY = "house:library"
+
+# The scope custody is booked under, in place of a guild id.
+#
+# Every other ledger row is guild-scoped and should be: a draft stake or a debt
+# is owed inside the server it arose in. Custody is not. The library is ONE MTGO
+# account, so cards a player deposited are theirs wherever they are standing,
+# and scoping them per guild made the ledger disagree with physical reality --
+# a deposit made in one server was invisible in another, and a withdrawal in the
+# second booked its returns against the second server's claim. Deposit a Bolt in
+# each of two servers and withdraw in one: that server goes to -1, the other
+# still claims +1, and the shelf is empty.
+#
+# A reserved guild id rather than a schema change, because the column means "the
+# server this obligation belongs to" and custody belongs to no server. Nothing
+# else in the ledger moves.
+LIBRARY_SCOPE = "library"
+
 
 def prize_wallet_id(tournament_id) -> str:
     """The holder that owns a tournament's pot."""
