@@ -17,6 +17,7 @@ Printings are the serve's business. It records which ones it received and hands
 those exact copies back on a withdraw, so nothing here names a catId.
 """
 import asyncio
+import time
 from datetime import datetime
 from typing import Any, Optional
 
@@ -39,6 +40,11 @@ from services.mtgo_tradebot_client import (
 # -- a card deposit filed under it would be polled against the wrong serve, get
 # a 404, and be recorded as a failure. That exact collision cost a live loan its
 # deposit on the lending side before it was found.
+# How long a command waits on its own trade before handing over to the
+# watchdog. The serve's offer stands ~10 min; this is only about answering the
+# person who ran the command.
+DEFAULT_POLL_S = 90
+
 JOB_KIND = "card-deposit"
 WITHDRAW_KIND = "card-withdraw"
 
@@ -78,11 +84,22 @@ async def start_deposit(guild_id: Any, owner_id: Any,
         resp = await client.deposit(handle, cards, wait_minutes=DEFAULT_WAIT_MINUTES)
 
     if resp and resp.get("_ambiguous"):
-        # The request reached the serve and only the answer was lost. Nothing is
-        # booked and nothing was taken from anyone, so the depositor can simply
-        # try again once the trade they may be looking at is resolved.
-        logger.error("deposit for {} may or may not have opened -- needs a look", owner_id)
-        return ("dispatch_unknown", None)
+        # The request reached the serve and only the ANSWER was lost, so a real
+        # trade may be open -- and if the depositor accepts it their cards are
+        # inside the library with no job row and nothing that will ever look for
+        # them. Find it: a deposit of this exact list, for this user, moments
+        # ago, IS our trade. The lending side does the same, and here the cards
+        # at risk are somebody's own rather than the house's.
+        adopted = await client.find_recent_deck_job("deposit", handle, cards) or {}
+        adopted_id = adopted.get("id")
+        if not adopted_id:
+            logger.error("deposit for {} may or may not have opened and no matching "
+                         "job was found -- needs a look", owner_id)
+            return ("dispatch_unknown", None)
+        logger.warning("library adopted orphaned deposit job {} for {}",
+                       adopted_id, owner_id)
+        await _record_jobs(guild_id, owner_id, handle, [(str(adopted_id), total)])
+        return ("dispatched", str(adopted_id))
 
     jobs = jobs_from(resp, total)
     if not jobs:
@@ -118,8 +135,14 @@ async def start_withdrawal(guild_id: Any, owner_id: Any) -> "tuple[str, Optional
                              f"{max_cards_per_trade()} in one trade")
 
     stock = await available_now(guild_id)
-    out = [f"{int(c['qty']) - stock.get(c['name'], 0)}x {c['name']}"
-           for c in held if stock.get(c["name"], 0) < int(c["qty"])]
+    # An unlisted card reads as PRESENT, not missing: /vault truncates its
+    # listing, so absence is not evidence of absence, and a deposit of any size
+    # runs off the end of it. Refusing on unknown would turn the normal case
+    # into "your cards are out on loan" when they are sitting right there. If
+    # we are wrong the trade says so, which is the same answer a minute later.
+    out = [f"{int(c['qty']) - stock.get(c['name'], int(c['qty']))}x {c['name']}"
+           for c in held
+           if stock.get(c["name"], int(c["qty"])) < int(c["qty"])]
     if out:
         return ("some_on_loan", ", ".join(sorted(out)))
 
@@ -203,6 +226,28 @@ async def settle_deposits(guild_id: Any = None) -> "dict[str, Any]":
     return settled
 
 
+async def poll_until_settled(guild_id: Any, job_id: str, timeout_s: float = DEFAULT_POLL_S,
+                             interval_s: float = 5) -> "dict[str, Any]":
+    """Watch one trade until it lands, or give up waiting.
+
+    The offer stands about ten minutes for a human to accept, so asking once is
+    asking too early -- the job is queued and the command falls silent, having
+    just told somebody to go and accept a trade. This exists so the person who
+    ran the command gets an answer while they are still looking at Discord.
+
+    Giving up is NOT failing: the job keeps its row and the watchdog settles it
+    later. Returns {"state": done|failed|running, "detail": ...}.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        settled = await settle_deposits(guild_id)
+        if job_id in settled:
+            return settled[job_id]
+        if time.monotonic() >= deadline:
+            return {"state": "running", "detail": None}
+        await asyncio.sleep(interval_s)
+
+
 async def _book_movement(guild_id: Any, owner_id: Any, items: "list[dict[str, Any]]",
                          job_id: str, kind: str) -> None:
     """Move the claim for one finished trade, card by card.
@@ -223,13 +268,13 @@ async def _book_movement(guild_id: Any, owner_id: Any, items: "list[dict[str, An
                     # The depositor is owed the copies back.
                     await debt_service.create_card_loan(
                         guild_id=str(guild_id), lender_id=str(owner_id),
-                        borrower_id=wallet_service.HOUSE_MTGO, card_name=item["name"],
+                        borrower_id=wallet_service.HOUSE_LIBRARY, card_name=item["name"],
                         quantity=item["qty"], created_by="card-library",
                         source_id=source_id)
                 case "card-withdraw":
                     # ...and the library has now given them back.
                     await debt_service.create_card_return(
-                        guild_id=str(guild_id), returner_id=wallet_service.HOUSE_MTGO,
+                        guild_id=str(guild_id), returner_id=wallet_service.HOUSE_LIBRARY,
                         owner_id=str(owner_id), card_name=item["name"],
                         quantity=item["qty"], created_by="card-library",
                         source_id=source_id)
@@ -249,5 +294,5 @@ async def held_for(guild_id: Any, owner_id: Any) -> "list[dict[str, Any]]":
     """What the library is holding for this depositor, from the claim ledger."""
     from services import debt_service
     rows = await debt_service.get_open_card_positions(
-        str(guild_id), str(owner_id), wallet_service.HOUSE_MTGO)
+        str(guild_id), str(owner_id), wallet_service.HOUSE_LIBRARY)
     return [{"name": r["card_name"], "qty": r["net"]} for r in rows if r["net"] > 0]

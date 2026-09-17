@@ -21,7 +21,7 @@ from helpers.money_gate import (
     spawn_followup,
 )
 from services.card_deposit_service import (
-    held_for, settle_deposits, start_deposit, start_withdrawal,
+    held_for, poll_until_settled, start_deposit, start_withdrawal,
 )
 from services.mtgo_tradebot_client import get_lending_client, max_cards_per_trade
 
@@ -112,9 +112,8 @@ class CardDepositCommands(commands.Cog):
             f"only take what's in your binder.",
             ephemeral=True)
 
-        settled = await settle_deposits(ctx.guild_id)
-        outcome = settled.get(detail) if detail else None
-        outcome = outcome or {}
+        outcome: "dict[str, Any]" = (
+            await poll_until_settled(ctx.guild_id, detail) if detail else {})
         if outcome.get("state") == "done":
             held = await held_for(ctx.guild_id, ctx.author.id)
             await ctx.followup.send(
@@ -169,8 +168,8 @@ class CardDepositCommands(commands.Cog):
             f"_You'll get the same printings you deposited._",
             ephemeral=True)
 
-        settled = await settle_deposits(ctx.guild_id)
-        outcome = (settled.get(detail) if detail else None) or {}
+        outcome: "dict[str, Any]" = (
+            await poll_until_settled(ctx.guild_id, detail) if detail else {})
         if outcome.get("state") == "done":
             left = await held_for(ctx.guild_id, ctx.author.id)
             tail = ("" if not left else
