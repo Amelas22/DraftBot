@@ -8,7 +8,7 @@ import io
 from collections import Counter, namedtuple
 from datetime import datetime
 from functools import partial
-from typing import Awaitable, Callable, Iterable
+from typing import Any, Awaitable, Callable, Iterable, Optional
 
 import discord
 from loguru import logger
@@ -25,30 +25,85 @@ from helpers.utils import (
 from models.draft_session import DraftSession
 
 
-def _grouped_lines(card_ids: list, carddata: dict) -> list:
-    """`"<count> <CardName>"` lines for `card_ids`, grouped by name (using the
-    front-face card name) and ordered by first appearance."""
+def _grouped_items(card_ids: list, carddata: dict,
+                   name_of: "Optional[Callable[[dict[str, Any]], str]]" = None,
+                   ) -> "list[dict[str, Any]]":
+    """`[{"name", "qty"}]` for `card_ids`, grouped by name and ordered by first
+    appearance.
+
+    `name_of` decides what a card is CALLED, taking its carddata entry and
+    defaulting to Draftmancer's own name, which leaves every existing caller
+    alone.
+
+    It is a parameter rather than a transform applied afterwards because
+    renaming has to happen BEFORE grouping. Two printings of
+    `Thing in the Ice // Awoken Horror` are two card ids with one MTGO name, and
+    they have to arrive as a single `qty: 2` entry: the serve keys a trade's
+    movement record by name, so a second entry for a name it has already seen
+    reads as the same movement and its copies are dropped. Mapping names over
+    the finished list cannot merge them.
+    """
     counts: dict[str, int] = {}
     order: list[str] = []
+    dropped = 0
     for cid in card_ids:
-        name = (carddata.get(cid) or {}).get("name")
+        entry = carddata.get(cid)
+        if not isinstance(entry, dict):
+            dropped += 1
+            continue
+        name = name_of(entry) if name_of else entry.get("name")
         if not name:
+            dropped += 1
             continue
         if name not in counts:
             order.append(name)
         counts[name] = counts.get(name, 0) + 1
-    return [f"{counts[name]} {name}" for name in order]
+    if dropped:
+        # Worth a line now that this also builds LOANS. As a printed decklist a
+        # missing card was cosmetic -- the reader sees a short list and asks.
+        # A loan is a claim on physical cards, and a silently short one is a
+        # deck the borrower is never offered and nobody ever misses.
+        logger.warning("pool: {} of {} card(s) had no readable name in carddata "
+                       "and were left out", dropped, len(card_ids))
+    return [{"name": name, "qty": counts[name]} for name in order]
+
+
+def _grouped_lines(card_ids: list, carddata: dict) -> list:
+    """`"<count> <CardName>"` lines for `card_ids`."""
+    return [f"{item['qty']} {item['name']}"
+            for item in _grouped_items(card_ids, carddata)]
+
+
+def pool_items(draft_data: dict, user_id: str,
+               name_of: "Optional[Callable[[dict[str, Any]], str]]" = None,
+               ) -> "list[dict[str, Any]]":
+    """One drafter's full pool as `[{"name", "qty"}]`, or `[]` if the user or
+    their cards are missing.
+
+    The same grouping render_pool prints, in the shape the card library's loans
+    are written in. Counted once and read two ways rather than twice: a pool
+    that a player is told they drafted and a deck the library then lends them
+    have to be the same cards, and two counters are two chances to disagree.
+    """
+    users = draft_data.get("users") or {}
+    carddata = draft_data.get("carddata") or {}
+    card_ids = (users.get(user_id) or {}).get("cards") or []
+    return _grouped_items(card_ids, carddata, name_of)
 
 
 def render_pool(draft_data: dict, user_id: str) -> str:
     """Importable decklist for one drafter's full pool: `"<count> <CardName>"`
-    lines from `users[user_id].cards`, using the front-face card name. Returns
-    "" if the user or their cards are missing."""
-    users = draft_data.get("users") or {}
-    user = users.get(user_id) or {}
-    carddata = draft_data.get("carddata") or {}
-    card_ids = user.get("cards") or []
-    return "\n".join(_grouped_lines(card_ids, carddata))
+    lines from `users[user_id].cards`. Returns "" if the user or their cards are
+    missing.
+
+    Draftmancer's OWN names, deliberately: a two-faced card stays
+    `"Front // Back"` here. That is what a player importing this list wants, and
+    it is the difference `name_of` exists to express -- a loan built from the
+    same pool is named the way MTGO names cards instead, which for everything
+    except split cards is the front face alone.
+    """
+    return "\n".join(f"{item['qty']} {item['name']}"
+                     for item in pool_items(draft_data, user_id))
 
 
 def map_discord_to_draftmancer(draft_data: dict, sign_ups: dict) -> dict[str, str]:

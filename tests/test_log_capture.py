@@ -265,6 +265,48 @@ async def test_on_end_draft_posts_team_pools():
 
 
 @pytest.mark.asyncio
+async def test_on_end_draft_offers_each_drafter_their_pool():
+    """The push half of the card library's join to a draft. A deck reaches a
+    player's hands only if something calls assign_drafted_decks, and for the
+    whole first version of the library nothing did."""
+    m = _manager()
+    m.draft_cancelled = False
+    m.draft_channel_id = "999"
+    m.current_draft_log = _draft_data()
+    bot = MagicMock()
+    bot.get_guild.return_value = None
+    bot.get_channel.return_value = None
+    with patch("services.draft_setup_manager.get_bot", return_value=bot), \
+         patch.object(DraftSetupManager, "capture_draft_log", AsyncMock()), \
+         patch("services.draft_setup_manager.post_team_logs", AsyncMock()), \
+         patch("services.draft_setup_manager.assign_drafted_decks",
+               AsyncMock()) as decks:
+        await m._on_end_draft()
+    decks.assert_awaited_once_with(m.session_id)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_pool_post_still_offers_the_decks():
+    """Separate try blocks: posting pools gives up whenever a team channel will
+    not resolve, and borrowing a deck has nothing to do with a room existing."""
+    m = _manager()
+    m.draft_cancelled = False
+    m.draft_channel_id = "999"
+    m.current_draft_log = _draft_data()
+    bot = MagicMock()
+    bot.get_guild.return_value = None
+    bot.get_channel.return_value = None
+    with patch("services.draft_setup_manager.get_bot", return_value=bot), \
+         patch.object(DraftSetupManager, "capture_draft_log", AsyncMock()), \
+         patch("services.draft_setup_manager.post_team_logs",
+               AsyncMock(side_effect=RuntimeError("no channel"))), \
+         patch("services.draft_setup_manager.assign_drafted_decks",
+               AsyncMock()) as decks:
+        await m._on_end_draft()
+    decks.assert_awaited_once_with(m.session_id)
+
+
+@pytest.mark.asyncio
 async def test_manually_unlock_delegates_to_publish_with_release():
     m = _manager()
     with patch.object(DraftSetupManager, "publish_draft_log", AsyncMock(return_value=True)) as pub:

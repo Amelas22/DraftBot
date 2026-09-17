@@ -15,6 +15,8 @@ project-includes = [
     "cogs/card_deposit_commands.py",
     "services/card_deposit_service.py",
     "helpers/cube_list.py",
+    "services/draft_deck_assignment.py",
+    "helpers/mtgo_names.py",
     "cogs/server_draft_stats.py",
     "draft_organization/bracket.py",
     "helpers/draft_outcome.py",
