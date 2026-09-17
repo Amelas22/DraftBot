@@ -20,7 +20,9 @@ from helpers.money_gate import (
     custodian_name, explain_trade_failure, mtgo_job_footer, mtgo_trade_prompt,
     spawn_followup,
 )
-from services.card_deposit_service import held_for, settle_deposits, start_deposit
+from services.card_deposit_service import (
+    held_for, settle_deposits, start_deposit, start_withdrawal,
+)
 from services.mtgo_tradebot_client import get_lending_client, max_cards_per_trade
 
 from cogs.card_lending_commands import library_gate
@@ -36,6 +38,7 @@ _MESSAGES = {
     "dispatch_unknown": "⚠️ We lost contact with MTGO while setting up the trade, so we "
                         "can't tell whether it started. Check MTGO for a message from the "
                         "library bot before trying again — nothing has been recorded.",
+    "nothing_held": "📭 The library isn't holding any of your cards.",
 }
 
 
@@ -125,6 +128,62 @@ class CardDepositCommands(commands.Cog):
                 f"recorded.\n\n{why}\n\nRun `/deposit` again when it's sorted.",
                 ephemeral=True)
         # still running: the watchdog settles it; saying nothing is correct
+
+    @discord.slash_command(name="withdraw",
+                           description="Take back the cards the card library is holding for you")
+    async def withdraw(self, ctx: discord.ApplicationContext) -> None:
+        logger.info("/withdraw by {} in guild {}", ctx.author.id, ctx.guild_id)
+        await ctx.defer(ephemeral=True)
+        blocked = library_gate(ctx)
+        if blocked:
+            await ctx.followup.send(blocked, ephemeral=True)
+            return
+        spawn_followup("card-library withdraw", self._withdraw_and_watch(ctx))
+
+    async def _withdraw_and_watch(self, ctx: Any) -> None:
+        status, detail = await start_withdrawal(ctx.guild_id, ctx.author.id)
+        if status == "some_on_loan":
+            # Named rather than traded for: the bot's binder is short by exactly
+            # what a borrower is holding, so the trade would open and fail.
+            await ctx.followup.send(
+                f"📦 Some of your cards are out on loan right now, so the library "
+                f"can't hand them back yet:\n{detail}\n\nTry again once they're "
+                f"returned — `/mydeposits` still shows everything it owes you.",
+                ephemeral=True)
+            return
+        if status == "too_large":
+            await ctx.followup.send(
+                f"📦 That's {detail}. Taking back this many at once isn't supported yet.",
+                ephemeral=True)
+            return
+        if status != "dispatched":
+            await ctx.followup.send(
+                _MESSAGES.get(status, f"⚠️ Couldn't take those back ({status})."),
+                ephemeral=True)
+            return
+
+        who = await custodian_name(get_lending_client())
+        await ctx.followup.send(
+            f"🤝 **Ready to hand them back.** {mtgo_trade_prompt(who)}\n"
+            f"{mtgo_job_footer(detail) if detail else ''}\n"
+            f"_You'll get the same printings you deposited._",
+            ephemeral=True)
+
+        settled = await settle_deposits(ctx.guild_id)
+        outcome = (settled.get(detail) if detail else None) or {}
+        if outcome.get("state") == "done":
+            left = await held_for(ctx.guild_id, ctx.author.id)
+            tail = ("" if not left else
+                    f"\nThe library still holds **{sum(c['qty'] for c in left)}** "
+                    f"of yours — `/mydeposits`.")
+            await ctx.followup.send(f"✅ Cards returned to your MTGO account.{tail}",
+                                    ephemeral=True)
+        elif outcome.get("state") == "failed":
+            why = explain_trade_failure(outcome.get("detail") or "the trade didn't complete")
+            await ctx.followup.send(
+                f"❌ The trade didn't complete, so nothing moved and the library still "
+                f"holds your cards.\n\n{why}\n\nRun `/withdraw` again when it's sorted.",
+                ephemeral=True)
 
     @discord.slash_command(name="mydeposits",
                            description="What the card library is holding for you")

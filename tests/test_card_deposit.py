@@ -38,6 +38,13 @@ def rig(monkeypatch):
     return client
 
 
+def _stock(stock):
+    """available_now, stubbed: what the library can physically hand over."""
+    async def _avail(guild_id):
+        return dict(stock)
+    return _avail
+
+
 async def _owed_to(player):
     rows = await debt_service.get_open_card_positions(
         GUILD, player, wallet_service.HOUSE_MTGO)
@@ -133,3 +140,57 @@ async def test_the_library_watchdog_settles_deposits_too(test_db, rig, monkeypat
     await svc.settle_deposits()               # what the watchdog calls next
 
     assert await _owed_to(OWNER) == {"Adarkar Valkyrie": 1, "Auramancer": 2}
+
+
+# --- taking them back out ---------------------------------------------------
+
+async def _deposit_and_settle(rig, cards, job="job-1"):
+    rig.job_id = job
+    rig.jobs[job] = {"state": "done", "receive": cards}
+    await svc.start_deposit(GUILD, OWNER, cards)
+    await svc.settle_deposits(GUILD)
+
+
+async def test_withdrawing_asks_for_everything_without_naming_it(test_db, rig, monkeypatch):
+    """The serve pins the exact printings it received from its own record, so a
+    whole-position withdraw names no cards -- and could only disagree with what
+    actually crossed if it tried to."""
+    await _deposit_and_settle(rig, CARDS)
+    monkeypatch.setattr(svc, "available_now", _stock({"Adarkar Valkyrie": 1, "Auramancer": 2}))
+
+    status, _ = await svc.start_withdrawal(GUILD, OWNER)
+
+    assert status == "dispatched"
+    assert rig.withdrawn == [(HANDLE, None)], "no card list goes out"
+
+
+async def test_a_completed_withdrawal_clears_what_was_owed(test_db, rig, monkeypatch):
+    await _deposit_and_settle(rig, CARDS)
+    monkeypatch.setattr(svc, "available_now", _stock({"Adarkar Valkyrie": 1, "Auramancer": 2}))
+    rig.job_id = "job-2"
+    rig.jobs["job-2"] = {"state": "done", "give": CARDS}
+
+    await svc.start_withdrawal(GUILD, OWNER)
+    await svc.settle_deposits(GUILD)
+
+    assert await _owed_to(OWNER) == {}, "the library owes them nothing now"
+
+
+async def test_cards_out_on_loan_are_named_rather_than_traded_for(test_db, rig, monkeypatch):
+    """Withdrawing what a borrower is holding opens a trade the bot cannot
+    complete: its binder is short by exactly the cards that are out. Better to
+    say which, and who has to bring them back, than to fail in MTGO."""
+    await _deposit_and_settle(rig, CARDS)
+    monkeypatch.setattr(svc, "available_now", _stock({"Adarkar Valkyrie": 1}))
+
+    status, detail = await svc.start_withdrawal(GUILD, OWNER)
+
+    assert status == "some_on_loan"
+    assert "Auramancer" in (detail or ""), f"say what is out: {detail}"
+    assert rig.withdrawn == [], "no doomed trade is opened"
+
+
+async def test_withdrawing_nothing_says_so(test_db, rig):
+    status, _ = await svc.start_withdrawal(GUILD, OWNER)
+
+    assert status == "nothing_held"

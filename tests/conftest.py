@@ -581,6 +581,7 @@ class FakeLendingServe:
         self.response = response
         self.lent: list[tuple] = []
         self.deposited: list[tuple] = []
+        self.withdrawn: list[tuple] = []
         self.collected: list[tuple] = []
         self.orphan = None
         self.returns = None          # what a return hands back; None = all of it
@@ -603,6 +604,11 @@ class FakeLendingServe:
     async def borrow(self, user, cards, qty=1, **kw):
         self.lent.append((user, cards))
         self._carried[self.job_id] = ("give", cards)
+        return self._accept()
+
+    async def withdraw_cards(self, user, card=None, qty=None, **kw):
+        self.withdrawn.append((user, card))
+        self._carried[self.job_id] = ("give", self.returns or [])
         return self._accept()
 
     async def return_cards(self, user, card=None, qty=None, **kw):
