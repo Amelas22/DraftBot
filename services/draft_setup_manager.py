@@ -29,6 +29,7 @@ from helpers.stale_drafts import is_finished_draft
 from notification_service import send_ready_check_dms
 from services.draft_socket_client import DraftSocketClient
 from services.draft_log_store import post_team_logs
+from services.draft_deck_assignment import assign_drafted_decks
 from cube_views.pack_options import DEFAULT_PACKS_PER_PLAYER, DEFAULT_CARDS_PER_PACK
 from helpers.team_names import BLUE, RED
 
@@ -446,6 +447,21 @@ class DraftSetupManager:
                     await post_team_logs(self.session_id, bot)
                 except Exception as e:
                     self.logger.error(f"Eager team-pool post failed for {self.session_id}: {e}")
+                # Its own try, and not folded into post_team_logs: posting pools
+                # is all-or-nothing on team channels resolving, and whether a
+                # player can borrow their deck has nothing to do with a room.
+                try:
+                    await assign_drafted_decks(self.session_id)
+                except Exception:
+                    # With the traceback: the body spans SQLAlchemy, config
+                    # reads and log parsing, so `{e}` alone gives an operator a
+                    # bare TypeError with no file and no line. A broad catch is
+                    # right here; a broad catch that also destroys the evidence
+                    # is not. Some drafters may have a deck and others not --
+                    # the reconciler re-runs and finishes the rest.
+                    self.logger.opt(exception=True).error(
+                        f"Deck assignment failed for {self.session_id}; it may "
+                        f"have assigned some drafters and not others")
             else:
                 self.logger.warning(f"No draft log available to capture for {self.session_id}")
             # Publishing the public embed is the reconciler's job (restart-safe);

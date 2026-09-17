@@ -26,3 +26,31 @@ def test_a_card_with_none_at_all_says_so_rather_than_offering_zero():
 
 def test_nothing_short_produces_nothing():
     assert describe_shortfall([]) == ""
+
+
+def test_a_whole_drafted_pool_being_short_still_fits_in_a_discord_message():
+    """Discord refuses a message over 2000 characters, and the send RAISES --
+    so an over-long shortfall is not truncated, it gets no reply at all.
+
+    Every loan used to be a hand-seeded fixture of two or three cards. A
+    drafted pool is up to 48 distinct names, and a library that covers none of
+    them names all 48. Reachable the obvious way: a second draft whose pools
+    overlap a singleton library the first draft already emptied.
+    """
+    short = [{"name": f"Some Reasonably Long Card Name {i}", "want": 3, "have": 0}
+             for i in range(48)]
+
+    message = describe_shortfall(short)
+
+    assert len(message) < 2000, f"{len(message)} characters"
+    assert "more" in message, "and it says how many it could not list"
+
+
+def test_a_short_list_is_not_truncated_and_says_nothing_about_more():
+    short = [{"name": "Swamp", "want": 4, "have": 1},
+             {"name": "Island", "want": 2, "have": 0}]
+
+    message = describe_shortfall(short)
+
+    assert "more" not in message
+    assert "Swamp" in message and "Island" in message

@@ -137,7 +137,35 @@ def describe_shortfall(short: "list[dict[str, Any]]") -> str:
         else:
             lines.append(f"• **{name}** — only **{have}** of {want} available; "
                          f"you'd need to source the other **{want - have}**")
-    return "\n".join(lines)
+    return _within_a_message(lines)
+
+
+# Discord refuses a message over 2000 characters, and the send RAISES -- so an
+# over-long shortfall does not get truncated, it gets no reply at all. Every
+# loan used to be a hand-seeded fixture of two or three cards; a drafted pool is
+# up to 48 distinct names, and a library that covers none of them names all 48
+# at ~60 characters each. The budget leaves room for the surrounding message.
+_SHORTFALL_BUDGET = 1500
+
+
+def _within_a_message(lines: "list[str]") -> str:
+    """As many lines as will fit, then a count of what did not.
+
+    Listing the first N is the useful half: the player is going to source these
+    themselves, and a truncated list they can act on beats an exception they
+    never see.
+    """
+    kept: "list[str]" = []
+    used = 0
+    for i, line in enumerate(lines):
+        remaining = len(lines) - i
+        tail = f"\n…and **{remaining}** more" if remaining else ""
+        if used + len(line) + 1 + len(tail) > _SHORTFALL_BUDGET:
+            kept.append(f"…and **{remaining}** more")
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return "\n".join(kept)
 
 
 def _deck_lines(loan: Any) -> str:

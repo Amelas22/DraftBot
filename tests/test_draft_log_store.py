@@ -1601,3 +1601,45 @@ async def test_every_pool_post_says_how_many_cards_it_is():
         assert "cards):" in line, f"the card count is missing from: {line!r}"
         assert "Cosmos" in line or "gypsy caravan" in line, (
             f"the open thread labels a post with its team: {line!r}")
+
+
+def test_the_posted_decklist_and_the_loan_name_cards_differently_on_purpose():
+    """The contract the `name_of` parameter exists for, pinned from both sides.
+
+    A player importing a decklist wants Draftmancer's "Front // Back"; a loan
+    the TradeBot has to fill wants the name MTGO actually trades under, which
+    for everything except split cards is the front face alone. Without this,
+    collapsing the two into "one naming rule" passes the whole suite while
+    every posted decklist silently loses its back faces.
+    """
+    from helpers.mtgo_names import mtgo_name
+    from services.draft_log_store import pool_items
+
+    log = {
+        "carddata": {
+            "c1": {"name": "Invasion of Ixalan // Belligerent Regisaur"},
+            "c2": {"name": "Fire // Ice", "layout": "split"},
+        },
+        "users": {"u1": {"userName": "Alice", "cards": ["c1", "c2"]}},
+    }
+
+    assert render_pool(log, "u1").splitlines() == [
+        "1 Invasion of Ixalan // Belligerent Regisaur",
+        "1 Fire // Ice",
+    ], "the human decklist keeps Draftmancer's names"
+
+    assert pool_items(log, "u1", name_of=mtgo_name) == [
+        {"name": "Invasion of Ixalan", "qty": 1},   # transforming: front face
+        {"name": "Fire // Ice", "qty": 1},          # split: MTGO trades this name
+    ], "the loan uses the names MTGO knows"
+
+
+def test_the_default_naming_rule_is_draftmancers_own():
+    """pool_items with no rule must not quietly become the MTGO one."""
+    from services.draft_log_store import pool_items
+
+    log = {"carddata": {"c1": {"name": "Brutal Cathar // Moonrage Brute"}},
+           "users": {"u1": {"userName": "Alice", "cards": ["c1"]}}}
+
+    assert pool_items(log, "u1") == [
+        {"name": "Brutal Cathar // Moonrage Brute", "qty": 1}]
