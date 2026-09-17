@@ -18,6 +18,7 @@ import discord
 from loguru import logger
 
 from helpers.utils import ui_button, ui_select
+from config import library_enabled
 from services import wallet_history, wallet_service
 
 CATEGORY_LABELS = {
@@ -26,6 +27,7 @@ CATEGORY_LABELS = {
     wallet_history.TOURNAMENT: "Tournaments",
     wallet_history.DEBT: "Debt settlements",
     wallet_history.MTGO: "MTGO deposits & withdrawals",
+    wallet_history.LIBRARY: "Card library deposits",
     wallet_history.TRANSFER: "Player-to-player & other",
 }
 _LABEL_CATEGORY = {label: category for category, label in CATEGORY_LABELS.items()}
@@ -40,6 +42,30 @@ _LABEL_CATEGORY = {label: category for category, label in CATEGORY_LABELS.items(
 # Not a category: it must not collide with any member of wallet_history's
 # CATEGORIES, or choosing "All activity" would filter to whichever one it named.
 ALL_CATEGORIES = "all"
+
+# What a borrower is told while the library has something of theirs. 'assigned'
+# is absent on purpose: no cards have moved and no deposit has been taken, so
+# there is nothing on the panel to explain.
+_LOAN_STATE_TEXT = {
+    "out_pending": "being traded to you now",
+    "borrowed": "out on loan",
+    "return_pending": "on its way back",
+}
+
+
+async def _outstanding_loan(guild_id: str, player_id: str):
+    """This player's live card-library loan, or None.
+
+    Imported lazily and read through the lending service so the wallet keeps no
+    opinion about how loans are stored. A guild with no library pays nothing at
+    all: this panel is rebuilt on every page turn and every filter change, not
+    just when it is opened, so the query is worth not making.
+    """
+    if not library_enabled(guild_id):
+        return None
+    from services.card_lending_service import active_loan
+    loan = await active_loan(guild_id, player_id)
+    return loan if loan is not None and loan.state in _LOAN_STATE_TEXT else None
 
 
 def page_from_footer(text: str | None) -> int:
@@ -117,6 +143,23 @@ async def wallet_embed(guild_id: str, player_id: str, display_name: str,
     # find the category on it either way.
     if category:
         footer += f" · {CATEGORY_LABELS[category]}"
+
+    # An adornment on someone's money, so it must never be the reason they
+    # cannot see their balance: the deck itself is /mydeck's job (far too long
+    # for a field), and all this owes the reader is that a loan is open and the
+    # reference to quote when asking about it.
+    try:
+        loan = await _outstanding_loan(guild_id, player_id)
+        if loan is not None:
+            reference = loan.source or f"loan {loan.id}"
+            embed.add_field(
+                name="Card library",
+                value=f"📦 A deck is **{_LOAN_STATE_TEXT[loan.state]}** — "
+                      f"`{reference}`\nUse `/mydeck` to see it.",
+                inline=False)
+    except Exception:
+        logger.exception("wallet panel: could not read {}'s card loan", player_id)
+
     embed.set_footer(text=footer)
     return embed, WalletHistoryView(history, guild_id, player_id, display_name)
 

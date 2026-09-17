@@ -435,6 +435,39 @@ def voice_channels_enabled(guild_id):
     return config.get("features", {}).get("voice_channels", False)
 
 
+def card_library_collateral(guild_id):
+    """Tix held against a borrowed deck, or None when this guild has no library.
+
+    None means the feature is OFF -- not free. A guild that wants to lend
+    without a deposit writes `collateral_tix: 0` and owns that decision; a guild
+    that has said nothing, or whose value is unusable, has not opted into
+    lending its cards. Reading a missing or mistyped amount as "charge nothing"
+    would invent a policy nobody chose, and the policy it invents is the one
+    that hands cards over uncollateralised.
+
+    Refusing to lend is recoverable by fixing the config. Lending without the
+    deposit a server asked for is not.
+    """
+    library = get_config(guild_id).get("features", {}).get("card_library", {})
+    if not isinstance(library, dict) or not library.get("enabled"):
+        return None
+    if "collateral_tix" not in library:
+        return None
+    amount = library["collateral_tix"]
+    if not isinstance(amount, int) or isinstance(amount, bool) or amount < 0:
+        return None
+    return amount
+
+
+def library_enabled(guild_id):
+    """Whether this guild runs a card-lending library at all.
+
+    A library is only configured once its deposit is stated, so this is exactly
+    "the collateral reads as a number".
+    """
+    return card_library_collateral(guild_id) is not None
+
+
 def get_debt_warning_threshold(guild_id):
     """Tix of week-old outstanding debt above which (strictly) a staked signup
     shows a debt warning to other players. 0 (or missing stakes config

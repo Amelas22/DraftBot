@@ -16,7 +16,12 @@ from helpers.money_gate import mtgo_trade_prompt
 
 
 async def _run_trade(command, start_name):
-    """Drive deposit/withdraw to the point where they tell the player what to do."""
+    """Drive deposit/withdraw to the point where they tell the player what to do.
+
+    The mock returns the full `_started` shape: `jobs` is what the cog iterates
+    (an order too big for one MTGO trade comes back split), and `job_id` is set
+    only because this one is a single job.
+    """
     from cogs.wallet_cog import WalletCommands
 
     cog = WalletCommands.__new__(WalletCommands)
@@ -27,7 +32,8 @@ async def _run_trade(command, start_name):
          patch("cogs.wallet_cog.linked_username", new=AsyncMock(return_value="me")), \
          patch("cogs.wallet_cog.custodian_name", new=AsyncMock(return_value="TheCustodian")), \
          patch(f"cogs.wallet_cog.resolution.{start_name}",
-               new=AsyncMock(return_value={"ok": True, "job_id": "J1"})), \
+               new=AsyncMock(return_value={"ok": True, "job_id": "J1",
+                                           "jobs": [{"id": "J1", "n": 5}]})), \
          patch("cogs.wallet_cog.spawn_followup",
                side_effect=lambda label, coro: coro.close()):
         await command.callback(cog, ctx, 5)

@@ -33,13 +33,14 @@ TOURNAMENT = "tournament"
 DEBT = "debt"
 MTGO = "mtgo"
 TRANSFER = "transfer"
+LIBRARY = "library"
 ADJUST = "adjust"
 
 
 @dataclass(frozen=True)
 class Origin:
     """What a ledger row was for. Derived from the row alone -- no I/O."""
-    category: str            # DRAFT | TOURNAMENT | DEBT | MTGO | TRANSFER | ADJUST
+    category: str            # DRAFT | TOURNAMENT | DEBT | MTGO | LIBRARY | TRANSFER | ADJUST
     event: str               # entry | winnings | refund | prize | deposit | withdraw | returned | settled | pay | adjust
     ref: str | None = None   # the draft session_id or tournament id to name
     detail: str | None = None  # a draft refund's reason, which its key carries
@@ -80,7 +81,17 @@ _EXACT = {
 # with classify() about which kinds they are.
 _MTGO_BOUNDARY_KINDS = ("deposit", "withdraw")
 
-CATEGORIES = (DRAFT, TOURNAMENT, DEBT, MTGO, TRANSFER)
+# The card library's deposit is recognised by WHO it moved to, not by the text
+# of its source. The holder is a structural fact -- card_lending_service builds
+# every deposit against collateral_holder(guild) -- where a key shape is only a
+# convention, and this ledger is append-only: rows outlive the format they were
+# written with, and one booked under an older key would otherwise read to its
+# owner as an unexplained "Sent" forever. The direction comes from the sign,
+# which is exact: a borrower's own leg is negative going out and positive
+# coming back.
+_LIBRARY_HOLDER_PREFIX = "library:collateral:"
+
+CATEGORIES = (DRAFT, TOURNAMENT, DEBT, MTGO, LIBRARY, TRANSFER)
 
 # The category a prefix belongs to, read straight off the classifier's table so
 # the filter cannot drift from what the lines say. A prefix added there is
@@ -99,9 +110,11 @@ _EXACT_CATEGORY = {source: category for source, (category, _) in _EXACT.items()}
 
 
 def _claimed(category: str) -> ColumnElement[bool]:
-    """What DRAFT/TOURNAMENT/DEBT/MTGO each own: their prefixes from
-    KNOWN_PREFIXES, their whole-key sources from _EXACT, and -- for MTGO alone
-    -- the boundary `kind`s, because a withdraw row carries no source at all.
+    """What DRAFT/TOURNAMENT/DEBT/MTGO/LIBRARY each own: their prefixes from
+    KNOWN_PREFIXES, their whole-key sources from _EXACT, and -- for the two
+    categories a source cannot describe -- a rule of their own: MTGO's boundary
+    `kind`s, because a withdraw row carries no source at all, and LIBRARY's
+    collateral holder, because its rows outlive their key format.
     This is the single definition of a category's ownership; TRANSFER's residual
     is built by negating the union of these, never by restating what they match.
 
@@ -120,6 +133,11 @@ def _claimed(category: str) -> ColumnElement[bool]:
     conds += [source == e for e, c in _EXACT_CATEGORY.items() if c == category]
     if category == MTGO:
         conds.append(WalletTx.kind.in_(_MTGO_BOUNDARY_KINDS))
+    if category == LIBRARY:
+        # Must agree with classify(), or a row renders as a library deposit and
+        # then vanishes when someone filters for library deposits.
+        conds.append(func.coalesce(WalletTx.counterparty_id, "").startswith(
+            _LIBRARY_HOLDER_PREFIX, autoescape=True))
     return or_(*conds)
 
 
@@ -140,7 +158,7 @@ def category_conditions(category: str | None) -> list[ColumnElement[bool]]:
         # learns it. A `kind IN ('pay', 'receive')` restriction would instead
         # drop `adjust` rows (kind="adjust") out of every filter, which is
         # exactly the bug this replaced.
-        claimed = [_claimed(c) for c in (DRAFT, TOURNAMENT, DEBT, MTGO)]
+        claimed = [_claimed(c) for c in (DRAFT, TOURNAMENT, DEBT, MTGO, LIBRARY)]
         return [not_(or_(*claimed))]
     return [_claimed(category)]
 
@@ -166,7 +184,21 @@ def classify(tx: WalletTx) -> Origin:
             return Origin(category, event,
                           ref=_segment(remainder, ref_index),
                           detail=_segment(remainder, detail_index))
+    if (tx.counterparty_id or "").startswith(_LIBRARY_HOLDER_PREFIX):
+        return Origin(LIBRARY, "returned" if tx.amount > 0 else "deposit",
+                      ref=_loan_ref(source))
     return Origin(TRANSFER, "pay")
+
+
+def _loan_ref(source: str) -> str | None:
+    """The loan id out of a collateral key, whatever shape it was written in.
+
+    Every shape so far puts the id in the second segment, so this reads that
+    rather than matching a list of prefixes -- the point of recognising these
+    rows by their holder is not needing to know the formats. A key it cannot
+    parse costs the reference on one line, not the classification."""
+    parts = source.split(":")
+    return parts[1] if len(parts) > 1 and parts[0].startswith("loan") else None
 
 
 def _segment(remainder: str, index: int | None) -> str | None:
@@ -236,6 +268,8 @@ _EVENT_TEXT = {
     (MTGO, "deposit"): "Deposit from MTGO",
     (MTGO, "withdraw"): "Withdrawal to MTGO",
     (MTGO, "returned"): "Withdrawal returned",
+    (LIBRARY, "deposit"): "Card library deposit",
+    (LIBRARY, "returned"): "Card library deposit returned",
     (ADJUST, "adjust"): "Adjustment",
 }
 

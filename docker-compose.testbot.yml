@@ -1,0 +1,74 @@
+# The test DraftBot, on the server rather than a desktop.
+#
+#   docker compose -p draftbot -f docker-compose.testbot.yml up -d --build
+#
+# The sidecar pattern is the one mtgo/docker-compose.instance2.yml already uses,
+# and for the same reason: this host is not on the tailnet, and the TradeBot
+# serves are reachable ONLY over it. The bot joins a tailscale node's network
+# namespace and then resolves `mtgo` and `mtgo2` by MagicDNS exactly as a
+# desktop on the tailnet does -- so MTGO_LENDING_URL and MTGO_TRADEBOT_URL need
+# no rewriting when the bot moves here.
+services:
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: draftbot-tailscale
+    # Owns the shared namespace; the bot joins it. This direction matters: the
+    # container that restarts often must not own the namespace, or every bot
+    # restart orphans the tailnet node.
+    network_mode: bridge
+    # tailscaled directly, NOT the image's containerboot: with no TS_AUTHKEY that
+    # wrapper exits after 60s and the restart policy regenerates the node key,
+    # invalidating the interactive login URL every minute. Log in once with
+    #   docker exec draftbot-tailscale tailscale up --hostname=draftbot-test
+    # and the state volume keeps the node across restarts.
+    #
+    # A REAL tun device, where the mtgo sidecars use --tun=userspace-networking.
+    # That difference is the whole point: userspace networking only carries
+    # traffic INTO the namespace, which is all a serve needs since it just
+    # listens. This bot has to make outbound calls to `mtgo` and `mtgo2`, and in
+    # userspace mode those neither route nor resolve -- MagicDNS answers on
+    # 100.100.100.100, which is itself only reachable over the tunnel. With a
+    # tun device both work transparently, so the URLs in .env stay as hostnames.
+    entrypoint:
+      - /usr/local/bin/tailscaled
+      - --state=/var/lib/tailscale/tailscaled.state
+      - --socket=/var/run/tailscale/tailscaled.sock
+    devices:
+      - /dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    restart: unless-stopped
+
+  draftbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: draftbot-test
+    network_mode: "container:draftbot-tailscale"
+    depends_on:
+      - tailscale
+    volumes:
+      # The code, so a change is a sync and a restart rather than a rebuild.
+      - .:/app
+      # State lives OUTSIDE the synced tree, in a sibling directory: the code is
+      # rsynced with --delete, and a database or a secrets file sitting inside it
+      # is one careless sync away from being replaced. Being a plain directory
+      # rather than a named volume also means the db can be copied in, backed up
+      # and inspected without a helper container.
+      - ../draftbot-data/.env:/app/.env:ro
+      # Mounted AT the path both halves already use. alembic.ini hardcodes
+      # `sqlite:///drafts.db` and db_session defaults to the same relative path,
+      # so pointing the bot elsewhere with DATABASE_URL just gave alembic its own
+      # empty database to migrate from zero -- which it did, and then died on a
+      # table that only exists further up the history. One file, one path, the
+      # same arrangement production runs.
+      - ../draftbot-data/drafts.db:/app/drafts.db
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+
+volumes:
+  tailscale-state:

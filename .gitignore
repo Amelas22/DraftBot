@@ -172,6 +172,20 @@ cython_debug/
 #.idea/
 card_analysis_cache/
 drafts.db.backup.*
+# Every other local copy of the database, however it got its suffix. The
+# backup-only pattern above let `drafts.db.prodcopy` and `drafts.db.bak-*`
+# through, and a `git add -A` then committed 1.1 GB of them.
+drafts.db.*
+drafts.db-shm
+drafts.db-wal
+
+# Screenshots and one-off pages from local analysis. Same story: untracked but
+# not ignored is one careless `add -A` away from being in the history.
+*.png
+*.html
+# ...but not the ones the repo actually ships.
+!images/**/*.png
+!league_site/**/*.html
 analysis_data/
 *.db-shm
 *.db-wal

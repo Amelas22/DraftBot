@@ -130,7 +130,8 @@ async def create_card_loan(
     borrower_id: str,
     card_name: str,
     quantity: int,
-    created_by: str = None
+    created_by: str = None,
+    source_id: str = None
 ) -> tuple[DebtLedger, DebtLedger]:
     """Record a card loan as a mirrored pair of card-entity entries.
 
@@ -143,7 +144,7 @@ async def create_card_loan(
     # The borrower owes the copies back: borrower = debtor, lender = creditor.
     borrower_entry, lender_entry = await create_ledger_entries(
         guild_id=guild_id, debtor_id=borrower_id, creditor_id=lender_id,
-        amount=quantity, source_type="card_loan", source_id=str(uuid.uuid4()),
+        amount=quantity, source_type="card_loan", source_id=source_id or str(uuid.uuid4()),
         card_name=card_name, created_by=created_by)
     return lender_entry, borrower_entry
 
@@ -154,7 +155,8 @@ async def create_card_return(
     owner_id: str,
     card_name: str,
     quantity: int,
-    created_by: str = None
+    created_by: str = None,
+    source_id: str = None
 ) -> tuple[DebtLedger, DebtLedger]:
     """Record copies of a card handed back: the offsetting pair of a loan.
 
@@ -169,7 +171,7 @@ async def create_card_return(
     # side of this event), the returner's owed count rises toward zero.
     owner_entry, returner_entry = await create_ledger_entries(
         guild_id=guild_id, debtor_id=owner_id, creditor_id=returner_id,
-        amount=quantity, source_type="card_return", source_id=str(uuid.uuid4()),
+        amount=quantity, source_type="card_return", source_id=source_id or str(uuid.uuid4()),
         card_name=card_name, created_by=created_by)
     return returner_entry, owner_entry
 

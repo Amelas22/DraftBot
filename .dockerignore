@@ -1,0 +1,14 @@
+.git
+.claude
+prod_logs
+analysis_data
+card_analysis_cache
+logs
+league_site
+drafts.db
+drafts.db.*
+*.png
+*.html
+__pycache__
+**/__pycache__
+.pytest_cache
