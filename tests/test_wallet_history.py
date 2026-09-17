@@ -326,6 +326,8 @@ async def _one_of_each(guild="g1", player="p1"):
                  source="draft-entry:sid1:p1:0:0-10")                           # draft
     await ws.pay(guild, player, "prize:tourney:3", 5, source="tourney:3:18")    # tournament
     await ws.pay(guild, player, "222", 4, source="debt:abc")                    # debt
+    await ws.pay(guild, player, "library:collateral:g1", 5,
+                 source="loan-hold:7:p1:0:0-5")                                # library
     await ws.pay(guild, player, "333", 3, source=None)                          # transfer (uuid)
     await ws.pay(guild, player, "444", 2, source="some-future-thing:9")         # unknown
 
@@ -334,6 +336,7 @@ async def _one_of_each(guild="g1", player="p1"):
     (wh.DRAFT, ["draft-entry:sid1:p1:0:0-10"]),
     (wh.TOURNAMENT, ["tourney:3:18"]),
     (wh.DEBT, ["debt:abc"]),
+    (wh.LIBRARY, ["loan-hold:7:p1:0:0-5"]),
 ])
 @pytest.mark.asyncio
 async def test_each_category_selects_exactly_its_own_rows(test_db, category, expected):  # noqa: F811
@@ -366,7 +369,7 @@ async def test_transfers_are_the_complement_of_the_known_prefixes(test_db):  # n
 @pytest.mark.asyncio
 async def test_no_category_is_everything(test_db):  # noqa: F811
     await _one_of_each()
-    assert (await wh.get_history_page("g1", "p1")).total == 6
+    assert (await wh.get_history_page("g1", "p1")).total == 7
 
 
 @pytest.mark.asyncio
@@ -406,7 +409,7 @@ async def test_categories_partition_the_ledger(test_db):  # noqa: F811
         await session.commit()
 
     all_ids = {r.id for r in (await wh.get_history_page("g1", "p1", size=100)).rows}
-    assert len(all_ids) == 7  # the six _one_of_each rows plus the adjust row
+    assert len(all_ids) == 8  # the seven _one_of_each rows plus the adjust row
 
     seen: set[int] = set()
     for category in wh.CATEGORIES:

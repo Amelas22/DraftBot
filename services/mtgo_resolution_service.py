@@ -35,7 +35,9 @@ from models.mtgo_job import MtgoJob
 from models.wallet_tx import WalletTx
 from models.debt_ledger import DebtLedger
 from helpers.money_gate import serve_busy_reason, spawn_followup
-from services.mtgo_tradebot_client import get_client
+from services.mtgo_tradebot_client import (
+    get_client, jobs_from, max_cards_per_trade, too_large,
+)
 from services import wallet_service
 from services import debt_service
 # Module scope, unlike the notifier below: preference_service reaches only config,
@@ -80,6 +82,41 @@ async def _poll_job(job_id: str, timeout_s: float):
 # durable job records — every started serve job is persisted so a startup
 # resumer can finish booking trades that outlive their in-memory poller
 # ---------------------------------------------------------------------------
+def _started(jobs: list[tuple[str, int]]) -> dict[str, Any]:
+    """The success shape every ``start_*`` returns.
+
+    ``jobs`` is always the full list and is what callers should iterate. ``job_id`` appears
+    ONLY when the order is a single job — deliberately absent once it splits, so a caller
+    still written against one id breaks loudly instead of booking the first batch and
+    silently abandoning the rest. That mirrors the serve, which omits its top-level ``id``
+    for exactly the same reason.
+    """
+    out: dict[str, Any] = {"ok": True, "jobs": [{"id": j, "n": n} for j, n in jobs]}
+    if len(jobs) == 1:
+        out["job_id"] = jobs[0][0]
+    return out
+
+
+def _too_large_message(n: int) -> str:
+    """Why an order was refused for its size, in the player's terms.
+
+    The serve would SPLIT this across several trades run one at a time, and
+    settling a split correctly -- each trade booking its own share, a scan that
+    sees only some of them, a refund against what is really still outstanding --
+    is a materially harder problem than settling one. Refused rather than split,
+    because getting it wrong costs somebody their tix or their cards.
+    """
+    limit = max_cards_per_trade()
+    return (f"That's {n}, and MTGO only moves {limit} in one trade. "
+            f"Do it in batches of {limit} or fewer.")
+
+
+# Reading the serve's response shape is the CLIENT's job, and the card library needs
+# the same reading -- a split order looks identical whether it moves tix or cards.
+# Kept as a name here so this module's call sites read unchanged.
+_jobs_from = jobs_from
+
+
 async def _record_job(job_id: str, kind: str, guild_id: str, player_id: str, mtgo_user: str,
                       amount: int):
     async def _do():
@@ -127,6 +164,10 @@ async def start_deposit(guild_id: str, player_id: str, mtgo_user: str, n: int, *
     but the job is durably recorded so it can't be stranded by a restart."""
     if n <= 0:
         return {"ok": False, "error": "amount must be positive"}
+    if too_large(n):
+        return {"ok": False, "error": _too_large_message(n)}
+    if too_large(n):
+        return {"ok": False, "error": _too_large_message(n)}
     client = get_client()
     if not client.enabled:
         return {"ok": False, "error": "MTGO TradeBot integration is disabled"}
@@ -134,16 +175,19 @@ async def start_deposit(guild_id: str, player_id: str, mtgo_user: str, n: int, *
     if busy:
         return {"ok": False, "error": busy, "busy": True}
     resp = await client.deposit_tix(mtgo_user, n, commit=commit, wait_minutes=wait_minutes)
-    if not resp or not resp.get("id"):
+    jobs = _jobs_from(resp, n)
+    if not jobs:
         # If the POST may have reached the serve with only the response lost, the trade
         # can still fire — adopt the job rather than orphan it. Definite failures skip
         # the scan and fail fast.
         resp = await _recover_lost_job(resp, "deposit", mtgo_user, n)
-        if not resp or not resp.get("id"):
+        jobs = _jobs_from(resp, n)
+        if not jobs:
             return {"ok": False, "error": "serve did not accept the deposit (unreachable or rejected)"}
-        logger.warning(f"start_deposit: adopted job {resp['id']} after lost POST response")
-    await _record_job(resp["id"], "deposit", guild_id, player_id, mtgo_user, n)
-    return {"ok": True, "job_id": resp["id"]}
+        logger.warning(f"start_deposit: adopted job {jobs[0][0]} after lost POST response")
+    for jid, cards in jobs:
+        await _record_job(jid, "deposit", guild_id, player_id, mtgo_user, cards)
+    return _started(jobs)
 
 
 async def finish_deposit(job_id: str, guild_id: str, player_id: str, n: int, mtgo_user: str,
@@ -252,16 +296,35 @@ async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, 
         return {"ok": False, "error": str(e)}
 
     resp = await client.withdraw_tix(mtgo_user, n, commit=commit, wait_minutes=wait_minutes)
-    if not resp or not resp.get("id"):
-        resp = await _recover_lost_job(resp, "request", mtgo_user, n)
-        if not resp or not resp.get("id"):
-            # Definite rejection, or an ambiguous failure whose job-list scan shows no
-            # job — either way no trade can have been opened; give the tix back.
+    answered = bool(resp) and not resp.get("_ambiguous")
+    jobs = _jobs_from(resp, n)
+    if not jobs:
+        recovered = await _recover_lost_job(resp, "request", mtgo_user, n)
+        jobs = _jobs_from(recovered, n)
+        if not jobs and answered:
+            # The serve ANSWERED, we just could not book what it said -- a split
+            # whose parts do not sum, or a shape we do not know. Those jobs
+            # exist and are moving the player's tix, so refunding here pays them
+            # while MTGO takes the tix anyway. Held in flight for a human.
+            logger.error(f"start_withdraw: unbookable response for {player_id} "
+                         f"({n} tix, keys {list(resp)}) -- left in flight")
+            return {"ok": False, "error": "MTGO answered in a way we could not read; "
+                                          "your tix are held while this is sorted out"}
+        if not jobs:
+            # Nothing was opened: a definite rejection, or an ambiguous failure
+            # whose job-list scan turned up nothing. Give the tix back.
             await _return_in_flight(guild_id, player_id, n, f"wd:{commit_key}")
             return {"ok": False, "error": "serve did not accept the withdraw (unreachable or rejected)"}
-        logger.warning(f"start_withdraw: adopted job {resp['id']} after lost POST response")
-    await _record_job(resp["id"], "withdraw", guild_id, player_id, mtgo_user, n)
-    return {"ok": True, "job_id": resp["id"]}
+        logger.warning(f"start_withdraw: adopted job {jobs[0][0]} after lost POST response")
+
+    # The WHOLE amount is committed to in-flight above and each batch books its own share as
+    # it lands, so the shares have to add up to n or tix would sit in in-flight with no job
+    # able to resolve them. _jobs_from enforces that and returns [] otherwise, which lands
+    # above in one of two branches: a refund when nothing was opened, and a HOLD when the
+    # serve answered with something unbookable — so by here the split accounts for every tix.
+    for jid, cards in jobs:
+        await _record_job(jid, "withdraw", guild_id, player_id, mtgo_user, cards)
+    return _started(jobs)
 
 
 async def finish_withdraw(job_id: str, guild_id: str, player_id: str, n: int,
@@ -320,6 +383,13 @@ async def resume_pending_jobs() -> int:
             elif job.kind == "withdraw":
                 await finish_withdraw(job.job_id, job.guild_id, job.player_id,
                                       job.amount, job.mtgo_user)
+            # Card jobs are the card library's, and its own watchdog settles
+            # them -- it has to, because it polls a DIFFERENT serve. Naming the
+            # kinds rather than ignoring them silently, so a card job resuming
+            # here reads as the mistake it would be.
+            elif job.kind in ("borrow", "return"):
+                logger.debug("resume_pending_jobs: leaving {} job {} to the card "
+                             "library's watchdog", job.kind, job.job_id)
         finally:
             _polling_jobs.discard(job.job_id)
 

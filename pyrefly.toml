@@ -9,6 +9,9 @@
 preset = "strict"
 
 project-includes = [
+    "models/card_loan.py",
+    "services/card_lending_service.py",
+    "cogs/card_lending_commands.py",
     "cogs/server_draft_stats.py",
     "draft_organization/bracket.py",
     "helpers/draft_outcome.py",

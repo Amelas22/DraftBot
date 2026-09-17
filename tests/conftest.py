@@ -550,3 +550,91 @@ def draft_control_cog():
     """The cog under test for /scrap and /abandon."""
     from cogs.draft_control import DraftControlCog
     return DraftControlCog(bot=MagicMock())
+
+
+_UNSET = object()
+
+
+class FakeLendingServe:
+    """One stand-in for the card library's TradeBot serve.
+
+    Shared rather than rewritten per file for a reason the suite has now paid
+    for twice: the client's contract changes (``borrow`` taking an item list,
+    ``get_job`` taking ``mark_missing``), and every private copy has to
+    learn each change or fail with a TypeError that says nothing about the test
+    it broke. A stub that lags the real client also stops testing anything.
+
+    Configure what varies; leave the rest:
+      stock     -- {name: qty} the vault reports
+      jobs      -- {job_id: projection}; `job` answers for any id not listed
+      response  -- override the 202 from a lend/collect: None for a definite
+                   refusal, {"_ambiguous": True} for a lost response
+    """
+    enabled = True
+
+    def __init__(self, stock=None, jobs=None, job=None, job_id="job-1",
+                 response=_UNSET):
+        self.stock = dict(stock or {})
+        self.jobs = dict(jobs or {})
+        self.job = job
+        self.job_id = job_id
+        self.response = response
+        self.lent: list[tuple] = []
+        self.collected: list[tuple] = []
+        self.orphan = None
+        self.returns = None          # what a return hands back; None = all of it
+        self._carried: dict = {}     # job id -> (side, items) it moved
+
+    # -- what the library holds ------------------------------------------
+    async def vault(self):
+        return {"available": True, "custodian": "Team01",
+                "top": [{"name": n, "qty": q} for n, q in self.stock.items()]}
+
+    # -- trades ----------------------------------------------------------
+    def _accept(self):
+        return {"id": self.job_id} if self.response is _UNSET else self.response
+
+    async def borrow(self, user, cards, qty=1, **kw):
+        self.lent.append((user, cards))
+        self._carried[self.job_id] = ("give", cards)
+        return self._accept()
+
+    async def return_cards(self, user, card=None, qty=None, **kw):
+        self.collected.append((user, card))
+        # A whole-loan return names nothing, so what comes back is whatever was
+        # lent -- unless a test says otherwise via `returns`, which is how a
+        # partial hand-back is expressed.
+        back = self.returns if self.returns is not None else \
+            [c for _, cards in self.lent for c in cards]
+        self._carried[self.job_id] = ("receive", back)
+        return self._accept()
+
+    @property
+    def sent(self):
+        """Just the card lists that went out, for tests about what was offered."""
+        return [cards for _, cards in self.lent]
+
+    # -- jobs ------------------------------------------------------------
+    async def get_job(self, job_id, *, mark_missing=False):
+        """The serve's projection, with what the trade CARRIED filled in.
+
+        Settlement books the claim off `give`/`receive` rather than off what was
+        asked for, because a batch is the unit that succeeds -- so a stub that
+        reports only a state settles as "nothing crossed" and silently loses
+        every card. A test that needs different items sets them explicitly.
+        """
+        job = self.jobs.get(job_id, self.job)
+        if job is None or job.get("state") != "done":
+            return job
+        side, items = self._carried.get(job_id, (None, None))
+        if side and side not in job:
+            job = {**job, side: items}
+        return job
+
+    async def find_recent_deck_job(self, job_type, mtgo_user, cards, **kw):
+        """What the /jobs scan turns up for a POST whose answer was lost.
+        `orphan` is the trade that really opened, or None for none."""
+        return self.orphan
+
+    async def health(self):
+        return {"ok": True}

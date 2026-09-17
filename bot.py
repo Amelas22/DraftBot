@@ -121,6 +121,11 @@ async def main():
         # poll timeout or across a restart always gets booked eventually.
         from services.mtgo_resolution_service import pending_jobs_watchdog
         bot.loop.create_task(pending_jobs_watchdog(bot))
+        # Same idea for the card library's trades: a borrow whose command poller
+        # died would otherwise sit in 'out_pending' forever, with the borrower
+        # holding cards the ledger says are still on the shelf.
+        from services.card_lending_service import lending_jobs_watchdog
+        bot.loop.create_task(lending_jobs_watchdog(bot))
         logger.info("Re-registered team finder")
 
     @bot.event

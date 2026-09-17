@@ -30,6 +30,7 @@ from .trophy_quiz_session import TrophyQuizSession
 from .trophy_quiz_submission import TrophyQuizSubmission
 from .mtgo_account import MtgoAccount
 from .mtgo_job import MtgoJob
+from .card_loan import CardLoan, ACTIVE_STATES
 from .wallet_tx import WalletTx
 
 # Export all models
@@ -73,4 +74,6 @@ __all__ = [
     'MtgoAccount',
     'MtgoJob',
     'WalletTx',
+    'CardLoan',
+    'ACTIVE_STATES',
 ]
