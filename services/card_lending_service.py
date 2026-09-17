@@ -581,7 +581,8 @@ async def poll_until_settled(guild_id: Any, borrower_id: Any, expect: str,
 
 async def lending_jobs_watchdog(bot: Any = None, interval_s: float = RESCAN_INTERVAL_S) -> None:
     """Settle library trades whose command poller died -- timeout, restart, or a
-    gateway reconnect. Started once from bot.py's on_ready.
+    gateway reconnect. Covers both directions: decks going out on loan and cards
+    coming in on deposit. Started once from bot.py's on_ready.
 
     on_ready refires on every reconnect, so the guard matters: without it each
     reconnect would add another loop, and they would poll the serve in chorus.
@@ -596,6 +597,13 @@ async def lending_jobs_watchdog(bot: Any = None, interval_s: float = RESCAN_INTE
             settled = await settle_in_flight()
             if settled:
                 logger.info("Card-library watchdog settled {} loan(s)", len(settled))
+            # Deposits run against the same serve and are settled here rather
+            # than by a second loop: two watchdogs polling one serve would just
+            # take turns waiting for each other.
+            from services.card_deposit_service import settle_deposits
+            deposited = await settle_deposits()
+            if deposited:
+                logger.info("Card-library watchdog settled {} deposit(s)", len(deposited))
         except Exception:
             # Never let one bad scan kill the loop; the next one may well work.
             logger.exception("Card-library watchdog scan failed")

@@ -580,6 +580,7 @@ class FakeLendingServe:
         self.job_id = job_id
         self.response = response
         self.lent: list[tuple] = []
+        self.deposited: list[tuple] = []
         self.collected: list[tuple] = []
         self.orphan = None
         self.returns = None          # what a return hands back; None = all of it
@@ -593,6 +594,11 @@ class FakeLendingServe:
     # -- trades ----------------------------------------------------------
     def _accept(self):
         return {"id": self.job_id} if self.response is _UNSET else self.response
+
+    async def deposit(self, user, cards, qty=1, **kw):
+        self.deposited.append((user, cards))
+        self._carried[self.job_id] = ("receive", cards)
+        return self._accept()
 
     async def borrow(self, user, cards, qty=1, **kw):
         self.lent.append((user, cards))
