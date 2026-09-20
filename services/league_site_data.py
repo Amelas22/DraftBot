@@ -25,7 +25,7 @@ from models.tournament import (
     TournamentRound,
 )
 from services.tournament_service import (
-    _cut_eligible,
+    cut_after_rank,
     get_active_tournament,
     get_rosters,
     get_standings_data,
@@ -136,31 +136,6 @@ async def _rounds(session: Any, tournament_id: int) -> list[dict[str, Any]]:
     ]
 
 
-def _cut_after_rank(standings: list[Any], cut_to: int | None) -> int | None:
-    """The standings rank the top-N cut line is drawn after, or None for no line.
-
-    NOT simply `cut_to`. A dropped team keeps its place in the standings --
-    its record still feeds every opponent's tiebreak -- but `_cut_eligible`
-    will not seat it. A line drawn at rank N would then promise the last seat
-    to a team that cannot take one.
-
-    `_cut_eligible` is imported rather than restated, private though it is:
-    "who can be seated" is the bot's rule, and a second copy here is exactly
-    the divergence between the public page and Discord this module exists to
-    prevent. It preserves rank order, so its Nth entry is the last team seated.
-
-    None when the cut cannot be filled, because `start_playoff` refuses that
-    cut outright -- drawing a line would advertise a bracket that will not run.
-    """
-    if not cut_to:
-        return None
-    eligible = _cut_eligible(standings)
-    if len(eligible) < cut_to:
-        return None
-    # Identity, not `.id`: these rows are not necessarily flushed.
-    return standings.index(eligible[cut_to - 1]) + 1
-
-
 async def build_tournament_data(session: Any, tournament_id: int) -> dict[str, Any]:
     """The whole public payload for one tournament.
 
@@ -196,7 +171,7 @@ async def build_tournament_data(session: Any, tournament_id: int) -> dict[str, A
         "cut_to": tournament.cut_to,
         # Where the line actually falls, which is not always `cut_to`:
         # a dropped team holds its rank but cannot be seated.
-        "cut_after_rank": _cut_after_rank(standings, tournament.cut_to),
+        "cut_after_rank": cut_after_rank(standings, tournament.cut_to),
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "teams": [
             {

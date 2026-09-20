@@ -10,9 +10,9 @@ import pytest
 from models.player import PlayerStats
 from models.tournament import TournamentParticipant
 from models.sign_up_history import SignUpHistory
+from services.tournament_service import cut_after_rank  # noqa: E402
 from services.league_site_data import (
     PLACEHOLDER_JSON,
-    _cut_after_rank,
     build_for_guild,
     build_tournament_data,
     inject,
@@ -147,26 +147,26 @@ def _ranked(*specs):
 
 def test_cut_line_sits_at_the_cut_size_when_nobody_has_dropped():
     standings = _ranked(("A", False), ("B", False), ("C", False), ("D", False))
-    assert _cut_after_rank(standings, 2) == 2
+    assert cut_after_rank(standings, 2) == 2
 
 
 def test_cut_line_moves_past_a_dropped_team_inside_the_cut():
     """A dropped team keeps its rank but cannot be seated, so a line drawn at
     rank N would promise the last seat to a team that will not take it."""
     standings = _ranked(("A", False), ("B", True), ("C", False), ("D", False))
-    assert _cut_after_rank(standings, 2) == 3
+    assert cut_after_rank(standings, 2) == 3
 
 
 def test_no_cut_line_without_a_declared_cut():
-    assert _cut_after_rank(_ranked(("A", False)), None) is None
-    assert _cut_after_rank(_ranked(("A", False)), 0) is None
+    assert cut_after_rank(_ranked(("A", False)), None) is None
+    assert cut_after_rank(_ranked(("A", False)), 0) is None
 
 
 def test_no_cut_line_when_too_few_teams_remain_to_fill_it():
     """start_playoff refuses this cut outright, so the page must not draw a
     line implying it will happen."""
     standings = _ranked(("A", False), ("B", True), ("C", True))
-    assert _cut_after_rank(standings, 2) is None
+    assert cut_after_rank(standings, 2) is None
 
 
 @pytest.mark.asyncio

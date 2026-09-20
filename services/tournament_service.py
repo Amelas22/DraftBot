@@ -7,6 +7,7 @@ All functions take an AsyncSession so callers control the transaction and tests
 can point them at a temp database (mirrors the leaderboard_service convention).
 """
 from datetime import datetime
+from typing import Any
 
 from loguru import logger
 from sqlalchemy import delete, func, or_, select
@@ -69,6 +70,31 @@ def _cut_eligible(standings):
     state exists to prevent.
     """
     return _pairable(standings)
+
+
+def cut_after_rank(standings: list[Any], cut_to: int | None) -> int | None:
+    """The standings rank the top-N cut line is drawn after, or None for no line.
+
+    NOT simply `cut_to`. A dropped team keeps its place in the standings --
+    its record still feeds every opponent's tiebreak -- but `_cut_eligible`
+    will not seat it. A line drawn at rank N would then promise the last seat
+    to a team that cannot take one.
+
+    Lives here, beside `_cut_eligible`, because both the Discord standings and
+    the public league page draw this line. Two copies of "who can be seated"
+    is exactly the divergence between the two surfaces worth preventing.
+    `_cut_eligible` preserves rank order, so its Nth entry is the last seated.
+
+    None when the cut cannot be filled, because `start_playoff` refuses that
+    cut outright -- drawing a line would advertise a bracket that will not run.
+    """
+    if not cut_to:
+        return None
+    eligible = _cut_eligible(standings)
+    if len(eligible) < cut_to:
+        return None
+    # Identity, not `.id`: these rows are not necessarily flushed.
+    return standings.index(eligible[cut_to - 1]) + 1
 
 
 class SwissComplete(Exception):
