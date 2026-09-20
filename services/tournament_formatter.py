@@ -13,7 +13,7 @@ from models.tournament import STAGE_PLAYOFF, STAGE_SWISS, Tournament
 from services.tournament_escrow_service import describe_structure
 from services.tournament_service import (
     current_round_stage,
-    get_standings_data,
+    get_standings_with_omw,
     get_tournament_id_for_match,
 )
 
@@ -66,18 +66,43 @@ def _add_chunked_field(embed, label, lines, cont_label=None):
         embed.add_field(name=label if i == 0 else cont, value=chunk, inline=False)
 
 
-def _omw_suffix(omw, participant):
-    """` · OMW 61.4%` for a participant, or "" when no OMW% was supplied.
+def _standings_rows(participants, omw):
+    """One line per team: an inline code span, then the name in normal markdown.
 
-    A participant missing from the mapping renders nothing rather than 0.0%:
-    an absent tiebreak is unknown, not a team whose opponents never won.
+    Discord aligns nothing in proportional text, and a fenced block aligns but
+    strips markdown -- so a dropped team could not be struck through. An inline
+    span splits the difference: it renders monospace, so spans built to the same
+    character count render the same width and every name starts at the same x,
+    while the name itself stays outside the span where bold and strikethrough
+    still apply.
+
+    The numbers have to lead. They are the fixed-width anchor, and the parts
+    whose rendered width cannot be known here -- emoji in a team name, a name
+    long enough to wrap -- have to come last so their drift never reaches the
+    columns. Column widths are measured from the teams actually being shown
+    rather than fixed, so a drawn record (W-L-D, two wider than W-L) or a
+    three-digit rank widens the column instead of knocking every row below it
+    out of true.
     """
-    if not omw:
-        return ""
-    value = omw.get(participant.id)
-    if value is None:
-        return ""
-    return f" · OMW {value * 100:.1f}%"
+    rank_w = len(str(len(participants)))
+    points_w = max(len(str(p.points)) for p in participants)
+    record_w = max(len(p.record) for p in participants)
+
+    rows = []
+    for i, p in enumerate(participants, start=1):
+        cells = [f"{i:>{rank_w}}", f"{p.points:>{points_w}}", f"{p.record:>{record_w}}"]
+        value = (omw or {}).get(p.id)
+        if value is not None:
+            # 5 wide, not 4: an OMW% of 100.0 is one character longer than 99.9
+            # and would otherwise push its own row out of line.
+            cells.append(f"{value * 100:>5.1f}%")
+        # A dropped team keeps its place and its record, because both still count
+        # towards the tiebreaks of everyone it played. Struck through and labelled
+        # is what stops the pairings quietly shrinking and reading as a bug.
+        name = (f"~~{p.team_name}~~ *(dropped)*" if p.dropped_at
+                else f"**{p.team_name}**")
+        rows.append(f"`{'  '.join(cells)}` {name}")
+    return rows
 
 
 def create_standings_embed(tournament, participants, stage=STAGE_SWISS, omw=None):
@@ -101,16 +126,7 @@ def create_standings_embed(tournament, participants, stage=STAGE_SWISS, omw=None
         color=discord.Color.gold(),
     )
     if participants:
-        rows = [
-            f"{i}. **{p.team_name}** — {p.points} pts ({p.record})"
-            f"{_omw_suffix(omw, p)}"
-            # A dropped team keeps its place and its record, because both still
-            # count towards the tiebreaks of everyone it played. Saying so is what
-            # stops the pairings quietly shrinking and reading as a bug.
-            f"{' *(dropped)*' if p.dropped_at else ''}"
-            for i, p in enumerate(participants, start=1)
-        ]
-        _add_chunked_field(embed, "Standings", rows)
+        _add_chunked_field(embed, "Standings", _standings_rows(participants, omw))
     else:
         embed.add_field(name="Standings", value="No teams registered yet.", inline=False)
     return embed
@@ -220,9 +236,10 @@ async def update_standings_message(bot, tournament_id):
         tournament = await session.get(Tournament, tournament_id)
         if tournament is None or not tournament.standings_message_id:
             return
-        participants = await get_standings_data(session, tournament_id)
+        participants, omw = await get_standings_with_omw(session, tournament_id)
         embed = create_standings_embed(
-            tournament, participants, await current_round_stage(session, tournament))
+            tournament, participants, await current_round_stage(session, tournament),
+            omw=omw)
         channel_id = int(tournament.standings_channel_id)
         message_id = int(tournament.standings_message_id)
 

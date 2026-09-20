@@ -56,7 +56,7 @@ from services.tournament_service import (
     get_final_placement,
     get_latest_completed_tournament,
     get_rosters,
-    get_standings_data,
+    get_standings_with_omw,
     is_playoff,
     list_participants,
     other_teams_for_user,
@@ -1663,9 +1663,10 @@ class TournamentCog(commands.Cog):
         """
         async with db_session() as session:
             tournament = await session.get(Tournament, tournament_id)
-            participants = await get_standings_data(session, tournament_id)
+            participants, omw = await get_standings_with_omw(session, tournament_id)
             embed = create_standings_embed(
-                tournament, participants, await current_round_stage(session, tournament))
+                tournament, participants, await current_round_stage(session, tournament),
+                omw=omw)
         message = await channel.send(embed=embed)
         await safe_pin(message)
         async with db_session() as session:
@@ -1762,11 +1763,12 @@ class TournamentCog(commands.Cog):
                 await ctx.followup.send("There is no active tournament in this server.", ephemeral=True)
                 return
             rosters = {}
+            omw = None
             if tournament.status == "registration":
                 participants = await list_participants(session, tournament.id)
                 rosters = await get_rosters(session, tournament.id)
             else:
-                participants = await get_standings_data(session, tournament.id)
+                participants, omw = await get_standings_with_omw(session, tournament.id)
             stage = await current_round_stage(session, tournament)
 
         fee = tournament.entry_fee or 0
@@ -1782,7 +1784,7 @@ class TournamentCog(commands.Cog):
             embed = create_registration_embed(tournament, participants, held, deficits,
                                               rosters=rosters)
         else:
-            embed = create_standings_embed(tournament, participants, stage)
+            embed = create_standings_embed(tournament, participants, stage, omw=omw)
             if fee > 0:
                 pool = await escrow.prize_pool(str(ctx.guild.id), tournament.id)
                 embed.add_field(name="🏦 Prize pool", value=f"{pool} tix", inline=False)

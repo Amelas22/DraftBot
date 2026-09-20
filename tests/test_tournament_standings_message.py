@@ -103,6 +103,65 @@ def test_standings_embed_shows_omw_percentage_for_each_team():
     assert "33.3%" in body
 
 
+def test_standings_row_leads_with_a_monospace_span_then_the_team_name():
+    """Rank, points, record and OMW% sit in one inline code span; the name follows.
+
+    Discord aligns nothing in proportional text, and a ``` block aligns but
+    strips markdown. An inline span is monospace, so equal-length spans render
+    equal widths and every name starts at the same x -- while the name stays
+    outside the span, where bold and strikethrough still apply.
+    """
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 2
+    alpha = _participant("Alpha", 6, wins=2, losses=1)
+    alpha.id = 11
+
+    embed = create_standings_embed(tournament, [alpha], omw={11: 0.625})
+
+    row = "\n".join(f.value for f in embed.fields).strip()
+    span, _, name = row.partition("` ")
+    assert span.startswith("`")
+    assert "6" in span and "2-1" in span and "62.5%" in span
+    assert name == "**Alpha**"
+
+
+def test_standings_row_strikes_through_a_dropped_team_and_still_says_dropped():
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 2
+    gone = _participant("Gone", 3, wins=1, losses=2)
+    gone.id, gone.dropped_at = 22, "2026-09-10 00:00:00"
+
+    embed = create_standings_embed(tournament, [gone], omw={22: 0.5})
+
+    body = "\n".join(f.value for f in embed.fields)
+    assert "~~Gone~~" in body
+    assert "*(dropped)*" in body
+
+
+def test_standings_spans_stay_the_same_width_when_a_team_has_a_draw():
+    """A drawn record renders W-L-D, two characters wider than W-L.
+
+    The column is sized from the widest record actually present, so one drawn
+    match cannot knock every row below it out of alignment.
+    """
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 3
+    plain = _participant("Plain", 6, wins=2, losses=1)
+    drawn = _participant("Drawn", 7, wins=2, losses=0, draws=1)
+    plain.id, drawn.id = 1, 2
+
+    embed = create_standings_embed(tournament, [plain, drawn],
+                                   omw={1: 0.5, 2: 0.5})
+
+    spans = [line.split("`")[1]
+             for line in "\n".join(f.value for f in embed.fields).splitlines()]
+    assert len(spans) == 2
+    assert len(spans[0]) == len(spans[1]), spans
+
+
 def test_standings_embed_labels_playoff_rounds_instead_of_counting_past_the_end():
     """Playoff rounds are numbered past total_rounds (round N+1 is the first
     bracket round), so the swiss "N of M" form renders "Round: 4/3" once the
@@ -163,6 +222,42 @@ async def test_update_standings_message_edits_stored_message(test_db):
     channel.fetch_message.assert_awaited_once_with(777)
     message.edit.assert_awaited_once()
     assert "embed" in message.edit.call_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_update_standings_message_shows_the_tiebreak_it_sorted_by(test_db):
+    """The posted board carries OMW%, not just the order OMW% produced.
+
+    The renderer cannot derive it -- that needs the match graph -- so the live
+    path has to hand it over. Without this the bot silently posts the new
+    layout with the tiebreak column missing.
+    """
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "Spring", 3)
+        await session.commit()
+        await register_team(session, tournament.id, "Alpha", "1")
+        await register_team(session, tournament.id, "Bravo", "2")
+        await session.commit()
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await set_result(session, matches[0].id, 2, 0)
+        tournament.standings_channel_id = "555"
+        tournament.standings_message_id = "777"
+        await session.commit()
+        tid = tournament.id
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+    channel = MagicMock()
+    channel.fetch_message = AsyncMock(return_value=message)
+    bot = MagicMock()
+    bot.get_channel.return_value = channel
+
+    with patch("services.tournament_formatter.db_session", _fake_db_session(test_db)):
+        await update_standings_message(bot, tid)
+
+    embed = message.edit.call_args.kwargs["embed"]
+    body = "\n".join(f.value for f in embed.fields)
+    assert "%" in body, body
 
 
 @pytest.mark.asyncio
@@ -317,7 +412,7 @@ def test_standings_embed_shows_a_win_loss_record():
         tournament, [_participant("Alpha", 6, wins=2, losses=0)])
 
     body = "\n".join(f.value for f in embed.fields)
-    assert "(2-0)" in body
+    assert "2-0" in body
     assert "2-0-0" not in body
 
 
@@ -331,4 +426,4 @@ def test_standings_embed_keeps_a_draw_that_was_actually_recorded():
     embed = create_standings_embed(
         tournament, [_participant("Alpha", 4, wins=1, losses=0, draws=1)])
 
-    assert "(1-0-1)" in "\n".join(f.value for f in embed.fields)
+    assert "1-0-1" in "\n".join(f.value for f in embed.fields)

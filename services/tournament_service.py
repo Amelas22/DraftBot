@@ -14,7 +14,12 @@ from sqlalchemy.exc import IntegrityError
 
 from database.db_session import db_session
 from draft_organization.bracket import advance_pairs, build_bracket, final_placement
-from draft_organization.swiss import pair_round, rank_standings, round_robin_schedule
+from draft_organization.swiss import (
+    omw_percentages,
+    pair_round,
+    rank_standings,
+    round_robin_schedule,
+)
 from models.team import Team
 from models.tournament import (
     STAGE_PLAYOFF,
@@ -1057,6 +1062,18 @@ async def get_standings_data(session, tournament_id):
     pairings into it would reorder two tied teams the instant the bracket is
     paired — the standings would contradict the seeds just announced.
     """
+    ranked, _ = await get_standings_with_omw(session, tournament_id)
+    return ranked
+
+
+async def get_standings_with_omw(session, tournament_id):
+    """``(ranked participants, {participant id: OMW%})`` from one load.
+
+    The board has to show the tiebreak it sorted by, and the renderer cannot
+    derive it -- OMW% needs the whole match graph, which only this layer has.
+    Returning both from the same read is what keeps the number displayed and
+    the number sorted on identical to each other.
+    """
     participants = (await session.execute(
         select(TournamentParticipant).where(
             TournamentParticipant.tournament_id == tournament_id
@@ -1068,7 +1085,7 @@ async def get_standings_data(session, tournament_id):
         .where(TournamentRound.tournament_id == tournament_id)
         .where(TournamentRound.stage != STAGE_PLAYOFF)
     )).scalars().all()
-    return rank_standings(participants, matches)
+    return rank_standings(participants, matches), omw_percentages(participants, matches)
 
 
 async def get_final_placement(session, tournament_id):
