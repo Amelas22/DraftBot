@@ -121,6 +121,18 @@ async def main():
         # poll timeout or across a restart always gets booked eventually.
         from services.mtgo_resolution_service import pending_jobs_watchdog
         bot.loop.create_task(pending_jobs_watchdog(bot))
+        # ...and a watcher for the serve itself: the jobs watchdog only notices a
+        # wedge when a trade happened to be in flight (rationale in the module).
+        from services.serve_health_monitor import watch_serve_health
+        # Referenced, not fire-and-forget: asyncio keeps only a weak reference,
+        # and this is the task whose silent death nothing else would reveal.
+        # Guarded because on_ready refires on every gateway reconnect, and the
+        # later task returns at once (the watcher is already claimed) -- so an
+        # unconditional assignment would replace the live watcher's reference
+        # with a finished no-op's, which is the thing this line prevents.
+        existing = getattr(bot, "_serve_health_task", None)
+        if existing is None or existing.done():
+            bot._serve_health_task = bot.loop.create_task(watch_serve_health(bot))
         logger.info("Re-registered team finder")
 
     @bot.event
