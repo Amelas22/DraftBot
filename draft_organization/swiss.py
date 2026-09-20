@@ -53,12 +53,16 @@ def match_win_percentage(match_points, rounds_played, floor=MWP_FLOOR):
     return max(floor, match_points / (3 * rounds_played))
 
 
-def rank_standings(participants, matches):
-    """Sort participants by points, then OMW%, then game diff, then name.
+def omw_percentages(participants, matches):
+    """{participant id: OMW%} -- the average match-win percentage of each
+    participant's *real* opponents (byes excluded).
 
-    OMW% is the average match-win percentage of each participant's *real*
-    opponents (byes excluded). Participants with no real opponents get the
-    floor. Pure: ``participants`` and ``matches`` are read-only.
+    Participants with no real opponents get the floor. Pure: ``participants``
+    and ``matches`` are read-only.
+
+    Split out of rank_standings so a caller that has to *show* the tiebreak
+    (the public league page) reads the same numbers the sort used, instead of
+    reimplementing them and drifting.
     """
     by_id = {p.id: p for p in participants}
     opponents = {p.id: [] for p in participants}
@@ -74,15 +78,45 @@ def rank_standings(participants, matches):
         rounds = p.match_wins + p.match_losses + p.match_draws
         return match_win_percentage(p.points, rounds)
 
-    def omw(p):
-        opp_ids = opponents[p.id]
-        if not opp_ids:
-            return MWP_FLOOR
-        return sum(mwp(by_id[oid]) for oid in opp_ids) / len(opp_ids)
+    return {
+        p.id: (sum(mwp(by_id[oid]) for oid in opponents[p.id]) / len(opponents[p.id])
+               if opponents[p.id] else MWP_FLOOR)
+        for p in participants
+    }
 
+
+def rank_standings(participants, matches, omw=None):
+    """Sort by points, then fewest rounds played, then OMW%, then game diff, then name.
+
+    Rounds played comes before OMW% because standings update live: a team that
+    has not played this round yet is compared against teams that have. Both
+    hold the same points, but the one that spent fewer rounds getting them has
+    a round in hand, and ranking it below a team that has already played that
+    round reads as the board being wrong.
+
+    Rounds played, not losses. The two agree only while no draw exists, and a
+    draw is reachable -- `_apply_result` records one whenever a team match ends
+    level. On losses, 0-0-3 (three rounds spent) outranks 1-1-0 (two rounds,
+    one in hand) at equal points, inverting the very comparison this exists to
+    fix. Ordering by match-win percentage instead would rank the top identically
+    and wreck the bottom, where the MWP floor collapses 1-2, 1-3, 0-2, 0-3 and
+    0-4 onto one value; used inside an equal-points group, rounds played never
+    reaches the floor at all.
+
+    ``omw`` may be a precomputed map from ``omw_percentages`` over the same
+    arguments -- a caller that also displays the tiebreak passes the map it
+    shows, so the board cannot rank on one set of numbers and print another.
+
+    Pure: ``participants`` and ``matches`` are read-only.
+    """
+    if omw is None:
+        omw = omw_percentages(participants, matches)
     return sorted(
         participants,
-        key=lambda p: (-p.points, -omw(p), -(p.game_wins - p.game_losses), p.team_name),
+        key=lambda p: (-p.points,
+                       p.match_wins + p.match_losses + p.match_draws,
+                       -omw[p.id],
+                       -(p.game_wins - p.game_losses), p.team_name),
     )
 
 

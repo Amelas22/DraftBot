@@ -20,6 +20,8 @@ from services.tournament_formatter import (
 )
 from services.tournament_service import (
     create_tournament,
+    drop_team,
+    get_standings_data,
     register_team,
     set_result,
     start_tournament,
@@ -79,6 +81,124 @@ def test_standings_embed_lists_teams_in_given_order():
     assert "Alpha" in body and "Bravo" in body
     assert body.index("Alpha") < body.index("Bravo")
     assert "3" in body  # points shown
+
+
+def test_standings_embed_shows_omw_percentage_for_each_team():
+    """OMW% is the first real tiebreak, so the board has to show it.
+
+    It is passed in rather than recomputed here: the sort already built these
+    numbers from the match graph, and a second derivation in the renderer is
+    how the shown value drifts from the one that ordered the rows.
+    """
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 2
+    alpha = _participant("Alpha", 6, wins=2, losses=1)
+    bravo = _participant("Bravo", 6, wins=2, losses=2)
+    alpha.id, bravo.id = 11, 22
+
+    embed = create_standings_embed(
+        tournament, [alpha, bravo], omw={11: 0.61423, 22: 1 / 3})
+
+    body = "\n".join(f.value for f in embed.fields)
+    assert "61.4%" in body
+    assert "33.3%" in body
+
+
+def test_standings_row_leads_with_a_monospace_span_then_the_team_name():
+    """Rank, points, record and OMW% sit in one inline code span; the name follows.
+
+    Discord aligns nothing in proportional text, and a ``` block aligns but
+    strips markdown. An inline span is monospace, so equal-length spans render
+    equal widths and every name starts at the same x -- while the name stays
+    outside the span, where bold and strikethrough still apply.
+    """
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 2
+    alpha = _participant("Alpha", 6, wins=2, losses=1)
+    alpha.id = 11
+
+    embed = create_standings_embed(tournament, [alpha], omw={11: 0.625})
+
+    row = "\n".join(f.value for f in embed.fields).strip()
+    span, _, name = row.partition("` ")
+    assert span.startswith("`")
+    assert "6" in span and "2-1" in span and "62.5%" in span
+    assert name == "**Alpha**"
+
+
+def test_standings_row_strikes_through_a_dropped_team_and_still_says_dropped():
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 2
+    gone = _participant("Gone", 3, wins=1, losses=2)
+    gone.id, gone.dropped_at = 22, "2026-09-10 00:00:00"
+
+    embed = create_standings_embed(tournament, [gone], omw={22: 0.5})
+
+    body = "\n".join(f.value for f in embed.fields)
+    assert "~~Gone~~" in body
+    assert "*(dropped)*" in body
+
+
+def test_standings_spans_stay_the_same_width_when_a_team_has_a_draw():
+    """A drawn record renders W-L-D, two characters wider than W-L.
+
+    The column is sized from the widest record actually present, so one drawn
+    match cannot knock every row below it out of alignment.
+    """
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 3
+    plain = _participant("Plain", 6, wins=2, losses=1)
+    drawn = _participant("Drawn", 7, wins=2, losses=0, draws=1)
+    plain.id, drawn.id = 1, 2
+
+    embed = create_standings_embed(tournament, [plain, drawn],
+                                   omw={1: 0.5, 2: 0.5})
+
+    spans = [line.split("`")[1]
+             for line in "\n".join(f.value for f in embed.fields).splitlines()]
+    assert len(spans) == 2
+    assert len(spans[0]) == len(spans[1]), spans
+
+
+def test_standings_embed_draws_the_cut_line_after_the_last_seated_team():
+    """The rule goes between the last team in the bracket and the first out.
+
+    Drawn after the rank ``cut_after_rank`` gives, not after ``cut_to``: a
+    dropped team keeps its standings place but cannot be seated, so the two
+    part company the moment one is above the line.
+    """
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 2
+    tournament.cut_to = 2
+    teams = [_participant("Alpha", 9, wins=3), _participant("Bravo", 6, wins=2),
+             _participant("Delta", 3, wins=1)]
+    for n, p in enumerate(teams, start=1):
+        p.id = n
+
+    embed = create_standings_embed(tournament, teams, cut_after=2)
+
+    lines = "\n".join(f.value for f in embed.fields).splitlines()
+    assert len(lines) == 4, lines
+    assert "Bravo" in lines[1]
+    assert "cut" in lines[2].lower(), lines[2]
+    assert "Delta" in lines[3]
+
+
+def test_standings_embed_draws_no_cut_line_when_there_is_no_cut():
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 2
+    alpha = _participant("Alpha", 3, wins=1)
+    alpha.id = 1
+
+    embed = create_standings_embed(tournament, [alpha])
+
+    assert "cut" not in "\n".join(f.value for f in embed.fields).lower()
 
 
 def test_standings_embed_labels_playoff_rounds_instead_of_counting_past_the_end():
@@ -141,6 +261,122 @@ async def test_update_standings_message_edits_stored_message(test_db):
     channel.fetch_message.assert_awaited_once_with(777)
     message.edit.assert_awaited_once()
     assert "embed" in message.edit.call_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_update_standings_message_shows_the_tiebreak_it_sorted_by(test_db):
+    """The posted board carries OMW%, not just the order OMW% produced.
+
+    The renderer cannot derive it -- that needs the match graph -- so the live
+    path has to hand it over. Without this the bot silently posts the new
+    layout with the tiebreak column missing.
+    """
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "Spring", 3)
+        await session.commit()
+        await register_team(session, tournament.id, "Alpha", "1")
+        await register_team(session, tournament.id, "Bravo", "2")
+        await session.commit()
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await set_result(session, matches[0].id, 2, 0)
+        tournament.standings_channel_id = "555"
+        tournament.standings_message_id = "777"
+        await session.commit()
+        tid = tournament.id
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+    channel = MagicMock()
+    channel.fetch_message = AsyncMock(return_value=message)
+    bot = MagicMock()
+    bot.get_channel.return_value = channel
+
+    with patch("services.tournament_formatter.db_session", _fake_db_session(test_db)):
+        await update_standings_message(bot, tid)
+
+    embed = message.edit.call_args.kwargs["embed"]
+    body = "\n".join(f.value for f in embed.fields)
+    assert "%" in body, body
+
+
+@pytest.mark.asyncio
+async def test_update_standings_message_draws_the_cut_line(test_db):
+    """A tournament with a declared cut shows where the bracket line falls.
+
+    The renderer is handed the rank, not the cut size: working out which rank
+    can actually be seated is the service's rule, and the public league page
+    already draws it from the same function.
+    """
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "Spring", 3, cut_to=1)
+        await session.commit()
+        await register_team(session, tournament.id, "Alpha", "1")
+        await register_team(session, tournament.id, "Bravo", "2")
+        await session.commit()
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await set_result(session, matches[0].id, 2, 0)
+        tournament.standings_channel_id = "555"
+        tournament.standings_message_id = "777"
+        await session.commit()
+        tid = tournament.id
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+    channel = MagicMock()
+    channel.fetch_message = AsyncMock(return_value=message)
+    bot = MagicMock()
+    bot.get_channel.return_value = channel
+
+    with patch("services.tournament_formatter.db_session", _fake_db_session(test_db)):
+        await update_standings_message(bot, tid)
+
+    embed = message.edit.call_args.kwargs["embed"]
+    body = "\n".join(f.value for f in embed.fields)
+    assert "top 1 cut" in body, body
+
+
+@pytest.mark.asyncio
+async def test_update_standings_message_moves_the_cut_line_past_a_dropped_team(test_db):
+    """The line follows the last SEATABLE team, not the cut size.
+
+    A dropped team keeps its standings place -- its record still feeds every
+    opponent's tiebreak -- but cannot take a bracket seat. With one sitting
+    inside the cut, `cut_after_rank` and `cut_to` part company, and a board
+    drawn at `cut_to` would promise the last seat to a team that cannot take
+    it. Passing `tournament.cut_to` instead fails this and nothing else.
+    """
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "Spring", 3, cut_to=2)
+        await session.commit()
+        for name, cap in (("Alpha", "1"), ("Bravo", "2"), ("Delta", "3"), ("Echo", "4")):
+            await register_team(session, tournament.id, name, cap)
+        await session.commit()
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        for m in matches:
+            await set_result(session, m.id, 2, 0)          # team A of each pair wins
+        await session.commit()
+        winners = [p.team_name for p in await get_standings_data(session, tournament.id)][:2]
+        await drop_team(session, tournament.id, winners[0])
+        tournament.standings_channel_id = "555"
+        tournament.standings_message_id = "777"
+        await session.commit()
+        tid = tournament.id
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+    channel = MagicMock()
+    channel.fetch_message = AsyncMock(return_value=message)
+    bot = MagicMock()
+    bot.get_channel.return_value = channel
+
+    with patch("services.tournament_formatter.db_session", _fake_db_session(test_db)):
+        await update_standings_message(bot, tid)
+
+    lines = "\n".join(f.value for f in message.edit.call_args.kwargs["embed"].fields).splitlines()
+    rule = next(i for i, line in enumerate(lines) if "cut" in line.lower())
+    assert rule == 3, (
+        "the rule should sit below three standings rows -- the dropped team "
+        f"plus the two that can actually be seated:\n" + "\n".join(lines))
 
 
 @pytest.mark.asyncio
@@ -280,3 +516,33 @@ def test_a_dropped_team_is_marked_but_keeps_its_place():
     alpha_line = next(line for line in body.splitlines() if "Alpha" in line)
     assert "dropped" in bravo_line.lower()
     assert "dropped" not in alpha_line.lower()
+
+
+# ---- records omit the draw count --------------------------------------------------
+
+def test_standings_embed_shows_a_win_loss_record():
+    # Every team match has to produce a winner, so the draw count is zero on
+    # every row and only makes the line harder to read.
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 2
+
+    embed = create_standings_embed(
+        tournament, [_participant("Alpha", 6, wins=2, losses=0)])
+
+    body = "\n".join(f.value for f in embed.fields)
+    assert "2-0" in body
+    assert "2-0-0" not in body
+
+
+def test_standings_embed_keeps_a_draw_that_was_actually_recorded():
+    # The schema permits a draw even though the rules do not; a record that
+    # had one must not silently lose it.
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 2
+
+    embed = create_standings_embed(
+        tournament, [_participant("Alpha", 4, wins=1, losses=0, draws=1)])
+
+    assert "1-0-1" in "\n".join(f.value for f in embed.fields)

@@ -119,6 +119,25 @@ class TournamentParticipant(Base):
                                  lazy="selectin")
 
     @property
+    def record(self) -> str:
+        """This tournament's record as W-L, or W-L-D if a draw was recorded.
+
+        The draw count is omitted because every team match has to produce a
+        winner -- an even team size that ends level is decided by a
+        representative playoff -- so it is zero on every row and only makes
+        the line harder to read. It is still appended when it is non-zero:
+        this column exists and set_result can write to it, so a hard W-L
+        format would silently drop a draw that did happen.
+
+        Lives on the model rather than in either renderer because the Discord
+        standings embed and the public league page both show this, and two
+        copies of the format would eventually disagree.
+        """
+        if self.match_draws:
+            return f"{self.match_wins}-{self.match_losses}-{self.match_draws}"
+        return f"{self.match_wins}-{self.match_losses}"
+
+    @property
     def roster_user_ids(self) -> list[str]:
         """Roster member ids as strings. The captain is NOT here --
         captain_user_id is the single authority for who owns the team -- so

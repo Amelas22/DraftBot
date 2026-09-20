@@ -7,6 +7,7 @@ All functions take an AsyncSession so callers control the transaction and tests
 can point them at a temp database (mirrors the leaderboard_service convention).
 """
 from datetime import datetime
+from typing import Any
 
 from loguru import logger
 from sqlalchemy import delete, func, or_, select
@@ -14,7 +15,12 @@ from sqlalchemy.exc import IntegrityError
 
 from database.db_session import db_session
 from draft_organization.bracket import advance_pairs, build_bracket, final_placement
-from draft_organization.swiss import pair_round, rank_standings, round_robin_schedule
+from draft_organization.swiss import (
+    omw_percentages,
+    pair_round,
+    rank_standings,
+    round_robin_schedule,
+)
 from models.team import Team
 from models.tournament import (
     STAGE_PLAYOFF,
@@ -64,6 +70,31 @@ def _cut_eligible(standings):
     state exists to prevent.
     """
     return _pairable(standings)
+
+
+def cut_after_rank(standings: list[Any], cut_to: int | None) -> int | None:
+    """The standings rank the top-N cut line is drawn after, or None for no line.
+
+    NOT simply `cut_to`. A dropped team keeps its place in the standings --
+    its record still feeds every opponent's tiebreak -- but `_cut_eligible`
+    will not seat it. A line drawn at rank N would then promise the last seat
+    to a team that cannot take one.
+
+    Lives here, beside `_cut_eligible`, because both the Discord standings and
+    the public league page draw this line. Two copies of "who can be seated"
+    is exactly the divergence between the two surfaces worth preventing.
+    `_cut_eligible` preserves rank order, so its Nth entry is the last seated.
+
+    None when the cut cannot be filled, because `start_playoff` refuses that
+    cut outright -- drawing a line would advertise a bracket that will not run.
+    """
+    if not cut_to:
+        return None
+    eligible = _cut_eligible(standings)
+    if len(eligible) < cut_to:
+        return None
+    # Identity, not `.id`: these rows are not necessarily flushed.
+    return standings.index(eligible[cut_to - 1]) + 1
 
 
 class SwissComplete(Exception):
@@ -1047,7 +1078,8 @@ async def advance_round(session, tournament_id, rng):
 
 
 async def get_standings_data(session, tournament_id):
-    """Participants ranked by points, then OMW%, then game diff, then name.
+    """Participants ranked by points, then fewest rounds played, then OMW%,
+    then game diff, then name.
 
     OMW% (opponents' match-win %, byes excluded) needs the full match graph, so
     we load participants and matches and rank in memory (tournaments are small).
@@ -1056,6 +1088,18 @@ async def get_standings_data(session, tournament_id):
     tiebreak and is computed from the opponent graph, so letting bracket
     pairings into it would reorder two tied teams the instant the bracket is
     paired — the standings would contradict the seeds just announced.
+    """
+    ranked, _ = await get_standings_with_omw(session, tournament_id)
+    return ranked
+
+
+async def get_standings_with_omw(session, tournament_id):
+    """``(ranked participants, {participant id: OMW%})`` from one load.
+
+    The board has to show the tiebreak it sorted by, and the renderer cannot
+    derive it -- OMW% needs the whole match graph, which only this layer has.
+    Returning both from the same read is what keeps the number displayed and
+    the number sorted on identical to each other.
     """
     participants = (await session.execute(
         select(TournamentParticipant).where(
@@ -1068,7 +1112,11 @@ async def get_standings_data(session, tournament_id):
         .where(TournamentRound.tournament_id == tournament_id)
         .where(TournamentRound.stage != STAGE_PLAYOFF)
     )).scalars().all()
-    return rank_standings(participants, matches)
+    # One derivation, passed to both: the map the board prints is the map the
+    # sort ranked on, by construction rather than by the two calls happening
+    # to carry identical arguments.
+    omw = omw_percentages(participants, matches)
+    return rank_standings(participants, matches, omw), omw
 
 
 async def get_final_placement(session, tournament_id):

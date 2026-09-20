@@ -19,6 +19,7 @@ project-includes = [
     "services/draft_reconstruct.py",
     "services/draft_table_page.py",
     "services/draft_table_publisher.py",
+    "services/league_site_data.py",
     "helpers/match_control.py",
     "helpers/opponent_threads.py",
     "helpers/scryfall_oracle.py",

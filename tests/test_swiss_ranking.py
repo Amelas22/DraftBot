@@ -3,7 +3,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from draft_organization.swiss import match_win_percentage, rank_standings
+from draft_organization.swiss import (
+    match_win_percentage,
+    omw_percentages,
+    rank_standings,
+)
 
 FLOOR = 1 / 3
 
@@ -86,3 +90,64 @@ def test_falls_through_to_game_diff_then_name():
     ranked = rank_standings([b, a, ob, oa], matches)
     # a and b: equal pts(3), equal OMW(0.33). a has better game diff(+2 vs +1).
     assert ranked.index(a) < ranked.index(b)
+
+
+# ---- omw_percentages: the same numbers, exposed for display ----------------------
+
+def test_omw_percentages_averages_real_opponents():
+    # T1 played one 1-0 opponent (MWP 1.0) and one 0-1 opponent (floored at 1/3).
+    p = participant(1, points=3, w=1, l=1)
+    strong = participant(2, points=3, w=1)
+    weak = participant(3, points=0, l=1)
+    matches = [match(1, 2), match(1, 3)]
+
+    omw = omw_percentages([p, strong, weak], matches)
+
+    assert omw[1] == pytest.approx((1.0 + FLOOR) / 2)
+
+
+def test_omw_percentages_ignores_byes():
+    # A bye is not an opponent, so a team whose only other game was a bye
+    # still sits at the floor rather than being credited with one.
+    p = participant(1, points=3, w=1)
+    matches = [match(1, None, is_bye=True)]
+
+    assert omw_percentages([p], matches)[1] == pytest.approx(FLOOR)
+
+
+# ---- rank_standings: teams part-way through a round ------------------------------
+
+def test_fewer_losses_outranks_at_equal_points_mid_round():
+    """A 2-1 team ranks above a 2-2 team, even with a worse OMW%.
+
+    Standings update live, so the field is comparing teams that have played
+    different numbers of rounds. Both of these hold 6 points; the one that
+    still has a round in hand is ahead on the only reading that matters --
+    it cannot yet have lost twice.
+    """
+    ahead = participant(1, points=6, w=2, l=1, gw=10, gl=6, name="RoundInHand")
+    behind = participant(2, points=6, w=2, l=2, gw=10, gl=6, name="Complete")
+    weak = participant(3, points=0, l=3, name="Weak")
+    strong = participant(4, points=9, w=3, name="Strong")
+    # behind played the stronger opponent, so OMW alone would put it first.
+    matches = [match(1, 3), match(2, 4)]
+
+    ranked = rank_standings([behind, ahead, weak, strong], matches)
+
+    assert ranked.index(ahead) < ranked.index(behind)
+
+
+def test_a_round_in_hand_beats_more_rounds_played_even_with_draws():
+    """The tiebreak is rounds played, not losses -- they diverge on a draw.
+
+    Both hold 3 points. The first has played two rounds and still has one in
+    hand; the second has spent three rounds to get there. Ranking on losses
+    inverts this pair, because three draws cost no losses at all -- and draws
+    are reachable: _apply_result records one whenever a team match ends level.
+    """
+    in_hand = participant(1, points=3, w=1, l=1, name="RoundInHand")
+    played_more = participant(2, points=3, d=3, name="PlayedMore")
+
+    ranked = rank_standings([played_more, in_hand], [])
+
+    assert ranked.index(in_hand) < ranked.index(played_more)

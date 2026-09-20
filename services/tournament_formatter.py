@@ -13,7 +13,8 @@ from models.tournament import STAGE_PLAYOFF, STAGE_SWISS, Tournament
 from services.tournament_escrow_service import describe_structure
 from services.tournament_service import (
     current_round_stage,
-    get_standings_data,
+    cut_after_rank,
+    get_standings_with_omw,
     get_tournament_id_for_match,
 )
 
@@ -66,12 +67,74 @@ def _add_chunked_field(embed, label, lines, cont_label=None):
         embed.add_field(name=label if i == 0 else cont, value=chunk, inline=False)
 
 
-def create_standings_embed(tournament, participants, stage=STAGE_SWISS):
+def _standings_rows(participants, omw):
+    """One line per team: an inline code span, then the name in normal markdown.
+
+    Discord aligns nothing in proportional text, and a fenced block aligns but
+    strips markdown -- so a dropped team could not be struck through. An inline
+    span splits the difference: it renders monospace, so spans built to the same
+    character count render the same width and every name starts at the same x,
+    while the name itself stays outside the span where bold and strikethrough
+    still apply.
+
+    The numbers have to lead. They are the fixed-width anchor, and the parts
+    whose rendered width cannot be known here -- emoji in a team name, a name
+    long enough to wrap -- have to come last so their drift never reaches the
+    columns. Column widths are measured from the teams actually being shown
+    rather than fixed, so a drawn record (W-L-D, two wider than W-L) or a
+    three-digit rank widens the column instead of knocking every row below it
+    out of true.
+    """
+    rank_w = len(str(len(participants)))
+    points_w = max(len(str(p.points)) for p in participants)
+    record_w = max(len(p.record) for p in participants)
+
+    rows = []
+    for i, p in enumerate(participants, start=1):
+        cells = [f"{i:>{rank_w}}", f"{p.points:>{points_w}}", f"{p.record:>{record_w}}"]
+        value = (omw or {}).get(p.id)
+        if value is not None:
+            # 5 wide, not 4: an OMW% of 100.0 is one character longer than 99.9
+            # and would otherwise push its own row out of line.
+            cells.append(f"{value * 100:>5.1f}%")
+        # A dropped team keeps its place and its record, because both still count
+        # towards the tiebreaks of everyone it played. Struck through and labelled
+        # is what stops the pairings quietly shrinking and reading as a bug.
+        name = (f"~~{p.team_name}~~ *(dropped)*" if p.dropped_at
+                else f"**{p.team_name}**")
+        rows.append(f"`{'  '.join(cells)}` {name}")
+    return rows
+
+
+def _cut_rule(cut_to):
+    """The rule drawn between the last team in the bracket and the first out.
+
+    Labelled rather than a bare line: the field splitter breaks between rows at
+    Discord's 1024-character cap, so the rule can land at the top of a
+    continuation field, away from the rank it follows. Naming the cut keeps it
+    readable wherever it lands.
+    """
+    return f"────────── **top {cut_to} cut** ──────────"
+
+
+def create_standings_embed(tournament, participants, stage=STAGE_SWISS, omw=None,
+                           cut_after=None):
     """Build the standings embed for a tournament (pure).
 
     ``stage`` is the stage of the round it is on (see
     tournament_service.current_round_stage). It defaults to swiss for the
-    read-only callers of a tournament that has none."""
+    read-only callers of a tournament that has none.
+
+    ``omw`` is {participant id: OMW%} from ``omw_percentages`` -- the same
+    mapping the sort used. It is passed in rather than derived here because
+    deriving it needs the match graph, and a second derivation is how the
+    number on the board drifts from the number that ordered the board. Omit it
+    and the rows render exactly as before.
+
+    ``cut_after`` is the rank the top-N rule is drawn after, from
+    ``tournament_service.cut_after_rank`` -- the rank, not the cut size, because
+    a dropped team holds its standings place but cannot be seated. None draws no
+    rule, which is also what that function returns for a cut nothing can fill."""
     embed = discord.Embed(
         title=f"🏆 {tournament.name} — Standings",
         description=(
@@ -81,15 +144,12 @@ def create_standings_embed(tournament, participants, stage=STAGE_SWISS):
         color=discord.Color.gold(),
     )
     if participants:
-        rows = [
-            f"{i}. **{p.team_name}** — {p.points} pts "
-            f"({p.match_wins}-{p.match_losses}-{p.match_draws})"
-            # A dropped team keeps its place and its record, because both still
-            # count towards the tiebreaks of everyone it played. Saying so is what
-            # stops the pairings quietly shrinking and reading as a bug.
-            f"{' *(dropped)*' if p.dropped_at else ''}"
-            for i, p in enumerate(participants, start=1)
-        ]
+        rows = _standings_rows(participants, omw)
+        # tournament.cut_to guards the label, not the position: the rule is
+        # named after the cut it marks, so a cut_after with no declared cut
+        # would render "top None cut" rather than no rule at all.
+        if cut_after and tournament.cut_to and 0 < cut_after < len(rows):
+            rows.insert(cut_after, _cut_rule(tournament.cut_to))
         _add_chunked_field(embed, "Standings", rows)
     else:
         embed.add_field(name="Standings", value="No teams registered yet.", inline=False)
@@ -200,9 +260,10 @@ async def update_standings_message(bot, tournament_id):
         tournament = await session.get(Tournament, tournament_id)
         if tournament is None or not tournament.standings_message_id:
             return
-        participants = await get_standings_data(session, tournament_id)
+        participants, omw = await get_standings_with_omw(session, tournament_id)
         embed = create_standings_embed(
-            tournament, participants, await current_round_stage(session, tournament))
+            tournament, participants, await current_round_stage(session, tournament),
+            omw=omw, cut_after=cut_after_rank(participants, tournament.cut_to))
         channel_id = int(tournament.standings_channel_id)
         message_id = int(tournament.standings_message_id)
 
