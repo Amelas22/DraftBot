@@ -13,6 +13,7 @@ from models.tournament import STAGE_PLAYOFF, STAGE_SWISS, Tournament
 from services.tournament_escrow_service import describe_structure
 from services.tournament_service import (
     current_round_stage,
+    cut_after_rank,
     get_standings_with_omw,
     get_tournament_id_for_match,
 )
@@ -105,7 +106,19 @@ def _standings_rows(participants, omw):
     return rows
 
 
-def create_standings_embed(tournament, participants, stage=STAGE_SWISS, omw=None):
+def _cut_rule(cut_to):
+    """The rule drawn between the last team in the bracket and the first out.
+
+    Labelled rather than a bare line: the field splitter breaks between rows at
+    Discord's 1024-character cap, so the rule can land at the top of a
+    continuation field, away from the rank it follows. Naming the cut keeps it
+    readable wherever it lands.
+    """
+    return f"────────── **top {cut_to} cut** ──────────"
+
+
+def create_standings_embed(tournament, participants, stage=STAGE_SWISS, omw=None,
+                           cut_after=None):
     """Build the standings embed for a tournament (pure).
 
     ``stage`` is the stage of the round it is on (see
@@ -116,7 +129,12 @@ def create_standings_embed(tournament, participants, stage=STAGE_SWISS, omw=None
     mapping the sort used. It is passed in rather than derived here because
     deriving it needs the match graph, and a second derivation is how the
     number on the board drifts from the number that ordered the board. Omit it
-    and the rows render exactly as before."""
+    and the rows render exactly as before.
+
+    ``cut_after`` is the rank the top-N rule is drawn after, from
+    ``tournament_service.cut_after_rank`` -- the rank, not the cut size, because
+    a dropped team holds its standings place but cannot be seated. None draws no
+    rule, which is also what that function returns for a cut nothing can fill."""
     embed = discord.Embed(
         title=f"🏆 {tournament.name} — Standings",
         description=(
@@ -126,7 +144,10 @@ def create_standings_embed(tournament, participants, stage=STAGE_SWISS, omw=None
         color=discord.Color.gold(),
     )
     if participants:
-        _add_chunked_field(embed, "Standings", _standings_rows(participants, omw))
+        rows = _standings_rows(participants, omw)
+        if cut_after and 0 < cut_after < len(rows):
+            rows.insert(cut_after, _cut_rule(tournament.cut_to))
+        _add_chunked_field(embed, "Standings", rows)
     else:
         embed.add_field(name="Standings", value="No teams registered yet.", inline=False)
     return embed
@@ -239,7 +260,7 @@ async def update_standings_message(bot, tournament_id):
         participants, omw = await get_standings_with_omw(session, tournament_id)
         embed = create_standings_embed(
             tournament, participants, await current_round_stage(session, tournament),
-            omw=omw)
+            omw=omw, cut_after=cut_after_rank(participants, tournament.cut_to))
         channel_id = int(tournament.standings_channel_id)
         message_id = int(tournament.standings_message_id)
 

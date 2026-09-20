@@ -162,6 +162,43 @@ def test_standings_spans_stay_the_same_width_when_a_team_has_a_draw():
     assert len(spans[0]) == len(spans[1]), spans
 
 
+def test_standings_embed_draws_the_cut_line_after_the_last_seated_team():
+    """The rule goes between the last team in the bracket and the first out.
+
+    Drawn after the rank ``cut_after_rank`` gives, not after ``cut_to``: a
+    dropped team keeps its standings place but cannot be seated, so the two
+    part company the moment one is above the line.
+    """
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 2
+    tournament.cut_to = 2
+    teams = [_participant("Alpha", 9, wins=3), _participant("Bravo", 6, wins=2),
+             _participant("Delta", 3, wins=1)]
+    for n, p in enumerate(teams, start=1):
+        p.id = n
+
+    embed = create_standings_embed(tournament, teams, cut_after=2)
+
+    lines = "\n".join(f.value for f in embed.fields).splitlines()
+    assert len(lines) == 4, lines
+    assert "Bravo" in lines[1]
+    assert "cut" in lines[2].lower(), lines[2]
+    assert "Delta" in lines[3]
+
+
+def test_standings_embed_draws_no_cut_line_when_there_is_no_cut():
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 2
+    alpha = _participant("Alpha", 3, wins=1)
+    alpha.id = 1
+
+    embed = create_standings_embed(tournament, [alpha])
+
+    assert "cut" not in "\n".join(f.value for f in embed.fields).lower()
+
+
 def test_standings_embed_labels_playoff_rounds_instead_of_counting_past_the_end():
     """Playoff rounds are numbered past total_rounds (round N+1 is the first
     bracket round), so the swiss "N of M" form renders "Round: 4/3" once the
@@ -258,6 +295,42 @@ async def test_update_standings_message_shows_the_tiebreak_it_sorted_by(test_db)
     embed = message.edit.call_args.kwargs["embed"]
     body = "\n".join(f.value for f in embed.fields)
     assert "%" in body, body
+
+
+@pytest.mark.asyncio
+async def test_update_standings_message_draws_the_cut_line(test_db):
+    """A tournament with a declared cut shows where the bracket line falls.
+
+    The renderer is handed the rank, not the cut size: working out which rank
+    can actually be seated is the service's rule, and the public league page
+    already draws it from the same function.
+    """
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "Spring", 3, cut_to=1)
+        await session.commit()
+        await register_team(session, tournament.id, "Alpha", "1")
+        await register_team(session, tournament.id, "Bravo", "2")
+        await session.commit()
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await set_result(session, matches[0].id, 2, 0)
+        tournament.standings_channel_id = "555"
+        tournament.standings_message_id = "777"
+        await session.commit()
+        tid = tournament.id
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+    channel = MagicMock()
+    channel.fetch_message = AsyncMock(return_value=message)
+    bot = MagicMock()
+    bot.get_channel.return_value = channel
+
+    with patch("services.tournament_formatter.db_session", _fake_db_session(test_db)):
+        await update_standings_message(bot, tid)
+
+    embed = message.edit.call_args.kwargs["embed"]
+    body = "\n".join(f.value for f in embed.fields)
+    assert "top 1 cut" in body, body
 
 
 @pytest.mark.asyncio

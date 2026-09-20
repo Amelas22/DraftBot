@@ -48,6 +48,7 @@ from services.tournament_service import (
     count_unreported_matches,
     create_tournament,
     current_round_stage,
+    cut_after_rank,
     finish_tournament,
     find_current_match,
     find_participant_by_name,
@@ -1666,7 +1667,7 @@ class TournamentCog(commands.Cog):
             participants, omw = await get_standings_with_omw(session, tournament_id)
             embed = create_standings_embed(
                 tournament, participants, await current_round_stage(session, tournament),
-                omw=omw)
+                omw=omw, cut_after=cut_after_rank(participants, tournament.cut_to))
         message = await channel.send(embed=embed)
         await safe_pin(message)
         async with db_session() as session:
@@ -1784,7 +1785,9 @@ class TournamentCog(commands.Cog):
             embed = create_registration_embed(tournament, participants, held, deficits,
                                               rosters=rosters)
         else:
-            embed = create_standings_embed(tournament, participants, stage, omw=omw)
+            embed = create_standings_embed(
+                tournament, participants, stage, omw=omw,
+                cut_after=cut_after_rank(participants, tournament.cut_to))
             if fee > 0:
                 pool = await escrow.prize_pool(str(ctx.guild.id), tournament.id)
                 embed.add_field(name="🏦 Prize pool", value=f"{pool} tix", inline=False)
