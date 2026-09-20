@@ -135,3 +135,19 @@ def test_fewer_losses_outranks_at_equal_points_mid_round():
     ranked = rank_standings([behind, ahead, weak, strong], matches)
 
     assert ranked.index(ahead) < ranked.index(behind)
+
+
+def test_a_round_in_hand_beats_more_rounds_played_even_with_draws():
+    """The tiebreak is rounds played, not losses -- they diverge on a draw.
+
+    Both hold 3 points. The first has played two rounds and still has one in
+    hand; the second has spent three rounds to get there. Ranking on losses
+    inverts this pair, because three draws cost no losses at all -- and draws
+    are reachable: _apply_result records one whenever a team match ends level.
+    """
+    in_hand = participant(1, points=3, w=1, l=1, name="RoundInHand")
+    played_more = participant(2, points=3, d=3, name="PlayedMore")
+
+    ranked = rank_standings([played_more, in_hand], [])
+
+    assert ranked.index(in_hand) < ranked.index(played_more)

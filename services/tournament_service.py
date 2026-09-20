@@ -1078,7 +1078,8 @@ async def advance_round(session, tournament_id, rng):
 
 
 async def get_standings_data(session, tournament_id):
-    """Participants ranked by points, then OMW%, then game diff, then name.
+    """Participants ranked by points, then fewest rounds played, then OMW%,
+    then game diff, then name.
 
     OMW% (opponents' match-win %, byes excluded) needs the full match graph, so
     we load participants and matches and rank in memory (tournaments are small).
@@ -1111,7 +1112,11 @@ async def get_standings_with_omw(session, tournament_id):
         .where(TournamentRound.tournament_id == tournament_id)
         .where(TournamentRound.stage != STAGE_PLAYOFF)
     )).scalars().all()
-    return rank_standings(participants, matches), omw_percentages(participants, matches)
+    # One derivation, passed to both: the map the board prints is the map the
+    # sort ranked on, by construction rather than by the two calls happening
+    # to carry identical arguments.
+    omw = omw_percentages(participants, matches)
+    return rank_standings(participants, matches, omw), omw
 
 
 async def get_final_placement(session, tournament_id):

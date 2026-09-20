@@ -85,23 +85,37 @@ def omw_percentages(participants, matches):
     }
 
 
-def rank_standings(participants, matches):
-    """Sort participants by points, then fewest losses, then OMW%, then game diff, then name.
+def rank_standings(participants, matches, omw=None):
+    """Sort by points, then fewest rounds played, then OMW%, then game diff, then name.
 
-    Losses come before OMW% because standings update live: a team that has not
-    played this round yet is compared against teams that have. Both hold the
-    same points, but the one with a round in hand cannot have lost as often,
-    and ranking it below a team that already took that loss reads as the board
-    being wrong. Ordering by match-win percentage instead would do the same job
-    at the top and wreck the bottom, where the MWP floor collapses 1-3, 0-2 and
-    0-4 onto one value.
+    Rounds played comes before OMW% because standings update live: a team that
+    has not played this round yet is compared against teams that have. Both
+    hold the same points, but the one that spent fewer rounds getting them has
+    a round in hand, and ranking it below a team that has already played that
+    round reads as the board being wrong.
+
+    Rounds played, not losses. The two agree only while no draw exists, and a
+    draw is reachable -- `_apply_result` records one whenever a team match ends
+    level. On losses, 0-0-3 (three rounds spent) outranks 1-1-0 (two rounds,
+    one in hand) at equal points, inverting the very comparison this exists to
+    fix. Ordering by match-win percentage instead would rank the top identically
+    and wreck the bottom, where the MWP floor collapses 1-2, 1-3, 0-2, 0-3 and
+    0-4 onto one value; used inside an equal-points group, rounds played never
+    reaches the floor at all.
+
+    ``omw`` may be a precomputed map from ``omw_percentages`` over the same
+    arguments -- a caller that also displays the tiebreak passes the map it
+    shows, so the board cannot rank on one set of numbers and print another.
 
     Pure: ``participants`` and ``matches`` are read-only.
     """
-    omw = omw_percentages(participants, matches)
+    if omw is None:
+        omw = omw_percentages(participants, matches)
     return sorted(
         participants,
-        key=lambda p: (-p.points, p.match_losses, -omw[p.id],
+        key=lambda p: (-p.points,
+                       p.match_wins + p.match_losses + p.match_draws,
+                       -omw[p.id],
                        -(p.game_wins - p.game_losses), p.team_name),
     )
 
