@@ -29,7 +29,21 @@ async def send_dm(bot_or_client, user_id: str, message: str, view=None, label: s
     who = f"{label} ({user_id})" if label else f"user {user_id}"
     logger.debug(f"Attempting DM to {who}: {message}")
     try:
-        user = bot_or_client.get_user(int(user_id)) or await bot_or_client.fetch_user(int(user_id))
+        # int() BEFORE anything else, and its failure is a failure like any
+        # other: the contract here is a bool, and a caller written against that
+        # loses the message entirely when an exception comes out instead. A
+        # Discord id looks like something you could write as a name, so this is
+        # the misconfiguration people actually make.
+        recipient = int(user_id)
+    except (TypeError, ValueError):
+        logger.warning(f"Could not DM {who} - {user_id!r} is not a Discord user id. "
+                       f"Message: {message}")
+        return False
+    try:
+        user = bot_or_client.get_user(recipient) or await bot_or_client.fetch_user(recipient)
+        if user is None:
+            logger.warning(f"Could not DM {who} - no such user. Message: {message}")
+            return False
         await user.send(message, view=view)
         logger.info(f"Successfully sent DM to {who}")
         return True
@@ -41,6 +55,15 @@ async def send_dm(bot_or_client, user_id: str, message: str, view=None, label: s
             logger.info(f"Could not DM {who} - DMs disabled (50007). Message: {message}")
             return False
         logger.warning(f"HTTP error sending DM to {who}: {e}. Message: {message}")
+        return False
+    except Exception as e:
+        # Anything else is still a failure to deliver, and the contract above
+        # is a bool. Only Discord's own exception types were caught, so the
+        # REST API being unreachable or slow -- likeliest at startup, which is
+        # when a caller is most apt to send its first message -- came out as an
+        # exception instead, through callers written to read a False.
+        logger.opt(exception=True).warning(
+            f"Could not DM {who} - {type(e).__name__}. Message: {message}")
         return False
 
 
