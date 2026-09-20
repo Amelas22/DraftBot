@@ -145,7 +145,10 @@ def create_standings_embed(tournament, participants, stage=STAGE_SWISS, omw=None
     )
     if participants:
         rows = _standings_rows(participants, omw)
-        if cut_after and 0 < cut_after < len(rows):
+        # tournament.cut_to guards the label, not the position: the rule is
+        # named after the cut it marks, so a cut_after with no declared cut
+        # would render "top None cut" rather than no rule at all.
+        if cut_after and tournament.cut_to and 0 < cut_after < len(rows):
             rows.insert(cut_after, _cut_rule(tournament.cut_to))
         _add_chunked_field(embed, "Standings", rows)
     else:

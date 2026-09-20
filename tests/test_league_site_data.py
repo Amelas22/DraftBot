@@ -10,7 +10,6 @@ import pytest
 from models.player import PlayerStats
 from models.tournament import TournamentParticipant
 from models.sign_up_history import SignUpHistory
-from services.tournament_service import cut_after_rank  # noqa: E402
 from services.league_site_data import (
     PLACEHOLDER_JSON,
     build_for_guild,
@@ -19,6 +18,7 @@ from services.league_site_data import (
     summarize,
 )
 from services.tournament_service import (
+    cut_after_rank,
     add_teammate,
     create_tournament,
     drop_team,

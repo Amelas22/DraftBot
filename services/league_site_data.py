@@ -1,10 +1,12 @@
 """The public league page's tournament payload: standings, pairings, rosters.
 
-Read-only, and deliberately built from the same functions Discord's standings
-use -- `get_standings_data` for the order and `omw_percentages` for the
-tiebreak it is ordered by. Re-deriving either here would let the public page
-and the Discord embed disagree about who is winning, which is the one failure
-this module has to make impossible.
+Read-only, and deliberately built from the same function Discord's standings
+use: `get_standings_with_omw` hands back the order and the tiebreak it is
+ordered by from one load. Re-deriving either here would let the public page and
+the Discord embed disagree about who is winning, which is the one failure this
+module has to make impossible -- and re-querying the match graph meant keeping
+a second copy of "swiss rounds only", spelled as a bare string rather than
+STAGE_PLAYOFF.
 
 The payload is embedded into league_site/index.html by `inject` at publish
 time (see scripts/upload_league_page.py), so the page needs no second request
@@ -16,7 +18,6 @@ from typing import Any
 
 from sqlalchemy import select
 
-from draft_organization.swiss import omw_percentages
 from models.player import PlayerStats
 from models.sign_up_history import SignUpHistory
 from models.tournament import (
@@ -28,7 +29,7 @@ from services.tournament_service import (
     cut_after_rank,
     get_active_tournament,
     get_rosters,
-    get_standings_data,
+    get_standings_with_omw,
 )
 
 # The block `inject` writes into. PLACEHOLDER_JSON is what index.html ships with
@@ -147,20 +148,10 @@ async def build_tournament_data(session: Any, tournament_id: int) -> dict[str, A
     if tournament is None:
         raise ValueError(f"No tournament with id {tournament_id}")
 
-    standings = await get_standings_data(session, tournament_id)
+    standings, omw = await get_standings_with_omw(session, tournament_id)
     rosters = await get_rosters(session, tournament_id)
     captains = await _captain_names(
         session, tournament.guild_id, [p.captain_user_id for p in standings])
-
-    # The same swiss-only match graph get_standings_data ranked by, so the
-    # displayed tiebreak is the one that produced the displayed order.
-    swiss = (await session.execute(
-        select(TournamentMatch)
-        .join(TournamentRound, TournamentMatch.round_id == TournamentRound.id)
-        .where(TournamentRound.tournament_id == tournament_id)
-        .where(TournamentRound.stage != "playoff")
-    )).scalars().all()
-    omw = omw_percentages(standings, swiss)
 
     return {
         "name": tournament.name,

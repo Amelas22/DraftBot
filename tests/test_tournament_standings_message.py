@@ -20,6 +20,8 @@ from services.tournament_formatter import (
 )
 from services.tournament_service import (
     create_tournament,
+    drop_team,
+    get_standings_data,
     register_team,
     set_result,
     start_tournament,
@@ -331,6 +333,50 @@ async def test_update_standings_message_draws_the_cut_line(test_db):
     embed = message.edit.call_args.kwargs["embed"]
     body = "\n".join(f.value for f in embed.fields)
     assert "top 1 cut" in body, body
+
+
+@pytest.mark.asyncio
+async def test_update_standings_message_moves_the_cut_line_past_a_dropped_team(test_db):
+    """The line follows the last SEATABLE team, not the cut size.
+
+    A dropped team keeps its standings place -- its record still feeds every
+    opponent's tiebreak -- but cannot take a bracket seat. With one sitting
+    inside the cut, `cut_after_rank` and `cut_to` part company, and a board
+    drawn at `cut_to` would promise the last seat to a team that cannot take
+    it. Passing `tournament.cut_to` instead fails this and nothing else.
+    """
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "Spring", 3, cut_to=2)
+        await session.commit()
+        for name, cap in (("Alpha", "1"), ("Bravo", "2"), ("Delta", "3"), ("Echo", "4")):
+            await register_team(session, tournament.id, name, cap)
+        await session.commit()
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        for m in matches:
+            await set_result(session, m.id, 2, 0)          # team A of each pair wins
+        await session.commit()
+        winners = [p.team_name for p in await get_standings_data(session, tournament.id)][:2]
+        await drop_team(session, tournament.id, winners[0])
+        tournament.standings_channel_id = "555"
+        tournament.standings_message_id = "777"
+        await session.commit()
+        tid = tournament.id
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+    channel = MagicMock()
+    channel.fetch_message = AsyncMock(return_value=message)
+    bot = MagicMock()
+    bot.get_channel.return_value = channel
+
+    with patch("services.tournament_formatter.db_session", _fake_db_session(test_db)):
+        await update_standings_message(bot, tid)
+
+    lines = "\n".join(f.value for f in message.edit.call_args.kwargs["embed"].fields).splitlines()
+    rule = next(i for i, line in enumerate(lines) if "cut" in line.lower())
+    assert rule == 3, (
+        "the rule should sit below three standings rows -- the dropped team "
+        f"plus the two that can actually be seated:\n" + "\n".join(lines))
 
 
 @pytest.mark.asyncio
