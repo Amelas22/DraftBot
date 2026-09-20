@@ -66,12 +66,32 @@ def _add_chunked_field(embed, label, lines, cont_label=None):
         embed.add_field(name=label if i == 0 else cont, value=chunk, inline=False)
 
 
-def create_standings_embed(tournament, participants, stage=STAGE_SWISS):
+def _omw_suffix(omw, participant):
+    """` · OMW 61.4%` for a participant, or "" when no OMW% was supplied.
+
+    A participant missing from the mapping renders nothing rather than 0.0%:
+    an absent tiebreak is unknown, not a team whose opponents never won.
+    """
+    if not omw:
+        return ""
+    value = omw.get(participant.id)
+    if value is None:
+        return ""
+    return f" · OMW {value * 100:.1f}%"
+
+
+def create_standings_embed(tournament, participants, stage=STAGE_SWISS, omw=None):
     """Build the standings embed for a tournament (pure).
 
     ``stage`` is the stage of the round it is on (see
     tournament_service.current_round_stage). It defaults to swiss for the
-    read-only callers of a tournament that has none."""
+    read-only callers of a tournament that has none.
+
+    ``omw`` is {participant id: OMW%} from ``omw_percentages`` -- the same
+    mapping the sort used. It is passed in rather than derived here because
+    deriving it needs the match graph, and a second derivation is how the
+    number on the board drifts from the number that ordered the board. Omit it
+    and the rows render exactly as before."""
     embed = discord.Embed(
         title=f"🏆 {tournament.name} — Standings",
         description=(
@@ -83,6 +103,7 @@ def create_standings_embed(tournament, participants, stage=STAGE_SWISS):
     if participants:
         rows = [
             f"{i}. **{p.team_name}** — {p.points} pts ({p.record})"
+            f"{_omw_suffix(omw, p)}"
             # A dropped team keeps its place and its record, because both still
             # count towards the tiebreaks of everyone it played. Saying so is what
             # stops the pairings quietly shrinking and reading as a bug.

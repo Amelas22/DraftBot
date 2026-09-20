@@ -81,6 +81,28 @@ def test_standings_embed_lists_teams_in_given_order():
     assert "3" in body  # points shown
 
 
+def test_standings_embed_shows_omw_percentage_for_each_team():
+    """OMW% is the first real tiebreak, so the board has to show it.
+
+    It is passed in rather than recomputed here: the sort already built these
+    numbers from the match graph, and a second derivation in the renderer is
+    how the shown value drifts from the one that ordered the rows.
+    """
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 2
+    alpha = _participant("Alpha", 6, wins=2, losses=1)
+    bravo = _participant("Bravo", 6, wins=2, losses=2)
+    alpha.id, bravo.id = 11, 22
+
+    embed = create_standings_embed(
+        tournament, [alpha, bravo], omw={11: 0.61423, 22: 1 / 3})
+
+    body = "\n".join(f.value for f in embed.fields)
+    assert "61.4%" in body
+    assert "33.3%" in body
+
+
 def test_standings_embed_labels_playoff_rounds_instead_of_counting_past_the_end():
     """Playoff rounds are numbered past total_rounds (round N+1 is the first
     bracket round), so the swiss "N of M" form renders "Round: 4/3" once the
