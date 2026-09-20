@@ -113,3 +113,25 @@ def test_omw_percentages_ignores_byes():
     matches = [match(1, None, is_bye=True)]
 
     assert omw_percentages([p], matches)[1] == pytest.approx(FLOOR)
+
+
+# ---- rank_standings: teams part-way through a round ------------------------------
+
+def test_fewer_losses_outranks_at_equal_points_mid_round():
+    """A 2-1 team ranks above a 2-2 team, even with a worse OMW%.
+
+    Standings update live, so the field is comparing teams that have played
+    different numbers of rounds. Both of these hold 6 points; the one that
+    still has a round in hand is ahead on the only reading that matters --
+    it cannot yet have lost twice.
+    """
+    ahead = participant(1, points=6, w=2, l=1, gw=10, gl=6, name="RoundInHand")
+    behind = participant(2, points=6, w=2, l=2, gw=10, gl=6, name="Complete")
+    weak = participant(3, points=0, l=3, name="Weak")
+    strong = participant(4, points=9, w=3, name="Strong")
+    # behind played the stronger opponent, so OMW alone would put it first.
+    matches = [match(1, 3), match(2, 4)]
+
+    ranked = rank_standings([behind, ahead, weak, strong], matches)
+
+    assert ranked.index(ahead) < ranked.index(behind)

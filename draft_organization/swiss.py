@@ -86,14 +86,23 @@ def omw_percentages(participants, matches):
 
 
 def rank_standings(participants, matches):
-    """Sort participants by points, then OMW%, then game diff, then name.
+    """Sort participants by points, then fewest losses, then OMW%, then game diff, then name.
+
+    Losses come before OMW% because standings update live: a team that has not
+    played this round yet is compared against teams that have. Both hold the
+    same points, but the one with a round in hand cannot have lost as often,
+    and ranking it below a team that already took that loss reads as the board
+    being wrong. Ordering by match-win percentage instead would do the same job
+    at the top and wreck the bottom, where the MWP floor collapses 1-3, 0-2 and
+    0-4 onto one value.
 
     Pure: ``participants`` and ``matches`` are read-only.
     """
     omw = omw_percentages(participants, matches)
     return sorted(
         participants,
-        key=lambda p: (-p.points, -omw[p.id], -(p.game_wins - p.game_losses), p.team_name),
+        key=lambda p: (-p.points, p.match_losses, -omw[p.id],
+                       -(p.game_wins - p.game_losses), p.team_name),
     )
 
 
