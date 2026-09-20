@@ -13,6 +13,7 @@ project-includes = [
     "draft_organization/bracket.py",
     "helpers/draft_outcome.py",
     "helpers/draft_rooms.py",
+    "services/serve_health_monitor.py",
     "services/draft_pool_service.py",
     "services/mtgo_resolution_service.py",
     "services/draft_reconstruct.py",
