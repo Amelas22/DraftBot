@@ -22,30 +22,61 @@ def debt_warning_suffix(total_owed, old_owed, threshold) -> str:
     return f" ⚠️ owes {total_owed} tix"
 
 
+# At or above this, a bet is shown as "100+" rather than its own figure. It is
+# the point past which an exact number stops informing anybody's choice and
+# starts inviting comparison: everything below is a step somebody might match,
+# everything above is simply more than the table is likely to cover.
+STAKE_SHOWN_CEILING = 100
+
+
+def shown_stake(amount) -> str:
+    """What a bet looks like on the signup board, before teams exist.
+
+    Bucketed at the top so the largest bets cannot be ranked against one
+    another. It is not obfuscation -- a bet over the ceiling has no effect the
+    exact figure would explain, because the matcher caps both sides at what
+    the smaller one can cover and hands the rest straight back.
+    """
+    try:
+        n = int(amount)
+    except (TypeError, ValueError):
+        return "?"
+    return f"{STAKE_SHOWN_CEILING}+" if n >= STAKE_SHOWN_CEILING else str(n)
+
+
 def format_staked_sign_ups(sign_ups, stake_info_by_player, owed_map, old_owed_map,
                            threshold, display_name_for, session_id: str = "",
                            pool: int = 0) -> str:
     """The staked draft message's Sign-Ups field text: the players in JOIN
-    order, the pool they are collectively playing for, and (players whose
-    week-old debt exceeds threshold only) the debt warning suffix.
+    order with what each has bet, the pool they are collectively playing for,
+    and (players whose week-old debt exceeds threshold only) the debt warning.
 
-    It used to print every player's own bet, sorted by size. That made signing
-    up a leaderboard: the largest bet sat at the top of every draft, and each
-    arrival could read what everyone else was in for before choosing their own.
-    The number that actually matters to the table is the pool, and a winner
-    takes double their matched stake -- so the most it can ever be worth is
-    what everyone has put in. The per-player figures are still shown once teams
-    form, where they are final and describe money already committed.
+    Bets are shown, but only up to STAKE_SHOWN_CEILING; at or above it every
+    bet reads "100+". Two of the three things that made this a leaderboard when
+    it printed exact figures sorted by size are gone: join order means the
+    largest no longer sits at the top of every draft, and a shared bucket means
+    the big bets cannot be ranked against each other at all -- somebody in for
+    300 and somebody in for 50 are indistinguishable here.
 
-    The cap emoji went with them: bet capping was read only by the tiered
+    The third, later arrivals reading the room before choosing, is now the
+    POINT rather than the cost. Unmatched money is returned, so a table that
+    converges on one figure is a table where everybody plays for what they
+    meant to; seeing roughly where the pod is, is how somebody lands on a
+    number that will actually be matched.
+
+    Exact figures return once teams form, where they are final and describe
+    money already committed rather than an invitation to anyone still choosing.
+
+    The cap emoji is not shown: bet capping was read only by the tiered
     matcher, which no longer runs.
     """
     lines = []
     for user_id, stored_name in sign_ups.items():
         display_name = display_name_for(user_id, stored_name)
         suffix = debt_warning_suffix(owed_map.get(user_id), old_owed_map.get(user_id), threshold)
-        if user_id in stake_info_by_player:
-            lines.append(f"{display_name}{suffix}")
+        stake = stake_info_by_player.get(user_id)
+        if stake is not None:
+            lines.append(f"{display_name} {shown_stake(stake.get('amount'))}{suffix}")
         else:
             lines.append(f"❌ {display_name} has not set a bet{suffix}")
 
