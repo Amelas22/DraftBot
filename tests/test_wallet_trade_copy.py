@@ -15,8 +15,14 @@ from conftest import test_db  # noqa: F401  (fixture)
 from helpers.money_gate import mtgo_trade_prompt
 
 
-async def _run_trade(command, start_name):
-    """Drive deposit/withdraw to the point where they tell the player what to do."""
+async def _run_trade(command, amount=5, balance=1000):
+    """Drive deposit/withdraw to the point where they tell the player what to do.
+
+    Nothing about the trade itself is stubbed: the command sends this message
+    before dispatching anything, and `spawn_followup` closes the coroutine that
+    would. The withdraw path does read the balance first, so the wallet is
+    funded.
+    """
     from cogs.wallet_cog import WalletCommands
 
     cog = WalletCommands.__new__(WalletCommands)
@@ -26,11 +32,11 @@ async def _run_trade(command, start_name):
     with patch("cogs.wallet_cog.gate_serve", return_value=None), \
          patch("cogs.wallet_cog.linked_username", new=AsyncMock(return_value="me")), \
          patch("cogs.wallet_cog.custodian_name", new=AsyncMock(return_value="TheCustodian")), \
-         patch(f"cogs.wallet_cog.resolution.{start_name}",
-               new=AsyncMock(return_value={"ok": True, "job_id": "J1"})), \
+         patch("cogs.wallet_cog.wallet_service.get_balance",
+               new=AsyncMock(return_value=balance)), \
          patch("cogs.wallet_cog.spawn_followup",
                side_effect=lambda label, coro: coro.close()):
-        await command.callback(cog, ctx, 5)
+        await command.callback(cog, ctx, amount)
 
     return ctx.followup.send.await_args.args[0]
 
@@ -46,8 +52,8 @@ async def test_both_trade_commands_give_the_same_instructions():
     """
     from cogs.wallet_cog import WalletCommands
 
-    deposit_msg = await _run_trade(WalletCommands.wallet_deposit, "start_deposit")
-    withdraw_msg = await _run_trade(WalletCommands.wallet_withdraw, "start_withdraw")
+    deposit_msg = await _run_trade(WalletCommands.wallet_deposit)
+    withdraw_msg = await _run_trade(WalletCommands.wallet_withdraw)
 
     shared = mtgo_trade_prompt("TheCustodian")
     assert shared in deposit_msg, "deposit should render the shared instructions"
@@ -179,3 +185,57 @@ async def test_other_value_errors_stay_untagged(test_db):  # noqa: F811
 
     assert res["ok"] is False
     assert "code" not in res
+
+
+# ---- what a chunked order tells the player up front --------------------------------
+
+@pytest.mark.asyncio
+async def test_a_one_trade_order_says_nothing_about_trade_counts():
+    from cogs.wallet_cog import WalletCommands
+
+    msg = await _run_trade(WalletCommands.wallet_withdraw, amount=300)
+
+    assert "trades" not in msg, "the ordinary case should not be cluttered"
+
+
+@pytest.mark.asyncio
+async def test_a_multi_trade_order_says_how_many_to_expect(monkeypatch):
+    """A second MTGO trade request is alarming if nobody mentioned it."""
+    monkeypatch.setenv("MTGO_MAX_CARDS_PER_TRADE", "300")
+    from cogs.wallet_cog import WalletCommands
+
+    msg = await _run_trade(WalletCommands.wallet_withdraw, amount=600)
+
+    assert "2 trades" in msg
+
+
+@pytest.mark.asyncio
+async def test_a_long_order_warns_that_it_will_not_report_back(monkeypatch):
+    """Each trade is polled for up to 14 minutes and Discord stops accepting
+    followups at about 15, so an order of TWO trades can already outlive the
+    window and lose its closing message. The wallet is the record; the player
+    is told so rather than left waiting.
+
+    Two, not three: fourteen minutes is the poll's timeout, and a player who is
+    slow on the first trade has spent the window before the second opens."""
+    monkeypatch.setenv("MTGO_MAX_CARDS_PER_TRADE", "300")
+    from cogs.wallet_cog import WalletCommands
+
+    two_trades = await _run_trade(WalletCommands.wallet_withdraw, amount=600,
+                                  balance=2000)
+    one_trade = await _run_trade(WalletCommands.wallet_withdraw, amount=300)
+
+    assert "/wallet" in two_trades and "longer than Discord" in two_trades
+    assert "longer than Discord" not in one_trade, "one trade cannot outlive it"
+
+
+@pytest.mark.asyncio
+async def test_a_withdraw_the_wallet_cannot_cover_is_refused_before_any_trade():
+    """Each trade checks only its own share, so without this an order the
+    wallet cannot cover would really trade its first chunk out of the vault
+    before the second one refused."""
+    from cogs.wallet_cog import WalletCommands
+
+    msg = await _run_trade(WalletCommands.wallet_withdraw, amount=1000, balance=350)
+
+    assert "Not enough tix" in msg and "350" in msg

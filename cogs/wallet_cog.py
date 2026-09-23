@@ -29,7 +29,7 @@ from models.mtgo_account import MtgoAccount
 from services import wallet_service
 from services import mtgo_resolution_service as resolution
 from services import tournament_escrow_service as escrow
-from services.mtgo_tradebot_client import EVENT_TICKET, max_cards_per_trade
+from services.mtgo_tradebot_client import DEFAULT_MAX_CARDS_PER_TRADE, EVENT_TICKET
 from services.tournament_formatter import refresh_boards
 from helpers.money_gate import (
     DEFAULT_WAIT_MINUTES, custodian_name, explain_trade_failure, gate_read, gate_serve,
@@ -50,6 +50,41 @@ async def _send_wallet(ctx, target) -> None:
     await ctx.followup.send(embed=embed, view=view, ephemeral=True)
 
 
+# The most one command will move, as Discord should refuse it. The service
+# refuses the same number itself -- this only saves the player a background
+# task that would answer with a refusal. A literal because a slash-command
+# option is evaluated at import, before the .env is read.
+_ORDER_CEILING = DEFAULT_MAX_CARDS_PER_TRADE * resolution.MAX_TRADES_PER_ORDER
+
+
+def _why(res: "dict") -> str:
+    """Why an order stopped, in the player's terms.
+
+    A busy custodian is queueing, not failing, and its reason is already a
+    whole sentence -- running it through explain_trade_failure would dress a
+    queue notice as a trade failure. Shared because the deposit and withdraw
+    ladders drifted on exactly this once.
+    """
+    reason = res.get("error")
+    return reason if res.get("busy") else explain_trade_failure(reason)
+
+
+def _long_order_note(n: int) -> str:
+    """Warn that a long order will not report back here.
+
+    Discord stops accepting followups for an interaction after about fifteen
+    minutes, and each trade is polled for up to fourteen -- so TWO trades can
+    already outlive the window, and the closing message is dropped with nothing
+    to show for it. (Fourteen is a timeout, not a duration: a player who
+    accepts promptly is done in a minute. The warning is for the case where
+    they are not.) Saying so up front turns a silent ending into an expected
+    one; the wallet is the record either way.
+    """
+    return ("" if resolution.trade_count(n) < 2 else
+            "\n_This many trades can take longer than Discord will wait for a reply — "
+            "check `/wallet` for the final balance._")
+
+
 def _trades_note(n: int) -> str:
     """How many trades this will take, when it is more than one.
 
@@ -57,8 +92,8 @@ def _trades_note(n: int) -> str:
     goes as several trades run back to back. Saying so up front is the whole
     difference between a second trade request and a surprise.
     """
-    parts = resolution.chunk_amounts(n, max_cards_per_trade())
-    return "" if len(parts) == 1 else f" across **{len(parts)} trades**"
+    trades = resolution.trade_count(n)
+    return "" if trades == 1 else f" across **{trades} trades**"
 
 
 class WalletCommands(commands.Cog):
@@ -107,7 +142,9 @@ class WalletCommands(commands.Cog):
 
     # ----- /wallet deposit <n> -----
     @wallet.command(name="deposit", description="Deposit tix into your wallet (trade them to the custodian)")
-    @option("amount", int, description="How many tix to deposit", min_value=1)
+    @option("amount", int,
+            description=f"How many tix to deposit (max {_ORDER_CEILING})",
+            min_value=1, max_value=_ORDER_CEILING)
     async def wallet_deposit(self, ctx: discord.ApplicationContext, amount: int):
         await ctx.defer(ephemeral=True)
         err = gate_serve(ctx)
@@ -122,8 +159,8 @@ class WalletCommands(commands.Cog):
         player_id = str(ctx.author.id)
         custodian = await custodian_name()
         await ctx.followup.send(
-            f"**Deposit started** — **{amount} {EVENT_TICKET}(s)**{_trades_note(amount)}. "
-            f"{mtgo_trade_prompt(custodian)}", ephemeral=True)
+            f"**Depositing {amount} {EVENT_TICKET}(s)**{_trades_note(amount)}. "
+            f"{mtgo_trade_prompt(custodian)}{_long_order_note(amount)}", ephemeral=True)
 
         # capture only what the poller needs (not ctx) — this task can live for ~14 min
         followup = ctx.followup
@@ -133,7 +170,7 @@ class WalletCommands(commands.Cog):
             res = await resolution.run_deposit_order(
                 guild_id, player_id, username, amount,
                 commit=True, wait_minutes=DEFAULT_WAIT_MINUTES)
-            credited = res["credited"]
+            credited = res["moved"]
             if credited:
                 # Entry before debts, and never raising past this point: both rules
                 # live in settle_deposit_inflow, which the watchdog's late-job path
@@ -147,22 +184,38 @@ class WalletCommands(commands.Cog):
                 await refresh_boards(
                     bot, set(completed) | set(await escrow.open_boards_for_captain(player_id)))
                 msg = f"✅ Deposit confirmed: **+{credited} tix**. Balance: **{bal} tix**."
-                if credited < amount:
+                if credited < amount and res.get("pending"):
+                    # Only the OPEN chunk is in a trade; anything after it was
+                    # never dispatched. Telling them to deposit the open part
+                    # again would have them send those tix twice -- the
+                    # watchdog credits it -- but saying nothing about the rest
+                    # loses it silently.
+                    still_open = res.get("open", 0)
+                    rest = amount - credited - still_open
+                    msg += (f"\n⏳ The trade for **{still_open}** is still open — accept "
+                            f"it in MTGO and it credits automatically.")
+                    if rest:
+                        msg += (f" The remaining **{rest}** was not sent; run the "
+                                f"command again for it.")
+                elif credited < amount:
                     # Chunks credit as they land, so a run that stopped part-way
                     # leaves the player paid for what completed and owing nothing
                     # for the rest. Asking again is the whole recovery.
                     msg += (f"\n⚠️ Only **{credited}** of **{amount}** went through: "
-                            f"{explain_trade_failure(res.get('error'))} "
+                            f"{_why(res)} "
                             f"Run the command again for the remaining **{amount - credited}**.")
                 if completed:
                     msg += f" Completed **{len(completed)}** pending tournament registration(s)."
                 if drawn:
                     total = sum(d.get("amount", 0) for d in drawn)
                     msg += f" Auto-applied **{total} tix** to {len(drawn)} debt(s)."
+            elif res.get("pending"):
+                msg = ("⏳ The trade is still open — accept it in MTGO and your tix "
+                       "credit automatically.")
             elif res.get("busy"):
                 msg = f"⏳ {res.get('error')}"
             else:
-                msg = f"❌ Deposit failed: {explain_trade_failure(res.get('error'))}"
+                msg = f"❌ Deposit failed: {_why(res)}"
             msg += mtgo_job_footer(", ".join(res["jobs"])) if res["jobs"] else ""
             await followup.send(msg, ephemeral=True)
 
@@ -183,10 +236,18 @@ class WalletCommands(commands.Cog):
 
         guild_id = str(ctx.guild.id)
         player_id = str(ctx.author.id)
+        # Each trade checks only its own share, so without this an order the
+        # wallet cannot cover would really trade its first chunk out of the
+        # vault before the second one refused.
+        bal = await wallet_service.get_balance(guild_id, player_id)
+        if bal < amount:
+            return await ctx.followup.send(
+                f"Not enough tix: you have **{bal}** and asked to withdraw **{amount}**.",
+                ephemeral=True)
         custodian = await custodian_name()
         await ctx.followup.send(
-            f"**Withdraw started** — **{amount} tix**{_trades_note(amount)}. "
-            f"{mtgo_trade_prompt(custodian)}", ephemeral=True)
+            f"**Withdrawing {amount} tix**{_trades_note(amount)}. "
+            f"{mtgo_trade_prompt(custodian)}{_long_order_note(amount)}", ephemeral=True)
 
         followup = ctx.followup
 
@@ -194,21 +255,31 @@ class WalletCommands(commands.Cog):
             res = await resolution.run_withdraw_order(
                 guild_id, player_id, username, amount,
                 commit=True, wait_minutes=DEFAULT_WAIT_MINUTES)
-            delivered = res["delivered"]
+            delivered = res["moved"]
             bal = await wallet_service.get_balance(guild_id, player_id)
             if delivered == amount:
                 msg = f"✅ Withdraw confirmed: **−{delivered} tix**. Balance: **{bal} tix**."
+            elif res.get("pending"):
+                # Those tix are committed to a trade that is still open. They
+                # are NOT back in the wallet, and must not be described as if
+                # they were -- the watchdog resolves the trade either way.
+                msg = (f"⏳ **{delivered}** tix delivered; the trade for the rest is still "
+                       f"open — accept it in MTGO. Those tix stay committed until it "
+                       f"resolves. Balance: **{bal} tix**."
+                       if delivered else
+                       f"⏳ The trade is still open — accept it in MTGO. Your tix stay "
+                       f"committed until it resolves. Balance: **{bal} tix**.")
             elif delivered:
                 # Each trade commits only its own tix, so whatever did not go
                 # out was never taken from the wallet. Nothing to unwind.
                 msg = (f"⚠️ Only **{delivered}** of **{amount}** tix went out: "
-                       f"{explain_trade_failure(res.get('error'))}\n"
+                       f"{_why(res)}\n"
                        f"The other **{amount - delivered}** are still in your wallet "
                        f"— run the command again for them. Balance: **{bal} tix**.")
             elif res.get("busy"):
                 msg = f"⏳ {res.get('error')}"
             else:
-                msg = (f"❌ Withdraw failed: {explain_trade_failure(res.get('error'))}\n"
+                msg = (f"❌ Withdraw failed: {_why(res)}\n"
                        f"Your {amount} tix are still in your wallet. Balance: **{bal} tix**.")
             msg += mtgo_job_footer(", ".join(res["jobs"])) if res["jobs"] else ""
             await followup.send(msg, ephemeral=True)

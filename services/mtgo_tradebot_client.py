@@ -13,6 +13,7 @@ method returns ``None`` — unless *both* are set, so nothing breaks on servers 
 Mirrors the aiohttp idiom in helpers/magicprotools_helper.py, plus a Bearer header + a timeout.
 """
 import os
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -20,9 +21,20 @@ import aiohttp
 from loguru import logger
 
 # On MTGO, event tickets are the currency. Depositing/withdrawing tix is just trading this "card".
-# What the serve moves in ONE trade. It REFUSES an order above this rather than
-# splitting it, so anything larger has to be sent as several trades -- see
-# mtgo_resolution_service.chunk_amounts and the order helpers there.
+EVENT_TICKET = "Event Ticket"
+
+
+# What the serve moves in ONE trade. It refuses an order above this; the bot
+# splits one itself -- see mtgo_resolution_service.chunk_amounts and the order
+# helpers there.
+#
+# Worth knowing why that matters, because nothing else in the tree records it:
+# two over-limit withdrawals once left the vault 800 tix behind the claim
+# ledger. start_withdraw read the serve's answer as a rejection and handed the
+# player their tix back, while the tix left the vault anyway. What exactly the
+# serve replied is no longer known -- an earlier account of it turned out to be
+# wrong, and it is not worth guessing again. Sending only orders that fit is
+# what keeps any version of that answer off the table.
 #
 # 300 is the serve's own figure. It cannot be read from the API, so it is
 # configuration on this side: set MTGO_MAX_CARDS_PER_TRADE to match if the
@@ -35,21 +47,27 @@ def max_cards_per_trade() -> int:
     """Read when ASKED, never at import.
 
     A module-level `os.getenv` is evaluated by whichever import touches this
-    module first, and a library cannot see who that is: bot.py loads the .env
-    at line 41, but its line-7 import of database.message_management pulls this
-    module in transitively before that. The value would then freeze at its
-    default while the environment said something else.
+    module first, and a library cannot see who that is: bot.py imports
+    database.message_management before it calls load_dotenv(), and that pulls
+    this module in transitively. The value would then freeze at its default
+    while the environment said something else.
+
+    A non-positive value is refused rather than honoured: it is always a typo,
+    and zero would divide by zero inside a background task where nothing
+    surfaces the traceback.
     """
     raw = os.getenv("MTGO_MAX_CARDS_PER_TRADE")
     try:
-        return int(raw) if raw else DEFAULT_MAX_CARDS_PER_TRADE
+        limit = int(raw) if raw else DEFAULT_MAX_CARDS_PER_TRADE
+        if limit < 1:
+            logger.warning("MTGO_MAX_CARDS_PER_TRADE must be positive ({!r}); using {}",
+                           raw, DEFAULT_MAX_CARDS_PER_TRADE)
+            return DEFAULT_MAX_CARDS_PER_TRADE
+        return limit
     except ValueError:
         logger.warning("MTGO_MAX_CARDS_PER_TRADE is not a number ({!r}); using {}",
                        raw, DEFAULT_MAX_CARDS_PER_TRADE)
         return DEFAULT_MAX_CARDS_PER_TRADE
-
-
-EVENT_TICKET = "Event Ticket"
 
 
 class MtgoTradeBotClient:
@@ -135,18 +153,28 @@ class MtgoTradeBotClient:
             j for j in jobs if (j.get("state") or "").lower() in ("queued", "running")]
 
     async def find_recent_job(self, job_type: str, mtgo_user: str, qty: int,
-                              max_age_s: float = 120.0):
+                              max_age_s: float = 120.0, exclude_ids: "Iterable[str]" = ()):
         """Recover a job whose POST response was lost: scan GET /jobs for the newest
         non-failed job of this type/user/qty created within ``max_age_s``. A POST that
         actually reached the serve created a job even if we never saw the 202 — adopting
         it here keeps the ledger attached to a trade that may still complete. Returns the
-        job dict or None."""
+        job dict or None.
+
+        ``exclude_ids`` are jobs the caller already owns. The match is only
+        (type, user, qty) within two minutes, which a chunked order satisfies
+        against ITSELF: an order of 600 is two trades of exactly 300, seconds
+        apart. Without this, the second chunk's lost POST adopts the first
+        chunk's completed job, books nothing, and leaves the second chunk's tix
+        committed to a trade that never existed."""
         jobs = await self._list_jobs()
         if not jobs:
             return None
         now = datetime.now(timezone.utc)
+        excluded = set(exclude_ids or ())
         for job in jobs:  # serve lists newest first
             if job.get("type") != job_type or job.get("state") == "failed":
+                continue
+            if job.get("id") in excluded:
                 continue
             if (job.get("user") or "").lower() != mtgo_user.lower():
                 continue

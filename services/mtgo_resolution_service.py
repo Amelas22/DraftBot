@@ -103,7 +103,8 @@ async def _resolve_job(job_id: str, status: str):
 
 
 async def _recover_lost_job(resp: dict[str, Any] | None, job_type: str,
-                            mtgo_user: str, n: int) -> dict[str, Any] | None:
+                            mtgo_user: str, n: int,
+                            exclude_ids: "Iterable[str]" = ()) -> dict[str, Any] | None:
     """Recovery for a failed job POST. Runs the /jobs adoption scan ONLY when the client
     flagged the failure as ambiguous (delivered-but-response-lost is possible); a definite
     rejection or never-connected error returns None immediately — no job can exist, and
@@ -111,29 +112,100 @@ async def _recover_lost_job(resp: dict[str, Any] | None, job_type: str,
     if not (resp and resp.get("_ambiguous")):
         return None
     client = get_client()
-    job = await client.find_recent_job(job_type, mtgo_user, n)
+    job = await client.find_recent_job(job_type, mtgo_user, n, exclude_ids=exclude_ids)
     if job is None:
         await asyncio.sleep(2)
-        job = await client.find_recent_job(job_type, mtgo_user, n)
+        job = await client.find_recent_job(job_type, mtgo_user, n, exclude_ids=exclude_ids)
     return job
 
 
 # ---------------------------------------------------------------------------
 # deposit (bot receives tix) — credit only on 'done'
 
-def chunk_amounts(n: int, limit: int) -> "list[int]":
-    """``n`` split into trade-sized pieces, largest first.
+# How many trades one command will run. The custodian works one at a time and
+# each needs a human to accept it, so an order past this is not a long wait --
+# it is somebody who should run the command twice.
+#
+# It also bounds the arithmetic: `chunk_amounts` materialises one element per
+# trade, and Discord will hand us any integer up to 2**53. Without a ceiling,
+# `/wallet deposit 1000000000000` allocates its way through the process inside
+# a background task, which is an OOM kill rather than a caught error.
+MAX_TRADES_PER_ORDER = 10
 
-    The serve refuses an order above its per-trade limit rather than splitting
-    it, so anything larger has to go as several trades. Full chunks first and
-    the remainder last, because the remainder is the piece most likely to be
-    left undone if the run stops part-way, and a player is better off having
-    been handed the big pieces.
+
+def chunk_amounts(n: int, limit: int) -> "list[int]":
+    """``n`` split into trade-sized pieces, full ones first.
+
+    The serve refuses an order above its per-trade limit, so anything larger
+    goes as several trades.
+
+    Full chunks first because the run stops at the first trade that does not
+    complete: the earlier a piece sits, the likelier it lands, so leading with
+    the big ones maximises what a stopped run actually handed over. 500 as
+    [300, 200] delivers 300 when the second trade fails; [200, 300] delivers
+    200.
     """
-    if n <= limit:
-        return [n]
     whole, rest = divmod(n, limit)
     return [limit] * whole + ([rest] if rest else [])
+
+
+def trade_count(n: int) -> int:
+    """How many trades an order of ``n`` will take.
+
+    So a caller can say so up front without importing the serve's limit.
+
+    Counted rather than planned: this runs in the command body on a number
+    Discord will accept up to 2**53, and building one list element per trade
+    would let `/wallet withdraw 1000000000000` allocate its way through the
+    process before any balance check ran.
+    """
+    limit = max_cards_per_trade()
+    return -(-n // limit) if n > 0 else 0
+
+
+async def _run_order(start: "Callable[..., Any]", finish: "Callable[..., Any]",
+                     guild_id: str, player_id: str, mtgo_user: str,
+                     n: int, *, commit: bool, wait_minutes: int) -> "dict[str, Any]":
+    """One order, as many trades as it takes, run one at a time.
+
+    Shared by deposit and withdraw because the loop is the same for both: what
+    genuinely differs between them -- committing tix to in-flight, returning
+    them -- lives inside their own start/finish pair, not here.
+
+    ``moved`` counts only chunks that finished. ``pending`` says the run
+    stopped on a trade that is still OPEN rather than one that failed, which
+    the caller must keep apart: the watchdog will settle a pending trade, so
+    telling the player to send that part again would have them send it twice.
+    """
+    if trade_count(n) > MAX_TRADES_PER_ORDER:
+        return {"moved": 0, "jobs": [],
+                "error": (f"That would take {trade_count(n)} separate MTGO trades. "
+                          f"The most one command runs is {MAX_TRADES_PER_ORDER} "
+                          f"-- split it across a few commands."),
+                "busy": False, "pending": False, "open": 0}
+    moved, error, busy, pending, open_part = 0, None, False, False, 0
+    jobs: "list[str]" = []
+    for part in chunk_amounts(n, max_cards_per_trade()):
+        started = await start(guild_id, player_id, mtgo_user, part,
+                              commit=commit, wait_minutes=wait_minutes,
+                              exclude_ids=jobs)
+        if not started.get("ok"):
+            error, busy = started.get("error"), bool(started.get("busy"))
+            break
+        jobs.append(started["job_id"])
+        res = await finish(started["job_id"], guild_id, player_id, part, mtgo_user)
+        if not res.get("ok"):
+            pending = res.get("outcome") == "pending"
+            # The chunk that is still open, so the caller can say how much is
+            # really in that trade. Only ONE chunk is ever open -- the run
+            # stops here -- and saying "the rest" counts undispatched chunks
+            # the player still has to ask for.
+            open_part = part if pending else 0
+            error = res.get("error") or res.get("outcome")
+            break
+        moved += part
+    return {"moved": moved, "jobs": jobs, "error": error,
+            "busy": busy, "pending": pending, "open": open_part}
 
 
 async def run_deposit_order(guild_id: str, player_id: str, mtgo_user: str, n: int, *,
@@ -144,37 +216,11 @@ async def run_deposit_order(guild_id: str, player_id: str, mtgo_user: str, n: in
     A convenience over running /wallet deposit several times, and it behaves
     like it: each chunk is an ordinary job that credits on its own, so a run
     that stops part-way leaves the player credited for what completed and owing
-    nothing for what did not. There is no order-level state to recover, and
+    nothing for what did not. There is no order-level state to recover and
     nothing to unwind -- the pieces were never a single thing.
-
-    Sequential because the custodian works one trade at a time. Stops at the
-    first chunk that does not complete: the same thing went wrong for the rest,
-    and opening more trades a player is not answering helps nobody.
-
-    Returns ``{requested, credited, jobs, error, busy}``. ``credited`` is what
-    actually landed, which is what the player should be told.
     """
-    parts = chunk_amounts(n, max_cards_per_trade())
-    credited, error, busy = 0, None, False
-    jobs: "list[str]" = []
-    for part in parts:
-        started = await start_deposit(guild_id, player_id, mtgo_user, part,
-                                      commit=commit, wait_minutes=wait_minutes)
-        if not started.get("ok"):
-            error, busy = started.get("error"), bool(started.get("busy"))
-            break
-        job_id = started["job_id"]
-        jobs.append(job_id)
-        res = await finish_deposit(job_id, guild_id, player_id, part, mtgo_user)
-        if not res.get("ok"):
-            # Pending is not a failure -- the watchdog finishes it and credits
-            # later -- but it does mean this trade is not done, so the next one
-            # must not open on top of it.
-            error = res.get("error") or res.get("outcome")
-            break
-        credited += part
-    return {"requested": n, "credited": credited, "jobs": jobs,
-            "error": error, "busy": busy}
+    return await _run_order(start_deposit, finish_deposit, guild_id, player_id,
+                            mtgo_user, n, commit=commit, wait_minutes=wait_minutes)
 
 
 async def run_withdraw_order(guild_id: str, player_id: str, mtgo_user: str, n: int, *,
@@ -182,35 +228,24 @@ async def run_withdraw_order(guild_id: str, player_id: str, mtgo_user: str, n: i
                              wait_minutes: int = 0) -> "dict[str, Any]":
     """Withdraw ``n`` tix in as many trades as the serve's limit requires.
 
-    The same shape as run_deposit_order, and safe for the same reason plus one
-    more: each chunk commits only its OWN tix to in-flight, at its own dispatch.
-    A run that stops part-way therefore leaves the remainder in the player's
-    balance, where they can ask for it again -- never committed to a trade that
-    was never opened.
+    Safe for the same reason as the deposit side, plus one more: each chunk
+    commits only its OWN tix to in-flight, at its own dispatch. A run that
+    stops part-way therefore leaves the remainder in the player's balance,
+    where they can ask for it again -- never committed to a trade that was
+    never opened.
+
+    The caller should check the balance covers ``n`` first. Each chunk checks
+    only its own share, so an unaffordable order would really trade the first
+    chunk out of the vault before the second one refused.
     """
-    parts = chunk_amounts(n, max_cards_per_trade())
-    delivered, error, busy = 0, None, False
-    jobs: "list[str]" = []
-    for part in parts:
-        started = await start_withdraw(guild_id, player_id, mtgo_user, part,
-                                       commit=commit, wait_minutes=wait_minutes)
-        if not started.get("ok"):
-            error, busy = started.get("error"), bool(started.get("busy"))
-            break
-        job_id = started["job_id"]
-        jobs.append(job_id)
-        res = await finish_withdraw(job_id, guild_id, player_id, part, mtgo_user)
-        if not res.get("ok"):
-            error = res.get("error") or res.get("outcome")
-            break
-        delivered += part
-    return {"requested": n, "delivered": delivered, "jobs": jobs,
-            "error": error, "busy": busy}
+    return await _run_order(start_withdraw, finish_withdraw, guild_id, player_id,
+                            mtgo_user, n, commit=commit, wait_minutes=wait_minutes)
 
 
 # ---------------------------------------------------------------------------
 async def start_deposit(guild_id: str, player_id: str, mtgo_user: str, n: int, *,
-                        commit: bool = True, wait_minutes: int = 0) -> dict[str, Any]:
+                        commit: bool = True, wait_minutes: int = 0,
+                        exclude_ids: "Iterable[str]" = ()) -> dict[str, Any]:
     """Enqueue a deposit (bot receives ``n`` tix from ``mtgo_user``). No wallet effect yet,
     but the job is durably recorded so it can't be stranded by a restart."""
     if n <= 0:
@@ -226,7 +261,8 @@ async def start_deposit(guild_id: str, player_id: str, mtgo_user: str, n: int, *
         # If the POST may have reached the serve with only the response lost, the trade
         # can still fire — adopt the job rather than orphan it. Definite failures skip
         # the scan and fail fast.
-        resp = await _recover_lost_job(resp, "deposit", mtgo_user, n)
+        resp = await _recover_lost_job(resp, "deposit", mtgo_user, n,
+                                       exclude_ids=exclude_ids)
         if not resp or not resp.get("id"):
             return {"ok": False, "error": "serve did not accept the deposit (unreachable or rejected)"}
         logger.warning(f"start_deposit: adopted job {resp['id']} after lost POST response")
@@ -313,7 +349,8 @@ async def settle_deposit_inflow(guild_id: str, player_id: str):
 
 
 async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, *,
-                         commit: bool = True, wait_minutes: int = 0) -> dict[str, Any]:
+                         commit: bool = True, wait_minutes: int = 0,
+                         exclude_ids: "Iterable[str]" = ()) -> dict[str, Any]:
     """Transfer ``n`` tix from the player to ``system:in-flight`` (atomic funds check),
     then enqueue the give. While the trade is open those tix belong to in-flight, so
     they're unspendable — no status, no special-casing in any balance query.
@@ -341,7 +378,8 @@ async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, 
 
     resp = await client.withdraw_tix(mtgo_user, n, commit=commit, wait_minutes=wait_minutes)
     if not resp or not resp.get("id"):
-        resp = await _recover_lost_job(resp, "request", mtgo_user, n)
+        resp = await _recover_lost_job(resp, "request", mtgo_user, n,
+                                       exclude_ids=exclude_ids)
         if not resp or not resp.get("id"):
             # Definite rejection, or an ambiguous failure whose job-list scan shows no
             # job — either way no trade can have been opened; give the tix back.

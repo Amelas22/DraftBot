@@ -18,6 +18,11 @@ from services.mtgo_resolution_service import chunk_amounts
 
 GUILD, PLAYER, MTGO = "g1", "p1", "Someone"
 
+# The order runners report `moved` -- one key for both directions, because the
+# loop is one loop. Asserting `credited`/`delivered` here is how a duplicated,
+# shadowing copy of that loop stayed green while the cog KeyError'd on every
+# order: these tests were exercising the dead copy.
+
 
 @pytest.fixture(autouse=True)
 def _serve_is_free(monkeypatch):
@@ -81,7 +86,7 @@ async def test_a_large_withdraw_opens_one_trade_per_chunk(test_db, monkeypatch):
 
     assert starts == [300, 200], "each trade asks for its own share"
     assert finishes == [("job-1", 300), ("job-2", 200)]
-    assert res["delivered"] == 500
+    assert res["moved"] == 500
     assert res["jobs"] == ["job-1", "job-2"]
 
 
@@ -104,7 +109,7 @@ async def test_a_chunk_that_fails_stops_the_run_and_keeps_what_landed(test_db, m
 
     res = await resolution.run_deposit_order(GUILD, PLAYER, MTGO, 800)
 
-    assert res["credited"] == 300, "only the trade that completed counts"
+    assert res["moved"] == 300, "only the trade that completed counts"
     assert res["error"] == "trade timed out"
     assert starts == [300, 300], "the third trade never opens"
 
@@ -136,7 +141,7 @@ async def test_a_withdraw_commits_each_chunk_at_its_own_dispatch(test_db, monkey
             side_effect=[{"id": "job-1"}, {"id": "job-2"}])
         res = await resolution.run_withdraw_order(GUILD, PLAYER, MTGO, 500)
 
-    assert res["delivered"] == 500
+    assert res["moved"] == 500
     assert balances == [200, 0], (
         "after the first trade is dispatched only its 300 has left the wallet; "
         "committing the whole order up front would read [0, 0]")
@@ -151,5 +156,183 @@ async def test_a_busy_custodian_stops_before_any_trade(test_db, monkeypatch):  #
 
     res = await resolution.run_deposit_order(GUILD, PLAYER, MTGO, 500)
 
-    assert res["credited"] == 0 and res["busy"] is True
+    assert res["moved"] == 0 and res["busy"] is True
     assert res["jobs"] == [], "nothing was opened"
+
+
+# ---- pending is not failure --------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_trade_the_player_has_not_accepted_yet_is_not_a_failure(test_db, monkeypatch):  # noqa: F811
+    """`finish_*` returns "pending" when the poll times out -- the trade is
+    still open in MTGO and the watchdog credits it whenever it completes.
+
+    It stops the run, because the custodian takes one trade at a time. But it
+    must not be reported like a failed chunk: a player told to deposit the
+    remainder again would accept the original trade AND send the tix a second
+    time.
+    """
+    monkeypatch.setenv("MTGO_MAX_CARDS_PER_TRADE", "300")
+
+    async def fake_start(g, p, u, n, **kw):
+        return {"ok": True, "job_id": "job-slow"}
+
+    async def fake_finish(job_id, g, p, n, u):
+        return {"ok": False, "outcome": "pending"}
+
+    monkeypatch.setattr(resolution, "start_deposit", fake_start)
+    monkeypatch.setattr(resolution, "finish_deposit", fake_finish)
+
+    res = await resolution.run_deposit_order(GUILD, PLAYER, MTGO, 500)
+
+    assert res["moved"] == 0, "nothing has credited yet"
+    assert res["pending"] is True, "the caller must be able to tell this from a failure"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_trade_is_not_reported_as_pending(test_db, monkeypatch):  # noqa: F811
+    """The other half of the pair: a real failure must stay distinguishable, or
+    the player is never told to try again."""
+    monkeypatch.setenv("MTGO_MAX_CARDS_PER_TRADE", "300")
+
+    async def fake_start(g, p, u, n, **kw):
+        return {"ok": True, "job_id": "job-bad"}
+
+    async def fake_finish(job_id, g, p, n, u):
+        return {"ok": False, "outcome": "failed", "error": "trade declined"}
+
+    monkeypatch.setattr(resolution, "start_deposit", fake_start)
+    monkeypatch.setattr(resolution, "finish_deposit", fake_finish)
+
+    res = await resolution.run_deposit_order(GUILD, PLAYER, MTGO, 500)
+
+    assert res["pending"] is False
+    assert res["error"] == "trade declined"
+
+
+# ---- a chunked order must not adopt its own earlier trade ------------------------
+
+@pytest.mark.asyncio
+async def test_a_lost_post_does_not_adopt_the_previous_chunks_job(test_db, monkeypatch):  # noqa: F811
+    """The collision chunking creates.
+
+    `find_recent_job` matches only (type, user, qty) within two minutes, and an
+    order of 600 is two trades of EXACTLY 300 seconds apart. If the second
+    chunk's POST response is lost, the adoption scan would hand back the first
+    chunk's completed job: booking is idempotent by job_id so nothing new is
+    written, yet the second chunk's tix were already committed to in-flight.
+    They would never be debited, never returned, and no job row would point at
+    them -- while the player is told the whole order went out.
+    """
+    monkeypatch.setenv("MTGO_MAX_CARDS_PER_TRADE", "300")
+    await _fund(600)
+    seen_exclusions = []
+
+    posts = []
+
+    class FakeClient:
+        enabled = True
+
+        async def withdraw_tix(self, user, n, **kw):
+            # First chunk answers normally; the second loses its response.
+            posts.append(n)
+            return {"id": "job-1"} if len(posts) == 1 else {"_ambiguous": True}
+
+        async def find_recent_job(self, job_type, user, qty, max_age_s=120.0,
+                                  exclude_ids=()):
+            seen_exclusions.append(set(exclude_ids or ()))
+            # The serve really does still list chunk 1: same type, user and qty.
+            return None if "job-1" in (exclude_ids or ()) else {"id": "job-1"}
+
+    async def fake_finish(job_id, g, p, n, u):
+        return {"ok": True}
+
+    monkeypatch.setattr(resolution, "finish_withdraw", fake_finish)
+    monkeypatch.setattr(resolution, "get_client", lambda: FakeClient())
+
+    res = await resolution.run_withdraw_order(GUILD, PLAYER, MTGO, 600)
+
+    assert seen_exclusions, "the second chunk ran the adoption scan"
+    assert "job-1" in seen_exclusions[0], \
+        "the scan must be told which jobs this run already owns"
+    assert res["moved"] == 300, "only the trade that really happened counts"
+    assert res["jobs"] == ["job-1"], "chunk 1's job is not claimed twice"
+
+
+# ---- what a stopped run says is still moving ---------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_pending_chunk_reports_only_its_own_size(test_db, monkeypatch):  # noqa: F811
+    """One chunk is open, not "the rest".
+
+    The run stops at the first trade that does not complete, so everything
+    after it was never dispatched and is still the player's to ask for.
+    Reporting the whole remainder as in-flight tells them to wait for tix
+    nobody is moving -- and the pending branch deliberately does NOT invite a
+    retry, so those tix are simply lost to them.
+    """
+    monkeypatch.setenv("MTGO_MAX_CARDS_PER_TRADE", "300")
+    sent = []
+
+    async def fake_start(g, p, u, n, **kw):
+        sent.append(n)
+        return {"ok": True, "job_id": f"job-{len(sent)}"}
+
+    async def fake_finish(job_id, g, p, n, u):
+        return {"ok": True} if job_id == "job-1" else {"ok": False, "outcome": "pending"}
+
+    monkeypatch.setattr(resolution, "start_deposit", fake_start)
+    monkeypatch.setattr(resolution, "finish_deposit", fake_finish)
+
+    res = await resolution.run_deposit_order(GUILD, PLAYER, MTGO, 900)
+
+    assert res["moved"] == 300, "the trade that completed"
+    assert res["open"] == 300, "the trade still open -- not the 600 outstanding"
+    assert res["pending"] is True
+    assert sent == [300, 300], "the third chunk never opened"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_chunk_leaves_nothing_open(test_db, monkeypatch):  # noqa: F811
+    """A failure is not a trade in progress: there is nothing to wait for."""
+    monkeypatch.setenv("MTGO_MAX_CARDS_PER_TRADE", "300")
+
+    async def fake_start(g, p, u, n, **kw):
+        return {"ok": True, "job_id": "job-1"}
+
+    async def fake_finish(job_id, g, p, n, u):
+        return {"ok": False, "outcome": "failed", "error": "declined"}
+
+    monkeypatch.setattr(resolution, "start_deposit", fake_start)
+    monkeypatch.setattr(resolution, "finish_deposit", fake_finish)
+
+    res = await resolution.run_deposit_order(GUILD, PLAYER, MTGO, 600)
+
+    assert res["open"] == 0 and res["pending"] is False
+
+
+# ---- an order nobody should be able to ask for --------------------------------------
+
+@pytest.mark.asyncio
+async def test_an_absurd_order_is_refused_before_it_is_planned(test_db, monkeypatch):  # noqa: F811
+    """Discord accepts any integer up to 2**53, and planning materialises one
+    element per trade. Without a ceiling `/wallet deposit 1000000000000`
+    allocates its way through the process inside a background task, which is an
+    OOM kill rather than a caught error.
+
+    Refused in the service, not only in the command, so a second caller cannot
+    reintroduce it.
+    """
+    monkeypatch.setenv("MTGO_MAX_CARDS_PER_TRADE", "300")
+    opened = []
+
+    async def fake_start(g, p, u, n, **kw):
+        opened.append(n)
+        return {"ok": True, "job_id": "job-1"}
+
+    monkeypatch.setattr(resolution, "start_deposit", fake_start)
+
+    res = await resolution.run_deposit_order(GUILD, PLAYER, MTGO, 10 ** 12)
+
+    assert res["moved"] == 0 and not opened, "nothing was dispatched"
+    assert "separate MTGO trades" in res["error"]
