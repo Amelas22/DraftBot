@@ -33,9 +33,11 @@ def shown_stake(amount) -> str:
     """What a bet looks like on the signup board, before teams exist.
 
     Bucketed at the top so the largest bets cannot be ranked against one
-    another. It is not obfuscation -- a bet over the ceiling has no effect the
-    exact figure would explain, because the matcher caps both sides at what
-    the smaller one can cover and hands the rest straight back.
+    another. What the bucket withholds is real but small: levelling caps both
+    sides at what the smaller can cover and hands the rest straight back, so
+    for that step the exact figure changes nothing. It does still set the
+    ceiling that opted-in opponents are capped to (draft_pool_service.
+    cap_targets), and hiding that distinction is the price of not ranking.
     """
     try:
         n = int(amount)
@@ -67,8 +69,10 @@ def format_staked_sign_ups(sign_ups, stake_info_by_player, owed_map, old_owed_ma
     Exact figures return once teams form, where they are final and describe
     money already committed rather than an invitation to anyone still choosing.
 
-    The cap emoji is not shown: bet capping was read only by the tiered
-    matcher, which no longer runs.
+    The cap emoji is not shown, but capping itself is still live -- the board
+    just does not advertise a per-player setting nobody else can act on.
+    draft_pool_service.cap_targets reads StakeInfo.is_capped at team creation
+    and trims to the top DECLARED opposing bet.
     """
     lines = []
     for user_id, stored_name in sign_ups.items():

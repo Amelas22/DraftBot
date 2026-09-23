@@ -3,7 +3,8 @@ import sys
 
 from loguru import logger
 
-from helpers.debt_warning import debt_warning_suffix, format_staked_sign_ups
+from helpers.debt_warning import (debt_warning_suffix, format_staked_sign_ups,
+                                  shown_stake)
 
 
 def _fmt(sign_ups, stakes, owed=None, old_owed=None, threshold=100, pool=0):
@@ -75,7 +76,7 @@ def test_the_queue_shows_the_pool_as_well_as_the_bets():
     assert "300" not in out, (
         f"an over-ceiling bet showed its own figure: {out!r}")
     assert "🧢" not in out and "🏎️" not in out, (
-        "the bet-cap markers outlived the matcher that read them")
+        "the board advertised a per-player cap setting nobody else can act on")
 
 
 def test_a_pool_of_nothing_is_not_advertised():
@@ -131,6 +132,16 @@ def test_a_large_bet_shows_only_that_it_is_large():
 
     assert "Dev 100+" in out and "Eli 100+" in out
     assert "300" not in out
+
+
+def test_the_ceiling_boundary_is_exact():
+    """One below the ceiling is a figure, the ceiling itself is the bucket.
+
+    The only edge here that can silently regress -- a `>` for a `>=` moves it
+    by one and nothing else in the suite would notice.
+    """
+    assert shown_stake(99) == "99"
+    assert shown_stake(100) == "100+"
 
 
 def test_the_ceiling_itself_is_already_large():
