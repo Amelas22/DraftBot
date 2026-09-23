@@ -35,7 +35,7 @@ from models.mtgo_job import MtgoJob
 from models.wallet_tx import WalletTx
 from models.debt_ledger import DebtLedger
 from helpers.money_gate import serve_busy_reason, spawn_followup
-from services.mtgo_tradebot_client import get_client
+from services.mtgo_tradebot_client import get_client, max_cards_per_trade
 from services import wallet_service
 from services import debt_service
 # Module scope, unlike the notifier below: preference_service reaches only config,
@@ -120,6 +120,94 @@ async def _recover_lost_job(resp: dict[str, Any] | None, job_type: str,
 
 # ---------------------------------------------------------------------------
 # deposit (bot receives tix) — credit only on 'done'
+
+def chunk_amounts(n: int, limit: int) -> "list[int]":
+    """``n`` split into trade-sized pieces, largest first.
+
+    The serve refuses an order above its per-trade limit rather than splitting
+    it, so anything larger has to go as several trades. Full chunks first and
+    the remainder last, because the remainder is the piece most likely to be
+    left undone if the run stops part-way, and a player is better off having
+    been handed the big pieces.
+    """
+    if n <= limit:
+        return [n]
+    whole, rest = divmod(n, limit)
+    return [limit] * whole + ([rest] if rest else [])
+
+
+async def run_deposit_order(guild_id: str, player_id: str, mtgo_user: str, n: int, *,
+                            commit: bool = True,
+                            wait_minutes: int = 0) -> "dict[str, Any]":
+    """Deposit ``n`` tix in as many trades as the serve's limit requires.
+
+    A convenience over running /wallet deposit several times, and it behaves
+    like it: each chunk is an ordinary job that credits on its own, so a run
+    that stops part-way leaves the player credited for what completed and owing
+    nothing for what did not. There is no order-level state to recover, and
+    nothing to unwind -- the pieces were never a single thing.
+
+    Sequential because the custodian works one trade at a time. Stops at the
+    first chunk that does not complete: the same thing went wrong for the rest,
+    and opening more trades a player is not answering helps nobody.
+
+    Returns ``{requested, credited, jobs, error, busy}``. ``credited`` is what
+    actually landed, which is what the player should be told.
+    """
+    parts = chunk_amounts(n, max_cards_per_trade())
+    credited, error, busy = 0, None, False
+    jobs: "list[str]" = []
+    for part in parts:
+        started = await start_deposit(guild_id, player_id, mtgo_user, part,
+                                      commit=commit, wait_minutes=wait_minutes)
+        if not started.get("ok"):
+            error, busy = started.get("error"), bool(started.get("busy"))
+            break
+        job_id = started["job_id"]
+        jobs.append(job_id)
+        res = await finish_deposit(job_id, guild_id, player_id, part, mtgo_user)
+        if not res.get("ok"):
+            # Pending is not a failure -- the watchdog finishes it and credits
+            # later -- but it does mean this trade is not done, so the next one
+            # must not open on top of it.
+            error = res.get("error") or res.get("outcome")
+            break
+        credited += part
+    return {"requested": n, "credited": credited, "jobs": jobs,
+            "error": error, "busy": busy}
+
+
+async def run_withdraw_order(guild_id: str, player_id: str, mtgo_user: str, n: int, *,
+                             commit: bool = True,
+                             wait_minutes: int = 0) -> "dict[str, Any]":
+    """Withdraw ``n`` tix in as many trades as the serve's limit requires.
+
+    The same shape as run_deposit_order, and safe for the same reason plus one
+    more: each chunk commits only its OWN tix to in-flight, at its own dispatch.
+    A run that stops part-way therefore leaves the remainder in the player's
+    balance, where they can ask for it again -- never committed to a trade that
+    was never opened.
+    """
+    parts = chunk_amounts(n, max_cards_per_trade())
+    delivered, error, busy = 0, None, False
+    jobs: "list[str]" = []
+    for part in parts:
+        started = await start_withdraw(guild_id, player_id, mtgo_user, part,
+                                       commit=commit, wait_minutes=wait_minutes)
+        if not started.get("ok"):
+            error, busy = started.get("error"), bool(started.get("busy"))
+            break
+        job_id = started["job_id"]
+        jobs.append(job_id)
+        res = await finish_withdraw(job_id, guild_id, player_id, part, mtgo_user)
+        if not res.get("ok"):
+            error = res.get("error") or res.get("outcome")
+            break
+        delivered += part
+    return {"requested": n, "delivered": delivered, "jobs": jobs,
+            "error": error, "busy": busy}
+
+
 # ---------------------------------------------------------------------------
 async def start_deposit(guild_id: str, player_id: str, mtgo_user: str, n: int, *,
                         commit: bool = True, wait_minutes: int = 0) -> dict[str, Any]:

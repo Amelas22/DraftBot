@@ -20,6 +20,35 @@ import aiohttp
 from loguru import logger
 
 # On MTGO, event tickets are the currency. Depositing/withdrawing tix is just trading this "card".
+# What the serve moves in ONE trade. It REFUSES an order above this rather than
+# splitting it, so anything larger has to be sent as several trades -- see
+# mtgo_resolution_service.chunk_amounts and the order helpers there.
+#
+# 300 is the serve's own figure. It cannot be read from the API, so it is
+# configuration on this side: set MTGO_MAX_CARDS_PER_TRADE to match if the
+# serve's limit changes. Too low only means more trades than necessary; too
+# high means the serve rejects a chunk the bot thought would fit.
+DEFAULT_MAX_CARDS_PER_TRADE = 300
+
+
+def max_cards_per_trade() -> int:
+    """Read when ASKED, never at import.
+
+    A module-level `os.getenv` is evaluated by whichever import touches this
+    module first, and a library cannot see who that is: bot.py loads the .env
+    at line 41, but its line-7 import of database.message_management pulls this
+    module in transitively before that. The value would then freeze at its
+    default while the environment said something else.
+    """
+    raw = os.getenv("MTGO_MAX_CARDS_PER_TRADE")
+    try:
+        return int(raw) if raw else DEFAULT_MAX_CARDS_PER_TRADE
+    except ValueError:
+        logger.warning("MTGO_MAX_CARDS_PER_TRADE is not a number ({!r}); using {}",
+                       raw, DEFAULT_MAX_CARDS_PER_TRADE)
+        return DEFAULT_MAX_CARDS_PER_TRADE
+
+
 EVENT_TICKET = "Event Ticket"
 
 
