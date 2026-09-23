@@ -50,6 +50,15 @@ async def _send_wallet(ctx, target) -> None:
     await ctx.followup.send(embed=embed, view=view, ephemeral=True)
 
 
+# The serve's per-trade card limit. A request above it is split into several
+# jobs, and that split response carries no single job id -- start_withdraw reads
+# the missing id as a rejection, returns the committed tix to the player, and the
+# serve delivers them anyway. Two such withdrawals left the vault 800 tix behind
+# the claim ledger. Capping the option contains that until start_withdraw can
+# understand a split response; it is not the cure.
+SERVE_TRADE_LIMIT = 300
+
+
 class WalletCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -157,7 +166,8 @@ class WalletCommands(commands.Cog):
 
     # ----- /wallet withdraw <n> -----
     @wallet.command(name="withdraw", description="Withdraw tix from your wallet (the custodian trades them to you)")
-    @option("amount", int, description="How many tix to withdraw", min_value=1)
+    @option("amount", int, description=f"How many tix to withdraw (max {SERVE_TRADE_LIMIT} per withdraw)",
+            min_value=1, max_value=SERVE_TRADE_LIMIT)
     async def wallet_withdraw(self, ctx: discord.ApplicationContext, amount: int):
         await ctx.defer(ephemeral=True)
         err = gate_serve(ctx)
