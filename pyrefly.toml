@@ -46,6 +46,8 @@ project-includes = [
     "cogs/card_lending_commands.py",
     "services/card_library_inventory.py",
     "helpers/cube_list.py",
+    "services/draft_deck_assignment.py",
+    "helpers/mtgo_names.py",
 ]
 
 # SQLAlchemy 1.x-style Column() declarations type column attributes as Column[T]

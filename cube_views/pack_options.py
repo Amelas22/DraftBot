@@ -7,7 +7,12 @@ without the circular import that ``modals`` -> ``sessions`` -> ``views`` would
 otherwise create.
 """
 import discord
+from loguru import logger
 from config import get_cube_options
+from helpers.cube_list import fetch_cube
+from services.card_library_inventory import (
+    cube_support, library_available, library_holdings,
+)
 
 # Default pack structure (standard MTG draft / Draftmancer defaults).
 DEFAULT_PACKS_PER_PLAYER = 3
@@ -138,7 +143,11 @@ class BaseCubeSelectionView(discord.ui.View):
         self.packs_per_player = DEFAULT_PACKS_PER_PLAYER
         self.cards_per_pack = DEFAULT_CARDS_PER_PACK
 
-        options = [discord.SelectOption(**opt) for opt in get_cube_options(guild_id, session_type)]
+        self.guild_id = guild_id
+        # Kept so the list can be re-rendered once the library's prices have
+        # been read; a view is built synchronously and those live in the DB.
+        self._cube_options = list(get_cube_options(guild_id, session_type))
+        options = [discord.SelectOption(**opt) for opt in self._cube_options]
         options.append(discord.SelectOption(label="Custom Cube...", value="custom"))
         self.cube_select = discord.ui.Select(placeholder="Select a Cube", options=options)
         self.cube_select.callback = self.cube_select_callback
@@ -155,6 +164,28 @@ class BaseCubeSelectionView(discord.ui.View):
         )
         self.submit_button.callback = self.submit_callback
         self.add_item(self.submit_button)
+
+    async def show_library_prices(self) -> None:
+        """Mark the cubes this server can borrow from, with what it costs.
+
+        Separate from __init__ because the price lives in the database and a
+        view is constructed synchronously. Callers await it before sending.
+
+        A failure here leaves the list unmarked rather than failing the draft:
+        not knowing what borrowing costs is a worse dropdown, but no dropdown
+        at all stops the draft that was being created.
+        """
+        try:
+            marked = await mark_library_cubes(self._cube_options, self.guild_id)
+        except Exception:
+            logger.opt(exception=True).warning(
+                "cube list: could not read library prices; cubes left unmarked")
+            return
+        options = [discord.SelectOption(**opt) for opt in marked]
+        options.append(discord.SelectOption(label="Custom Cube...", value="custom"))
+        for opt in options:
+            opt.default = (opt.value == self.cube_choice)
+        self.cube_select.options = options
 
     async def advanced_options_callback(self, interaction: discord.Interaction):
         await interaction.response.send_modal(AdvancedOptionsModal(self))
@@ -179,3 +210,167 @@ class BaseCubeSelectionView(discord.ui.View):
 
     async def submit_callback(self, interaction: discord.Interaction):
         raise NotImplementedError
+
+
+# Discord rejects a SelectOption description longer than this, taking the whole
+# dropdown with it rather than truncating.
+_JOIN = " · "
+_DESCRIPTION_LIMIT = 100
+
+
+def _library_note(collateral: int) -> str:
+    """How a cube's borrowing price reads in the list.
+
+    The NUMBER, not merely that there is one: "costs tix" leaves a player
+    guessing whether they can afford it, and being able to answer that before
+    joining is the whole reason this is shown here.
+    """
+    if collateral == 0:
+        return "🆓 Free cube — borrow a deck free"
+    return f"🏛️ Library cube — {collateral} tix deposit"
+
+
+def _shortfall_note(short: int, stocked: bool) -> "tuple[str, str]":
+    """(emoji, caveat) for a cube the library cannot cover right now.
+
+    Two different situations that must not read the same way. A cube whose
+    cards are OUT is borrowable again shortly, and telling somebody so is
+    useful. A cube the library never stocked is not coming back later, and
+    "try again soon" would be a lie.
+    """
+    if not stocked:
+        return ("🚫", "library doesn't stock it yet")
+    return ("⚠️", f"{short} cards out right now")
+
+
+async def mark_library_cubes(options: list, guild_id) -> list:
+    """Copy of `options` with the borrowable cubes marked.
+
+    Shown where cubes are CHOSEN because a drafter has to know whether they can
+    afford to borrow before they join, not after they have drafted a deck they
+    cannot pay for.
+
+    The badge answers "does the library lend for this cube", which is stable.
+    Whether it can cover a draft THIS MINUTE is far more volatile -- a draft in
+    progress has its cards in players' hands -- so that goes in a caveat beside
+    the badge rather than into the badge itself. A badge that flickered on and
+    off as drafts came and went would read as broken rather than informative.
+
+    A cube the library cannot lend for here is returned untouched. Most cubes
+    have nothing to do with the library, and decorating every one of them would
+    make the marked ones invisible -- which is also why only the priced ones
+    cost a CubeCobra read.
+    """
+    from services.library_service import library_id_for, prices_for
+
+    prices = await prices_for([o.get("value") for o in options], guild_id)
+    if not prices:
+        return list(options)
+
+    # Resolved once, after prices_for has already established there IS a
+    # library here -- so the common case, a server that borrows nothing, pays
+    # a single lookup and stops.
+    library_id = await library_id_for(guild_id)
+    held = await library_holdings(library_id)
+    available = await library_available(library_id)
+
+    marked = []
+    for opt in options:
+        cube = opt.get("value")
+        priced = prices.get(cube)
+        if priced is None:
+            marked.append(opt)
+            continue
+
+        collateral = priced
+        emoji = "🆓" if collateral == 0 else "🏛️"
+        parts = [_library_note(collateral)]
+        try:
+            cards = await fetch_cube(cube)
+        except Exception:
+            logger.opt(exception=True).warning(
+                "cube list: could not read {} to check availability", cube)
+            cards = None
+        if cards:
+            short = cube_support(cards, available).cards_short
+            if short:
+                emoji, caveat = _shortfall_note(
+                    short, stocked=cube_support(cards, held).ok)
+                parts.append(caveat)
+
+        note = " · ".join(parts)
+        existing = opt.get("description")
+        if existing:
+            # The guild's own text gives way, not the note. Both together run
+            # past Discord's cap, and a plain truncation cut from the right --
+            # which is where the note is, so a server with a wordy cube
+            # description lost the PRICE and kept the prose. "🏛️ Library cube
+            # — 10" for a 100-tix cube is worse than no marking at all.
+            room = _DESCRIPTION_LIMIT - len(note) - len(_JOIN)
+            existing = existing[:room] if room > 0 else ""
+        description = f"{existing}{_JOIN}{note}" if existing else note
+        marked.append({**opt, "description": description[:_DESCRIPTION_LIMIT],
+                       "emoji": emoji})
+    return marked
+
+
+LIBRARY_FIELD_NAME = "Cards:"
+
+
+async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
+    """One line for the signup board, or None if the library is not involved.
+
+    Answers the question a player deciding whether to join actually has: can I
+    play this without owning the cards? Every other library signal lives where
+    the draft is CREATED, which only the organiser sees -- so somebody signing
+    up had no way to know, and finding out at fire time wastes the whole pod's
+    evening.
+
+    None for a cube the library does not lend for, which is most of them. A
+    field reading "you need your own cards" on every ordinary draft would be
+    noise on the majority in order to inform a minority.
+
+    Never claims coverage it has not checked. If the cube cannot be read, or
+    the ledger cannot be reached, it says nothing rather than promising a deck
+    that may not be there -- which is the exact failure it exists to prevent.
+    """
+    from services.library_access_service import is_invite_only
+    from services.library_service import library_for, offers, price_of
+
+    try:
+        library = await library_for(guild_id)
+        if library is None or not await offers(library.id, cube_id):
+            return None
+        cards = await fetch_cube(cube_id)
+        if not cards:
+            return None
+        available = await library_available(library.id)
+        covered = cube_support(cards, available).ok
+        restricted = await is_invite_only(library.id)
+    except Exception:
+        logger.opt(exception=True).warning(
+            "signup board: could not check the library for {}", cube_id)
+        return None
+
+    if not covered:
+        return ("⚠️ **Bring your own cards** — the library can't cover this "
+                "cube right now.")
+
+    collateral = price_of(library) or 0
+    # Said before the terms, not after: on an invite-only library the terms do
+    # not apply to most people reading this. The board is shared, so it cannot
+    # know who is looking -- but promising a free deck to a room where most of
+    # them will be turned away at /borrow is the version that wastes an evening.
+    who = " for members" if restricted else ""
+    if collateral == 0:
+        free = f"🆓 **No cards needed{who}** — borrow your deck from the library free."
+        return free if not restricted else (
+            free + " Borrowing here is invite-only.")
+
+    # Says the deposit comes back, because that is the part that decides
+    # whether somebody can afford to play: 100 tix they get back is a very
+    # different proposition from 100 tix spent.
+    tail = " Borrowing here is invite-only." if restricted else ""
+    return (f"🏛️ **No cards needed{who}** — borrow your deck for a "
+            f"**{collateral} tix** deposit, refunded when you return it."
+            + tail)

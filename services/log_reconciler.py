@@ -1,7 +1,7 @@
 """Backup retry loop for draft-log capture/publish. Push is primary; this poll
 re-fires idempotent steps the push path left pending. Pure-DB actions
-(team-pool retry, delayed public embed) live here; the socket capture-retry is
-added in reconcile_capture (Task 6)."""
+(team-pool retry, deck assignment, delayed public embed) live here; the socket
+capture-retry is added in reconcile_capture (Task 6)."""
 import asyncio
 from datetime import datetime, timedelta
 
@@ -11,10 +11,18 @@ from sqlalchemy import select
 from database.db_session import db_session
 from models.draft_session import DraftSession
 from services.draft_log_store import post_team_logs
+from services.draft_deck_assignment import assign_drafted_decks
 from services.draft_setup_manager import ACTIVE_MANAGERS, DraftSetupManager
 
 RECONCILE_INTERVAL_SECONDS: int = 60
 CAPTURE_RETRY_WINDOW_HOURS: int = 12   # only chase recently-active drafts
+# How long a draft stays eligible to have its decks handed out. Its own
+# constant, not the team-post window it happens to equal today: that one is
+# justified by how long a teammate might still want a pool posted, and retuning
+# it should not silently change how long a missed deck assignment can be
+# recovered. 3 days covers a bot that was down over a weekend.
+DECK_ASSIGN_RETRY_WINDOW_HOURS: int = 72
+
 TEAM_POST_RETRY_WINDOW_HOURS: int = 72  # 3 days: long enough to recover a real
 # post failure (bot/Discord down; league matches span days and a sub may need
 # a teammate's pool a day or two later) while still bounded so pre-existing/
@@ -67,8 +75,9 @@ async def reconcile_capture(bot) -> None:
 
 
 async def reconcile_publish_and_team_logs(bot) -> None:
-    """Retry pending team-pool posts, and publish the public embed for captured
-    drafts whose unlock_at has passed. Both actions are idempotent."""
+    """Three idempotent passes over captured drafts: retry pending team-pool
+    posts, hand each drafter their pool as a borrowable deck, and publish the
+    public embed for drafts whose unlock_at has passed."""
     # Pending team-pool posts: captured but not yet posted. Bounded to recently
     # captured drafts of session types that actually have Red-Team/Blue-Team
     # channels -- otherwise every historical captured draft (team_logs_posted_at
@@ -90,6 +99,38 @@ async def reconcile_publish_and_team_logs(bot) -> None:
             await post_team_logs(ds.session_id, bot)
         except Exception as e:
             logger.error(f"[reconciler] team-pool retry failed for {ds.session_id}: {e}")
+
+    # Decks to borrow: its OWN sweep, not a passenger on the one above. That one
+    # selects only drafts whose pools have NOT posted, which is the opposite of
+    # the case that needs retrying here -- pools post on the first try for
+    # almost every draft, so riding along would mean a draft that missed the
+    # endDraft push (the bot was restarting, the log landed late) never got
+    # another chance. Scoped by "a log was captured recently" and nothing else,
+    # because that is the only precondition for handing out a deck; it is not
+    # bounded by session type either, since a pool exists in every draft format
+    # whether or not the format has team channels to post it to.
+    #
+    # Re-running is idempotent, and assign_drafted_decks is ordered so that a
+    # draft it has already finished costs two small queries and never touches
+    # the draft log -- which matters here, because this selects every draft in
+    # the window on every tick and a captured log is hundreds of KB of JSON.
+    # NOTE: card_loans.source is not indexed, so the "already done" lookup is a
+    # table scan. Fine at this scale; index it before card_loans gets large.
+    deck_cutoff: datetime = datetime.now() - timedelta(hours=DECK_ASSIGN_RETRY_WINDOW_HOURS)
+    async with db_session() as session:
+        recently_captured = (await session.execute(
+            select(DraftSession).filter(
+                DraftSession.logs_captured_at.isnot(None),
+                DraftSession.logs_captured_at >= deck_cutoff,
+            )
+        )).scalars().all()
+    for ds in recently_captured:
+        try:
+            await assign_drafted_decks(ds.session_id)
+        except Exception:
+            logger.opt(exception=True).error(
+                f"[reconciler] deck assignment failed for {ds.session_id}; it may "
+                f"have assigned some drafters and not others")
 
     # Due public embeds: captured, unlock passed, not yet published. Bounded
     # by publish_retry_cutoff so a draft that can never publish (e.g. no
