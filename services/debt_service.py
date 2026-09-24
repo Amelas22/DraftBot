@@ -130,7 +130,8 @@ async def create_card_loan(
     borrower_id: str,
     card_name: str,
     quantity: int,
-    created_by: str = None
+    created_by: str = None,
+    source_id: str = None
 ) -> tuple[DebtLedger, DebtLedger]:
     """Record a card loan as a mirrored pair of card-entity entries.
 
@@ -143,7 +144,7 @@ async def create_card_loan(
     # The borrower owes the copies back: borrower = debtor, lender = creditor.
     borrower_entry, lender_entry = await create_ledger_entries(
         guild_id=guild_id, debtor_id=borrower_id, creditor_id=lender_id,
-        amount=quantity, source_type="card_loan", source_id=str(uuid.uuid4()),
+        amount=quantity, source_type="card_loan", source_id=source_id or str(uuid.uuid4()),
         card_name=card_name, created_by=created_by)
     return lender_entry, borrower_entry
 
@@ -154,7 +155,8 @@ async def create_card_return(
     owner_id: str,
     card_name: str,
     quantity: int,
-    created_by: str = None
+    created_by: str = None,
+    source_id: str = None
 ) -> tuple[DebtLedger, DebtLedger]:
     """Record copies of a card handed back: the offsetting pair of a loan.
 
@@ -169,7 +171,7 @@ async def create_card_return(
     # side of this event), the returner's owed count rises toward zero.
     owner_entry, returner_entry = await create_ledger_entries(
         guild_id=guild_id, debtor_id=owner_id, creditor_id=returner_id,
-        amount=quantity, source_type="card_return", source_id=str(uuid.uuid4()),
+        amount=quantity, source_type="card_return", source_id=source_id or str(uuid.uuid4()),
         card_name=card_name, created_by=created_by)
     return returner_entry, owner_entry
 
@@ -1502,6 +1504,25 @@ async def get_open_card_positions(
          "net": g["net"]}
         for _, g in sorted(groups.items(), key=lambda kv: kv[0][1:])
     ]
+
+
+async def get_cards_owed_by(guild_id: str, counterparty_id: str) -> dict[str, int]:
+    """Total copies one counterparty owes, summed across everyone it owes them
+    to: `{card_name: copies}`.
+
+    Projection of _open_card_groups asked without a player, so it spans every
+    creditor rather than one. The card library reads its whole shelf this way --
+    what it holds is the sum of what it owes each donor back -- and the
+    per-donor positions stay exactly where they were, which is what keeps
+    attribution intact underneath the total.
+    """
+    groups = await _open_card_groups(guild_id, counterparty_id=counterparty_id)
+    owed: dict[str, int] = {}
+    for g in groups.values():
+        # Positive net is owed TO the player, i.e. owed BY the counterparty.
+        if g["net"] > 0:
+            owed[g["card_name"]] = owed.get(g["card_name"], 0) + g["net"]
+    return owed
 
 
 async def get_guild_card_pair_counts(guild_id: str) -> dict[tuple, int]:

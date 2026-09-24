@@ -133,6 +133,22 @@ async def main():
         existing = getattr(bot, "_serve_health_task", None)
         if existing is None or existing.done():
             bot._serve_health_task = bot.loop.create_task(watch_serve_health(bot))
+        # Same idea for the card library's trades, against the other serve: a
+        # borrow whose command poller died would otherwise sit in 'out_pending'
+        # forever, with the borrower holding cards the ledger says are still on
+        # the shelf and a deposit nothing will ever release. It also retracts
+        # offers for drafts that are over, which hold both cards and their
+        # borrower's one loan slot.
+        #
+        # Referenced, not fire-and-forget: asyncio keeps only a weak reference,
+        # and this is the sole recovery path for every stranded loan and
+        # deposit. Guarded for the same reason as the watcher above -- on_ready
+        # refires on every gateway reconnect.
+        from services.card_lending_service import lending_jobs_watchdog
+        lending_task = getattr(bot, "_lending_watchdog_task", None)
+        if lending_task is None or lending_task.done():
+            bot._lending_watchdog_task = bot.loop.create_task(
+                lending_jobs_watchdog(bot))
         logger.info("Re-registered team finder")
 
     @bot.event

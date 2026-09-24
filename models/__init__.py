@@ -3,6 +3,7 @@ from .match import MatchResult, Match
 from .player import PlayerStats, PlayerLimit
 from .team import Team, WeeklyLimit
 from .challenge import Challenge, SwissChallenge
+from .card_loan import CardLoan, ACTIVE_STATES
 from .library import Library, COMMUNAL, RENTAL
 from .library_server import LibraryServer
 from .library_cube import LibraryCube
@@ -83,4 +84,6 @@ __all__ = [
     'LibraryMember',
     'COMMUNAL',
     'RENTAL',
+    'CardLoan',
+    'ACTIVE_STATES',
 ]

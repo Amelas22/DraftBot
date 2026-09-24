@@ -40,6 +40,12 @@ project-includes = [
     "models/library_cube.py",
     "services/library_access_service.py",
     "models/library_member.py",
+    "models/card_loan.py",
+    "models/mtgo_job.py",
+    "services/card_lending_service.py",
+    "cogs/card_lending_commands.py",
+    "services/card_library_inventory.py",
+    "helpers/cube_list.py",
 ]
 
 # SQLAlchemy 1.x-style Column() declarations type column attributes as Column[T]

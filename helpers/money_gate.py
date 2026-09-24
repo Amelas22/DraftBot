@@ -27,7 +27,10 @@ from services.mtgo_tradebot_client import get_client
 # has to accept the in-client trade.
 DEFAULT_WAIT_MINUTES = 10
 
-_custodian_cache: str | None = None
+# Keyed by serve URL: there is more than one custodian now (the wallet's vault
+# and the card library), and a single slot would answer the first name asked for
+# to every later caller -- telling a borrower to expect a trade from the wrong bot.
+_custodian_cache: dict = {}
 _background_tasks: set = set()
 
 
@@ -87,6 +90,28 @@ def mtgo_trade_prompt(custodian: str) -> str:
             f"the trade. Accept it and I'll confirm here once it lands.")
 
 
+def full_trade_list_advice(exact_printing: bool = False) -> str:
+    """How to open a trade the bot is going to TAKE cards in.
+
+    MTGO offers two sides to a trade: your whole collection, and a trade binder
+    you curate yourself. The bot asks for cards by name, so the full trade list
+    is the easy path -- it finds them wherever they are. Out of a binder it can
+    only see what somebody remembered to put there, and a short binder reads
+    like the bot losing cards rather than like a list being incomplete.
+
+    `exact_printing` for a return, where it is not merely easier but safer: the
+    bot takes back the same printing it lent, and a binder holding a different
+    one of the same card leaves the trade unable to complete.
+    """
+    if exact_printing:
+        return ("💡 Easiest way: open the trade from your **Full Trade List**, and "
+                "the bot takes back exactly the printing it lent you. A binder "
+                "works too, but it has to hold that same printing.")
+    return ("💡 Easiest way: open the trade from your **Full Trade List**, and the "
+            "bot finds the cards wherever they are in your collection. From a "
+            "binder it can only take what you have put in there.")
+
+
 def mtgo_job_footer(job_id: str) -> str:
     """The job reference and how long the player has to accept.
 
@@ -122,7 +147,7 @@ async def linked_username(discord_id) -> str | None:
     return acct.mtgo_username if acct else None
 
 
-async def serve_busy_reason() -> str | None:
+async def serve_busy_reason(client=None) -> str | None:
     """Why the custodian can't take a trade right now, or None if it's free.
 
     The custodian works ONE trade at a time, so enqueuing behind an in-flight job just
@@ -133,11 +158,10 @@ async def serve_busy_reason() -> str | None:
     ``jobs`` field: that counter includes terminal jobs, so a single past failure would
     otherwise wedge every future deposit behind a permanent "busy".
     """
-    global _custodian_cache
-    client = get_client()
+    client = client or get_client()
     health = await client.health()
-    if health and not _custodian_cache and isinstance(health.get("custodian"), str):
-        _custodian_cache = health["custodian"]  # saves custodian_name() its own /health
+    if health and isinstance(health.get("custodian"), str):
+        _custodian_cache[client.url] = health["custodian"]  # saves custodian_name() its own /health
     if not health or not health.get("ok"):
         return ("The MTGO custodian isn't reachable right now. Try again in a few "
                 "minutes — nothing has been charged.")
@@ -163,21 +187,32 @@ def explain_trade_failure(detail: str) -> str:
         return (f"{text}\nThat's the MTGO username linked to your Discord account — check "
                 f"it with `/mtgo_whoami` and fix it with `/link_mtgo <username>` "
                 f"(spelling must match your MTGO login exactly), then try again.")
+    if "binder" in low:
+        # MTGO delivers received cards into the COLLECTION; trading works from
+        # the trade binder, which is a separate curated list. A borrower who
+        # does not know that reads a short binder as the bot losing their cards.
+        return (f"{text}\nCards you receive land in your collection, not your trade "
+                f"binder. Move them into your **MTGO trade binder**, then try again.")
     if "not presented" in low or "cards not presented" in low:
         return (f"{text}\nThe trade window opened but the tix weren't added to it. Accept "
                 f"the trade, put the tix in, and confirm — then try again.")
     return text
 
 
-async def custodian_name() -> str:
-    """The vault account's display name, from the serve's /health (cached on success)."""
-    global _custodian_cache
-    if _custodian_cache:
-        return _custodian_cache
-    health = await get_client().health()
+async def custodian_name(client=None) -> str:
+    """This serve's account display name, from /health (cached per serve on success).
+
+    Takes a client because the bot now talks to more than one MTGO account, and
+    the name is what tells a player whose trade window to accept.
+    """
+    client = client or get_client()
+    cached = _custodian_cache.get(client.url)
+    if cached:
+        return cached
+    health = await client.health()
     name = (health or {}).get("custodian")
     if isinstance(name, str) and name:
-        _custodian_cache = name
+        _custodian_cache[client.url] = name
         return name
     return "the custodian bot"
 

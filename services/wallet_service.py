@@ -46,6 +46,59 @@ from models.wallet_tx import WalletTx
 # resolution take the guild from the same MtgoJob, so a cross-guild withdraw can't arise.
 SYSTEM_IN_FLIGHT = "system:in-flight"   # tix committed to an open MTGO withdraw trade
 
+# The vault itself, as a counterparty for CARD obligations. Cards never enter the wallet
+# (it is tix-only), but a card lent out of the vault is owed back to someone, and that
+# someone is the house. Defined here so it sits beside the other synthetic holders and is
+# covered by is_system_account below -- every renderer that skips non-people already does
+# the right thing with it, with no change.
+HOUSE_MTGO = "house:mtgo"
+
+# Cards a player has DEPOSITED and the library is holding for them -- custody,
+# not a loan, and a separate counterparty because the two obligations run in
+# opposite directions against the same people. Netted together, a deposit of
+# four Bolts would cancel a loan of four: the depositor's cards would vanish
+# from /mydeposits, and worse, a live loan would read as settled and free its
+# borrower for another deck while the cards were still out. The serve tracks
+# and honours the two separately -- it returns the printings it was given and
+# expects back the ones it lent -- so the ledger has to as well.
+HOUSE_LIBRARY = "house:library"
+
+# The scope custody is booked under, in place of a guild id.
+#
+# Every other ledger row is guild-scoped and should be: a draft stake or a debt
+# is owed inside the server it arose in. Custody is not. The library is ONE MTGO
+# account, so cards a player deposited are theirs wherever they are standing,
+# and scoping them per guild made the ledger disagree with physical reality --
+# a deposit made in one server was invisible in another, and a withdrawal in the
+# second booked its returns against the second server's claim. Deposit a Bolt in
+# each of two servers and withdraw in one: that server goes to -1, the other
+# still claims +1, and the shelf is empty.
+#
+# A reserved guild id rather than a schema change, because the column means "the
+# server this obligation belongs to" and custody belongs to no server. Nothing
+# else in the ledger moves.
+LIBRARY_SCOPE = "library"
+
+
+def library_scope(library_id) -> str:
+    """The custody scope for one library's shelf.
+
+    Several libraries share the one MTGO account, so the vault holds all of
+    their cards commingled and nothing physical keeps them apart. This scope
+    is what does: a deposit is booked to the library it was given to, and a
+    borrow may only draw against its own library's rows. Somebody who lends to
+    Cube Night is lending to Cube Night, in whichever server it plays.
+
+    Built from the bare LIBRARY_SCOPE so the two read as the same vocabulary,
+    and so the pre-library rows -- booked under "library" flat, before there
+    was more than one -- sort next to their successors rather than looking
+    like a different kind of thing entirely.
+    """
+    if library_id is None or not str(library_id).strip():
+        raise ValueError("A card movement must name its library")
+    return f"{LIBRARY_SCOPE}:{library_id}"
+
+
 
 def prize_wallet_id(tournament_id) -> str:
     """The holder that owns a tournament's pot."""
