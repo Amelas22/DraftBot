@@ -225,8 +225,7 @@ async def test_a_short_wallet_is_told_the_deposit_and_the_gap(monkeypatch):
     be fetched and rendered on the path the player actually walks."""
     import cogs.card_lending_commands as mod
     monkeypatch.setattr(mod, "deposit_shortfall",
-                        AsyncMock(return_value={"deposit": 5, "fee": 0, "need": 5,
-                                                "have": 2, "short": 3}))
+                        AsyncMock(return_value={"deposit": 5, "have": 2, "short": 3}))
 
     said = await _run(monkeypatch, "borrow", "short_funds")
 
@@ -337,3 +336,12 @@ async def test_an_uninvited_borrower_is_turned_away(monkeypatch):
     assert mod.may_borrow.await_args.args[0] == "other", \
         "the gate must ask the loan's library, not the server's current one"
 
+
+@pytest.mark.asyncio
+async def test_depositing_is_not_gated_by_the_invite_list(monkeypatch):
+    """Only borrowing is restricted. Somebody contributing cards is not the
+    risk, and a sponsor locked out of their own deposits would be absurd."""
+    import cogs.card_deposit_commands as deposit_mod
+
+    assert not hasattr(deposit_mod, "may_borrow"), \
+        "the deposit cog must not import the borrow gate"

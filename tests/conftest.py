@@ -571,6 +571,15 @@ class FakeLendingServe:
                    refusal, {"_ambiguous": True} for a lost response
     """
     enabled = True
+    # The real client is keyed by url wherever a per-serve cache exists (the
+    # custodian name, for one). Without it a fake that reports a custodian --
+    # which this one does -- raises AttributeError deep inside money_gate
+    # rather than failing the assertion the test was about.
+    #
+    # One value for every instance, so every fake in the suite shares that
+    # cache key -- see forget_the_custodian below, which is what keeps that
+    # from making one test's custodian the next test's answer.
+    url = "http://fake-serve"
 
     def __init__(self, stock=None, jobs=None, job=None, job_id="job-1",
                  response=_UNSET):
@@ -684,6 +693,23 @@ class FakeLendingServe:
         if self.orphan and str(self.orphan.get("id")) in {str(i) for i in exclude_ids}:
             return None
         return self.orphan
+
+
+@pytest.fixture(autouse=True)
+def forget_the_custodian():
+    """Empty the custodian-name cache around every test.
+
+    money_gate caches the name by serve URL, for the life of the process and
+    with nothing that clears it -- which is right in the bot, where the
+    custodian does not change, and wrong in a suite where every FakeLendingServe
+    answers to the same URL. Without this, the first test to report a custodian
+    decides what every later test is told, and a test that sets up a different
+    one passes or fails on where pytest happens to put it in the run.
+    """
+    from helpers.money_gate import _custodian_cache
+    _custodian_cache.clear()
+    yield
+    _custodian_cache.clear()
 
 
 async def a_library(library_id="lib", *, guild="g1", kind="communal",

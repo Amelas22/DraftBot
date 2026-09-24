@@ -911,6 +911,19 @@ async def lending_jobs_watchdog(bot: Any = None, interval_s: float = RESCAN_INTE
             await expire_stale_assignments()
         except Exception as e:
             logger.exception("Card-library watchdog (stale offers) failed: {}", e)
+        try:
+            # Deposits run against the same serve and are settled here rather
+            # than by a second loop: two watchdogs polling one serve would just
+            # take turns waiting for each other. Its own try, because the two
+            # scans share nothing but the serve -- a loan that raises used to
+            # mean deposits went unsettled until the next round, or forever if
+            # it raised every time.
+            from services.card_deposit_service import settle_deposits
+            deposited = await settle_deposits()
+            if deposited:
+                logger.info("Card-library watchdog settled {} deposit(s)", len(deposited))
+        except Exception:
+            logger.exception("Card-library deposit scan failed")
         await asyncio.sleep(interval_s)
 
 
