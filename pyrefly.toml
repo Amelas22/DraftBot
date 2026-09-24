@@ -34,6 +34,12 @@ project-includes = [
     "services/tournament_roles.py",
     "services/wallet_history.py",
     "wallet_history_view.py",
+    "services/library_service.py",
+    "models/library.py",
+    "models/library_server.py",
+    "models/library_cube.py",
+    "services/library_access_service.py",
+    "models/library_member.py",
 ]
 
 # SQLAlchemy 1.x-style Column() declarations type column attributes as Column[T]
