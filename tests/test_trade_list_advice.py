@@ -59,7 +59,7 @@ async def test_only_the_side_that_HANDS_CARDS_OVER_gets_the_advice(monkeypatch):
     reformat broke it with no change in behaviour at all, while a real
     condition flip would have gone unnoticed.
     """
-    from test_card_lending_commands import _run
+    from test_library_commands import _run
 
     collecting = await _run(monkeypatch, "borrow", "dispatched")
     giving_back = await _run(monkeypatch, "return_cards", "dispatched")

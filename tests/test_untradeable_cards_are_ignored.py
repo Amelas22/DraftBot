@@ -11,7 +11,7 @@ card in the trade.
 import pytest
 import services.card_library_inventory as inventory
 
-import cogs.card_deposit_commands as deposit_mod
+import cogs.library_commands as deposit_mod
 import cube_views.pack_options as mod
 from conftest import a_library
 from cube_views.pack_options import library_signup_note

@@ -89,7 +89,7 @@ async def test_a_cube_the_library_already_covers_is_not_adopted_for_free(
     shelf happens to cover borrowable for nothing, including one stocked with
     a sponsor's cards.
     """
-    import cogs.card_deposit_commands as mod
+    import cogs.library_commands as mod
 
     await a_library(COMMUNAL, guild="g1", kind="communal")
     listed = []
@@ -101,8 +101,8 @@ async def test_a_cube_the_library_already_covers_is_not_adopted_for_free(
     monkeypatch.setattr(inventory, "fetch_cube", _returns([{"name": "Swamp", "qty": 1}]))
     monkeypatch.setattr(mod, "cards_to_deposit", _returns([]))
 
-    await mod.CardDepositCommands(None).deposit.callback(
-        mod.CardDepositCommands(None), ctx, "somecube")
+    await mod.LibraryCommands(None).deposit.callback(
+        mod.LibraryCommands(None), ctx, "somecube")
 
     assert listed == [], "nothing was given, so nothing was listed"
 

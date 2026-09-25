@@ -13,7 +13,7 @@ import pytest
 
 from conftest import stub_library
 
-from cogs.card_lending_commands import CardLendingCommands
+from cogs.library_commands import LibraryCommands
 
 pytestmark = pytest.mark.asyncio
 
@@ -39,8 +39,8 @@ def _said(ctx):
 
 
 async def _run(monkeypatch, command, status, loan=None, busy=None, waited=False):
-    import cogs.card_lending_commands as mod
-    cog = CardLendingCommands(bot=SimpleNamespace())
+    import cogs.library_commands as mod
+    cog = LibraryCommands(bot=SimpleNamespace())
     ctx = _ctx()
     # Borrows and returns both queue behind the serve and report out of band,
     # so both are driven through the same detached followup below.
@@ -101,7 +101,7 @@ async def test_a_borrow_already_in_flight_does_not_read_as_an_error(monkeypatch)
 
 async def test_someone_holding_their_deck_is_pointed_at_return(monkeypatch):
     said = await _run(monkeypatch, "borrow", "already_borrowed")
-    assert "/return" in said
+    assert "/library return" in said
 
 
 async def test_an_offline_library_says_so_rather_than_failing_silently(monkeypatch):
@@ -141,9 +141,9 @@ async def test_no_status_leaves_the_player_without_an_answer(monkeypatch, status
 async def test_a_guild_without_a_library_is_told_so(monkeypatch):
     """The feature is per-guild; a server that never enabled it should not get
     a trade prompt for an account it has nothing to do with."""
-    import cogs.card_lending_commands as mod
+    import cogs.library_commands as mod
     monkeypatch.setattr(mod, "library_gate", lambda ctx: "The card library isn't set up here.")
-    cog = CardLendingCommands(bot=SimpleNamespace())
+    cog = LibraryCommands(bot=SimpleNamespace())
     ctx = _ctx()
     await cog.borrow.callback(cog, ctx)
     assert "isn't set up" in _said(ctx)
@@ -162,7 +162,7 @@ async def test_the_gate_does_not_price_anything(monkeypatch):
     still holds a collateral_tix, it simply must not decide anything now.
     """
     import inspect
-    import cogs.card_lending_commands as mod
+    import cogs.library_commands as mod
 
     source = inspect.getsource(mod.library_gate)
     assert "card_library_collateral" not in source
@@ -172,7 +172,7 @@ async def test_the_gate_does_not_price_anything(monkeypatch):
 async def test_a_free_library_needs_no_money_server(monkeypatch):
     """The case that was broken in Cube Night: every cube free, no wallet, and
     the gate refused everyone."""
-    import cogs.card_lending_commands as mod
+    import cogs.library_commands as mod
     monkeypatch.setattr(mod, "is_money_server", lambda gid: False)
     assert mod.library_gate(_ctx()) is None
 
@@ -181,7 +181,7 @@ async def test_the_borrower_is_told_which_bot_is_trading_with_them(monkeypatch):
     """Two bot accounts now offer trades -- the wallet's and the library's. A
     prompt that does not name one leaves the player guessing which window is
     theirs."""
-    import cogs.card_lending_commands as mod
+    import cogs.library_commands as mod
     monkeypatch.setattr(mod, "custodian_name", AsyncMock(return_value="Team01"))
     said = await _run(monkeypatch, "borrow", "dispatched",
                       loan=SimpleNamespace(cards=DECK, state="assigned", id=1))
@@ -223,7 +223,7 @@ async def test_giving_up_on_a_long_queue_says_nothing_was_charged(monkeypatch):
 async def test_a_short_wallet_is_told_the_deposit_and_the_gap(monkeypatch):
     """Straight through the command, not just the string: the figures have to
     be fetched and rendered on the path the player actually walks."""
-    import cogs.card_lending_commands as mod
+    import cogs.library_commands as mod
     monkeypatch.setattr(mod, "deposit_shortfall",
                         AsyncMock(return_value={"deposit": 5, "have": 2, "short": 3}))
 
@@ -273,7 +273,7 @@ async def test_a_short_wallet_still_gets_an_answer_if_the_figures_fail(monkeypat
     and never answered, which Discord shows as "the application did not
     respond". The player is told they are short either way.
     """
-    import cogs.card_lending_commands as mod
+    import cogs.library_commands as mod
 
     async def unreadable(*a, **k):
         raise RuntimeError("wallet unavailable")
@@ -293,7 +293,7 @@ async def test_an_unconfigured_library_says_so_instead_of_queueing(monkeypatch):
     all over again. `_dispatch` does return "unavailable" for a disabled
     client; it was simply never reached from behind the queue.
     """
-    import cogs.card_lending_commands as mod
+    import cogs.library_commands as mod
     stub_library(monkeypatch, mod, collateral=0, stock=_STOCK)
     monkeypatch.setattr(mod, "get_lending_client",
                         lambda: SimpleNamespace(enabled=False))
@@ -313,9 +313,9 @@ async def test_an_uninvited_borrower_is_turned_away(monkeypatch):
     up at all -- the failure mode where a check exists, passes its own tests,
     and is never called.
     """
-    import cogs.card_lending_commands as mod
+    import cogs.library_commands as mod
 
-    cog = CardLendingCommands(bot=SimpleNamespace())
+    cog = LibraryCommands(bot=SimpleNamespace())
     ctx = _ctx()
     monkeypatch.setattr(mod, "library_gate", lambda ctx: None)
     stub_library(monkeypatch, mod, stock=_STOCK)
@@ -329,7 +329,7 @@ async def test_an_uninvited_borrower_is_turned_away(monkeypatch):
                         AsyncMock(return_value=SimpleNamespace(
                             id=1, library_id="other", cards=DECK)))
 
-    await mod.CardLendingCommands.borrow.callback(cog, ctx)
+    await mod.LibraryCommands.borrow.callback(cog, ctx)
 
     said = ctx.followup.send.await_args.args[0]
     assert "invite-only" in said.lower()
@@ -338,10 +338,30 @@ async def test_an_uninvited_borrower_is_turned_away(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_depositing_is_not_gated_by_the_invite_list(monkeypatch):
+async def test_depositing_is_not_gated_by_the_invite_list(test_db, monkeypatch):
     """Only borrowing is restricted. Somebody contributing cards is not the
-    risk, and a sponsor locked out of their own deposits would be absurd."""
-    import cogs.card_deposit_commands as deposit_mod
+    risk, and a sponsor locked out of their own deposits would be absurd.
 
-    assert not hasattr(deposit_mod, "may_borrow"), \
-        "the deposit cog must not import the borrow gate"
+    Driven through the command with the gate saying NO, rather than asserted on
+    what the module imports: the two commands used to live in separate files,
+    so "the deposit cog cannot see may_borrow" was a true statement about the
+    import graph -- and it stopped being one the moment they shared a module,
+    while the behaviour it stood for did not change at all.
+    """
+    import cogs.library_commands as mod
+    from conftest import a_library
+
+    await a_library("lib-gated", guild=99, kind="curated")
+    monkeypatch.setattr(mod, "may_borrow", AsyncMock(return_value=False))
+    monkeypatch.setattr(mod, "defer_if_usable", AsyncMock(return_value=True))
+    monkeypatch.setattr(mod, "cube_as_the_library_sees_it",
+                        AsyncMock(return_value=None))
+
+    ctx = _ctx()
+    cog = LibraryCommands(bot=SimpleNamespace())
+    await cog.deposit.callback(cog, ctx, "somecube")
+
+    said = _said(ctx)
+    assert "not on the list" not in said and "invite" not in said, said
+    assert "CubeCobra" in said, \
+        "it got as far as reading the cube, which is past every gate"

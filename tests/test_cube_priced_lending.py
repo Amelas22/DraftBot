@@ -114,7 +114,7 @@ async def test_a_free_cube_needs_no_wallet(test_db, monkeypatch):
     server whose cubes are all free was told to enable the wallet before anyone
     could borrow. What a deck costs belongs to the CUBE, and a free one touches
     no money at all."""
-    import cogs.card_lending_commands as cog
+    import cogs.library_commands as cog
 
     assert cog.library_gate(_a_ctx(monkeypatch)) is None
 
@@ -130,7 +130,7 @@ async def test_the_gate_lets_a_charging_guild_through_without_a_wallet(
     and now says nothing, because whether money is involved is a question
     about the cube and is asked at the charge.
     """
-    import cogs.card_lending_commands as cog
+    import cogs.library_commands as cog
 
     monkeypatch.setattr("config.get_config",
                         lambda gid: {"features": {"card_library":
@@ -150,7 +150,7 @@ def _a_ctx(monkeypatch):
     """
     from types import SimpleNamespace
     from unittest.mock import MagicMock
-    import cogs.card_lending_commands as cog
+    import cogs.library_commands as cog
     monkeypatch.setattr(cog, "get_lending_client",
                         MagicMock(return_value=SimpleNamespace(enabled=True)))
     return SimpleNamespace(guild=SimpleNamespace(id=999), guild_id=999)

@@ -5,7 +5,7 @@ available and the number they must find elsewhere -- then offers them the
 partial deck, because a player who can source two Swamps themselves would
 rather have the other eight than nothing.
 """
-from cogs.card_lending_commands import describe_shortfall
+from cogs.library_commands import describe_shortfall
 
 SHORT = [{"name": "Swamp", "want": 10, "have": 2},
          {"name": "Ghostly Wings", "want": 1, "have": 0}]

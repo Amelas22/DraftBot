@@ -12,7 +12,7 @@ import pytest
 
 from database.db_session import AsyncSessionLocal
 from services import debt_service, wallet_service
-from cogs.card_deposit_commands import cards_to_deposit
+from cogs.library_commands import cards_to_deposit
 
 OWNER = "u1"
 LIB = "lib"

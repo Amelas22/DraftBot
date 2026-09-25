@@ -146,7 +146,7 @@ async def test_a_cube_too_big_for_one_trade_becomes_several(test_db, rig):
     """What /deposit actually does with a big cube. The service refuses an
     oversized ORDER (below); the command never hands it one, because splitting
     is the caller's job -- so this is the behaviour a depositor sees."""
-    from cogs.card_deposit_commands import chunk_cards
+    from cogs.library_commands import chunk_cards
 
     big = [{"name": "Swamp", "qty": 25}]
 
