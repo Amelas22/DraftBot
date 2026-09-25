@@ -13,6 +13,7 @@ method returns ``None`` — unless *both* are set, so nothing breaks on servers 
 Mirrors the aiohttp idiom in helpers/magicprotools_helper.py, plus a Bearer header + a timeout.
 """
 import os
+import time
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -170,12 +171,54 @@ class MtgoTradeBotClient:
     def enabled(self) -> bool:
         return bool(self.url and self.token)
 
+    @staticmethod
+    def _trace() -> "aiohttp.TraceConfig":
+        """Remember how far a call got, so a failure can say where it stopped.
+
+        "The serve never saw it" and "the serve saw it and did not answer" want
+        opposite investigations, and the exception cannot tell them apart: a
+        total-timeout raises the same bare asyncio.TimeoutError whether it
+        expired queued behind a busy connection pool, mid-DNS, mid-connect, or
+        waiting on a response to a request already sent in full. On 2026-09-24
+        that distinction is what identified a Tailscale DERP relay dropping
+        order-sized POSTs before they reached the wire.
+
+        Recorded rather than logged. Every hook writes one word into the
+        caller's own dict and says nothing; only _call's failure arm prints it.
+        A ladder of DEBUG lines per request looked free and was not -- bot.py
+        adds both sinks with no level, so DEBUG reaches journald and a 500MB
+        rotating file, and the job poller alone would have written several
+        hundred lines per deposit.
+        """
+        trace = aiohttp.TraceConfig()
+
+        def _mark(event: str):
+            async def _cb(_session, ctx, _params):
+                got = getattr(ctx, "trace_request_ctx", None)
+                if isinstance(got, dict):
+                    got["got_to"] = event
+            return _cb
+
+        for event, hook in (
+            ("waiting for a free connection", trace.on_connection_queued_start),
+            ("resolving dns", trace.on_dns_resolvehost_start),
+            ("connecting", trace.on_connection_create_start),
+            ("connected", trace.on_connection_create_end),
+            ("reusing a pooled connection", trace.on_connection_reuseconn),
+            # The one that mattered: past here the serve has the request, so a
+            # silence afterwards is the serve's and not the network's.
+            ("request body sent", trace.on_request_chunk_sent),
+        ):
+            hook.append(_mark(event))
+        return trace
+
     def _get_session(self) -> aiohttp.ClientSession:
         """One shared session for connection reuse — job polling hits the serve every few
         seconds for minutes at a time, so per-call sessions would pay a fresh TCP handshake
         each poll. Lives for the process; aiohttp reclaims idle connections itself."""
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=self.timeout)
+            self._session = aiohttp.ClientSession(timeout=self.timeout,
+                                                  trace_configs=[self._trace()])
         return self._session
 
     async def close(self):
@@ -207,11 +250,21 @@ class MtgoTradeBotClient:
             return None
         headers = {"Authorization": f"Bearer {self.token}"}
         full = f"{self.url}{path}"
+        # How many cards, not how many bytes: an order's cost at the serve
+        # scales with the number of distinct NAMES in it, and counting a list
+        # is free where re-serialising the body to measure it is not -- and
+        # would raise on a body aiohttp would have refused anyway, out of a
+        # method whose whole contract is that it never raises to the caller.
+        carried = len(json.get("items") or json.get("cards") or ()) if json else 0
+        started = time.monotonic()
+        # Filled in by the trace hooks; read only if this call fails.
+        progress: "dict[str, Any]" = {"got_to": "not started"}
         try:
             session = self._get_session()
             kw = {} if timeout is None else {"timeout": aiohttp.ClientTimeout(total=timeout)}
             async with session.request(method, full, headers=headers, json=json,
-                                       params=params, **kw) as resp:
+                                       params=params, trace_request_ctx=progress,
+                                       **kw) as resp:
                 text = await resp.text()
                 if resp.status == 404 and mark_missing:
                     return {"_missing": True}
@@ -225,10 +278,19 @@ class MtgoTradeBotClient:
                 except Exception:
                     return {"raw": text}
         except aiohttp.ClientConnectorError as e:  # connection refused / DNS — never delivered
-            logger.error(f"TradeBot {method} {path} unreachable: {e}")
+            logger.error("TradeBot {} {} unreachable after {:.1f}s: {}",
+                         method, path, time.monotonic() - started, e)
             return None
         except Exception as e:  # timeout / reset mid-flight — delivery unknown
-            logger.error(f"TradeBot {method} {path} failed ambiguously: {e}")
+            # The class and how far it got, because asyncio.TimeoutError carries
+            # no message at all -- "failed ambiguously: " told nobody anything --
+            # and "stopped at connecting" and "stopped after request body sent"
+            # are the difference between a network fault and a silent serve.
+            logger.error("TradeBot {} {} failed ambiguously after {:.1f}s "
+                         "(got as far as: {}; {} card(s)): {}: {}",
+                         method, path, time.monotonic() - started,
+                         progress.get("got_to"), carried,
+                         type(e).__name__, e or "(no message)")
             return {"_ambiguous": True} if mark_ambiguous else None
 
     # ---- reads ----

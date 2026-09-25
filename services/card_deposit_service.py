@@ -133,11 +133,29 @@ async def start_deposit(guild_id: Any, owner_id: Any,
 
     # One trade window at a time, shared with borrows and returns -- the serve
     # does not care which direction a trade runs in.
+    #
+    # Logged at each step because a deposit that never arrives looks identical
+    # from Discord whether it is queued on this lock behind another dispatch,
+    # waiting on the serve's busy check, or in the POST itself -- and the first
+    # of those is invisible from the serve's side entirely.
+    waited = time.monotonic()
+    logger.debug("deposit {}: waiting for the dispatch lock", order_id)
     async with _DISPATCH_LOCK:
+        logger.debug("deposit {}: got the dispatch lock after {:.1f}s",
+                     order_id, time.monotonic() - waited)
+        asked = time.monotonic()
         busy = await library_busy_reason()
+        logger.debug("deposit {}: busy check took {:.1f}s -> {}",
+                     order_id, time.monotonic() - asked, busy or "free")
         if busy:
             return ("busy", busy)
+        logger.info("deposit {}: posting {} cards ({} names) to the serve",
+                    order_id, total, len(cards))
         resp = await client.deposit(handle, cards, wait_minutes=DEFAULT_WAIT_MINUTES)
+        logger.info("deposit {}: serve answered {}", order_id,
+                    "nothing (None)" if resp is None else
+                    "ambiguously" if resp.get("_ambiguous") else
+                    f"job {resp.get('id')}")
 
     if resp and resp.get("_ambiguous"):
         # The request reached the serve and only the ANSWER was lost, so a real
@@ -459,6 +477,30 @@ async def _boundary_holds_for(client: Any, job_row: Any) -> bool:
     return bool(held.get("held") or held.get("lent"))
 
 
+def _log_job_shape(job: "dict[str, Any]", job_row: Any) -> None:
+    """Everything the serve says about a finished trade, so a mismatch is
+    visible rather than inferred later from a ledger that will not balance."""
+    def _names(key: str) -> str:
+        v = job.get(key) or []
+        if not isinstance(v, list):
+            return repr(v)
+        shown = ", ".join(str(e.get("name") if isinstance(e, dict) else e)
+                          for e in v[:4])
+        return f"{len(v)}" + (f" [{shown}{', …' if len(v) > 4 else ''}]" if v else "")
+
+    logger.info("job {} ({}) settled: asked give={} receive={} | actual gave={} "
+                "received={} | substitutions={}", job_row.job_id, job_row.kind,
+                _names("give"), _names("receive"), _names("gaveActual"),
+                _names("receivedActual"), _names("substitutions"))
+    subs = job.get("substitutions") or []
+    if subs:
+        # The whole entry, because nothing here yet knows its shape -- this is
+        # the record that tells the library a cube name and an MTGO name are
+        # one card.
+        logger.warning("job {}: the serve SUBSTITUTED {} card(s): {}",
+                       job_row.job_id, len(subs), subs)
+
+
 async def _settle_one(client: Any, job_row: Any,
                       settled: "dict[str, Any]") -> None:
     """Resolve one job and book what it carried, or leave it pending."""
@@ -486,6 +528,15 @@ async def _settle_one(client: Any, job_row: Any,
             return
         state = "failed"
     if state == "done":
+        # The serve reports four lists, and they are not the same thing: give /
+        # receive are the order as ASKED (with catIds filled in once resolved),
+        # gaveActual / receivedActual are what crossed, and substitutions names
+        # any card it handed over under a different name than the one asked for
+        # -- a Universes Beyond card is listed by CubeCobra under its crossover
+        # name and by MTGO under its in-universe one. Logged in full because the
+        # library books custody BY NAME, so a substitution the ledger does not
+        # learn about is a card it can never ask for back.
+        _log_job_shape(job or {}, job_row)
         # Off the serve's own record of the trade, and from the side the BOT
         # was on. Shared with the lending half rather than re-derived: that
         # function refuses a kind it does not know, and guessing the side

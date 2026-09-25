@@ -9,6 +9,7 @@ says so. A player who is not told will run the command, see nothing happen, and
 the offer will sit for its wait and expire -- which reads as a broken bot rather
 than an unaccepted trade.
 """
+import time
 from typing import Any, Optional
 
 import discord
@@ -274,10 +275,19 @@ class CardDepositCommands(commands.Cog):
         failure here: the later chunks would only fail the same way, and a
         depositor watching trades fail one after another learns nothing.
         """
+        # The first thing this does is talk to the serve, so a stall here looks
+        # exactly like a stall in the deposit itself from Discord's side: the
+        # command has already said "Setting up..." and nothing further is sent.
+        logger.debug("deposit run: asking the serve who the custodian is")
+        t0 = time.monotonic()
         who = await custodian_name(get_lending_client())
+        logger.debug("deposit run: custodian is {} ({:.1f}s)", who, time.monotonic() - t0)
         # Read once, before anything moves. What lands is measured against it
         # rather than counted up from the chunks -- see _so_far.
+        t0 = time.monotonic()
         before = _count(await held_for(ctx.author.id, library_id))
+        logger.debug("deposit run: already held = {} ({:.1f}s); {} chunk(s) to send",
+                     before, time.monotonic() - t0, len(chunks))
 
         async def stop(message: str, at: int) -> None:
             """Every early exit says the same two things: why it stopped, and
@@ -289,6 +299,8 @@ class CardDepositCommands(commands.Cog):
 
         for n, chunk in enumerate(chunks, start=1):
             of = "" if len(chunks) == 1 else f" ({n} of {len(chunks)})"
+            logger.info("deposit run: chunk {} of {} -- {} cards",
+                        n, len(chunks), _count(chunk))
             status, detail = await start_deposit(ctx.guild_id, ctx.author.id, chunk)
             if status != "dispatched":
                 await stop(_said(status, f"⚠️ Couldn't deposit those cards ({status}).",
