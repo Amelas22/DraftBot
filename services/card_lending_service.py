@@ -1071,13 +1071,39 @@ async def _items_moved(job: "dict[str, Any]", kind: str) -> "list[dict[str, Any]
     which settles as "nothing crossed" and loses somebody's cards. An unknown
     kind is refused for the same reason: guessing a side is the failure.
     """
+    # Which side of the trade the BOT was on, named as the serve names it.
+    # Spelled out rather than built from the direction: the field is past tense
+    # and one of the two irregular (gaveActual, not giveActual), so a derived
+    # name reads plausibly and resolves to nothing.
     match kind:
         case "borrow" | "card-withdraw":
-            side = "give"
+            side = "gaveActual"
         case "return" | "card-deposit":
-            side = "receive"
+            side = "receivedActual"
         case _:
             raise ValueError(f"not a library job kind: {kind!r}")
+
+    # Outcome over intent. give/receive echo the order as ASKED; gaveActual /
+    # receivedActual are what the trade carried, and the serve maintains them
+    # separately because they differ: it substitutes a card whose MTGO printing
+    # carries another name, and it can move fewer copies than were asked for.
+    #
+    # Booking the ask was wrong in both directions. Job 9a9f62d38f9c on
+    # 2026-09-25 was asked for "Spectacular Spider-Man" and moved "Ademi of the
+    # Silkchutes"; custody went on the shelf under a name MTGO has never had,
+    # and /withdraw answered `409 asked for 1x ... but only 0 held` -- the cards
+    # were unreachable by the only command that hands them back.
+    #
+    # Read the outcome, never the order. The serve always emits both arrays --
+    # they are non-nullable fields projected unconditionally by every job
+    # endpoint, /jobs and /jobs/{id} alike -- so there is no "the serve did not
+    # say" case to fall back for, and a fallback here would only ever fire on a
+    # response shape this code does not consume.
+    #
+    # Empty is a fact, not a gap: "empty until the trade closes; never a
+    # substitute for `state`", as the serve puts it. What keeps that honest is
+    # the state check at the settler, which books only a job the serve has
+    # already called done.
     # Summed by name, not listed as they come. The claim for a trade is keyed
     # by job and card name, so two entries for one name would read as the same
     # movement and the second would be dropped as already booked -- quietly

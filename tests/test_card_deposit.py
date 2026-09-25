@@ -378,13 +378,69 @@ async def test_each_kind_reads_the_side_the_bot_was_on():
     """
     from services.card_lending_service import _items_moved
 
-    job = {"give": [{"name": "Swamp", "qty": 2}],
-           "receive": [{"name": "Island", "qty": 3}]}
+    # The outcome fields, because that is what settlement reads. give/receive
+    # are only the order, and a trade can carry something else.
+    job = {"gaveActual": [{"name": "Swamp", "qty": 2}],
+           "receivedActual": [{"name": "Island", "qty": 3}]}
 
     assert await _items_moved(job, "borrow") == [{"name": "Swamp", "qty": 2}]
     assert await _items_moved(job, "card-withdraw") == [{"name": "Swamp", "qty": 2}]
     assert await _items_moved(job, "return") == [{"name": "Island", "qty": 3}]
     assert await _items_moved(job, "card-deposit") == [{"name": "Island", "qty": 3}]
+
+
+async def test_a_settled_trade_is_booked_from_what_ACTUALLY_crossed():
+    """The serve reports intent and outcome separately, and they differ.
+
+    `give`/`receive` echo the order as asked; `gaveActual`/`receivedActual` are
+    what the trade carried. Booking the ask records cards under names the serve
+    may never have moved -- proved live on 2026-09-25 by job 9a9f62d38f9c, which
+    was asked for "Spectacular Spider-Man" and moved "Ademi of the Silkchutes":
+    the library then held custody under a name MTGO does not know and /withdraw
+    answered `409 asked for 1x ... but only 0 held`.
+    """
+    from services.card_lending_service import _items_moved
+
+    job = {"give": [{"name": "Norman Osborn", "qty": 1}],
+           "gaveActual": [{"name": "Goben, Gene-Splice Savant", "qty": 1}],
+           "receive": [{"name": "Spectacular Spider-Man", "qty": 1}],
+           "receivedActual": [{"name": "Ademi of the Silkchutes", "qty": 1}]}
+
+    assert await _items_moved(job, "card-deposit") == [
+        {"name": "Ademi of the Silkchutes", "qty": 1}]
+    assert await _items_moved(job, "return") == [
+        {"name": "Ademi of the Silkchutes", "qty": 1}]
+    assert await _items_moved(job, "card-withdraw") == [
+        {"name": "Goben, Gene-Splice Savant", "qty": 1}]
+    assert await _items_moved(job, "borrow") == [
+        {"name": "Goben, Gene-Splice Savant", "qty": 1}]
+
+
+async def test_a_partial_trade_books_only_the_part_that_moved():
+    """Asked for three, two crossed.
+
+    The serve requires exact quantities before it approves a trade, so it does
+    not produce this itself -- this guards the ledger against a serve that one
+    day does, because booking the ask would credit a card the player still
+    holds and leave the library owing something it was never given.
+    """
+    from services.card_lending_service import _items_moved
+
+    job = {"receive": [{"name": "Swamp", "qty": 3}],
+           "receivedActual": [{"name": "Swamp", "qty": 2}]}
+
+    assert await _items_moved(job, "card-deposit") == [{"name": "Swamp", "qty": 2}]
+
+
+async def test_a_done_trade_that_carried_nothing_books_nothing():
+    """An empty outcome on a finished job is a fact, not a missing field: the
+    trade closed without moving anything. Falling back to the ask here would
+    invent a movement."""
+    from services.card_lending_service import _items_moved
+
+    job = {"receive": [{"name": "Swamp", "qty": 3}], "receivedActual": []}
+
+    assert await _items_moved(job, "card-deposit") == []
 
 
 async def test_an_unknown_kind_is_refused_rather_than_guessed():

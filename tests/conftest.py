@@ -663,13 +663,22 @@ class FakeLendingServe:
         """
         return []
 
+    # What the serve calls the two sides, and what it calls what actually
+    # crossed on each. The real projection always carries all four.
+    _OUTCOME = {"give": "gaveActual", "receive": "receivedActual"}
+
     async def get_job(self, job_id, *, mark_missing=False):
         """The serve's projection, with what the trade CARRIED filled in.
 
-        Settlement books the claim off `give`/`receive` rather than off what was
-        asked for, because a batch is the unit that succeeds -- so a stub that
-        reports only a state settles as "nothing crossed" and silently loses
-        every card. A test that needs different items sets them explicitly.
+        Settlement books the claim off gaveActual/receivedActual -- what the
+        trade carried -- not off give/receive, which only echo the order. The
+        real serve projects both pairs unconditionally on every job, so a stub
+        that reported only the order was modelling a serve that does not exist:
+        a substituted card would settle under the name asked for rather than
+        the name that moved, and a short fill would settle as complete.
+
+        A test that needs the two to DIFFER sets them explicitly; by default
+        the trade carried exactly what it was asked for.
         """
         job = self.jobs.get(job_id, self.job)
         if job is None or job.get("state") != "done":
@@ -677,6 +686,9 @@ class FakeLendingServe:
         side, items = self._carried.get(job_id, (None, None))
         if side and side not in job:
             job = {**job, side: items}
+        for asked, actual in self._OUTCOME.items():
+            if actual not in job:
+                job = {**job, actual: job.get(asked, [])}
         return job
 
     async def find_recent_deck_job(self, job_type, mtgo_user, cards,
