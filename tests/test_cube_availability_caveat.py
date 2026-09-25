@@ -11,6 +11,7 @@ reads as broken. It goes in a caveat beside the badge instead, so the badge
 keeps meaning what a player thinks it means.
 """
 import pytest
+import services.card_library_inventory as inventory
 
 from database.db_session import AsyncSessionLocal
 from conftest import a_library
@@ -55,7 +56,7 @@ async def _mark(options, held, available, cube_cards, monkeypatch):
     h, a = _shelf(held, available)
     monkeypatch.setattr(mod, "library_holdings", h)
     monkeypatch.setattr(mod, "library_available", a)
-    monkeypatch.setattr(mod, "fetch_cube", _cubes(cube_cards))
+    monkeypatch.setattr(inventory, "fetch_cube", _cubes(cube_cards))
     return await mark_library_cubes(options, GUILD)
 
 
@@ -137,7 +138,7 @@ async def test_an_unpriced_cube_is_never_fetched(test_db, monkeypatch):
     h, a = _shelf({"Swamp": 4}, {"Swamp": 4})
     monkeypatch.setattr(mod, "library_holdings", h)
     monkeypatch.setattr(mod, "library_available", a)
-    monkeypatch.setattr(mod, "fetch_cube", fetch)
+    monkeypatch.setattr(inventory, "fetch_cube", fetch)
 
     await mark_library_cubes([{"label": "other", "value": "other"}], GUILD)
 

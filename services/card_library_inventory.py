@@ -25,6 +25,8 @@ from sqlalchemy import select
 
 from database.db_session import AsyncSessionLocal
 from helpers.cube_list import fetch_cube
+from helpers.mtgo_untradeable import split_untradeable
+from services.card_substitution_service import to_mtgo_names
 from models.card_loan import ACTIVE_STATES, CardLoan
 from models.draft_session import DraftSession
 from models.library_server import LibraryServer
@@ -54,6 +56,47 @@ DRAFTING_WINDOW = timedelta(minutes=60)
 
 # Stages a draft is no longer consuming its cube in.
 FINISHED_STAGES = ("completed", "abandoned")
+
+
+@dataclass
+class LibraryCubeList:
+    """A cube as the library deals in it.
+
+    `cards` speak MTGO's vocabulary, so they can be compared to custody and
+    sent as an order without further thought. `not_on_mtgo` keeps the CUBE's
+    own names, because it is shown to the cube's owner and those are the names
+    their list uses.
+    """
+    cards: "list[dict[str, Any]]"
+    not_on_mtgo: "list[str]"
+
+
+async def cube_as_the_library_sees_it(
+    cube_id: Any, fetch: "Optional[Callable[[str], Any]]" = None,
+) -> "Optional[LibraryCubeList]":
+    """Read a cube and put it in the terms the library works in.
+
+    THE doorway. Every consumer of a cube list -- the deposit, the two coverage
+    checks, and what a draft is holding -- goes through here, so the two rules
+    that make a CubeCobra list usable are applied once instead of being a
+    convention each caller has to remember:
+
+      * cards MTGO has never had are taken out (it refuses an order naming one,
+        and refuses it whole), and
+      * everything else is renamed to what MTGO calls it.
+
+    Applying these per consumer is what left `_being_drafted` without them: a
+    Universes Beyond card in a drafting cube never matched the ledger's name for
+    it, so it reserved nothing and stayed lendable to a second draft at once.
+
+    None for a cube that could not be read, mirroring fetch_cube -- "the cube is
+    empty" and "CubeCobra did not answer" lead to different messages.
+    """
+    cards = await (fetch or fetch_cube)(str(cube_id))
+    if cards is None:
+        return None
+    kept, dropped = split_untradeable(cards)
+    return LibraryCubeList(cards=await to_mtgo_names(kept), not_on_mtgo=dropped)
 
 
 async def library_holdings(library_id: Any) -> "dict[str, int]":
@@ -184,7 +227,13 @@ async def _being_drafted(fetch: "Callable[[str], Any]",
             continue
         if f"draft:{draft.session_id}" in assigned:
             continue                      # its loans speak for it now
-        cards = await fetch(draft.cube)
+        # Through the doorway, so what a draft is holding is named the way
+        # custody is. Comparing a raw CubeCobra list to the ledger meant a
+        # Universes Beyond card reserved nothing -- its cube name never matched
+        # the MTGO name it was booked under -- and those copies stayed lendable
+        # while a draft had them on the table.
+        seen = await cube_as_the_library_sees_it(draft.cube, fetch=fetch)
+        cards = seen.cards if seen else None
         if not cards:
             # CubeCobra could not be read. Holding nothing is the safe way to be
             # wrong: the shelf stays lendable and a borrow that overreaches is

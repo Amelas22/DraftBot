@@ -7,6 +7,7 @@ it was: most cubes have nothing to do with the library, and decorating them all
 would make the marked ones invisible.
 """
 import pytest
+import services.card_library_inventory as inventory
 
 from database.db_session import AsyncSessionLocal
 from conftest import a_library
@@ -39,7 +40,7 @@ def offline(monkeypatch):
 
     async def no_cube(_cube):
         return None
-    monkeypatch.setattr(mod, "fetch_cube", no_cube)
+    monkeypatch.setattr(inventory, "fetch_cube", no_cube)
 
 
 _MADE: "set[str]" = set()

@@ -29,6 +29,8 @@ from sqlalchemy.orm import undefer
 from services.library_service import library_for, offers
 from database.db_session import AsyncSessionLocal
 from helpers.mtgo_names import mtgo_name
+from helpers.mtgo_untradeable import split_untradeable
+from services.card_substitution_service import to_mtgo_names
 from models.card_loan import ACTIVE_STATES, CardLoan
 from models.draft_session import DraftSession
 from services.card_lending_service import assign_deck
@@ -168,6 +170,26 @@ def _say_once(key: str, message: str, *args: Any) -> None:
     logger.warning(message, *args)
 
 
+async def _pool_the_library_can_lend(
+    cards: "list[dict[str, Any]]",
+) -> "list[dict[str, Any]]":
+    """A drafted pool in the vocabulary custody is booked in.
+
+    Named rather than inlined so the rule has somewhere to be tested and
+    somewhere to be found. Two rules beyond the face-splitting pool_items has
+    already done: cards MTGO has never had come out, because an order naming
+    one is refused whole; and the rest are renamed to whatever MTGO calls them,
+    because the ledger holds them under the name that MOVED.
+
+    What is dropped here is not reported to the drafter. Unlike a deposit --
+    where the cube's owner can fix their list -- nobody can act on a pool: the
+    draft has happened, and a card the library could never lend was never going
+    to be part of the deck it offers.
+    """
+    kept, _ = split_untradeable(cards)
+    return await to_mtgo_names(kept)
+
+
 async def assign_drafted_decks(session_id: Any) -> int:
     """Give every drafter their own pool as a deck they may collect.
 
@@ -261,7 +283,18 @@ async def assign_drafted_decks(session_id: Any) -> int:
         # Named the way the SERVE names them, not the way Draftmancer does. It
         # matches exactly and refuses an order containing a name it does not
         # know, so one two-faced card takes the whole deck down with it.
-        cards = pool_items(draft_data, seat, name_of=mtgo_name)
+        #
+        # Three rules make a card list nameable to the serve, and a pool needs
+        # all three. mtgo_name settles the two-faced ones; the library's own
+        # vocabulary settles the other two -- cards MTGO has never had (no deck
+        # can include one, because the order would be refused whole) and cards
+        # MTGO calls something else. Custody is booked under the name that
+        # MOVED, so a pool left in Draftmancer's vocabulary names a Universes
+        # Beyond card the library cannot match: the entitlement reads as zero,
+        # _cap quietly drops it, and the drafter loses a card the library is
+        # holding for them.
+        cards = await _pool_the_library_can_lend(
+            pool_items(draft_data, seat, name_of=mtgo_name))
         if not cards:
             # An empty pool is not a deck, and a loan of nothing would still
             # occupy their one active-loan slot and block the next draft.
@@ -320,11 +353,17 @@ def _report(session_id: Any, sign_ups: "dict[str, Any]", assigned: int,
     caller looks at the return value. Nobody -- player or operator -- gets a
     signal that anything was meant to happen.
     """
+    # "nothing to lend" rather than "unreadable": it used to mean only that the
+    # draft log had no pool for that seat, and it now also means the pool had
+    # one but nothing in it was a card the library could lend -- every name
+    # dropped as not-on-MTGO. Those are the same non-event to this feature and
+    # a very different thing to go and look at, and an operator sent after a
+    # parse failure that never happened reads the log and finds nothing wrong.
     tail = (f"{assigned} assigned, {len(done)} already had one, {len(busy)} "
-            f"holding a deck, {len(empty)} with an unreadable pool, "
+            f"holding a deck, {len(empty)} with nothing to lend, "
             f"{len(failed)} failed, of {len(sign_ups)} drafters")
     if failed or empty:
-        logger.warning("deck assignment for {}: {} -- unreadable={} failed={}",
+        logger.warning("deck assignment for {}: {} -- nothing-to-lend={} failed={}",
                        session_id, tail, empty, failed)
     elif assigned:
         logger.info("deck assignment for {}: {}", session_id, tail)

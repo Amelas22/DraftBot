@@ -554,3 +554,33 @@ async def test_one_shared_name_does_not_block_the_unambiguous_drafters():
 
     assert _shared_names({"a": "Alex", "b": "Alex", "c": "Sam"}) == {"Alex"}
     assert _shared_names({"a": "Alex", "b": "Sam"}) == set()
+
+
+async def test_a_pool_of_nothing_lendable_is_not_reported_as_unreadable(
+        test_db, library_on):
+    """What the operator is sent to look at has to be the thing that happened.
+
+    A drafter reaches the "nothing to lend" bucket two ways now: the draft log
+    had no pool for their seat, or it had one and every card in it was a card
+    MTGO has never had. The second is not a failure at all -- it is a cube with
+    conspiracies in it, working as designed -- and the line used to call both
+    an unreadable pool, sending whoever read it hunting a parse error that
+    never happened.
+    """
+    await _seed(draft_data={
+        "carddata": {"c1": {"name": "Advantageous Proclamation"},
+                     "c2": {"name": "Agent of Acquisitions"},
+                     "c3": {"name": "Island"}},
+        "users": {
+            "dm_a": {"userName": "Alice", "seatNum": 0, "cards": ["c1", "c2"]},
+            "dm_b": {"userName": "Bob", "seatNum": 1, "cards": ["c3"]},
+        },
+    })
+
+    with patch.object(svc.logger, "warning") as warned:
+        await svc.assign_drafted_decks(SESSION)
+
+    assert ALICE not in await _loans(), "nothing of hers was lendable"
+    said = " ".join(str(c.args) for c in warned.call_args_list)
+    assert "unreadable" not in said, said
+    assert "nothing to lend" in said, said

@@ -16,6 +16,7 @@ so listing a cube adds it to that library's offer on terms somebody already
 set -- there is no per-cube number for a deposit to invent.
 """
 import pytest
+import services.card_library_inventory as inventory
 
 from conftest import a_library
 from database.db_session import AsyncSessionLocal
@@ -97,7 +98,7 @@ async def test_a_cube_the_library_already_covers_is_not_adopted_for_free(
 
     ctx = _ctx()
     monkeypatch.setattr(mod, "defer_if_usable", _returns(True))
-    monkeypatch.setattr(mod, "fetch_cube", _returns([{"name": "Swamp", "qty": 1}]))
+    monkeypatch.setattr(inventory, "fetch_cube", _returns([{"name": "Swamp", "qty": 1}]))
     monkeypatch.setattr(mod, "cards_to_deposit", _returns([]))
 
     await mod.CardDepositCommands(None).deposit.callback(

@@ -9,9 +9,8 @@ otherwise create.
 import discord
 from loguru import logger
 from config import get_cube_options
-from helpers.cube_list import fetch_cube
 from services.card_library_inventory import (
-    cube_support, library_available, library_holdings,
+    cube_as_the_library_sees_it, cube_support, library_available, library_holdings,
 )
 
 # Default pack structure (standard MTG draft / Draftmancer defaults).
@@ -286,7 +285,8 @@ async def mark_library_cubes(options: list, guild_id) -> list:
         emoji = "🆓" if collateral == 0 else "🏛️"
         parts = [_library_note(collateral)]
         try:
-            cards = await fetch_cube(cube)
+            seen = await cube_as_the_library_sees_it(cube)
+            cards = seen.cards if seen else None
         except Exception:
             logger.opt(exception=True).warning(
                 "cube list: could not read {} to check availability", cube)
@@ -341,9 +341,10 @@ async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
         library = await library_for(guild_id)
         if library is None or not await offers(library.id, cube_id):
             return None
-        cards = await fetch_cube(cube_id)
-        if not cards:
+        seen = await cube_as_the_library_sees_it(cube_id)
+        if not (seen and seen.cards):
             return None
+        cards = seen.cards
         available = await library_available(library.id)
         covered = cube_support(cards, available).ok
         restricted = await is_invite_only(library.id)

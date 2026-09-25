@@ -6,6 +6,7 @@ from .challenge import Challenge, SwissChallenge
 from .card_loan import CardLoan, ACTIVE_STATES
 from .library import Library, COMMUNAL, RENTAL
 from .library_server import LibraryServer
+from .card_substitution import CardSubstitution
 from .library_cube import LibraryCube
 from .library_member import LibraryMember
 from .utility import TeamFinder
@@ -80,6 +81,7 @@ __all__ = [
     'WalletTx',
     'Library',
     'LibraryServer',
+    'CardSubstitution',
     'LibraryCube',
     'LibraryMember',
     'COMMUNAL',

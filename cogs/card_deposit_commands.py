@@ -15,7 +15,7 @@ import discord
 from discord.ext import commands
 from loguru import logger
 
-from helpers.cube_list import fetch_cube
+from services.card_library_inventory import cube_as_the_library_sees_it
 from helpers.money_gate import (
     custodian_name, explain_trade_failure, full_trade_list_advice,
     mtgo_job_footer, mtgo_trade_prompt,
@@ -30,7 +30,8 @@ from services.mtgo_tradebot_client import get_lending_client, max_cards_per_trad
 from config import bot_config, get_config, save_config
 from services.library_service import is_communal, library_for, offer_cube
 
-from cogs.card_lending_commands import defer_if_usable
+from cogs.card_lending_commands import _within_a_message, defer_if_usable
+from debt_views.helpers import card_count_label
 
 _MESSAGES = {
     "nothing_to_deposit": "📭 That cube came back empty — nothing to deposit.",
@@ -138,6 +139,23 @@ async def cards_to_deposit(cards: "list[dict[str, Any]]", library_id: Any,
     return [{"name": m["name"], "qty": m["short"]} for m in short]
 
 
+def left_out_note(dropped: "list[str]") -> str:
+    """What to tell a depositor about cards that cannot cross.
+
+    Named rather than counted, because this is the only place anybody learns
+    these cards are a problem and a name is the only form the cube's owner can
+    act on. Empty for the ordinary cube, which is nearly every cube -- a note
+    that fires on every deposit stops being read.
+    """
+    if not dropped:
+        return ""
+    one = len(dropped) == 1
+    said = (f"{card_count_label(len(dropped))} "
+            f"{'isn' if one else 'aren'}'t on MTGO, so "
+            f"{'it was' if one else 'they were'} left out")
+    return f"\n\n⚠️ {said}:\n{_within_a_message([f'> {n}' for n in dropped])}"
+
+
 def describe_cube(cards: "list[dict[str, Any]]") -> str:
     """A cube in one line. The card list itself belongs in the trade window, not
     in an embed -- three hundred names is not something anyone reads here."""
@@ -171,7 +189,9 @@ class CardDepositCommands(commands.Cog):
             await ctx.followup.send(_NO_LIBRARY, ephemeral=True)
             return
 
-        cards = await fetch_cube(cube)
+        seen = await cube_as_the_library_sees_it(cube)
+        cards = seen.cards if seen else None
+        untradeable = seen.not_on_mtgo if seen else []
         if cards is None:
             await ctx.followup.send(
                 f"🔌 Couldn't read `{cube}` from CubeCobra. Check the cube id "
@@ -185,7 +205,8 @@ class CardDepositCommands(commands.Cog):
                 f"✅ The library already has enough for **{copies}** "
                 f"{'draft' if copies == 1 else 'simultaneous drafts'} of `{cube}` "
                 f"— nothing to hand over. Raise `copies`, or pass "
-                f"`full_copy: True`, to give it more anyway.", ephemeral=True)
+                f"`full_copy: True`, to give it more anyway."
+                f"{left_out_note(untradeable)}", ephemeral=True)
             return
 
         chunks = chunk_cards(offering, max_cards_per_trade())
@@ -195,7 +216,8 @@ class CardDepositCommands(commands.Cog):
         what = (f"`{cube}` — {describe_cube(cards)}" if full_copy
                 else f"the **{describe_cube(offering)}** `{cube}` is missing")
         await ctx.followup.send(
-            f"📦 Depositing {what}.{run}\n_Setting up…_", ephemeral=True)
+            f"📦 Depositing {what}.{run}{left_out_note(untradeable)}"
+            f"\n_Setting up…_", ephemeral=True)
         spawn_followup("card-library deposit",
                        self._deposit_and_watch(ctx, chunks, cube, library.id))
 

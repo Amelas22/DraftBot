@@ -9,6 +9,7 @@ field saying "you need your own cards" on every ordinary draft would be noise
 on the majority to inform a minority.
 """
 import pytest
+import services.card_library_inventory as inventory
 
 from database.db_session import AsyncSessionLocal
 from conftest import a_library
@@ -42,7 +43,7 @@ def _shelf(monkeypatch, held, available, cards):
         return cards
     monkeypatch.setattr(mod, "library_holdings", _held)
     monkeypatch.setattr(mod, "library_available", _avail)
-    monkeypatch.setattr(mod, "fetch_cube", _fetch)
+    monkeypatch.setattr(inventory, "fetch_cube", _fetch)
 
 
 CUBE_CARDS = [{"name": "Swamp", "qty": 4}]
@@ -119,7 +120,7 @@ async def test_a_failure_to_check_does_not_break_the_signup_board(
 
     async def _fetch(cube_id):
         return CUBE_CARDS
-    monkeypatch.setattr(mod, "fetch_cube", _fetch)
+    monkeypatch.setattr(inventory, "fetch_cube", _fetch)
 
     assert await library_signup_note(CUBE, GUILD) is None
 

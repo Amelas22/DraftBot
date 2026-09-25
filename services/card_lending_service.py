@@ -27,6 +27,7 @@ from sqlalchemy import and_, or_, select, update
 
 from config import is_money_server
 from database.db_session import AsyncSessionLocal, db_session
+from services.card_substitution_service import learn_substitutions
 from database.retry import with_db_retry
 from models.card_loan import ACTIVE_STATES, CardLoan
 from models.library import Library
@@ -1104,6 +1105,12 @@ async def _items_moved(job: "dict[str, Any]", kind: str) -> "list[dict[str, Any]
     # substitute for `state`", as the serve puts it. What keeps that honest is
     # the state check at the settler, which books only a job the serve has
     # already called done.
+
+    # Learned HERE because this is the one place a finished job is read -- both
+    # the loan settler and the deposit settler come through it. Recording it at
+    # the two callers instead would be two places to keep in step, and the one
+    # that drifted would leave cards on the shelf that nothing can ask for.
+    await learn_substitutions(job.get("substitutions"), job_id=job.get("id"))
     # Summed by name, not listed as they come. The claim for a trade is keyed
     # by job and card name, so two entries for one name would read as the same
     # movement and the second would be dropped as already booked -- quietly
