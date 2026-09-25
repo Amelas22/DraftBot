@@ -8,7 +8,25 @@ from views import PersistentView
 import discord
 from services.draft_setup_manager import DraftSetupManager
 import asyncio
+from loguru import logger
 from config import get_session_deletion_hours
+
+# How long the signup board's library line may hold up the draft it describes.
+#
+# Discord gives three seconds to answer an interaction, and this runs BEFORE
+# that answer: the line is read from CubeCobra, and a slow read is not an error
+# the note's own try/except can catch. Overrunning does not merely lose the
+# line -- the command has already written a draft row and opened a Draftmancer
+# session, so the player is left with a half-made draft and no message at all.
+#
+# A second is generous for a read that normally takes a quarter of one, and
+# losing the line costs only a convenience: the cube is still listed, the
+# library still lends, /borrow still works. Deferring the interaction is the
+# better answer once this is in front of players who do not already know the
+# library is there; it is not worth the UX change while the feature is behind
+# a whitelist.
+_SIGNUP_INTERACTION_BUDGET_S = 1.0
+
 
 class BaseSession:
     def __init__(self, session_details: SessionDetails, session_factory=None):
@@ -42,6 +60,24 @@ class BaseSession:
                 self.connection_task = asyncio.create_task(self.draft_manager.keep_connection_alive())
                 
                 # Step 3: Create Embed and Persistent View
+                #
+                # Read before the embed is built, because it is a database and
+                # network question and create_embed is synchronous. Somebody
+                # deciding whether to join needs to know whether they can play
+                # without owning the cards, and the signup board is the only
+                # surface they see.
+                from cube_views.pack_options import library_signup_note
+                try:
+                    self.library_note = await asyncio.wait_for(
+                        library_signup_note(new_draft_session.cube,
+                                            new_draft_session.guild_id),
+                        timeout=_SIGNUP_INTERACTION_BUDGET_S)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "signup board: the library line took longer than {}s; "
+                        "posting the draft without it",
+                        _SIGNUP_INTERACTION_BUDGET_S)
+                    self.library_note = None
                 embed = self.create_embed()
                 view = PersistentView(
                     bot=bot,
@@ -109,6 +145,14 @@ class BaseSession:
         # Add a dedicated Cube field (easier to update in views.py)
         cube_field_value = f"[{self.session_details.cube_choice}](https://cubecobra.com/cube/list/{self.session_details.cube_choice})"
         embed.add_field(name="Cube:", value=cube_field_value, inline=True)
+
+        # Beside the cube, because it is a fact ABOUT this cube. Absent unless
+        # the library lends for it, which is most drafts.
+        library_note = getattr(self, "library_note", None)
+        if library_note:
+            from cube_views.pack_options import LIBRARY_FIELD_NAME
+            embed.add_field(name=LIBRARY_FIELD_NAME, value=library_note,
+                            inline=False)
 
         # Surface pack structure only when it differs from the default.
         from cube_views.pack_options import pack_format_display, PACK_FORMAT_FIELD_NAME

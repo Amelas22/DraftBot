@@ -3,6 +3,12 @@ from .match import MatchResult, Match
 from .player import PlayerStats, PlayerLimit
 from .team import Team, WeeklyLimit
 from .challenge import Challenge, SwissChallenge
+from .card_loan import CardLoan, ACTIVE_STATES
+from .library import Library, COMMUNAL, RENTAL
+from .library_server import LibraryServer
+from .card_substitution import CardSubstitution
+from .library_cube import LibraryCube
+from .library_member import LibraryMember
 from .utility import TeamFinder
 from .stake import StakeInfo
 from .stake_pairing import StakePairing
@@ -73,4 +79,13 @@ __all__ = [
     'MtgoAccount',
     'MtgoJob',
     'WalletTx',
+    'Library',
+    'LibraryServer',
+    'CardSubstitution',
+    'LibraryCube',
+    'LibraryMember',
+    'COMMUNAL',
+    'RENTAL',
+    'CardLoan',
+    'ACTIVE_STATES',
 ]

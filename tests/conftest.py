@@ -550,3 +550,279 @@ def draft_control_cog():
     """The cog under test for /scrap and /abandon."""
     from cogs.draft_control import DraftControlCog
     return DraftControlCog(bot=MagicMock())
+
+
+_UNSET = object()
+
+
+class FakeLendingServe:
+    """One stand-in for the card library's TradeBot serve.
+
+    Shared rather than rewritten per file for a reason the suite has now paid
+    for twice: the client's contract changes (``borrow`` taking an item list,
+    ``get_job`` taking ``mark_missing``), and every private copy has to
+    learn each change or fail with a TypeError that says nothing about the test
+    it broke. A stub that lags the real client also stops testing anything.
+
+    Configure what varies; leave the rest:
+      stock     -- {name: qty} the vault reports
+      jobs      -- {job_id: projection}; `job` answers for any id not listed
+      response  -- override the 202 from a lend/collect: None for a definite
+                   refusal, {"_ambiguous": True} for a lost response
+    """
+    enabled = True
+    # The real client is keyed by url wherever a per-serve cache exists (the
+    # custodian name, for one). Without it a fake that reports a custodian --
+    # which this one does -- raises AttributeError deep inside money_gate
+    # rather than failing the assertion the test was about.
+    #
+    # One value for every instance, so every fake in the suite shares that
+    # cache key -- see forget_the_custodian below, which is what keeps that
+    # from making one test's custodian the next test's answer.
+    url = "http://fake-serve"
+
+    def __init__(self, stock=None, jobs=None, job=None, job_id="job-1",
+                 response=_UNSET):
+        self.stock = dict(stock or {})
+        self.jobs = dict(jobs or {})
+        self.job = job
+        self.job_id = job_id
+        self.response = response
+        self.held: "dict[str, list]" = {"held": [], "lent": []}
+        self.lent: list[tuple] = []
+        self.deposited: list[tuple] = []
+        self.withdrawn: list[tuple] = []
+        self.collected: list[tuple] = []
+        self.orphan = None
+        self.returns = None          # what a return hands back; None = all of it
+        self._carried: dict = {}     # job id -> (side, items) it moved
+
+    # -- what the library holds ------------------------------------------
+    async def vault(self):
+        return {"available": True, "custodian": "Team01",
+                "top": [{"name": n, "qty": q} for n, q in self.stock.items()]}
+
+    # -- trades ----------------------------------------------------------
+    def _accept(self):
+        return {"id": self.job_id} if self.response is _UNSET else self.response
+
+    async def deposit(self, user, cards, qty=1, **kw):
+        self.deposited.append((user, cards))
+        self._carried[self.job_id] = ("receive", cards)
+        return self._accept()
+
+    async def borrow(self, user, cards, qty=1, **kw):
+        self.lent.append((user, cards))
+        self._carried[self.job_id] = ("give", cards)
+        return self._accept()
+
+    async def withdraw_cards(self, user, cards=None, qty=None, **kw):
+        # `cards`, not `card`: a position too big for one trade is asked for in
+        # named pieces, and a stub still taking a single card would swallow the
+        # list into **kw and record None for every one of them.
+        self.withdrawn.append((user, cards))
+        self._carried[self.job_id] = ("give", self.returns or cards or [])
+        return self._accept()
+
+    async def return_cards(self, user, card=None, qty=None, **kw):
+        self.collected.append((user, card))
+        # A whole-loan return names nothing, so what comes back is whatever was
+        # lent -- unless a test says otherwise via `returns`, which is how a
+        # partial hand-back is expressed.
+        back = self.returns if self.returns is not None else \
+            [c for _, cards in self.lent for c in cards]
+        self._carried[self.job_id] = ("receive", back)
+        return self._accept()
+
+    @property
+    def sent(self):
+        """Just the card lists that went out, for tests about what was offered."""
+        return [cards for _, cards in self.lent]
+
+    # -- jobs ------------------------------------------------------------
+    async def health(self):
+        """A reachable, idle custodian."""
+        return {"ok": True, "custodian": "Library01"}
+
+    async def positions(self, user=None):
+        """What the boundary is holding for somebody.
+
+        Asked only when a job has vanished from the serve, to tell "the trade
+        never happened" apart from "the serve forgot a trade that did". The
+        default is holding nothing, which is the answer that lets a vanished
+        job be written off -- set `held` to make the fake say otherwise.
+        """
+        return self.held
+
+    async def active_jobs(self):
+        """Nothing in flight.
+
+        The busy check asks this before every dispatch, so a fake without it
+        fails with an AttributeError deep inside money_gate rather than in the
+        test -- which reads as a production bug and is not one.
+        """
+        return []
+
+    # What the serve calls the two sides, and what it calls what actually
+    # crossed on each. The real projection always carries all four.
+    _OUTCOME = {"give": "gaveActual", "receive": "receivedActual"}
+
+    async def get_job(self, job_id, *, mark_missing=False):
+        """The serve's projection, with what the trade CARRIED filled in.
+
+        Settlement books the claim off gaveActual/receivedActual -- what the
+        trade carried -- not off give/receive, which only echo the order. The
+        real serve projects both pairs unconditionally on every job, so a stub
+        that reported only the order was modelling a serve that does not exist:
+        a substituted card would settle under the name asked for rather than
+        the name that moved, and a short fill would settle as complete.
+
+        A test that needs the two to DIFFER sets them explicitly; by default
+        the trade carried exactly what it was asked for.
+        """
+        job = self.jobs.get(job_id, self.job)
+        if job is None or job.get("state") != "done":
+            return job
+        side, items = self._carried.get(job_id, (None, None))
+        if side and side not in job:
+            job = {**job, side: items}
+        for asked, actual in self._OUTCOME.items():
+            if actual not in job:
+                job = {**job, actual: job.get(asked, [])}
+        return job
+
+    async def find_recent_deck_job(self, job_type, mtgo_user, cards,
+                                   exclude_ids=(), **kw):
+        """What the /jobs scan turns up for a POST whose answer was lost.
+
+        `orphan` is the trade that really opened, or None for none.
+
+        `exclude_ids` is honoured rather than swallowed: it is the caller's
+        only defence against adopting a trade of its own that the scan cannot
+        tell apart from this one, and a fake that ignores it lets that defence
+        be deleted with every test still green.
+        """
+        if self.orphan and str(self.orphan.get("id")) in {str(i) for i in exclude_ids}:
+            return None
+        return self.orphan
+
+
+@pytest.fixture(autouse=True)
+def forget_the_custodian():
+    """Empty the custodian-name cache around every test.
+
+    money_gate caches the name by serve URL, for the life of the process and
+    with nothing that clears it -- which is right in the bot, where the
+    custodian does not change, and wrong in a suite where every FakeLendingServe
+    answers to the same URL. Without this, the first test to report a custodian
+    decides what every later test is told, and a test that sets up a different
+    one passes or fails on where pytest happens to put it in the run.
+    """
+    from helpers.money_gate import _custodian_cache
+    _custodian_cache.clear()
+    yield
+    _custodian_cache.clear()
+
+
+async def a_library(library_id="lib", *, guild="g1", kind="communal",
+                    collateral=0, cubes=(), stock=None):
+    """Seed a library, bind a server to it, list its cubes, and stock its shelf.
+
+    Almost every library test needs the same rows, and writing them out each
+    time buries what the test is actually about. `guild=None` leaves the
+    library unbound, which is how a server with no library is expressed.
+
+    `stock` is {card name: copies}, booked the way a settled deposit books
+    them. A dispatch checks the shelf before it opens a trade, so a library
+    with cubes listed but nothing on it refuses every borrow with
+    "short_cards" -- which is correct, and is rarely what a test about fees or
+    ownership meant to arrange.
+    """
+    from database.db_session import AsyncSessionLocal
+    from models.library import Library
+    from models.library_cube import LibraryCube
+    from models.library_server import LibraryServer
+
+    async with AsyncSessionLocal() as s:
+        s.add(Library(id=library_id, name=library_id, kind=kind,
+                      collateral_tix=collateral, created_by="test"))
+        if guild is not None:
+            s.add(LibraryServer(guild_id=str(guild), library_id=library_id,
+                                bound_by="test"))
+        for cube in cubes:
+            s.add(LibraryCube(library_id=library_id, cube_id=cube, added_by="test"))
+        await s.commit()
+
+    if stock:
+        from services import debt_service, wallet_service
+        for name, qty in dict(stock).items():
+            await debt_service.create_card_loan(
+                guild_id=wallet_service.library_scope(library_id),
+                lender_id="donor:test", borrower_id=wallet_service.HOUSE_LIBRARY,
+                card_name=name, quantity=qty, created_by="test",
+                source_id=f"seed:{library_id}:{name}")
+    return library_id
+
+
+def stub_library(monkeypatch, module, *, collateral=0, library_id="lib",
+                 kind="communal", stock=None):
+    """Give a module's library lookup a fixed answer, with no database.
+
+    The counterpart to `a_library` for the many tests that are about something
+    else entirely -- what a dispatch does, how a crash recovers -- and only
+    need SOME library to exist with a known price. Seeding real rows would
+    make every one of their sync fixtures async to say nothing new.
+
+    Patches `library_for`, which is the single seam everything else reads
+    through: collateral_for, fee_due_for and the gate all end up here.
+
+    `stock` does the same for the shelf. A dispatch checks what the library can
+    actually hand over before it opens a trade, and that check reads the real
+    custody ledger -- which these tests deliberately never write, so without it
+    every one of them refuses with "short_cards" for want of stock nobody meant
+    to be testing. Pass {name: copies} covering the deck under test.
+
+    A real dict, deliberately: `_cap` copies it with `dict(avail)`, which on a
+    dict SUBCLASS copies the underlying storage and silently ignores any
+    __getitem__ or get override. A clever stand-in that answers every lookup
+    therefore trims every deck to nothing, one layer below where anyone is
+    looking. Leave it None to let the real ledger answer.
+    """
+    from types import SimpleNamespace
+
+    library = SimpleNamespace(id=library_id, name=library_id, kind=kind,
+                              collateral_tix=collateral)
+
+    async def _for(_guild_id):
+        return library
+
+    # Once a dispatch stamps library_id on the loan, library_behind stops
+    # asking library_for and looks the row up by id instead -- which these
+    # tests never write, so the SECOND dispatch of the same loan finds no
+    # library and refuses with "unavailable". Same fixed answer, same seam.
+    if hasattr(module, "library_behind"):
+        async def _behind(_loan, _guild_id):
+            return library
+
+        monkeypatch.setattr(module, "library_behind", _behind)
+
+    if stock is not None and hasattr(module, "lendable_now"):
+        async def _lendable(_library_id, *, exclude_loan_id=None):
+            return dict(stock)
+
+        monkeypatch.setattr(module, "lendable_now", _lendable)
+
+    async def _id_for(_guild_id):
+        return library_id
+
+    # Only what the module actually imported. The two lookups are separate
+    # names and most modules pull in just one, so patching unconditionally
+    # would invent an attribute nothing reads and hide a missing import.
+    patched = False
+    for name, fn in (("library_for", _for), ("library_id_for", _id_for)):
+        if hasattr(module, name):
+            monkeypatch.setattr(module, name, fn)
+            patched = True
+    assert patched, f"{module.__name__} looks up no library to stub"
+
+    return library
