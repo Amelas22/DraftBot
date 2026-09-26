@@ -18,7 +18,6 @@ DEFAULT_BOTS_WITH_DRAFT_ACCESS = ["Scryfall"]
 
 # Tix of week-old outstanding debt strictly above which a staked signup line
 # shows a debt warning. 0 disables the warning for a guild.
-DEFAULT_DEBT_WARNING_THRESHOLD = 100
 
 def is_test_mode() -> bool:
     """Returns True if TEST_MODE env var is set to a truthy value."""
@@ -99,8 +98,7 @@ class Config:
             },
             "stakes": {
                 "use_optimized_algorithm": True,
-                "stake_multiple": 10,
-                "debt_warning_threshold": DEFAULT_DEBT_WARNING_THRESHOLD
+                "stake_multiple": 10
             },
             "activity_tracking": {
                 "enabled": False,
@@ -211,8 +209,7 @@ class Config:
             },
             "stakes": {
                 "use_optimized_algorithm": True,
-                "stake_multiple": 10,
-                "debt_warning_threshold": DEFAULT_DEBT_WARNING_THRESHOLD
+                "stake_multiple": 10
             },
             "activity_tracking": {
                 "enabled": False,
@@ -435,13 +432,6 @@ def voice_channels_enabled(guild_id):
     return config.get("features", {}).get("voice_channels", False)
 
 
-def get_debt_warning_threshold(guild_id):
-    """Tix of week-old outstanding debt above which (strictly) a staked signup
-    shows a debt warning to other players. 0 (or missing stakes config
-    entirely) disables."""
-    config = get_config(guild_id)
-    return config.get("stakes", {}).get("debt_warning_threshold", DEFAULT_DEBT_WARNING_THRESHOLD)
-
 def get_league_challenge_hours(guild_id):
     """Get league challenge timeout in hours"""
     timeout_config = get_timeout_config(guild_id)
@@ -470,7 +460,6 @@ def migrate_configs():
 
         # Add debt_warning_threshold if missing (staked signup debt warnings)
         if "stakes" in config and "debt_warning_threshold" not in config["stakes"]:
-            config["stakes"]["debt_warning_threshold"] = DEFAULT_DEBT_WARNING_THRESHOLD
             updated = True
 
         # Rebase debt_warning_threshold from the old total-debt default to the
