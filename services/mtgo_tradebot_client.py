@@ -12,6 +12,8 @@ method returns ``None`` — unless *both* are set, so nothing breaks on servers 
 
 Mirrors the aiohttp idiom in helpers/magicprotools_helper.py, plus a Bearer header + a timeout.
 """
+import gzip
+import json as jsonlib
 import os
 import time
 from collections.abc import Iterable
@@ -46,6 +48,22 @@ EVENT_TICKET = "Event Ticket"
 # serve's limit changes. Too low only means more trades than necessary; too
 # high means the serve rejects a chunk the bot thought would fit.
 DEFAULT_MAX_CARDS_PER_TRADE = 300
+
+# The serve drops a request body past one TCP congestion window (measured on
+# 2026-09-26: 11,874B answered, 12,124B dropped) -- see _call for why. Bodies go
+# up gzipped, so this bounds the COMPRESSED size.
+#
+# Sized against real card names, not a flattering fixture. A 300-card chunk of
+# random PowerLSV names is 3,662B compressed; 300 of the LONGEST names in the
+# pool -- the worst case a full trade can be, since the serve refuses more than
+# 300 -- is 5,156B. 8KB clears that by 1.6x while still sitting well under the
+# serve's own edge.
+#
+# It exists to catch max_cards_per_trade() being raised past what the wire can
+# carry, because crossing the serve's edge is not a clean error: it ACKs the
+# body and hangs up, which _call can only report as ambiguous, which sends an
+# asset-moving order to a human instead of failing cleanly.
+MAX_BODY_BYTES = 8192
 
 
 # How long to wait for a request that CREATES an order, as opposed to a read.
@@ -256,13 +274,69 @@ class MtgoTradeBotClient:
         # would raise on a body aiohttp would have refused anyway, out of a
         # method whose whole contract is that it never raises to the caller.
         carried = len(json.get("items") or json.get("cards") or ()) if json else 0
+        # Serialised and gzipped here rather than handed to aiohttp as json=.
+        #
+        # The serve runs under Wine, whose HTTP stack mishandles a Content-Length
+        # body that arrives across more than one read: it ACKs every byte, then
+        # closes without answering. A 0ms link puts the whole body in one read
+        # and hides it, which is why this passed every local and mock test; over
+        # the 88ms tailnet link anything past one congestion window -- ~11.8KB,
+        # about 300 cards -- dies. Chunked is not the way out: the serve does not
+        # dechunk at all, and reads an empty body ("bad json") from every client
+        # that tries it.
+        #
+        # Compressing is. Measured on 300 real PowerLSV card names, the shape a
+        # full chunk actually has: 12,544B raw -- just over the ceiling, which is
+        # why deposits died -- and 3,584B gzipped, 3.5:1. That is 3.3x of margin.
+        # Do not expect more: synthetic names with a shared prefix compress 16:1
+        # and flatter the figure badly.
+        #
+        # The ceiling still applies, to the COMPRESSED bytes, so
+        # max_cards_per_trade() still bounds a chunk -- this widens the margin,
+        # it does not remove the limit. The serve enforces 300 of its own accord
+        # ("a trade carries at most 300 cards; a larger order is refused"), so
+        # the two agree.
+        #
+        # Both serves were checked on 2026-09-26: /deposit, /borrow, /return,
+        # /withdraw and /request all decompress on the lending account, and
+        # /deposit, /request and /withdraw on the wallet account.
+        #
+        # Not aiohttp's own compress="gzip": that routes through
+        # writer.enable_compression(), which leaves the payload size unknown and
+        # so forces chunked -- the one framing this serve cannot read at all.
+        # Compressing by hand keeps Content-Length, which is what it does read.
+        body = None
+        if json is not None:
+            try:
+                body = gzip.compress(jsonlib.dumps(json).encode(), 6)
+            except Exception as e:
+                # DEFINITE, never ambiguous: nothing was sent, so no job can
+                # exist and no adoption scan should run. Returning rather than
+                # raising keeps the never-raise contract that callers commit
+                # money against -- they unwind on the return value, and an
+                # exception here would skip the unwind entirely.
+                logger.error("TradeBot {} {} could not build the body "
+                             "({} card(s)): {}: {}",
+                             method, path, carried, type(e).__name__, e)
+                return None
+            if len(body) > MAX_BODY_BYTES:
+                # Refuse it ourselves rather than let the serve ACK it and hang
+                # up: a definite failure the caller can unwind cleanly beats the
+                # ambiguous silence that sends an order to a human.
+                logger.error("TradeBot {} {} body is {}B compressed, over the "
+                             "{}B ceiling ({} card(s)) -- refusing rather than "
+                             "risking a silent drop",
+                             method, path, len(body), MAX_BODY_BYTES, carried)
+                return None
+            headers["Content-Type"] = "application/json"
+            headers["Content-Encoding"] = "gzip"
         started = time.monotonic()
         # Filled in by the trace hooks; read only if this call fails.
         progress: "dict[str, Any]" = {"got_to": "not started"}
         try:
             session = self._get_session()
             kw = {} if timeout is None else {"timeout": aiohttp.ClientTimeout(total=timeout)}
-            async with session.request(method, full, headers=headers, json=json,
+            async with session.request(method, full, headers=headers, data=body,
                                        params=params, trace_request_ctx=progress,
                                        **kw) as resp:
                 text = await resp.text()
@@ -287,9 +361,9 @@ class MtgoTradeBotClient:
             # and "stopped at connecting" and "stopped after request body sent"
             # are the difference between a network fault and a silent serve.
             logger.error("TradeBot {} {} failed ambiguously after {:.1f}s "
-                         "(got as far as: {}; {} card(s)): {}: {}",
+                         "(got as far as: {}; {} card(s), {}B compressed): {}: {}",
                          method, path, time.monotonic() - started,
-                         progress.get("got_to"), carried,
+                         progress.get("got_to"), carried, len(body or b""),
                          type(e).__name__, e or "(no message)")
             return {"_ambiguous": True} if mark_ambiguous else None
 
