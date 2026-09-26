@@ -584,3 +584,60 @@ async def test_a_pool_of_nothing_lendable_is_not_reported_as_unreadable(
     said = " ".join(str(c.args) for c in warned.call_args_list)
     assert "unreadable" not in said, said
     assert "nothing to lend" in said, said
+
+
+async def test_every_drafter_is_told_their_deck_is_waiting(test_db, library_on):
+    """A whitelisted library says nothing on the shared signup board, so this
+    DM is the only thing that tells a borrower a deck exists. Sent from the
+    assignment itself rather than the ten-minute watchdog, because somebody
+    waiting to start wants it now."""
+    import notification_service
+
+    told = []
+
+    async def _record(bot, user_id, message, label=None):
+        told.append((str(user_id), message))
+
+    await _seed()
+    with patch.object(notification_service, "send_dm", _record), \
+         patch("services.library_reminders._client", return_value=object()):
+        assigned = await svc.assign_drafted_decks(SESSION)
+
+    assert assigned and len(told) == assigned, (
+        f"{assigned} decks assigned but {len(told)} drafters told")
+    assert all("/library borrow" in msg for _, msg in told), told
+
+
+async def test_nobody_is_told_when_no_bot_is_running(test_db, library_on):
+    """Migrations, the CLI and most tests run with no bot registered. The decks
+    still have to be assigned -- the same rule notify_wallet follows."""
+    import notification_service
+
+    told = []
+
+    async def _record(bot, user_id, message, label=None):
+        told.append(str(user_id))
+
+    await _seed()
+    with patch.object(notification_service, "send_dm", _record), \
+         patch("services.library_reminders._client", return_value=None):
+        assert await svc.assign_drafted_decks(SESSION) > 0
+
+    assert told == []
+
+
+async def test_a_drafter_with_closed_dms_still_gets_their_deck(test_db, library_on):
+    """The DM is the last step and the least important one: a delivery failure
+    must not cost that player the loan, nor anybody after them theirs."""
+    import notification_service
+
+    async def _boom(*a, **k):
+        raise RuntimeError("cannot DM this user")
+
+    await _seed()
+    with patch.object(notification_service, "send_dm", _boom), \
+         patch("services.library_reminders._client", return_value=object()):
+        assigned = await svc.assign_drafted_decks(SESSION)
+
+    assert assigned > 0, "a failed DM swallowed the assignment"
+    assert len(await _loans()) == assigned

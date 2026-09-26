@@ -83,6 +83,11 @@ class CardLoan(Base):
     created_at = Column(DateTime, default=datetime.now)
     borrowed_at = Column(DateTime, nullable=True)
     returned_at = Column(DateTime, nullable=True)
+    # When we last asked for these cards back. NULL means never asked, so this
+    # is both "has the first reminder gone" and "how long since the last one" --
+    # the watchdog polls every ten minutes and without this it would ask every
+    # ten minutes.
+    last_reminded_at = Column(DateTime, nullable=True)
 
     __table_args__ = (
         Index('ix_card_loans_borrower', 'guild_id', 'borrower_id'),

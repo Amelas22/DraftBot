@@ -193,6 +193,12 @@ async def _pool_the_library_can_lend(
 async def assign_drafted_decks(session_id: Any) -> int:
     """Give every drafter their own pool as a deck they may collect.
 
+    DMs each drafter that their deck is waiting. That DM is not a courtesy: a library in whitelist mode says nothing on
+    the shared signup board (cube_views.pack_options.library_signup_note), so it
+    is the only thing that tells a borrower a deck exists. Sent from here rather
+    than from the watchdog because a borrower waiting to start wants it now, and
+    the watchdog is a ten-minute poll.
+
     Returns how many were assigned. Safe to call repeatedly, which it will be:
     the push path runs it the moment the log is captured and the reconciler
     runs it again, every minute, for anything that did not take.
@@ -312,9 +318,9 @@ async def assign_drafted_decks(session_id: Any) -> int:
                          max_cards_per_trade())
             continue
         try:
-            await assign_deck(guild_id, discord_id, cards,
-                              source=_source(session_id),
-                              library_id=str(library.id))
+            loan_id = await assign_deck(guild_id, discord_id, cards,
+                                        source=_source(session_id),
+                                        library_id=str(library.id))
         except IntegrityError:
             # The push path and a reconciler tick can both be inside this
             # function for one session; they share an event loop and interleave
@@ -339,9 +345,29 @@ async def assign_drafted_decks(session_id: Any) -> int:
                 discord_id, session_id)
         else:
             assigned += 1
+            await _say_it_is_ready(loan_id, discord_id, cards,
+                                   int(library.collateral_tix or 0))
 
     _report(session_id, sign_ups, assigned, done, busy, empty, failed)
     return assigned
+
+
+async def _say_it_is_ready(loan_id: Any, discord_id: Any,
+                           cards: "list[dict[str, Any]]", collateral: int) -> None:
+    """Tell one drafter their deck is waiting, and never let that failure cost
+    anybody else theirs -- the same rule every other per-player step here
+    follows."""
+    from types import SimpleNamespace
+
+    from services.library_reminders import notify_deck_ready
+
+    try:
+        await notify_deck_ready(
+            SimpleNamespace(borrower_id=str(discord_id), cards=cards), collateral)
+    except Exception:
+        logger.opt(exception=True).warning(
+            "deck assignment: assigned loan {} to {} but could not tell them",
+            loan_id, discord_id)
 
 
 def _report(session_id: Any, sign_ups: "dict[str, Any]", assigned: int,

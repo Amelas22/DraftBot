@@ -925,6 +925,14 @@ async def lending_jobs_watchdog(bot: Any = None, interval_s: float = RESCAN_INTE
                 logger.info("Card-library watchdog settled {} deposit(s)", len(deposited))
         except Exception:
             logger.exception("Card-library deposit scan failed")
+        try:
+            # Asking for decks back. Its own try for the same reason as the
+            # others: a borrower with closed DMs must not cost this tick its
+            # settlements.
+            from services.library_reminders import send_due_reminders
+            await send_due_reminders()
+        except Exception:
+            logger.exception("Card-library return-reminder scan failed")
         await asyncio.sleep(interval_s)
 
 
