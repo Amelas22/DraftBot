@@ -31,6 +31,7 @@ from services.tournament_service import (
     get_active_tournament,
     get_rosters,
     get_standings_data,
+    get_standings_with_omw,
     list_participants,
     other_teams_for_user,
     register_team,
@@ -1187,3 +1188,104 @@ async def test_dropping_once_the_bracket_exists_is_refused(test_db):
 
         with pytest.raises(ValueError, match="bracket"):
             await drop_team(session, tournament.id, "Team0")
+
+
+# ---- ranked pairing reaches the engine --------------------------------------
+#
+# The engine's own behaviour is covered in test_swiss_pairing; what these pin
+# is the seam. pair_round no longer ranks its own input, so a caller that hands
+# it teams in database order silently reverts every bit of this -- and nothing
+# downstream would fail, because an unranked list is still a valid pairing.
+
+def _capture_pair_round(monkeypatch):
+    """Record what the service hands the pairing engine, then run it for real."""
+    import services.tournament_service as svc
+    from draft_organization.swiss import pair_round as real
+    seen = []
+
+    def spy(teams, history, rng, power_pair=False, **kw):
+        seen.append({"points": [t["points"] for t in teams],
+                     "power_pair": power_pair, **kw})
+        return real(teams, history, rng, power_pair=power_pair, **kw)
+
+    monkeypatch.setattr(svc, "pair_round", spy)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_teams_reach_the_engine_in_ranked_order(test_db, monkeypatch):
+    seen = _capture_pair_round(monkeypatch)
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 8, rounds=3)
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        for m in matches:
+            await set_result(session, m.id, 2, 0)
+        await session.commit()
+        await advance_round(session, tournament.id, random.Random(7))
+        await session.commit()
+
+    points = seen[-1]["points"]
+    assert points == sorted(points, reverse=True), \
+        f"the engine pairs the order it is given, and got {points}"
+
+
+@pytest.mark.asyncio
+async def test_only_the_final_round_is_power_paired(test_db, monkeypatch):
+    """Ordinary rounds keep their variety; the last one, where the standings
+    are the thing being decided, does not."""
+    seen = _capture_pair_round(monkeypatch)
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 4, rounds=2)
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        for m in matches:
+            await set_result(session, m.id, 2, 0)
+        await session.commit()
+        await advance_round(session, tournament.id, random.Random(7))
+        await session.commit()
+
+    assert [s["power_pair"] for s in seen] == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_pairing_ranks_on_the_same_omw_the_board_shows(test_db, monkeypatch):
+    """A dropped team keeps its place in the standings and its record still
+    feeds every opponent's tiebreak -- `cut_after_rank` says so, and
+    `get_standings_with_omw` computes OMW over the whole field for that reason.
+
+    Pairing has to rank on the same number. `omw_percentages` silently skips an
+    opponent that is not in the list it was handed, so ranking the PAIRABLE
+    teams alone quietly drops every dropped opponent from the tiebreak -- and
+    the down-pair then contradicts the standings players read it from.
+    """
+    import services.tournament_service as svc
+    from draft_organization.swiss import pairing_order as real
+    seen = {}
+
+    def spy(participants, matches, rng, omw=None):
+        seen["omw"] = omw
+        return real(participants, matches, rng, omw=omw)
+
+    monkeypatch.setattr(svc, "pairing_order", spy)
+
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 4, rounds=2)
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        for m in matches:
+            await set_result(session, m.id, 0, 2)
+        await session.commit()
+        await drop_team(session, tournament.id, "Team0")
+        await session.commit()
+
+        # Read BEFORE advancing: the board pairing must agree with is the one
+        # showing when the pairings are made. Afterwards the new round's own
+        # unreported matches are in the graph and the two legitimately differ.
+        _, board = await get_standings_with_omw(session, tournament.id)
+
+        await advance_round(session, tournament.id, random.Random(7))
+        await session.commit()
+
+    assert seen["omw"] is not None, "pairing must be given the field-wide OMW"
+    assert seen["omw"] == board, "pairing and the board must rank on one set of numbers"
