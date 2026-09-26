@@ -7,7 +7,7 @@ and attempts to repost them using the existing infrastructure.
 
 import asyncio
 import datetime
-from sqlalchemy import create_engine, and_
+from sqlalchemy import create_engine, and_, or_
 from sqlalchemy.orm import sessionmaker
 from models import DraftSession
 import discord
@@ -39,12 +39,22 @@ class LogRetrigger:
         
         session = self.Session()
         try:
+            # A played-out draft, the way helpers.stale_drafts.is_finished_draft
+            # decides it: the stage OR a posted victory message. The stage alone
+            # is not a finish line -- most finished drafts never advance past
+            # 'pairings' -- and this used to read `== "COMPLETED"`, a spelling no
+            # row has ever held, so the query matched nothing and the script
+            # found no drafts to retrigger at all.
             unposted_drafts = session.query(DraftSession).filter(
                 and_(
                     DraftSession.draft_start_time >= cutoff_date,
                     DraftSession.logs_message_id.is_(None),
                     DraftSession.data_received == True,
-                    DraftSession.session_stage == "COMPLETED"
+                    or_(
+                        DraftSession.session_stage == "completed",
+                        DraftSession.victory_message_id_draft_chat.isnot(None),
+                        DraftSession.victory_message_id_results_channel.isnot(None),
+                    ),
                 )
             ).order_by(DraftSession.draft_start_time.desc()).all()
             

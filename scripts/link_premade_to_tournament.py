@@ -26,7 +26,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from database.db_session import get_session_factory
 from models.draft_session import DraftSession
@@ -67,7 +67,11 @@ async def plan_links(session, guild_id, db_path):
             DraftSession.guild_id == str(guild_id),
             DraftSession.session_type == "premade",
             DraftSession.tournament_match_id.is_(None),
-            DraftSession.session_stage != "completed",
+            # A `!=` against a NULL column yields NULL rather than true, so the
+            # bare inequality silently dropped every draft with no stage set --
+            # which is most premade queues until teams form.
+            or_(DraftSession.session_stage.is_(None),
+                DraftSession.session_stage != "completed"),
             DraftSession.draft_start_time >= "2026-06-01",
         )
     )).scalars().all()
