@@ -1323,34 +1323,6 @@ async def get_total_owed_map(guild_id: str, player_ids) -> dict[str, int]:
     return totals
 
 
-async def get_owed_maps(guild_id: str, player_ids, aged_cutoff) -> tuple[dict[str, int], dict[str, int]]:
-    """(total_owed_map, old_owed_map) for the given players.
-
-    total_owed_map: current outstanding debt per player (as get_total_owed_map).
-    old_owed_map: per player, the sum over creditor pairs of
-    min(owed_now, owed_as_of_aged_cutoff) — debt that is both currently
-    outstanding and was already owed at the cutoff. Settling always shrinks
-    it; debt incurred after the cutoff never enters it. Players with zero
-    in a map are absent from that map.
-    """
-    if not player_ids:
-        return {}, {}
-    now_rows = await _negative_pair_balances(guild_id, player_ids=player_ids)
-    aged_rows = await _negative_pair_balances(
-        guild_id, player_ids=player_ids, created_before=aged_cutoff
-    )
-    now_pairs = {(r.player_id, r.counterparty_id): int(-r.balance) for r in now_rows}
-    aged_pairs = {(r.player_id, r.counterparty_id): int(-r.balance) for r in aged_rows}
-    totals: dict[str, int] = {}
-    old_totals: dict[str, int] = {}
-    for (player_id, counterparty_id), owed_now in now_pairs.items():
-        totals[player_id] = totals.get(player_id, 0) + owed_now
-        aged = min(owed_now, aged_pairs.get((player_id, counterparty_id), 0))
-        if aged > 0:
-            old_totals[player_id] = old_totals.get(player_id, 0) + aged
-    return totals, old_totals
-
-
 async def get_guild_debt_rows(guild_id: str) -> list:
     """
     Get all debt relationships for a guild (from debtor perspective).
