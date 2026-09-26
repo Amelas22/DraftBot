@@ -195,38 +195,19 @@ async def _list_a_member(player_id="p1", library_id="lib"):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("collateral,available", [
+    (0, {"Swamp": 4}),     # free and covered
+    (25, {"Swamp": 4}),    # priced
+    (0, {}),               # stocked but nothing free -- the loudest line
+])
 async def test_a_whitelisted_library_says_nothing_on_the_shared_board(
-        test_db, monkeypatch):
+        test_db, monkeypatch, collateral, available):
     """The board is one message for the whole room, so it cannot address only
     the people who may borrow. While a library lends to named people only, the
-    room is told nothing and the named are told directly instead."""
-    await _price(0)
+    room is told nothing whatever the terms, and the named are DMed instead."""
+    await _price(collateral)
     await _list_a_member()
-    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
-
-    assert await library_signup_note(CUBE, GUILD) is None
-
-
-@pytest.mark.asyncio
-async def test_a_whitelisted_library_does_not_advertise_its_price_either(
-        test_db, monkeypatch):
-    await _price(25)
-    await _list_a_member()
-    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
-
-    note = await library_signup_note(CUBE, GUILD)
-
-    assert note is None, f"a whitelisted library quoted its terms to the room: {note}"
-
-
-@pytest.mark.asyncio
-async def test_a_whitelisted_library_does_not_warn_about_coverage_either(
-        test_db, monkeypatch):
-    """"Bring your own cards" is the loudest line on the board and the least
-    use to a room that cannot borrow from this library at all."""
-    await _price(0)
-    await _list_a_member()
-    _shelf(monkeypatch, {"Swamp": 4}, {}, CUBE_CARDS)      # stocked, none free
+    _shelf(monkeypatch, {"Swamp": 4}, available, CUBE_CARDS)
 
     assert await library_signup_note(CUBE, GUILD) is None
 

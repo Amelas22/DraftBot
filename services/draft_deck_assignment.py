@@ -19,7 +19,7 @@ does not mis-post a message: it hands somebody another player's forty-five
 cards and takes collateral off them for it. So an empty mapping assigns nobody
 anything -- not the subset that could be lined up.
 """
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from loguru import logger
 from sqlalchemy import select
@@ -27,6 +27,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import undefer
 
 from services.library_service import library_for, offers
+from services.library_access_service import members
 from database.db_session import AsyncSessionLocal
 from helpers.mtgo_names import mtgo_name
 from helpers.mtgo_untradeable import split_untradeable
@@ -238,7 +239,18 @@ async def assign_drafted_decks(session_id: Any) -> int:
     # unique index says so -- so someone who has not returned last week's deck
     # is passed over rather than the whole draft failing on their row.
     busy = await _holding_a_deck(candidates)
-    assignable = [d for d in candidates if d not in busy]
+    # The third case this function refuses, alongside an empty pool and a pool
+    # too large to trade: a deck nobody may collect. On an invite-only library
+    # most drafters would be turned away at /library borrow, and the loan would
+    # still take their ONE active-loan slot -- the unique index is not scoped by
+    # guild, so it also locks them out of a room served by an open library,
+    # where they could really have borrowed. One membership read for the pod,
+    # not one per drafter.
+    listed = set(await members(library.id))
+    not_invited = [d for d in candidates
+                   if d not in busy and listed and str(d) not in listed]
+    assignable = [d for d in candidates
+                  if d not in busy and d not in set(not_invited)]
     if not assignable:
         _say_once(f"busy:{session_id}",
                   "deck assignment: nobody on {} can be given a deck -- {} of {} "
@@ -280,6 +292,7 @@ async def assign_drafted_decks(session_id: Any) -> int:
         return 0
 
     assigned = 0
+    announce: "list[tuple[Any, Any]]" = []
     empty: "list[str]" = []
     failed: "list[str]" = []
     for discord_id in assignable:
@@ -345,9 +358,16 @@ async def assign_drafted_decks(session_id: Any) -> int:
                 discord_id, session_id)
         else:
             assigned += 1
-            await _say_it_is_ready(loan_id, discord_id)
+            announce.append((loan_id, discord_id))
 
-    _report(session_id, sign_ups, assigned, done, busy, empty, failed)
+    # After the loop, not inside it. Each DM is one or two Discord round trips,
+    # so announcing inline stretched the assignment phase by seconds for a full
+    # pod and widened the interleave window documented above, where the push
+    # path and the reconciler tick race the one-active-loan index.
+    for loan_id, discord_id in announce:
+        await _say_it_is_ready(loan_id, discord_id)
+
+    _report(session_id, sign_ups, assigned, done, busy, empty, failed, not_invited)
     return assigned
 
 
@@ -357,20 +377,14 @@ async def _say_it_is_ready(loan_id: Any, discord_id: Any) -> None:
     follows.
 
     Sent here rather than left to the watchdog because a drafter waiting to
-    start should not wait for a ten-minute poll. Everything about WHO gets told
-    and what counts as having been told lives in library_reminders.announce_one,
-    which the watchdog's retry sweep also calls -- the loan is committed before
-    this runs, so an undelivered DM has to be recoverable from the loan alone.
+    start should not wait for a ten-minute poll. Everything about what counts as
+    having been told lives in library_reminders.announce_one, which the
+    watchdog's retry sweep also calls.
     """
-    from database.db_session import AsyncSessionLocal as _Session
-    from models.card_loan import CardLoan
     from services.library_reminders import announce_one
 
     try:
-        async with _Session() as session:
-            loan = await session.get(CardLoan, loan_id)
-        if loan is not None:
-            await announce_one(loan)
+        await announce_one(loan_id)
     except Exception:
         logger.opt(exception=True).warning(
             "deck assignment: assigned loan {} to {} but could not tell them; "
@@ -378,7 +392,8 @@ async def _say_it_is_ready(loan_id: Any, discord_id: Any) -> None:
 
 
 def _report(session_id: Any, sign_ups: "dict[str, Any]", assigned: int,
-            done: "set[str]", busy: "set[str]", empty: "list[str]", failed: "list[str]") -> None:
+            done: "set[str]", busy: "set[str]", empty: "list[str]",
+            failed: "list[str]", not_invited: "Sequence[Any]" = ()) -> None:
     """Say what happened, every time, including when the answer is "nothing".
 
     Logging only on success is how a whole draft assigns nobody in silence: the
@@ -394,6 +409,7 @@ def _report(session_id: Any, sign_ups: "dict[str, Any]", assigned: int,
     # parse failure that never happened reads the log and finds nothing wrong.
     tail = (f"{assigned} assigned, {len(done)} already had one, {len(busy)} "
             f"holding a deck, {len(empty)} with nothing to lend, "
+            f"{len(not_invited)} not on the borrowing list, "
             f"{len(failed)} failed, of {len(sign_ups)} drafters")
     if failed or empty:
         logger.warning("deck assignment for {}: {} -- nothing-to-lend={} failed={}",

@@ -346,20 +346,26 @@ async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
         library = await library_for(guild_id)
         if library is None or not await offers(library.id, cube_id):
             return None
+        if await is_invite_only(library.id):
+            # Before the reads below, not after: this runs inline in draft
+            # creation under a one-second budget, and cube_as_the_library_sees_it
+            # is an uncached CubeCobra fetch. Computing coverage and then
+            # discarding it spent that whole budget on nothing -- in the only
+            # mode the feature is deployed in.
+            #
+            # The board is ONE message for the whole room, so it cannot address
+            # only the people who may borrow. It used to state the terms and add
+            # "invite-only", which told a room of people who cannot borrow what
+            # they would have paid if they could. While a library lends to named
+            # people only the room is told nothing, and the named are DMed
+            # instead (services/library_reminders).
+            return None
         seen = await cube_as_the_library_sees_it(cube_id)
         if not (seen and seen.cards):
             return None
         cards = seen.cards
         available = await library_available(library.id)
         covered = cube_support(cards, available).ok
-        if await is_invite_only(library.id):
-            # The board is ONE message for the whole room, so it cannot address
-            # only the people who may borrow. It used to say the terms and add
-            # "invite-only", which told a room of people who cannot borrow what
-            # they would have paid if they could. While a library lends to named
-            # people only, the room is told nothing and the named are DMed
-            # instead (services/library_reminders).
-            return None
     except Exception:
         logger.opt(exception=True).warning(
             "signup board: could not check the library for {}", cube_id)
