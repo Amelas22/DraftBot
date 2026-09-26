@@ -7,7 +7,7 @@ from discord import SelectOption
 from discord.ui import Button, View, Select, select
 from config import (
     is_test_mode, should_reset_on_signup, get_queue_inactivity_minutes,
-    get_debt_warning_threshold, get_config,
+    get_config,
 )
 from notification_service import send_ready_check_dms
 from ready_check import ReadyCheckView, ReadyCheckSession
@@ -19,7 +19,7 @@ from sqlalchemy.orm import selectinload
 from helpers.utils import get_cube_thumbnail_url
 from helpers.money_gate import wallet_howto
 from helpers.display_names import get_display_name, get_display_name_by_id
-from helpers.debt_warning import format_staked_sign_ups, DEBT_WARNING_AGE_DAYS
+from helpers.signup_board import FIELD_SPLIT_THRESHOLD, build_board
 from helpers.draft_footer import apply_draft_footer_from_session
 from helpers.draft_rooms import (
     BLUE_SIDE, DRAFT_ROOM_COUNT, RED_SIDE, SHARED_CHAT_TEAM,
@@ -2664,23 +2664,6 @@ async def update_draft_message(bot, session_id):
         guild = channel.guild
 
         if draft_session.session_type == "staked":
-            # Debt warnings: best-effort, render-time only. A lookup failure
-            # renders the plain list — it must never block the embed update.
-            owed_map = {}
-            old_owed_map = {}
-            threshold = get_debt_warning_threshold(draft_session.guild_id)
-            if threshold:
-                try:
-                    from services.debt_service import get_owed_maps
-                    aged_cutoff = datetime.now() - timedelta(days=DEBT_WARNING_AGE_DAYS)
-                    owed_map, old_owed_map = await get_owed_maps(
-                        str(draft_session.guild_id),
-                        list(draft_session.sign_ups.keys()),
-                        aged_cutoff,
-                    )
-                except Exception as e:
-                    logger.warning(f"[debt-warning] lookup failed for {session_id}: {e}; "
-                                   "rendering without markers")
             # What the table is playing for: the pot, both sides of it. Teams
             # do not exist yet, so quote the best case -- every entry faced with
             # the closest other entry it could meet. The total escrowed is the
@@ -2690,14 +2673,10 @@ async def update_draft_message(bot, session_id):
             from services.draft_pool_service import contributions, max_pool
             held = await contributions(str(draft_session.guild_id), session_id)
             pool = max_pool(held.values())
-            sign_ups_str = format_staked_sign_ups(
+            sign_ups_str = build_board(
                 draft_session.sign_ups,
                 stake_info_by_player,
-                owed_map,
-                old_owed_map,
-                threshold,
-                display_name_for=lambda uid, stored: get_display_name_by_id(uid, guild, stored),
-                session_id=session_id,
+                lambda uid, stored: get_display_name_by_id(uid, guild, stored),
                 pool=pool,
             )
         else:
@@ -2737,10 +2716,10 @@ async def update_draft_message(bot, session_id):
             embed.remove_field(idx)
         
         # Check if the sign-ups string is too long
-        if len(sign_ups_str) > 1000:  # Using 1000 to be safe (Discord limit is 1024)
+        if len(sign_ups_str) > FIELD_SPLIT_THRESHOLD:  # under Discord's 1024 limit
             # Split the sign-ups into parts using our helper function
             parts = split_content_for_embed(sign_ups_str, include_header=True)
-            
+        
             # Update or add fields with standardized names
             for i, part in enumerate(parts):
                 field_name = sign_ups_field_name if i == 0 else f"{sign_ups_field_name} (cont. {i})"
