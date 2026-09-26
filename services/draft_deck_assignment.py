@@ -345,29 +345,36 @@ async def assign_drafted_decks(session_id: Any) -> int:
                 discord_id, session_id)
         else:
             assigned += 1
-            await _say_it_is_ready(loan_id, discord_id, cards,
-                                   int(library.collateral_tix or 0))
+            await _say_it_is_ready(loan_id, discord_id)
 
     _report(session_id, sign_ups, assigned, done, busy, empty, failed)
     return assigned
 
 
-async def _say_it_is_ready(loan_id: Any, discord_id: Any,
-                           cards: "list[dict[str, Any]]", collateral: int) -> None:
+async def _say_it_is_ready(loan_id: Any, discord_id: Any) -> None:
     """Tell one drafter their deck is waiting, and never let that failure cost
     anybody else theirs -- the same rule every other per-player step here
-    follows."""
-    from types import SimpleNamespace
+    follows.
 
-    from services.library_reminders import notify_deck_ready
+    Sent here rather than left to the watchdog because a drafter waiting to
+    start should not wait for a ten-minute poll. Everything about WHO gets told
+    and what counts as having been told lives in library_reminders.announce_one,
+    which the watchdog's retry sweep also calls -- the loan is committed before
+    this runs, so an undelivered DM has to be recoverable from the loan alone.
+    """
+    from database.db_session import AsyncSessionLocal as _Session
+    from models.card_loan import CardLoan
+    from services.library_reminders import announce_one
 
     try:
-        await notify_deck_ready(
-            SimpleNamespace(borrower_id=str(discord_id), cards=cards), collateral)
+        async with _Session() as session:
+            loan = await session.get(CardLoan, loan_id)
+        if loan is not None:
+            await announce_one(loan)
     except Exception:
         logger.opt(exception=True).warning(
-            "deck assignment: assigned loan {} to {} but could not tell them",
-            loan_id, discord_id)
+            "deck assignment: assigned loan {} to {} but could not tell them; "
+            "the watchdog will retry", loan_id, discord_id)
 
 
 def _report(session_id: Any, sign_ups: "dict[str, Any]", assigned: int,

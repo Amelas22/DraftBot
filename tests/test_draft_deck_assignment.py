@@ -641,3 +641,48 @@ async def test_a_drafter_with_closed_dms_still_gets_their_deck(test_db, library_
 
     assert assigned > 0, "a failed DM swallowed the assignment"
     assert len(await _loans()) == assigned
+
+
+async def test_an_uninvited_drafter_is_not_promised_a_deck(test_db, library_on):
+    """The sibling change stopped the shared board promising a deck to a room
+    where most people would be turned away at /library borrow. A DM is worse:
+    it is addressed personally, and unlike the board this surface CAN know who
+    it is talking to, so there is no excuse for telling somebody to run a
+    command that will refuse them.
+    """
+    import notification_service
+
+    told = []
+
+    async def _record(bot, user_id, message, label=None):
+        told.append(str(user_id))
+        return True
+
+    await _seed()
+    with patch.object(notification_service, "send_dm", _record), \
+         patch("services.library_reminders._client", return_value=object()), \
+         patch("services.library_reminders._may_collect",
+               new=AsyncMock(return_value=False)):
+        assigned = await svc.assign_drafted_decks(SESSION)
+
+    assert assigned > 0, "the decks should still be assigned"
+    assert told == [], f"an uninvited drafter was promised a deck: {told}"
+
+
+async def test_an_invited_drafter_is_still_told(test_db, library_on):
+    import notification_service
+
+    told = []
+
+    async def _record(bot, user_id, message, label=None):
+        told.append(str(user_id))
+        return True
+
+    await _seed()
+    with patch.object(notification_service, "send_dm", _record), \
+         patch("services.library_reminders._client", return_value=object()), \
+         patch("services.library_reminders._may_collect",
+               new=AsyncMock(return_value=True)):
+        assigned = await svc.assign_drafted_decks(SESSION)
+
+    assert len(told) == assigned > 0

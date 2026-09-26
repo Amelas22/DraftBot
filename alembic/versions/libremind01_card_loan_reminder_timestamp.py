@@ -1,8 +1,8 @@
-"""card loan reminder timestamp
+"""card loan notification timestamps
 
-When we last asked a borrower for their cards back. Additive and nullable:
-NULL means never asked, which is the correct reading for every loan that
-predates this.
+Whether a borrower has been told their deck is ready, and when we last asked
+for it back. Both additive and nullable: NULL means "not yet", which is the
+correct reading for every loan that predates this.
 
 Revision ID: libremind01
 Revises: cardlib03
@@ -23,6 +23,7 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     """Upgrade schema."""
     with op.batch_alter_table('card_loans', schema=None) as batch_op:
+        batch_op.add_column(sa.Column('ready_dm_at', sa.DateTime(), nullable=True))
         batch_op.add_column(sa.Column('last_reminded_at', sa.DateTime(), nullable=True))
 
 
@@ -30,3 +31,4 @@ def downgrade() -> None:
     """Downgrade schema."""
     with op.batch_alter_table('card_loans', schema=None) as batch_op:
         batch_op.drop_column('last_reminded_at')
+        batch_op.drop_column('ready_dm_at')

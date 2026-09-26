@@ -926,6 +926,15 @@ async def lending_jobs_watchdog(bot: Any = None, interval_s: float = RESCAN_INTE
         except Exception:
             logger.exception("Card-library deposit scan failed")
         try:
+            # Retrying announcements that never landed. The loan is committed
+            # before its DM is attempted and later assignment passes skip a
+            # borrower who already has a loan, so this is the only thing that
+            # recovers a drafter nobody managed to tell.
+            from services.library_reminders import announce_ready_decks
+            await announce_ready_decks()
+        except Exception:
+            logger.exception("Card-library ready-announcement scan failed")
+        try:
             # Asking for decks back. Its own try for the same reason as the
             # others: a borrower with closed DMs must not cost this tick its
             # settlements.

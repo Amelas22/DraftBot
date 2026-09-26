@@ -6,6 +6,7 @@ deck is waiting. The asking-back half is driven by the lending watchdog, which
 polls every ten minutes -- so "have I already asked" has to be recorded, or
 every tick asks again.
 """
+import re
 from datetime import datetime, timedelta
 
 import pytest
@@ -126,15 +127,15 @@ def test_the_return_dm_says_how_to_return():
     assert "/library return" in return_message(_loan())
 
 
-def test_the_return_dm_promises_the_refund_only_when_there_is_a_deposit():
-    """Promising a refund to somebody who put nothing up reads as a mistake and
-    invites them to go looking for tix that were never taken."""
-    paid = return_message(_loan(), collateral=25)
-    free = return_message(_loan(), collateral=0)
+def test_the_return_dm_does_not_quote_a_deposit_figure():
+    """It used to name the library's CURRENT price, which is not necessarily
+    what this borrower put up -- a library that changed its terms mid-loan
+    promised the wrong refund. /library return states the real figure at the
+    moment it hands it back, where it cannot be stale."""
+    msg = return_message(_loan())
 
-    assert "25" in paid and "deposit" in paid.lower(), paid
-    assert "deposit" not in free.lower(), free
-
+    assert "deposit" in msg.lower(), msg
+    assert not re.search(r"\d+ tix", msg), f"quoted a figure it cannot vouch for: {msg}"
 
 # ---- who has finished playing (against the real tables) --------------------
 
@@ -250,6 +251,7 @@ class _Recorder:
 
     async def __call__(self, bot, user_id, message, label=None):
         self.sent.append((str(user_id), message))
+        return True      # send_dm's contract: True delivered, False not
 
 
 @pytest.mark.asyncio
@@ -325,18 +327,22 @@ async def test_a_deck_never_collected_is_not_chased(test_db, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_failed_dm_is_not_recorded_as_sent(test_db, monkeypatch):
-    """Stamping on failure would mean a borrower with a transient delivery
-    problem is never asked at all. Leaving it unstamped retries next tick."""
+    """send_dm RETURNS False for a blocked inbox, an HTTP error or a bad id --
+    it does not raise, by documented contract. A wrapper that ignores the
+    return stamps last_reminded_at for a DM that never arrived, and the
+    borrower is then not asked again for a day. Mocking an exception here
+    tested a failure mode the real function cannot produce.
+    """
     import notification_service
     from services.library_reminders import send_due_reminders
 
     await seed_session("s1", stype="random", stage="completed")
     loan_id = await _a_borrowed_deck()
 
-    async def _boom(*a, **k):
-        raise RuntimeError("DMs closed")
+    async def _undeliverable(*a, **k):
+        return False
 
-    monkeypatch.setattr(notification_service, "send_dm", _boom)
+    monkeypatch.setattr(notification_service, "send_dm", _undeliverable)
     _with_a_client(monkeypatch)
 
     assert await send_due_reminders(now=NOW) == 0
@@ -379,3 +385,176 @@ async def test_a_swiss_draft_that_was_played_out_still_gets_chased(test_db, monk
     _with_a_client(monkeypatch)
 
     assert await send_due_reminders(now=NOW) == 1, recorder.sent
+
+
+@pytest.mark.asyncio
+async def test_a_deck_returned_mid_scan_is_not_chased(test_db, monkeypatch):
+    """The scan reads the loans, then sends DMs one at a time. A borrower can
+    hand their deck back while an earlier DM is still in flight, and asking
+    them afterwards -- possibly promising a refund they have already had --
+    reads as the library losing track."""
+    import notification_service
+    import services.library_reminders as mod
+    from database.db_session import AsyncSessionLocal as SessionLocal
+    from models.card_loan import CardLoan
+
+    await seed_session("s1", stype="random", stage="completed")
+    loan_id = await _a_borrowed_deck()
+    recorder = _Recorder()
+    _with_a_client(monkeypatch)
+
+    async def _return_it_first(*a, **k):
+        async with SessionLocal() as s:
+            row = await s.get(CardLoan, loan_id)
+            row.state = "returned"
+            await s.commit()
+        return await recorder(*a, **k)
+
+    # Hand the deck back at the moment the scan decides to send.
+    monkeypatch.setattr(notification_service, "send_dm", _return_it_first)
+    monkeypatch.setattr(mod, "_still_out", _returned_already(loan_id))
+
+    assert await mod.send_due_reminders(now=NOW) == 0, recorder.sent
+
+
+def _returned_already(loan_id):
+    """Stands in for the freshness check: the loan moved on before dispatch."""
+    async def _check(loan):
+        return False
+    return _check
+
+
+# ---- announcing a ready deck, and retrying when that fails -----------------
+
+async def _an_assigned_deck(borrower="p1", session="s1", state="assigned",
+                            ready_dm_at=None):
+    from database.db_session import AsyncSessionLocal as SessionLocal
+    from models.card_loan import CardLoan
+
+    async with SessionLocal() as s:
+        loan = CardLoan(guild_id="g", library_id="lib", borrower_id=borrower,
+                        cards=[{"name": "Swamp", "qty": 4}], state=state,
+                        source=f"draft:{session}", ready_dm_at=ready_dm_at)
+        s.add(loan)
+        await s.commit()
+        return loan.id
+
+
+async def _ready_stamp(loan_id):
+    from database.db_session import AsyncSessionLocal as SessionLocal
+    from models.card_loan import CardLoan
+
+    async with SessionLocal() as s:
+        return (await s.get(CardLoan, loan_id)).ready_dm_at
+
+
+@pytest.mark.asyncio
+async def test_a_deck_nobody_has_been_told_about_is_announced(test_db, monkeypatch):
+    """The retry that closes the gap: the loan is committed before the DM is
+    attempted, and every later assignment pass skips a borrower who already has
+    a loan -- so without this sweep a Discord blip meant they were never told."""
+    import notification_service
+    import services.library_reminders as mod
+
+    loan_id = await _an_assigned_deck()
+    recorder = _Recorder()
+    monkeypatch.setattr(notification_service, "send_dm", recorder)
+    _with_a_client(monkeypatch)
+    monkeypatch.setattr(mod, "_may_collect", _always(True))
+
+    assert await mod.announce_ready_decks(now=NOW) == 1, recorder.sent
+    assert await _ready_stamp(loan_id) == NOW
+
+
+@pytest.mark.asyncio
+async def test_a_borrower_already_told_is_not_told_again(test_db, monkeypatch):
+    import notification_service
+    import services.library_reminders as mod
+
+    await _an_assigned_deck(ready_dm_at=NOW - timedelta(days=3))
+    recorder = _Recorder()
+    monkeypatch.setattr(notification_service, "send_dm", recorder)
+    _with_a_client(monkeypatch)
+    monkeypatch.setattr(mod, "_may_collect", _always(True))
+
+    assert await mod.announce_ready_decks(now=NOW) == 0, recorder.sent
+
+
+@pytest.mark.asyncio
+async def test_a_borrower_who_already_has_the_cards_is_not_told(test_db, monkeypatch):
+    """They collected it without needing the DM. Telling them their deck is
+    ready to borrow, when it is already in their account, is noise."""
+    import notification_service
+    import services.library_reminders as mod
+
+    await _an_assigned_deck(state="borrowed")
+    recorder = _Recorder()
+    monkeypatch.setattr(notification_service, "send_dm", recorder)
+    _with_a_client(monkeypatch)
+    monkeypatch.setattr(mod, "_may_collect", _always(True))
+
+    assert await mod.announce_ready_decks(now=NOW) == 0, recorder.sent
+
+
+@pytest.mark.asyncio
+async def test_a_deck_nobody_needs_any_more_is_not_announced(test_db, monkeypatch):
+    """expire_stale_assignments retracts an offer once its draft is over.
+    Announcing it then invites somebody to run a command that has nothing to
+    hand them."""
+    import notification_service
+    import services.library_reminders as mod
+
+    await _an_assigned_deck(state="expired")
+    recorder = _Recorder()
+    monkeypatch.setattr(notification_service, "send_dm", recorder)
+    _with_a_client(monkeypatch)
+    monkeypatch.setattr(mod, "_may_collect", _always(True))
+
+    assert await mod.announce_ready_decks(now=NOW) == 0, recorder.sent
+
+
+@pytest.mark.asyncio
+async def test_an_uninvited_borrower_is_not_announced_to_and_not_stamped(
+        test_db, monkeypatch):
+    """Not stamped, because nothing was sent: if they are added to the library's
+    list later, the sweep should still tell them."""
+    import notification_service
+    import services.library_reminders as mod
+
+    loan_id = await _an_assigned_deck()
+    recorder = _Recorder()
+    monkeypatch.setattr(notification_service, "send_dm", recorder)
+    _with_a_client(monkeypatch)
+    monkeypatch.setattr(mod, "_may_collect", _always(False))
+
+    assert await mod.announce_ready_decks(now=NOW) == 0, recorder.sent
+    assert await _ready_stamp(loan_id) is None
+
+
+@pytest.mark.asyncio
+async def test_an_undelivered_announcement_is_retried_next_tick(test_db, monkeypatch):
+    """The whole point: send_dm returning False must leave the loan unstamped."""
+    import notification_service
+    import services.library_reminders as mod
+
+    loan_id = await _an_assigned_deck()
+    _with_a_client(monkeypatch)
+    monkeypatch.setattr(mod, "_may_collect", _always(True))
+
+    async def _undeliverable(*a, **k):
+        return False
+
+    monkeypatch.setattr(notification_service, "send_dm", _undeliverable)
+    assert await mod.announce_ready_decks(now=NOW) == 0
+    assert await _ready_stamp(loan_id) is None
+
+    recorder = _Recorder()
+    monkeypatch.setattr(notification_service, "send_dm", recorder)
+    assert await mod.announce_ready_decks(now=NOW) == 1, "the retry never came"
+    assert await _ready_stamp(loan_id) == NOW
+
+
+def _always(answer):
+    async def _check(*a, **k):
+        return answer
+    return _check
