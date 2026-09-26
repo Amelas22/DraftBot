@@ -387,3 +387,118 @@ async def test_a_learned_substitution_reaches_the_next_cube_read(library):
     assert {c["name"] for c in seen.cards} == {"Chain Lightning", "Counterspell",
                                                "Island"}, \
         "the cube is read in the vocabulary the library trades in"
+
+
+# --- arc four: told it is there, and asked for it back -----------------------
+
+def _dms(monkeypatch, delivers=True):
+    """A registered bot and a recording send_dm, answering the way the real one
+    does: True delivered, False not."""
+    import bot_registry
+    import notification_service
+
+    sent = []
+
+    async def _record(bot, user_id, message, label=None):
+        sent.append((str(user_id), message))
+        return delivers
+
+    monkeypatch.setattr(bot_registry, "get_bot", lambda: object())
+    monkeypatch.setattr(notification_service, "send_dm", _record)
+    return sent
+
+
+async def _list_members(*players):
+    from database.db_session import AsyncSessionLocal as S
+    from models.library_member import LibraryMember
+
+    async with S() as s:
+        for player in players:
+            s.add(LibraryMember(library_id=LIB, player_id=player, added_by="e2e"))
+        await s.commit()
+
+
+async def _loan_stamps(player):
+    loan = await lending_svc.active_loan(player)
+    return None if loan is None else (loan.state, loan.ready_dm_at, loan.last_reminded_at)
+
+
+async def test_a_drafter_is_told_their_deck_is_waiting_and_asked_for_it_back(
+        library, monkeypatch):
+    """The whole notification arc, through the real services.
+
+    A whitelisted library says nothing on the shared signup board, so the DM is
+    the only thing that tells a borrower a deck exists -- and the ask afterwards
+    is the only thing that gets a sponsor's cards back. Both are asserted on the
+    LOAN, not on what was said, so a DM that was attempted but never delivered
+    cannot pass.
+    """
+    from services.library_reminders import announce_ready_decks, send_due_reminders
+
+    sent = _dms(monkeypatch)
+    await _run(library, "deposit", CUBE, who=BOB)
+    await _list_members(ALICE, BOB)          # both invited
+    await _a_finished_draft({"Alice": ["Lightning Bolt", "Island"],
+                             "Bob": ["Counterspell"]})
+
+    from services.draft_deck_assignment import assign_drafted_decks
+    assert await assign_drafted_decks(SESSION) == 2
+
+    # Told at assignment, and recorded because it landed.
+    assert [who for who, _ in sent] == [ALICE, BOB], sent
+    assert all("/library borrow" in msg for _, msg in sent), sent
+    state, ready_at, reminded_at = await _loan_stamps(ALICE)
+    assert state == "assigned" and ready_at is not None and reminded_at is None
+
+    # Nothing is announced twice, however often the watchdog runs.
+    sent.clear()
+    assert await announce_ready_decks() == 0 and sent == []
+
+    await _run(library, "borrow")
+    assert (await _loan_stamps(ALICE))[0] == "borrowed"
+
+    # Mid-draft, the cards are how they play the rest of it.
+    assert await send_due_reminders() == 0, sent
+
+    async with AsyncSessionLocal() as s:
+        row = await s.get(DraftSession, (await _session_pk()))
+        row.session_stage = "completed"
+        await s.commit()
+
+    assert await send_due_reminders() == 1, "nobody was asked for the cards back"
+    assert [who for who, _ in sent] == [ALICE], sent
+    assert "/library return" in sent[0][1]
+    assert (await _loan_stamps(ALICE))[2] is not None, "the ask was not recorded"
+
+    # And not again on the next tick.
+    sent.clear()
+    assert await send_due_reminders() == 0 and sent == []
+
+    await _run(library, "return")
+    assert await lending_svc.active_loan(ALICE) is None
+
+
+async def test_an_uninvited_drafter_gets_no_deck_and_no_promise(library, monkeypatch):
+    """A deck nobody may collect is not created at all. The loan would take
+    their ONE active-loan slot -- the unique index is not scoped by guild -- so
+    it would lock them out of a room served by an open library too."""
+    sent = _dms(monkeypatch)
+    await _run(library, "deposit", CUBE, who=BOB)
+    await _list_members(ALICE)               # Bob drafts but is not listed
+    await _a_finished_draft({"Alice": ["Lightning Bolt"], "Bob": ["Counterspell"]})
+
+    from services.draft_deck_assignment import assign_drafted_decks
+    assert await assign_drafted_decks(SESSION) == 1, "only the invited drafter"
+
+    assert [who for who, _ in sent] == [ALICE], sent
+    assert await lending_svc.active_loan(BOB) is None, \
+        "an uncollectable offer occupied Bob's only loan slot"
+
+
+async def _session_pk():
+    """The DraftSession primary key for SESSION."""
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as s:
+        return await s.scalar(
+            select(DraftSession.id).where(DraftSession.session_id == SESSION))

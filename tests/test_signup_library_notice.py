@@ -177,3 +177,78 @@ async def test_a_paid_library_says_the_deposit_comes_back(
 
     assert "100" in note
     assert "refund" in note.lower(), "the deposit must read as coming back"
+
+# ---- whitelist mode: the shared board says nothing -------------------------
+
+async def _list_a_member(player_id="p1", library_id="lib"):
+    """Name somebody, which is what puts a library into whitelist mode.
+
+    is_invite_only is literally "does anybody appear on the member list", so
+    one row is the whole switch.
+    """
+    from models.library_member import LibraryMember
+
+    async with AsyncSessionLocal() as s:
+        s.add(LibraryMember(library_id=library_id, player_id=player_id,
+                            added_by="test"))
+        await s.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collateral,available", [
+    (0, {"Swamp": 4}),     # free and covered
+    (25, {"Swamp": 4}),    # priced
+    (0, {}),               # stocked but nothing free -- the loudest line
+])
+async def test_a_whitelisted_library_says_nothing_on_the_shared_board(
+        test_db, monkeypatch, collateral, available):
+    """The board is one message for the whole room, so it cannot address only
+    the people who may borrow. While a library lends to named people only, the
+    room is told nothing whatever the terms, and the named are DMed instead."""
+    await _price(collateral)
+    await _list_a_member()
+    _shelf(monkeypatch, {"Swamp": 4}, available, CUBE_CARDS)
+
+    assert await library_signup_note(CUBE, GUILD) is None
+
+
+@pytest.mark.asyncio
+async def test_a_communal_library_still_warns_about_coverage(test_db, monkeypatch):
+    """The guard that whitelist mode is the only thing suppressed: with nobody
+    listed the library lends to everyone reading, so the warning is theirs."""
+    await _price(0)
+    _shelf(monkeypatch, {"Swamp": 4}, {}, CUBE_CARDS)
+
+    note = await library_signup_note(CUBE, GUILD)
+
+    assert note and "bring your own cards" in note.lower(), note
+
+
+@pytest.mark.asyncio
+async def test_a_whitelisted_library_leaves_the_cube_dropdown_unmarked(
+        test_db, monkeypatch):
+    """The other shared surface: the cube list an organiser picks from is seen
+    by the room too, so its badges follow the same rule."""
+    from cube_views.pack_options import mark_library_cubes
+
+    await _price(0)
+    await _list_a_member()
+    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
+    options = [{"value": CUBE, "label": CUBE, "description": "a cube"}]
+
+    marked = await mark_library_cubes(options, GUILD)
+
+    assert marked == options, f"a whitelisted library badged the dropdown: {marked}"
+
+
+@pytest.mark.asyncio
+async def test_a_communal_library_still_marks_the_cube_dropdown(test_db, monkeypatch):
+    from cube_views.pack_options import mark_library_cubes
+
+    await _price(0)
+    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
+    options = [{"value": CUBE, "label": CUBE, "description": "a cube"}]
+
+    marked = await mark_library_cubes(options, GUILD)
+
+    assert marked != options, "a communal library should still badge its cubes"

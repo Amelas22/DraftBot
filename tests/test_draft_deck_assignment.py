@@ -584,3 +584,94 @@ async def test_a_pool_of_nothing_lendable_is_not_reported_as_unreadable(
     said = " ".join(str(c.args) for c in warned.call_args_list)
     assert "unreadable" not in said, said
     assert "nothing to lend" in said, said
+
+
+def _recording_dm(monkeypatch, delivers=True):
+    """A registered bot and a send_dm that answers the way the real one does:
+    True delivered, False not. A stub returning None reads as a failure."""
+    import bot_registry
+    import notification_service
+
+    told = []
+
+    async def _record(bot, user_id, message, label=None):
+        told.append((str(user_id), message))
+        return delivers
+
+    monkeypatch.setattr(bot_registry, "get_bot", lambda: object())
+    monkeypatch.setattr(notification_service, "send_dm", _record)
+    return told
+
+
+async def test_every_drafter_is_told_their_deck_is_waiting(
+        test_db, library_on, monkeypatch):
+    """A whitelisted library says nothing on the shared board, so this DM is the
+    only thing that tells a borrower a deck exists. Sent from the assignment
+    itself rather than the ten-minute watchdog."""
+    told = _recording_dm(monkeypatch)
+    await _seed()
+
+    assigned = await svc.assign_drafted_decks(SESSION)
+
+    assert assigned and len(told) == assigned, (
+        f"{assigned} decks assigned but {len(told)} drafters told")
+    assert all("/library borrow" in msg for _, msg in told), told
+
+
+async def test_nobody_is_told_when_no_bot_is_running(test_db, library_on, monkeypatch):
+    """Migrations, the CLI and most tests run with no bot registered. The decks
+    still have to be assigned -- the same rule notify_wallet follows."""
+    import bot_registry
+
+    told = _recording_dm(monkeypatch)
+    monkeypatch.setattr(bot_registry, "get_bot", lambda: None)
+    await _seed()
+
+    assert await svc.assign_drafted_decks(SESSION) > 0
+    assert told == []
+
+
+async def test_a_drafter_with_closed_dms_still_gets_their_deck(
+        test_db, library_on, monkeypatch):
+    """The DM is the last step and the least important: an undelivered one must
+    not cost that player the loan, nor anybody after them theirs."""
+    _recording_dm(monkeypatch, delivers=False)
+    await _seed()
+
+    assigned = await svc.assign_drafted_decks(SESSION)
+
+    assert assigned > 0, "an undelivered DM swallowed the assignment"
+    assert len(await _loans()) == assigned
+
+
+async def test_an_uninvited_drafter_gets_no_deck_and_no_promise(
+        test_db, library_on, monkeypatch):
+    """The third case this function refuses, alongside an empty pool and one too
+    large to trade: a deck nobody may collect. The loan would still take their
+    ONE active-loan slot -- the unique index is not scoped by guild -- so it
+    would lock them out of a room served by an open library, where they could
+    really have borrowed.
+    """
+    told = _recording_dm(monkeypatch)
+    await _seed()
+    with patch("services.draft_deck_assignment.members",
+               new=AsyncMock(return_value=["somebody-else"])):
+        assigned = await svc.assign_drafted_decks(SESSION)
+
+    assert assigned == 0, "an uncollectable offer was created anyway"
+    assert await _loans() == {}, "the loan occupies a slot nobody can free"
+    assert told == [], f"an uninvited drafter was promised a deck: {told}"
+
+
+async def test_a_communal_library_lends_to_everyone_in_the_pod(
+        test_db, library_on, monkeypatch):
+    """An empty member list means the library is open, which must keep working
+    untouched -- that is the common case."""
+    told = _recording_dm(monkeypatch)
+    await _seed()
+
+    with patch("services.draft_deck_assignment.members",
+               new=AsyncMock(return_value=[])):
+        assigned = await svc.assign_drafted_decks(SESSION)
+
+    assert assigned > 0 and len(told) == assigned

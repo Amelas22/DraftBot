@@ -227,18 +227,6 @@ class DraftSession(Base):
             await session.commit()
     
     @classmethod
-    async def get_active_sessions(cls, guild_id: str = None):
-        """Get all active draft sessions, optionally filtered by guild ID"""
-        async with db_session() as session:
-            query = select(cls).where(cls.session_stage != "COMPLETED")
-            
-            if guild_id:
-                query = query.filter_by(guild_id=guild_id)
-            
-            result = await session.execute(query)
-            return result.scalars().all()
-    
-    @classmethod
     async def get_by_draft_id(cls, draft_id: str):
         """Get a draft session by its draft ID"""
         async with db_session() as session:
