@@ -151,3 +151,112 @@ def test_a_round_in_hand_beats_more_rounds_played_even_with_draws():
     ranked = rank_standings([played_more, in_hand], [])
 
     assert ranked.index(in_hand) < ranked.index(played_more)
+
+
+# ---- pairing_order: rank for PAIRING, which is not rank for display ----------
+
+def _order(participants, matches, seed=0):
+    import random
+    from draft_organization.swiss import pairing_order
+    return [p.id for p in pairing_order(participants, matches, random.Random(seed))]
+
+
+def test_pairing_order_leads_with_points():
+    low, high = participant(1, points=3), participant(2, points=6)
+
+    assert _order([low, high], []) == [2, 1]
+
+
+def test_pairing_order_uses_the_same_tiebreaks_the_board_shows():
+    """Two teams level on points, one with a tougher road. The board already
+    ranks them; pairing must agree, or the down-pair contradicts the standings
+    players are reading it from."""
+    strong = participant(1, points=3, w=1, gw=2, name="Strong")
+    weak = participant(2, points=3, w=1, gw=2, name="Weak")
+    a_winner = participant(3, points=3, w=1, gw=2)      # strong's opponent
+    a_loser = participant(4, points=0, l=1, gl=2)       # weak's opponent
+    matches = [match(1, 3), match(2, 4)]
+
+    # Asserted as a relative order, not an index: `strong` and `a_winner` are
+    # level on every key including OMW, so which of them leads is the random
+    # tiebreak doing its job -- and pinning it would test the seed.
+    order = _order([weak, strong, a_winner, a_loser], matches)
+
+    assert order.index(1) < order.index(2), \
+        "the team that beat a winner outranks the team that beat a loser"
+
+
+def test_an_exact_tie_is_broken_randomly_not_alphabetically():
+    """Round one, where nobody has played and every tiebreak is level.
+
+    The display sort ends on team_name so the board holds still between
+    refreshes. Pairing must NOT: alphabetical pairings are fixed before a card
+    is drawn, and anyone who notices can pick their team name to choose an
+    opponent.
+    """
+    field = [participant(i, name=chr(ord("A") + i)) for i in range(8)]
+
+    seen = {tuple(_order(field, [], seed=s)) for s in range(30)}
+
+    assert len(seen) > 1, "round one pairing order must not be deterministic"
+
+
+def test_the_board_still_breaks_that_same_tie_by_name():
+    """The other half of the split: rank_standings stays stable."""
+    field = [participant(i, name=chr(ord("Z") - i)) for i in range(4)]
+
+    twice = [[p.id for p in rank_standings(field, [])] for _ in range(2)]
+
+    assert twice[0] == twice[1]
+    assert [p.team_name for p in rank_standings(field, [])] == ["W", "X", "Y", "Z"]
+
+
+# ---- every ranking key has to actually decide something --------------------
+#
+# Each of these was, until it was written, a key the suite would let you delete
+# in silence. They assert the order is the same for EVERY seed, not for one:
+# delete the key and the two teams become exactly tied, at which point the
+# random tiebreak returns the expected order about half the time -- so a
+# single-seed assertion here passes by luck and proves nothing.
+
+SEEDS = range(40)
+
+
+def _always(participants, matches, expected):
+    orders = {tuple(_order(participants, matches, seed=s)) for s in SEEDS}
+    assert orders == {tuple(expected)}, f"not decided by rank: {orders}"
+
+
+def test_a_round_in_hand_outranks_a_round_already_spent():
+    """Standings update live. Two teams on the same points, one of whom has
+    not played this round yet, are not equal -- the one with a round in hand
+    got there in fewer games and must not be ranked beneath the other."""
+    _always([participant(1, points=3, w=1, l=1),
+             participant(2, points=3, w=1)], [], [2, 1])
+
+
+def test_game_differential_separates_teams_level_on_everything_else():
+    same = dict(points=3, w=1, l=0)
+    _always([participant(1, gw=2, gl=1, **same),
+             participant(2, gw=2, gl=0, **same)], [], [2, 1])
+
+
+def test_the_omw_handed_in_is_the_omw_ranked_on():
+    """`pairing_order` takes a precomputed OMW map because the caller has to
+    compute it over the WHOLE field -- dropped teams included -- while ranking
+    only the teams being paired. If the map were quietly recomputed from the
+    teams handed in, every dropped opponent would vanish from the tiebreak and
+    the bug that argument exists to prevent would be back.
+
+    Proved by handing in a map that contradicts what recomputation would give:
+    the order must follow the map, for every seed.
+    """
+    import random
+    from draft_organization.swiss import pairing_order
+    field = [participant(1, points=3, w=1), participant(2, points=3, w=1)]
+
+    orders = {tuple(p.id for p in
+                    pairing_order(field, [], random.Random(s), omw={1: 0.0, 2: 1.0}))
+              for s in SEEDS}
+
+    assert orders == {(2, 1)}, f"the supplied map must decide the order: {orders}"

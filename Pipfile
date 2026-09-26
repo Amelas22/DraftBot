@@ -21,6 +21,7 @@ openpyxl = "*"
 alembic = "*"
 pillow = "*"
 aiohttp = "*"
+networkx = "*"
 
 [dev-packages]
 pytest = "*"

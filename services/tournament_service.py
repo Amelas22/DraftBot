@@ -18,6 +18,7 @@ from draft_organization.bracket import advance_pairs, build_bracket, final_place
 from draft_organization.swiss import (
     omw_percentages,
     pair_round,
+    pairing_order,
     rank_standings,
     round_robin_schedule,
 )
@@ -500,15 +501,48 @@ def _apply_result(part_a, part_b, a_wins, b_wins, sign=1):
         part_b.points += sign * POINTS_DRAW
 
 
-async def _create_round_with_pairings(session, tournament, participants, history, rng):
-    """Create the next round row and its matches; auto-scores the bye."""
+async def _create_round_with_pairings(session, tournament, participants, history,
+                                      rng, played=(), everyone=None):
+    """Create the next round row and its matches; auto-scores the bye.
+
+    `played` is every match so far, for the pairing tiebreaks. Empty for round
+    one, which has no record to rank on.
+
+    OMW is computed over the WHOLE field, not the teams being paired. A dropped
+    team keeps its place in the standings and its record still feeds every
+    opponent's tiebreak -- and `omw_percentages` silently skips an opponent
+    missing from the list it is handed, so ranking the pairable teams alone
+    would quietly drop every dropped opponent from the tiebreak and rank the
+    field on numbers the board does not show.
+
+    The engine is handed the field already ranked, and told whether this is the
+    final round. Rank decides two different amounts in those two cases -- the
+    boundary seats always, every seat in the last round -- and the reasoning
+    for that split lives on `_arrange_bracket`.
+    """
     round_number = tournament.current_round + 1
     new_round = TournamentRound(tournament_id=tournament.id, round_number=round_number)
     session.add(new_round)
     await session.flush()
 
-    teams = [{"id": p.id, "points": p.points, "byes": p.byes} for p in participants]
-    pairs, bye_id = pair_round(teams, history, rng)
+    # Defaults to a fresh load rather than to `participants`: getting this
+    # wrong narrows the tiebreak silently, which is the bug this argument
+    # exists to prevent, so the safe answer is the one you get by saying
+    # nothing. `advance_round` passes the list it already holds.
+    if everyone is None:
+        everyone = await list_participants(session, tournament.id)
+    played = list(played)
+    omw = omw_percentages(everyone, played)
+    ranked = pairing_order(participants, played, rng, omw=omw)
+    teams = [{"id": p.id, "points": p.points, "byes": p.byes} for p in ranked]
+
+    # `cut_to` only matters in the final round, where it lets the engine break
+    # a tie towards not pairing a team still playing for a seat against one
+    # that is out on arithmetic alone.
+    pairs, bye_id = pair_round(teams, history, rng,
+                               power_pair=round_number == tournament.total_rounds,
+                               cut_to=tournament.cut_to,
+                               points_for_win=POINTS_WIN)
     by_id = {p.id: p for p in participants}
 
     matches = []
@@ -1070,9 +1104,9 @@ async def advance_round(session, tournament_id, rng):
         if not m.is_bye
     }
 
-    participants = _pairable(await list_participants(session, tournament_id))
+    everyone = await list_participants(session, tournament_id)
     new_round, _ = await _create_round_with_pairings(
-        session, tournament, participants, history, rng
+        session, tournament, _pairable(everyone), history, rng, played, everyone
     )
     return new_round
 
