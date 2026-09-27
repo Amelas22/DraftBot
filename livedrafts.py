@@ -172,7 +172,7 @@ async def generate_live_draft_embed(bot, draft_session):
         # Add the bet field to the embed
         if stake_lines:
             embed.add_field(
-                name=f"**Total Bets: {total_stakes} tix**",
+                name=f"**Prize Pool: {total_stakes} tix**",
                 value="\n".join(stake_lines),
                 inline=False
             )

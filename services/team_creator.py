@@ -262,7 +262,7 @@ async def _add_stake_info_to_embed(embed, session, stake_info_by_player):
         formatted_lines.append(f"**{names[0]}** vs **{names[1]}**: {parts[1]}")
 
     if formatted_lines:
-        add_links_to_embed_safely(embed, formatted_lines, f"Bets (Total: {total_stakes} tix)")
+        add_links_to_embed_safely(embed, formatted_lines, f"Prize Pool: {total_stakes} tix")
 
 
 async def _create_teams_embed(session, team_a_names, team_b_names, seating_order, stake_info_by_player, session_type):

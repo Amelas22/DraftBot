@@ -92,7 +92,7 @@ async def test_each_winner_is_told_what_they_won(_a_decided_staked_draft, sent):
     await settle_decided_draft(SID)
 
     told = _winners_told(sent)
-    # Set equality, so this also pins that no LOSER was DMed -- the Bet Outcomes
+    # Set equality, so this also pins that no LOSER was DMed -- the Prize Pool Payouts
     # embed already tells them, and a DM would be bad news arriving twice.
     assert told == set(A), f"DMed {sorted(told)}, expected the winners {A}"
     for _pid, message in _dms(sent):

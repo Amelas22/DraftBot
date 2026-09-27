@@ -233,7 +233,7 @@ class PersistentView(discord.ui.View):
             self._add_button("Create Teams", "blurple", "randomize_teams", self.randomize_teams_callback)
 
         if self.session_type == "staked" and self.session_stage != "teams":
-            self._add_button("How Bets Work 💰", "green", "explain_stakes", self.explain_stakes_callback)
+            self._add_button("How the Prize Pool Works 💰", "green", "explain_stakes", self.explain_stakes_callback)
 
         # Add test button only if global test mode is enabled
         if is_test_mode():
@@ -554,7 +554,7 @@ class PersistentView(discord.ui.View):
                 # Say how a bet is actually paid BEFORE it is placed, not only after
                 # it is lost.
                 howto = wallet_howto(draft_session.guild_id, brief=True)
-                prompt = f"Min Bet for queue is {draft_session.min_stake}. Select your max bet:"
+                prompt = f"Minimum entry is {draft_session.min_stake} tix. Choose your maximum entry:"
                 if howto:
                     prompt += f"\n-# {howto}"
                 await interaction.response.send_message(
@@ -1108,7 +1108,7 @@ class PersistentView(discord.ui.View):
         embed = discord.Embed(
             title="How the Prize Pool Works",
             description=(
-                "Everyone bets what they are comfortable with. Your tix go into the draft's "
+                "Everyone enters what they are comfortable with. Your tix go into the draft's "
                 "prize pool when you sign up, and the winners split it when the draft is decided. "
                 "Nobody ever owes anybody: the money is already there before a game is played."
             ),
@@ -1118,7 +1118,7 @@ class PersistentView(discord.ui.View):
         embed.add_field(
             name="Core Principles",
             value=(
-                "• **Max Bet Protection**: You are never at risk for more than you entered\n"
+                "• **Max Entry Protection**: You are never at risk for more than you put in\n"
                 "• **Team Formation**: Teams are created randomly FIRST, then the sides are levelled\n"
                 "• **No Debts**: Your entry is paid up front, and anything not matched comes straight back"
             ),
@@ -1128,8 +1128,8 @@ class PersistentView(discord.ui.View):
         embed.add_field(
             name="Process Overview",
             value=(
-                "1. **Entry**: your bet moves into the pool when you sign up\n"
-                "2. **Bet Cap**: if you opted in, your bet is trimmed first\n"
+                "1. **Entry**: your tix move into the pool when you sign up\n"
+                "2. **Entry Cap**: if you opted in, your entry is trimmed first\n"
                 "3. **Levelling**: the two teams are brought to the same total\n"
                 "4. **Payout**: the winning team splits the pool"
             ),
@@ -1137,13 +1137,16 @@ class PersistentView(discord.ui.View):
         )
 
         embed.add_field(
-            name="Bet Capping Option",
+            name="Capping Your Entry",
             value=(
                 "• Players can choose \"capped\" (🧢) or \"uncapped\" (🏎️)\n"
-                "• A capped bet is trimmed to the highest bet on the opposing team\n"
-                "• This is applied before anything else, and the excess is returned immediately\n"
-                "• Because it lowers your team's total, a large capped bet can also reduce "
-                "how much of your teammates' bets get matched"
+                "• A capped entry is trimmed so you never carry more than **55% of your "
+                "own team's total** — it protects you from being the one funding a side\n"
+                "• It depends on your team, not your opponents: 50 alongside three "
+                "teammates on 20 is fine, but alongside a single 20 it is trimmed\n"
+                "• Applied before anything else, and the excess is returned immediately\n"
+                "• Because it lowers your team's total, a large capped entry can also "
+                "reduce how much of your teammates' entries get matched"
             ),
             inline=False
         )
@@ -1154,8 +1157,8 @@ class PersistentView(discord.ui.View):
                 "A tix on one side has to be covered by a tix on the other, so both teams are "
                 "brought down to whichever team's total is smaller. Everything above that is "
                 "returned before the draft starts.\n\n"
-                "Within a team, every bet fills up to a **common ceiling**: you keep the lower "
-                "of your own bet and that ceiling, and the ceiling rises until the team's total "
+                "Within a team, every entry fills up to a **common ceiling**: you keep the lower "
+                "of your own entry and that ceiling, and the ceiling rises until the team's total "
                 "is spent. Whoever is above it carries the shortfall; whoever is below it is "
                 "untouched."
             ),
@@ -1165,9 +1168,9 @@ class PersistentView(discord.ui.View):
         embed.add_field(
             name="What That Means For You",
             value=(
-                "• Betting more never leaves you holding less than someone who bet less\n"
-                "• If the other team cannot cover even the small bets, the ceiling drops below "
-                "them and every bet is cut alike -- there is no floor under a small bet"
+                "• Entering more never leaves you holding less than someone who entered less\n"
+                "• If the other team cannot cover even the small entries, the ceiling drops "
+                "below them and every entry is cut alike — there is no floor under a small entry"
             ),
             inline=False
         )
@@ -1177,8 +1180,8 @@ class PersistentView(discord.ui.View):
             value=(
                 "• Both teams have the same amount in, so a winner takes exactly **double** "
                 "what they had at risk\n"
-                "• Every matched tix pays at the same rate, so a teammate's bet can change how "
-                "much of yours is matched, never what it pays\n"
+                "• Every matched tix pays at the same rate, so a teammate's entry can change "
+                "how much of yours is matched, never what it pays\n"
                 "• On a draw, or if the draft is cancelled or abandoned, everyone gets their "
                 "entry back"
             ),
@@ -2507,7 +2510,7 @@ class PersonalizedCapStatusView(discord.ui.View):
                 
                 updated_view = discord.ui.View(timeout=None)
                 status_button = discord.ui.Button(
-                    label=f"Bet Cap: {new_status}",
+                    label=f"Entry Cap: {new_status}",
                     style=style,
                     custom_id=f"bet_cap_status_{self.draft_session_id}",
                     disabled=True
@@ -2524,9 +2527,9 @@ class PersonalizedCapStatusView(discord.ui.View):
                 updated_view.add_item(toggle_button)
                 
                 await interaction.response.edit_message(
-                    content=f"Your bet cap status is now: {new_status}.\n" +
-                    ("Your bet will be capped at the highest opponent bet." if stake_info.is_capped else 
-                     "Your bet will NOT be capped by the opposing team's highest bet and may be spread across multiple opponents."),
+                    content=f"Your entry cap is now: {new_status}.\n" +
+                    ("Your entry is capped so you never carry more than your share of your own team." if stake_info.is_capped else 
+                     "Your entry is uncapped: you keep your full entry however your team is made up."),
                     view=updated_view
                 )
                 
@@ -2558,7 +2561,7 @@ async def show_personalized_cap_status(interaction, draft_session_id):
             
             view = discord.ui.View(timeout=None)
             status_button = discord.ui.Button(
-                label=f"Bet Cap: {status}",
+                label=f"Entry Cap: {status}",
                 style=style,
                 custom_id=f"bet_cap_status_{draft_session_id}",
                 disabled=True
@@ -2580,9 +2583,9 @@ async def show_personalized_cap_status(interaction, draft_session_id):
             view.add_item(toggle_button)
             
             await interaction.response.send_message(
-                f"Your bet cap status is: {status}.\n" +
-                ("Your bet will be capped at the highest opponent bet." if is_capped else 
-                 "Your bet will NOT be capped by the opposing team's highest bet and may be spread across multiple opponents."),
+                f"Your entry cap is: {status}.\n" +
+                ("Your entry is capped so you never carry more than your share of your own team." if is_capped else 
+                 "Your entry is uncapped: you keep your full entry however your team is made up."),
                 view=view,
                 ephemeral=True
             )
@@ -2937,7 +2940,7 @@ class StakeOptionsSelect(discord.ui.Select):
             options.append(discord.SelectOption(label="100 TIX", value="100"))
         options.append(discord.SelectOption(label="Over 100 TIX", value="over_100"))
 
-        super().__init__(placeholder=f"Select your maximum bet... ", min_values=1, max_values=1, options=options)
+        super().__init__(placeholder="Choose your maximum entry...", min_values=1, max_values=1, options=options)
         
     async def callback(self, interaction: discord.Interaction):
         user_id = str(interaction.user.id)
@@ -3124,9 +3127,9 @@ class StakeOptionsSelect(discord.ui.Select):
                         ))
 
         # Confirm stake and provide draft link
-        cap_status = "capped at the highest opponent bet" if is_capped else "NOT capped (full action)"
+        cap_status = "capped to your share of your team" if is_capped else "uncapped"
         signup_message = f"You've set your maximum stake to {stake_amount} tix."
-        signup_message += f"\nYour bet will be {cap_status}."
+        signup_message += f"\nYour entry is {cap_status}."
             
         signup_message += "\n\nYou are now signed up! Your Draftmancer link will be provided once teams are created."
 
@@ -3150,15 +3153,15 @@ class StakeOptionsView(discord.ui.View):
         
 class StakeModal(discord.ui.Modal):
     def __init__(self, over_100=False):
-        super().__init__(title="Enter Maximum Bet")
+        super().__init__(title="Set Your Maximum Entry")
         
         self.over_100 = over_100
         self.default_cap_setting = True  
         self.has_draftmancer_role = False  
-        placeholder_text = "Reminder: Your bet can fill multiple bets when possible" if over_100 else "Enter maximum amount you're willing to bet"
+        placeholder_text = "Over 100: your entry can be matched by more than one opponent" if over_100 else "The most you're willing to put in"
         
         self.stake_input = discord.ui.InputText(
-            label="Enter max bet (increments of 50)",
+            label="Maximum entry (multiples of 50)",
             placeholder=placeholder_text,
             required=True
         )
@@ -3167,8 +3170,8 @@ class StakeModal(discord.ui.Modal):
         # Add checkbox for bet capping (only visible for over_100)
         if over_100:
             self.cap_checkbox = discord.ui.InputText(
-                label="Cap my bet at highest opponent bet",
-                placeholder="Type 'yes' to cap or 'no' to keep your full bet",
+                label="Cap my entry to my share of my team",
+                placeholder="Type 'yes' to cap, or 'no' to keep your full entry",
                 required=True,
                 value="yes"  # Will be updated with default_cap_setting before showing
             )
@@ -3299,16 +3302,16 @@ class StakeModal(discord.ui.Modal):
                     await session.commit()
             
             # Create a response that includes the stake confirmation, reminder about stake usage, and draft link
-            cap_status = "capped at the highest opponent bet" if is_capped else "NOT capped (full action)"
+            cap_status = "capped to your share of your team" if is_capped else "uncapped"
             signup_message = f"You've set your maximum stake to {max_stake} tix."
-            signup_message += f"\nYour bet will be {cap_status}."
+            signup_message += f"\nYour entry is {cap_status}."
             
             # Add note about preference being saved for future drafts
             signup_message += f"\n\nThis setting will be remembered for future drafts."
             
             # Add reminder for stakes over 100
             if max_stake > 100:
-                signup_message += "\n\nReminder: Your max bet will be used to fill as many opposing team bets as possible."
+                signup_message += "\n\nYour entry can be matched by more than one opponent."
                 
             signup_message += "\n\nYou are now signed up! Your Draftmancer link will be provided once teams are created."
 
@@ -3395,7 +3398,7 @@ class PersonalizedCapStatusView(discord.ui.View):
                 
                 updated_view = discord.ui.View(timeout=None)
                 status_button = discord.ui.Button(
-                    label=f"Bet Cap: {new_status}",
+                    label=f"Entry Cap: {new_status}",
                     style=style,
                     custom_id=f"bet_cap_status_{self.draft_session_id}",
                     disabled=True
@@ -3412,9 +3415,9 @@ class PersonalizedCapStatusView(discord.ui.View):
                 updated_view.add_item(toggle_button)
                 
                 await interaction.response.edit_message(
-                    content=f"Your bet cap status is now: {new_status}.\n" +
-                    ("Your bet will be capped at the highest opponent bet." if stake_info.is_capped else 
-                     "Your bet will NOT be capped by the opposing team's highest bet and may be spread across multiple opponents."),
+                    content=f"Your entry cap is now: {new_status}.\n" +
+                    ("Your entry is capped so you never carry more than your share of your own team." if stake_info.is_capped else 
+                     "Your entry is uncapped: you keep your full entry however your team is made up."),
                     view=updated_view
                 )
                 
@@ -3446,7 +3449,7 @@ async def show_personalized_cap_status(interaction, draft_session_id):
             
             view = discord.ui.View(timeout=None)
             status_button = discord.ui.Button(
-                label=f"Bet Cap: {status}",
+                label=f"Entry Cap: {status}",
                 style=style,
                 custom_id=f"bet_cap_status_{draft_session_id}",
                 disabled=True
@@ -3468,9 +3471,9 @@ async def show_personalized_cap_status(interaction, draft_session_id):
             view.add_item(toggle_button)
             
             await interaction.response.send_message(
-                f"Your bet cap status is: {status}.\n" +
-                ("Your bet will be capped at the highest opponent bet." if is_capped else 
-                 "Your bet will NOT be capped by the opposing team's highest bet and may be spread across multiple opponents."),
+                f"Your entry cap is: {status}.\n" +
+                ("Your entry is capped so you never carry more than your share of your own team." if is_capped else 
+                 "Your entry is uncapped: you keep your full entry however your team is made up."),
                 view=view,
                 ephemeral=True
             )
@@ -3478,7 +3481,7 @@ async def show_personalized_cap_status(interaction, draft_session_id):
 class BetCapToggleButton(CallbackButton):
     def __init__(self, draft_session_id):
         super().__init__(
-            label="Change Bet/Settings",
+            label="Change Entry / Settings",
             style=discord.ButtonStyle.secondary,
             custom_id=f"bet_cap_toggle_{draft_session_id}",
             custom_callback=self.bet_cap_callback
@@ -3558,7 +3561,7 @@ class BetCapToggleButton(CallbackButton):
                 # disabled button still takes a dispatch slot and still collides with
                 # the same panel opened by another player in this draft.
                 status_button = discord.ui.Button(
-                    label=f"Bet Cap: {status}",
+                    label=f"Entry Cap: {status}",
                     style=style,
                     disabled=True
                 )
@@ -3606,9 +3609,9 @@ class BetCapToggleButton(CallbackButton):
                 combined_view.add_item(no_button)
                 
                 # Send the ephemeral message with the combined view
-                message_content = f"Your current bet is {current_stake} tix with bet cap {status}.\n"
-                message_content += f"Min Bet for queue is {min_stake}. Select a new max bet and/or adjust your cap settings.\n"
-                message_content += "Your bet cap preferences will be saved for future drafts."
+                message_content = f"Your current entry is {current_stake} tix, cap {status}.\n"
+                message_content += f"Minimum entry is {min_stake} tix. Choose a new maximum, or change your cap.\n"
+                message_content += "Your cap setting is remembered for future drafts."
                 
                 await interaction.response.send_message(
                     content=message_content,
@@ -3646,10 +3649,10 @@ class BetCapToggleButton(CallbackButton):
         
         # Inform the user
         status_text = "ON 🧢" if is_capped else "OFF 🏎️"
-        description_text = "capped at the highest opponent bet" if is_capped else "NOT capped and may be spread across multiple opponents"
+        description_text = "capped to your share of your team" if is_capped else "uncapped, whatever your team looks like"
         
         await interaction.response.send_message(
-            f"Your bet cap has been turned {status_text}. Your bet will be {description_text}.\n\nThis preference will be remembered for future drafts.",
+            f"Your entry cap is now {status_text}. Your entry is {description_text}.\n\nThis preference is remembered for future drafts.",
             ephemeral=True
         )
 
@@ -3662,7 +3665,7 @@ class CombinedStakeSelect(discord.ui.Select):
         self.current_stake = current_stake
         
         # Set placeholder to show current stake
-        placeholder = f"Current Bet: {current_stake} tix - Select new max bet..."
+        placeholder = f"Current entry: {current_stake} tix — choose a new maximum..."
         
         super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
         
@@ -3781,9 +3784,9 @@ class CombinedStakeSelect(discord.ui.Select):
             return
         
         # Confirm stake and provide draft link
-        cap_status = "capped at the highest opponent bet" if is_capped else "NOT capped (full action)"
-        signup_message = f"You've updated your maximum bet to {stake_amount} tix."
-        signup_message += f"\nYour bet will be {cap_status}."
+        cap_status = "capped to your share of your team" if is_capped else "uncapped"
+        signup_message = f"Your maximum entry is now {stake_amount} tix."
+        signup_message += f"\nYour entry is {cap_status}."
             
         # Send confirmation message
         await interaction.response.send_message(signup_message, ephemeral=True)

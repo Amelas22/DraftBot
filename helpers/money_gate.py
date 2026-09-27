@@ -55,8 +55,8 @@ def wallet_howto(guild_id, *, brief=False) -> str | None:
     if not is_money_server(str(guild_id)):
         return None
     if brief:
-        return ("Bets settle from your tix wallet — `/wallet deposit <n>` covers "
-                "what you owe automatically.")
+        return ("Entries are paid from your tix wallet — `/wallet deposit <n>` "
+                "tops it up and settles anything you owe automatically.")
     return (
         "`/wallet deposit <n>` — credits your wallet, and pays your oldest debts automatically\n"
         "`/wallet show` — your balance and recent activity\n"

@@ -706,7 +706,7 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                     # Add the stakes field to the embed
                     if stake_lines:
                         embed.add_field(
-                            name=f"**Total Bets: {total_stakes} tix**",
+                            name=f"**Prize Pool: {total_stakes} tix**",
                             value="\n".join(stake_lines),
                             inline=False
                         )
@@ -737,11 +737,11 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                             bet_description = f"\n{separator}\n".join(outcome_lines)
 
                             bet_embed = discord.Embed(
-                                title="💰 Bet Outcomes",
+                                title="💰 Prize Pool Payouts",
                                 description=bet_description,
                                 color=discord_color  # Match main embed color
                             )
-                            bet_embed.set_footer(text=f"Total bets settled: {outcome_total} tix")
+                            bet_embed.set_footer(text=f"Prize pool paid out: {outcome_total} tix")
                             # Where a loser first reads what this draft cost
                             # them, so it is where the wallet is explained.
                             add_wallet_howto(bet_embed, draft_session.guild_id)

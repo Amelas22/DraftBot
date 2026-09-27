@@ -365,7 +365,7 @@ async def notify_draft_winnings(bot, guild_id: str, player_id: str,
 
     Reports the amount that actually reached the wallet, which is what /wallet
     and its history will agree with. Deliberately NOT itemised into stake-back
-    and winnings: the 💰 Bet Outcomes embed already carries the profit figure
+    and winnings: the 💰 Prize Pool Payouts embed already carries the profit figure
     for anyone who wants it, and a player reading a DM wants to know what they
     got, not to reconcile a receipt.
     """
