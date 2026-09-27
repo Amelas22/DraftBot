@@ -585,7 +585,7 @@ async def test_a_capped_entry_is_trimmed_to_its_share_of_its_own_side(test_db):
     """400 beside a single teammate on 20 comes back to 20.
 
     CAP_SHARE of 55% allows 1.222x the teammates' total -- 24 here -- and the
-    ceiling snaps DOWN to a bucket a player could have chosen, so 20.
+    ceiling snaps DOWN to a whole stake step, so 20.
     """
     await _a_400_on_a_side_of_20(b1_capped=True)
 
@@ -631,7 +631,8 @@ async def test_the_modal_roster_is_left_alone(test_db):
 @pytest.mark.asyncio
 async def test_an_entry_over_the_share_is_trimmed_even_on_a_full_team(test_db):
     """100 beside 20 and 50 is 59% of its side, and that band wins 44.5%.
-    Teammates total 70, so the allowance is 85 and the ceiling snaps to 50."""
+    Teammates total 70, so the allowance is 85 and the ceiling snaps to 80 --
+    leaving b1 at 53% of the side, which is what the 55% rule asks for."""
     await _fund({"a1": 100, "a2": 100, "a3": 100,
                  "b1": 100, "b2": 20, "b3": 50})
     await seed_stakes("s1", {"a1": (100, False), "a2": (100, False), "a3": (100, False),
@@ -639,8 +640,8 @@ async def test_an_entry_over_the_share_is_trimmed_even_on_a_full_team(test_db):
 
     result = await pool.match_pool("g", "s1", ["a1", "a2", "a3"], ["b1", "b2", "b3"])
 
-    assert result["capped"] == {"b1": 50}, (
-        f"an entry at 59% of its side was not trimmed: {result}")
+    assert result["capped"] == {"b1": 20}, (
+        f"an entry at 59% of its side was not trimmed to its allowance: {result}")
 
 
 @pytest.mark.asyncio
@@ -664,9 +665,9 @@ async def test_the_allowance_grows_with_the_team(test_db):
 
 @pytest.mark.asyncio
 async def test_the_ceiling_snaps_down_never_up(test_db):
-    """A share allowance is not a bucket, and rounding it UP would let a player
-    hold more of their side than the share they opted into. 100 beside 50 and 20
-    allows 85: snapping up to 100 would leave b1 at 59%, over the line."""
+    """An allowance is rarely a whole step, and rounding it UP would let a
+    player hold more of their side than the share they opted into. 100 beside 50
+    and 20 allows 85: snapping up to 90 would leave b1 at 56%, over the line."""
     await _fund({"a1": 200, "a2": 200, "b1": 100, "b2": 50, "b3": 20})
     await seed_stakes("s1", {"a1": (200, False), "a2": (200, False),
                              "b1": (100, True), "b2": (50, False), "b3": (20, False)})
@@ -674,7 +675,7 @@ async def test_the_ceiling_snaps_down_never_up(test_db):
     await pool.match_pool("g", "s1", ["a1", "a2"], ["b1", "b2", "b3"])
     held = await pool.contributions("g", "s1")
 
-    assert held["b1"] == 50, f"the ceiling rounded up past the share: {held}"
+    assert held["b1"] == 80, f"the ceiling rounded up past the share: {held}"
 
 
 @pytest.mark.asyncio
@@ -857,3 +858,21 @@ def test_the_advertised_pot_is_the_best_any_legal_split_could_make(stakes):
     """The ceiling must be exactly reachable -- not above (a promise the draft
     cannot keep) and not below (a draft that pays more than it advertised)."""
     assert pool.max_pool(stakes) == _best_pot_by_brute_force(stakes)
+
+
+@pytest.mark.asyncio
+async def test_a_ceiling_that_snaps_to_nothing_never_refunds_a_whole_entry(test_db):
+    """The guard has to test the CEILING, not the teammates' total.
+
+    Teammates totalling under 9 give an allowance under one step, snapping to 0 --
+    and a ceiling of zero would hand back the capped player's entire entry, the
+    one outcome this must never do. Guarding on the teammate total instead lets
+    that through, because the total is positive.
+    """
+    from services.draft_pool_service import cap_targets
+
+    targets = cap_targets(["x", "y"], {"x": 200, "y": 5}, {"x"},
+                          {"x": 200, "y": 5})
+
+    assert targets["x"] == 200, (
+        f"a ceiling that snapped to nothing refunded the whole entry: {targets}")

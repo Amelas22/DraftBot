@@ -428,7 +428,7 @@ class PersistentView(discord.ui.View):
         if len(fake_users) > 0:
             success_msg = f"Added {len(fake_users)} test users to the draft (total: {len(sign_ups)})."
             if draft_session.session_type == "staked":
-                success_msg += " Each user has different stake amounts and preferences."
+                success_msg += " Each user has a different entry and cap preference."
             
             logger.info(f"Test users added successfully: {success_msg}")
             await interaction.followup.send(success_msg, ephemeral=True)
@@ -1041,7 +1041,7 @@ class PersistentView(discord.ui.View):
             # Format error message
             players_str = ", ".join(missing_names)
             await interaction.followup.send(
-                f"Cannot create teams yet. The following players need to set their stakes: {players_str}",
+                f"Cannot create teams yet. These players have not set an entry: {players_str}",
                 ephemeral=True
             )
             return False
@@ -1109,7 +1109,8 @@ class PersistentView(discord.ui.View):
             title="How the Prize Pool Works",
             description=(
                 "Everyone enters what they are comfortable with. Your tix go into the draft's "
-                "prize pool when you sign up, and the winners split it when the draft is decided. "
+                "prize pool when you sign up, and the winners are paid from it when the draft is "
+                "decided, in proportion to what each of them had matched. "
                 "Nobody ever owes anybody: the money is already there before a game is played."
             ),
             color=discord.Color.blue()
@@ -1118,9 +1119,12 @@ class PersistentView(discord.ui.View):
         embed.add_field(
             name="Core Principles",
             value=(
-                "• **Max Entry Protection**: You are never at risk for more than you put in\n"
-                "• **Team Formation**: Teams are created randomly FIRST, then the sides are levelled\n"
-                "• **No Debts**: Your entry is paid up front, and anything not matched comes straight back"
+                "• **Your entry is the ceiling**: it is the most this draft can cost you, and "
+                "nothing is ever added on top whatever anyone else enters\n"
+                "• **Random teams**: teams are drawn before any money is levelled, so your entry "
+                "never affects which side you land on\n"
+                "• **Nothing to settle afterwards**: a prize pool draft can never leave you owing "
+                "another player — your entry is paid up front and anything unmatched comes back"
             ),
             inline=False
         )
@@ -1129,7 +1133,8 @@ class PersistentView(discord.ui.View):
             name="Process Overview",
             value=(
                 "1. **Entry**: your tix move into the pool when you sign up\n"
-                "2. **Entry Cap**: if you opted in, your entry is trimmed first\n"
+                "2. **Entry Cap**: your entry is trimmed to your share of your team — "
+                "**on by default**, and you can turn it off\n"
                 "3. **Levelling**: the two teams are brought to the same total\n"
                 "4. **Payout**: the winning team splits the pool"
             ),
@@ -1139,9 +1144,9 @@ class PersistentView(discord.ui.View):
         embed.add_field(
             name="Capping Your Entry",
             value=(
-                "• Players can choose \"capped\" (🧢) or \"uncapped\" (🏎️)\n"
-                "• A capped entry is trimmed so you never carry more than **55% of your "
-                "own team's total** — it protects you from being the one funding a side\n"
+                "• The cap is **on unless you turn it off** (🧢 capped / 🏎️ uncapped)\n"
+                "• A capped entry is trimmed until it is no bigger than your teammates' "
+                "entries put together — so you are never most of your own side\n"
                 "• It depends on your team, not your opponents: 50 alongside three "
                 "teammates on 20 is fine, but alongside a single 20 it is trimmed\n"
                 "• Applied before anything else, and the excess is returned immediately\n"
@@ -1154,13 +1159,14 @@ class PersistentView(discord.ui.View):
         embed.add_field(
             name="Levelling the Two Teams",
             value=(
-                "A tix on one side has to be covered by a tix on the other, so both teams are "
-                "brought down to whichever team's total is smaller. Everything above that is "
-                "returned before the draft starts.\n\n"
-                "Within a team, every entry fills up to a **common ceiling**: you keep the lower "
-                "of your own entry and that ceiling, and the ceiling rises until the team's total "
-                "is spent. Whoever is above it carries the shortfall; whoever is below it is "
-                "untouched."
+                "A tix on one side has to be covered by a tix on the other, so the heavier side "
+                "is brought down to the lighter side's total and the excess is returned before "
+                "the draft starts. Only that side gets money back — the lighter side is "
+                "already fully matched.\n\n"
+                "Inside a team there is one **cut-off**, and you hold the lower of your entry "
+                "and that cut-off. It is set as high as the team's budget allows, so the "
+                "largest entries absorb the whole reduction and the smaller ones are "
+                "usually untouched."
             ),
             inline=False
         )
@@ -1169,8 +1175,9 @@ class PersistentView(discord.ui.View):
             name="What That Means For You",
             value=(
                 "• Entering more never leaves you holding less than someone who entered less\n"
-                "• If the other team cannot cover even the small entries, the ceiling drops "
-                "below them and every entry is cut alike — there is no floor under a small entry"
+                "• If the other side cannot cover even the small entries, everyone on your side is "
+                "cut to the same figure — below the draft minimum if that is what it takes. A "
+                "small entry is usually untouched, but it is not protected"
             ),
             inline=False
         )
@@ -1179,9 +1186,11 @@ class PersistentView(discord.ui.View):
             name="Winning, Losing and Draws",
             value=(
                 "• Both teams have the same amount in, so a winner takes exactly **double** "
-                "what they had at risk\n"
+                "what they had matched\n"
                 "• Every matched tix pays at the same rate, so a teammate's entry can change "
                 "how much of yours is matched, never what it pays\n"
+                "• If your team loses, the matched part of your entry is gone — it is already in "
+                "the pool and the winners take it\n"
                 "• On a draw, or if the draft is cancelled or abandoned, everyone gets their "
                 "entry back"
             ),
@@ -2201,7 +2210,7 @@ class MatchResultSelect(Select):
         staked = draft_session.session_type == "staked"
 
         if outcome == "draw":
-            money = "\nA draw pays nobody, so no stakes are settled." if staked else ""
+            money = "\nA draw pays nobody: everyone gets their entry back." if staked else ""
             return (f"### This ends the draft in a draw\n"
                     f"Recording this makes it {score}, and the draft is over.{money}\n"
                     f"\nNothing has been recorded yet.")
@@ -2493,7 +2502,7 @@ class PersonalizedCapStatusView(discord.ui.View):
                 stake_info = stake_result.scalars().first()
                 
                 if not stake_info:
-                    await interaction.response.send_message("You need to set a stake amount first.", ephemeral=True)
+                    await interaction.response.send_message("You need to set an entry first.", ephemeral=True)
                     return
                 
                 # Toggle the capping status
@@ -2527,7 +2536,7 @@ class PersonalizedCapStatusView(discord.ui.View):
                 updated_view.add_item(toggle_button)
                 
                 await interaction.response.edit_message(
-                    content=f"Your entry cap is now: {new_status}.\n" +
+                    content=f"Your entry cap is now {new_status}.\n" +
                     ("Your entry is capped so you never carry more than your share of your own team." if stake_info.is_capped else 
                      "Your entry is uncapped: you keep your full entry however your team is made up."),
                     view=updated_view
@@ -2551,7 +2560,7 @@ async def show_personalized_cap_status(interaction, draft_session_id):
             stake_info = stake_result.scalars().first()
             
             if not stake_info:
-                await interaction.response.send_message("You need to set a stake amount first.", ephemeral=True)
+                await interaction.response.send_message("You need to set an entry first.", ephemeral=True)
                 return
             
             # Create the personalized view
@@ -2911,13 +2920,13 @@ async def refuse_unfunded_stake(interaction, draft_session_id, guild_id,
     if funding["owed"]:
         claims.append(f"{funding['owed']} tix of debt")
     if funding["at_risk"]:
-        claims.append(f"{funding['at_risk']} tix at risk in drafts you are already in")
+        claims.append(f"{funding['at_risk']} tix still committed in drafts you have not finished")
     because = (" Your wallet also has to cover " + " and ".join(claims) + "."
                if claims else "")
 
     await interaction.response.send_message(
-        f"You need {funding['gap']} more tix to stake {stake_amount}. {have}."
-        f"{because} Deposit more, or stake less.", ephemeral=True)
+        f"You need {funding['gap']} more tix to enter for {stake_amount} tix. {have}."
+        f"{because} Add funds, or enter for less.", ephemeral=True)
     return True
 
 
@@ -3085,7 +3094,7 @@ class StakeOptionsSelect(discord.ui.Select):
         if not charged["ok"]:
             await interaction.response.send_message(
                 f"You need {charged['deficit']} more tix to enter for "
-                f"{stake_amount}. Add funds, or join for less.", ephemeral=True)
+                f"{stake_amount} tix. Add funds, or enter for less.", ephemeral=True)
             return
 
         # After the commit: record_signup_event opens its own connection, and a
@@ -3127,9 +3136,17 @@ class StakeOptionsSelect(discord.ui.Select):
                         ))
 
         # Confirm stake and provide draft link
-        cap_status = "capped to your share of your team" if is_capped else "uncapped"
-        signup_message = f"You've set your maximum stake to {stake_amount} tix."
-        signup_message += f"\nYour entry is {cap_status}."
+        signup_message = (f"Your maximum entry is {stake_amount} tix, and it has left "
+                          "your wallet for the prize pool. Anything the other side "
+                          "cannot cover comes back before the draft starts.")
+        # Said here because the dropdown never asks: the cap is on by default and
+        # only the over-100 modal offers the choice, so for most players this is
+        # the one place they learn it applies to them.
+        signup_message += ("\nYour entry is **capped** to your share of your team (🧢) — "
+                           "use **Change Entry / Settings** to turn it off."
+                           if is_capped else
+                           "\nYour entry is **uncapped** (🏎️): you keep it all, however "
+                           "your team is made up.")
             
         signup_message += "\n\nYou are now signed up! Your Draftmancer link will be provided once teams are created."
 
@@ -3158,7 +3175,7 @@ class StakeModal(discord.ui.Modal):
         self.over_100 = over_100
         self.default_cap_setting = True  
         self.has_draftmancer_role = False  
-        placeholder_text = "Over 100: your entry can be matched by more than one opponent" if over_100 else "The most you're willing to put in"
+        placeholder_text = "A multiple of 50 — e.g. 150, 200, 300" if over_100 else "The most you're willing to put in"
         
         self.stake_input = discord.ui.InputText(
             label="Maximum entry (multiples of 50)",
@@ -3303,7 +3320,7 @@ class StakeModal(discord.ui.Modal):
             
             # Create a response that includes the stake confirmation, reminder about stake usage, and draft link
             cap_status = "capped to your share of your team" if is_capped else "uncapped"
-            signup_message = f"You've set your maximum stake to {max_stake} tix."
+            signup_message = f"Your maximum entry is {max_stake} tix."
             signup_message += f"\nYour entry is {cap_status}."
             
             # Add note about preference being saved for future drafts
@@ -3311,7 +3328,7 @@ class StakeModal(discord.ui.Modal):
             
             # Add reminder for stakes over 100
             if max_stake > 100:
-                signup_message += "\n\nYour entry can be matched by more than one opponent."
+                signup_message += "\n\nAnything the other side cannot cover comes back before the draft starts."
                 
             signup_message += "\n\nYou are now signed up! Your Draftmancer link will be provided once teams are created."
 
@@ -3381,7 +3398,7 @@ class PersonalizedCapStatusView(discord.ui.View):
                 stake_info = stake_result.scalars().first()
                 
                 if not stake_info:
-                    await interaction.response.send_message("You need to set a stake amount first.", ephemeral=True)
+                    await interaction.response.send_message("You need to set an entry first.", ephemeral=True)
                     return
                 
                 # Toggle the capping status
@@ -3415,7 +3432,7 @@ class PersonalizedCapStatusView(discord.ui.View):
                 updated_view.add_item(toggle_button)
                 
                 await interaction.response.edit_message(
-                    content=f"Your entry cap is now: {new_status}.\n" +
+                    content=f"Your entry cap is now {new_status}.\n" +
                     ("Your entry is capped so you never carry more than your share of your own team." if stake_info.is_capped else 
                      "Your entry is uncapped: you keep your full entry however your team is made up."),
                     view=updated_view
@@ -3439,7 +3456,7 @@ async def show_personalized_cap_status(interaction, draft_session_id):
             stake_info = stake_result.scalars().first()
             
             if not stake_info:
-                await interaction.response.send_message("You need to set a stake amount first.", ephemeral=True)
+                await interaction.response.send_message("You need to set an entry first.", ephemeral=True)
                 return
             
             # Create the personalized view
@@ -3518,7 +3535,7 @@ class BetCapToggleButton(CallbackButton):
                 stake_info = stake_result.scalars().first()
                 
                 if not stake_info:
-                    await interaction.response.send_message("You need to set a stake amount first.", ephemeral=True)
+                    await interaction.response.send_message("You need to set an entry first.", ephemeral=True)
                     return
                 
                 # Get user's current status
@@ -3609,7 +3626,7 @@ class BetCapToggleButton(CallbackButton):
                 combined_view.add_item(no_button)
                 
                 # Send the ephemeral message with the combined view
-                message_content = f"Your current entry is {current_stake} tix, cap {status}.\n"
+                message_content = f"You are in for {current_stake} tix, with your entry cap **{status}**.\n"
                 message_content += f"Minimum entry is {min_stake} tix. Choose a new maximum, or change your cap.\n"
                 message_content += "Your cap setting is remembered for future drafts."
                 
@@ -3632,7 +3649,7 @@ class BetCapToggleButton(CallbackButton):
                 inner_stake_info = inner_stake_result.scalars().first()
                 
                 if not inner_stake_info:
-                    await interaction.response.send_message("Error: Stake info not found.", ephemeral=True)
+                    await interaction.response.send_message("Error: your entry could not be found.", ephemeral=True)
                     return
                 
                 # Set is_capped status
@@ -3779,8 +3796,8 @@ class CombinedStakeSelect(discord.ui.Select):
             return
         if not changed["ok"]:
             await interaction.response.send_message(
-                f"You need {changed['deficit']} more tix to raise your stake to "
-                f"{stake_amount}. Your stake is unchanged.", ephemeral=True)
+                f"You need {changed['deficit']} more tix to raise your entry to "
+                f"{stake_amount}. Your entry is unchanged.", ephemeral=True)
             return
         
         # Confirm stake and provide draft link

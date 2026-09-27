@@ -60,11 +60,12 @@ def shown_stake(amount: Any) -> str:
     """What an entry looks like on the signup board, before teams exist.
 
     Bucketed at the top so the largest entries cannot be ranked against one
-    another. What the bucket withholds costs nothing: levelling caps both sides
-    at what the smaller can cover and hands the rest straight back, so the exact
-    figure above the ceiling changes nothing -- and the entry cap now reads a
-    player's own side (draft_pool_service.cap_targets), so hiding an opponent's
-    exact figure no longer hides anything that decides what somebody keeps.
+    another. What the bucket withholds is real, and became MORE real when the
+    entry cap moved to reading a player's own side
+    (draft_pool_service.cap_targets): anybody in this queue may be drawn as your
+    teammate, and their declared figures are what your own ceiling is computed
+    from, so a neighbour shown as "100+" could be 100 or 400 and you cannot tell
+    which. That is the price of not ranking, and it is charged here knowingly.
     """
     try:
         n = int(amount)

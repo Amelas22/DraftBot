@@ -202,7 +202,24 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
         # transaction rolls back -- leaving teams written by split_into_teams
         # (its own transaction) beside a session_stage that never advanced.
         if pool_sides is not None:
-            await match_pool(*pool_sides)
+            result = await match_pool(*pool_sides)
+            # Say what came back, now the money has actually moved. The copy
+            # promises unmatched entries are returned before the draft starts;
+            # until this, nothing told the player it had happened.
+            try:
+                from services.draft_pool_service import contributions
+                from services.entry_notices import announce_refunds
+                guild_id, session_id = pool_sides[0], pool_sides[1]
+                await announce_refunds(
+                    guild_id, session_id,
+                    refunded=result.get("refunded") or {},
+                    capped=result.get("capped") or {},
+                    held=await contributions(str(guild_id), session_id),
+                    friendly_id=getattr(session, "friendly_id", None))
+            except Exception:
+                logger.opt(exception=True).warning(
+                    "could not tell players what came back on {}; the pool is "
+                    "settled either way", getattr(session, "session_id", "?"))
 
         if staked_done:
             # A staked draft's own completion handler has already posted its
@@ -262,7 +279,12 @@ async def _add_stake_info_to_embed(embed, session, stake_info_by_player):
         formatted_lines.append(f"**{names[0]}** vs **{names[1]}**: {parts[1]}")
 
     if formatted_lines:
-        add_links_to_embed_safely(embed, formatted_lines, f"Prize Pool: {total_stakes} tix")
+        # "Entries", not "Prize Pool": this embed is built before match_pool
+        # runs, so the figure is what players DECLARED and escrowed, before any
+        # cap or levelling. Calling it the pool would announce 860 tix for a
+        # draft that goes on to play for 220.
+        add_links_to_embed_safely(embed, formatted_lines,
+                                  f"Entries (Total: {total_stakes} tix)")
 
 
 async def _create_teams_embed(session, team_a_names, team_b_names, seating_order, stake_info_by_player, session_type):

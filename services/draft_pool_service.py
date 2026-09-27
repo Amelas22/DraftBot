@@ -328,13 +328,6 @@ async def entry_in(session: AsyncSession, guild_id: str, session_id: str,
 # above that -- so a matched stake of 96 is not a bet anyone placed.
 _STAKE_STEP = 10
 
-# The entries a player can choose: the signup dropdown offers 10/20/50/100 and
-# then "over 100" in multiples of 50. A cap has to land on one of these, because
-# a ceiling of 24 is not a figure anybody could have declared, and a levelled
-# stake that reads 24 is one nobody recognises.
-ENTRY_BUCKETS = (10, 20, 50, 100)
-_OVER_100_STEP = 50
-
 # How much of their own side a capped player may carry.
 #
 # 55%, from the history rather than taste. The win rate of a side breaks at this
@@ -347,18 +340,23 @@ _OVER_100_STEP = 50
 CAP_SHARE = 0.55
 
 
-def snap_to_entry(amount: int) -> int:
-    """The largest entry a player could have declared that is <= `amount`.
+def snap_to_step(amount: int) -> int:
+    """`amount` rounded DOWN to a whole stake step.
 
-    DOWN, never up. This is a ceiling: rounding 85 up to 100 would let a player
+    Down, never up. This is a ceiling: rounding 85 up to 90 would let a player
     hold a larger share of their side than the one they opted into, which is the
     only thing the cap promises.
+
+    To the STEP, not to the entries the dropdown offers (10/20/50/100, then
+    50s). Snapping to those overshoots badly, because nothing sits between 50 and
+    100: an allowance of 97 would become 50, refunding nearly twice what the rule
+    asks and leaving the player at 38% of their side rather than 55%. Measured
+    over the same rosters, ten-granularity lands every case at 50-55% where
+    bucket-granularity ranged 33-53%. The step is also what the rest of the
+    system already quotes -- level_side hands out 30, 70 and 90 routinely -- so a
+    ceiling of 80 is no stranger a figure than a levelled draft already shows.
     """
-    if amount < ENTRY_BUCKETS[0]:
-        return 0
-    if amount < ENTRY_BUCKETS[-1]:
-        return max(b for b in ENTRY_BUCKETS if b <= amount)
-    return amount // _OVER_100_STEP * _OVER_100_STEP
+    return max(amount, 0) // _STAKE_STEP * _STAKE_STEP
 
 
 def max_pool(stakes: Iterable[int]) -> int:
@@ -560,13 +558,16 @@ def cap_targets(side: list[str], bets: dict[str, int], wants_cap: set[str],
             targets[player] = held[player]
             continue
         mates = sum(bets.get(p, 0) for p in side if p != player)
-        if mates <= 0:
-            # Nobody to take a share OF -- a solo side, or teammates with no
-            # declared entry. Treating that as a ceiling of zero would refund
-            # their whole entry.
+        ceiling = snap_to_step(int(mates * CAP_SHARE / (1 - CAP_SHARE)))
+        if ceiling <= 0:
+            # Nothing to cap against: a solo side, teammates with no declared
+            # entry, or an allowance too small to reach one whole step. The test
+            # is the CEILING and not the teammates' total, because a positive
+            # total can still snap to nothing -- and a ceiling of zero would
+            # refund this player's whole entry, the one thing the cap must never
+            # do.
             targets[player] = held[player]
             continue
-        ceiling = snap_to_entry(int(mates * CAP_SHARE / (1 - CAP_SHARE)))
         targets[player] = min(held[player], ceiling)
     return targets
 

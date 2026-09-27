@@ -577,7 +577,7 @@ async def create_debt_entries_from_stakes(
     winning_team_ids: list[str]
 ) -> list[tuple[str, str, int]]:
     """
-    Create debt ledger entries from stake outcomes when a draft completes.
+    Create debt ledger entries from prize pool payouts when a draft completes.
 
     For each stake pair where players are on opposite teams, creates debt entries
     where the loser owes the winner.
@@ -665,7 +665,7 @@ async def create_debt_entries_from_stakes(
                 amount=-amount,  # Negative: they owe
                 source_type='draft',
                 source_id=session_id,
-                notes=f"Draft #{session_id} stake outcome"
+                notes=f"Draft #{session_id} prize pool payout"
             )
 
             # Entry from creditor's perspective (they are owed, so positive)
@@ -676,7 +676,7 @@ async def create_debt_entries_from_stakes(
                 amount=amount,  # Positive: they are owed
                 source_type='draft',
                 source_id=session_id,
-                notes=f"Draft #{session_id} stake outcome"
+                notes=f"Draft #{session_id} prize pool payout"
             )
 
             session.add(debtor_entry)
@@ -691,7 +691,7 @@ async def create_debt_entries_from_stakes(
 
 
 async def get_draft_debtors(guild_id: str, session_id: str) -> list[str]:
-    """Everyone left owing tix from this draft's stake outcomes.
+    """Everyone left owing tix from this draft's prize pool payouts.
 
     Settlement callers use THIS rather than create_debt_entries_from_stakes' return
     value, which names the debtors only on the pass that created them: an idempotent
