@@ -24,6 +24,12 @@ class StakedSession(RandomSession):
             "up on which team.\n"
             "\n"
             "**How it works:**\n"
+            # The cap is ON unless a player turns it off, it runs BEFORE
+            # levelling, and until this the queue embed never mentioned it --
+            # so the first a trimmed player heard of a default-on setting was
+            # the refund. Listed first because that is the order it applies in.
+            "• Your entry is **capped to your share of your team** unless you turn "
+            "that off, so you are never left funding most of your own side.\n"
             "• Both sides have to be backing the same amount, so when teams form the "
             "heavier side is levelled down and the excess goes straight back to the "
             "players it came from.\n"

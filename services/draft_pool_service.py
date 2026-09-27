@@ -362,6 +362,19 @@ def snap_to_step(amount: int) -> int:
 def max_pool(stakes: Iterable[int]) -> int:
     """The biggest pot this queue could play for, over every legal split of it.
 
+    An UPPER bound, not an exact figure, and deliberately so. It models
+    levelling only -- an opted-in entry cap (cap_targets) can lower the
+    achievable pot below this, because a capped player's ceiling depends on the
+    teammates they are drawn WITH. On the prod copy that bites 22 of 917 real
+    queues (2.4%), median 40 tix, worst case 900 advertised against 320.
+
+    Exactness is not merely unimplemented here, it is unattainable at the point
+    this is called: the signup board renders it while players are still joining,
+    and the cap flags of players who have not joined yet cannot be known. So the
+    board says "up to N", which stays true, and
+    test_the_advertised_pot_is_an_UPPER_bound_once_entries_are_capped pins the
+    inequality rather than an equality the cap can break.
+
     match_pool caps both sides at the smaller side's whole-ten TOTAL, so the
     holder ends up with twice that. This asks which split of the current queue
     makes that figure largest -- teams are random, so any of them can happen.
@@ -576,6 +589,7 @@ class MatchResult(TypedDict):
     matched: int                    # what each side ends up holding
     refunded: dict[str, int]        # returned because the other side could not cover it
     capped: dict[str, int]          # returned because the player asked to be capped
+    held: dict[str, int]            # what each player is left playing for, after both ceilings
 
 
 async def match_pool(guild_id: str, session_id: str,
@@ -620,7 +634,7 @@ async def match_pool(guild_id: str, session_id: str,
     # units of ten, so an entry of 25 backs 20 of the other side and hands back
     # the 5 -- and the figure the two sides meet at has to be one BOTH can
     # reach that way, not merely the smaller total.
-    totals = [sum(held[p] // _STAKE_STEP * _STAKE_STEP for p in side)
+    totals = [sum(snap_to_step(held[p]) for p in side)
               for side in sides]
     matched = min(totals)
 
@@ -637,11 +651,14 @@ async def match_pool(guild_id: str, session_id: str,
                 f"refunded {sum(capped.values())} over players' own caps and "
                 f"{sum(refunded.values())} unmatched")
     await check_pool(guild_id, session_id)
-    # The two reasons stay apart in the return value as well as in the ledger.
-    # No production caller reads either today -- team_creator discards the
-    # result -- but the tests assert on them, and a "where did my tix go" line
-    # would need the split rather than a single total.
-    return {"matched": matched, "refunded": refunded, "capped": capped}
+    # The two reasons stay apart in the return value as well as in the ledger,
+    # because team_creator's refund DM names each one's share and they are not
+    # interchangeable: a cap is the player's own setting and levelling is not.
+    # `held` rides along for the same caller -- _trim has already computed it in
+    # place, so returning it saves that caller re-reading the ledger it was just
+    # written from.
+    return {"matched": matched, "refunded": refunded, "capped": capped,
+            "held": dict(held)}
 
 
 def _payout_source(session_id: str, player_id: str) -> str:

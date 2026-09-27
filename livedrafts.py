@@ -169,7 +169,8 @@ async def generate_live_draft_embed(bot, draft_session):
             draft_session.sign_ups
         )
         
-        # Add the bet field to the embed
+        # Both sides are still in at this point, so the total here really is the
+        # whole pool -- unlike the summary embed, which re-renders after payout.
         if stake_lines:
             embed.add_field(
                 name=f"**Prize Pool: {total_stakes} tix**",

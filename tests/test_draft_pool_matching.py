@@ -545,17 +545,41 @@ def test_the_queue_explainer_does_not_describe_the_retired_matcher():
     It caught nothing when written -- the rewrite came first. It exists because
     the explainer and the rule live in different files, and the last time they
     drifted the embed described a system that had not run for months.
+
+    Two later changes proved the anchor is worth widening rather than merely
+    keeping. The cap moved from reading the OPPOSING side to reading your own,
+    and the copy was renamed off "bet" entirely; neither retirement was listed
+    here, so nothing failed when the explainer went on describing the old rule.
+    A reviewer found that instead, which is precisely the job this test exists
+    to do.
+
+    "opponent" is deliberately NOT banned: the live copy says the cap depends on
+    your team and "not your opponents", which is the correct statement of the new
+    rule. What is banned is the vocabulary that can only belong to the old one.
     """
     import inspect
+    import re
 
     from views import PersistentView
 
     text = inspect.getsource(PersistentView.explain_stakes_callback).lower()
+
     for retired in ("proportional", "tiered", "minimum requirement",
-                    "player-to-player", "betting pair", "bet score"):
+                    "player-to-player", "betting pair", "bet score",
+                    # the cap used to measure against the other side
+                    "opposing", "biggest opponent", "highest opponent",
+                    # and used to snap to a fixed ladder, then to a median
+                    "bucket", "median"):
         assert retired not in text, (
-            f"the queue explainer still uses {retired!r}, which belongs to the "
-            f"retired tiered matcher, not the pool")
+            f"the queue explainer still uses {retired!r}, which belongs to a "
+            f"retired rule, not the one the pool runs today")
+
+    # Whole words only: "bet" is a substring of "between" and "better", either of
+    # which a future edit could legitimately introduce.
+    stale = re.findall(r"\b(bet|bets|betting|bettor|better)\b", text)
+    assert not stale, (
+        f"the queue explainer still calls it a bet ({sorted(set(stale))}); the "
+        "player-facing term is an entry")
 
 
 # ---- entry capping: the 🧢 preference, applied before levelling --------------------
@@ -632,7 +656,13 @@ async def test_the_modal_roster_is_left_alone(test_db):
 async def test_an_entry_over_the_share_is_trimmed_even_on_a_full_team(test_db):
     """100 beside 20 and 50 is 59% of its side, and that band wins 44.5%.
     Teammates total 70, so the allowance is 85 and the ceiling snaps to 80 --
-    leaving b1 at 53% of the side, which is what the 55% rule asks for."""
+    leaving b1 at 53% of the side, which is what the 55% rule asks for.
+
+    The snap direction is load-bearing and this is the case that shows it: an
+    allowance is rarely a whole step, and rounding 85 UP to 90 would leave b1
+    holding 90 of 160, or 56% -- past the line the cap exists to hold. Down,
+    never up.
+    """
     await _fund({"a1": 100, "a2": 100, "a3": 100,
                  "b1": 100, "b2": 20, "b3": 50})
     await seed_stakes("s1", {"a1": (100, False), "a2": (100, False), "a3": (100, False),
@@ -661,21 +691,6 @@ async def test_the_allowance_grows_with_the_team(test_db):
 
     assert result["capped"] == {}, (
         f"50 beside three 20s is 45% of its side and should stand: {result}")
-
-
-@pytest.mark.asyncio
-async def test_the_ceiling_snaps_down_never_up(test_db):
-    """An allowance is rarely a whole step, and rounding it UP would let a
-    player hold more of their side than the share they opted into. 100 beside 50
-    and 20 allows 85: snapping up to 90 would leave b1 at 56%, over the line."""
-    await _fund({"a1": 200, "a2": 200, "b1": 100, "b2": 50, "b3": 20})
-    await seed_stakes("s1", {"a1": (200, False), "a2": (200, False),
-                             "b1": (100, True), "b2": (50, False), "b3": (20, False)})
-
-    await pool.match_pool("g", "s1", ["a1", "a2"], ["b1", "b2", "b3"])
-    held = await pool.contributions("g", "s1")
-
-    assert held["b1"] == 80, f"the ceiling rounded up past the share: {held}"
 
 
 @pytest.mark.asyncio
@@ -842,6 +857,43 @@ def _best_pot_by_brute_force(stakes: list[int]) -> int:
     return best
 
 
+@pytest.mark.asyncio
+async def test_the_advertised_pot_is_an_UPPER_bound_once_entries_are_capped(test_db):
+    """The board's figure is pre-cap, and an opted-in cap can only lower it.
+
+    Every other max_pool test seeds entries through _fund, which never writes
+    is_capped -- so they all exercise the UNCAPPED path and none of them can see
+    a cap change move the achievable pot. That blind spot is what let the cap
+    move from reading the opposing side to reading your own without a single
+    failure: measured on the prod copy, 22 of 917 real queues (2.4%) can no
+    longer reach their advertised figure, worst case 900 advertised against 320
+    achievable.
+
+    So the contract is stated here as the inequality it actually is. Exactness
+    is not merely unimplemented, it is unattainable at the point the board
+    renders: the ceiling depends on who you are drawn WITH, and the cap flags of
+    players who have not joined yet are unknowable. "Up to N" is the honest
+    claim, and this pins that it stays an upper bound rather than drifting into
+    a figure the draft cannot pay.
+    """
+    stakes = {"a1": 100, "a2": 20, "b1": 100, "b2": 20}
+    await _fund(stakes)
+    await seed_stakes("s1", {p: (n, True) for p, n in stakes.items()})
+
+    advertised = pool.max_pool(stakes.values())
+    assert advertised == 240, "pre-cap, the two sides can meet at 120 each"
+
+    result = await pool.match_pool("g", "s1", ["a1", "a2"], ["b1", "b2"])
+    actual = await pool.pool_balance("g", "s1")
+
+    assert actual <= advertised, (
+        f"the queue advertised {advertised} and the draft holds {actual} -- "
+        "the board must never promise more than a draft can pay")
+    assert actual == 80, (
+        f"each 100 sits beside a single 20, so its ceiling snaps to 20: {result}")
+    assert result["matched"] * 2 == actual
+
+
 @pytest.mark.parametrize("stakes", [
     [200, 100],
     [100, 20, 50, 50],
@@ -856,7 +908,13 @@ def _best_pot_by_brute_force(stakes: list[int]) -> int:
 ])
 def test_the_advertised_pot_is_the_best_any_legal_split_could_make(stakes):
     """The ceiling must be exactly reachable -- not above (a promise the draft
-    cannot keep) and not below (a draft that pays more than it advertised)."""
+    cannot keep) and not below (a draft that pays more than it advertised).
+
+    Exactly reachable BEFORE any entry cap applies, which is what max_pool
+    models and all this oracle knows about. A capped entry can lower the
+    achievable pot below this figure; that case is
+    test_the_advertised_pot_is_an_UPPER_bound_once_entries_are_capped.
+    """
     assert pool.max_pool(stakes) == _best_pot_by_brute_force(stakes)
 
 

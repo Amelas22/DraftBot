@@ -206,15 +206,26 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
             # Say what came back, now the money has actually moved. The copy
             # promises unmatched entries are returned before the draft starts;
             # until this, nothing told the player it had happened.
+            #
+            # Everything it needs is already in `result` -- notably `held`, which
+            # match_pool computed in place. Re-deriving it with a second
+            # contributions() read would be a second source of truth for the
+            # figure the DM asserts, and the only thing in this block that could
+            # go stale. Local names only: `guild_id` here is the enclosing
+            # function's, and send_teams_created_dms still reads it below.
+            #
+            # One guard, at this boundary and not around each send -- the shape
+            # card_lending_service's watchdog already uses for the library DMs:
+            # send_dm catches its own Discord errors and returns False, so a
+            # guard further in would catch nothing, but the pool is settled by
+            # now and a notification must not be able to fail team creation.
             try:
-                from services.draft_pool_service import contributions
                 from services.entry_notices import announce_refunds
-                guild_id, session_id = pool_sides[0], pool_sides[1]
                 await announce_refunds(
-                    guild_id, session_id,
+                    pool_sides[1],
                     refunded=result.get("refunded") or {},
                     capped=result.get("capped") or {},
-                    held=await contributions(str(guild_id), session_id),
+                    held=result.get("held") or {},
                     friendly_id=getattr(session, "friendly_id", None))
             except Exception:
                 logger.opt(exception=True).warning(

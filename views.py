@@ -19,7 +19,8 @@ from sqlalchemy.orm import selectinload
 from helpers.utils import get_cube_thumbnail_url
 from helpers.money_gate import wallet_howto
 from helpers.display_names import get_display_name, get_display_name_by_id
-from helpers.signup_board import FIELD_SPLIT_THRESHOLD, build_board
+from helpers.signup_board import (FIELD_SPLIT_THRESHOLD, build_board,
+                                  entry_cap_phrase)
 from helpers.draft_footer import apply_draft_footer_from_session
 from helpers.draft_rooms import (
     BLUE_SIDE, DRAFT_ROOM_COUNT, RED_SIDE, SHARED_CHAT_TEAM,
@@ -1145,8 +1146,9 @@ class PersistentView(discord.ui.View):
             name="Capping Your Entry",
             value=(
                 "• The cap is **on unless you turn it off** (🧢 capped / 🏎️ uncapped)\n"
-                "• A capped entry is trimmed until it is no bigger than your teammates' "
-                "entries put together — so you are never most of your own side\n"
+                "• A capped entry is trimmed so you never hold more than **55% of your "
+                "own team's total** — you can be the biggest entry on your side, but not "
+                "most of it\n"
                 "• It depends on your team, not your opponents: 50 alongside three "
                 "teammates on 20 is fine, but alongside a single 20 it is trimmed\n"
                 "• Applied before anything else, and the excess is returned immediately\n"
@@ -2467,139 +2469,6 @@ class UserRemovalView(discord.ui.View):
         self.add_item(UserRemovalSelect(options=options, session_id=session_id))
 
 
-class PersonalizedCapStatusView(discord.ui.View):
-    def __init__(self, draft_session_id, user_id):
-        super().__init__(timeout=None)
-        self.draft_session_id = draft_session_id
-        self.user_id = user_id
-        
-        # Add toggle button
-        self.toggle_button = discord.ui.Button(
-            label="Toggle Cap Status",
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"toggle_bet_cap_{draft_session_id}"
-        )
-        self.toggle_button.callback = self.toggle_cap_callback
-        self.add_item(self.toggle_button)
-    
-    async def toggle_cap_callback(self, interaction: discord.Interaction):
-        user_id = self.user_id
-        
-        # Only the owner of the view should be able to toggle
-        if str(interaction.user.id) != user_id:
-            await interaction.response.send_message("This button is not for you.", ephemeral=True)
-            return
-            
-        # Update stake info in database
-        async with AsyncSessionLocal() as session:
-            async with session.begin():
-                # Get the user's stake info
-                stake_stmt = select(StakeInfo).where(and_(
-                    StakeInfo.session_id == self.draft_session_id,
-                    StakeInfo.player_id == user_id
-                ))
-                stake_result = await session.execute(stake_stmt)
-                stake_info = stake_result.scalars().first()
-                
-                if not stake_info:
-                    await interaction.response.send_message("You need to set an entry first.", ephemeral=True)
-                    return
-                
-                # Toggle the capping status
-                current_cap_status = getattr(stake_info, 'is_capped', True)
-                stake_info.is_capped = not current_cap_status
-                
-                # Update the database
-                session.add(stake_info)
-                await session.commit()
-        
-                # Create an updated view
-                new_status = "ON 🧢" if stake_info.is_capped else "OFF 🏎️"
-                style = discord.ButtonStyle.green if stake_info.is_capped else discord.ButtonStyle.red
-                
-                updated_view = discord.ui.View(timeout=None)
-                status_button = discord.ui.Button(
-                    label=f"Entry Cap: {new_status}",
-                    style=style,
-                    custom_id=f"bet_cap_status_{self.draft_session_id}",
-                    disabled=True
-                )
-                updated_view.add_item(status_button)
-                
-                # Add the toggle button back
-                toggle_button = discord.ui.Button(
-                    label="Toggle Cap Status",
-                    style=discord.ButtonStyle.secondary,
-                    custom_id=f"toggle_bet_cap_{self.draft_session_id}"
-                )
-                toggle_button.callback = self.toggle_cap_callback
-                updated_view.add_item(toggle_button)
-                
-                await interaction.response.edit_message(
-                    content=f"Your entry cap is now {new_status}.\n" +
-                    ("Your entry is capped so you never carry more than your share of your own team." if stake_info.is_capped else 
-                     "Your entry is uncapped: you keep your full entry however your team is made up."),
-                    view=updated_view
-                )
-                
-                # Update the draft message
-                await update_draft_message(interaction.client, self.draft_session_id)
-
-async def show_personalized_cap_status(interaction, draft_session_id):
-    """Shows a personalized cap status button for the user"""
-    user_id = str(interaction.user.id)
-    
-    async with AsyncSessionLocal() as session:
-        async with session.begin():
-            # Get the user's stake info
-            stake_stmt = select(StakeInfo).where(and_(
-                StakeInfo.session_id == draft_session_id,
-                StakeInfo.player_id == user_id
-            ))
-            stake_result = await session.execute(stake_stmt)
-            stake_info = stake_result.scalars().first()
-            
-            if not stake_info:
-                await interaction.response.send_message("You need to set an entry first.", ephemeral=True)
-                return
-            
-            # Create the personalized view
-            is_capped = getattr(stake_info, 'is_capped', True)
-            status = "ON 🧢" if is_capped else "OFF 🏎️"
-            style = discord.ButtonStyle.green if is_capped else discord.ButtonStyle.red
-            
-            view = discord.ui.View(timeout=None)
-            status_button = discord.ui.Button(
-                label=f"Entry Cap: {status}",
-                style=style,
-                custom_id=f"bet_cap_status_{draft_session_id}",
-                disabled=True
-            )
-            view.add_item(status_button)
-            
-            # Add the toggle button 
-            toggle_button = discord.ui.Button(
-                label="Toggle Cap Status",
-                style=discord.ButtonStyle.secondary,
-                custom_id=f"toggle_bet_cap_{draft_session_id}"
-            )
-            
-            # Define callback for the toggle button
-            async def toggle_callback(interaction):
-                await show_personalized_cap_status(interaction, draft_session_id)
-            
-            toggle_button.callback = toggle_callback
-            view.add_item(toggle_button)
-            
-            await interaction.response.send_message(
-                f"Your entry cap is: {status}.\n" +
-                ("Your entry is capped so you never carry more than your share of your own team." if is_capped else 
-                 "Your entry is uncapped: you keep your full entry however your team is made up."),
-                view=view,
-                ephemeral=True
-            )
-            
-                                    
 class CallbackButton(discord.ui.Button):
     def __init__(self, *, label, style, custom_id, custom_callback, disabled=False):
         super().__init__(label=label, style=style, custom_id=custom_id, disabled=disabled)
@@ -3319,7 +3188,7 @@ class StakeModal(discord.ui.Modal):
                     await session.commit()
             
             # Create a response that includes the stake confirmation, reminder about stake usage, and draft link
-            cap_status = "capped to your share of your team" if is_capped else "uncapped"
+            cap_status = entry_cap_phrase(is_capped)
             signup_message = f"Your maximum entry is {max_stake} tix."
             signup_message += f"\nYour entry is {cap_status}."
             
@@ -3362,138 +3231,6 @@ class StakeModal(discord.ui.Modal):
                     await interaction.followup.send(error_message, ephemeral=True)
                 except Exception as followup_error:
                     print(f"Failed to send error message to user: {followup_error}")
-
-class PersonalizedCapStatusView(discord.ui.View):
-    def __init__(self, draft_session_id, user_id):
-        super().__init__(timeout=None)
-        self.draft_session_id = draft_session_id
-        self.user_id = user_id
-        
-        # Add toggle button
-        self.toggle_button = discord.ui.Button(
-            label="Toggle Cap Status",
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"toggle_bet_cap_{draft_session_id}"
-        )
-        self.toggle_button.callback = self.toggle_cap_callback
-        self.add_item(self.toggle_button)
-    
-    async def toggle_cap_callback(self, interaction: discord.Interaction):
-        user_id = self.user_id
-        
-        # Only the owner of the view should be able to toggle
-        if str(interaction.user.id) != user_id:
-            await interaction.response.send_message("This button is not for you.", ephemeral=True)
-            return
-            
-        # Update stake info in database
-        async with AsyncSessionLocal() as session:
-            async with session.begin():
-                # Get the user's stake info
-                stake_stmt = select(StakeInfo).where(and_(
-                    StakeInfo.session_id == self.draft_session_id,
-                    StakeInfo.player_id == user_id
-                ))
-                stake_result = await session.execute(stake_stmt)
-                stake_info = stake_result.scalars().first()
-                
-                if not stake_info:
-                    await interaction.response.send_message("You need to set an entry first.", ephemeral=True)
-                    return
-                
-                # Toggle the capping status
-                current_cap_status = getattr(stake_info, 'is_capped', True)
-                stake_info.is_capped = not current_cap_status
-                
-                # Update the database
-                session.add(stake_info)
-                await session.commit()
-        
-                # Create an updated view
-                new_status = "ON 🧢" if stake_info.is_capped else "OFF 🏎️"
-                style = discord.ButtonStyle.green if stake_info.is_capped else discord.ButtonStyle.red
-                
-                updated_view = discord.ui.View(timeout=None)
-                status_button = discord.ui.Button(
-                    label=f"Entry Cap: {new_status}",
-                    style=style,
-                    custom_id=f"bet_cap_status_{self.draft_session_id}",
-                    disabled=True
-                )
-                updated_view.add_item(status_button)
-                
-                # Add the toggle button back
-                toggle_button = discord.ui.Button(
-                    label="Toggle Cap Status",
-                    style=discord.ButtonStyle.secondary,
-                    custom_id=f"toggle_bet_cap_{self.draft_session_id}"
-                )
-                toggle_button.callback = self.toggle_cap_callback
-                updated_view.add_item(toggle_button)
-                
-                await interaction.response.edit_message(
-                    content=f"Your entry cap is now {new_status}.\n" +
-                    ("Your entry is capped so you never carry more than your share of your own team." if stake_info.is_capped else 
-                     "Your entry is uncapped: you keep your full entry however your team is made up."),
-                    view=updated_view
-                )
-                
-                # Update the draft message
-                await update_draft_message(interaction.client, self.draft_session_id)
-
-async def show_personalized_cap_status(interaction, draft_session_id):
-    """Shows a personalized cap status button for the user"""
-    user_id = str(interaction.user.id)
-    
-    async with AsyncSessionLocal() as session:
-        async with session.begin():
-            # Get the user's stake info
-            stake_stmt = select(StakeInfo).where(and_(
-                StakeInfo.session_id == draft_session_id,
-                StakeInfo.player_id == user_id
-            ))
-            stake_result = await session.execute(stake_stmt)
-            stake_info = stake_result.scalars().first()
-            
-            if not stake_info:
-                await interaction.response.send_message("You need to set an entry first.", ephemeral=True)
-                return
-            
-            # Create the personalized view
-            is_capped = getattr(stake_info, 'is_capped', True)
-            status = "ON 🧢" if is_capped else "OFF 🏎️"
-            style = discord.ButtonStyle.green if is_capped else discord.ButtonStyle.red
-            
-            view = discord.ui.View(timeout=None)
-            status_button = discord.ui.Button(
-                label=f"Entry Cap: {status}",
-                style=style,
-                custom_id=f"bet_cap_status_{draft_session_id}",
-                disabled=True
-            )
-            view.add_item(status_button)
-            
-            # Add the toggle button 
-            toggle_button = discord.ui.Button(
-                label="Toggle Cap Status",
-                style=discord.ButtonStyle.secondary,
-                custom_id=f"toggle_bet_cap_{draft_session_id}"
-            )
-            
-            # Define callback for the toggle button
-            async def toggle_callback(interaction):
-                await show_personalized_cap_status(interaction, draft_session_id)
-            
-            toggle_button.callback = toggle_callback
-            view.add_item(toggle_button)
-            
-            await interaction.response.send_message(
-                f"Your entry cap is: {status}.\n" +
-                ("Your entry is capped so you never carry more than your share of your own team." if is_capped else 
-                 "Your entry is uncapped: you keep your full entry however your team is made up."),
-                view=view,
-                ephemeral=True
-            )
 
 class BetCapToggleButton(CallbackButton):
     def __init__(self, draft_session_id):
@@ -3666,7 +3403,7 @@ class BetCapToggleButton(CallbackButton):
         
         # Inform the user
         status_text = "ON 🧢" if is_capped else "OFF 🏎️"
-        description_text = "capped to your share of your team" if is_capped else "uncapped, whatever your team looks like"
+        description_text = entry_cap_phrase(is_capped)
         
         await interaction.response.send_message(
             f"Your entry cap is now {status_text}. Your entry is {description_text}.\n\nThis preference is remembered for future drafts.",
@@ -3801,7 +3538,7 @@ class CombinedStakeSelect(discord.ui.Select):
             return
         
         # Confirm stake and provide draft link
-        cap_status = "capped to your share of your team" if is_capped else "uncapped"
+        cap_status = entry_cap_phrase(is_capped)
         signup_message = f"Your maximum entry is now {stake_amount} tix."
         signup_message += f"\nYour entry is {cap_status}."
             

@@ -28,16 +28,30 @@ def refund_message(returned: int, held: int, capped: int,
     A cap is named when one applied, because that is the player's OWN setting
     and the one thing here they chose -- levelling is not, and blaming it on a
     cap they did not set would send them looking for a preference to change.
+
+    Both ceilings can bite ONE entry -- capping runs first, then levelling -- and
+    when they do, each share is named. Reporting the combined total under the
+    cap's name alone is not merely imprecise, it is advice that does not work:
+    side B {400 capped, 200} against {100, 100} has the cap return 160 and
+    levelling return a further 140, but with the cap OFF that 400 still levels
+    to exactly 100 -- so the preference the message points at would have
+    returned none of it. A single reason stays a single sentence; the split only
+    earns its words when both actually applied.
     """
     which = f" in **{friendly_id}**" if friendly_id else ""
-    why = ("your entry cap trimmed it to your share of your team"
-           if capped else
-           "your side was levelled down to match the other side")
+    levelled = max(returned - capped, 0)
+    if capped and levelled:
+        why = (f"**{capped}** to your entry cap and **{levelled}** to levelling "
+               "your side down to match the other side")
+    elif capped:
+        why = "your entry cap trimmed it to your share of your team"
+    else:
+        why = "your side was levelled down to match the other side"
     return (f"↩️ **{returned} tix** came back from your entry{which} — {why}.\n"
             f"You are playing for **{held} tix**.")
 
 
-async def announce_refunds(guild_id: Any, session_id: Any, *,
+async def announce_refunds(session_id: Any, *,
                            refunded: Mapping[str, int],
                            capped: Mapping[str, int],
                            held: Mapping[str, int],
@@ -64,16 +78,15 @@ async def announce_refunds(guild_id: Any, session_id: Any, *,
         total = int(refunded.get(player_id, 0) or 0) + by_cap
         if total <= 0:
             continue
-        try:
-            sent = await notification_service.send_dm(
-                bot, player_id,
-                refund_message(total, int(held.get(player_id, 0) or 0), by_cap,
-                               friendly_id),
-                label=f"entry refund for {player_id}")
-        except Exception:
-            logger.opt(exception=True).warning(
-                "entry notices: could not tell {} about their refund", player_id)
-            continue
+        # No try/except, for the reason library_reminders._dm documents: send_dm
+        # catches Forbidden, HTTPException and anything else itself and returns
+        # False. A guard here would catch nothing and would state a contract
+        # opposite to the one that module states in writing.
+        sent = await notification_service.send_dm(
+            bot, player_id,
+            refund_message(total, int(held.get(player_id, 0) or 0), by_cap,
+                           friendly_id),
+            label=f"entry refund for {player_id}")
         told += bool(sent)
     if told:
         logger.info("entry notices: told {} player(s) what came back on {}",

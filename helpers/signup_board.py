@@ -74,6 +74,24 @@ def shown_stake(amount: Any) -> str:
     return f"{STAKE_SHOWN_CEILING}+" if n >= STAKE_SHOWN_CEILING else str(n)
 
 
+def entry_cap_phrase(is_capped: Any) -> str:
+    """How a player's cap setting reads, in the one place the wording lives.
+
+    Three confirmation surfaces state this -- the signup confirmation, the
+    over-100 modal's result and the cap toggle -- and they stated it three ways,
+    one of which dropped the clause explaining what "uncapped" is relative to.
+    Same reasoning money_gate.wallet_howto gives for itself: written once
+    because the copies drift, and a reviewer had to find the drift last time.
+
+    It deliberately does NOT quote the percentage. CAP_SHARE is a tunable
+    justified from history in draft_pool_service, so a confirmation line naming
+    55% would need rewriting every time it moved; the figure belongs in the
+    explainer panel, which has the room to say what it is measured against.
+    """
+    return ("capped to your share of your team" if is_capped else
+            "uncapped, whatever your team looks like")
+
+
 def _weighted(name: str) -> str:
     """The name, bold, unless bolding it would break the row.
 
