@@ -328,6 +328,38 @@ async def entry_in(session: AsyncSession, guild_id: str, session_id: str,
 # above that -- so a matched stake of 96 is not a bet anyone placed.
 _STAKE_STEP = 10
 
+# The entries a player can choose: the signup dropdown offers 10/20/50/100 and
+# then "over 100" in multiples of 50. A cap has to land on one of these, because
+# a ceiling of 24 is not a figure anybody could have declared, and a levelled
+# stake that reads 24 is one nobody recognises.
+ENTRY_BUCKETS = (10, 20, 50, 100)
+_OVER_100_STEP = 50
+
+# How much of their own side a capped player may carry.
+#
+# 55%, from the history rather than taste. The win rate of a side breaks at this
+# line: its top entry wins 52.1% while holding 50-55% of the side and 44.5% at
+# 55-60%. It also matters exactly where the line falls -- 100 beside two
+# teammates on 50 is the single most common roster in the history (164 of them)
+# and sits at precisely 50%, so a 50% ceiling would clip the shape that is doing
+# fine. 55% leaves it alone and still reaches three quarters of every band below
+# even money.
+CAP_SHARE = 0.55
+
+
+def snap_to_entry(amount: int) -> int:
+    """The largest entry a player could have declared that is <= `amount`.
+
+    DOWN, never up. This is a ceiling: rounding 85 up to 100 would let a player
+    hold a larger share of their side than the one they opted into, which is the
+    only thing the cap promises.
+    """
+    if amount < ENTRY_BUCKETS[0]:
+        return 0
+    if amount < ENTRY_BUCKETS[-1]:
+        return max(b for b in ENTRY_BUCKETS if b <= amount)
+    return amount // _OVER_100_STEP * _OVER_100_STEP
+
 
 def max_pool(stakes: Iterable[int]) -> int:
     """The biggest pot this queue could play for, over every legal split of it.
@@ -494,27 +526,49 @@ async def _apply_refunds(guild_id: str, session_id: str,
 
 
 def cap_targets(side: list[str], bets: dict[str, int], wants_cap: set[str],
-                opposing: list[str], held: dict[str, int]) -> dict[str, int]:
-    """What each player on `side` may keep once their own bet cap is applied.
+                held: dict[str, int]) -> dict[str, int]:
+    """What each player on `side` may keep once their own entry cap is applied.
 
-    "Cap my bet at the highest bet on the opposing team" is a personal ceiling
-    a player opts into at signup, and it only ever trims: opting in cannot cost
-    a player who is already at or below the top opposing bet.
+    "Cap my entry so I never carry more than my share of my own team" is a
+    personal ceiling a player opts into at signup, and it only ever trims:
+    opting in cannot cost a player already inside their share.
 
-    The ceiling comes from the DECLARED bets -- StakeInfo.max_stake -- never
-    from what the other side currently holds. match_pool is re-entrant, and a
-    ceiling read from live holdings would ratchet down on every replay: the
-    first call levels a side, the second sees that side's smaller top entry,
-    caps the opponent harder, and levels again. The declared figure is what the
-    player agreed to and levelling never writes to it, so every pass computes
-    the same ceiling and the second finds nothing left to trim.
+    Measured against their TEAMMATES, not the opposing side, and that is the
+    point of it. What players are protecting themselves from is being the one
+    carrying a side -- and the history says the fear is well founded: a side
+    whose top entry holds 55-60% of it wins 44.5%, and 65%+ wins 42.2%, against
+    50% overall. Being merely the biggest entry is harmless (49.7%); being most
+    of the side is not. A ceiling read from the opponents could not express that,
+    because it says nothing about the team you are actually on.
+
+    The share is of the whole side, so how MANY teammates you have changes the
+    allowance -- 50 beside three teammates on 20 is 45% of its side and stands,
+    where beside a single 20 it would be 71% and would not. A ceiling read from
+    one teammate's figure cannot say that either.
+
+    The ceiling comes from the DECLARED entries -- StakeInfo.max_stake -- never
+    from what the side currently holds. match_pool is re-entrant, and a ceiling
+    read from live holdings would ratchet down on every replay: levelling
+    shrinks the teammates' holdings, so the next pass would compute a smaller
+    allowance and trim again. The declared figure is what the player agreed to
+    and levelling never writes to it, so every pass computes the same ceiling
+    and the second finds nothing left to trim.
     """
-    ceiling = max((bets.get(p, 0) for p in opposing), default=0)
-    if ceiling <= 0:
-        # Nobody opposite declared a bet, so there is nothing to cap against.
-        # Treating that as a ceiling of zero would refund the whole side.
-        return {p: held[p] for p in side}
-    return {p: min(held[p], ceiling) if p in wants_cap else held[p] for p in side}
+    targets = {}
+    for player in side:
+        if player not in wants_cap:
+            targets[player] = held[player]
+            continue
+        mates = sum(bets.get(p, 0) for p in side if p != player)
+        if mates <= 0:
+            # Nobody to take a share OF -- a solo side, or teammates with no
+            # declared entry. Treating that as a ceiling of zero would refund
+            # their whole entry.
+            targets[player] = held[player]
+            continue
+        ceiling = snap_to_entry(int(mates * CAP_SHARE / (1 - CAP_SHARE)))
+        targets[player] = min(held[player], ceiling)
+    return targets
 
 
 class MatchResult(TypedDict):
@@ -558,9 +612,8 @@ async def match_pool(guild_id: str, session_id: str,
 
     bets, wants_cap = await _declared_bets(session_id)
     capped: dict[str, int] = {}
-    for side, opposing in ((side_a, side_b), (side_b, side_a)):
-        capped |= _trim(held, side,
-                        cap_targets(side, bets, wants_cap, opposing, held))
+    for side in (side_a, side_b):
+        capped |= _trim(held, side, cap_targets(side, bets, wants_cap, held))
 
     # What each side can actually put up in whole tens. A stake is matched in
     # units of ten, so an entry of 25 backs 20 of the other side and hands back
