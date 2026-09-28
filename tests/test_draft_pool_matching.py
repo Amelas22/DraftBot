@@ -293,15 +293,14 @@ def test_the_staked_path_reaches_the_book_closing():
     from services.team_creator import create_and_display_teams
 
     src = inspect.getsource(create_and_display_teams)
-    staked_at = src.find('if persistent_view.session_type == "staked":')
+    staked_at = src.find('staked_done = persistent_view.session_type == "staked"')
     match_at = src.find("await match_pool(")
-    assert staked_at != -1 and match_at != -1
+    assert staked_at != -1, "the staked branch moved; re-check this assertion"
+    assert match_at != -1, "team creation never closes the book"
     between = src[staked_at:match_at]
     assert "return True" not in between, (
         "the staked branch returns before the book is closed, so matching never "
         "runs for the only drafts that have a pool")
-    assert "staked_done = True" in between, (
-        "the staked branch no longer records that it handled the draft")
 
 
 def test_matching_and_settlement_agree_on_which_drafts_have_a_pool():

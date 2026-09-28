@@ -107,7 +107,6 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                 # BOTH paths here (premade had them from creation; random and
                 # staked have just had them written by split_into_teams). The
                 # money itself moves AFTER this transaction commits; see below.
-                staked_done = False
                 pool_sides = None
                 # STAKED only, matching utils.py's settlement gate exactly. Entries
                 # can only arrive through the staked signup UI, and settlement is
@@ -150,26 +149,31 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                                         .where(DraftSession.session_id == session.session_id)
                                         .values(sign_ups=new_sign_ups))
 
-                # Create main embed
-                embed = await _create_teams_embed(session, team_a_display_names if session.session_type != 'swiss' else None,
-                                           team_b_display_names if session.session_type != 'swiss' else None,
-                                           seating_order, persistent_view.session_type)
+                # A staked draft is NOT announced here. Its embed states the
+                # prize pool, and the pool is not real until match_pool has
+                # run -- which cannot happen until this transaction closes,
+                # because that money moves on its own connection and SQLite is
+                # single-writer. Posting now would announce what players
+                # DECLARED: 860 tix for a draft that goes on to play for 220.
+                # So the staked path builds and posts below the commit.
+                #
+                # Nothing holds it here. The embed builders read columns
+                # already loaded on `session` and open their own database
+                # sessions rather than joining this one. Moving them out also
+                # stops two Discord round trips from happening while this
+                # transaction holds SQLite's single write lock.
+                staked_done = persistent_view.session_type == "staked"
 
-                # Create channel announcement embed
-                channel_embed = await _create_channel_announcement_embed(
-                    session, seating_order, persistent_view.session_type
-                )
+                if not staked_done:
+                    # Create main embed
+                    embed = await _create_teams_embed(session, team_a_display_names if session.session_type != 'swiss' else None,
+                                               team_b_display_names if session.session_type != 'swiss' else None,
+                                               seating_order, persistent_view.session_type)
 
-                # Handle staked drafts specially
-                if persistent_view.session_type == "staked":
-                    await _handle_staked_draft_completion(
-                        interaction, db_session, session, embed, channel_embed,
-                        persistent_view, draft_session_id, bot, guild_id
+                    # Create channel announcement embed
+                    channel_embed = await _create_channel_announcement_embed(
+                        session, seating_order, persistent_view.session_type
                     )
-                    # Do NOT return from inside the transaction: the pool has to
-                    # be matched, and that money cannot move while this
-                    # transaction holds the write lock. Fall out first.
-                    staked_done = True
 
                 # Update button states for non-staked drafts. Guarded because a
                 # staked draft used to return before reaching here; falling out
@@ -186,10 +190,7 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                             item.disabled = False
                         else:
                             item.disabled = True
-                if not staked_done:
-                    # The staked completion handler commits internally, so the
-                    # transaction is already closed by the time we get here.
-                    await db_session.commit()
+                await db_session.commit()
 
         # The book closes here, OUTSIDE the transaction above.
         #
@@ -200,7 +201,18 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
         # transaction rolls back -- leaving teams written by split_into_teams
         # (its own transaction) beside a session_stage that never advanced.
         if pool_sides is not None:
-            result = await match_pool(*pool_sides)
+            # Guarded so a failure here cannot swallow the announcement. The
+            # teams are written and committed by now; a draft nobody is told
+            # about is worse than one whose pool figure is the declared total,
+            # which is what every staked draft posted before this change.
+            try:
+                result = await match_pool(*pool_sides)
+            except Exception:
+                logger.opt(exception=True).error(
+                    "the pool did not settle on {}; announcing the draft "
+                    "anyway, and the figure below is what was declared",
+                    getattr(session, "session_id", "?"))
+                result = {}
             # Say what came back, now the money has actually moved. The copy
             # promises unmatched entries are returned before the draft starts;
             # until this, nothing told the player it had happened.
@@ -231,8 +243,19 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                     "settled either way", getattr(session, "session_id", "?"))
 
         if staked_done:
-            # A staked draft's own completion handler has already posted its
-            # embeds; everything below is the non-staked announcement path.
+            # Built HERE, not above the commit, because only now does
+            # get_formatted_stake_pairs read a settled pool -- this is the
+            # whole reason the staked path skipped the builders inside the
+            # transaction. The number on the embed is what the draft plays
+            # for, first time, with nothing to correct afterwards.
+            embed = await _create_teams_embed(
+                session, team_a_display_names, team_b_display_names,
+                seating_order, persistent_view.session_type)
+            channel_embed = await _create_channel_announcement_embed(
+                session, seating_order, persistent_view.session_type)
+            await _handle_staked_draft_completion(
+                interaction, session, embed, channel_embed,
+                persistent_view, draft_session_id, bot, guild_id)
             return True
 
         # Update message and send announcement
@@ -275,7 +298,7 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
 
 
 async def _add_stake_info_to_embed(embed, session):
-    """Put what each player has at risk on the embed, or nothing if none is.
+    """Put the draft's prize pool on the embed, or nothing if there is none.
 
     Gated on the lines themselves. It used to be gated on a
     `stake_info_by_player` dict that the prize-pool migration stopped
@@ -291,17 +314,18 @@ async def _add_stake_info_to_embed(embed, session):
     to render, and a player whose name contains " vs " is no longer parsed as
     two people.
 
-    The figure is what players DECLARED, not the pool: the caller builds this
-    before match_pool runs, so calling it the pool would announce 860 tix for
-    a draft that goes on to play for 220.
+    The caller posts this only AFTER match_pool has run, so the figure is the
+    settled pool and not what players declared -- see create_and_display_teams.
     """
     stake_lines, total_stakes = await get_formatted_stake_pairs(
         session.session_id, session.sign_ups)
     if not stake_lines:
         return
 
+    # Spelled as utils.py and livedrafts.py already spell it; this is the same
+    # field on a third surface, not a new one.
     add_links_to_embed_safely(embed, stake_lines,
-                              f"Entries (Total: {total_stakes} tix)")
+                              f"**Prize Pool: {total_stakes} tix**")
 
 
 async def _create_teams_embed(session, team_a_names, team_b_names, seating_order, session_type):
@@ -395,7 +419,7 @@ async def _create_channel_announcement_embed(session, seating_order, session_typ
     return channel_embed
 
 
-async def _handle_staked_draft_completion(interaction, db_session, session, embed, channel_embed,
+async def _handle_staked_draft_completion(interaction, session, embed, channel_embed,
                                          persistent_view, draft_session_id, bot, guild_id):
     """Handle special completion flow for staked drafts."""
     from views import CallbackButton
@@ -429,7 +453,6 @@ async def _handle_staked_draft_completion(interaction, db_session, session, embe
         logger.error(f"Failed to update draft message: {e}")
 
     await interaction.channel.send(embed=channel_embed)
-    await db_session.commit()
 
     # Send DM notifications with draft links to users who have opted in
     await send_teams_created_dms(
