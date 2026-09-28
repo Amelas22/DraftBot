@@ -90,8 +90,6 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                     session.deletion_time = datetime.now() + timedelta(hours=4)
                 session.session_stage = 'teams'
 
-                stake_info_by_player = {}
-
                 # Clean up any active ready check, regardless of session type
                 from ready_check import ReadyCheckSession
                 rc_channel = bot.get_channel(int(session.draft_channel_id)) if session.draft_channel_id else None
@@ -155,11 +153,11 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                 # Create main embed
                 embed = await _create_teams_embed(session, team_a_display_names if session.session_type != 'swiss' else None,
                                            team_b_display_names if session.session_type != 'swiss' else None,
-                                           seating_order, stake_info_by_player, persistent_view.session_type)
+                                           seating_order, persistent_view.session_type)
 
                 # Create channel announcement embed
                 channel_embed = await _create_channel_announcement_embed(
-                    session, seating_order, stake_info_by_player, persistent_view.session_type
+                    session, seating_order, persistent_view.session_type
                 )
 
                 # Handle staked drafts specially
@@ -276,29 +274,37 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
         return False
 
 
-async def _add_stake_info_to_embed(embed, session, stake_info_by_player):
-    """Add formatted stake information to an embed if applicable."""
-    if not stake_info_by_player:
+async def _add_stake_info_to_embed(embed, session):
+    """Put what each player has at risk on the embed, or nothing if none is.
+
+    Gated on the lines themselves. It used to be gated on a
+    `stake_info_by_player` dict that the prize-pool migration stopped
+    populating, so this returned before doing anything and the field vanished
+    from every staked draft -- which also hid the second half of the same
+    breakage: a parser here re-derived the regime by splitting each line on
+    " vs ", which the pool's one-line-per-player format does not contain.
+    An empty gate in front of a broken parser reads as "staked drafts have no
+    entries" rather than as either bug.
+
+    Both are gone. get_formatted_stake_pairs picks the regime and emits one
+    shape for both, which is what that function is for; the lines arrive ready
+    to render, and a player whose name contains " vs " is no longer parsed as
+    two people.
+
+    The figure is what players DECLARED, not the pool: the caller builds this
+    before match_pool runs, so calling it the pool would announce 860 tix for
+    a draft that goes on to play for 220.
+    """
+    stake_lines, total_stakes = await get_formatted_stake_pairs(
+        session.session_id, session.sign_ups)
+    if not stake_lines:
         return
 
-    stake_lines, total_stakes = await get_formatted_stake_pairs(session.session_id, session.sign_ups)
-
-    formatted_lines = []
-    for line in stake_lines:
-        parts = line.split(': ')
-        names = parts[0].split(' vs ')
-        formatted_lines.append(f"**{names[0]}** vs **{names[1]}**: {parts[1]}")
-
-    if formatted_lines:
-        # "Entries", not "Prize Pool": this embed is built before match_pool
-        # runs, so the figure is what players DECLARED and escrowed, before any
-        # cap or levelling. Calling it the pool would announce 860 tix for a
-        # draft that goes on to play for 220.
-        add_links_to_embed_safely(embed, formatted_lines,
-                                  f"Entries (Total: {total_stakes} tix)")
+    add_links_to_embed_safely(embed, stake_lines,
+                              f"Entries (Total: {total_stakes} tix)")
 
 
-async def _create_teams_embed(session, team_a_names, team_b_names, seating_order, stake_info_by_player, session_type):
+async def _create_teams_embed(session, team_a_names, team_b_names, seating_order, session_type):
     """Create the main embed showing teams and seating order."""
 
     title_prefix = "Winston " if session.session_type == 'winston' else ""
@@ -335,14 +341,14 @@ async def _create_teams_embed(session, team_a_names, team_b_names, seating_order
 
     # Add stakes for staked drafts
     if session_type == "staked":
-        await _add_stake_info_to_embed(embed, session, stake_info_by_player)
+        await _add_stake_info_to_embed(embed, session)
 
     apply_draft_footer_from_session(embed, session)
 
     return embed
 
 
-async def _create_channel_announcement_embed(session, seating_order, stake_info_by_player, session_type):
+async def _create_channel_announcement_embed(session, seating_order, session_type):
     """Create the channel announcement embed."""
 
     channel_embed = discord.Embed(
@@ -382,7 +388,7 @@ async def _create_channel_announcement_embed(session, seating_order, stake_info_
 
     # Add stakes for staked drafts
     if session_type == "staked":
-        await _add_stake_info_to_embed(channel_embed, session, stake_info_by_player)
+        await _add_stake_info_to_embed(channel_embed, session)
 
     apply_draft_footer_from_session(channel_embed, session)
 
