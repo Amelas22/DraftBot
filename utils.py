@@ -3078,8 +3078,13 @@ async def get_formatted_stake_pairs(session_id, sign_ups):
             # Sort by amount (highest first)
             unique_pairs.sort(key=lambda x: x[2], reverse=True)
             
-            # Format for display - Team Red player vs Team Blue player
-            formatted_lines = [f"{a} vs {b}: {amount} tix" for a, b, amount in unique_pairs]
+            # Bolded to match what format_entries emits for a pool draft.
+            # Both regimes come out of this function and land on the same four
+            # surfaces; if they render differently, every one of those surfaces
+            # needs to know which regime it is looking at, which is precisely
+            # what this function exists to spare them.
+            formatted_lines = [f"**{a}** vs **{b}**: {amount} tix"
+                               for a, b, amount in unique_pairs]
             
             return formatted_lines, total_stake
 

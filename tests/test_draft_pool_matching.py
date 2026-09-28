@@ -402,6 +402,49 @@ async def test_every_display_surface_reads_the_pool_for_a_pool_draft(test_db):
     assert any("Ada" in line and "30" in line for line in lines), lines
 
 
+@pytest.mark.asyncio
+async def test_both_regimes_describe_the_money_the_same_way(test_db):
+    """Four surfaces render these lines and none of them is told which regime
+    produced them -- that is the point of routing both through one formatter.
+    If the two shapes differ, every surface has to sniff the text to render it,
+    and one of them did: the teams embed split each line on " vs " to decide,
+    which mangled a player whose display name happened to contain it.
+
+    So the shapes have to match. Names bolded, amount after ": ", "tix".
+    """
+    import re
+
+    from models.stake_pairing import StakePairing
+    from utils import get_formatted_stake_pairs
+
+    names = {"p1": "Ada", "p2": "Brin", "p3": "Cyd", "p4": "Dov"}
+
+    await seed_session(session_id="pool", guild="g", stage=None,
+                       teams=(["p1", "p2"], ["p3", "p4"]))
+    for player, amount in {"p1": 30, "p2": 20, "p3": 30, "p4": 20}.items():
+        await wallet_service.adjust("g", player, 500, f"seed-{player}", "test")
+        await pool.set_entry("g", "pool", player, amount)
+    pool_lines, _ = await get_formatted_stake_pairs("pool", names)
+
+    # A legacy draft is one that HAS pairing rows; that is the whole gate.
+    await seed_session(session_id="tiered", guild="g", stage=None,
+                       teams=(["p1", "p2"], ["p3", "p4"]))
+    async with AsyncSessionLocal() as db:
+        async with db.begin():
+            db.add(StakePairing(session_id="tiered", player_a_id="p1",
+                                player_b_id="p3", amount=30))
+            db.add(StakePairing(session_id="tiered", player_a_id="p2",
+                                player_b_id="p4", amount=20))
+    tiered_lines, _ = await get_formatted_stake_pairs("tiered", names)
+
+    assert pool_lines and tiered_lines, (pool_lines, tiered_lines)
+    shape = re.compile(r"^(\*\*[^*]+\*\*)( vs \*\*[^*]+\*\*)?: \d+ tix$")
+    for line in pool_lines + tiered_lines:
+        assert shape.match(line), (
+            f"{line!r} is a third rendering of the same field -- a surface "
+            f"that shows both regimes now has to tell them apart by eye")
+
+
 def test_a_pool_draft_is_not_offered_a_settle_debts_button():
     """No debt exists under the pool; the button invites a player to pay
     something they do not owe."""
