@@ -1,4 +1,5 @@
 """Top-N cut: starting the bracket, freezing swiss, advancing, placement."""
+from datetime import datetime
 import random
 
 import pytest
@@ -67,9 +68,12 @@ async def _matches(session, round_id):
 
 
 async def _participants(session, tournament_id):
+    """Ordered by points, best first -- the seeding order. Unordered, a test
+    that drops "the top two" drops an unspecified two."""
     return (await session.execute(
         select(TournamentParticipant).where(
             TournamentParticipant.tournament_id == tournament_id)
+        .order_by(TournamentParticipant.points.desc())
     )).scalars().all()
 
 
@@ -120,8 +124,13 @@ async def test_a_bracket_bye_awards_no_points(session):
 @pytest.mark.asyncio
 async def test_start_playoff_refuses_a_short_field(session):
     t = await _swiss_done(session, cut_to=8, teams=6)
-    with pytest.raises(ValueError, match="6"):
+    with pytest.raises(ValueError) as caught:
         await start_playoff(session, t.id)
+    # Named counts, not a bare "6": the message has to say how many are
+    # eligible AND what was asked for, or an organiser cannot tell whether to
+    # shrink the cut or chase a drop.
+    assert "6 eligible team(s)" in str(caught.value)
+    assert "top 8" in str(caught.value)
 
 
 @pytest.mark.asyncio
@@ -602,3 +611,66 @@ async def test_advance_round_refuses_a_current_round_with_no_round_row(session):
         await advance_round(session, t.id, random.Random(1))
 
     assert t.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_start_playoff_counts_dropped_teams_out_of_the_cut(session):
+    """Six entered, two dropped, cut to 6: the bracket cannot be filled even
+    though the tournament has six teams in it."""
+    t = await _swiss_done(session, cut_to=6, teams=6)
+    for participant in (await _participants(session, t.id))[:2]:
+        participant.dropped_at = datetime.now()
+    await session.flush()
+
+    with pytest.raises(ValueError) as caught:
+        await start_playoff(session, t.id)
+    assert "4 eligible team(s)" in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_the_prompt_and_the_bracket_agree_that_a_cut_is_unfillable(session):
+    """The Start button's state IS what `start_playoff` will do.
+
+    This is the invariant the shared rule exists for. The prompt used to
+    decide for itself, comparing an eligible count against the cut size; if
+    that ever disagreed with what `start_playoff` refuses, the organiser got a
+    live button that then errored. Asserting the two together is the only test
+    that catches them drifting apart.
+    """
+    t = await _swiss_done(session, cut_to=8, teams=6)
+    with pytest.raises(SwissComplete) as prompt:
+        await advance_round(session, t.id, random.Random(1))
+    assert prompt.value.fillable is False
+    with pytest.raises(ValueError):                   # ... and the bracket agrees
+        await start_playoff(session, t.id)
+
+
+@pytest.mark.asyncio
+async def test_the_prompt_and_the_bracket_agree_that_a_cut_is_fillable(session):
+    """The other half: an enabled button must lead to a bracket that starts."""
+    t = await _swiss_done(session, cut_to=4, teams=6)
+    with pytest.raises(SwissComplete) as prompt:
+        await advance_round(session, t.id, random.Random(1))
+    assert prompt.value.fillable is True
+    assert await start_playoff(session, t.id) is not None
+
+
+@pytest.mark.asyncio
+async def test_start_playoff_seeds_past_a_dropped_team_rather_than_over_it(session):
+    """A drop above the line moves the line down, it does not leave a hole.
+
+    The refusal case is covered; this is the one that costs money if it is
+    wrong. Eight teams, the top two dropped, cut to four: the seeds belong to
+    the best four still IN, and no dropped team carries one.
+    """
+    t = await _swiss_done(session, cut_to=4, teams=8)
+    ranked = await _participants(session, t.id)
+    for participant in ranked[:2]:
+        participant.dropped_at = datetime.now()
+    await session.flush()
+
+    await start_playoff(session, t.id)
+
+    seeded = {p.team_name: p.seed for p in await _participants(session, t.id)
+              if p.seed is not None}
+    assert seeded == {"Team2": 1, "Team3": 2, "Team4": 3, "Team5": 4}

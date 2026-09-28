@@ -466,3 +466,21 @@ async def test_record_shows_a_draw_if_one_is_ever_recorded(match_control_db):
 
     row = next(s for s in data["standings"] if s["team_id"] == alpha.id)
     assert row["record"] == "1-0-1"
+
+
+def test_no_cut_line_for_a_size_that_is_not_a_positive_number():
+    """A negative cut is not a smaller cut.
+
+    `cut_to=-1` used to slice "all but the last" and report a line two thirds
+    down the standings; a size past the field raised IndexError. Both were
+    reachable, because create_tournament stores cut_to unvalidated and only
+    the Discord option enforces a minimum. Neither is a cut, so neither draws
+    a line.
+    """
+    standings = _ranked(("A", False), ("B", False), ("C", False))
+    assert cut_after_rank(standings, -1) is None
+    assert cut_after_rank(standings, -5) is None
+    assert cut_after_rank(standings, 0) is None
+    assert cut_after_rank(standings, None) is None
+    # still draws a real line for a real cut
+    assert cut_after_rank(standings, 2) == 2

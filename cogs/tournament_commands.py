@@ -1320,7 +1320,9 @@ class TournamentCog(commands.Cog):
                 except SwissComplete as done:
                     # Completing is irreversible and one call away, so the TO
                     # chooses rather than having the choice made for them.
-                    short = done.eligible < done.cut_to
+                    # Not `done.eligible < done.cut_to`: who a cut can seat
+                    # is decided once, beside the rule start_playoff refuses on.
+                    short = not done.fillable
                     view = PlayoffPromptView(self, tournament_id, done.cut_to, disabled=short)
                     # `top:` has min_value=2, so suggesting top:1 (or top:0)
                     # hands the TO a command Discord will refuse to send.
