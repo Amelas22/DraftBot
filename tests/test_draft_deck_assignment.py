@@ -376,9 +376,11 @@ def _forget_what_was_said():
     would otherwise leak between tests."""
     svc._SAID.clear()
     svc._UNSEATABLE.clear()
+    svc._OVER.clear()
     yield
     svc._SAID.clear()
     svc._UNSEATABLE.clear()
+    svc._OVER.clear()
 
 
 async def test_a_finished_draft_is_not_re_read_from_disk_every_tick(test_db, library_on):
@@ -675,3 +677,149 @@ async def test_a_communal_library_lends_to_everyone_in_the_pod(
         assigned = await svc.assign_drafted_decks(SESSION)
 
     assert assigned > 0 and len(told) == assigned
+
+
+# --- who can still use a deck ------------------------------------------------
+#
+# A drafter may borrow from the moment their pool is assigned until they have no
+# match left that can change the draft. Two things end it, and they are asked
+# per PLAYER, not per pod: the draft being decided, or that player's own matches
+# all being in. The same rule decides when the library asks for a deck BACK
+# (services.library_reminders.reminder_due), so the moment it would chase a deck
+# is the moment it stops handing one out.
+
+async def _reported(session_id, pairs):
+    """Give the draft its matches. `pairs` is (p1, p2, reported?) per match."""
+    from datetime import datetime
+
+    from models.match import MatchResult
+    from sqlalchemy import select as _select
+    async with AsyncSessionLocal() as s:
+        row = await s.scalar(
+            _select(DraftSession).where(DraftSession.session_id == session_id))
+        row.session_type = "staked"          # a fully-paired format
+        for n, (p1, p2, done) in enumerate(pairs, 1):
+            s.add(MatchResult(session_id=session_id, match_number=n,
+                              player1_id=p1, player2_id=p2,
+                              result_submitted_at=datetime.now() if done else None))
+        await s.commit()
+
+
+async def test_a_drafter_with_a_match_left_is_still_given_their_deck(
+        test_db, library_on):
+    """The pod is not the unit. Bob reporting says nothing about whether Alice
+    still needs her cards -- she has a match to play, and the deck is how she
+    plays it.
+
+    This is the case a draft-level check gets wrong: the bot restarts during
+    deckbuilding so the endDraft push never runs, the players who own their
+    cards report round one, and the reconciler then arrives to find one result
+    in. Refusing the whole pod there strands everybody who had not collected.
+    """
+    await _seed()
+    await _reported(SESSION, [(BOB, "other", True), (ALICE, "other2", False)])
+
+    assert await svc.assign_drafted_decks(SESSION) == 1
+
+    loans = await _loans()
+    assert ALICE in loans, "she has a match left; the deck is how she plays it"
+    assert BOB not in loans, "his match is reported; he is done"
+
+
+async def test_a_drafter_whose_matches_are_all_in_is_not_given_a_deck(
+        test_db, library_on):
+    """Nothing left to play with it, so nothing to lend it for."""
+    await _seed()
+    await _reported(SESSION, [(ALICE, "other", True), (BOB, "other2", False)])
+
+    await svc.assign_drafted_decks(SESSION)
+
+    loans = await _loans()
+    assert ALICE not in loans, "all of Alice's matches are reported"
+    assert BOB in loans, "Bob still has one to play"
+
+
+async def test_a_decided_draft_offers_nobody_a_deck(test_db, library_on):
+    """Settled, not fully played: a side clinching decides the draft with dead
+    rubbers still unreported, and cards should not go out for those."""
+    await _seed()
+    await _reported(SESSION, [(ALICE, BOB, False)])
+    from sqlalchemy import select as _select
+    async with AsyncSessionLocal() as s:
+        row = await s.scalar(
+            _select(DraftSession).where(DraftSession.session_id == SESSION))
+        row.victory_message_id_results_channel = "123"
+        await s.commit()
+
+    assert await svc.assign_drafted_decks(SESSION) == 0
+    assert await _loans() == {}
+
+
+async def test_an_unsettled_draft_is_not_cached_as_finished(test_db, library_on):
+    """"Everyone still owed a deck has reported" looks terminal and is not.
+
+    create_rooms_pairings deletes a session's match rows and regenerates them
+    unreported, so a re-run puts those players back in play. Caching on that
+    would skip them for the rest of the process's life. Only settlement, which
+    cannot be undone, is cached.
+    """
+    await _seed()
+    await _reported(SESSION, [(ALICE, BOB, True)])
+
+    assert await svc.assign_drafted_decks(SESSION) == 0
+    assert str(SESSION) not in svc._OVER, "not terminal -- pairings can be redone"
+
+    # the pairings are regenerated, unreported, exactly as utils.py does it
+    from sqlalchemy import delete as _delete
+
+    from models.match import MatchResult
+    async with AsyncSessionLocal() as s:
+        await s.execute(_delete(MatchResult).where(
+            MatchResult.session_id == SESSION))
+        await s.commit()
+    await _reported(SESSION, [(ALICE, BOB, False)])
+
+    assert await svc.assign_drafted_decks(SESSION) == 2, "they are back in play"
+
+
+async def test_a_draft_that_has_gone_quiet_offers_nobody_a_deck(
+        test_db, library_on):
+    """A draft that stalls satisfies neither half of the rule on its own: it
+    never settles, and its last matches are never reported. Without a backstop
+    the offer is immortal -- the cards stay reserved and the drafter's one
+    active-loan slot stays occupied, so they are silently skipped at every
+    later draft. An hour without a report is taken as over.
+    """
+    from datetime import datetime, timedelta
+    from sqlalchemy import select as _select
+
+    await _seed()
+    await _reported(SESSION, [(ALICE, BOB, False)])
+    long_ago = datetime.now() - timedelta(hours=3)
+    async with AsyncSessionLocal() as s:
+        row = await s.scalar(
+            _select(DraftSession).where(DraftSession.session_id == SESSION))
+        row.draft_start_time = row.teams_start_time = long_ago
+        await s.commit()
+
+    assert await svc.assign_drafted_decks(SESSION) == 0
+    assert await _loans() == {}
+
+
+async def test_a_draft_reported_recently_is_still_live(test_db, library_on):
+    """The clock runs from the last sign of life, not from the draft's start:
+    a long draft still reporting results is not stale."""
+    from datetime import datetime, timedelta
+    from sqlalchemy import select as _select
+
+    await _seed()
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", True)])
+    long_ago = datetime.now() - timedelta(hours=5)
+    async with AsyncSessionLocal() as s:
+        row = await s.scalar(
+            _select(DraftSession).where(DraftSession.session_id == SESSION))
+        row.draft_start_time = row.teams_start_time = long_ago
+        await s.commit()
+
+    assert await svc.assign_drafted_decks(SESSION) == 1, "Bob reported just now"
+    assert ALICE in await _loans()

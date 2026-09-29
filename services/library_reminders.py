@@ -35,6 +35,14 @@ from loguru import logger
 REMIND_AFTER_FINISH = timedelta(hours=1)
 REPEAT_AFTER = timedelta(hours=1)
 
+# A draft with no sign of life for this long is treated as over. Without it an
+# offer can be immortal: a draft that is partly reported and then fizzles never
+# settles and never finishes its matches, so neither half of the rule in
+# who_can_still_use ever fires. The cards stay reserved and -- least visibly and
+# most damagingly -- the borrower's one active-loan slot stays occupied, so they
+# are silently passed over at every later draft.
+QUIET_AFTER = timedelta(hours=1)
+
 # The one state with anything to give back. An 'assigned' loan is an offer
 # nobody collected, which expire_stale_assignments retracts on its own, and the
 # in-flight states mean a trade is already moving.
@@ -313,10 +321,58 @@ async def _still_out(loan_id: Any) -> bool:
 
 
 class DraftState(NamedTuple):
-    """What the reminder pass needs to know about one draft, read once."""
+    """What the library needs to know about one draft, read once."""
     done_at: "dict[str, datetime]"      # finished players -> when they reported their last match
     settled: bool                       # see draft_state
     last_result: Optional[datetime]     # latest reported result; None if nothing was reported
+    # Newest sign of life: the latest result, else when teams were made or the
+    # draft started. None when there is nothing to measure from. See gone_quiet.
+    last_activity: Optional[datetime] = None
+
+    def gone_quiet(self, now: Optional[datetime] = None) -> bool:
+        """Has this draft shown no sign of life for QUIET_AFTER?
+
+        Measured from the last thing that happened, not from the draft's start,
+        so a long evening that is still reporting results is not stale. A draft
+        with nothing to measure from is left alone.
+        """
+        if self.last_activity is None:
+            return False
+        return (now or datetime.now()) - self.last_activity > QUIET_AFTER
+
+
+def who_can_still_use(state: DraftState, player_ids: Any,
+                      now: Optional[datetime] = None) -> "set[str]":
+    """Which of these players still have a match that can change this draft.
+
+    The library's one rule about time: the moment this stops including somebody
+    is the moment reminder_due starts asking them for the deck BACK (done_at and
+    settled are exactly what send_due_reminders reads). Handing one out, taking
+    an uncollected offer back and chasing a collected one are the same question
+    asked from three sides, so they read the same DraftState.
+
+    Asked per PLAYER, never per pod. One drafter reporting says nothing about
+    whether another still needs their cards, and refusing a whole pod on the
+    first result strands everyone who had not collected yet.
+
+    Empty when the draft is decided: a side clinching settles it with dead
+    rubbers still unreported, and cards should not go out for those. Empty too
+    when it has simply gone quiet -- see DraftState.gone_quiet, which is what
+    stops a fizzled draft pinning a deck and a loan slot for good.
+
+    Note the per-player half is vacuous for a progressively-paired format, where
+    done_at cannot answer from the rows that exist yet: for those only
+    settlement and silence end it.
+    """
+    if state.settled or state.gone_quiet(now):
+        return set()
+    return {str(p) for p in player_ids if str(p) not in state.done_at}
+
+
+async def who_can_still_use_a_deck(session_id: Any, player_ids: Any,
+                                   now: Optional[datetime] = None) -> "set[str]":
+    """who_can_still_use, reading the draft first."""
+    return who_can_still_use(await draft_state(session_id), player_ids, now)
 
 
 async def draft_state(session_id: Any) -> DraftState:
@@ -332,9 +388,8 @@ async def draft_state(session_id: Any) -> DraftState:
     this does not reuse it.
 
     settled -- is this draft decided? Named for what it means, not "over":
-    card_lending_service._drafts_that_are_over asks a different question in the
-    same subsystem (would anybody still collect an offer), and counts a first
-    result rather than a victory. Defers to helpers.stale_drafts.is_finished_draft,
+    who_can_still_use asks the narrower question the library acts on (can THIS
+    player still use a deck), and this is one of its halves. Defers to helpers.stale_drafts.is_finished_draft,
     which reads the victory message as well as the stage -- the stage alone is
     wrong for most finished drafts, which never advance past 'pairings'. So a
     draft counts as settled the moment a side clinches, with dead rubbers
@@ -345,6 +400,9 @@ async def draft_state(session_id: Any) -> DraftState:
     last_result -- for a settled draft, the moment it was decided, give or take
     a dead rubber reported after the clinch (which only ever makes the first ask
     later, never early).
+
+    last_activity -- the newest of last_result, teams_start_time and
+    draft_start_time: what DraftState.gone_quiet measures silence from.
     """
     from sqlalchemy import select
 
@@ -366,8 +424,11 @@ async def draft_state(session_id: Any) -> DraftState:
 
     settled = row.session_stage in FINISHED_STAGES or is_finished_draft(row)
     last_result = max((t for _, _, t in results if t is not None), default=None)
+    last_activity = max((t for t in (last_result, row.teams_start_time,
+                                     row.draft_start_time) if t is not None),
+                        default=None)
     if row.session_type not in FULLY_PAIRED_TYPES:
-        return DraftState({}, settled, last_result)
+        return DraftState({}, settled, last_result, last_activity)
 
     last_played: "dict[str, datetime]" = {}
     outstanding: "set[str]" = set()
@@ -381,4 +442,4 @@ async def draft_state(session_id: Any) -> DraftState:
             elif pid not in last_played or submitted_at > last_played[pid]:
                 last_played[pid] = submitted_at
     done_at = {pid: t for pid, t in last_played.items() if pid not in outstanding}
-    return DraftState(done_at, settled, last_result)
+    return DraftState(done_at, settled, last_result, last_activity)

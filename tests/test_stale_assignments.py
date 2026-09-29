@@ -1,9 +1,10 @@
-"""A deck offered for a draft that is over stops being collectable.
+"""A deck nobody can use any more stops being collectable.
 
-An assignment is a promise to a drafter who might still collect it. Once the
-draft is underway -- the first match result is in -- whoever was going to
-borrow has borrowed, and anyone still holding an uncollected assignment played
-without it. The offer is dead.
+An assignment is a promise to a drafter who might still collect it. It stops
+being one when that drafter has no match left that can change the draft --
+their own results are all in, or the draft has been decided. Asked per
+borrower: somebody else reporting says nothing about whether this player still
+needs their cards.
 
 Leaving it alive costs three things at once: the cards stay reserved so nobody
 else can borrow them, the drafter's one active-loan slot stays occupied so they
@@ -30,7 +31,7 @@ DECK = [{"name": "Swamp", "qty": 4}]
 async def _draft(stage="pairings", results=0, submitted=0, session_id=SESSION):
     async with AsyncSessionLocal() as s:
         s.add(DraftSession(session_id=session_id, guild_id=GUILD, cube="c",
-                           session_stage=stage))
+                           session_stage=stage, session_type="staked"))
         for i in range(results):
             s.add(MatchResult(
                 session_id=session_id, match_number=i + 1,
@@ -56,12 +57,16 @@ async def _state(loan_id):
         return (await s.get(CardLoan, loan_id)).state
 
 
-async def test_a_deck_expires_when_its_draft_has_a_result(test_db):
+async def test_a_result_from_someone_else_does_not_expire_an_offer(test_db):
+    """This used to retract the whole pod the moment ANY result landed, which
+    took decks off players who still had matches to play with them. The
+    borrower here is in no reported match of their own, so their offer stands.
+    """
     await _draft(results=9, submitted=1)
     loan_id = await _assigned()
 
-    assert await svc.expire_stale_assignments() == 1
-    assert await _state(loan_id) == "expired"
+    assert await svc.expire_stale_assignments() == 0
+    assert await _state(loan_id) == "assigned"
 
 
 async def test_a_draft_that_has_not_started_keeps_its_offer(test_db):
@@ -161,17 +166,18 @@ async def test_an_offer_collected_mid_sweep_is_not_retracted_under_the_borrower(
     await _draft(stage="completed", session_id="s-race")
     loan_id = await _assigned(source="draft:s-race")
 
-    real = svc._drafts_that_are_over
+    import services.library_reminders as rem
+    real = rem.who_can_still_use_a_deck
 
-    async def collect_it_first(session, sessions):
+    async def collect_it_first(session_id, player_ids):
         """Stand in for a /borrow landing between the read and the write."""
         async with AsyncSessionLocal() as other:
             loan = await other.get(CardLoan, loan_id)
             loan.state, loan.job_id = "out_pending", "live-race"
             await other.commit()
-        return await real(session, sessions)
+        return await real(session_id, player_ids)
 
-    monkeypatch.setattr(svc, "_drafts_that_are_over", collect_it_first)
+    monkeypatch.setattr(rem, "who_can_still_use_a_deck", collect_it_first)
 
     assert await svc.expire_stale_assignments() == 0, "nothing was retractable"
 
@@ -179,3 +185,73 @@ async def test_an_offer_collected_mid_sweep_is_not_retracted_under_the_borrower(
         loan = await s.get(CardLoan, loan_id)
     assert loan.state == "out_pending", "the collected deck is left alone"
     assert loan.job_id == "live-race", "and its trade is still tracked"
+
+
+# --- the other side of the same rule -----------------------------------------
+#
+# Retraction and assignment answer one question from opposite sides: can this
+# borrower still use a deck? Retracting on the pod's first result took the deck
+# away from players who had matches left to play with it.
+
+async def _pod(session_id=SESSION, matches=()):
+    """A fully-paired draft and its matches: (p1, p2, reported?) each."""
+    async with AsyncSessionLocal() as s:
+        s.add(DraftSession(session_id=session_id, guild_id=GUILD, cube="c",
+                           session_stage="pairings", session_type="staked"))
+        for n, (p1, p2, done) in enumerate(matches, 1):
+            s.add(MatchResult(session_id=session_id, match_number=n,
+                              player1_id=p1, player2_id=p2,
+                              result_submitted_at=datetime.now() if done else None))
+        await s.commit()
+
+
+async def test_an_offer_survives_while_its_borrower_still_has_a_match(test_db):
+    """Somebody else reporting is not this borrower's business. The deck is how
+    they play the match they have left, and retracting it here is what left
+    them unable to borrow at all."""
+    await _pod(matches=[("other1", "other2", True), (BORROWER, "x", False)])
+    loan = await _assigned()
+
+    assert await svc.expire_stale_assignments() == 0
+    assert await _state(loan) == "assigned"
+
+
+async def test_an_offer_expires_once_its_own_borrower_is_done(test_db):
+    """Nothing left to play with it, so the cards go back on the shelf and the
+    one active-loan slot is freed."""
+    await _pod(matches=[(BORROWER, "x", True), ("other1", "other2", False)])
+    loan = await _assigned()
+
+    assert await svc.expire_stale_assignments() == 1
+    assert await _state(loan) == "expired"
+
+
+async def test_an_offer_for_a_fizzled_draft_does_not_live_forever(test_db):
+    """The case that has no other backstop.
+
+    A draft that is partly reported and then stops -- no victory message, the
+    stage never leaves 'pairings', nobody abandons it -- never settles and
+    never finishes its matches. Eight drafts in the production database have
+    exactly that shape. Without a clock the offer is permanent: the cards stay
+    reserved, and the borrower's one active-loan slot stays occupied so they
+    are skipped at every later draft.
+    """
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    await _pod(matches=[(BORROWER, "x", False), ("y", "z", True)])
+    loan = await _assigned()
+    long_ago = datetime.now() - timedelta(hours=4)
+    async with AsyncSessionLocal() as s:
+        row = await s.scalar(
+            select(DraftSession).where(DraftSession.session_id == SESSION))
+        row.draft_start_time = row.teams_start_time = long_ago
+        for m in (await s.scalars(select(MatchResult).where(
+                MatchResult.session_id == SESSION))).all():
+            if m.result_submitted_at is not None:
+                m.result_submitted_at = long_ago
+        await s.commit()
+
+    assert await svc.expire_stale_assignments() == 1
+    assert await _state(loan) == "expired"

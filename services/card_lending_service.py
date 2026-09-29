@@ -31,8 +31,6 @@ from services.card_substitution_service import learn_substitutions
 from database.retry import with_db_retry
 from models.card_loan import ACTIVE_STATES, CardLoan
 from models.library import Library
-from models.match import MatchResult
-from models.draft_session import DraftSession
 from services.card_library_inventory import library_available
 from services.library_service import library_for, library_id_for
 from services.library_access_service import may_borrow
@@ -504,14 +502,17 @@ async def assign_deck(guild_id: Any, borrower_id: Any, cards: "list[dict[str, An
 
 
 async def expire_stale_assignments() -> int:
-    """Retract deck offers for drafts that are over. Returns how many.
+    """Retract deck offers nobody can use any more. Returns how many.
 
-    An assignment is a promise to a drafter who might still collect it. Once
-    the draft is UNDERWAY -- its first match result recorded -- whoever was
-    going to borrow has borrowed, and anybody still holding an uncollected
-    offer played without it. A draft that reached 'completed' or was abandoned
-    is over whether or not every result was entered, and waiting for one that
-    is never coming would reserve those cards for good.
+    An assignment is a promise to a drafter who might still collect it. It
+    stops being one when that drafter has no match left that can change the
+    draft -- their own results are all in, or the draft has been decided and
+    what remains is dead rubbers.
+
+    Asked per BORROWER, not per draft. Retracting the whole pod on its first
+    reported result took the deck away from players who still had matches to
+    play with it, and left them unable to borrow at all. It is the same rule
+    assignment mints by and reminder_due chases by, read from the third side.
 
     Only 'assigned' is retracted. A collected deck really is out, and expiring
     it would abandon the claim on cards somebody is holding.
@@ -525,42 +526,39 @@ async def expire_stale_assignments() -> int:
     A loan with no draft behind it is left alone: nothing here can tell whether
     a hand-made assignment is stale.
     """
+    from collections import defaultdict
+
+    from services.library_reminders import who_can_still_use_a_deck
+
     async with AsyncSessionLocal() as session:
         offers = list((await session.scalars(
             select(CardLoan).where(CardLoan.state == "assigned",
                                    CardLoan.source.like("draft:%")))).all())
-        if not offers:
-            return 0
+    if not offers:
+        return 0
 
-        finished = await _drafts_that_are_over(
-            session, {str(l.source).split(":", 1)[1] for l in offers})
-        retract = [l for l in offers
-                   if str(l.source).split(":", 1)[1] in finished]
-        if not retract:
-            return 0
+    # Grouped so the question is asked once per draft rather than once per
+    # offer, and asked outside the write session above: the rule reads the
+    # draft and its results through sessions of its own.
+    by_draft: "dict[str, list[Any]]" = defaultdict(list)
+    for loan in offers:
+        by_draft[str(loan.source).split(":", 1)[1]].append(loan)
+
+    retract: "list[Any]" = []
+    for session_id, loans in by_draft.items():
+        still_playing = await who_can_still_use_a_deck(
+            session_id, [l.borrower_id for l in loans])
+        retract += [l for l in loans if str(l.borrower_id) not in still_playing]
+    if not retract:
+        return 0
+
+    async with AsyncSessionLocal() as session:
         expired = await _retract(session, retract)
 
     if expired:
-        logger.info("library: retracted {} uncollected deck offer(s) for drafts "
-                    "that are over", expired)
+        logger.info("library: retracted {} uncollected deck offer(s) whose "
+                    "borrower has no match left to play", expired)
     return expired
-
-
-async def _drafts_that_are_over(session: Any, sessions: "set[str]") -> "set[str]":
-    """Which of these drafts no longer owe anybody an uncollected deck.
-
-    Either the draft reached a terminal stage, or its first result is in --
-    at which point whoever was going to borrow has borrowed.
-    """
-    over = set((await session.scalars(
-        select(DraftSession.session_id).where(
-            DraftSession.session_id.in_(sessions),
-            DraftSession.session_stage.in_(("completed", "abandoned"))))).all())
-    started = set((await session.scalars(
-        select(MatchResult.session_id).where(
-            MatchResult.session_id.in_(sessions),
-            MatchResult.result_submitted_at.isnot(None)))).all())
-    return over | started
 
 
 async def _retract(session: Any, loans: "list[Any]") -> int:
