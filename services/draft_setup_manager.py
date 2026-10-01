@@ -1514,13 +1514,6 @@ class DraftSetupManager:
                     self.logger.info(f"Draft log already published for {self.session_id}; skipping")
                     return True
                 draft_data = draft_session.draft_data
-                # getattr, not direct access: models/draft_session.py declares
-                # session_type = Column(String(64)) with no nullable=False, so
-                # the column is genuinely nullable -- absence just means "not
-                # premade", the same as any other non-premade type. The same
-                # nullable-coalesce shape already guards this attribute
-                # elsewhere in this file and in log_reconciler.py.
-                session_type = getattr(draft_session, "session_type", None)
 
             if not draft_data:
                 self.logger.warning(f"No captured draft_data for {self.session_id}; nothing to publish")
@@ -1536,7 +1529,7 @@ class DraftSetupManager:
                 except Exception as e:
                     self.logger.error(f"Failed to release Draftmancer log for {self.session_id}: {e}")
 
-            # Premade drafts get a full table page. Built before the embed
+            # Every draft gets a full table page. Built before the embed
             # because its URL goes inside; best-effort because the embed is
             # the deliverable and the page is only an enhancement to it. The
             # `draft_session` read above is detached once that `async with`
@@ -1550,16 +1543,15 @@ class DraftSetupManager:
             # seconds, not millis) -- the engine uses NullPool, so there is no
             # pool for this to exhaust. Accepted: the only DB work before the
             # call is one SELECT, SQLite is WAL-mode so no writer blocks on
-            # it, and this runs at most once per completed premade draft.
+            # it, and this runs at most once per completed draft.
             table_url = None
-            if session_type == "premade":
-                from services.draft_table_publisher import publish as publish_table
-                async with db_session() as session:
-                    draft_session = (await session.execute(
-                        select(DraftSession).filter(DraftSession.session_id == self.session_id)
-                    )).scalar_one_or_none()
-                    if draft_session:
-                        table_url = await publish_table(draft_data, draft_session)
+            from services.draft_table_publisher import publish as publish_table
+            async with db_session() as session:
+                draft_session = (await session.execute(
+                    select(DraftSession).filter(DraftSession.session_id == self.session_id)
+                )).scalar_one_or_none()
+                if draft_session:
+                    table_url = await publish_table(draft_data, draft_session)
 
             # Post the MagicProTools embed/links to Discord.
             sent = False

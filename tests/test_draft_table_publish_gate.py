@@ -23,9 +23,14 @@ def _session_row(session_type="premade"):
 
 
 @pytest.mark.asyncio
-async def test_a_premade_draft_publishes_a_page_and_records_the_url():
+@pytest.mark.parametrize("session_type", ["premade", "random", "staked"])
+async def test_every_draft_publishes_a_page_and_records_the_url(session_type):
+    """Every draft whose log is published gets the table, not only league
+    (premade) drafts -- these three are every type that has posted a log in
+    the last 90 days."""
     m = _manager()
-    ds = _session_row()
+    m.session_type = session_type
+    ds = _session_row(session_type=session_type)
     db_factory, _ = _mock_db_session(ds)
     with patch("services.draft_setup_manager.db_session", db_factory), \
          patch("services.draft_table_publisher.publish",
@@ -40,25 +45,6 @@ async def test_a_premade_draft_publishes_a_page_and_records_the_url():
     assert embed.await_args.kwargs["table_url"] == URL
     assert ds.drafttable_url == URL
     assert ds.data_received is True
-
-
-@pytest.mark.asyncio
-async def test_a_staked_draft_does_not_build_a_page():
-    """Scope is premade only -- every other type must not even call the publisher."""
-    m = _manager()
-    ds = _session_row(session_type="staked")
-    db_factory, _ = _mock_db_session(ds)
-    with patch("services.draft_setup_manager.db_session", db_factory), \
-         patch("services.draft_table_publisher.publish",
-               AsyncMock(side_effect=AssertionError("must not build"))) as publish, \
-         patch.object(DraftSetupManager, "send_magicprotools_embed",
-                      AsyncMock(return_value=True)) as embed:
-        ok = await m.publish_draft_log()
-
-    assert ok is True
-    publish.assert_not_awaited()
-    assert embed.await_args.kwargs["table_url"] is None
-    assert ds.drafttable_url is None
 
 
 @pytest.mark.asyncio

@@ -5,9 +5,9 @@ subtypes -- but no oracle text, no power/toughness, and no combined type line.
 It does carry the Scryfall `id`, so everything missing is one lookup away.
 
 Fetched in bulk (`/cards/collection`, 75 identifiers per POST). There is no
-disk cache: the bot builds well under one page a day, so a page costs about
-four requests and caching would buy nothing while adding an absolute path and
-a corrupt-cache branch to reason about.
+disk cache: a page costs about four requests and the bot builds one per
+published draft log -- a handful a day -- so caching would buy little while
+adding an absolute path and a corrupt-cache branch to reason about.
 
 Follows the same Scryfall etiquette as helpers/card_image_fetcher.py -- a real
 User-Agent and <=10 req/s -- because this hits the API, not the image CDN.
