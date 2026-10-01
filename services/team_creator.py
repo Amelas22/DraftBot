@@ -9,7 +9,7 @@ and enable reuse across different team creation triggers.
 from loguru import logger
 from datetime import datetime, timedelta
 
-from services.draft_pool_service import match_pool
+from services.draft_pool_service import match_pool, pool_balance
 import discord
 import random
 from sqlalchemy import update, select
@@ -81,6 +81,10 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                         await db_session.execute(update(DraftSession)
                                             .where(DraftSession.session_id == session.session_id)
                                             .values(team_a=team_a, team_b=team_b))
+
+                # What team creation is about to change, so a pool that cannot
+                # settle can put the draft back exactly as it was.
+                before = _unwind_snapshot(session)
 
                 # Update session timing and stage
                 session.teams_start_time = datetime.now()
@@ -201,18 +205,21 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
         # transaction rolls back -- leaving teams written by split_into_teams
         # (its own transaction) beside a session_stage that never advanced.
         if pool_sides is not None:
-            # Guarded so a failure here cannot swallow the announcement. The
-            # teams are written and committed by now; a draft nobody is told
-            # about is worse than one whose pool figure is the declared total,
-            # which is what every staked draft posted before this change.
+            # match_pool is all or nothing, so a failure here has moved no
+            # money. The draft goes back to sign-ups as it was, and nothing has
+            # been announced yet -- both announcements come after this block.
             try:
                 result = await match_pool(*pool_sides)
             except Exception:
                 logger.opt(exception=True).error(
-                    "the pool did not settle on {}; announcing the draft "
-                    "anyway, and the figure below is what was declared",
+                    "the pool did not settle on {}; unwinding the draft to sign-ups",
                     getattr(session, "session_id", "?"))
-                result = {}
+                await unwind_team_creation(session.session_id, before)
+                await interaction.followup.send(
+                    "⚠️ The prize pool couldn't be settled, so teams weren't "
+                    "created. Everyone's entry is unchanged -- run a new "
+                    "**ready check**, then **Create Teams** to try again.")
+                return False
             # Say what came back, now the money has actually moved. The copy
             # promises unmatched entries are returned before the draft starts;
             # until this, nothing told the player it had happened.
@@ -295,6 +302,89 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
         except:
             pass
         return False
+
+
+# Every column team creation changes before the pool is matched.
+_UNWIND_COLUMNS = ("session_stage", "teams_start_time", "deletion_time",
+                   "team_a", "team_b", "sign_ups")
+
+
+def _unwind_snapshot(session):
+    """The draft's values for _UNWIND_COLUMNS, copied so later edits cannot reach them."""
+    snap = {}
+    for column in _UNWIND_COLUMNS:
+        value = getattr(session, column)
+        snap[column] = (dict(value) if isinstance(value, dict)
+                        else list(value) if isinstance(value, list) else value)
+    return snap
+
+
+async def unwind_team_creation(session_id, restore):
+    """Put a draft back to before team creation, in one transaction.
+
+    For a pool that could not be matched: the teams, the stage and the clocks
+    revert, so the queue is a queue again and Create Teams can be pressed anew.
+    """
+    async with AsyncSessionLocal() as db_session:
+        async with db_session.begin():
+            await db_session.execute(update(DraftSession)
+                                     .where(DraftSession.session_id == session_id)
+                                     .values(**restore))
+
+
+# How far back startup looks for a draft a crash left half-made.
+_INTERRUPTED_LOOKBACK = timedelta(hours=24)
+
+
+async def unwind_interrupted_team_creations(bot):
+    """Put back drafts a crash left between committing teams and matching the pool.
+
+    No except clause sees a process dying. match_pool is all or nothing and
+    stamps pool_matched_at in the same transaction as its refunds, so what such
+    a crash leaves is a draft at 'teams' with money in its pool and no stamp --
+    and nothing announced. The stamp, not the sides, is the test: removing a
+    player after teams form refunds their entry, so a running draft's sides go
+    unequal too. Run once at startup, before drafts in setup are reconnected.
+
+    The draft returns to sign-ups with every entry where it was. A premade
+    draft keeps its rosters, which were set when it was created, not here.
+    """
+    from config import get_queue_inactivity_minutes
+
+    cutoff = datetime.now() - _INTERRUPTED_LOOKBACK
+    async with AsyncSessionLocal() as db_session:
+        drafts = [d for d in (await db_session.scalars(select(DraftSession).where(
+            DraftSession.session_stage == "teams",
+            DraftSession.pool_matched_at.is_(None),
+            DraftSession.teams_start_time >= cutoff))).all()
+            if d.session_type == "staked" or d.entry_fee]
+
+    unwound = []
+    for draft in drafts:
+        if await pool_balance(str(draft.guild_id), draft.session_id) <= 0:
+            continue          # nothing at risk: never funded, or already paid out
+        restore = {
+            "session_stage": None, "teams_start_time": None,
+            "deletion_time": datetime.now() + timedelta(
+                minutes=get_queue_inactivity_minutes(draft.guild_id)),
+        }
+        if draft.session_type != "premade":
+            restore.update(team_a=None, team_b=None)
+        await unwind_team_creation(draft.session_id, restore)
+        unwound.append(draft.session_id)
+        logger.warning("draft {} was interrupted before its pool was matched; "
+                       "returned it to sign-ups", draft.session_id)
+        channel = bot.get_channel(int(draft.draft_channel_id)) if draft.draft_channel_id else None
+        if channel is not None:
+            try:
+                await channel.send(
+                    f"⚠️ Team creation for `{draft.friendly_id or draft.session_id}` "
+                    "was interrupted before its prize pool was settled, so the draft "
+                    "is back at sign-ups with every entry unchanged. Run a new "
+                    "**ready check**, then **Create Teams** to try again.")
+            except discord.HTTPException as e:
+                logger.warning(f"could not tell {draft.session_id}'s channel it was unwound: {e}")
+    return unwound
 
 
 async def _add_stake_info_to_embed(embed, session):

@@ -52,3 +52,14 @@ async def test_a_retry_after_a_failure_levels_the_pool_normally():
     held = await pool.contributions("g", "s1")
     assert result["matched"] == 50
     assert sum(held[p] for p in A) == sum(held[p] for p in B) == 50
+
+
+@pytest.mark.asyncio
+async def test_a_failed_match_does_not_record_the_pool_as_matched():
+    from session import get_draft_session
+
+    with patch.object(pool, "_refund_in", failing_refund()):
+        with pytest.raises(Exception):
+            await pool.match_pool("g", "s1", A, B)
+
+    assert (await get_draft_session("s1")).pool_matched_at is None

@@ -21,6 +21,7 @@ Note the ledgers differ on refunds: tournament escrow keys a refund as
 once. A pool entry can be refunded repeatedly -- unmatched excess, then teardown
 -- so refunds here carry their own reason in the key.
 """
+from datetime import datetime
 from operator import itemgetter
 from typing import Awaitable, Callable, Iterable, TypedDict, TypeVar
 
@@ -526,14 +527,27 @@ def _trim(held: dict[str, int], players: list[str],
 
 async def _apply_refunds(guild_id: str, session_id: str,
                          refunds: list[tuple[str, int, str]]) -> None:
-    """Book match_pool's planned refunds all at once, or not at all.
+    """Book match_pool's planned refunds, and record the pool as matched, at once or not at all.
 
     One commit per refund left a pool half-levelled at stage 'teams' whenever
     anything failed part-way, process death included.
+
+    The same transaction stamps the draft's pool_matched_at, even when there is
+    nothing to refund: a matched pool and its record of being matched cannot
+    exist without each other. That record is what startup recovery reads to
+    tell a draft a crash left half-made from one whose sides went unequal
+    because a player was removed after teams formed.
     """
-    if refunds:
-        await _money_transaction(lambda session: _refund_all_in(
-            session, guild_id, session_id, refunds))
+    from sqlalchemy import update as _update
+    from models.draft_session import DraftSession
+
+    async def book(session: AsyncSession) -> None:
+        await _refund_all_in(session, guild_id, session_id, refunds)
+        await session.execute(_update(DraftSession)
+                              .where(DraftSession.session_id == session_id)
+                              .values(pool_matched_at=datetime.now()))
+
+    await _money_transaction(book)
 
 
 def cap_targets(side: list[str], bets: dict[str, int], wants_cap: set[str],

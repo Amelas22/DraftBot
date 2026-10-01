@@ -76,6 +76,16 @@ async def main():
         ensure_running(bot, "_inactive_players_task", lambda: check_inactive_players_task(bot))
         from services.log_reconciler import run_log_reconciler
         ensure_running(bot, "_log_reconciler_task", lambda: run_log_reconciler(bot))
+        # Before reconnecting drafts in setup: a draft a crash left between
+        # committing its teams and settling its pool goes back to sign-ups,
+        # and is then one of them. Once per process, until it first succeeds.
+        if not getattr(bot, "_interrupted_teams_unwound", False):
+            try:
+                from services.team_creator import unwind_interrupted_team_creations
+                await unwind_interrupted_team_creations(bot)
+                bot._interrupted_teams_unwound = True
+            except Exception as e:
+                logger.error(f"Error unwinding interrupted team creations: {e}")
         # A reconnect leaves the managers of drafts in setup running, so this
         # runs until it first succeeds, not on every refire.
         if not getattr(bot, "_setup_drafts_reconnected", False):
