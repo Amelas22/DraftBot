@@ -2774,8 +2774,6 @@ class CancelConfirmationView(discord.ui.View):
 
     @discord.ui.button(label="Yes, Cancel Draft", style=discord.ButtonStyle.danger)
     async def confirm_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
-        
         # Disable buttons
         for child in self.children:
             child.disabled = True
@@ -2794,23 +2792,7 @@ class CancelConfirmationView(discord.ui.View):
                 f"User **{self.user_display_name}** has cancelled the draft `{session.friendly_id}`."
             )
         
-        # Check if there's an active draft manager for this session
-        manager = DraftSetupManager.get_active_manager(self.draft_session_id)
-        if manager:
-            logger.info(f"Found active draft manager for session {self.draft_session_id}, marking as cancelled")
-            # Mark the draft as cancelled to prevent log collection
-            await manager.mark_draft_cancelled()
-            
-            # Disconnect the manager from Draftmancer
-            logger.info(f"Disconnecting draft manager for session {self.draft_session_id} from Draftmancer")
-            await manager.disconnect_safely()
-            
-            # Verify manager is removed from active managers registry
-            if self.draft_session_id not in ACTIVE_MANAGERS:
-                logger.success(f"Successfully removed manager for session {self.draft_session_id} from active managers")
-            else:
-                logger.warning(f"Failed to remove manager for session {self.draft_session_id} from active managers registry")
-        else:
+        if not await DraftSetupManager.cancel_for_session(self.draft_session_id):
             logger.info(f"No active draft manager found for session {self.draft_session_id}")
         
         await ReadyCheckSession.cleanup(self.draft_session_id, channel)

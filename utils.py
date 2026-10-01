@@ -1779,6 +1779,7 @@ async def calculate_three_zero_drafters(session, draft_session_id, guild):
 
 async def cleanup_sessions_task(bot):
     while True:
+        cancelled_queues = []
         # A failed pass is logged and the next runs on schedule: a loop that dies
         # here is only revived at the next gateway reconnect.
         try:
@@ -1817,6 +1818,7 @@ async def cleanup_sessions_task(bot):
                         # never be attributed to anyone again.
                         await release_draft_pool(str(session.guild_id),
                                                  session.session_id, "expired")
+                        cancelled_queues.append(session.session_id)
                     
                         # Cancel the queue due to inactivity
                         if session.draft_channel_id and session.message_id:
@@ -1893,6 +1895,13 @@ async def cleanup_sessions_task(bot):
                         # Commit deletion of challenge
 
                         print(f"{challenge.id} has been removed.")
+
+            # A cancelled queue's manager would otherwise hold its Draftmancer
+            # socket until MANAGER_MAX_LIFETIME_MINUTES. Stopped after the commit,
+            # since each stop waits on its socket. (Local: that module imports this one.)
+            from services.draft_setup_manager import DraftSetupManager
+            await asyncio.gather(*(DraftSetupManager.cancel_for_session(session_id)
+                                   for session_id in cancelled_queues))
         except Exception as e:
             logger.exception(f"cleanup_sessions_task pass failed: {e}")
         # Sleep for a certain amount of time before running again

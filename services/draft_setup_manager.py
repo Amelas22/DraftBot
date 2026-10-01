@@ -2642,7 +2642,24 @@ class DraftSetupManager:
             The DraftSetupManager instance if found, None otherwise
         """
         return ACTIVE_MANAGERS.get(session_id)
-    
+
+    @classmethod
+    async def cancel_for_session(cls, session_id: str) -> bool:
+        """Stop a cancelled draft's manager, if it has one; True if it had.
+
+        Marked cancelled first, so its teardown attempts no log collection.
+        """
+        manager = cls.get_active_manager(session_id)
+        if manager is None:
+            return False
+        await manager.mark_draft_cancelled()
+        await manager.disconnect_safely()
+        if ACTIVE_MANAGERS.get(session_id) is manager:
+            # disconnect_safely swallows a failed socket disconnect, which
+            # leaves the manager registered; this is the only trace of it.
+            logger.warning(f"Manager for {session_id} is still registered after cancelling")
+        return True
+
     async def _handle_victory_aware_disconnect(self):
         """
         Handle disconnect with victory detection awareness.
