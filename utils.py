@@ -20,7 +20,7 @@ from helpers.draft_rooms import BLUE_SIDE, RED_SIDE, SHARED_CHAT_TEAM
 from helpers.team_names import RED, labels_for
 from services.draft_pool_service import (format_entries, format_outcomes,
                                          pool_balance, release_draft_pool,
-                                         settle_draw, settle_pool)
+                                         settle_draw, settle_pool, PoolNotSettled)
 from services.draft_analysis import DraftAnalysis
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
@@ -592,8 +592,15 @@ async def settle_decided_draft(draft_session_id):
     if await pool_balance(guild_id, draft_session_id) > 0:
         if outcome == "draw":
             # A draw pays nobody, which means everybody gets their entry back --
-            # otherwise the pool sits funded on a completed draft forever.
-            await settle_draw(guild_id, draft_session_id)
+            # otherwise the pool sits funded on a completed draft forever. This
+            # runs inside every match report, so a release that fails must not
+            # stop the draw being posted; the entries stay held, logged.
+            try:
+                await settle_draw(guild_id, draft_session_id)
+            except PoolNotSettled:
+                logger.opt(exception=True).error(
+                    f"drawn draft {draft_session_id}: could not return the entries; "
+                    f"they are still held in its pool")
         else:
             result = await settle_pool(guild_id, draft_session_id, list(winners or []))
             # Only the call that actually settles gets here with anything to
@@ -1816,8 +1823,20 @@ async def cleanup_sessions_task(bot):
                         # reaped, and the pool is keyed to its session_id, so anything
                         # still held has to come back before that happens or it can
                         # never be attributed to anyone again.
-                        await release_draft_pool(str(session.guild_id),
-                                                 session.session_id, "expired")
+                        # One queue that cannot release is skipped with its row kept,
+                        # and the next pass tries again. Raising would roll back the
+                        # whole pass -- every other queue, channel and challenge in it.
+                        try:
+                            # Releases and deletes the row in one transaction, so no
+                            # entry can be charged between the two.
+                            await release_draft_pool(str(session.guild_id),
+                                                     session.session_id, "expired",
+                                                     delete_draft=True)
+                        except PoolNotSettled:
+                            logger.opt(exception=True).error(
+                                f"could not release the pool of expired queue "
+                                f"{session.session_id}; keeping it for the next pass")
+                            continue
                         cancelled_queues.append(session.session_id)
                     
                         # Cancel the queue due to inactivity
@@ -1838,9 +1857,6 @@ async def cleanup_sessions_task(bot):
                                     logger.error(f"Failed to delete message ID {session.message_id} in draft channel. Reason: {e}")
                                 from ready_check import ReadyCheckSession
                                 await ReadyCheckSession.cleanup(session.session_id, draft_channel)
-                    
-                        # Delete the session from the database
-                        await db_session.delete(session)
 
                     # Original cleanup code for regular sessions
                     for session in sessions_to_cleanup:

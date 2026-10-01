@@ -30,7 +30,7 @@ from helpers.draft_outcome import decides_draft, standings_after, total_matches_
 from helpers.opponent_threads import spawn_opponent_threads
 from helpers.permissions import bot_manager_button
 from helpers.team_names import heads_field, labels_for
-from services.draft_pool_service import entry_in, release_draft_pool, set_entry
+from services.draft_pool_service import ENTRIES_STILL_HELD, PoolNotSettled, entry_in, release_draft_pool, set_entry
 from utils import (
     calculate_pairings,
     calculate_team_wins,
@@ -2765,6 +2765,17 @@ async def update_draft_message(bot, session_id):
         logger.exception(f"Failed to update message for session {session_id}. Error: {e}")
 
 
+async def _delete_message(channel, message_id):
+    """Delete a message by id if it is still there."""
+    if not channel or not message_id:
+        return
+    try:
+        message = await channel.fetch_message(int(message_id))
+        await message.delete()
+    except discord.NotFound:
+        pass
+
+
 class CancelConfirmationView(discord.ui.View):
     def __init__(self, bot, draft_session_id, user_display_name):
         super().__init__(timeout=60)  # 60 second timeout
@@ -2784,39 +2795,56 @@ class CancelConfirmationView(discord.ui.View):
         if not session:
             await interaction.followup.send("The draft session could not be found.", ephemeral=True)
             return
-        
-        # First, announce the cancellation in the channel
+
+        # Entries first: everything after this -- the announcement, stopping the
+        # draft's manager, deleting the sign-up message -- cannot be taken back,
+        # and the row cannot go while the pool still holds money keyed to it.
+        # The release is all or nothing, so a failure leaves the draft as it was.
+        try:
+            await release_draft_pool(str(session.guild_id), self.draft_session_id, "cancelled")
+        except PoolNotSettled:
+            logger.opt(exception=True).error(
+                f"could not return the entries on {self.draft_session_id}; not cancelling it")
+            await interaction.followup.send(
+                "⚠️ The entries couldn't be returned, so the draft wasn't cancelled. "
+                "Nothing was changed -- please try again.", ephemeral=True)
+            return
+
+        # The entries are back, so from here the cancel goes through. Each step
+        # stands alone: one failing must not skip the rest -- above all not
+        # stopping the draft's manager, which would keep its Draftmancer socket
+        # under a draft that is about to be deleted.
         channel = self.bot.get_channel(int(session.draft_channel_id))
-        if channel:
-            await channel.send(
-                f"User **{self.user_display_name}** has cancelled the draft `{session.friendly_id}`."
-            )
-        
-        if not await DraftSetupManager.cancel_for_session(self.draft_session_id):
-            logger.info(f"No active draft manager found for session {self.draft_session_id}")
-        
-        await ReadyCheckSession.cleanup(self.draft_session_id, channel)
 
-        # Then delete the draft sign-up message
-        if channel:
+        async def best_effort(name, awaitable):
             try:
-                message = await channel.fetch_message(int(session.message_id))
-                await message.delete()
-            except Exception as e:
-                logger.error(f"Failed to delete draft message: {e}")
+                await awaitable
+            except Exception:
+                logger.opt(exception=True).error(
+                    f"cancelling {self.draft_session_id}: could not {name}; carrying on")
 
-        # Remove from database
+        if channel:
+            await best_effort("announce", channel.send(
+                f"User **{self.user_display_name}** has cancelled the draft `{session.friendly_id}`."))
+        await best_effort("stop the manager", DraftSetupManager.cancel_for_session(self.draft_session_id))
+        await best_effort("clear the ready check", ReadyCheckSession.cleanup(self.draft_session_id, channel))
+        await best_effort("delete the sign-up", _delete_message(channel, session.message_id))
+
+        # Release once more and delete the row in ONE transaction: the Join
+        # button was live until the sign-up went, and a stake selector stays
+        # live for minutes. Together under MONEY_LOCK, no entry can land
+        # between them, and none can be charged once the row is gone.
         tournament_match_id = session.tournament_match_id
-        async with AsyncSessionLocal() as db_session:
-            async with db_session.begin():
-                # BEFORE the delete. The pool is keyed to session_id and the
-                # row is about to go, so a refund that runs after this has
-                # nothing left to look up.
-                await release_draft_pool(str(session.guild_id),
-                                         self.draft_session_id, "cancelled")
-                await db_session.delete(session)
-                await db_session.commit()
-                logger.info(f"Removed draft session {self.draft_session_id} from database")
+        try:
+            await release_draft_pool(str(session.guild_id), self.draft_session_id,
+                                     "cancelled", delete_draft=True)
+        except PoolNotSettled:
+            logger.opt(exception=True).error(
+                f"cancelled {self.draft_session_id} but could not return a late entry; keeping the row")
+            await interaction.followup.send(
+                f"The draft has been canceled.\n{ENTRIES_STILL_HELD}", ephemeral=True)
+            return
+        logger.info(f"Removed draft session {self.draft_session_id} from database")
 
         if tournament_match_id is not None:
             # Cancelling is the only way a linked unfinished draft ever goes away

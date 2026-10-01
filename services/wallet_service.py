@@ -205,14 +205,19 @@ async def contributions_to(guild_id: str, holder: str) -> dict[str, int]:
     refunded out of a pool does not show up as holding nothing.
     """
     async with db_session() as session:
-        rows = (await session.execute(
-            select(WalletTx.counterparty_id, func.coalesce(func.sum(WalletTx.amount), 0))
-            .where(WalletTx.guild_id == guild_id,
-                   WalletTx.player_id == holder,
-                   WalletTx.counterparty_id.isnot(None))
-            .group_by(WalletTx.counterparty_id)
-            .having(func.coalesce(func.sum(WalletTx.amount), 0) != 0)
-        )).all()
+        return await contributions_to_in(session, guild_id, holder)
+
+
+async def contributions_to_in(session, guild_id: str, holder: str) -> dict[str, int]:
+    """contributions_to, inside an existing session/transaction."""
+    rows = (await session.execute(
+        select(WalletTx.counterparty_id, func.coalesce(func.sum(WalletTx.amount), 0))
+        .where(WalletTx.guild_id == guild_id,
+               WalletTx.player_id == holder,
+               WalletTx.counterparty_id.isnot(None))
+        .group_by(WalletTx.counterparty_id)
+        .having(func.coalesce(func.sum(WalletTx.amount), 0) != 0)
+    )).all()
     return {str(party): int(total) for party, total in rows}
 
 

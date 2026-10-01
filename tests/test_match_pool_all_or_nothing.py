@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 import pytest_asyncio
 
-from conftest import seed_session
+from conftest import failing_refund, seed_session
 from services import draft_pool_service as pool
 from services import wallet_service
 
@@ -28,34 +28,12 @@ async def _a_funded_queue(test_db):
         await pool.set_entry("g", "s1", player, amount)
 
 
-def _second_refund(behaviour):
-    """Let the first refund through, and make the second one `behaviour`."""
-    real = pool._refund_in
-    calls = []
-
-    async def refund_in(session, *args, **kwargs):
-        calls.append(args)
-        if len(calls) == 2:
-            return await behaviour()
-        return await real(session, *args, **kwargs)
-
-    return refund_in
-
-
-async def _refused():
-    return False
-
-
-async def _raises():
-    raise RuntimeError("disk I/O error")
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("behaviour", [_refused, _raises], ids=["refused", "raises"])
+@pytest.mark.parametrize("behaviour", ["refused", "raises"])
 async def test_a_failed_refund_moves_no_money_at_all(behaviour):
     before = await pool.contributions("g", "s1")
 
-    with patch.object(pool, "_refund_in", _second_refund(behaviour)):
+    with patch.object(pool, "_refund_in", failing_refund(behaviour=behaviour)):
         with pytest.raises(Exception):
             await pool.match_pool("g", "s1", A, B)
 
@@ -65,7 +43,7 @@ async def test_a_failed_refund_moves_no_money_at_all(behaviour):
 
 @pytest.mark.asyncio
 async def test_a_retry_after_a_failure_levels_the_pool_normally():
-    with patch.object(pool, "_refund_in", _second_refund(_refused)):
+    with patch.object(pool, "_refund_in", failing_refund()):
         with pytest.raises(Exception):
             await pool.match_pool("g", "s1", A, B)
 

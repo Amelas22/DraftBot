@@ -22,7 +22,7 @@ once. A pool entry can be refunded repeatedly -- unmatched excess, then teardown
 -- so refunds here carry their own reason in the key.
 """
 from operator import itemgetter
-from typing import Iterable, TypedDict
+from typing import Awaitable, Callable, Iterable, TypedDict, TypeVar
 
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -162,16 +162,55 @@ async def _refund_in(session: AsyncSession, guild_id: str, session_id: str, play
     return True
 
 
-async def refund_entry(guild_id: str, session_id: str, player_id: str,
-                       amount: int, reason: str) -> bool:
-    """Return `amount` from the pool to the player. True once the money is back."""
-    async def _do():
+_T = TypeVar("_T")
+
+
+async def _money_transaction(work: Callable[[AsyncSession], Awaitable[_T]]) -> _T:
+    """Run `work` in ONE transaction, under MONEY_LOCK, retried while the
+    database is locked. Every write this module makes goes through here."""
+    async def _do() -> _T:
         async with db_session() as session:
-            return await _refund_in(session, guild_id, session_id, player_id,
-                                    amount, reason)
+            return await work(session)
 
     async with wallet_service.MONEY_LOCK:
         return await with_db_retry(_do)
+
+
+class PoolNotSettled(RuntimeError):
+    """A batch of refunds could not all be made, so none of them was.
+
+    Raised with every refund in the batch rolled back, so the pool is exactly
+    as it was before the attempt.
+    """
+
+
+# What to tell players when a release fails after their draft has already
+# ended (abandoned, scrapped, cancelled). Nothing was lost -- a failed release
+# leaves the pool untouched -- but nothing will return the money on its own.
+ENTRIES_STILL_HELD = ("⚠️ The entries couldn't be returned automatically. They're "
+                      "still held safely in the pool -- an admin needs to return them.")
+
+
+async def _refund_all_in(session: AsyncSession, guild_id: str, session_id: str,
+                         refunds: list[tuple[str, int, str]]) -> None:
+    """Book every (player, amount, reason) refund inside the caller's transaction.
+
+    A refund that is refused raises, so the caller's transaction rolls back with
+    every refund before it: a pool is never left half-refunded. The reason keys
+    each refund for idempotency and names it in the ledger.
+    """
+    for player_id, amount, reason in refunds:
+        if not await _refund_in(session, guild_id, session_id, player_id, amount, reason):
+            raise PoolNotSettled(
+                f"draft pool {session_id}: the refund of {amount} to {player_id} "
+                f"({reason}) was refused, so none was made")
+
+
+async def refund_entry(guild_id: str, session_id: str, player_id: str,
+                       amount: int, reason: str) -> bool:
+    """Return `amount` from the pool to the player. True once the money is back."""
+    return await _money_transaction(lambda session: _refund_in(
+        session, guild_id, session_id, player_id, amount, reason))
 
 
 async def set_entry(guild_id: str, session_id: str, player_id: str,
@@ -199,13 +238,8 @@ async def set_entry(guild_id: str, session_id: str, player_id: str,
     if amount < 0:
         raise ValueError("Entry amount cannot be negative")
 
-    async def _do():
-        async with db_session() as session:
-            return await entry_in(session, guild_id, session_id,
-                                  player_id, amount, reason)
-
-    async with wallet_service.MONEY_LOCK:
-        result = await with_db_retry(_do)
+    result = await _money_transaction(lambda session: entry_in(
+        session, guild_id, session_id, player_id, amount, reason))
 
     # After the commit and outside the lock: check_pool opens its own reads, and
     # what it audits is committed state.
@@ -421,14 +455,6 @@ async def _declared_bets(session_id: str) -> tuple[dict[str, int], set[str]]:
             {player_id for player_id, _, capped in rows if capped is True})
 
 
-class PoolNotSettled(RuntimeError):
-    """A draft's pool could not be matched, and none of it was.
-
-    Raised with every planned refund rolled back, so the pool is exactly as it
-    was before the attempt: the caller can retry, or unwind the draft.
-    """
-
-
 def _trim(held: dict[str, int], players: list[str],
           stays: dict[str, int]) -> dict[str, int]:
     """Plan the refund of whatever each of `players` holds above `stays`.
@@ -457,29 +483,14 @@ def _trim(held: dict[str, int], players: list[str],
 
 async def _apply_refunds(guild_id: str, session_id: str,
                          refunds: list[tuple[str, int, str]]) -> None:
-    """Book every (player, amount, reason) refund in ONE transaction.
+    """Book match_pool's planned refunds all at once, or not at all.
 
-    All or nothing. A refund that is refused or raises rolls back every one
-    before it, so the pool is left exactly as it was -- the alternative, one
-    commit per refund, left a pool half-levelled at stage 'teams' whenever
-    anything failed part-way, process death included. The reason keys each
-    refund for idempotency and names it in the ledger, so a cap and a levelling
-    refund to one player stay distinguishable.
+    One commit per refund left a pool half-levelled at stage 'teams' whenever
+    anything failed part-way, process death included.
     """
-    if not refunds:
-        return
-
-    async def _do() -> None:
-        async with db_session() as session:
-            for player_id, amount, reason in refunds:
-                if not await _refund_in(session, guild_id, session_id, player_id,
-                                        amount, reason):
-                    raise PoolNotSettled(
-                        f"draft pool {session_id}: the refund of {amount} to "
-                        f"{player_id} ({reason}) was refused, so none was made")
-
-    async with wallet_service.MONEY_LOCK:
-        await with_db_retry(_do)
+    if refunds:
+        await _money_transaction(lambda session: _refund_all_in(
+            session, guild_id, session_id, refunds))
 
 
 def cap_targets(side: list[str], bets: dict[str, int], wants_cap: set[str],
@@ -616,7 +627,7 @@ async def settle_pool(guild_id: str, session_id: str,
     # same question in a worse place: at payout every cause looks alike, whereas
     # the invariant raises at the mutation that broke it.
 
-    async def _do() -> dict[str, int]:
+    async def pay(session: AsyncSession) -> dict[str, int]:
         # Every winner in ONE transaction. Paying them one at a time looks
         # harmless because each transfer is idempotent, but a failure between
         # two of them commits the first and leaves the holder half empty with
@@ -625,48 +636,78 @@ async def settle_pool(guild_id: str, session_id: str,
         # paying a draft out would make that draft unsettleable forever.
         holder = pool_wallet_id(session_id)
         settled: dict[str, int] = {}
-        async with db_session() as session:
-            for player_id, amount in shares.items():
-                if amount <= 0:
-                    continue
-                source = _payout_source(session_id, player_id)
-                if await wallet_service.transfer_legs(session, source):
-                    # Someone else already paid this winner. Two match reports
-                    # can both read the pool before either takes MONEY_LOCK, so
-                    # both arrive here with a full set of shares; only the one
-                    # that actually books the transfer may claim it. Recording
-                    # it either way made `paid` mean "is square with the pool"
-                    # rather than "was paid by this call" -- harmless until a
-                    # caller started announcing payouts from it.
-                    continue
-                await wallet_service.transfer_in(
-                    session, guild_id, holder, player_id, amount, source,
-                    notes=f"Draft winnings {session_id}")
-                settled[player_id] = amount
+        for player_id, amount in shares.items():
+            if amount <= 0:
+                continue
+            source = _payout_source(session_id, player_id)
+            if await wallet_service.transfer_legs(session, source):
+                # Someone else already paid this winner. Two match reports
+                # can both read the pool before either takes MONEY_LOCK, so
+                # both arrive here with a full set of shares; only the one
+                # that actually books the transfer may claim it. Recording
+                # it either way made `paid` mean "is square with the pool"
+                # rather than "was paid by this call" -- harmless until a
+                # caller started announcing payouts from it.
+                continue
+            await wallet_service.transfer_in(
+                session, guild_id, holder, player_id, amount, source,
+                notes=f"Draft winnings {session_id}")
+            settled[player_id] = amount
         return settled
 
-    async with wallet_service.MONEY_LOCK:
-        paid = await with_db_retry(_do)
+    paid = await _money_transaction(pay)
 
     logger.info(f"draft pool {session_id}: paid {sum(paid.values())} to {len(paid)} winners")
     await check_pool(guild_id, session_id)
     return {"paid": paid}
 
 
-async def release_draft_pool(guild_id: str, session_id: str,
-                             reason: str) -> dict[str, dict[str, int]]:
+async def release_draft_pool(guild_id: str, session_id: str, reason: str, *,
+                             delete_draft: bool = False) -> dict[str, dict[str, int]]:
     """Empty a draft's pool back to its contributors.
 
     One idempotent function for every path that ends a draft early. Idempotence
     -- not an event bus -- is what makes several callers safe, and it is why
     calling this on a draft that never had a pool is a no-op rather than an
     error: most drafts are not staked, and every teardown path calls it anyway.
+
+    All or nothing, in one transaction: a refund that is refused or fails
+    raises PoolNotSettled with the pool untouched.
+
+    `delete_draft` deletes the draft's row in the same transaction, for a queue
+    being torn down. Releasing and deleting separately leaves a window in which
+    an entry -- from a stake selector opened minutes earlier -- is charged into
+    a row that is about to go; together, under MONEY_LOCK, nothing can land
+    between them, and entry_in refuses a draft with no row from then on. Releasing one
+    refund at a time left a pool half-released -- and the inactive-queue reaper
+    deletes the row right after, stranding whatever was still held.
     """
-    held = await contributions(guild_id, session_id)
-    refunded: dict[str, int] = {}
-    for player_id, amount in held.items():
-        if await refund_entry(guild_id, session_id, player_id, amount, reason):
-            refunded[player_id] = amount
+    async def release(session: AsyncSession) -> dict[str, int]:
+        # Read inside the transaction, under the lock: an entry revised between
+        # an outside read and the lock would have its stale amount refused.
+        net = await wallet_service.contributions_to_in(
+            session, guild_id, pool_wallet_id(session_id))
+        held = {player_id: amount for player_id, amount in net.items() if amount > 0}
+        await _refund_all_in(session, guild_id, session_id,
+                             [(player_id, amount, reason) for player_id, amount in held.items()])
+        if delete_draft:
+            from sqlalchemy import select
+            from models.draft_session import DraftSession
+            row = (await session.execute(select(DraftSession).where(
+                DraftSession.session_id == session_id))).scalar_one_or_none()
+            if row is not None:
+                await session.delete(row)    # the ORM delete, as callers did before
+        return held
+
+    try:
+        refunded = await _money_transaction(release)
+    except PoolNotSettled:
+        raise
+    except Exception as e:
+        # One thing for every teardown path to catch, whatever failed: the
+        # transaction rolled back, so the pool is untouched either way.
+        raise PoolNotSettled(
+            f"draft pool {session_id}: could not release ({reason}): {e}") from e
     if refunded:
         logger.info(f"draft pool {session_id}: released {sum(refunded.values())} "
                     f"to {len(refunded)} players ({reason})")
