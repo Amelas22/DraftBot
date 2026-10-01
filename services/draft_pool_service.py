@@ -248,8 +248,9 @@ async def entry_in(session: AsyncSession, guild_id: str, session_id: str,
         # an invariant the player has no way to repair. Refuse here, so that
         # state is never reached rather than reconciled afterwards.
         #
-        # Matching's own pro-rata refund and every teardown path call
-        # refund_entry directly and are unaffected by this guard.
+        # Matching books its refunds through _refund_in and every teardown path
+        # calls refund_entry; neither goes through here, so this guard does not
+        # touch them.
         logger.info(f"draft pool {session_id}: refusing a late stake change "
                     f"from {player_id} ({held} -> {amount}) -- the book has "
                     f"already closed")
@@ -420,16 +421,23 @@ async def _declared_bets(session_id: str) -> tuple[dict[str, int], set[str]]:
             {player_id for player_id, _, capped in rows if capped is True})
 
 
-async def _trim(guild_id: str, session_id: str, held: dict[str, int],
-                players: list[str], stays: dict[str, int],
-                reason: str) -> dict[str, int]:
-    """Refund whatever each of `players` holds above `stays`, and record it.
+class PoolNotSettled(RuntimeError):
+    """A draft's pool could not be matched, and none of it was.
+
+    Raised with every planned refund rolled back, so the pool is exactly as it
+    was before the attempt: the caller can retry, or unwind the draft.
+    """
+
+
+def _trim(held: dict[str, int], players: list[str],
+          stays: dict[str, int]) -> dict[str, int]:
+    """Plan the refund of whatever each of `players` holds above `stays`.
 
     Both ceilings a draft applies -- the player's own cap, and the one the two
     sides meet at -- are the same operation against a different target map, so
-    they are the same code against a different `reason`. That reason keys the
-    refund for idempotency and names it in the ledger, so the two stay
-    distinguishable everywhere it matters.
+    they are the same code. It moves no money -- the refunds are booked together
+    by _apply_refunds, so a failure part-way cannot leave a pool half-levelled --
+    but it does update `held` in place (below).
 
     `players` is the scope rather than the keys of `stays`, because a player
     levelled all the way to zero is absent from `stays` and still has an entry
@@ -441,11 +449,37 @@ async def _trim(guild_id: str, session_id: str, held: dict[str, int],
     refunded: dict[str, int] = {}
     for player_id in players:
         excess = held[player_id] - stays.get(player_id, 0)
-        if excess > 0 and await refund_entry(guild_id, session_id, player_id,
-                                             excess, reason):
+        if excess > 0:
             held[player_id] -= excess
             refunded[player_id] = excess
     return refunded
+
+
+async def _apply_refunds(guild_id: str, session_id: str,
+                         refunds: list[tuple[str, int, str]]) -> None:
+    """Book every (player, amount, reason) refund in ONE transaction.
+
+    All or nothing. A refund that is refused or raises rolls back every one
+    before it, so the pool is left exactly as it was -- the alternative, one
+    commit per refund, left a pool half-levelled at stage 'teams' whenever
+    anything failed part-way, process death included. The reason keys each
+    refund for idempotency and names it in the ledger, so a cap and a levelling
+    refund to one player stay distinguishable.
+    """
+    if not refunds:
+        return
+
+    async def _do() -> None:
+        async with db_session() as session:
+            for player_id, amount, reason in refunds:
+                if not await _refund_in(session, guild_id, session_id, player_id,
+                                        amount, reason):
+                    raise PoolNotSettled(
+                        f"draft pool {session_id}: the refund of {amount} to "
+                        f"{player_id} ({reason}) was refused, so none was made")
+
+    async with wallet_service.MONEY_LOCK:
+        await with_db_retry(_do)
 
 
 def cap_targets(side: list[str], bets: dict[str, int], wants_cap: set[str],
@@ -491,22 +525,21 @@ async def match_pool(guild_id: str, session_id: str,
     refund. team_creator can be re-entered after a restart, and this has to be
     safe when it is.
 
-    That covers a SEQUENTIAL replay, not a concurrent one. `held` is read once
-    and the refunds commit one at a time, each under its own lock, so two
-    overlapping calls would both compute their trim from the same snapshot and
-    both book it -- taking a side down twice and leaving check_pool to raise on
-    an imbalance already committed. What rules that out is upstream: every
-    caller of create_and_display_teams (views.py's create-teams and start-draft
-    buttons, ready_check's auto-create) tests and sets
+    That covers a SEQUENTIAL replay, not a concurrent one. `held` is read once,
+    before the refunds commit, so two overlapping calls would both compute
+    their trim from the same snapshot and both book it -- taking a side down
+    twice and leaving check_pool to raise on an imbalance already committed.
+    What rules that out is upstream: every caller of create_and_display_teams
+    (views.py's create-teams and start-draft buttons, ready_check's
+    auto-create) tests and sets
     state_manager.is_creating_teams with no await in between, so the flag is a
     real mutex on this whole function. Adding a caller that skips it reopens
     the hole; a lock here would not, because the read is what goes stale.
 
-    A partial failure mid-refund is survivable but not exactly repeatable: the
-    retry recomputes level_side from what the first attempt left behind, which
-    can settle the odd ten on a different player. Both splits are valid, the
-    sides still balance and no tix are lost -- only who is exposed for the last
-    ten differs.
+    All or nothing: every refund is planned first and booked in one
+    transaction (_apply_refunds), so a failure -- a refund refused or raising,
+    or the process dying mid-way -- leaves the pool exactly as it was, and
+    raises PoolNotSettled or the underlying error.
     """
     held = await contributions(guild_id, session_id)
     sides = ([p for p in team_a if held.get(p)], [p for p in team_b if held.get(p)])
@@ -515,9 +548,8 @@ async def match_pool(guild_id: str, session_id: str,
     bets, wants_cap = await _declared_bets(session_id)
     capped: dict[str, int] = {}
     for side, opposing in ((side_a, side_b), (side_b, side_a)):
-        capped |= await _trim(guild_id, session_id, held, side,
-                              cap_targets(side, bets, wants_cap, opposing, held),
-                              "capped")
+        capped |= _trim(held, side,
+                        cap_targets(side, bets, wants_cap, opposing, held))
 
     # What each side can actually put up in whole tens. A stake is matched in
     # units of ten, so an entry of 25 backs 20 of the other side and hands back
@@ -530,8 +562,11 @@ async def match_pool(guild_id: str, session_id: str,
     refunded: dict[str, int] = {}
     for side in sides:
         stays = level_side({p: held[p] for p in side}, matched)
-        refunded |= await _trim(guild_id, session_id, held, side,
-                                stays, "unmatched")
+        refunded |= _trim(held, side, stays)
+
+    await _apply_refunds(guild_id, session_id,
+                         [(p, n, "capped") for p, n in capped.items()]
+                         + [(p, n, "unmatched") for p, n in refunded.items()])
 
     logger.info(f"draft pool {session_id}: matched at {matched} a side, "
                 f"refunded {sum(capped.values())} over players' own caps and "
