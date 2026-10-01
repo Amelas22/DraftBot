@@ -1779,117 +1779,122 @@ async def calculate_three_zero_drafters(session, draft_session_id, guild):
 
 async def cleanup_sessions_task(bot):
     while True:
-        current_time = datetime.now()
-        window_time = current_time - timedelta(hours=24)
-        challenge_time = current_time - timedelta(hours=2)
-        async with AsyncSessionLocal() as db_session:  
-            async with db_session.begin():
-                # Fetch sessions that are past their deletion time and in the deletion window
-                stmt = select(DraftSession).where(DraftSession.deletion_time.between(window_time, current_time))
-                results = await db_session.execute(stmt)
-                sessions_to_cleanup = results.scalars().all()
+        # A failed pass is logged and the next runs on schedule: a loop that dies
+        # here is only revived at the next gateway reconnect.
+        try:
+            current_time = datetime.now()
+            window_time = current_time - timedelta(hours=24)
+            challenge_time = current_time - timedelta(hours=2)
+            async with AsyncSessionLocal() as db_session:  
+                async with db_session.begin():
+                    # Fetch sessions that are past their deletion time and in the deletion window
+                    stmt = select(DraftSession).where(DraftSession.deletion_time.between(window_time, current_time))
+                    results = await db_session.execute(stmt)
+                    sessions_to_cleanup = results.scalars().all()
                 
-                challenge_stmt = select(Challenge).where(Challenge.start_time < challenge_time)
-                challenge_results = await db_session.execute(challenge_stmt)
-                challenges_to_cleanup = challenge_results.scalars().all()
+                    challenge_stmt = select(Challenge).where(Challenge.start_time < challenge_time)
+                    challenge_results = await db_session.execute(challenge_stmt)
+                    challenges_to_cleanup = challenge_results.scalars().all()
 
-                # Check for inactive initial queues (no activity for 90 minutes)
-                inactive_stmt = select(DraftSession).where(
-                    DraftSession.session_stage.is_(None),  # Only initial queue stage
-                    DraftSession.deletion_time < current_time  # Past the deletion time
-                )
-                inactive_results = await db_session.execute(inactive_stmt)
-                inactive_sessions = inactive_results.scalars().all()
+                    # Check for inactive initial queues (no activity for 90 minutes)
+                    inactive_stmt = select(DraftSession).where(
+                        DraftSession.session_stage.is_(None),  # Only initial queue stage
+                        DraftSession.deletion_time < current_time  # Past the deletion time
+                    )
+                    inactive_results = await db_session.execute(inactive_stmt)
+                    inactive_sessions = inactive_results.scalars().all()
 
-                # Process inactive sessions for cancellation due to inactivity
-                for session in inactive_sessions:
-                    # Skip queue cleanup for guilds marked as cleanup_exempt
-                    if is_cleanup_exempt(session.guild_id):
-                        continue
+                    # Process inactive sessions for cancellation due to inactivity
+                    for session in inactive_sessions:
+                        # Skip queue cleanup for guilds marked as cleanup_exempt
+                        if is_cleanup_exempt(session.guild_id):
+                            continue
 
-                    # A queue that never filled is the COMMONEST end for a staked
-                    # draft -- 1,207 of 2,398 historically. The row is about to be
-                    # reaped, and the pool is keyed to its session_id, so anything
-                    # still held has to come back before that happens or it can
-                    # never be attributed to anyone again.
-                    await release_draft_pool(str(session.guild_id),
-                                             session.session_id, "expired")
+                        # A queue that never filled is the COMMONEST end for a staked
+                        # draft -- 1,207 of 2,398 historically. The row is about to be
+                        # reaped, and the pool is keyed to its session_id, so anything
+                        # still held has to come back before that happens or it can
+                        # never be attributed to anyone again.
+                        await release_draft_pool(str(session.guild_id),
+                                                 session.session_id, "expired")
                     
-                    # Cancel the queue due to inactivity
-                    if session.draft_channel_id and session.message_id:
-                        draft_channel = bot.get_channel(int(session.draft_channel_id))
-                        if draft_channel:
-                            try:
-                                # Delete the original message
-                                msg = await draft_channel.fetch_message(int(session.message_id))
-                                if msg:
-                                    # Send cancellation notification
-                                    await draft_channel.send(f"Queue for `{session.friendly_id}` has been cancelled due to inactivity (no new signups for 180 minutes).")
-                                    await msg.delete()
-                                    logger.info(f"Cancelled inactive queue for session {session.session_id} ({session.friendly_id})")
-                            except discord.NotFound:
-                                pass
-                            except discord.HTTPException as e:
-                                logger.error(f"Failed to delete message ID {session.message_id} in draft channel. Reason: {e}")
-                            from ready_check import ReadyCheckSession
-                            await ReadyCheckSession.cleanup(session.session_id, draft_channel)
-                    
-                    # Delete the session from the database
-                    await db_session.delete(session)
-
-                # Original cleanup code for regular sessions
-                for session in sessions_to_cleanup:
-                    # Never reap a draft whose tournament match is still unfinished —
-                    # extend its lifespan instead so the pairing buttons stay alive.
-                    from services.tournament_service import extend_deletion_if_unfinished
-                    if await extend_deletion_if_unfinished(db_session, session, current_time):
-                        logger.info(
-                            f"Skipped cleanup for session {session.session_id}: tournament "
-                            f"match {session.tournament_match_id} unfinished; deletion_time extended"
-                        )
-                        continue
-                    # Check if channel_ids is not None and is iterable before attempting to iterate
-                    if session.channel_ids:
-                        for channel_id in session.channel_ids:
-                            channel = bot.get_channel(int(channel_id))
-                            if channel:  # Check if channel was found
+                        # Cancel the queue due to inactivity
+                        if session.draft_channel_id and session.message_id:
+                            draft_channel = bot.get_channel(int(session.draft_channel_id))
+                            if draft_channel:
                                 try:
-                                    await channel.delete(reason="Session expired.")
+                                    # Delete the original message
+                                    msg = await draft_channel.fetch_message(int(session.message_id))
+                                    if msg:
+                                        # Send cancellation notification
+                                        await draft_channel.send(f"Queue for `{session.friendly_id}` has been cancelled due to inactivity (no new signups for 180 minutes).")
+                                        await msg.delete()
+                                        logger.info(f"Cancelled inactive queue for session {session.session_id} ({session.friendly_id})")
+                                except discord.NotFound:
+                                    pass
+                                except discord.HTTPException as e:
+                                    logger.error(f"Failed to delete message ID {session.message_id} in draft channel. Reason: {e}")
+                                from ready_check import ReadyCheckSession
+                                await ReadyCheckSession.cleanup(session.session_id, draft_channel)
+                    
+                        # Delete the session from the database
+                        await db_session.delete(session)
+
+                    # Original cleanup code for regular sessions
+                    for session in sessions_to_cleanup:
+                        # Never reap a draft whose tournament match is still unfinished —
+                        # extend its lifespan instead so the pairing buttons stay alive.
+                        from services.tournament_service import extend_deletion_if_unfinished
+                        if await extend_deletion_if_unfinished(db_session, session, current_time):
+                            logger.info(
+                                f"Skipped cleanup for session {session.session_id}: tournament "
+                                f"match {session.tournament_match_id} unfinished; deletion_time extended"
+                            )
+                            continue
+                        # Check if channel_ids is not None and is iterable before attempting to iterate
+                        if session.channel_ids:
+                            for channel_id in session.channel_ids:
+                                channel = bot.get_channel(int(channel_id))
+                                if channel:  # Check if channel was found
+                                    try:
+                                        await channel.delete(reason="Session expired.")
+                                    except discord.NotFound:
+                                        # If the message is not found, silently continue
+                                        continue
+                                    except discord.HTTPException as e:
+                                        print(f"Failed to delete channel: {channel.name}. Reason: {e}")
+
+                        if session.draft_channel_id and session.message_id:
+                            if session.session_type == "winston":
+                                if not session.sign_ups or len(session.sign_ups) < 2:
+                                    continue
+                            draft_channel = bot.get_channel(int(session.draft_channel_id))
+                            if draft_channel:
+                                try:
+                                    msg = await draft_channel.fetch_message(int(session.message_id))
+                                    await msg.delete()
                                 except discord.NotFound:
                                     # If the message is not found, silently continue
                                     continue
                                 except discord.HTTPException as e:
-                                    print(f"Failed to delete channel: {channel.name}. Reason: {e}")
+                                    print(f"Failed to delete message ID {session.message_id} in draft channel. Reason: {e}")
 
-                    if session.draft_channel_id and session.message_id:
-                        if session.session_type == "winston":
-                            if not session.sign_ups or len(session.sign_ups) < 2:
-                                continue
-                        draft_channel = bot.get_channel(int(session.draft_channel_id))
-                        if draft_channel:
-                            try:
-                                msg = await draft_channel.fetch_message(int(session.message_id))
-                                await msg.delete()
-                            except discord.NotFound:
-                                # If the message is not found, silently continue
-                                continue
-                            except discord.HTTPException as e:
-                                print(f"Failed to delete message ID {session.message_id} in draft channel. Reason: {e}")
+                    for challenge in challenges_to_cleanup:
+                        if challenge.channel_id and challenge.message_id:
+                            channel = bot.get_channel(int(challenge.channel_id))
+                            if channel:
+                                try:
+                                    msg = await channel.fetch_message(int(challenge.message_id))
+                                    await msg.delete()
+                                except Exception as e:
+                                    print(f"Failed to delete challenge message {challenge.message_id}: {e}")
 
-                for challenge in challenges_to_cleanup:
-                    if challenge.channel_id and challenge.message_id:
-                        channel = bot.get_channel(int(challenge.channel_id))
-                        if channel:
-                            try:
-                                msg = await channel.fetch_message(int(challenge.message_id))
-                                await msg.delete()
-                            except Exception as e:
-                                print(f"Failed to delete challenge message {challenge.message_id}: {e}")
+                        await db_session.delete(challenge)
+                        # Commit deletion of challenge
 
-                    await db_session.delete(challenge)
-                    # Commit deletion of challenge
-
-                    print(f"{challenge.id} has been removed.")
+                        print(f"{challenge.id} has been removed.")
+        except Exception as e:
+            logger.exception(f"cleanup_sessions_task pass failed: {e}")
         # Sleep for a certain amount of time before running again
         await asyncio.sleep(600)  # Sleep for 10 minutes
 
@@ -3256,100 +3261,105 @@ async def check_inactive_players_task(bot):
     while True:
         # Run every week (7 days)
         await asyncio.sleep(7 * 24 * 60 * 60)
-        logger.info("Running inactive players check")
+        # A failed pass is logged and the next runs on schedule: a loop that dies
+        # here is only revived at the next gateway reconnect.
+        try:
+            logger.info("Running inactive players check")
         
-        # Process each guild the bot is in
-        for guild in bot.guilds:
-            guild_id = str(guild.id)
+            # Process each guild the bot is in
+            for guild in bot.guilds:
+                guild_id = str(guild.id)
             
-            # Get config for this guild
-            from config import get_config
-            config = get_config(guild_id)
+                # Get config for this guild
+                from config import get_config
+                config = get_config(guild_id)
             
-            # Skip if activity tracking is not enabled for this guild
-            if not config.get("activity_tracking", {}).get("enabled", False):
-                continue
+                # Skip if activity tracking is not enabled for this guild
+                if not config.get("activity_tracking", {}).get("enabled", False):
+                    continue
             
-            # Get role names from config
-            active_role_name = config["activity_tracking"].get("active_role", "Active")
-            exempt_role_name = config["activity_tracking"].get("exempt_role", "degen")
-            mod_chat_channel_name = config["activity_tracking"].get("mod_chat_channel", "mod-chat")
-            inactivity_months = config["activity_tracking"].get("inactivity_months", 3)
+                # Get role names from config
+                active_role_name = config["activity_tracking"].get("active_role", "Active")
+                exempt_role_name = config["activity_tracking"].get("exempt_role", "degen")
+                mod_chat_channel_name = config["activity_tracking"].get("mod_chat_channel", "mod-chat")
+                inactivity_months = config["activity_tracking"].get("inactivity_months", 3)
             
-            # Find the roles and channel
-            active_role = discord.utils.get(guild.roles, name=active_role_name)
-            exempt_role = discord.utils.get(guild.roles, name=exempt_role_name)
-            mod_chat_channel = discord.utils.get(guild.text_channels, name=mod_chat_channel_name)
+                # Find the roles and channel
+                active_role = discord.utils.get(guild.roles, name=active_role_name)
+                exempt_role = discord.utils.get(guild.roles, name=exempt_role_name)
+                mod_chat_channel = discord.utils.get(guild.text_channels, name=mod_chat_channel_name)
             
-            if not active_role:
-                logger.warning(f"Active role '{active_role_name}' not found in guild {guild.name}")
-                continue
+                if not active_role:
+                    logger.warning(f"Active role '{active_role_name}' not found in guild {guild.name}")
+                    continue
                 
-            if not mod_chat_channel:
-                logger.warning(f"Mod chat channel '{mod_chat_channel_name}' not found in guild {guild.name}")
-                continue
+                if not mod_chat_channel:
+                    logger.warning(f"Mod chat channel '{mod_chat_channel_name}' not found in guild {guild.name}")
+                    continue
             
-            # Calculate the cutoff date (3 months ago)
-            current_time = datetime.now()
-            cutoff_date = current_time - timedelta(days=30 * inactivity_months)
+                # Calculate the cutoff date (3 months ago)
+                current_time = datetime.now()
+                cutoff_date = current_time - timedelta(days=30 * inactivity_months)
             
-            # Get all players with the Active role
-            async with AsyncSessionLocal() as db_session:
-                # Fetch all players with last_draft_timestamp before cutoff_date or NULL
-                stmt = select(PlayerStats).where(
-                    PlayerStats.guild_id == guild_id,
-                    or_(
-                        PlayerStats.last_draft_timestamp < cutoff_date,
-                        PlayerStats.last_draft_timestamp == None
+                # Get all players with the Active role
+                async with AsyncSessionLocal() as db_session:
+                    # Fetch all players with last_draft_timestamp before cutoff_date or NULL
+                    stmt = select(PlayerStats).where(
+                        PlayerStats.guild_id == guild_id,
+                        or_(
+                            PlayerStats.last_draft_timestamp < cutoff_date,
+                            PlayerStats.last_draft_timestamp == None
+                        )
                     )
-                )
-                results = await db_session.execute(stmt)
-                inactive_players = results.scalars().all()
+                    results = await db_session.execute(stmt)
+                    inactive_players = results.scalars().all()
                 
-                # List to store players who had their role removed
-                removed_role_players = []
+                    # List to store players who had their role removed
+                    removed_role_players = []
                 
-                # Process each inactive player
-                for player in inactive_players:
-                    try:
-                        # Find the member in the guild
-                        member = guild.get_member(int(player.player_id))
+                    # Process each inactive player
+                    for player in inactive_players:
+                        try:
+                            # Find the member in the guild
+                            member = guild.get_member(int(player.player_id))
                         
-                        # Skip if member not found or has exempt role
-                        if not member:
-                            logger.info(f"Member {player.player_id} not found in guild {guild.name}")
-                            continue
+                            # Skip if member not found or has exempt role
+                            if not member:
+                                logger.info(f"Member {player.player_id} not found in guild {guild.name}")
+                                continue
                             
-                        if exempt_role and exempt_role in member.roles:
-                            logger.info(f"Skipping exempt member {get_display_name(member, guild)}")
-                            continue
+                            if exempt_role and exempt_role in member.roles:
+                                logger.info(f"Skipping exempt member {get_display_name(member, guild)}")
+                                continue
 
-                        # Check if member has the Active role
-                        if active_role in member.roles:
-                            # Remove the Active role
-                            await member.remove_roles(active_role)
-                            logger.info(f"Removed Active role from {get_display_name(member, guild)} due to inactivity")
-                            removed_role_players.append(get_display_name(member, guild))
-                    except Exception as e:
-                        logger.error(f"Error processing inactive player {player.player_id}: {e}")
+                            # Check if member has the Active role
+                            if active_role in member.roles:
+                                # Remove the Active role
+                                await member.remove_roles(active_role)
+                                logger.info(f"Removed Active role from {get_display_name(member, guild)} due to inactivity")
+                                removed_role_players.append(get_display_name(member, guild))
+                        except Exception as e:
+                            logger.error(f"Error processing inactive player {player.player_id}: {e}")
             
-            # Send message to mod-chat if any players had their role removed
-            if removed_role_players:
-                embed = discord.Embed(
-                    title="Inactive Players - Active Role Removed",
-                    description=f"The following players have not participated in a draft for {inactivity_months} months and have had their Active role removed:",
-                    color=discord.Color.orange()
-                )
+                # Send message to mod-chat if any players had their role removed
+                if removed_role_players:
+                    embed = discord.Embed(
+                        title="Inactive Players - Active Role Removed",
+                        description=f"The following players have not participated in a draft for {inactivity_months} months and have had their Active role removed:",
+                        color=discord.Color.orange()
+                    )
                 
-                # Add player names to the embed
-                embed.add_field(
-                    name=f"Players ({len(removed_role_players)})",
-                    value="\n".join(removed_role_players) if removed_role_players else "None",
-                    inline=False
-                )
+                    # Add player names to the embed
+                    embed.add_field(
+                        name=f"Players ({len(removed_role_players)})",
+                        value="\n".join(removed_role_players) if removed_role_players else "None",
+                        inline=False
+                    )
                 
-                try:
-                    await mod_chat_channel.send(embed=embed)
-                    logger.info(f"Sent inactive players message to {mod_chat_channel.name} in {guild.name}")
-                except Exception as e:
-                    logger.error(f"Error sending inactive players message: {e}")
+                    try:
+                        await mod_chat_channel.send(embed=embed)
+                        logger.info(f"Sent inactive players message to {mod_chat_channel.name} in {guild.name}")
+                    except Exception as e:
+                        logger.error(f"Error sending inactive players message: {e}")
+        except Exception as e:
+            logger.exception(f"check_inactive_players_task pass failed: {e}")

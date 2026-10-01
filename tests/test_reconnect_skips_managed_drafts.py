@@ -5,10 +5,12 @@ used to start another copy of each background loop every time, and to build a
 manager for every draft still in setup beside the one it already had -- in
 production one queue ended up with three, all connected to Draftmancer as the
 same user, the older two out of reach of anything that stops a draft's manager.
+The loops are now started once and revived only if they die, so they must also
+survive a failed pass rather than die from it.
 """
 import pytest
 
-from conftest import make_manager, seed_queue
+from conftest import make_manager, run_until_sleep, seed_queue
 from reconnect_drafts import reconnect_draft_setup_sessions
 from services.draft_setup_manager import ACTIVE_MANAGERS
 
@@ -78,3 +80,46 @@ def test_on_ready_reconnects_setup_drafts_behind_a_guard():
 
     guarded = _names_called_inside(n for n in ast.walk(_on_ready()) if isinstance(n, ast.If))
     assert "reconnect_draft_setup_sessions" in guarded
+
+
+@pytest.mark.asyncio
+async def test_a_failed_cleanup_pass_does_not_end_the_cleanup_loop(test_db):
+    """A loop that dies is only revived at the next gateway reconnect, and one
+    bad pass -- a locked database, say -- used to end it there and then."""
+    from unittest.mock import MagicMock, patch
+
+    import utils
+
+    real_session = utils.AsyncSessionLocal
+    opened = []
+
+    def flaky_session(*args, **kwargs):
+        opened.append(1)
+        if len(opened) == 1:
+            raise RuntimeError("database is locked")
+        return real_session(*args, **kwargs)
+
+    with patch("utils.AsyncSessionLocal", flaky_session):
+        await run_until_sleep(utils.cleanup_sessions_task(MagicMock()), 600, nth=2)
+
+    assert len(opened) == 2, "the loop did not survive its failed pass"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_inactivity_pass_does_not_end_the_inactivity_loop():
+    """The same, for the weekly inactive-player check."""
+    from types import SimpleNamespace
+
+    import utils
+
+    class Unreachable:
+        def __iter__(self):
+            passes.append(1)
+            raise RuntimeError("guild cache unavailable")
+
+    passes = []
+    bot = SimpleNamespace(guilds=Unreachable())
+
+    await run_until_sleep(utils.check_inactive_players_task(bot), 7 * 24 * 60 * 60, nth=3)
+
+    assert len(passes) == 2, "the loop did not survive its failed pass"
