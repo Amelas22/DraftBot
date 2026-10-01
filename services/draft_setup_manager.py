@@ -1514,6 +1514,7 @@ class DraftSetupManager:
                     self.logger.info(f"Draft log already published for {self.session_id}; skipping")
                     return True
                 draft_data = draft_session.draft_data
+                table_url = draft_session.drafttable_url
 
             if not draft_data:
                 self.logger.warning(f"No captured draft_data for {self.session_id}; nothing to publish")
@@ -1529,29 +1530,30 @@ class DraftSetupManager:
                 except Exception as e:
                     self.logger.error(f"Failed to release Draftmancer log for {self.session_id}: {e}")
 
-            # Every draft gets a full table page. Built before the embed
-            # because its URL goes inside; best-effort because the embed is
-            # the deliverable and the page is only an enhancement to it. The
-            # `draft_session` read above is detached once that `async with`
-            # block exits, so it's re-read here rather than reused detached --
-            # the publisher needs several of its fields (rosters, cube,
-            # friendly_id, ...) -- and the publish call is kept inside the
-            # fresh session's block so those attributes stay live for it.
+            # Every draft gets a full table page, built before the embed because
+            # its URL goes inside; best-effort, since the embed is the
+            # deliverable. The row is re-read (the one above is detached) and the
+            # publish runs inside that session so its fields stay live -- holding
+            # a connection for the seconds a Scryfall fetch, render and upload
+            # take, which NullPool and WAL-mode SQLite make harmless.
             #
-            # That deliberately holds a database connection open across the
-            # publish call (a Scryfall fetch, a render, a Spaces upload --
-            # seconds, not millis) -- the engine uses NullPool, so there is no
-            # pool for this to exhaust. Accepted: the only DB work before the
-            # call is one SELECT, SQLite is WAL-mode so no writer blocks on
-            # it, and this runs at most once per completed draft.
-            table_url = None
-            from services.draft_table_publisher import publish as publish_table
-            async with db_session() as session:
-                draft_session = (await session.execute(
-                    select(DraftSession).filter(DraftSession.session_id == self.session_id)
-                )).scalar_one_or_none()
-                if draft_session:
-                    table_url = await publish_table(draft_data, draft_session)
+            # The URL is recorded as soon as the page is up, not with
+            # data_received: a failed embed is retried every reconciler tick,
+            # and each retry would otherwise build and upload the page again.
+            # So a page is built once per draft, unless its upload itself fails.
+            if not table_url:
+                from services.draft_table_publisher import publish as publish_table
+                async with db_session() as session:
+                    draft_session = (await session.execute(
+                        select(DraftSession).filter(DraftSession.session_id == self.session_id)
+                    )).scalar_one_or_none()
+                    if draft_session and draft_session.drafttable_url:
+                        table_url = draft_session.drafttable_url  # an overlapping publish got there first
+                    elif draft_session:
+                        table_url = await publish_table(draft_data, draft_session)
+                        if table_url:
+                            draft_session.drafttable_url = table_url
+                            await session.commit()
 
             # Post the MagicProTools embed/links to Discord.
             sent = False
@@ -1571,8 +1573,6 @@ class DraftSetupManager:
                 )).scalar_one_or_none()
                 if draft_session:
                     draft_session.data_received = True
-                    if table_url:
-                        draft_session.drafttable_url = table_url
                     await session.commit()
 
             self.logger.info(f"Published draft log for {self.session_id} (release={release})")

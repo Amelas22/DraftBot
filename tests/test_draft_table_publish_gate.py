@@ -67,9 +67,11 @@ async def test_a_failed_page_still_sends_the_embed():
 
 
 @pytest.mark.asyncio
-async def test_a_failed_send_persists_neither():
-    """data_received stays unset so the reconciler retries the whole publish --
-    which rebuilds the page too."""
+async def test_a_failed_send_keeps_the_page_but_not_the_publish():
+    """data_received stays unset so the reconciler retries the embed. The page
+    is recorded as soon as it is uploaded, so that retry does not build it
+    again -- it would otherwise re-render and re-upload every tick for as long
+    as the embed keeps failing."""
     m = _manager()
     ds = _session_row()
     db_factory, _ = _mock_db_session(ds)
@@ -82,4 +84,23 @@ async def test_a_failed_send_persists_neither():
 
     assert ok is False
     assert ds.data_received is False
-    assert ds.drafttable_url is None
+    assert ds.drafttable_url == URL
+
+
+@pytest.mark.asyncio
+async def test_a_retry_reuses_the_page_it_already_published():
+    m = _manager()
+    ds = _session_row()
+    ds.drafttable_url = URL
+    db_factory, _ = _mock_db_session(ds)
+    with patch("services.draft_setup_manager.db_session", db_factory), \
+         patch("services.draft_table_publisher.publish",
+               AsyncMock(side_effect=AssertionError("must not rebuild"))) as publish, \
+         patch.object(DraftSetupManager, "send_magicprotools_embed",
+                      AsyncMock(return_value=True)) as embed:
+        ok = await m.publish_draft_log()
+
+    assert ok is True
+    publish.assert_not_awaited()
+    assert embed.await_args.kwargs["table_url"] == URL
+    assert ds.data_received is True

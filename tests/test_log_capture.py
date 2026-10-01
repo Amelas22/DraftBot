@@ -162,7 +162,7 @@ async def test_on_end_draft_warns_when_no_log_arrives():
 @pytest.mark.asyncio
 async def test_publish_posts_and_marks_received():
     m = _manager()
-    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False)
+    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False, drafttable_url=None)
     db_factory, _ = _mock_db_session(ds)
     with patch("services.draft_setup_manager.db_session", db_factory), \
          patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock(return_value=True)) as embed:
@@ -178,7 +178,7 @@ async def test_publish_does_not_mark_received_when_embed_not_sent():
     (guild/channel missing, or an exception was swallowed), publish_draft_log
     must NOT stamp data_received, so the reconciler retries on a later tick."""
     m = _manager()
-    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False)
+    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False, drafttable_url=None)
     db_factory, _ = _mock_db_session(ds)
     with patch("services.draft_setup_manager.db_session", db_factory), \
          patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock(return_value=False)) as embed:
@@ -191,7 +191,7 @@ async def test_publish_does_not_mark_received_when_embed_not_sent():
 @pytest.mark.asyncio
 async def test_publish_idempotent_when_already_received():
     m = _manager()
-    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=True)
+    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=True, drafttable_url=None)
     db_factory, _ = _mock_db_session(ds)
     with patch("services.draft_setup_manager.db_session", db_factory), \
          patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock()) as embed:
@@ -203,7 +203,7 @@ async def test_publish_idempotent_when_already_received():
 @pytest.mark.asyncio
 async def test_publish_no_data_returns_false():
     m = _manager()
-    ds = SimpleNamespace(session_id="sid", draft_data=None, data_received=False)
+    ds = SimpleNamespace(session_id="sid", draft_data=None, data_received=False, drafttable_url=None)
     db_factory, _ = _mock_db_session(ds)
     with patch("services.draft_setup_manager.db_session", db_factory), \
          patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock()) as embed:
@@ -219,7 +219,7 @@ async def test_publish_release_emits_sharedraftlog_when_connected():
     m.socket_client = MagicMock()
     m.socket_client.connected = True
     m.socket_client.emit = AsyncMock()
-    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False)
+    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False, drafttable_url=None)
     db_factory, _ = _mock_db_session(ds)
     with patch("services.draft_setup_manager.db_session", db_factory), \
          patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock()):
@@ -237,7 +237,7 @@ async def test_publish_release_skips_when_disconnected():
     m.socket_client = MagicMock()
     m.socket_client.connected = False
     m.socket_client.emit = AsyncMock()
-    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False)
+    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False, drafttable_url=None)
     db_factory, _ = _mock_db_session(ds)
     with patch("services.draft_setup_manager.db_session", db_factory), \
          patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock()) as embed:
