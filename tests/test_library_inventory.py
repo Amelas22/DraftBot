@@ -41,12 +41,15 @@ async def _deposit(owner, name, qty, source):
 
 async def _loan(borrower, cards, state, source="draft:s1", guild="g1"):
     async with AsyncSessionLocal() as s:
-        s.add(CardLoan(guild_id=guild, borrower_id=borrower, cards=cards,
-                       library_id=LIB, state=state, source=source))
+        loan = CardLoan(guild_id=guild, borrower_id=borrower, cards=cards,
+                        library_id=LIB, state=state, source=source)
+        s.add(loan)
         await s.commit()
+        return loan.id
 
 
-async def _draft(session_id="s1", cube=CUBE, minutes_ago=5, stage="pairings"):
+async def _draft(session_id="s1", cube=CUBE, minutes_ago=5, stage="pairings",
+                 sign_ups=None):
     """A draft underway in a server this library serves.
 
     The binding is what makes it count: a draft in a room drawing on a
@@ -59,6 +62,7 @@ async def _draft(session_id="s1", cube=CUBE, minutes_ago=5, stage="pairings"):
             s.add(LibraryServer(guild_id="g1", library_id=LIB, bound_by="test"))
         s.add(DraftSession(
             session_id=session_id, guild_id="g1", cube=cube, session_stage=stage,
+            sign_ups=sign_ups if sign_ups is not None else {ALICE: "Alice", BOB: "Bob"},
             draft_start_time=datetime.now() - timedelta(minutes=minutes_ago + 60),
             teams_start_time=datetime.now() - timedelta(minutes=minutes_ago)))
         await s.commit()
@@ -221,3 +225,113 @@ async def test_a_cube_that_cannot_be_read_holds_nothing_rather_than_everything(
 
     assert await inv.library_available(LIB, fetch=_cubes({})) == {"Swamp": 4}
 
+
+
+# --- two drafts of one cube: the earlier reservation wins -------------------
+#
+# A shelf holding one copy of each card cannot cover two drafts of the same
+# cube, so one of them has to be told no. It is the one that reserved second.
+# A draft reserves when its teams form, and the decks it assigns carry that
+# reservation forward rather than starting a new one -- otherwise a draft that
+# finished first would lose its cards to one that was still dealing packs.
+
+async def test_a_later_drafts_whole_cube_hold_does_not_take_an_earlier_drafts_deck(
+        test_db):
+    """Measured on 2026-09-30: a PowerLSV draft assigned its decks while a
+    second PowerLSV draft, whose teams had formed three minutes after the
+    first's, was still holding its whole cube. Every card in the first draft's
+    decks read 1 held - 1 held = 0, and nobody could collect anything."""
+    await _deposit(ALICE, "Swamp", 1, "d1")
+    await _draft("first", minutes_ago=20)
+    mine = await _loan(BOB, [{"name": "Swamp", "qty": 1}], "assigned",
+                       source="draft:first")
+    await _draft("second", minutes_ago=15)
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 1}]}),
+        exclude_loan_id=mine)
+
+    assert available == {"Swamp": 1}
+
+
+async def test_an_earlier_drafts_whole_cube_hold_still_takes_a_later_drafts_deck(
+        test_db):
+    """The same rule from the other side: a draft still dealing packs reserved
+    first, so a deck from a draft that started after it must wait."""
+    await _deposit(ALICE, "Swamp", 1, "d1")
+    await _draft("first", minutes_ago=20)
+    await _draft("second", minutes_ago=15)
+    mine = await _loan(BOB, [{"name": "Swamp", "qty": 1}], "assigned",
+                       source="draft:second")
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 1}]}),
+        exclude_loan_id=mine)
+
+    assert available == {}
+
+
+async def test_a_later_drafts_uncollected_deck_does_not_take_an_earlier_drafts_deck(
+        test_db):
+    """Once the later draft assigns its own decks its hold becomes those decks
+    -- still a reservation made second, so it still yields."""
+    await _deposit(ALICE, "Swamp", 1, "d1")
+    await _draft("first", minutes_ago=20)
+    await _draft("second", minutes_ago=15)
+    mine = await _loan(BOB, [{"name": "Swamp", "qty": 1}], "assigned",
+                       source="draft:first")
+    await _loan(ALICE, [{"name": "Swamp", "qty": 1}], "assigned",
+                source="draft:second")
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({}), exclude_loan_id=mine)
+
+    assert available == {"Swamp": 1}
+
+
+async def test_a_collected_deck_counts_whichever_draft_it_came_from(test_db):
+    """Priority settles who may take a card off the shelf, not who has to give
+    one back. A card somebody is holding is gone, however late they reserved."""
+    await _deposit(ALICE, "Swamp", 1, "d1")
+    await _draft("first", minutes_ago=20)
+    await _draft("second", minutes_ago=15)
+    mine = await _loan(BOB, [{"name": "Swamp", "qty": 1}], "assigned",
+                       source="draft:first")
+    await _loan(ALICE, [{"name": "Swamp", "qty": 1}], "borrowed",
+                source="draft:second")
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({}), exclude_loan_id=mine)
+
+    assert available == {}
+
+
+# --- a draft holds the cube only if somebody in it could borrow -------------
+
+async def test_a_draft_nobody_in_it_may_borrow_from_holds_nothing(test_db):
+    """In an invite-only library a draft of uninvited players will never
+    collect a deck, so reserving the whole cube for it only blocks the people
+    who can."""
+    from services.library_access_service import invite
+    await _deposit(ALICE, "Swamp", 4, "d1")
+    await invite(LIB, ALICE, added_by="test")
+    await _draft(sign_ups={BOB: "Bob", "u3": "Carol"})
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+
+    assert available == {"Swamp": 4}
+
+
+async def test_one_invited_drafter_is_enough_to_hold_the_cube(test_db):
+    """Which cards they will end up with is unknown until decks are assigned,
+    so one possible borrower holds the whole cube just as eight would."""
+    from services.library_access_service import invite
+    await _deposit(ALICE, "Swamp", 4, "d1")
+    await invite(LIB, ALICE, added_by="test")
+    await _draft(sign_ups={ALICE: "Alice", "u3": "Carol"})
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+
+    assert available == {"Swamp": 1}

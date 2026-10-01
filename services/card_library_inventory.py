@@ -31,6 +31,8 @@ from models.card_loan import ACTIVE_STATES, CardLoan
 from models.draft_session import DraftSession
 from models.library_server import LibraryServer
 from services import debt_service, wallet_service
+from services.library_access_service import members
+from services.library_reminders import session_of
 
 # Loan states whose cards are not on the shelf: every state a loan can be in
 # without being finished.
@@ -130,12 +132,23 @@ async def library_available(
     has produced no loans, and loans exist only once decks are assigned. No card
     can be counted by both.
 
+    `exclude_loan_id` asks on behalf of that loan, which does two things: the
+    loan is not counted against itself, and the earlier reservation wins -- a
+    draft that formed its teams after this loan's draft (see _reserved_since)
+    holds nothing against it, whether still dealing packs or holding decks
+    nobody has collected. A shelf with one copy of each card cannot serve two
+    drafts of the same cube, and the one that reserved second waits. Cards
+    somebody has actually collected count whichever draft they came from.
+
     `fetch` reads a cube's list and defaults to CubeCobra; tests pass their own
     so nothing here reaches the network.
     """
     held = await library_holdings(library_id)
-    spoken_for = await _on_loan(library_id, exclude_loan_id=exclude_loan_id)
-    for name, qty in (await _being_drafted(fetch or fetch_cube, library_id)).items():
+    since = await _reserved_since(exclude_loan_id)
+    spoken_for = await _on_loan(library_id, exclude_loan_id=exclude_loan_id,
+                                yield_after=since)
+    for name, qty in (await _being_drafted(fetch or fetch_cube, library_id,
+                                           yield_after=since)).items():
         spoken_for[name] = spoken_for.get(name, 0) + qty
 
     available: "dict[str, int]" = {}
@@ -149,21 +162,64 @@ async def library_available(
     return available
 
 
-async def _on_loan(library_id: Any, *, exclude_loan_id: Optional[int] = None
-                   ) -> "dict[str, int]":
+async def _teams_formed(session: Any, draft_ids: "list[str]") -> "dict[str, datetime]":
+    """When each of these drafts formed its teams -- the moment it reserved."""
+    if not draft_ids:
+        return {}
+    rows = (await session.execute(
+        select(DraftSession.session_id, DraftSession.teams_start_time).where(
+            DraftSession.session_id.in_(draft_ids)))).all()
+    return {sid: formed for sid, formed in rows if formed is not None}
+
+
+async def _reserved_since(loan_id: Optional[int]) -> Optional[datetime]:
+    """When this loan's claim on the shelf began, or None if unknown.
+
+    A deck carries its draft's reservation forward: the draft held the cube
+    from the moment its teams formed, and assigning decks narrowed that hold,
+    it did not start a new one. Dating a deck from its own assignment would
+    hand a draft that finished first to one still dealing packs. A loan from no
+    draft dates from its creation.
+    """
+    if loan_id is None:
+        return None
+    async with AsyncSessionLocal() as session:
+        loan = await session.get(CardLoan, loan_id)
+        if loan is None:
+            return None
+        draft_id = session_of(loan)
+        if draft_id is None:
+            return loan.created_at
+        return (await _teams_formed(session, [draft_id])).get(draft_id)
+
+
+async def _on_loan(library_id: Any, *, exclude_loan_id: Optional[int] = None,
+                   yield_after: Optional[datetime] = None) -> "dict[str, int]":
     """Cards committed by THIS library's loans: assigned, in flight, out, or
     coming back. Another library's loans draw down its own shelf, not this
-    one's, however much the two share an MTGO account."""
+    one's, however much the two share an MTGO account.
+
+    An assigned deck whose draft formed after `yield_after` is a later
+    reservation and is left out. Only an ASSIGNED one: anything past that has
+    cards in flight or in somebody's hands, and priority cannot take them back.
+    """
     async with AsyncSessionLocal() as session:
         loans = list((await session.scalars(
             select(CardLoan).where(
                 CardLoan.state.in_(SPOKEN_FOR),
                 CardLoan.library_id == str(library_id)))).all())
+        formed: "dict[str, datetime]" = {}
+        if yield_after is not None:
+            formed = await _teams_formed(session, [
+                d for d in (session_of(loan) for loan in loans
+                            if loan.state == "assigned") if d])
 
     out: "dict[str, int]" = {}
     for loan in loans:
         if loan.id == exclude_loan_id and loan.state == "assigned":
             continue  # Collecting this reservation must not subtract it twice.
+        if loan.state == "assigned" and _later(formed.get(session_of(loan) or ""), yield_after):
+            continue  # Reserved after the loan asking; it waits its turn.
         cards = loan.offered_cards if loan.state == "out_pending" else loan.cards
         if loan.state in ("borrowed", "return_pending"):
             positions = await debt_service.get_open_card_positions(
@@ -182,8 +238,15 @@ async def _on_loan(library_id: Any, *, exclude_loan_id: Optional[int] = None
     return out
 
 
-async def _being_drafted(fetch: "Callable[[str], Any]",
-                         library_id: Any) -> "dict[str, int]":
+def _later(formed: Optional[datetime], than: Optional[datetime]) -> bool:
+    """Strictly later. An unknown or tied time does not yield: holding is the
+    safe way to be wrong, since the borrower is told what is short."""
+    return formed is not None and than is not None and formed > than
+
+
+async def _being_drafted(fetch: "Callable[[str], Any]", library_id: Any, *,
+                         yield_after: Optional[datetime] = None
+                         ) -> "dict[str, int]":
     """The full card lists of THIS library's drafts that are underway but not
     yet assigned.
 
@@ -197,6 +260,14 @@ async def _being_drafted(fetch: "Callable[[str], Any]",
     a different library takes its cards from that library's shelf, and holding
     this one's cube against it would make a cube undraftable because an
     unrelated community happened to be playing it.
+
+    And only drafts somebody in could borrow from. In an invite-only library a
+    table of uninvited players will never collect a deck, so holding the cube
+    for them only blocks the people who can. One invited drafter is enough to
+    hold all of it: which cards they will end up with is unknown until now.
+
+    A draft whose teams formed after `yield_after` holds nothing: see
+    library_available.
     """
     cutoff = datetime.now() - DRAFTING_WINDOW
     async with AsyncSessionLocal() as session:
@@ -221,12 +292,17 @@ async def _being_drafted(fetch: "Callable[[str], Any]",
                 ))).all()
         }
 
+    invited = set(await members(library_id))
     committed: "dict[str, int]" = {}
     for draft in underway:
         if draft.session_stage in FINISHED_STAGES:
             continue
         if f"draft:{draft.session_id}" in assigned:
             continue                      # its loans speak for it now
+        if _later(draft.teams_start_time, yield_after):
+            continue                      # reserved after the loan asking
+        if invited and not invited & set(draft.sign_ups or {}):
+            continue                      # nobody here could collect a deck
         # Through the doorway, so what a draft is holding is named the way
         # custody is. Comparing a raw CubeCobra list to the ledger meant a
         # Universes Beyond card reserved nothing -- its cube name never matched
