@@ -43,7 +43,12 @@ async def reconnect_draft_setup_sessions(discord_client):
             if not all([session.session_id, session.draft_id, session.cube]):
                 logger.warning(f"Skipping session {session.session_id}: Missing required fields")
                 continue
-                
+
+            # A second manager would orphan the live one, socket and all.
+            if DraftSetupManager.get_active_manager(session.session_id):
+                logger.info(f"Skipping session {session.session_id}: it already has a manager")
+                continue
+
             # Calculate how long ago the session was created
             time_since_creation = current_time - session.draft_start_time
             hours_since_creation = time_since_creation.total_seconds() / 3600

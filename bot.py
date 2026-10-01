@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from database.message_management import setup_sticky_handler
 from database.db_session import init_db
 from utils import cleanup_sessions_task, check_inactive_players_task
+from helpers.background_tasks import ensure_running
 from commands import core_commands, scheduled_posts
 from reconnect_drafts import reconnect_draft_setup_sessions
 from bot_registry import register_bot
@@ -69,22 +70,28 @@ async def main():
         except Exception as e:
             logger.error(f"Failed to sync commands: {e}")
         
-        bot.loop.create_task(cleanup_sessions_task(bot))
-        bot.loop.create_task(check_inactive_players_task(bot))
+        # on_ready refires on every gateway reconnect: ensure_running starts each
+        # loop only if it isn't already running, and revives one that died.
+        ensure_running(bot, "_cleanup_sessions_task", lambda: cleanup_sessions_task(bot))
+        ensure_running(bot, "_inactive_players_task", lambda: check_inactive_players_task(bot))
         from services.log_reconciler import run_log_reconciler
-        bot.loop.create_task(run_log_reconciler(bot))
-        try:
-            # Reconnect to sessions needing setup
-            logger.info("Starting draft setup reconnection...")
-            setup_managers = await reconnect_draft_setup_sessions(bot)
-            if setup_managers:
-                logger.info(f"Created {len(setup_managers)} draft setup reconnection managers")
-                bot.loop.create_task(monitor_reconnection_tasks(setup_managers, "setup"))
-            else:
-                logger.info("No draft setup sessions to reconnect")
-                      
-        except Exception as e:
-            logger.error(f"Error setting up draft reconnections: {e}")
+        ensure_running(bot, "_log_reconciler_task", lambda: run_log_reconciler(bot))
+        # A reconnect leaves the managers of drafts in setup running, so this
+        # runs until it first succeeds, not on every refire.
+        if not getattr(bot, "_setup_drafts_reconnected", False):
+            try:
+                # Reconnect to sessions needing setup
+                logger.info("Starting draft setup reconnection...")
+                setup_managers = await reconnect_draft_setup_sessions(bot)
+                bot._setup_drafts_reconnected = True
+                if setup_managers:
+                    logger.info(f"Created {len(setup_managers)} draft setup reconnection managers")
+                    bot.loop.create_task(monitor_reconnection_tasks(setup_managers, "setup"))
+                else:
+                    logger.info("No draft setup sessions to reconnect")
+
+            except Exception as e:
+                logger.error(f"Error setting up draft reconnections: {e}")
 
         from config import migrate_configs
         migrate_configs()
@@ -124,15 +131,12 @@ async def main():
         # ...and a watcher for the serve itself: the jobs watchdog only notices a
         # wedge when a trade happened to be in flight (rationale in the module).
         from services.serve_health_monitor import watch_serve_health
-        # Referenced, not fire-and-forget: asyncio keeps only a weak reference,
-        # and this is the task whose silent death nothing else would reveal.
-        # Guarded because on_ready refires on every gateway reconnect, and the
-        # later task returns at once (the watcher is already claimed) -- so an
-        # unconditional assignment would replace the live watcher's reference
-        # with a finished no-op's, which is the thing this line prevents.
-        existing = getattr(bot, "_serve_health_task", None)
-        if existing is None or existing.done():
-            bot._serve_health_task = bot.loop.create_task(watch_serve_health(bot))
+        # Referenced, not fire-and-forget: this is the task whose silent death
+        # nothing else would reveal. Through ensure_running because the later
+        # task returns at once (the watcher is already claimed), so an
+        # unconditional start would replace the live watcher's reference with a
+        # finished no-op's.
+        ensure_running(bot, "_serve_health_task", lambda: watch_serve_health(bot))
         # Same idea for the card library's trades, against the other serve: a
         # borrow whose command poller died would otherwise sit in 'out_pending'
         # forever, with the borrower holding cards the ledger says are still on
@@ -140,15 +144,10 @@ async def main():
         # offers for drafts that are over, which hold both cards and their
         # borrower's one loan slot.
         #
-        # Referenced, not fire-and-forget: asyncio keeps only a weak reference,
-        # and this is the sole recovery path for every stranded loan and
-        # deposit. Guarded for the same reason as the watcher above -- on_ready
-        # refires on every gateway reconnect.
+        # Referenced, not fire-and-forget: this is the sole recovery path for
+        # every stranded loan and deposit.
         from services.card_lending_service import lending_jobs_watchdog
-        lending_task = getattr(bot, "_lending_watchdog_task", None)
-        if lending_task is None or lending_task.done():
-            bot._lending_watchdog_task = bot.loop.create_task(
-                lending_jobs_watchdog(bot))
+        ensure_running(bot, "_lending_watchdog_task", lambda: lending_jobs_watchdog(bot))
         logger.info("Re-registered team finder")
 
     @bot.event

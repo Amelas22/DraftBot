@@ -17,12 +17,7 @@ import services.draft_setup_manager as dsm
 from services.draft_setup_manager import ACTIVE_MANAGERS
 
 
-@pytest.fixture(autouse=True)
-def _clean_registry():
-    """__init__ registers every manager globally; don't leak between tests."""
-    ACTIVE_MANAGERS.clear()
-    yield
-    ACTIVE_MANAGERS.clear()
+pytestmark = pytest.mark.usefixtures("clean_manager_registry")
 
 
 def loopable(mgr):

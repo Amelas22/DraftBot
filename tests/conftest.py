@@ -239,6 +239,28 @@ def embed_field(embed, name):
     return next((f for f in embed.fields if f.name == name), None)
 
 
+async def seed_queue(session_id, **overrides):
+    """A draft still in setup (session_stage NULL), created just now."""
+    await seed_session(**{"session_id": session_id, "stage": None,
+                          "draft_id": f"d-{session_id}", "start": datetime.now(),
+                          **overrides})
+
+
+@pytest.fixture
+def clean_manager_registry():
+    """Empty ACTIVE_MANAGERS around a test.
+
+    DraftSetupManager.__init__ registers every manager globally, so a test that
+    builds one leaks it into the next. Opt in with
+    ``pytestmark = pytest.mark.usefixtures("clean_manager_registry")``.
+    """
+    from services.draft_setup_manager import ACTIVE_MANAGERS
+
+    ACTIVE_MANAGERS.clear()
+    yield
+    ACTIVE_MANAGERS.clear()
+
+
 def make_manager(**kwargs):
     """A DraftSetupManager with its socket mocked out.
 
