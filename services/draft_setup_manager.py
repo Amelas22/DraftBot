@@ -349,7 +349,7 @@ class DraftSetupManager:
 
         # Status tracking variables
         self.status_message_id = None
-        self.last_status_update = None
+        self._status_lock = asyncio.Lock()  # serialises _post_status
         self.session_status = {
             'present_users': [],
             'missing_users': [],
@@ -2406,10 +2406,10 @@ class DraftSetupManager:
                 self.session_status['updated_at'] = datetime.now().strftime('%H:%M:%S')
 
                 channel = await self._get_draft_channel()
-                if channel and self.status_message_id:
+                if channel:
                     new_content = self.format_status_message(self.session_status)
                     new_content += "\n\n✅ **Seating order set successfully! Starting ready check...**"
-                    await self._update_or_send_message(channel, self.status_message_id, content=new_content)
+                    await self._post_status(channel, new_content)
 
                 # Automatically initiate the first ready check after seating is set
                 await asyncio.sleep(1)  # Brief pause to ensure everything is settled
@@ -2429,12 +2429,12 @@ class DraftSetupManager:
                 self.session_status['updated_at'] = datetime.now().strftime('%H:%M:%S')
 
                 channel = await self._get_draft_channel()
-                if channel and self.status_message_id:
+                if channel:
                     new_content = self.format_status_message(self.session_status)
                     missing_users_str = ", ".join(missing_users)
                     new_content += f"\n\n❌ **Failed to set seating order. Missing users: {missing_users_str}**\n"
                     new_content += f"These players need to join the Draftmancer session."
-                    await self._update_or_send_message(channel, self.status_message_id, content=new_content)
+                    await self._post_status(channel, new_content)
 
                     # Also send a separate notification for visibility
                     await channel.send(
@@ -3394,25 +3394,31 @@ class DraftSetupManager:
             # Format the message using the status dictionary
             message_content = self.format_status_message(self.session_status)
 
-            # Try to update existing message or create a new one
-            message = await self._update_or_send_message(channel, self.status_message_id, content=message_content)
-
-            if message:
-                self.last_status_update = datetime.now()
-                # If we created a new message, store the ID
-                if not self.status_message_id or str(message.id) != self.status_message_id:
-                    self.status_message_id = str(message.id)
-                    self.logger.info(f"Created new status message with ID {self.status_message_id}")
-                    await self.update_draft_session_field('status_message_id', self.status_message_id)
-                else:
-                    self.logger.info("Successfully updated existing status message")
-
-            return message
+            return await self._post_status(channel, message_content)
 
         except Exception as e:
             self.logger.exception(f"Error sending/updating status message: {e}")
             return None
             
+    async def _post_status(self, channel, content):
+        """Edit the draft's status message, posting one if there is none, and track it.
+
+        Every status write goes through here, under _status_lock, so callers that
+        arrive together edit one message rather than each posting their own; a
+        replacement for a deleted message is tracked from then on. (The only other
+        writer of status_message_id restores it from the database while unset.)
+        """
+        async with self._status_lock:
+            message = await self._update_or_send_message(channel, self.status_message_id,
+                                                         content=content)
+            if message and str(message.id) != self.status_message_id:
+                self.status_message_id = str(message.id)
+                self.logger.info(f"Created new status message with ID {self.status_message_id}")
+                await self.update_draft_session_field('status_message_id', self.status_message_id)
+            elif message:
+                self.logger.info("Successfully updated existing status message")
+            return message
+
     def format_status_message(self, status):
         """
         Formats the status dictionary into a readable Discord message.
