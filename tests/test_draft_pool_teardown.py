@@ -96,20 +96,19 @@ def test_forming_teams_closes_the_book():
         "session that never reaches the table")
 
 
-def test_the_queue_cancel_refunds_before_deleting_the_row():
-    """Ordering IS the test. The pool is keyed to session_id and this path
-    deletes the DraftSession row, so a refund running afterwards has nothing to
-    key to and the money is stranded with no owner."""
+def test_the_queue_cancel_refunds_and_deletes_the_row_together():
+    """The pool is keyed to session_id and this path deletes the DraftSession
+    row, so a refund running after the delete has nothing to key to -- and one
+    running before it in a separate transaction leaves a window for an entry to
+    land in between. The cancel releases and deletes in one transaction."""
     from views import CancelConfirmationView
 
     src = _source(CancelConfirmationView.confirm_button)
-    release_at = src.find("release_draft_pool")
-    delete_at = src.find("db_session.delete(session)")
-    assert release_at != -1, "the queue cancel does not release the pool at all"
-    assert delete_at != -1, "the delete moved; re-check this ordering assertion"
-    assert release_at < delete_at, (
-        "the pool is released AFTER the DraftSession row is deleted -- by then "
-        "there is nothing to key the refund to")
+    assert "release_draft_pool" in src, "the queue cancel does not release the pool at all"
+    assert "delete_draft=True" in src, (
+        "the queue cancel deletes the row separately from the release -- an entry "
+        "can be charged between the two and is stranded with the row gone")
+    assert "db_session.delete(session)" not in src, "a second, separate delete is back"
 
 
 def test_abandoning_a_draft_releases_its_pool():

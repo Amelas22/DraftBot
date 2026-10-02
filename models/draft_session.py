@@ -72,6 +72,7 @@ class DraftSession(Base):
     spaces_object_key = Column(String(256), nullable=True)  # DigitalOcean Spaces object path
     unlock_at = Column(DateTime)              # when the public embed may publish (logs_captured_at + PUBLISH_DELAY; manual release = now)
     drafttable_url = Column(String(512))   # published draft table page, once it exists
+    pool_matched_at = Column(DateTime, nullable=True)  # set by match_pool, in the transaction that books its refunds
     team_logs_posted_at = Column(DateTime)    # when per-team pools were posted to team channels (immediate; no time gate)
     # Where each team's drafted pools are being delivered: the pools thread,
     # or the team channel itself when Discord refused a thread. Whichever one

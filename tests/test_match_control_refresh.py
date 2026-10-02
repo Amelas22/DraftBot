@@ -252,16 +252,22 @@ async def test_cancel_reads_tournament_match_id_before_the_row_is_deleted():
     interaction.response.edit_message = AsyncMock()
     interaction.followup.send = AsyncMock()
 
-    with patch.object(views, "release_draft_pool",
-                      AsyncMock(return_value={"refunded": {}})), \
-    patch("views.get_draft_session", AsyncMock(return_value=session)), \
+    # The row is deleted inside the release now (delete_draft=True), in the
+    # same transaction as the refund -- so that is where it gets mutated.
+    async def _release(guild_id, session_id, reason, *, delete_draft=False):
+        if delete_draft:
+            _mutate_on_delete(session)
+        return {"refunded": {}}
+
+    with patch.object(views, "release_draft_pool", AsyncMock(side_effect=_release)) as release, \
+         patch("views.get_draft_session", AsyncMock(return_value=session)), \
          patch("views.AsyncSessionLocal", session_factory), \
          patch.dict(ACTIVE_MANAGERS, {}, clear=True), \
          patch.object(ReadyCheckSession, "cleanup", AsyncMock()), \
          patch("match_control_view.refresh_match_views", AsyncMock()) as refresh:
         await view.confirm_button(MagicMock(), interaction)
 
-    db_sess.delete.assert_awaited_once_with(session)
+    assert release.await_args.kwargs.get("delete_draft") is True
     refresh.assert_awaited_once_with(view.bot, 99)
 
 

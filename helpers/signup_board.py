@@ -60,17 +60,36 @@ def shown_stake(amount: Any) -> str:
     """What an entry looks like on the signup board, before teams exist.
 
     Bucketed at the top so the largest entries cannot be ranked against one
-    another. What the bucket withholds is real but small: levelling caps both
-    sides at what the smaller can cover and hands the rest straight back, so
-    for that step the exact figure changes nothing. It does still set the
-    ceiling that opted-in opponents are capped to (draft_pool_service.
-    cap_targets), and hiding that distinction is the price of not ranking.
+    another. What the bucket withholds is real, and became MORE real when the
+    entry cap moved to reading a player's own side
+    (draft_pool_service.cap_targets): anybody in this queue may be drawn as your
+    teammate, and their declared figures are what your own ceiling is computed
+    from, so a neighbour shown as "100+" could be 100 or 400 and you cannot tell
+    which. That is the price of not ranking, and it is charged here knowingly.
     """
     try:
         n = int(amount)
     except (TypeError, ValueError):
         return "?"
     return f"{STAKE_SHOWN_CEILING}+" if n >= STAKE_SHOWN_CEILING else str(n)
+
+
+def entry_cap_phrase(is_capped: Any) -> str:
+    """How a player's cap setting reads, in the one place the wording lives.
+
+    Three confirmation surfaces state this -- the signup confirmation, the
+    over-100 modal's result and the cap toggle -- and they stated it three ways,
+    one of which dropped the clause explaining what "uncapped" is relative to.
+    Same reasoning money_gate.wallet_howto gives for itself: written once
+    because the copies drift, and a reviewer had to find the drift last time.
+
+    It deliberately does NOT quote the percentage. CAP_SHARE is a tunable
+    justified from history in draft_pool_service, so a confirmation line naming
+    55% would need rewriting every time it moved; the figure belongs in the
+    explainer panel, which has the room to say what it is measured against.
+    """
+    return ("capped to your share of your team" if is_capped else
+            "uncapped, whatever your team looks like")
 
 
 def _weighted(name: str) -> str:

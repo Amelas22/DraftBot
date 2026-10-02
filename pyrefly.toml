@@ -10,6 +10,7 @@ preset = "strict"
 
 project-includes = [
     "helpers/background_tasks.py",
+    "services/entry_notices.py",
     "helpers/signup_board.py",
     "services/library_reminders.py",
     "cogs/server_draft_stats.py",

@@ -20,7 +20,7 @@ from helpers.draft_rooms import BLUE_SIDE, RED_SIDE, SHARED_CHAT_TEAM
 from helpers.team_names import RED, labels_for
 from services.draft_pool_service import (format_entries, format_outcomes,
                                          pool_balance, release_draft_pool,
-                                         settle_draw, settle_pool)
+                                         settle_draw, settle_pool, PoolNotSettled)
 from services.draft_analysis import DraftAnalysis
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
@@ -592,8 +592,15 @@ async def settle_decided_draft(draft_session_id):
     if await pool_balance(guild_id, draft_session_id) > 0:
         if outcome == "draw":
             # A draw pays nobody, which means everybody gets their entry back --
-            # otherwise the pool sits funded on a completed draft forever.
-            await settle_draw(guild_id, draft_session_id)
+            # otherwise the pool sits funded on a completed draft forever. This
+            # runs inside every match report, so a release that fails must not
+            # stop the draw being posted; the entries stay held, logged.
+            try:
+                await settle_draw(guild_id, draft_session_id)
+            except PoolNotSettled:
+                logger.opt(exception=True).error(
+                    f"drawn draft {draft_session_id}: could not return the entries; "
+                    f"they are still held in its pool")
         else:
             result = await settle_pool(guild_id, draft_session_id, list(winners or []))
             # Only the call that actually settles gets here with anything to
@@ -699,12 +706,12 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                     # Add the stakes field to the embed
                     if stake_lines:
                         embed.add_field(
-                            name=f"**Total Bets: {total_stakes} tix**",
+                            name=f"**Prize Pool: {total_stakes} tix**",
                             value="\n".join(stake_lines),
                             inline=False
                         )
                     
-                    # Create bet outcomes embed if there's a winner.
+                    # Create the payouts embed if there's a winner.
                     # Victory only: a draw pays nobody, so this is the line that
                     # decides whether any money moves for this draft.
                     outcome = decides_draft(team_a_wins, team_b_wins, total_matches)
@@ -713,7 +720,7 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                         # Determine the winning team
                         winning_team = draft_session.team_a if team_a_wins > team_b_wins else draft_session.team_b
 
-                        # Get bet outcome lines. The pool has already paid --
+                        # Get the payout lines. The pool has already paid --
                         # settle_draft_pool runs before this transaction opens.
                         # Reports what moved, whichever way it moved: under
                         # the pool nobody owes anybody, because the money
@@ -724,17 +731,20 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                             winning_team
                         )
 
-                        # Create separate bet outcomes embed
+                        # Create the separate payouts embed
                         if outcome_lines:
                             separator = "💵━━━━━━━━━━━━━━━"
                             bet_description = f"\n{separator}\n".join(outcome_lines)
 
                             bet_embed = discord.Embed(
-                                title="💰 Bet Outcomes",
+                                title="💰 Prize Pool Payouts",
                                 description=bet_description,
                                 color=discord_color  # Match main embed color
                             )
-                            bet_embed.set_footer(text=f"Total bets settled: {outcome_total} tix")
+                            # The figure is the sum of the winners' PROFIT, which is what changed
+                            # hands. The pool paid is twice it, because each winner put in
+                            # c and took 2c -- so this cannot be called the pool.
+                            bet_embed.set_footer(text=f"Winnings paid: {outcome_total} tix")
                             # Where a loser first reads what this draft cost
                             # them, so it is where the wallet is explained.
                             add_wallet_howto(bet_embed, draft_session.guild_id)
@@ -749,7 +759,7 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                 embed = discord.Embed(title=title, description=description, color=discord_color)
                 seating_order = [draft_session.sign_ups[user_id] for user_id in sign_ups_list]
                 embed.add_field(name="Seating Order", value=format_seating_order(seating_order), inline=False)
-                bet_embed = None  # Swiss drafts don't have bet outcomes
+                bet_embed = None  # Swiss drafts have no payouts embed
 
             # Shared draft metadata footer, on the main embed only — bet_embed
             # carries its own settled-total footer.
@@ -1816,8 +1826,20 @@ async def cleanup_sessions_task(bot):
                         # reaped, and the pool is keyed to its session_id, so anything
                         # still held has to come back before that happens or it can
                         # never be attributed to anyone again.
-                        await release_draft_pool(str(session.guild_id),
-                                                 session.session_id, "expired")
+                        # One queue that cannot release is skipped with its row kept,
+                        # and the next pass tries again. Raising would roll back the
+                        # whole pass -- every other queue, channel and challenge in it.
+                        try:
+                            # Releases and deletes the row in one transaction, so no
+                            # entry can be charged between the two.
+                            await release_draft_pool(str(session.guild_id),
+                                                     session.session_id, "expired",
+                                                     delete_draft=True)
+                        except PoolNotSettled:
+                            logger.opt(exception=True).error(
+                                f"could not release the pool of expired queue "
+                                f"{session.session_id}; keeping it for the next pass")
+                            continue
                         cancelled_queues.append(session.session_id)
                     
                         # Cancel the queue due to inactivity
@@ -1838,9 +1860,6 @@ async def cleanup_sessions_task(bot):
                                     logger.error(f"Failed to delete message ID {session.message_id} in draft channel. Reason: {e}")
                                 from ready_check import ReadyCheckSession
                                 await ReadyCheckSession.cleanup(session.session_id, draft_channel)
-                    
-                        # Delete the session from the database
-                        await db_session.delete(session)
 
                     # Original cleanup code for regular sessions
                     for session in sessions_to_cleanup:
@@ -3059,8 +3078,13 @@ async def get_formatted_stake_pairs(session_id, sign_ups):
             # Sort by amount (highest first)
             unique_pairs.sort(key=lambda x: x[2], reverse=True)
             
-            # Format for display - Team Red player vs Team Blue player
-            formatted_lines = [f"{a} vs {b}: {amount} tix" for a, b, amount in unique_pairs]
+            # Bolded to match what format_entries emits for a pool draft.
+            # Both regimes come out of this function and land on the same four
+            # surfaces; if they render differently, every one of those surfaces
+            # needs to know which regime it is looking at, which is precisely
+            # what this function exists to spare them.
+            formatted_lines = [f"**{a}** vs **{b}**: {amount} tix"
+                               for a, b, amount in unique_pairs]
             
             return formatted_lines, total_stake
 
@@ -3112,7 +3136,7 @@ async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
                 player_b_on_winning_team = pairing.player_b_id in winning_team_ids
 
                 if player_a_on_winning_team == player_b_on_winning_team:
-                    # Both are winners or both are losers, so no bet outcome
+                    # Both are winners or both are losers, so no payout
                     continue
 
                 # Determine winner and loser

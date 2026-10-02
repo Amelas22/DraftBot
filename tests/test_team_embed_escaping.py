@@ -47,7 +47,7 @@ def field_values(embed):
 async def test_draft_link_labels_are_left_raw():
     """Escaping a link label puts visible backslashes in front of players."""
     embed = await team_creator._create_channel_announcement_embed(
-        fake_session(), ["**Bold**User"], {}, "random"
+        fake_session(), ["**Bold**User"], "random"
     )
     links = "\n".join(f.value for f in embed.fields if "Draft Links" in f.name)
     assert "[**Bold**User]" in links, f"link label should stay raw: {links}"
@@ -59,7 +59,7 @@ async def test_link_urls_keep_the_raw_name():
     """The URL becomes ?userName= and is what seats the player -- escaping it
     would send backslashes to Draftmancer and break the join."""
     embed = await team_creator._create_channel_announcement_embed(
-        fake_session(), ["**Bold**User"], {}, "random"
+        fake_session(), ["**Bold**User"], "random"
     )
     assert "userName=**Bold**User" in field_values(embed)
 
@@ -67,7 +67,7 @@ async def test_link_urls_keep_the_raw_name():
 @pytest.mark.asyncio
 async def test_announcement_seating_order_is_escaped():
     embed = await team_creator._create_channel_announcement_embed(
-        fake_session(), ["**Bold**User", "*Single*Star"], {}, "random"
+        fake_session(), ["**Bold**User", "*Single*Star"], "random"
     )
     seating = next(f.value for f in embed.fields if f.name == "Seating Order")
     assert "\\*\\*Bold\\*\\*User" in seating, f"plain field should be escaped: {seating}"
@@ -78,7 +78,7 @@ async def test_team_roster_lists_are_escaped():
     """Plain fields, so the escapes are consumed and the name renders literally."""
     embed = await team_creator._create_teams_embed(
         fake_session(), ["**Bold**User", "*Single*Star"], ["~Strike~User", "plain"],
-        ["**Bold**User"], {}, "random",
+        ["**Bold**User"], "random",
     )
     roster = next(f.value for f in embed.fields if "Team Red" in f.name)
     assert "\\*\\*Bold\\*\\*User" in roster, f"roster should be escaped: {roster}"

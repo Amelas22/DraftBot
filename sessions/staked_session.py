@@ -13,23 +13,30 @@ class StakedSession(RandomSession):
     def _create_embed_content(self):
         """Create an embed message for a staked draft session."""
         # Remove the cube from the title since it's now in its own field
-        title = f"Prize Pool Draft! Minimum Bet: {self.session_details.min_stake} tix"
+        title = (f"Prize Pool Draft! Minimum entry: "
+                 f"{self.session_details.min_stake} tix")
         description = (
             f"Queue Opened <t:{self.session_details.draft_start_time}:R>\n\n"
             "**Prize Pool Draft Queue**\n"
-            "1. Sign up and enter your max bet. It leaves your wallet now and "
-            "goes into the prize pool.\n"
-            "2. Teams are made randomly. Bets are **NOT** factored in when "
-            "making teams.\n"
-            f"3. Minimum bet: {self.session_details.min_stake} tix\n\n"
+            "1. Sign up and set your maximum entry. It leaves your wallet now "
+            "and goes into the prize pool.\n"
+            "2. Teams are drawn at random. Entries play **no** part in who ends "
+            "up on which team.\n"
+            "\n"
             "**How it works:**\n"
-            "• Both sides have to be backing the same amount, so when teams "
-            "form the heavier side is levelled down and the difference comes "
-            "straight back to your wallet.\n"
-            "• Small bets are filled first; the larger ones share what is left "
-            "in proportion to their size.\n"
-            "• The winning team splits the pool: whatever you had matched, you "
-            "get back double.\n"
+            # The cap is ON unless a player turns it off, it runs BEFORE
+            # levelling, and until this the queue embed never mentioned it --
+            # so the first a trimmed player heard of a default-on setting was
+            # the refund. Listed first because that is the order it applies in.
+            "• Your entry is **capped to your share of your team** unless you turn "
+            "that off, so you are never left funding most of your own side.\n"
+            "• Both sides have to be backing the same amount, so when teams form the "
+            "heavier side is levelled down and the excess goes straight back to the "
+            "players it came from.\n"
+            "• Inside a team there is one cut-off and nobody holds more than it: "
+            "entries under it are untouched, entries above it are trimmed to it.\n"
+            "• Each winner gets back double what they had matched, so the pool pays "
+            "out in proportion to what each player held rather than in equal shares.\n"
             f"{self.get_common_description()}"
         )
         embed = Embed(title=title, description=description, color=Color.gold())

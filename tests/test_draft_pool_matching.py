@@ -293,15 +293,14 @@ def test_the_staked_path_reaches_the_book_closing():
     from services.team_creator import create_and_display_teams
 
     src = inspect.getsource(create_and_display_teams)
-    staked_at = src.find('if persistent_view.session_type == "staked":')
+    staked_at = src.find('staked_done = persistent_view.session_type == "staked"')
     match_at = src.find("await match_pool(")
-    assert staked_at != -1 and match_at != -1
+    assert staked_at != -1, "the staked branch moved; re-check this assertion"
+    assert match_at != -1, "team creation never closes the book"
     between = src[staked_at:match_at]
     assert "return True" not in between, (
         "the staked branch returns before the book is closed, so matching never "
         "runs for the only drafts that have a pool")
-    assert "staked_done = True" in between, (
-        "the staked branch no longer records that it handled the draft")
 
 
 def test_matching_and_settlement_agree_on_which_drafts_have_a_pool():
@@ -400,6 +399,49 @@ async def test_every_display_surface_reads_the_pool_for_a_pool_draft(test_db):
         "the surface reports 0 tix at risk for a draft holding 100 -- it is "
         "still reading StakePairing rows that a pool draft never has")
     assert any("Ada" in line and "30" in line for line in lines), lines
+
+
+@pytest.mark.asyncio
+async def test_both_regimes_describe_the_money_the_same_way(test_db):
+    """Four surfaces render these lines and none of them is told which regime
+    produced them -- that is the point of routing both through one formatter.
+    If the two shapes differ, every surface has to sniff the text to render it,
+    and one of them did: the teams embed split each line on " vs " to decide,
+    which mangled a player whose display name happened to contain it.
+
+    So the shapes have to match. Names bolded, amount after ": ", "tix".
+    """
+    import re
+
+    from models.stake_pairing import StakePairing
+    from utils import get_formatted_stake_pairs
+
+    names = {"p1": "Ada", "p2": "Brin", "p3": "Cyd", "p4": "Dov"}
+
+    await seed_session(session_id="pool", guild="g", stage=None,
+                       teams=(["p1", "p2"], ["p3", "p4"]))
+    for player, amount in {"p1": 30, "p2": 20, "p3": 30, "p4": 20}.items():
+        await wallet_service.adjust("g", player, 500, f"seed-{player}", "test")
+        await pool.set_entry("g", "pool", player, amount)
+    pool_lines, _ = await get_formatted_stake_pairs("pool", names)
+
+    # A legacy draft is one that HAS pairing rows; that is the whole gate.
+    await seed_session(session_id="tiered", guild="g", stage=None,
+                       teams=(["p1", "p2"], ["p3", "p4"]))
+    async with AsyncSessionLocal() as db:
+        async with db.begin():
+            db.add(StakePairing(session_id="tiered", player_a_id="p1",
+                                player_b_id="p3", amount=30))
+            db.add(StakePairing(session_id="tiered", player_a_id="p2",
+                                player_b_id="p4", amount=20))
+    tiered_lines, _ = await get_formatted_stake_pairs("tiered", names)
+
+    assert pool_lines and tiered_lines, (pool_lines, tiered_lines)
+    shape = re.compile(r"^(\*\*[^*]+\*\*)( vs \*\*[^*]+\*\*)?: \d+ tix$")
+    for line in pool_lines + tiered_lines:
+        assert shape.match(line), (
+            f"{line!r} is a third rendering of the same field -- a surface "
+            f"that shows both regimes now has to tell them apart by eye")
 
 
 def test_a_pool_draft_is_not_offered_a_settle_debts_button():
@@ -545,87 +587,192 @@ def test_the_queue_explainer_does_not_describe_the_retired_matcher():
     It caught nothing when written -- the rewrite came first. It exists because
     the explainer and the rule live in different files, and the last time they
     drifted the embed described a system that had not run for months.
+
+    Two later changes proved the anchor is worth widening rather than merely
+    keeping. The cap moved from reading the OPPOSING side to reading your own,
+    and the copy was renamed off "bet" entirely; neither retirement was listed
+    here, so nothing failed when the explainer went on describing the old rule.
+    A reviewer found that instead, which is precisely the job this test exists
+    to do.
+
+    "opponent" is deliberately NOT banned: the live copy says the cap depends on
+    your team and "not your opponents", which is the correct statement of the new
+    rule. What is banned is the vocabulary that can only belong to the old one.
     """
     import inspect
+    import re
 
     from views import PersistentView
 
     text = inspect.getsource(PersistentView.explain_stakes_callback).lower()
+
     for retired in ("proportional", "tiered", "minimum requirement",
-                    "player-to-player", "betting pair", "bet score"):
+                    "player-to-player", "betting pair", "bet score",
+                    # the cap used to measure against the other side
+                    "opposing", "biggest opponent", "highest opponent",
+                    # and used to snap to a fixed ladder, then to a median
+                    "bucket", "median"):
         assert retired not in text, (
-            f"the queue explainer still uses {retired!r}, which belongs to the "
-            f"retired tiered matcher, not the pool")
+            f"the queue explainer still uses {retired!r}, which belongs to a "
+            f"retired rule, not the one the pool runs today")
+
+    # Whole words only: "bet" is a substring of "between" and "better", either of
+    # which a future edit could legitimately introduce.
+    stale = re.findall(r"\b(bet|bets|betting|bettor|better)\b", text)
+    assert not stale, (
+        f"the queue explainer still calls it a bet ({sorted(set(stale))}); the "
+        "player-facing term is an entry")
 
 
-# ---- bet capping: the 🧢 preference, applied before levelling ----------------------
+# ---- entry capping: the 🧢 preference, applied before levelling --------------------
 #
-# "Cap my bet at the highest bet on the opposing team" is a personal ceiling a
-# player opts into at signup. It runs BEFORE levelling and hands the excess
-# straight back, so a capped player never has money sitting in a pot they said
-# they did not want that much action in.
+# "Cap my entry so I never carry more than my share of my own team" is a personal
+# ceiling a player opts into at signup. It runs BEFORE levelling and hands the
+# excess straight back, so a capped player never has money sitting in a pot they
+# said they did not want that much action in.
+#
+# Measured against their own side rather than the opponents, because that is what
+# the history says matters: a side whose top entry holds 55-60% of it wins 44.5%
+# and 65%+ wins 42.2%, against 50% overall -- while being merely the biggest
+# entry is harmless at 49.7%.
 
 
-async def _a_400_against_a_top_bet_of_100(b1_capped):
-    """The one scenario the cap tests turn on: b1 bets 400 into a side whose
-    biggest bet is 100. Only b1's own preference varies between them."""
+async def _a_400_on_a_side_of_20(b1_capped):
+    """The scenario the cap tests turn on: b1 declares 400 alongside one
+    teammate on 20, so b1 carries 95% of their own side. Only b1's own
+    preference varies between them."""
     await _fund({"a1": 100, "a2": 100, "b1": 400, "b2": 20})
     await seed_stakes("s1", {"a1": (100, False), "a2": (100, False),
                              "b1": (400, b1_capped), "b2": (20, False)})
 
 
 @pytest.mark.asyncio
-async def test_a_capped_bet_is_trimmed_to_the_top_opposing_bet(test_db):
-    """400 against a side whose biggest bet is 100 comes back to 100."""
-    await _a_400_against_a_top_bet_of_100(b1_capped=True)
+async def test_a_capped_entry_is_trimmed_to_its_share_of_its_own_side(test_db):
+    """400 beside a single teammate on 20 comes back to 20.
+
+    CAP_SHARE of 55% allows 1.222x the teammates' total -- 24 here -- and the
+    ceiling snaps DOWN to a whole stake step, so 20.
+    """
+    await _a_400_on_a_side_of_20(b1_capped=True)
 
     result = await pool.match_pool("g", "s1", A, B)
 
-    assert result["capped"] == {"b1": 300}, (
-        f"the capped bet was not trimmed to the opposing top bet: {result}")
+    assert result["capped"] == {"b1": 380}, (
+        f"the capped entry was not trimmed to its share of its side: {result}")
     held = await pool.contributions("g", "s1")
-    assert held["b1"] == 100, f"the cap did not stick: {held}"
+    assert held["b1"] == 20, f"the cap did not stick: {held}"
 
 
 @pytest.mark.asyncio
-async def test_an_uncapped_bet_is_left_for_levelling(test_db):
-    """🏎️ means the bet is not trimmed up front; it takes its chances with the
-    ceiling like everyone else, and keeps whatever the other side can cover."""
-    await _a_400_against_a_top_bet_of_100(b1_capped=False)
+async def test_an_uncapped_entry_is_left_for_levelling(test_db):
+    """🏎️ means the entry is not trimmed up front; it takes its chances with
+    the ceiling like everyone else, and keeps whatever the other side covers."""
+    await _a_400_on_a_side_of_20(b1_capped=False)
 
     result = await pool.match_pool("g", "s1", A, B)
 
-    assert result["capped"] == {}, f"an uncapped bet was trimmed: {result}"
+    assert result["capped"] == {}, f"an uncapped entry was trimmed: {result}"
     held = await pool.contributions("g", "s1")
     assert held["b1"] == 180, (
-        f"the uncapped bet did not take what the other side could cover: {held}")
+        f"the uncapped entry did not take what the other side could cover: {held}")
 
 
 @pytest.mark.asyncio
-async def test_a_capped_bet_under_the_ceiling_is_untouched(test_db):
-    """The cap only ever trims. Opting in cannot cost a player who is already
-    at or below the top opposing bet."""
+async def test_the_modal_roster_is_left_alone(test_db):
+    """100 beside two teammates on 50 is the single most common shape in the
+    history -- 164 occurrences -- and it wins 52.4%, so it is not what the cap
+    is for. It sits at exactly 50% of its side, which is why the threshold is
+    55% and not 50%: a 50% ceiling would clip the modal roster.
+    """
+    await _fund({"a1": 100, "a2": 100, "a3": 100,
+                 "b1": 100, "b2": 50, "b3": 50})
+    await seed_stakes("s1", {"a1": (100, False), "a2": (100, False), "a3": (100, False),
+                             "b1": (100, True), "b2": (50, True), "b3": (50, True)})
+
+    result = await pool.match_pool("g", "s1", ["a1", "a2", "a3"], ["b1", "b2", "b3"])
+
+    assert result["capped"] == {}, f"the modal roster was clipped: {result}"
+
+
+@pytest.mark.asyncio
+async def test_an_entry_over_the_share_is_trimmed_even_on_a_full_team(test_db):
+    """100 beside 20 and 50 is 59% of its side, and that band wins 44.5%.
+    Teammates total 70, so the allowance is 85 and the ceiling snaps to 80 --
+    leaving b1 at 53% of the side, which is what the 55% rule asks for.
+
+    The snap direction is load-bearing and this is the case that shows it: an
+    allowance is rarely a whole step, and rounding 85 UP to 90 would leave b1
+    holding 90 of 160, or 56% -- past the line the cap exists to hold. Down,
+    never up.
+    """
+    await _fund({"a1": 100, "a2": 100, "a3": 100,
+                 "b1": 100, "b2": 20, "b3": 50})
+    await seed_stakes("s1", {"a1": (100, False), "a2": (100, False), "a3": (100, False),
+                             "b1": (100, True), "b2": (20, False), "b3": (50, False)})
+
+    result = await pool.match_pool("g", "s1", ["a1", "a2", "a3"], ["b1", "b2", "b3"])
+
+    assert result["capped"] == {"b1": 20}, (
+        f"an entry at 59% of its side was not trimmed to its allowance: {result}")
+
+
+@pytest.mark.asyncio
+async def test_the_allowance_grows_with_the_team(test_db):
+    """The share is of the whole side, so how MANY teammates you have matters --
+    which is what a ceiling read from one teammate's figure cannot express.
+    Three teammates on 20 total 60, allowing 73, so 50 stands where beside a
+    single 20 it would not."""
+    await _fund({"a1": 100, "a2": 100, "a3": 100, "a4": 100,
+                 "b1": 50, "b2": 20, "b3": 20, "b4": 20})
+    await seed_stakes("s1", {"a1": (100, False), "a2": (100, False),
+                             "a3": (100, False), "a4": (100, False),
+                             "b1": (50, True), "b2": (20, False),
+                             "b3": (20, False), "b4": (20, False)})
+
+    result = await pool.match_pool("g", "s1", A, B)
+
+    assert result["capped"] == {}, (
+        f"50 beside three 20s is 45% of its side and should stand: {result}")
+
+
+@pytest.mark.asyncio
+async def test_a_capped_entry_under_the_share_is_untouched(test_db):
+    """The cap only ever trims. Opting in cannot cost a player already inside
+    their share."""
     await _fund({"a1": 100, "a2": 100, "b1": 50, "b2": 50})
     await seed_stakes("s1", {"a1": (100, False), "a2": (100, False),
                     "b1": (50, True), "b2": (50, True)})
 
     result = await pool.match_pool("g", "s1", A, B)
 
-    assert result["capped"] == {}, f"a bet below the cap was trimmed: {result}"
+    assert result["capped"] == {}, f"an entry below the cap was trimmed: {result}"
+
+
+@pytest.mark.asyncio
+async def test_a_lone_entry_with_no_teammates_is_never_capped(test_db):
+    """Nobody to take a share OF. Treating an empty teammate total as a ceiling
+    of zero would refund their whole entry."""
+    await _fund({"a1": 100, "b1": 100})
+    await seed_stakes("s1", {"a1": (100, False), "b1": (100, True)})
+
+    result = await pool.match_pool("g", "s1", ["a1"], ["b1"])
+
+    assert result["capped"] == {}, f"a lone entry was capped to nothing: {result}"
+    held = await pool.contributions("g", "s1")
+    assert held["b1"] == 100, held
 
 
 @pytest.mark.asyncio
 async def test_capping_does_not_ratchet_when_matching_is_replayed(test_db):
-    """The regression the declared-bet key exists to prevent.
+    """The regression the declared-entry key exists to prevent.
 
     team_creator replays match_pool after a restart. A ceiling read from what
-    the opposing side currently HOLDS would fall on every pass -- the first
-    call levels team A down to 60 apiece, so the second call would cap b1 at 60
-    instead of 100, level A again, and shrink the pot on every replay. Reading
-    StakeInfo.max_stake, which levelling never touches, makes the ceiling the
-    same figure every time.
+    the side currently HOLDS would fall on every pass -- levelling shrinks the
+    teammates' holdings, so the second call would compute a smaller allowance,
+    trim again, and shrink the pot on every replay. Reading StakeInfo.max_stake,
+    which levelling never touches, makes the ceiling the same figure every time.
     """
-    await _a_400_against_a_top_bet_of_100(b1_capped=True)
+    await _a_400_on_a_side_of_20(b1_capped=True)
 
     first = await pool.match_pool("g", "s1", A, B)
     after_one = await pool.contributions("g", "s1")
@@ -640,9 +787,9 @@ async def test_capping_does_not_ratchet_when_matching_is_replayed(test_db):
 
 @pytest.mark.asyncio
 async def test_a_draft_with_no_declared_bets_is_never_capped(test_db):
-    """A premade entry fee has no StakeInfo and nothing to cap against. Absent
-    rows must read as "no preference", not as a ceiling of zero -- which would
-    refund the whole table."""
+    """A premade entry fee has no StakeInfo and nothing to take a share of.
+    Absent rows must read as "no preference", not as a ceiling of zero -- which
+    would refund the whole table."""
     await _fund({"a1": 100, "a2": 100, "b1": 100, "b2": 100})
 
     result = await pool.match_pool("g", "s1", A, B)
@@ -752,6 +899,43 @@ def _best_pot_by_brute_force(stakes: list[int]) -> int:
     return best
 
 
+@pytest.mark.asyncio
+async def test_the_advertised_pot_is_an_UPPER_bound_once_entries_are_capped(test_db):
+    """The board's figure is pre-cap, and an opted-in cap can only lower it.
+
+    Every other max_pool test seeds entries through _fund, which never writes
+    is_capped -- so they all exercise the UNCAPPED path and none of them can see
+    a cap change move the achievable pot. That blind spot is what let the cap
+    move from reading the opposing side to reading your own without a single
+    failure: measured on the prod copy, 22 of 917 real queues (2.4%) can no
+    longer reach their advertised figure, worst case 900 advertised against 320
+    achievable.
+
+    So the contract is stated here as the inequality it actually is. Exactness
+    is not merely unimplemented, it is unattainable at the point the board
+    renders: the ceiling depends on who you are drawn WITH, and the cap flags of
+    players who have not joined yet are unknowable. "Up to N" is the honest
+    claim, and this pins that it stays an upper bound rather than drifting into
+    a figure the draft cannot pay.
+    """
+    stakes = {"a1": 100, "a2": 20, "b1": 100, "b2": 20}
+    await _fund(stakes)
+    await seed_stakes("s1", {p: (n, True) for p, n in stakes.items()})
+
+    advertised = pool.max_pool(stakes.values())
+    assert advertised == 240, "pre-cap, the two sides can meet at 120 each"
+
+    result = await pool.match_pool("g", "s1", ["a1", "a2"], ["b1", "b2"])
+    actual = await pool.pool_balance("g", "s1")
+
+    assert actual <= advertised, (
+        f"the queue advertised {advertised} and the draft holds {actual} -- "
+        "the board must never promise more than a draft can pay")
+    assert actual == 80, (
+        f"each 100 sits beside a single 20, so its ceiling snaps to 20: {result}")
+    assert result["matched"] * 2 == actual
+
+
 @pytest.mark.parametrize("stakes", [
     [200, 100],
     [100, 20, 50, 50],
@@ -766,5 +950,29 @@ def _best_pot_by_brute_force(stakes: list[int]) -> int:
 ])
 def test_the_advertised_pot_is_the_best_any_legal_split_could_make(stakes):
     """The ceiling must be exactly reachable -- not above (a promise the draft
-    cannot keep) and not below (a draft that pays more than it advertised)."""
+    cannot keep) and not below (a draft that pays more than it advertised).
+
+    Exactly reachable BEFORE any entry cap applies, which is what max_pool
+    models and all this oracle knows about. A capped entry can lower the
+    achievable pot below this figure; that case is
+    test_the_advertised_pot_is_an_UPPER_bound_once_entries_are_capped.
+    """
     assert pool.max_pool(stakes) == _best_pot_by_brute_force(stakes)
+
+
+@pytest.mark.asyncio
+async def test_a_ceiling_that_snaps_to_nothing_never_refunds_a_whole_entry(test_db):
+    """The guard has to test the CEILING, not the teammates' total.
+
+    Teammates totalling under 9 give an allowance under one step, snapping to 0 --
+    and a ceiling of zero would hand back the capped player's entire entry, the
+    one outcome this must never do. Guarding on the teammate total instead lets
+    that through, because the total is positive.
+    """
+    from services.draft_pool_service import cap_targets
+
+    targets = cap_targets(["x", "y"], {"x": 200, "y": 5}, {"x"},
+                          {"x": 200, "y": 5})
+
+    assert targets["x"] == 200, (
+        f"a ceiling that snapped to nothing refunded the whole entry: {targets}")

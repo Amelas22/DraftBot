@@ -6,7 +6,7 @@ from models.draft_session import DraftSession
 from helpers.stale_drafts import is_finished_draft
 from models.match import MatchResult
 from helpers.permissions import is_bot_manager
-from services.draft_pool_service import release_draft_pool
+from services.draft_pool_service import ENTRIES_STILL_HELD, PoolNotSettled, release_draft_pool
 from helpers.stale_drafts import is_finished_draft
 from discord.ui import View, Button
 from datetime import datetime, timedelta
@@ -108,7 +108,8 @@ async def abandon_draft_session(session_id, session_factory=None):
     ``deletion_time`` so the existing cleanup task removes its channels.
 
     Returns True if it abandoned the draft, False if it refused because the draft
-    had finished. The callers check that too, but they check it when the command
+    had finished. Raises PoolNotSettled if it abandoned the draft but could not
+    return its entries -- they are still held, and the callers say so. The callers check that too, but they check it when the command
     is typed and this runs up to ninety seconds later -- after a vote, or after an
     admin gets round to clicking confirm. The last match can be reported in that
     window, and a finished draft losing every result is not recoverable by asking
@@ -342,7 +343,18 @@ class AbandonConfirmView(View):
         _disable_all(self)
         # Same race as the vote path: the draft can finish between offering this
         # button and its being clicked, and abandon_draft_session refuses then.
-        if not await abandon_draft_session(self.session_id):
+        try:
+            abandoned = await abandon_draft_session(self.session_id)
+        except PoolNotSettled:
+            logger.opt(exception=True).error(f"abandoned {self.session_id} but could not release its pool")
+            await interaction.response.edit_message(
+                content=f"🛑 Draft abandoned. All match results have been voided.\n{ENTRIES_STILL_HELD}",
+                view=self)
+            await self.channel.send(
+                "🛑 **This draft has been abandoned by an admin.** All match results "
+                f"have been voided.\n{ENTRIES_STILL_HELD}")
+            return
+        if not abandoned:
             await interaction.response.edit_message(
                 content="✅ This draft finished before the abandon was confirmed. "
                         "Nothing was voided — the results stand.",
@@ -759,8 +771,14 @@ class DraftControlCog(commands.Cog):
                 # state does. If the emit above had failed we would have told
                 # players the draft is still running -- refunding them at that
                 # point hands back the entries for a draft they are still in.
-                await release_draft_pool(str(draft_session.guild_id),
-                                         draft_session.session_id, "scrapped")
+                try:
+                    await release_draft_pool(str(draft_session.guild_id),
+                                             draft_session.session_id, "scrapped")
+                except PoolNotSettled:
+                    logger.opt(exception=True).error(
+                        f"scrapped {draft_session.session_id} but could not release its pool")
+                    await final_message.edit(content=f"🛑 **Draft canceled!**\n{ENTRIES_STILL_HELD}")
+                    return
                 await final_message.edit(content=
                                         "🛑 **Draft canceled!** \n" \
                                         "Use `/ready` to begin a ready check for a new draft.\n" \
@@ -888,7 +906,16 @@ class DraftControlCog(commands.Cog):
                 # The draft can finish while the vote runs, and abandon_draft_session
                 # refuses when it has. Saying "voided" anyway would send six players
                 # to re-report matches that were never touched.
-                if await abandon_draft_session(draft_session.session_id):
+                try:
+                    abandoned = await abandon_draft_session(draft_session.session_id)
+                except PoolNotSettled:
+                    logger.opt(exception=True).error(
+                        f"abandoned {draft_session.session_id} but could not release its pool")
+                    await vote_channel.send(
+                        "🛑 **Vote passed — draft abandoned.** All match results have been "
+                        f"voided.\n{ENTRIES_STILL_HELD}")
+                    return
+                if abandoned:
                     await vote_channel.send(
                         "🛑 **Vote passed — draft abandoned.** All match results have been voided."
                     )

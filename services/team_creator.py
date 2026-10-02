@@ -9,7 +9,7 @@ and enable reuse across different team creation triggers.
 from loguru import logger
 from datetime import datetime, timedelta
 
-from services.draft_pool_service import match_pool
+from services.draft_pool_service import match_pool, pool_balance
 import discord
 import random
 from sqlalchemy import update, select
@@ -82,6 +82,10 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                                             .where(DraftSession.session_id == session.session_id)
                                             .values(team_a=team_a, team_b=team_b))
 
+                # What team creation is about to change, so a pool that cannot
+                # settle can put the draft back exactly as it was.
+                before = _unwind_snapshot(session)
+
                 # Update session timing and stage
                 session.teams_start_time = datetime.now()
                 if session.session_type == 'premade':
@@ -89,8 +93,6 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                 else:
                     session.deletion_time = datetime.now() + timedelta(hours=4)
                 session.session_stage = 'teams'
-
-                stake_info_by_player = {}
 
                 # Clean up any active ready check, regardless of session type
                 from ready_check import ReadyCheckSession
@@ -109,7 +111,6 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                 # BOTH paths here (premade had them from creation; random and
                 # staked have just had them written by split_into_teams). The
                 # money itself moves AFTER this transaction commits; see below.
-                staked_done = False
                 pool_sides = None
                 # STAKED only, matching utils.py's settlement gate exactly. Entries
                 # can only arrive through the staked signup UI, and settlement is
@@ -152,26 +153,31 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                                         .where(DraftSession.session_id == session.session_id)
                                         .values(sign_ups=new_sign_ups))
 
-                # Create main embed
-                embed = await _create_teams_embed(session, team_a_display_names if session.session_type != 'swiss' else None,
-                                           team_b_display_names if session.session_type != 'swiss' else None,
-                                           seating_order, stake_info_by_player, persistent_view.session_type)
+                # A staked draft is NOT announced here. Its embed states the
+                # prize pool, and the pool is not real until match_pool has
+                # run -- which cannot happen until this transaction closes,
+                # because that money moves on its own connection and SQLite is
+                # single-writer. Posting now would announce what players
+                # DECLARED: 860 tix for a draft that goes on to play for 220.
+                # So the staked path builds and posts below the commit.
+                #
+                # Nothing holds it here. The embed builders read columns
+                # already loaded on `session` and open their own database
+                # sessions rather than joining this one. Moving them out also
+                # stops two Discord round trips from happening while this
+                # transaction holds SQLite's single write lock.
+                staked_done = persistent_view.session_type == "staked"
 
-                # Create channel announcement embed
-                channel_embed = await _create_channel_announcement_embed(
-                    session, seating_order, stake_info_by_player, persistent_view.session_type
-                )
+                if not staked_done:
+                    # Create main embed
+                    embed = await _create_teams_embed(session, team_a_display_names if session.session_type != 'swiss' else None,
+                                               team_b_display_names if session.session_type != 'swiss' else None,
+                                               seating_order, persistent_view.session_type)
 
-                # Handle staked drafts specially
-                if persistent_view.session_type == "staked":
-                    await _handle_staked_draft_completion(
-                        interaction, db_session, session, embed, channel_embed,
-                        persistent_view, draft_session_id, bot, guild_id
+                    # Create channel announcement embed
+                    channel_embed = await _create_channel_announcement_embed(
+                        session, seating_order, persistent_view.session_type
                     )
-                    # Do NOT return from inside the transaction: the pool has to
-                    # be matched, and that money cannot move while this
-                    # transaction holds the write lock. Fall out first.
-                    staked_done = True
 
                 # Update button states for non-staked drafts. Guarded because a
                 # staked draft used to return before reaching here; falling out
@@ -188,10 +194,7 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                             item.disabled = False
                         else:
                             item.disabled = True
-                if not staked_done:
-                    # The staked completion handler commits internally, so the
-                    # transaction is already closed by the time we get here.
-                    await db_session.commit()
+                await db_session.commit()
 
         # The book closes here, OUTSIDE the transaction above.
         #
@@ -202,11 +205,64 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
         # transaction rolls back -- leaving teams written by split_into_teams
         # (its own transaction) beside a session_stage that never advanced.
         if pool_sides is not None:
-            await match_pool(*pool_sides)
+            # match_pool is all or nothing, so a failure here has moved no
+            # money. The draft goes back to sign-ups as it was, and nothing has
+            # been announced yet -- both announcements come after this block.
+            try:
+                result = await match_pool(*pool_sides)
+            except Exception:
+                logger.opt(exception=True).error(
+                    "the pool did not settle on {}; unwinding the draft to sign-ups",
+                    getattr(session, "session_id", "?"))
+                await unwind_team_creation(session.session_id, before)
+                await interaction.followup.send(
+                    "⚠️ The prize pool couldn't be settled, so teams weren't "
+                    "created. Everyone's entry is unchanged -- run a new "
+                    "**ready check**, then **Create Teams** to try again.")
+                return False
+            # Say what came back, now the money has actually moved. The copy
+            # promises unmatched entries are returned before the draft starts;
+            # until this, nothing told the player it had happened.
+            #
+            # Everything it needs is already in `result` -- notably `held`, which
+            # match_pool computed in place. Re-deriving it with a second
+            # contributions() read would be a second source of truth for the
+            # figure the DM asserts, and the only thing in this block that could
+            # go stale. Local names only: `guild_id` here is the enclosing
+            # function's, and send_teams_created_dms still reads it below.
+            #
+            # One guard, at this boundary and not around each send -- the shape
+            # card_lending_service's watchdog already uses for the library DMs:
+            # send_dm catches its own Discord errors and returns False, so a
+            # guard further in would catch nothing, but the pool is settled by
+            # now and a notification must not be able to fail team creation.
+            try:
+                from services.entry_notices import announce_refunds
+                await announce_refunds(
+                    pool_sides[1],
+                    refunded=result.get("refunded") or {},
+                    capped=result.get("capped") or {},
+                    held=result.get("held") or {},
+                    friendly_id=getattr(session, "friendly_id", None))
+            except Exception:
+                logger.opt(exception=True).warning(
+                    "could not tell players what came back on {}; the pool is "
+                    "settled either way", getattr(session, "session_id", "?"))
 
         if staked_done:
-            # A staked draft's own completion handler has already posted its
-            # embeds; everything below is the non-staked announcement path.
+            # Built HERE, not above the commit, because only now does
+            # get_formatted_stake_pairs read a settled pool -- this is the
+            # whole reason the staked path skipped the builders inside the
+            # transaction. The number on the embed is what the draft plays
+            # for, first time, with nothing to correct afterwards.
+            embed = await _create_teams_embed(
+                session, team_a_display_names, team_b_display_names,
+                seating_order, persistent_view.session_type)
+            channel_embed = await _create_channel_announcement_embed(
+                session, seating_order, persistent_view.session_type)
+            await _handle_staked_draft_completion(
+                interaction, session, embed, channel_embed,
+                persistent_view, draft_session_id, bot, guild_id)
             return True
 
         # Update message and send announcement
@@ -248,24 +304,121 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
         return False
 
 
-async def _add_stake_info_to_embed(embed, session, stake_info_by_player):
-    """Add formatted stake information to an embed if applicable."""
-    if not stake_info_by_player:
+# Every column team creation changes before the pool is matched.
+_UNWIND_COLUMNS = ("session_stage", "teams_start_time", "deletion_time",
+                   "team_a", "team_b", "sign_ups")
+
+
+def _unwind_snapshot(session):
+    """The draft's values for _UNWIND_COLUMNS, copied so later edits cannot reach them."""
+    snap = {}
+    for column in _UNWIND_COLUMNS:
+        value = getattr(session, column)
+        snap[column] = (dict(value) if isinstance(value, dict)
+                        else list(value) if isinstance(value, list) else value)
+    return snap
+
+
+async def unwind_team_creation(session_id, restore):
+    """Put a draft back to before team creation, in one transaction.
+
+    For a pool that could not be matched: the teams, the stage and the clocks
+    revert, so the queue is a queue again and Create Teams can be pressed anew.
+    """
+    async with AsyncSessionLocal() as db_session:
+        async with db_session.begin():
+            await db_session.execute(update(DraftSession)
+                                     .where(DraftSession.session_id == session_id)
+                                     .values(**restore))
+
+
+# How far back startup looks for a draft a crash left half-made.
+_INTERRUPTED_LOOKBACK = timedelta(hours=24)
+
+
+async def unwind_interrupted_team_creations(bot):
+    """Put back drafts a crash left between committing teams and matching the pool.
+
+    No except clause sees a process dying. match_pool is all or nothing and
+    stamps pool_matched_at in the same transaction as its refunds, so what such
+    a crash leaves is a draft at 'teams' with money in its pool and no stamp --
+    and nothing announced. The stamp, not the sides, is the test: removing a
+    player after teams form refunds their entry, so a running draft's sides go
+    unequal too. Run once at startup, before drafts in setup are reconnected.
+
+    The draft returns to sign-ups with every entry where it was. A premade
+    draft keeps its rosters, which were set when it was created, not here.
+    """
+    from config import get_queue_inactivity_minutes
+
+    cutoff = datetime.now() - _INTERRUPTED_LOOKBACK
+    async with AsyncSessionLocal() as db_session:
+        drafts = [d for d in (await db_session.scalars(select(DraftSession).where(
+            DraftSession.session_stage == "teams",
+            DraftSession.pool_matched_at.is_(None),
+            DraftSession.teams_start_time >= cutoff))).all()
+            if d.session_type == "staked" or d.entry_fee]
+
+    unwound = []
+    for draft in drafts:
+        if await pool_balance(str(draft.guild_id), draft.session_id) <= 0:
+            continue          # nothing at risk: never funded, or already paid out
+        restore = {
+            "session_stage": None, "teams_start_time": None,
+            "deletion_time": datetime.now() + timedelta(
+                minutes=get_queue_inactivity_minutes(draft.guild_id)),
+        }
+        if draft.session_type != "premade":
+            restore.update(team_a=None, team_b=None)
+        await unwind_team_creation(draft.session_id, restore)
+        unwound.append(draft.session_id)
+        logger.warning("draft {} was interrupted before its pool was matched; "
+                       "returned it to sign-ups", draft.session_id)
+        channel = bot.get_channel(int(draft.draft_channel_id)) if draft.draft_channel_id else None
+        if channel is not None:
+            try:
+                await channel.send(
+                    f"⚠️ Team creation for `{draft.friendly_id or draft.session_id}` "
+                    "was interrupted before its prize pool was settled, so the draft "
+                    "is back at sign-ups with every entry unchanged. Run a new "
+                    "**ready check**, then **Create Teams** to try again.")
+            except discord.HTTPException as e:
+                logger.warning(f"could not tell {draft.session_id}'s channel it was unwound: {e}")
+    return unwound
+
+
+async def _add_stake_info_to_embed(embed, session):
+    """Put the draft's prize pool on the embed, or nothing if there is none.
+
+    Gated on the lines themselves. It used to be gated on a
+    `stake_info_by_player` dict that the prize-pool migration stopped
+    populating, so this returned before doing anything and the field vanished
+    from every staked draft -- which also hid the second half of the same
+    breakage: a parser here re-derived the regime by splitting each line on
+    " vs ", which the pool's one-line-per-player format does not contain.
+    An empty gate in front of a broken parser reads as "staked drafts have no
+    entries" rather than as either bug.
+
+    Both are gone. get_formatted_stake_pairs picks the regime and emits one
+    shape for both, which is what that function is for; the lines arrive ready
+    to render, and a player whose name contains " vs " is no longer parsed as
+    two people.
+
+    The caller posts this only AFTER match_pool has run, so the figure is the
+    settled pool and not what players declared -- see create_and_display_teams.
+    """
+    stake_lines, total_stakes = await get_formatted_stake_pairs(
+        session.session_id, session.sign_ups)
+    if not stake_lines:
         return
 
-    stake_lines, total_stakes = await get_formatted_stake_pairs(session.session_id, session.sign_ups)
-
-    formatted_lines = []
-    for line in stake_lines:
-        parts = line.split(': ')
-        names = parts[0].split(' vs ')
-        formatted_lines.append(f"**{names[0]}** vs **{names[1]}**: {parts[1]}")
-
-    if formatted_lines:
-        add_links_to_embed_safely(embed, formatted_lines, f"Bets (Total: {total_stakes} tix)")
+    # Spelled as utils.py and livedrafts.py already spell it; this is the same
+    # field on a third surface, not a new one.
+    add_links_to_embed_safely(embed, stake_lines,
+                              f"**Prize Pool: {total_stakes} tix**")
 
 
-async def _create_teams_embed(session, team_a_names, team_b_names, seating_order, stake_info_by_player, session_type):
+async def _create_teams_embed(session, team_a_names, team_b_names, seating_order, session_type):
     """Create the main embed showing teams and seating order."""
 
     title_prefix = "Winston " if session.session_type == 'winston' else ""
@@ -302,14 +455,14 @@ async def _create_teams_embed(session, team_a_names, team_b_names, seating_order
 
     # Add stakes for staked drafts
     if session_type == "staked":
-        await _add_stake_info_to_embed(embed, session, stake_info_by_player)
+        await _add_stake_info_to_embed(embed, session)
 
     apply_draft_footer_from_session(embed, session)
 
     return embed
 
 
-async def _create_channel_announcement_embed(session, seating_order, stake_info_by_player, session_type):
+async def _create_channel_announcement_embed(session, seating_order, session_type):
     """Create the channel announcement embed."""
 
     channel_embed = discord.Embed(
@@ -349,14 +502,14 @@ async def _create_channel_announcement_embed(session, seating_order, stake_info_
 
     # Add stakes for staked drafts
     if session_type == "staked":
-        await _add_stake_info_to_embed(channel_embed, session, stake_info_by_player)
+        await _add_stake_info_to_embed(channel_embed, session)
 
     apply_draft_footer_from_session(channel_embed, session)
 
     return channel_embed
 
 
-async def _handle_staked_draft_completion(interaction, db_session, session, embed, channel_embed,
+async def _handle_staked_draft_completion(interaction, session, embed, channel_embed,
                                          persistent_view, draft_session_id, bot, guild_id):
     """Handle special completion flow for staked drafts."""
     from views import CallbackButton
@@ -390,7 +543,6 @@ async def _handle_staked_draft_completion(interaction, db_session, session, embe
         logger.error(f"Failed to update draft message: {e}")
 
     await interaction.channel.send(embed=channel_embed)
-    await db_session.commit()
 
     # Send DM notifications with draft links to users who have opted in
     await send_teams_created_dms(

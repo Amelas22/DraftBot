@@ -21,8 +21,9 @@ Note the ledgers differ on refunds: tournament escrow keys a refund as
 once. A pool entry can be refunded repeatedly -- unmatched excess, then teardown
 -- so refunds here carry their own reason in the key.
 """
+from datetime import datetime
 from operator import itemgetter
-from typing import Iterable, TypedDict
+from typing import Awaitable, Callable, Iterable, TypedDict, TypeVar
 
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -162,16 +163,55 @@ async def _refund_in(session: AsyncSession, guild_id: str, session_id: str, play
     return True
 
 
-async def refund_entry(guild_id: str, session_id: str, player_id: str,
-                       amount: int, reason: str) -> bool:
-    """Return `amount` from the pool to the player. True once the money is back."""
-    async def _do():
+_T = TypeVar("_T")
+
+
+async def _money_transaction(work: Callable[[AsyncSession], Awaitable[_T]]) -> _T:
+    """Run `work` in ONE transaction, under MONEY_LOCK, retried while the
+    database is locked. Every write this module makes goes through here."""
+    async def _do() -> _T:
         async with db_session() as session:
-            return await _refund_in(session, guild_id, session_id, player_id,
-                                    amount, reason)
+            return await work(session)
 
     async with wallet_service.MONEY_LOCK:
         return await with_db_retry(_do)
+
+
+class PoolNotSettled(RuntimeError):
+    """A batch of refunds could not all be made, so none of them was.
+
+    Raised with every refund in the batch rolled back, so the pool is exactly
+    as it was before the attempt.
+    """
+
+
+# What to tell players when a release fails after their draft has already
+# ended (abandoned, scrapped, cancelled). Nothing was lost -- a failed release
+# leaves the pool untouched -- but nothing will return the money on its own.
+ENTRIES_STILL_HELD = ("⚠️ The entries couldn't be returned automatically. They're "
+                      "still held safely in the pool -- an admin needs to return them.")
+
+
+async def _refund_all_in(session: AsyncSession, guild_id: str, session_id: str,
+                         refunds: list[tuple[str, int, str]]) -> None:
+    """Book every (player, amount, reason) refund inside the caller's transaction.
+
+    A refund that is refused raises, so the caller's transaction rolls back with
+    every refund before it: a pool is never left half-refunded. The reason keys
+    each refund for idempotency and names it in the ledger.
+    """
+    for player_id, amount, reason in refunds:
+        if not await _refund_in(session, guild_id, session_id, player_id, amount, reason):
+            raise PoolNotSettled(
+                f"draft pool {session_id}: the refund of {amount} to {player_id} "
+                f"({reason}) was refused, so none was made")
+
+
+async def refund_entry(guild_id: str, session_id: str, player_id: str,
+                       amount: int, reason: str) -> bool:
+    """Return `amount` from the pool to the player. True once the money is back."""
+    return await _money_transaction(lambda session: _refund_in(
+        session, guild_id, session_id, player_id, amount, reason))
 
 
 async def set_entry(guild_id: str, session_id: str, player_id: str,
@@ -199,13 +239,8 @@ async def set_entry(guild_id: str, session_id: str, player_id: str,
     if amount < 0:
         raise ValueError("Entry amount cannot be negative")
 
-    async def _do():
-        async with db_session() as session:
-            return await entry_in(session, guild_id, session_id,
-                                  player_id, amount, reason)
-
-    async with wallet_service.MONEY_LOCK:
-        result = await with_db_retry(_do)
+    result = await _money_transaction(lambda session: entry_in(
+        session, guild_id, session_id, player_id, amount, reason))
 
     # After the commit and outside the lock: check_pool opens its own reads, and
     # what it audits is committed state.
@@ -248,8 +283,9 @@ async def entry_in(session: AsyncSession, guild_id: str, session_id: str,
         # an invariant the player has no way to repair. Refuse here, so that
         # state is never reached rather than reconciled afterwards.
         #
-        # Matching's own pro-rata refund and every teardown path call
-        # refund_entry directly and are unaffected by this guard.
+        # Matching books its refunds through _refund_in and every teardown path
+        # calls refund_entry; neither goes through here, so this guard does not
+        # touch them.
         logger.info(f"draft pool {session_id}: refusing a late stake change "
                     f"from {player_id} ({held} -> {amount}) -- the book has "
                     f"already closed")
@@ -293,9 +329,52 @@ async def entry_in(session: AsyncSession, guild_id: str, session_id: str,
 # above that -- so a matched stake of 96 is not a bet anyone placed.
 _STAKE_STEP = 10
 
+# How much of their own side a capped player may carry.
+#
+# 55%, from the history rather than taste. The win rate of a side breaks at this
+# line: its top entry wins 52.1% while holding 50-55% of the side and 44.5% at
+# 55-60%. It also matters exactly where the line falls -- 100 beside two
+# teammates on 50 is the single most common roster in the history (164 of them)
+# and sits at precisely 50%, so a 50% ceiling would clip the shape that is doing
+# fine. 55% leaves it alone and still reaches three quarters of every band below
+# even money.
+CAP_SHARE = 0.55
+
+
+def snap_to_step(amount: int) -> int:
+    """`amount` rounded DOWN to a whole stake step.
+
+    Down, never up. This is a ceiling: rounding 85 up to 90 would let a player
+    hold a larger share of their side than the one they opted into, which is the
+    only thing the cap promises.
+
+    To the STEP, not to the entries the dropdown offers (10/20/50/100, then
+    50s). Snapping to those overshoots badly, because nothing sits between 50 and
+    100: an allowance of 97 would become 50, refunding nearly twice what the rule
+    asks and leaving the player at 38% of their side rather than 55%. Measured
+    over the same rosters, ten-granularity lands every case at 50-55% where
+    bucket-granularity ranged 33-53%. The step is also what the rest of the
+    system already quotes -- level_side hands out 30, 70 and 90 routinely -- so a
+    ceiling of 80 is no stranger a figure than a levelled draft already shows.
+    """
+    return max(amount, 0) // _STAKE_STEP * _STAKE_STEP
+
 
 def max_pool(stakes: Iterable[int]) -> int:
     """The biggest pot this queue could play for, over every legal split of it.
+
+    An UPPER bound, not an exact figure, and deliberately so. It models
+    levelling only -- an opted-in entry cap (cap_targets) can lower the
+    achievable pot below this, because a capped player's ceiling depends on the
+    teammates they are drawn WITH. On the prod copy that bites 22 of 917 real
+    queues (2.4%), median 40 tix, worst case 900 advertised against 320.
+
+    Exactness is not merely unimplemented here, it is unattainable at the point
+    this is called: the signup board renders it while players are still joining,
+    and the cap flags of players who have not joined yet cannot be known. So the
+    board says "up to N", which stays true, and
+    test_the_advertised_pot_is_an_UPPER_bound_once_entries_are_capped pins the
+    inequality rather than an equality the cap can break.
 
     match_pool caps both sides at the smaller side's whole-ten TOTAL, so the
     holder ends up with twice that. This asks which split of the current queue
@@ -420,16 +499,15 @@ async def _declared_bets(session_id: str) -> tuple[dict[str, int], set[str]]:
             {player_id for player_id, _, capped in rows if capped is True})
 
 
-async def _trim(guild_id: str, session_id: str, held: dict[str, int],
-                players: list[str], stays: dict[str, int],
-                reason: str) -> dict[str, int]:
-    """Refund whatever each of `players` holds above `stays`, and record it.
+def _trim(held: dict[str, int], players: list[str],
+          stays: dict[str, int]) -> dict[str, int]:
+    """Plan the refund of whatever each of `players` holds above `stays`.
 
     Both ceilings a draft applies -- the player's own cap, and the one the two
     sides meet at -- are the same operation against a different target map, so
-    they are the same code against a different `reason`. That reason keys the
-    refund for idempotency and names it in the ledger, so the two stay
-    distinguishable everywhere it matters.
+    they are the same code. It moves no money -- the refunds are booked together
+    by _apply_refunds, so a failure part-way cannot leave a pool half-levelled --
+    but it does update `held` in place (below).
 
     `players` is the scope rather than the keys of `stays`, because a player
     levelled all the way to zero is absent from `stays` and still has an entry
@@ -441,41 +519,91 @@ async def _trim(guild_id: str, session_id: str, held: dict[str, int],
     refunded: dict[str, int] = {}
     for player_id in players:
         excess = held[player_id] - stays.get(player_id, 0)
-        if excess > 0 and await refund_entry(guild_id, session_id, player_id,
-                                             excess, reason):
+        if excess > 0:
             held[player_id] -= excess
             refunded[player_id] = excess
     return refunded
 
 
-def cap_targets(side: list[str], bets: dict[str, int], wants_cap: set[str],
-                opposing: list[str], held: dict[str, int]) -> dict[str, int]:
-    """What each player on `side` may keep once their own bet cap is applied.
+async def _apply_refunds(guild_id: str, session_id: str,
+                         refunds: list[tuple[str, int, str]]) -> None:
+    """Book match_pool's planned refunds, and record the pool as matched, at once or not at all.
 
-    "Cap my bet at the highest bet on the opposing team" is a personal ceiling
-    a player opts into at signup, and it only ever trims: opting in cannot cost
-    a player who is already at or below the top opposing bet.
+    One commit per refund left a pool half-levelled at stage 'teams' whenever
+    anything failed part-way, process death included.
 
-    The ceiling comes from the DECLARED bets -- StakeInfo.max_stake -- never
-    from what the other side currently holds. match_pool is re-entrant, and a
-    ceiling read from live holdings would ratchet down on every replay: the
-    first call levels a side, the second sees that side's smaller top entry,
-    caps the opponent harder, and levels again. The declared figure is what the
-    player agreed to and levelling never writes to it, so every pass computes
-    the same ceiling and the second finds nothing left to trim.
+    The same transaction stamps the draft's pool_matched_at, even when there is
+    nothing to refund: a matched pool and its record of being matched cannot
+    exist without each other. That record is what startup recovery reads to
+    tell a draft a crash left half-made from one whose sides went unequal
+    because a player was removed after teams formed.
     """
-    ceiling = max((bets.get(p, 0) for p in opposing), default=0)
-    if ceiling <= 0:
-        # Nobody opposite declared a bet, so there is nothing to cap against.
-        # Treating that as a ceiling of zero would refund the whole side.
-        return {p: held[p] for p in side}
-    return {p: min(held[p], ceiling) if p in wants_cap else held[p] for p in side}
+    from sqlalchemy import update as _update
+    from models.draft_session import DraftSession
+
+    async def book(session: AsyncSession) -> None:
+        await _refund_all_in(session, guild_id, session_id, refunds)
+        await session.execute(_update(DraftSession)
+                              .where(DraftSession.session_id == session_id)
+                              .values(pool_matched_at=datetime.now()))
+
+    await _money_transaction(book)
+
+
+def cap_targets(side: list[str], bets: dict[str, int], wants_cap: set[str],
+                held: dict[str, int]) -> dict[str, int]:
+    """What each player on `side` may keep once their own entry cap is applied.
+
+    "Cap my entry so I never carry more than my share of my own team" is a
+    personal ceiling a player opts into at signup, and it only ever trims:
+    opting in cannot cost a player already inside their share.
+
+    Measured against their TEAMMATES, not the opposing side, and that is the
+    point of it. What players are protecting themselves from is being the one
+    carrying a side -- and the history says the fear is well founded: a side
+    whose top entry holds 55-60% of it wins 44.5%, and 65%+ wins 42.2%, against
+    50% overall. Being merely the biggest entry is harmless (49.7%); being most
+    of the side is not. A ceiling read from the opponents could not express that,
+    because it says nothing about the team you are actually on.
+
+    The share is of the whole side, so how MANY teammates you have changes the
+    allowance -- 50 beside three teammates on 20 is 45% of its side and stands,
+    where beside a single 20 it would be 71% and would not. A ceiling read from
+    one teammate's figure cannot say that either.
+
+    The ceiling comes from the DECLARED entries -- StakeInfo.max_stake -- never
+    from what the side currently holds. match_pool is re-entrant, and a ceiling
+    read from live holdings would ratchet down on every replay: levelling
+    shrinks the teammates' holdings, so the next pass would compute a smaller
+    allowance and trim again. The declared figure is what the player agreed to
+    and levelling never writes to it, so every pass computes the same ceiling
+    and the second finds nothing left to trim.
+    """
+    targets = {}
+    for player in side:
+        if player not in wants_cap:
+            targets[player] = held[player]
+            continue
+        mates = sum(bets.get(p, 0) for p in side if p != player)
+        ceiling = snap_to_step(int(mates * CAP_SHARE / (1 - CAP_SHARE)))
+        if ceiling <= 0:
+            # Nothing to cap against: a solo side, teammates with no declared
+            # entry, or an allowance too small to reach one whole step. The test
+            # is the CEILING and not the teammates' total, because a positive
+            # total can still snap to nothing -- and a ceiling of zero would
+            # refund this player's whole entry, the one thing the cap must never
+            # do.
+            targets[player] = held[player]
+            continue
+        targets[player] = min(held[player], ceiling)
+    return targets
 
 
 class MatchResult(TypedDict):
     matched: int                    # what each side ends up holding
     refunded: dict[str, int]        # returned because the other side could not cover it
     capped: dict[str, int]          # returned because the player asked to be capped
+    held: dict[str, int]            # what each player is left playing for, after both ceilings
 
 
 async def match_pool(guild_id: str, session_id: str,
@@ -491,22 +619,21 @@ async def match_pool(guild_id: str, session_id: str,
     refund. team_creator can be re-entered after a restart, and this has to be
     safe when it is.
 
-    That covers a SEQUENTIAL replay, not a concurrent one. `held` is read once
-    and the refunds commit one at a time, each under its own lock, so two
-    overlapping calls would both compute their trim from the same snapshot and
-    both book it -- taking a side down twice and leaving check_pool to raise on
-    an imbalance already committed. What rules that out is upstream: every
-    caller of create_and_display_teams (views.py's create-teams and start-draft
-    buttons, ready_check's auto-create) tests and sets
+    That covers a SEQUENTIAL replay, not a concurrent one. `held` is read once,
+    before the refunds commit, so two overlapping calls would both compute
+    their trim from the same snapshot and both book it -- taking a side down
+    twice and leaving check_pool to raise on an imbalance already committed.
+    What rules that out is upstream: every caller of create_and_display_teams
+    (views.py's create-teams and start-draft buttons, ready_check's
+    auto-create) tests and sets
     state_manager.is_creating_teams with no await in between, so the flag is a
     real mutex on this whole function. Adding a caller that skips it reopens
     the hole; a lock here would not, because the read is what goes stale.
 
-    A partial failure mid-refund is survivable but not exactly repeatable: the
-    retry recomputes level_side from what the first attempt left behind, which
-    can settle the odd ten on a different player. Both splits are valid, the
-    sides still balance and no tix are lost -- only who is exposed for the last
-    ten differs.
+    All or nothing: every refund is planned first and booked in one
+    transaction (_apply_refunds), so a failure -- a refund refused or raising,
+    or the process dying mid-way -- leaves the pool exactly as it was, and
+    raises PoolNotSettled or the underlying error.
     """
     held = await contributions(guild_id, session_id)
     sides = ([p for p in team_a if held.get(p)], [p for p in team_b if held.get(p)])
@@ -514,34 +641,38 @@ async def match_pool(guild_id: str, session_id: str,
 
     bets, wants_cap = await _declared_bets(session_id)
     capped: dict[str, int] = {}
-    for side, opposing in ((side_a, side_b), (side_b, side_a)):
-        capped |= await _trim(guild_id, session_id, held, side,
-                              cap_targets(side, bets, wants_cap, opposing, held),
-                              "capped")
+    for side in (side_a, side_b):
+        capped |= _trim(held, side, cap_targets(side, bets, wants_cap, held))
 
     # What each side can actually put up in whole tens. A stake is matched in
     # units of ten, so an entry of 25 backs 20 of the other side and hands back
     # the 5 -- and the figure the two sides meet at has to be one BOTH can
     # reach that way, not merely the smaller total.
-    totals = [sum(held[p] // _STAKE_STEP * _STAKE_STEP for p in side)
+    totals = [sum(snap_to_step(held[p]) for p in side)
               for side in sides]
     matched = min(totals)
 
     refunded: dict[str, int] = {}
     for side in sides:
         stays = level_side({p: held[p] for p in side}, matched)
-        refunded |= await _trim(guild_id, session_id, held, side,
-                                stays, "unmatched")
+        refunded |= _trim(held, side, stays)
+
+    await _apply_refunds(guild_id, session_id,
+                         [(p, n, "capped") for p, n in capped.items()]
+                         + [(p, n, "unmatched") for p, n in refunded.items()])
 
     logger.info(f"draft pool {session_id}: matched at {matched} a side, "
                 f"refunded {sum(capped.values())} over players' own caps and "
                 f"{sum(refunded.values())} unmatched")
     await check_pool(guild_id, session_id)
-    # The two reasons stay apart in the return value as well as in the ledger.
-    # No production caller reads either today -- team_creator discards the
-    # result -- but the tests assert on them, and a "where did my tix go" line
-    # would need the split rather than a single total.
-    return {"matched": matched, "refunded": refunded, "capped": capped}
+    # The two reasons stay apart in the return value as well as in the ledger,
+    # because team_creator's refund DM names each one's share and they are not
+    # interchangeable: a cap is the player's own setting and levelling is not.
+    # `held` rides along for the same caller -- _trim has already computed it in
+    # place, so returning it saves that caller re-reading the ledger it was just
+    # written from.
+    return {"matched": matched, "refunded": refunded, "capped": capped,
+            "held": dict(held)}
 
 
 def _payout_source(session_id: str, player_id: str) -> str:
@@ -581,7 +712,7 @@ async def settle_pool(guild_id: str, session_id: str,
     # same question in a worse place: at payout every cause looks alike, whereas
     # the invariant raises at the mutation that broke it.
 
-    async def _do() -> dict[str, int]:
+    async def pay(session: AsyncSession) -> dict[str, int]:
         # Every winner in ONE transaction. Paying them one at a time looks
         # harmless because each transfer is idempotent, but a failure between
         # two of them commits the first and leaves the holder half empty with
@@ -590,48 +721,78 @@ async def settle_pool(guild_id: str, session_id: str,
         # paying a draft out would make that draft unsettleable forever.
         holder = pool_wallet_id(session_id)
         settled: dict[str, int] = {}
-        async with db_session() as session:
-            for player_id, amount in shares.items():
-                if amount <= 0:
-                    continue
-                source = _payout_source(session_id, player_id)
-                if await wallet_service.transfer_legs(session, source):
-                    # Someone else already paid this winner. Two match reports
-                    # can both read the pool before either takes MONEY_LOCK, so
-                    # both arrive here with a full set of shares; only the one
-                    # that actually books the transfer may claim it. Recording
-                    # it either way made `paid` mean "is square with the pool"
-                    # rather than "was paid by this call" -- harmless until a
-                    # caller started announcing payouts from it.
-                    continue
-                await wallet_service.transfer_in(
-                    session, guild_id, holder, player_id, amount, source,
-                    notes=f"Draft winnings {session_id}")
-                settled[player_id] = amount
+        for player_id, amount in shares.items():
+            if amount <= 0:
+                continue
+            source = _payout_source(session_id, player_id)
+            if await wallet_service.transfer_legs(session, source):
+                # Someone else already paid this winner. Two match reports
+                # can both read the pool before either takes MONEY_LOCK, so
+                # both arrive here with a full set of shares; only the one
+                # that actually books the transfer may claim it. Recording
+                # it either way made `paid` mean "is square with the pool"
+                # rather than "was paid by this call" -- harmless until a
+                # caller started announcing payouts from it.
+                continue
+            await wallet_service.transfer_in(
+                session, guild_id, holder, player_id, amount, source,
+                notes=f"Draft winnings {session_id}")
+            settled[player_id] = amount
         return settled
 
-    async with wallet_service.MONEY_LOCK:
-        paid = await with_db_retry(_do)
+    paid = await _money_transaction(pay)
 
     logger.info(f"draft pool {session_id}: paid {sum(paid.values())} to {len(paid)} winners")
     await check_pool(guild_id, session_id)
     return {"paid": paid}
 
 
-async def release_draft_pool(guild_id: str, session_id: str,
-                             reason: str) -> dict[str, dict[str, int]]:
+async def release_draft_pool(guild_id: str, session_id: str, reason: str, *,
+                             delete_draft: bool = False) -> dict[str, dict[str, int]]:
     """Empty a draft's pool back to its contributors.
 
     One idempotent function for every path that ends a draft early. Idempotence
     -- not an event bus -- is what makes several callers safe, and it is why
     calling this on a draft that never had a pool is a no-op rather than an
     error: most drafts are not staked, and every teardown path calls it anyway.
+
+    All or nothing, in one transaction: a refund that is refused or fails
+    raises PoolNotSettled with the pool untouched.
+
+    `delete_draft` deletes the draft's row in the same transaction, for a queue
+    being torn down. Releasing and deleting separately leaves a window in which
+    an entry -- from a stake selector opened minutes earlier -- is charged into
+    a row that is about to go; together, under MONEY_LOCK, nothing can land
+    between them, and entry_in refuses a draft with no row from then on. Releasing one
+    refund at a time left a pool half-released -- and the inactive-queue reaper
+    deletes the row right after, stranding whatever was still held.
     """
-    held = await contributions(guild_id, session_id)
-    refunded: dict[str, int] = {}
-    for player_id, amount in held.items():
-        if await refund_entry(guild_id, session_id, player_id, amount, reason):
-            refunded[player_id] = amount
+    async def release(session: AsyncSession) -> dict[str, int]:
+        # Read inside the transaction, under the lock: an entry revised between
+        # an outside read and the lock would have its stale amount refused.
+        net = await wallet_service.contributions_to_in(
+            session, guild_id, pool_wallet_id(session_id))
+        held = {player_id: amount for player_id, amount in net.items() if amount > 0}
+        await _refund_all_in(session, guild_id, session_id,
+                             [(player_id, amount, reason) for player_id, amount in held.items()])
+        if delete_draft:
+            from sqlalchemy import select
+            from models.draft_session import DraftSession
+            row = (await session.execute(select(DraftSession).where(
+                DraftSession.session_id == session_id))).scalar_one_or_none()
+            if row is not None:
+                await session.delete(row)    # the ORM delete, as callers did before
+        return held
+
+    try:
+        refunded = await _money_transaction(release)
+    except PoolNotSettled:
+        raise
+    except Exception as e:
+        # One thing for every teardown path to catch, whatever failed: the
+        # transaction rolled back, so the pool is untouched either way.
+        raise PoolNotSettled(
+            f"draft pool {session_id}: could not release ({reason}): {e}") from e
     if refunded:
         logger.info(f"draft pool {session_id}: released {sum(refunded.values())} "
                     f"to {len(refunded)} players ({reason})")

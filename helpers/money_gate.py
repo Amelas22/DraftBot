@@ -40,7 +40,7 @@ WALLET_HOWTO_TITLE = "💡 Paying with tix"
 def wallet_howto(guild_id, *, brief=False) -> str | None:
     """How to pay with tix, in the one place the wording lives.
 
-    It appears wherever a player is confronted with tix they owe — the bet outcomes
+    It appears wherever a player is confronted with tix they owe — the prize pool payouts
     of a finished staked draft, their own balances, the guild debt summary — and once
     before they bet at all. Written once here because four copies drift, and because
     the middle line is the part nobody guesses: funding a wallet settles debts by
@@ -55,8 +55,8 @@ def wallet_howto(guild_id, *, brief=False) -> str | None:
     if not is_money_server(str(guild_id)):
         return None
     if brief:
-        return ("Bets settle from your tix wallet — `/wallet deposit <n>` covers "
-                "what you owe automatically.")
+        return ("Entries are paid from your tix wallet — `/wallet deposit <n>` "
+                "tops it up and settles anything you owe automatically.")
     return (
         "`/wallet deposit <n>` — credits your wallet, and pays your oldest debts automatically\n"
         "`/wallet show` — your balance and recent activity\n"

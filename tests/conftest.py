@@ -266,6 +266,30 @@ async def run_until_sleep(loop_coro, seconds, nth=1):
             await loop_coro
 
 
+def failing_refund(nth=2, behaviour="refused", session_id=None):
+    """A stand-in for draft_pool_service._refund_in that fails its nth call --
+    for `session_id` only, if given -- and passes every other call through.
+
+    "refused" makes that call return False (a refund the pool will not make);
+    "raises" makes it raise. Patch it over the real one:
+    ``patch.object(pool, "_refund_in", failing_refund())``.
+    """
+    from services import draft_pool_service as pool
+
+    real, calls = pool._refund_in, []
+
+    async def refund_in(session, *args, **kwargs):
+        if session_id is None or args[1] == session_id:
+            calls.append(args)
+            if len(calls) == nth:
+                if behaviour == "raises":
+                    raise RuntimeError("disk I/O error")
+                return False
+        return await real(session, *args, **kwargs)
+
+    return refund_in
+
+
 async def seed_queue(session_id, **overrides):
     """A draft still in setup (session_stage NULL), created just now."""
     await seed_session(**{"session_id": session_id, "stage": None,
