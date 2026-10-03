@@ -254,6 +254,20 @@ async def test_start_tournament_activates_and_pairs_round_one(test_db):
 
 
 @pytest.mark.asyncio
+async def test_start_tournament_draws_each_team_a_distinct_number(test_db):
+    """The last standings tiebreak: one shuffled 1..N over the field, so no
+    two teams can still be tied after it."""
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 5)
+        await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+
+        draws = [p.draw_number for p in await list_participants(session, tournament.id)]
+        assert sorted(draws) == [1, 2, 3, 4, 5]
+        assert draws != [1, 2, 3, 4, 5], "drawn at random, not in registration order"
+
+
+@pytest.mark.asyncio
 async def test_start_tournament_odd_count_scores_the_bye(test_db):
     async with test_db() as session:
         tournament = await _tournament_with_teams(session, 5)

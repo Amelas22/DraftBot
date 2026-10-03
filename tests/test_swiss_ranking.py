@@ -12,10 +12,11 @@ from draft_organization.swiss import (
 FLOOR = 1 / 3
 
 
-def participant(pid, points=0, w=0, l=0, d=0, gw=0, gl=0, name=None):
+def participant(pid, points=0, w=0, l=0, d=0, gw=0, gl=0, name=None, draw=None):
     return SimpleNamespace(
         id=pid, points=points, match_wins=w, match_losses=l, match_draws=d,
         game_wins=gw, game_losses=gl, team_name=name or f"T{pid}",
+        draw_number=draw,
     )
 
 
@@ -230,16 +231,27 @@ def test_an_exact_tie_is_broken_randomly_not_in_a_fixed_order():
     assert len(seen) > 1, "round one pairing order must not be deterministic"
 
 
-def test_the_board_breaks_that_same_tie_by_registration_order():
+def test_the_board_breaks_that_same_tie_by_draw_number():
     """The other half of the split: rank_standings stays stable, and a team
-    tied on every key goes below the team that registered before it -- not
-    below whichever name sorts first, which a team picks for itself."""
-    field = [participant(i, name=chr(ord("Z") - i)) for i in range(4)]
+    tied on every key goes below the team with the lower draw number -- a
+    number drawn at random when the tournament started. Not the name, which a
+    team picks, and not registration order, which a team can time."""
+    field = [participant(i, name=chr(ord("A") + i), draw=draw)
+             for i, draw in enumerate([3, 1, 4, 2])]
 
     twice = [[p.id for p in rank_standings(field, [])] for _ in range(2)]
 
     assert twice[0] == twice[1]
-    assert [p.id for p in rank_standings(list(reversed(field)), [])] == [0, 1, 2, 3]
+    assert [p.id for p in rank_standings(field, [])] == [1, 3, 0, 2]
+
+
+def test_a_team_with_no_draw_number_goes_below_the_drawn_ones():
+    """A team added after the draw has no number. It must still sort -- None
+    cannot be compared with an int -- and it goes after every drawn team,
+    with participant id settling any undrawn ties."""
+    field = [participant(5), participant(4), participant(9, draw=2), participant(8, draw=1)]
+
+    assert [p.id for p in rank_standings(field, [])] == [8, 9, 4, 5]
 
 
 # ---- every ranking key has to actually decide something --------------------

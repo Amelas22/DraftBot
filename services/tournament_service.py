@@ -740,13 +740,18 @@ async def start_tournament(session, tournament_id, rng):
 
     tournament.status = "active"
     if tournament.format == "round_robin":
-        return await _build_round_robin(session, tournament, paid, rng)
-    if tournament.format == "manual":
-        return await _open_manual_schedule(session, tournament)
-
-    _, matches = await _create_round_with_pairings(
-        session, tournament, paid, set(), rng
-    )
+        matches = await _build_round_robin(session, tournament, paid, rng)
+    elif tournament.format == "manual":
+        matches = await _open_manual_schedule(session, tournament)
+    else:
+        _, matches = await _create_round_with_pairings(
+            session, tournament, paid, set(), rng
+        )
+    # Drawn after the schedule so it consumes nothing the pairing reads: a
+    # seeded rng pairs round one exactly as it did before draw numbers existed.
+    for participant, number in zip(paid, rng.sample(range(1, len(paid) + 1), len(paid))):
+        participant.draw_number = number
+    await session.flush()
     return matches
 
 

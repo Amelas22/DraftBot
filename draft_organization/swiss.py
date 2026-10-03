@@ -103,7 +103,7 @@ def _ranking_key(participant: Any, omw: "dict[Any, float]") -> "tuple[Any, ...]"
 
     Shared by the board and by pairing so the two cannot drift. They differ
     only in what happens once this is exhausted: the board appends the
-    participant id, so it holds still between refreshes, and pairing appends
+    stored draw number, so it holds still between refreshes, and pairing appends
     nothing and lets the caller's shuffle decide -- see `pairing_order` for why
     a fixed order must never choose an opponent.
     """
@@ -115,7 +115,7 @@ def _ranking_key(participant: Any, omw: "dict[Any, float]") -> "tuple[Any, ...]"
 
 def rank_standings(participants, matches, omw=None):
     """Sort by points, then fewest rounds played, then OMW%, then game diff, then
-    registration order.
+    draw number.
 
     Rounds played comes before OMW% because standings update live: a team that
     has not played this round yet is compared against teams that have. Both
@@ -140,9 +140,11 @@ def rank_standings(participants, matches, omw=None):
     """
     if omw is None:
         omw = omw_percentages(participants, matches)
-    # Registration order (participant id), not team name, settles a total tie:
-    # a name is something a team picks, and it would decide a seed.
-    return sorted(participants, key=lambda p: (*_ranking_key(p, omw), p.id))
+    # A total tie goes to the draw number, drawn at random at start -- not the
+    # name, which a team picks, nor registration order, which it can time.
+    # Undrawn teams (added after the draw) go last; id only keeps them stable.
+    return sorted(participants, key=lambda p: (
+        *_ranking_key(p, omw), p.draw_number is None, p.draw_number or 0, p.id))
 
 
 def pairing_order(participants: "list[Any]", matches: "list[Any]",
@@ -151,14 +153,14 @@ def pairing_order(participants: "list[Any]", matches: "list[Any]",
     """The field in the order a round should PAIR it, best first.
 
     The same keys `rank_standings` ranks on, with one deliberate difference:
-    an exact tie is broken by the rng rather than by participant id.
+    an exact tie is broken by the rng rather than by the stored draw number.
 
     That difference is the whole reason this exists separately. The board ends
-    on participant id so it holds still between refreshes, which is right for
-    something people read. Pairing must not: in round one nobody has played,
-    every other key is level for everybody, and ranking on a fixed key would
-    pair the first round in that order -- settled before a card is drawn, and
-    choosable by anyone who times their registration (or, on name, picks it).
+    on the stored draw number so it holds still between refreshes, which is
+    right for something people read. Pairing must not: in round one nobody has
+    played, every other key is level for everybody, and ranking on any stored
+    key would pair the first round in that order -- and every later round's
+    exact ties the same way each time, rather than afresh.
 
     Pure apart from consuming `rng`. ``participants`` and ``matches`` are
     read-only.
