@@ -831,7 +831,7 @@ async def test_short_field_only_suggests_a_playoff_size_the_option_accepts(eligi
          patch("cogs.tournament_commands.get_active_tournament",
                AsyncMock(return_value=tournament)), \
          patch("cogs.tournament_commands.advance_round",
-               AsyncMock(side_effect=SwissComplete(4, eligible))):
+               AsyncMock(side_effect=SwissComplete(4, eligible, eligible >= 4))):
         await TournamentCog.next_round.callback(cog, ctx)
 
     message = ctx.followup.send.call_args.args[0]

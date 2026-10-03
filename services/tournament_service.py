@@ -73,6 +73,35 @@ def _cut_eligible(standings):
     return _pairable(standings)
 
 
+def _seated_by_cut(standings, cut_to):
+    """The teams a top-N cut would actually seat, in rank order.
+
+    Empty when the cut cannot be filled, which is the answer `start_playoff`
+    already gives: a bracket short of entrants does not run, so nobody is
+    seated rather than a smaller bracket being invented.
+
+    One definition, because three callers were deriving it independently and
+    they have to agree -- `cut_after_rank` draws the line the standings show,
+    `start_playoff` seats the teams above it, and the end-of-swiss prompt
+    enables its Start button on it. If they drift, the prompt offers a button
+    that then refuses.
+
+    Rank order is load-bearing and inherited: `_cut_eligible` filters without
+    reordering, so the last entry here is the last team seated and the one the
+    line is drawn after.
+    """
+    # `< 1`, not just falsy. A negative size is not a smaller cut: `cut_to=-1`
+    # slices "all but the last" and reports a line two-thirds down the
+    # standings, and a size past the field length raised IndexError instead.
+    # Both were reachable -- create_tournament stores cut_to unvalidated, and
+    # only the Discord option enforces a minimum -- so neither is worth
+    # preserving. A cut that is not a positive number seats nobody.
+    if not cut_to or cut_to < 1:
+        return []
+    eligible = _cut_eligible(standings)
+    return list(eligible[:cut_to]) if len(eligible) >= cut_to else []
+
+
 def cut_after_rank(standings: list[Any], cut_to: int | None) -> int | None:
     """The standings rank the top-N cut line is drawn after, or None for no line.
 
@@ -84,18 +113,15 @@ def cut_after_rank(standings: list[Any], cut_to: int | None) -> int | None:
     Lives here, beside `_cut_eligible`, because both the Discord standings and
     the public league page draw this line. Two copies of "who can be seated"
     is exactly the divergence between the two surfaces worth preventing.
-    `_cut_eligible` preserves rank order, so its Nth entry is the last seated.
 
     None when the cut cannot be filled, because `start_playoff` refuses that
     cut outright -- drawing a line would advertise a bracket that will not run.
     """
-    if not cut_to:
-        return None
-    eligible = _cut_eligible(standings)
-    if len(eligible) < cut_to:
+    seated = _seated_by_cut(standings, cut_to)
+    if not seated:
         return None
     # Identity, not `.id`: these rows are not necessarily flushed.
-    return standings.index(eligible[cut_to - 1]) + 1
+    return standings.index(seated[-1]) + 1
 
 
 class SwissComplete(Exception):
@@ -106,10 +132,18 @@ class SwissComplete(Exception):
     tournament is irreversible and one call away — the caller must decide.
     """
 
-    def __init__(self, cut_to, eligible):
+    def __init__(self, cut_to, eligible, fillable):
         super().__init__(f"Swiss complete; cut to top {cut_to} is pending.")
         self.cut_to = cut_to
         self.eligible = eligible
+        # Whether the bracket can actually be seated, decided HERE by
+        # `_seated_by_cut` rather than left for the caller to infer from
+        # `eligible`. The prompt disables its Start button on this, and
+        # `start_playoff` refuses on the same rule -- when the caller
+        # re-derived it, the two could drift and the prompt would offer a
+        # button that then refused. Required, not defaulted: a new raise site
+        # has to answer the question rather than inherit a guess.
+        self.fillable = fillable
 
 
 async def get_active_tournament(session, guild_id):
@@ -628,14 +662,12 @@ async def start_playoff(session, tournament_id, size=None):
         )
 
     standings = await get_standings_data(session, tournament_id)
-    eligible = _cut_eligible(standings)
-    if len(eligible) < size:
+    cut = _seated_by_cut(standings, size)
+    if not cut:
         raise ValueError(
-            f"Only {len(eligible)} eligible team(s) — can't cut to top {size}. "
-            f"Re-run with a smaller `top:`."
+            f"Only {len(_cut_eligible(standings))} eligible team(s) — can't cut "
+            f"to top {size}. Re-run with a smaller `top:`."
         )
-
-    cut = eligible[:size]
     for position, participant in enumerate(cut, start=1):
         participant.seed = position
     by_seed = {position: p.id for position, p in enumerate(cut, start=1)}
@@ -1051,7 +1083,7 @@ async def advance_round(session, tournament_id, rng):
     completes (end of swiss with no cut declared, or the playoff final has
     just been decided). Raises ValueError while the current round still has
     unreported matches (or, in the bracket, on a drawn match — single
-    elimination has no such result). Raises SwissComplete(cut_to, eligible)
+    elimination has no such result). Raises SwissComplete(cut_to, eligible, fillable)
     at the end of swiss instead of completing when a cut IS declared: the
     caller must ask the organizer whether to start the bracket or finish and
     crown the swiss leader, since completing is otherwise irreversible.
@@ -1092,7 +1124,11 @@ async def advance_round(session, tournament_id, rng):
     if tournament.current_round >= tournament.total_rounds:
         if tournament.cut_to:
             standings = await get_standings_data(session, tournament_id)
-            raise SwissComplete(tournament.cut_to, len(_cut_eligible(standings)))
+            raise SwissComplete(
+                tournament.cut_to,
+                len(_cut_eligible(standings)),
+                bool(_seated_by_cut(standings, tournament.cut_to)),
+            )
         tournament.status = "completed"
         await session.flush()
         return None
