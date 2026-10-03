@@ -123,9 +123,8 @@ def test_somebody_still_holding_an_hour_later_is_asked_again():
 
 
 def test_the_repeat_comes_on_the_hour_not_a_tick_later():
-    """last_reminded_at is stamped at a watchdog tick, so the tick an interval
-    later lands exactly on the boundary. Requiring strictly MORE than the
-    interval slipped every repeat a whole tick: hourly became every 70 min."""
+    """Due an hour after the last ask means exactly that at the boundary:
+    requiring strictly MORE than the interval would not ask at exactly an hour."""
     loan = _loan(last_reminded_at=NOW - REPEAT_AFTER)
 
     assert reminder_due(loan, done_playing=True, draft_settled=True, now=NOW)
@@ -359,6 +358,21 @@ async def test_the_watchdog_waits_an_hour_after_the_draft_is_decided(test_db, dm
 
 
 @pytest.mark.asyncio
+async def test_the_watchdog_times_a_borrower_from_their_own_last_result(test_db, dm):
+    """p1 finished long before the draft's latest result (p3 vs p4, later). The
+    hour runs from p1's own finish, not from the draft's last result."""
+    await seed_session("s1", stype="random", stage="pairings", matches=[
+        ("p1", "p2", "p1", NOW),
+        ("p3", "p4", "p3", NOW + timedelta(minutes=30))])
+    await _a_loan()
+
+    early = await mod.send_due_reminders(now=NOW + timedelta(minutes=50))
+    on_time = await mod.send_due_reminders(now=NOW + timedelta(minutes=60))
+
+    assert (early, on_time) == (0, 1), dm.sent
+
+
+@pytest.mark.asyncio
 async def test_a_player_mid_draft_is_left_alone(test_db, dm):
     await seed_session("s1", stype="random", stage="pairings",
                        matches=[("p1", "p2", "p1", NOW), ("p1", "p3", None, None)])
@@ -390,7 +404,7 @@ async def test_a_swiss_draft_that_settled_still_gets_chased(test_db, dm):
 async def test_a_failed_dm_is_not_recorded_as_sent(test_db, dm):
     """send_dm RETURNS False for a blocked inbox -- it does not raise. A wrapper
     ignoring that return stamps last_reminded_at for a DM that never arrived,
-    and the borrower goes unasked for a day."""
+    and the borrower goes unasked until the cooldown would have lapsed."""
     await seed_session("s1", stype="random", stage="completed")
     loan_id = await _a_loan()
     dm.delivers = False

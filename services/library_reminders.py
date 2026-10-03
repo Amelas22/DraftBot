@@ -101,7 +101,7 @@ def reminder_due(loan: Any, *, done_playing: bool, draft_settled: bool,
         return finished_at is None or at - finished_at >= REMIND_AFTER_FINISH
     # Repeats key on the last ask alone: a dead rubber reported after the first
     # ask must not push the next one back. Due ON the interval, not after it --
-    # the stamp is a watchdog tick, so ">" would slip every repeat a whole tick.
+    # ">=" makes "due an hour after" mean exactly that at the boundary.
     return at - loan.last_reminded_at >= REPEAT_AFTER
 
 
