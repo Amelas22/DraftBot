@@ -142,3 +142,15 @@ async def test_context_blocks_when_the_match_is_already_recorded(match_control_d
         _id, _overrides, block = await match_room_context(session, 900)
 
     assert "Result recorded" in block
+
+
+@pytest.mark.asyncio
+async def test_pairing_round_name_calls_a_swiss_round_a_week_everywhere(match_control_db):
+    from match_control_view import match_facts, pairing_round_name
+
+    async with match_control_db() as session:
+        match = await seed_tournament_match(session, thread_id="900")
+        # The pairings message says "Week"; the room header keeps "Round".
+        assert await pairing_round_name(session, match.id) == "Week 1"
+        assert (await match_facts(session, match.id))[3] == "Round 1"
+        assert (await match_facts(session, match.id, swiss_noun="Week"))[3] == "Week 1"

@@ -6,12 +6,14 @@ standings.
 All functions take an AsyncSession so callers control the transaction and tests
 can point them at a temp database (mirrors the leaderboard_service convention).
 """
+from collections import Counter
 from datetime import datetime
 from typing import Any
 
 from loguru import logger
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import aliased
 
 from database.db_session import db_session
 from draft_organization.bracket import advance_pairs, build_bracket, final_placement
@@ -22,8 +24,10 @@ from draft_organization.swiss import (
     rank_standings,
     round_robin_schedule,
 )
+from helpers.match_control import match_tag
 from models.team import Team
 from models.tournament import (
+    BRACKET_STAGES,
     STAGE_PLAYOFF,
     STAGE_SWISS,
     Tournament,
@@ -42,13 +46,13 @@ POINTS_DRAW = 1
 
 
 def is_playoff(round_):
-    """True when a round is a bracket round.
+    """True when a round is a bracket round (the play-in included).
 
     The one place a stage value is interpreted. It used to be spelled out as
     `== "playoff"` in three places and `!= "playoff"` in a fourth, so any third
     stage would have been included by one predicate and excluded by the other.
     """
-    return round_ is not None and round_.stage == STAGE_PLAYOFF
+    return round_ is not None and round_.stage in BRACKET_STAGES
 
 
 def _pairable(participants):
@@ -609,10 +613,17 @@ async def _playoff_rounds(session, tournament_id):
     stmt = (
         select(TournamentRound)
         .where(TournamentRound.tournament_id == tournament_id)
-        .where(TournamentRound.stage == STAGE_PLAYOFF)
+        .where(TournamentRound.stage.in_(BRACKET_STAGES))
         .order_by(TournamentRound.round_number)
     )
     return (await session.execute(stmt)).scalars().all()
+
+
+async def _swiss_frozen(session, tournament):
+    """True once a tournament's swiss results can no longer change: it has ended
+    or its bracket exists, and seeds, placement and prizes were drawn from them."""
+    return tournament.status != "active" or bool(
+        await _playoff_rounds(session, tournament.id))
 
 
 async def start_playoff(session, tournament_id, size=None):
@@ -953,6 +964,21 @@ async def set_result(session, match_id, team_a_wins, team_b_wins):
                 "result cannot be changed once a later bracket round exists."
             )
 
+    if round_ is not None and not playoff_round:
+        # Match ids span the server, so a swiss result can be aimed at a finished
+        # event or a week before the cut; both would rewrite settled standings.
+        tournament = await session.get(Tournament, round_.tournament_id)
+        if tournament is not None and await _swiss_frozen(session, tournament):
+            if tournament.status != "active":
+                raise ValueError(
+                    f"'{tournament.name}' is {tournament.status} — its Swiss "
+                    "results are final."
+                )
+            raise ValueError(
+                "Swiss records froze at the cut — a Swiss result cannot be "
+                "changed once the playoff has started."
+            )
+
     part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
     part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
 
@@ -1076,6 +1102,61 @@ async def find_current_match(session, tournament_id, team_name):
     return None
 
 
+async def match_in_guild(session, match_id, guild_id):
+    """The tournament match with this id, or None unless it belongs to a
+    tournament on this server. Admins enter results by the id shown on the
+    pairing line, so the id is checked against the server it was typed in."""
+    return (await session.execute(
+        select(TournamentMatch)
+        .join(TournamentRound, TournamentMatch.round_id == TournamentRound.id)
+        .join(Tournament, TournamentRound.tournament_id == Tournament.id)
+        .where(TournamentMatch.id == match_id, Tournament.guild_id == str(guild_id))
+    )).scalars().first()
+
+
+AUTOCOMPLETE_LIMIT = 25  # Discord's cap on suggestions per autocomplete
+
+
+async def reportable_match_choices(session, guild_id, typed=""):
+    """(match_id, label) rows for /tournament set_result's `match` autocomplete.
+
+    Offers the active tournament's playable matches by name (no byes; swiss only
+    until the cut), unreported first then newest; ``typed`` filters the label.
+    """
+    # Imported here: the formatter imports this module.
+    from services.tournament_formatter import round_label
+
+    tournament = await get_active_tournament(session, guild_id)
+    if tournament is None:
+        return []
+    part_a = aliased(TournamentParticipant)
+    part_b = aliased(TournamentParticipant)
+    stmt = (
+        select(TournamentMatch, TournamentRound, part_a.team_name, part_b.team_name)
+        .join(TournamentRound, TournamentMatch.round_id == TournamentRound.id)
+        .outerjoin(part_a, TournamentMatch.team_a_participant_id == part_a.id)
+        .outerjoin(part_b, TournamentMatch.team_b_participant_id == part_b.id)
+        .where(TournamentRound.tournament_id == tournament.id)
+    )
+    if await _swiss_frozen(session, tournament):
+        stmt = stmt.where(TournamentRound.stage.in_(BRACKET_STAGES))
+    found = (await session.execute(stmt)).all()
+    # A bracket round is named by its match count, byes included.
+    in_round = Counter(match.round_id for match, *_ in found)
+    needle = typed.strip().lower()
+    rows = []
+    for match, round_, a_name, b_name in found:
+        if match.is_bye or a_name is None or b_name is None:
+            continue
+        name = round_label(tournament.total_rounds, round_.round_number, round_.stage,
+                           swiss_noun="Week", matches_in_round=in_round[round_.id])
+        label = f"{match_tag(match.id, name)} · {a_name} vs {b_name}"
+        if needle in label.lower():
+            rows.append((match.team_a_wins is not None, -match.id, match.id, label))
+    rows.sort()
+    return [(match_id, label) for _, _, match_id, label in rows[:AUTOCOMPLETE_LIMIT]]
+
+
 async def advance_round(session, tournament_id, rng):
     """Advance to the next round, or complete the tournament after round N.
 
@@ -1186,7 +1267,7 @@ async def get_standings_with_omw(session, tournament_id):
         select(TournamentMatch)
         .join(TournamentRound, TournamentMatch.round_id == TournamentRound.id)
         .where(TournamentRound.tournament_id == tournament_id)
-        .where(TournamentRound.stage != STAGE_PLAYOFF)
+        .where(TournamentRound.stage.notin_(BRACKET_STAGES))
     )).scalars().all()
     # One derivation, passed to both: the map the board prints is the map the
     # sort ranked on, by construction rather than by the two calls happening

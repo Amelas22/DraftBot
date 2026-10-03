@@ -7,9 +7,16 @@ message in place on every result change, mirroring
 """
 import discord
 from loguru import logger
+from sqlalchemy import func, select
 
 from database.db_session import db_session
-from models.tournament import STAGE_PLAYOFF, STAGE_SWISS, Tournament
+from models.tournament import (
+    BRACKET_STAGES,
+    STAGE_PLAY_IN,
+    STAGE_SWISS,
+    Tournament,
+    TournamentMatch,
+)
 from services.tournament_escrow_service import describe_structure
 from services.tournament_service import (
     current_round_stage,
@@ -19,28 +26,52 @@ from services.tournament_service import (
 )
 
 
-def round_label(total_rounds, round_number, stage, swiss_noun="Round"):
+def bracket_stage_name(stage, matches_in_round):
+    """A bracket round's name: Play-in, or by how many matches it holds."""
+    if stage == STAGE_PLAY_IN:
+        return "Play-in"
+    return {1: "Final", 2: "Semifinal", 4: "Quarterfinal"}.get(
+        matches_in_round, f"Round of {matches_in_round * 2}")
+
+
+def round_label(total_rounds, round_number, stage, swiss_noun="Round",
+                matches_in_round=None):
     """How one round is named, wherever a round is named.
 
     Bracket rounds are numbered past total_rounds -- the first one of a 3-round
     swiss is round 4 -- so naming them as swiss rounds calls the semifinal
     "Week 4". Three display sites did that arithmetic differently (or not at
-    all); this is the one that answers now.
+    all); this is the one that answers now. A bracket round is named by
+    bracket_stage_name when the caller knows its match count.
 
     ``swiss_noun`` is the word a site already uses for a swiss round: "Week" in
     the pairings channel, "Round" on a match's control message. Only the swiss
     wording differs between sites -- the playoff form is identical everywhere,
     which is the half that was wrong.
     """
-    if stage == STAGE_PLAYOFF:
+    if stage in BRACKET_STAGES:
+        if matches_in_round:
+            return bracket_stage_name(stage, matches_in_round)
         return f"Playoff round {round_number - total_rounds}"
     return f"{swiss_noun} {round_number}"
+
+
+async def round_name(session, round_, total_rounds, swiss_noun="Round"):
+    """round_label for a stored round, counting its matches only when a bracket
+    round needs them for its name."""
+    count = None
+    if round_.stage in BRACKET_STAGES:
+        count = (await session.execute(
+            select(func.count(TournamentMatch.id))
+            .where(TournamentMatch.round_id == round_.id))).scalar_one()
+    return round_label(total_rounds, round_.round_number, round_.stage,
+                       swiss_noun=swiss_noun, matches_in_round=count)
 
 
 def _round_line(tournament, stage):
     """The "**Round:** …" line. A bracket round is named, not counted: the
     swiss "N of M" form reads "Round: 4/3" once the bracket starts."""
-    if stage == STAGE_PLAYOFF:
+    if stage in BRACKET_STAGES:
         return (f"**Round:** "
                 f"{round_label(tournament.total_rounds, tournament.current_round, stage)}")
     return f"**Round:** {tournament.current_round}/{tournament.total_rounds}"

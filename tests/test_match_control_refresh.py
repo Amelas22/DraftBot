@@ -300,7 +300,7 @@ async def test_set_result_refreshes_the_match_control_message(test_db):
     with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
          patch("match_control_view.refresh_match_views", AsyncMock()) as refresh:
         await TournamentCog.set_result.callback(
-            cog, ctx, team="Alpha", team_wins=2, opponent_wins=0)
+            cog, ctx, match=match_id, team_a_wins=2, team_b_wins=0)
 
     refresh.assert_awaited_once_with(cog.bot, match_id)
 

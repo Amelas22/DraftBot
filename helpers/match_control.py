@@ -34,19 +34,24 @@ def recorded_result_line(a_name: str, b_name: str, a_wins: int, b_wins: int) -> 
     return f"✅ Result recorded: **{a_name}** {a_wins}–{b_wins} **{b_name}**"
 
 
+def match_tag(match_id: int, name: str) -> str:
+    """"#143 · Quarterfinal": a match's id and round name, as every surface shows them."""
+    return f"#{match_id} · {name}"
+
+
 def render_match_control(
     state: str,
     a_name: str,
     b_name: str,
-    round_label: str,
+    match_label: str,
     lobby_link: str | None = None,
     result: tuple[int, int] | None = None,
     role_mentions: tuple[str | None, str | None] | None = None,
 ) -> str:
     """Body text of the control message for a match in ``state``.
 
-    ``round_label`` is the round's name, already rendered by
-    tournament_formatter.round_label -- this module stays free of the database
+    ``match_label`` is match_tag(id, round name), the name rendered by
+    tournament_formatter.round_name -- this module stays free of the database
     a bracket round's name has to be read from.
 
     ``role_mentions`` is (team_a's role id, team_b's role id), and only
@@ -54,7 +59,7 @@ def render_match_control(
     the other is worse than tagging neither, since nothing on the message
     would explain the gap.
     """
-    header = f"**{round_label} — {a_name} vs {b_name}**"
+    header = f"**{match_label} — {a_name} vs {b_name}**"
     if state == RECORDED:
         assert result is not None, "result required when state is RECORDED"
         a_wins, b_wins = result
@@ -76,8 +81,13 @@ def render_pairing_line(
     b_name: str,
     thread_id: str | None = None,
     result: tuple[int | None, int | None] | None = None,
+    match_id: int | None = None,
+    stage: str | None = None,
 ) -> str:
     """One match's line on the pairings message.
+
+    ``match_id`` and ``stage`` (the round's name) lead the line so the id an
+    admin needs for /tournament set_result is on screen.
 
     Carries a link to the match's room, and the score once the match is played,
     so the pairings channel reads as an index of the round. A match with no
@@ -85,6 +95,8 @@ def render_pairing_line(
     than rendering a broken mention.
     """
     line = f"• **{a_name}** vs **{b_name}**"
+    if match_id is not None and stage:
+        line = f"• **#{match_id}** · {stage} · **{a_name}** vs **{b_name}**"
     if thread_id:
         line = f"{line} — <#{thread_id}>"
     if result is not None and result[0] is not None and result[1] is not None:

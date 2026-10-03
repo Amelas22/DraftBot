@@ -19,6 +19,7 @@ from helpers.match_control import (
     match_state,
     recorded_result_line,
     render_match_control,
+    match_tag,
     render_pairing_line,
 )
 from helpers.pin_helpers import safe_pin
@@ -30,33 +31,35 @@ from models.tournament import (
     TournamentParticipant,
     TournamentRound,
 )
-from services.tournament_formatter import round_label
+from services.tournament_formatter import round_name
 
 
 async def match_facts(
-    session: AsyncSession, match_id: int
+    session: AsyncSession, match_id: int, swiss_noun: str = "Round"
 ) -> tuple[TournamentMatch, str, str, str, DraftSession | None] | None:
-    """(match, a_name, b_name, round_label, draft) for a match, or None.
+    """(match, a_name, b_name, round_name, draft) for a match, or None.
 
     ``draft`` is the DraftSession linked to this match, or None. One query set
     feeding every render, so the state can never be derived from a half-stale
     picture.
 
-    ``round_label`` is the round's name rather than its number: a bracket round
+    ``round_name`` is the round's name rather than its number: a bracket round
     is numbered past the swiss total, so "Round 4" named the semifinal of a
     3-round swiss after a swiss round nobody played.
+
+    ``swiss_noun`` names a swiss round ("Round" in the room, "Week" on the
+    pairings message); see ``pairing_round_name``.
     """
     row = (await session.execute(
-        select(TournamentMatch, TournamentRound.round_number, TournamentRound.stage,
-               Tournament.total_rounds)
+        select(TournamentMatch, TournamentRound, Tournament.total_rounds)
         .join(TournamentRound, TournamentMatch.round_id == TournamentRound.id)
         .join(Tournament, TournamentRound.tournament_id == Tournament.id)
         .where(TournamentMatch.id == match_id)
     )).first()
     if row is None:
         return None
-    match, round_number, stage, total_rounds = row
-    label = round_label(total_rounds, round_number, stage)
+    match, round_, total_rounds = row
+    name = await round_name(session, round_, total_rounds, swiss_noun=swiss_noun)
     part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
     part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
     if part_a is None or part_b is None:
@@ -64,7 +67,18 @@ async def match_facts(
     draft = (await session.execute(
         select(DraftSession).where(DraftSession.tournament_match_id == match_id)
     )).scalars().first()
-    return match, part_a.team_name, part_b.team_name, label, draft
+    return match, part_a.team_name, part_b.team_name, name, draft
+
+
+async def pairing_round_name(session: AsyncSession, match_id: int) -> str | None:
+    """The round name a match's pairing line wears, or None.
+
+    The single source for every render of that line (first post, room link,
+    refresh): the pairings message calls a swiss round a "Week", so naming the
+    round anywhere else made the wording flip once the line was rewritten.
+    """
+    facts = await match_facts(session, match_id, swiss_noun="Week")
+    return facts[3] if facts is not None else None
 
 
 def lobby_link(draft: DraftSession | None) -> str | None:
@@ -86,7 +100,7 @@ def block_for_facts(
     draft-creation guard in sessions/premade_session.py); written once here
     so the three cannot render "why not" differently for the same state.
     """
-    match, a_name, b_name, _label, draft = facts
+    match, a_name, b_name, _name, draft = facts
     return launch_block_text(
         match_state(match.team_a_wins is not None, draft is not None),
         lobby_link(draft),
@@ -95,7 +109,7 @@ def block_for_facts(
 
 
 def control_body_and_view(
-    match: TournamentMatch, a_name: str, b_name: str, label: str, draft: DraftSession | None,
+    match: TournamentMatch, a_name: str, b_name: str, name: str, draft: DraftSession | None,
     role_mentions: tuple[str | None, str | None] | None = None,
 ) -> tuple[str, "MatchControlView | None"]:
     """(body, view) for a match's control message. View is None off `scheduling`.
@@ -117,7 +131,7 @@ def control_body_and_view(
     """
     state = match_state(match.team_a_wins is not None, draft is not None)
     body = render_match_control(
-        state, a_name, b_name, label,
+        state, a_name, b_name, match_tag(match.id, name),
         lobby_link=lobby_link(draft),
         result=(match.team_a_wins, match.team_b_wins),
         role_mentions=role_mentions,
@@ -218,7 +232,7 @@ async def create_match_room(message: discord.Message, match_id: int) -> discord.
         facts = await match_facts(session, match_id)
         if facts is None:
             return None
-        match, a_name, b_name, label, draft = facts
+        match, a_name, b_name, name, draft = facts
         # Two columns, one query. session.get would return whole participants
         # instead -- and each of those drags in its team_members relationship,
         # which is eager (lazy="selectin"), so the pair costs four queries to
@@ -231,7 +245,7 @@ async def create_match_room(message: discord.Message, match_id: int) -> discord.
                 [match.team_a_participant_id, match.team_b_participant_id]))
         )).all())
         body, view = control_body_and_view(
-            match, a_name, b_name, label, draft,
+            match, a_name, b_name, name, draft,
             role_mentions=(roles.get(match.team_a_participant_id),
                            roles.get(match.team_b_participant_id)),
         )
@@ -294,8 +308,8 @@ async def start_match_draft(interaction: discord.Interaction, match_id: int) -> 
             await interaction.response.send_message(
                 "This match no longer exists.", ephemeral=True)
             return
-        match, a_name, b_name, label, draft = facts
-        body, view = control_body_and_view(match, a_name, b_name, label, draft)
+        match, a_name, b_name, name, draft = facts
+        body, view = control_body_and_view(match, a_name, b_name, name, draft)
         # Same facts already fetched above -- launch_block_for would open a
         # second session and re-run the same lookup for nothing.
         block = block_for_facts(facts)
@@ -328,6 +342,8 @@ async def _refresh_pairing_message(
     channel = bot.get_channel(int(match.pairings_channel_id))
     if channel is None:
         return
+    async with db_session() as session:
+        stage = await pairing_round_name(session, match.id)
     try:
         message = await as_messageable(channel).fetch_message(int(match.pairings_message_id))
         # view=None strips components: a message posted before this task's
@@ -337,7 +353,7 @@ async def _refresh_pairing_message(
         # for them and a repair for legacy ones.
         await message.edit(content=render_pairing_line(
             a_name, b_name, match.thread_id,
-            (match.team_a_wins, match.team_b_wins)), view=None)
+            (match.team_a_wins, match.team_b_wins), match.id, stage), view=None)
     except discord.NotFound:
         logger.warning(f"Pairing message for match {match.id} is gone; not refreshed")
     except discord.HTTPException as e:
@@ -356,8 +372,8 @@ async def _refresh_match_views_with_facts(
     """
     if facts is None:
         return
-    match, a_name, b_name, label, draft = facts
-    body, view = control_body_and_view(match, a_name, b_name, label, draft)
+    match, a_name, b_name, name, draft = facts
+    body, view = control_body_and_view(match, a_name, b_name, name, draft)
 
     if match.control_message_id and match.thread_id:
         thread_id, control_id = int(match.thread_id), int(match.control_message_id)
@@ -452,9 +468,9 @@ async def announce_and_refresh(
     async with db_session() as session:
         facts = await match_facts(session, match_id)
     if facts is not None:
-        _match, a_name, b_name, label, _draft = facts
+        match, a_name, b_name, name, _draft = facts
         await channel.send(
-            f"🔗 Linked to {label} — **{a_name}** vs **{b_name}**. "
+            f"🔗 Linked to {match_tag(match.id, name)} — **{a_name}** vs **{b_name}**. "
             "The result will record automatically.")
     # Facts already fetched above -- the public refresh_match_views would
     # open a second session and fetch them again for the same match.

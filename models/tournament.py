@@ -214,6 +214,9 @@ class TournamentTeamMember(Base):
 # constant would be a circular import back into this module.
 STAGE_SWISS = 'swiss'
 STAGE_PLAYOFF = 'playoff'
+# A single match for the last seat, played before (and feeding) the bracket.
+STAGE_PLAY_IN = 'play_in'
+BRACKET_STAGES = (STAGE_PLAY_IN, STAGE_PLAYOFF)
 
 
 class TournamentRound(Base):

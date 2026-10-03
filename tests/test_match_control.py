@@ -124,3 +124,12 @@ def test_pairing_line_with_an_unplayed_result_pair_stays_unrecorded():
     # (None, None) is what an unplayed match carries; it must not render a score.
     line = render_pairing_line("Alpha", "Bravo", thread_id="900", result=(None, None))
     assert "Result recorded" not in line
+
+
+def test_pairing_line_leads_with_the_match_label():
+    line = render_pairing_line("Alpha", "Bravo", thread_id="900", match_id=143, stage="Quarterfinal")
+    assert line == "• **#143** · Quarterfinal · **Alpha** vs **Bravo** — <#900>"
+
+
+def test_pairing_line_without_a_label_is_unchanged():
+    assert render_pairing_line("Alpha", "Bravo") == "• **Alpha** vs **Bravo**"
