@@ -751,7 +751,6 @@ async def start_tournament(session, tournament_id, rng):
     # seeded rng pairs round one exactly as it did before draw numbers existed.
     for participant, number in zip(paid, rng.sample(range(1, len(paid) + 1), len(paid))):
         participant.draw_number = number
-    await session.flush()
     return matches
 
 

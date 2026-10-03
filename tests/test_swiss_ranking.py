@@ -80,8 +80,8 @@ def test_no_real_opponents_uses_floor():
     assert ranked.index(played) < ranked.index(only_bye)
 
 
-def test_falls_through_to_game_diff_then_name():
-    # Equal points and equal OMW% -> game diff, then registration order.
+def test_falls_through_to_game_diff():
+    # Equal points and equal OMW% -> game diff.
     a = participant(1, points=3, w=1, gw=2, gl=0, name="Alpha")
     b = participant(2, points=3, w=1, gw=2, gl=1, name="Bravo")
     oa = participant(3, points=0, l=1, name="OppA")
@@ -219,10 +219,9 @@ def test_pairing_order_uses_the_same_tiebreaks_the_board_shows():
 def test_an_exact_tie_is_broken_randomly_not_in_a_fixed_order():
     """Round one, where nobody has played and every tiebreak is level.
 
-    The display sort ends on participant id so the board holds still between
-    refreshes. Pairing must NOT: pairings in a fixed order are settled before a
-    card is drawn, and anyone who notices can time their registration to
-    choose an opponent.
+    The display sort ends on the stored draw number so the board holds still
+    between refreshes. Pairing must NOT: a stored order pairs every exact tie
+    the same way each time, rather than afresh.
     """
     field = [participant(i, name=chr(ord("A") + i)) for i in range(8)]
 
@@ -232,10 +231,8 @@ def test_an_exact_tie_is_broken_randomly_not_in_a_fixed_order():
 
 
 def test_the_board_breaks_that_same_tie_by_draw_number():
-    """The other half of the split: rank_standings stays stable, and a team
-    tied on every key goes below the team with the lower draw number -- a
-    number drawn at random when the tournament started. Not the name, which a
-    team picks, and not registration order, which a team can time."""
+    """The other half of the split: rank_standings stays stable, and a total
+    tie goes to the lower draw number -- not to the name."""
     field = [participant(i, name=chr(ord("A") + i), draw=draw)
              for i, draw in enumerate([3, 1, 4, 2])]
 
@@ -246,9 +243,8 @@ def test_the_board_breaks_that_same_tie_by_draw_number():
 
 
 def test_a_team_with_no_draw_number_goes_below_the_drawn_ones():
-    """A team added after the draw has no number. It must still sort -- None
-    cannot be compared with an int -- and it goes after every drawn team,
-    with participant id settling any undrawn ties."""
+    """A row from before draw numbers existed has none. It must still sort --
+    None cannot be compared with an int -- and goes after every drawn team."""
     field = [participant(5), participant(4), participant(9, draw=2), participant(8, draw=1)]
 
     assert [p.id for p in rank_standings(field, [])] == [8, 9, 4, 5]

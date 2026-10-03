@@ -1,13 +1,8 @@
 """add draw_number to tournament participants
 
-The standings' last tiebreak: a shuffled 1..N over a tournament's field, drawn
-when it starts. It replaces the team name, which a team picks for itself and
-which could decide a seed.
-
-Backfilled with a fresh random draw for every tournament still active, so a
-tournament already under way ranks on it from the first restart; finished and
-not-yet-started tournaments are left NULL (a start draws its own). Additive
-and nullable: nothing is dropped, so no data is at risk on upgrade.
+The standings' last tiebreak (see TournamentParticipant.draw_number). Active
+tournaments get a fresh random draw here; others stay NULL (a start draws its
+own). Additive and nullable: nothing is dropped.
 
 Revision ID: drawnum01
 Revises: poolmatch01
@@ -37,7 +32,9 @@ def upgrade() -> None:
         ids = bind.execute(sa.text(
             "SELECT id FROM tournament_participants WHERE tournament_id = :t ORDER BY id"
         ), {"t": tournament_id}).scalars().all()
-        for participant_id, number in zip(ids, rng.sample(range(1, len(ids) + 1), len(ids))):
+        numbers = list(range(1, len(ids) + 1))
+        rng.shuffle(numbers)
+        for participant_id, number in zip(ids, numbers):
             bind.execute(sa.text(
                 "UPDATE tournament_participants SET draw_number = :n WHERE id = :p"
             ), {"n": number, "p": participant_id})

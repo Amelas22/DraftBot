@@ -52,8 +52,7 @@ def match_win_percentage(match_points, rounds_played, floor=MWP_FLOOR):
     """A participant's match-win percentage, floored (MTR convention), exact.
 
     match_points are 3 per win / 1 per draw; the denominator is 3 per round
-    played. Zero rounds returns the floor. A Fraction, not a float, so the
-    averages built from it in `omw_percentages` are exact too.
+    played. Zero rounds returns the floor.
     """
     if rounds_played <= 0:
         return floor
@@ -71,11 +70,9 @@ def omw_percentages(participants, matches):
     (the public league page) reads the same numbers the sort used, instead of
     reimplementing them and drifting.
 
-    Averaged exactly and converted to float once, at the end. Summed as floats,
-    two averages that are mathematically equal can differ in the last bit
-    depending on the order the opponents were played -- and the sort then
-    ranks one team above the other on that noise instead of reaching game
-    diff. Equal fractions always round to the same float, so a tie stays a tie.
+    Averaged exactly, then converted to float once: a float sum of equal
+    averages can differ in the last bit by summation order, and the sort would
+    rank on that noise instead of reaching game diff.
     """
     by_id = {p.id: p for p in participants}
     opponents = {p.id: [] for p in participants}
@@ -140,11 +137,9 @@ def rank_standings(participants, matches, omw=None):
     """
     if omw is None:
         omw = omw_percentages(participants, matches)
-    # A total tie goes to the draw number, drawn at random at start -- not the
-    # name, which a team picks, nor registration order, which it can time.
-    # Undrawn teams (added after the draw) go last; id only keeps them stable.
+    # Draw number: see TournamentParticipant.draw_number. Undrawn rows go last.
     return sorted(participants, key=lambda p: (
-        *_ranking_key(p, omw), p.draw_number is None, p.draw_number or 0, p.id))
+        *_ranking_key(p, omw), p.draw_number is None, p.draw_number, p.id))
 
 
 def pairing_order(participants: "list[Any]", matches: "list[Any]",
