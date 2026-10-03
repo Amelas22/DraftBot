@@ -22,14 +22,18 @@ The decisions live here as plain functions over a loan so the interesting cases
 draft or a Discord client.
 """
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from loguru import logger
 
-# How long before a borrower still holding cards is asked again. Escalates
-# rather than nags: a first ask can be missed, and a sponsor's cards sitting in
-# a finished drafter's account help nobody.
-REPEAT_AFTER = timedelta(hours=24)
+# When to ask. The first ask waits an hour after the borrower finished -- room
+# to hand the deck back unprompted, or to play a dead rubber -- and then repeats
+# hourly until it comes back: a sponsor's cards sitting in a finished drafter's
+# account help nobody, and a daily ask let a deck sit out for most of a day.
+# The lending watchdog evaluates this every ten minutes, so each ask lands up
+# to ten minutes after it falls due.
+REMIND_AFTER_FINISH = timedelta(hours=1)
+REPEAT_AFTER = timedelta(hours=1)
 
 # The one state with anything to give back. An 'assigned' loan is an offer
 # nobody collected, which expire_stale_assignments retracts on its own, and the
@@ -65,11 +69,15 @@ def session_of(loan: Any) -> Optional[str]:
 
 
 def reminder_due(loan: Any, *, done_playing: bool, draft_settled: bool,
+                 finished_at: Optional[datetime] = None,
                  now: Optional[datetime] = None) -> bool:
     """Should we ask for this deck back right now?
 
     Asked when the borrower has no more matches to play with it, or when the
-    draft is settled -- whichever comes first.
+    draft is settled -- whichever comes first -- once REMIND_AFTER_FINISH has
+    passed since then. `finished_at` is that moment; None means it isn't known
+    (a draft settled with no reported result, such as an abandoned one), and
+    then the ask goes at once, as it always did.
 
     Settled, not fully played: a side clinching 5 of 9 decides the draft with
     four matches still unreported, and the cards should come back then. Whoever
@@ -78,7 +86,7 @@ def reminder_due(loan: Any, *, done_playing: bool, draft_settled: bool,
     A borrower whose own draft is still live is never asked -- there the cards
     are how they play the rest of it.
 
-    Then at most once per REPEAT_AFTER, which is the whole reason
+    Then once per REPEAT_AFTER, which is the whole reason
     last_reminded_at exists: the watchdog re-evaluates every ten minutes and a
     condition that stays true would otherwise be a DM every ten minutes.
     """
@@ -88,9 +96,13 @@ def reminder_due(loan: Any, *, done_playing: bool, draft_settled: bool,
         return False
     if not (done_playing or draft_settled):
         return False
+    at = now or datetime.now()
     if loan.last_reminded_at is None:
-        return True
-    return (now or datetime.now()) - loan.last_reminded_at > REPEAT_AFTER
+        return finished_at is None or at - finished_at >= REMIND_AFTER_FINISH
+    # Repeats key on the last ask alone: a dead rubber reported after the first
+    # ask must not push the next one back. Due ON the interval, not after it --
+    # the stamp is a watchdog tick, so ">" would slip every repeat a whole tick.
+    return at - loan.last_reminded_at >= REPEAT_AFTER
 
 
 def _deck_summary(cards: Any) -> str:
@@ -252,22 +264,26 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
     if not loans:
         return 0
 
-    # Two reads per DRAFT, not per loan: a pod shares its draft, so eight
-    # borrowers would otherwise ask the same two questions eight times. The
-    # finished-players SET is cached rather than a per-borrower answer, so one
-    # entry serves every borrower in that pod.
-    verdicts: "dict[str, tuple[set[str], bool]]" = {}
+    # Reads per DRAFT, not per loan: a pod shares its draft, so eight borrowers
+    # would otherwise ask the same questions eight times. The finished-players
+    # map is cached rather than a per-borrower answer, so one entry serves every
+    # borrower in that pod.
+    verdicts: "dict[str, DraftState]" = {}
     due: "list[Any]" = []
     for loan in loans:
         session_id = session_of(loan)
         if session_id is None:
             continue
         if session_id not in verdicts:
-            verdicts[session_id] = (await players_done_playing(session_id),
-                                    await draft_is_settled(session_id))
-        finished, settled = verdicts[session_id]
-        if reminder_due(loan, done_playing=str(loan.borrower_id) in finished,
-                        draft_settled=settled, now=at):
+            verdicts[session_id] = await draft_state(session_id)
+        state = verdicts[session_id]
+        mine = state.done_at.get(str(loan.borrower_id))
+        # Finished when their own last match was reported, else when the draft
+        # was decided. Their own always wins when known: it can be no later than
+        # the draft's latest result. Neither known -> None, and the ask goes now.
+        finished_at = mine or (state.last_result if state.settled else None)
+        if reminder_due(loan, done_playing=mine is not None, draft_settled=state.settled,
+                        finished_at=finished_at, now=at):
             due.append(loan)
 
     asked = 0
@@ -296,70 +312,73 @@ async def _still_out(loan_id: Any) -> bool:
     return row is not None and row.state == RETURNABLE_STATE
 
 
-async def players_done_playing(session_id: Any) -> "set[str]":
-    """Who in this draft has no unreported match left.
-
-    Empty for a progressively-paired format, where the question cannot be
-    answered from the rows that exist yet -- see FULLY_PAIRED_TYPES.
-
-    Keys on result_submitted_at rather than winner_id: a DRAW is reported and
-    has no winner, so keying on the winner would leave that player permanently
-    unfinished. MatchResult.find_unreported_for_user makes the other choice,
-    which is why this does not reuse it.
-    """
-    from sqlalchemy import select
-
-    from database.db_session import db_session
-    from models.draft_session import DraftSession
-    from models.match import MatchResult
-
-    async with db_session() as session:
-        stype = await session.scalar(
-            select(DraftSession.session_type).where(
-                DraftSession.session_id == str(session_id)))
-        if stype not in FULLY_PAIRED_TYPES:
-            return set()
-        rows = (await session.execute(
-            select(MatchResult.player1_id, MatchResult.player2_id,
-                   MatchResult.result_submitted_at)
-            .where(MatchResult.session_id == str(session_id)))).all()
-
-    played: "set[str]" = set()
-    outstanding: "set[str]" = set()
-    for player1_id, player2_id, submitted_at in rows:
-        for player_id in (player1_id, player2_id):
-            if player_id is None:
-                continue
-            (played if submitted_at is not None else outstanding).add(str(player_id))
-    return played - outstanding
+class DraftState(NamedTuple):
+    """What the reminder pass needs to know about one draft, read once."""
+    done_at: "dict[str, datetime]"      # finished players -> when they reported their last match
+    settled: bool                       # see draft_state
+    last_result: Optional[datetime]     # latest reported result; None if nothing was reported
 
 
-async def draft_is_settled(session_id: Any) -> bool:
-    """Is this draft decided?
+async def draft_state(session_id: Any) -> DraftState:
+    """One read of a draft and its results, for every loan out against it.
 
-    Named for what it means, not "over": card_lending_service._drafts_that_are_over
-    asks a different question in the same subsystem (would anybody still collect
-    an offer), and counts a first result rather than a victory.
+    done_at -- who has no unreported match left, and when they reported their
+    last one: the moment they were done with a borrowed deck. Empty for a
+    progressively-paired format, where the question cannot be answered from the
+    rows that exist yet -- see FULLY_PAIRED_TYPES. Keys on result_submitted_at
+    rather than winner_id: a DRAW is reported and has no winner, so keying on
+    the winner would leave that player permanently unfinished.
+    MatchResult.find_unreported_for_user makes the other choice, which is why
+    this does not reuse it.
 
-    Defers to helpers.stale_drafts.is_finished_draft, which reads the victory
-    message as well as the stage -- the stage alone is wrong for most finished
-    drafts, which never advance past 'pairings'. That means a draft counts as
-    settled the moment a side clinches, with dead rubbers possibly unreported,
-    which is deliberate: see reminder_due. 'abandoned' is checked here because
-    is_finished_draft does not treat a collapsed draft as finished, and for
-    getting cards back it plainly is.
+    settled -- is this draft decided? Named for what it means, not "over":
+    card_lending_service._drafts_that_are_over asks a different question in the
+    same subsystem (would anybody still collect an offer), and counts a first
+    result rather than a victory. Defers to helpers.stale_drafts.is_finished_draft,
+    which reads the victory message as well as the stage -- the stage alone is
+    wrong for most finished drafts, which never advance past 'pairings'. So a
+    draft counts as settled the moment a side clinches, with dead rubbers
+    possibly unreported, which is deliberate: see reminder_due. 'abandoned' is
+    checked here because is_finished_draft does not treat a collapsed draft as
+    finished, and for getting cards back it plainly is.
+
+    last_result -- for a settled draft, the moment it was decided, give or take
+    a dead rubber reported after the clinch (which only ever makes the first ask
+    later, never early).
     """
     from sqlalchemy import select
 
     from database.db_session import db_session
     from helpers.stale_drafts import is_finished_draft
     from models.draft_session import DraftSession
+    from models.match import MatchResult
     from services.card_library_inventory import FINISHED_STAGES
 
     async with db_session() as session:
         row = await session.scalar(
-            select(DraftSession).where(
-                DraftSession.session_id == str(session_id)))
-    if row is None:
-        return False
-    return row.session_stage in FINISHED_STAGES or is_finished_draft(row)
+            select(DraftSession).where(DraftSession.session_id == str(session_id)))
+        if row is None:
+            return DraftState({}, False, None)
+        results = (await session.execute(
+            select(MatchResult.player1_id, MatchResult.player2_id,
+                   MatchResult.result_submitted_at)
+            .where(MatchResult.session_id == str(session_id)))).all()
+
+    settled = row.session_stage in FINISHED_STAGES or is_finished_draft(row)
+    last_result = max((t for _, _, t in results if t is not None), default=None)
+    if row.session_type not in FULLY_PAIRED_TYPES:
+        return DraftState({}, settled, last_result)
+
+    last_played: "dict[str, datetime]" = {}
+    outstanding: "set[str]" = set()
+    for player1_id, player2_id, submitted_at in results:
+        for player_id in (player1_id, player2_id):
+            if player_id is None:
+                continue
+            pid = str(player_id)
+            if submitted_at is None:
+                outstanding.add(pid)
+            elif pid not in last_played or submitted_at > last_played[pid]:
+                last_played[pid] = submitted_at
+    done_at = {pid: t for pid, t in last_played.items() if pid not in outstanding}
+    return DraftState(done_at, settled, last_result)

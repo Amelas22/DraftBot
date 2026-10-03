@@ -14,9 +14,9 @@ import pytest
 
 from conftest import seed_session
 import services.library_reminders as mod
-from services.library_reminders import (REPEAT_AFTER, deck_ready_message,
-                                        reminder_due, return_message,
-                                        session_of)
+from services.library_reminders import (REMIND_AFTER_FINISH, REPEAT_AFTER,
+                                        deck_ready_message, reminder_due,
+                                        return_message, session_of)
 
 NOW = datetime(2026, 9, 26, 12, 0, 0)
 
@@ -111,23 +111,63 @@ def test_a_settled_draft_asks_everyone_still_holding():
 
 def test_somebody_already_asked_is_not_asked_again_immediately():
     """The watchdog polls every ten minutes."""
-    loan = _loan(last_reminded_at=NOW - timedelta(hours=1))
+    loan = _loan(last_reminded_at=NOW - REPEAT_AFTER + timedelta(minutes=10))
 
     assert not reminder_due(loan, done_playing=True, draft_settled=True, now=NOW)
 
 
-def test_somebody_still_holding_a_day_later_is_asked_again():
+def test_somebody_still_holding_an_hour_later_is_asked_again():
     loan = _loan(last_reminded_at=NOW - REPEAT_AFTER - timedelta(minutes=1))
 
     assert reminder_due(loan, done_playing=True, draft_settled=True, now=NOW)
 
 
-def test_the_repeat_boundary_is_not_early():
-    """Exactly at the interval is not past it, or a tick landing on the
-    boundary double-asks."""
+def test_the_repeat_comes_on_the_hour_not_a_tick_later():
+    """last_reminded_at is stamped at a watchdog tick, so the tick an interval
+    later lands exactly on the boundary. Requiring strictly MORE than the
+    interval slipped every repeat a whole tick: hourly became every 70 min."""
     loan = _loan(last_reminded_at=NOW - REPEAT_AFTER)
 
-    assert not reminder_due(loan, done_playing=True, draft_settled=True, now=NOW)
+    assert reminder_due(loan, done_playing=True, draft_settled=True, now=NOW)
+
+
+def test_nobody_is_asked_in_the_first_hour_after_finishing():
+    """Room to hand the deck back unprompted, or to play a dead rubber."""
+    finished = NOW - REMIND_AFTER_FINISH + timedelta(minutes=1)
+
+    assert not reminder_due(_loan(), done_playing=True, draft_settled=False,
+                            finished_at=finished, now=NOW)
+
+
+def test_the_first_ask_comes_an_hour_after_finishing():
+    finished = NOW - REMIND_AFTER_FINISH
+
+    assert reminder_due(_loan(), done_playing=True, draft_settled=False,
+                        finished_at=finished, now=NOW)
+
+
+def test_the_hourly_repeat_holds_after_the_first_ask():
+    """Once asked, the finish time no longer matters -- only the last ask."""
+    loan = _loan(last_reminded_at=NOW - REPEAT_AFTER - timedelta(minutes=1))
+
+    assert reminder_due(loan, done_playing=True, draft_settled=False,
+                        finished_at=NOW - timedelta(hours=5), now=NOW)
+
+
+def test_a_result_reported_after_the_first_ask_does_not_postpone_the_next():
+    """A dead rubber reported after the first ask moves the draft's latest
+    result later. Only the first ask waits on the finish time."""
+    loan = _loan(last_reminded_at=NOW - REPEAT_AFTER)
+
+    assert reminder_due(loan, done_playing=False, draft_settled=True,
+                        finished_at=NOW - timedelta(minutes=10), now=NOW)
+
+
+def test_an_unknown_finish_time_asks_at_once():
+    """A draft settled with nothing reported (abandoned) has no finish time to
+    wait from, and holding the cards an extra hour helps nobody."""
+    assert reminder_due(_loan(), done_playing=False, draft_settled=True,
+                        finished_at=None, now=NOW)
 
 
 def test_a_deck_merely_on_offer_is_never_asked_for():
@@ -182,7 +222,7 @@ async def test_a_player_with_every_match_reported_has_finished(test_db):
         ("p1", "p2", "p1", NOW), ("p1", "p3", "p1", NOW), ("p1", "p4", "p4", NOW),
         ("p5", "p2", None, None)])
 
-    assert "p1" in await mod.players_done_playing("s1")
+    assert "p1" in (await mod.draft_state("s1")).done_at
 
 
 @pytest.mark.asyncio
@@ -190,7 +230,7 @@ async def test_a_player_with_a_match_outstanding_has_not(test_db):
     await seed_session("s1", stype="random", stage="pairings", matches=[
         ("p1", "p2", "p1", NOW), ("p1", "p3", None, None)])
 
-    assert "p1" not in await mod.players_done_playing("s1")
+    assert "p1" not in (await mod.draft_state("s1")).done_at
 
 
 @pytest.mark.asyncio
@@ -201,7 +241,33 @@ async def test_a_drawn_match_counts_as_played(test_db):
     await seed_session("s1", stype="random", stage="pairings",
                        matches=[("p1", "p2", None, NOW)])
 
-    assert "p1" in await mod.players_done_playing("s1")
+    assert "p1" in (await mod.draft_state("s1")).done_at
+
+
+@pytest.mark.asyncio
+async def test_a_player_finished_when_they_reported_their_last_match(test_db):
+    """The first ask is timed from here."""
+    await seed_session("s1", stype="random", stage="pairings", matches=[
+        ("p1", "p2", "p1", NOW - timedelta(hours=2)),
+        ("p1", "p3", "p1", NOW - timedelta(minutes=30))])
+
+    assert (await mod.draft_state("s1")).done_at["p1"] == NOW - timedelta(minutes=30)
+
+
+@pytest.mark.asyncio
+async def test_a_draft_was_decided_at_its_latest_result(test_db):
+    await seed_session("s1", stype="swiss", stage="completed", matches=[
+        ("p1", "p2", "p1", NOW - timedelta(hours=2)),
+        ("p3", "p4", "p3", NOW - timedelta(minutes=20))])
+
+    assert (await mod.draft_state("s1")).last_result == NOW - timedelta(minutes=20)
+
+
+@pytest.mark.asyncio
+async def test_a_draft_with_nothing_reported_has_no_finish_time(test_db):
+    await seed_session("s1", stype="random", stage="abandoned")
+
+    assert (await mod.draft_state("s1")).last_result is None
 
 
 @pytest.mark.asyncio
@@ -212,7 +278,7 @@ async def test_a_swiss_draft_never_reports_anybody_as_finished(test_db):
     await seed_session("s1", stype="swiss", stage="pairings",
                        matches=[("p1", "p2", "p1", NOW)])
 
-    assert await mod.players_done_playing("s1") == set()
+    assert (await mod.draft_state("s1")).done_at == {}
 
 
 # ---- when a draft counts as settled ----------------------------------------
@@ -221,7 +287,7 @@ async def test_a_swiss_draft_never_reports_anybody_as_finished(test_db):
 async def test_a_completed_draft_is_settled(test_db):
     await seed_session("s1", stype="random", stage="completed")
 
-    assert await mod.draft_is_settled("s1") is True
+    assert (await mod.draft_state("s1")).settled is True
 
 
 @pytest.mark.asyncio
@@ -230,14 +296,14 @@ async def test_an_abandoned_draft_is_settled_too(test_db):
     finished -- abandoned is exactly when nobody thinks to return."""
     await seed_session("s1", stype="random", stage="abandoned")
 
-    assert await mod.draft_is_settled("s1") is True
+    assert (await mod.draft_state("s1")).settled is True
 
 
 @pytest.mark.asyncio
 async def test_a_draft_still_running_is_not_settled(test_db):
     await seed_session("s1", stype="random", stage="pairings")
 
-    assert await mod.draft_is_settled("s1") is False
+    assert (await mod.draft_state("s1")).settled is False
 
 
 @pytest.mark.asyncio
@@ -248,7 +314,7 @@ async def test_a_clinched_draft_is_settled_even_at_the_pairings_stage(test_db):
     the only trigger, those borrowers would never be asked at all."""
     await seed_session("s1", stype="random", stage="pairings", victory=12345)
 
-    assert await mod.draft_is_settled("s1") is True
+    assert (await mod.draft_state("s1")).settled is True
 
 
 # ---- the watchdog pass ------------------------------------------------------
@@ -260,22 +326,36 @@ async def test_a_finished_player_is_asked_once_not_once_per_tick(test_db, dm):
     await seed_session("s1", stype="random", stage="pairings",
                        matches=[("p1", "p2", "p1", NOW)])
     await _a_loan()
+    due = NOW + REMIND_AFTER_FINISH
 
-    first = await mod.send_due_reminders(now=NOW)
-    second = await mod.send_due_reminders(now=NOW + timedelta(minutes=10))
+    first = await mod.send_due_reminders(now=due)
+    second = await mod.send_due_reminders(now=due + timedelta(minutes=10))
 
     assert first == 1 and second == 0, dm.sent
     assert [uid for uid, _ in dm.sent] == ["p1"]
 
 
 @pytest.mark.asyncio
-async def test_cards_still_out_a_day_later_are_asked_for_again(test_db, dm):
+async def test_cards_still_out_an_hour_later_are_asked_for_again(test_db, dm):
     await seed_session("s1", stype="random", stage="completed")
     await _a_loan()
 
     await mod.send_due_reminders(now=NOW)
 
-    assert await mod.send_due_reminders(now=NOW + timedelta(hours=25)) == 1, dm.sent
+    assert await mod.send_due_reminders(now=NOW + timedelta(minutes=61)) == 1, dm.sent
+
+
+@pytest.mark.asyncio
+async def test_the_watchdog_waits_an_hour_after_the_draft_is_decided(test_db, dm):
+    """Then asks, then asks hourly while the cards stay out -- and not between."""
+    await seed_session("s1", stype="swiss", stage="completed",
+                       matches=[("p1", "p2", "p1", NOW)])
+    await _a_loan()
+
+    asks = [await mod.send_due_reminders(now=NOW + timedelta(minutes=m))
+            for m in (10, 50, 60, 70, 110, 120, 130)]
+
+    assert asks == [0, 0, 1, 0, 0, 1, 0], dm.sent
 
 
 @pytest.mark.asyncio
@@ -303,7 +383,7 @@ async def test_a_swiss_draft_that_settled_still_gets_chased(test_db, dm):
                        matches=[("p1", "p2", "p1", NOW)])
     await _a_loan()
 
-    assert await mod.send_due_reminders(now=NOW) == 1, dm.sent
+    assert await mod.send_due_reminders(now=NOW + REMIND_AFTER_FINISH) == 1, dm.sent
 
 
 @pytest.mark.asyncio
