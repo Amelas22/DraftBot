@@ -1,7 +1,7 @@
 """Pure bracket maths: layout, advancement, placement."""
 import pytest
 
-from draft_organization.bracket import bracket_size, build_bracket, advance_pairs, final_placement
+from draft_organization.bracket import bracket_size, build_bracket, final_placement, BracketNode, bracket_tree
 
 
 def test_bracket_size_rounds_up_to_a_power_of_two():
@@ -32,13 +32,10 @@ def test_bracket_needs_at_least_two_seeds():
         build_bracket(1)
 
 
-def test_advance_pairs_pairs_adjacent_winners_in_order():
-    assert advance_pairs(["a", "b", "c", "d"]) == [("a", "b"), ("c", "d")]
-
-
-def test_advance_pairs_rejects_an_odd_number_of_winners():
-    with pytest.raises(ValueError):
-        advance_pairs(["a", "b", "c"])
+def test_bracket_tree_neighbours_share_a_parent_slot_a_then_b():
+    first_round = [n for n in bracket_tree(8) if n.round == 0]
+    assert [n.feeds for n in first_round] == [
+        (1, 0, "a"), (1, 0, "b"), (1, 1, "a"), (1, 1, "b")]
 
 
 @pytest.mark.parametrize("size", range(4, 17))
@@ -54,19 +51,23 @@ def test_seeds_one_and_two_meet_only_in_the_final(size):
     sizes are the ones where byes shift who meets whom, so they are where a
     bad seat order would actually surface.
     """
-    pairs = build_bracket(size)
+    nodes = bracket_tree(size)
     # Rounds are set by the FULL bracket, not the entry count: a top 6 plays
     # three rounds (two of its first-round seats are byes), not two.
     total_rounds = bracket_size(size).bit_length() - 1
     met_in = None
-    for rnd in range(1, total_rounds + 1):
-        for a, b in pairs:
-            if {a, b} == {1, 2}:
-                met_in = rnd
+    seats = {}                      # (round, index) -> {"a": seed, "b": seed}
+    for n in nodes:
+        slots = seats.setdefault((n.round, n.index), {})
+        if n.round == 0:
+            slots["a"], slots["b"] = n.a_seed, n.b_seed
+        a, b = slots.get("a"), slots.get("b")
+        if {a, b} == {1, 2}:
+            met_in = n.round + 1
         # `b is None` is a bye, so `a` walks through.
-        winners = [a if b is None else min(a, b) for a, b in pairs]
-        if len(winners) > 1:
-            pairs = advance_pairs(winners)
+        winner = a if b is None else min(a, b)
+        if n.feeds is not None:
+            seats.setdefault(n.feeds[:2], {})[n.feeds[2]] = winner
     assert met_in == total_rounds
 
 
@@ -107,3 +108,27 @@ def test_final_placement_never_lists_a_team_twice():
     order = final_placement(rounds, seeds)
     assert order.count("A") == 1
     assert sorted(order) == ["A", "B", "C"]
+
+
+def test_tree_for_eight_has_four_two_one_matches():
+    nodes = bracket_tree(8)
+    assert [sum(n.round == r for n in nodes) for r in range(3)] == [4, 2, 1]
+
+
+def test_first_round_matches_build_bracket_and_later_rounds_are_empty():
+    nodes = bracket_tree(8)
+    assert [(n.a_seed, n.b_seed) for n in nodes if n.round == 0] == build_bracket(8)
+    assert all(n.a_seed is None and n.b_seed is None for n in nodes if n.round > 0)
+
+
+def test_neighbours_feed_the_same_parent_in_slots_a_then_b():
+    nodes = bracket_tree(8)
+    first = [n for n in nodes if n.round == 0]
+    assert [n.feeds for n in first] == [(1, 0, "a"), (1, 0, "b"), (1, 1, "a"), (1, 1, "b")]
+    final = [n for n in nodes if n.round == 2]
+    assert final[0].feeds is None
+
+
+def test_a_bye_cut_marks_the_bye_in_round_zero():
+    first = [n for n in bracket_tree(6) if n.round == 0]
+    assert sum(n.b_seed is None for n in first) == 2

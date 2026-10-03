@@ -317,19 +317,24 @@ async def test_post_round_messages_gives_only_the_playable_match_a_room(test_db)
         bye_text = "• **Alpha** — BYE (auto win)"
         reported_text = "• **Bravo** 2–0 **Charlie**"
 
-    cog = TournamentCog.__new__(TournamentCog)  # no bot needed; not touched
+    sent = {}
 
     def make_message(*_a, **_k):
         msg = MagicMock()
         msg.id = 500 + make_message.count
         msg.channel.id = 555
         msg.edit = AsyncMock()
+        sent[msg.id] = msg
         make_message.count += 1
         return msg
     make_message.count = 0
 
     channel = MagicMock()
     channel.send = AsyncMock(side_effect=make_message)
+    channel.fetch_message = AsyncMock(side_effect=lambda message_id: sent[message_id])
+    cog = TournamentCog.__new__(TournamentCog)
+    cog.bot = MagicMock()
+    cog.bot.get_channel.return_value = channel
 
     thread = MagicMock()
     thread.id = 9999
@@ -396,6 +401,7 @@ async def test_post_round_messages_without_create_rooms_skips_rooms(test_db):
         round_id, round_number, playable_id = round_.id, round_.round_number, playable.id
 
     cog = TournamentCog.__new__(TournamentCog)
+    cog.bot = MagicMock()
 
     def make_message(*_a, **_k):
         msg = MagicMock()
@@ -524,16 +530,20 @@ async def test_post_round_messages_continues_past_a_failing_match(test_db):
         return msg
 
     channel = MagicMock()
+    surviving = make_message()
     # header succeeds, match 1's line raises, match 2's line succeeds.
     channel.send = AsyncMock(side_effect=[
         MagicMock(),
         discord.HTTPException(MagicMock(), "boom"),
-        make_message(),
+        surviving,
     ])
+    channel.fetch_message = AsyncMock(return_value=surviving)
 
     with patch("cogs.tournament_commands.db_session", _fake_db_session(test_db)), \
          patch("cogs.tournament_commands.create_match_room", AsyncMock(return_value=None)):
         cog = TournamentCog.__new__(TournamentCog)
+        cog.bot = MagicMock()
+        cog.bot.get_channel.return_value = channel
         await cog._post_round_messages(channel, round_id, 1)
 
     assert channel.send.call_count == 3  # header + failed attempt + surviving line
@@ -635,45 +645,6 @@ async def test_open_rooms_opens_only_roomless_matches_and_is_idempotent(test_db)
         assert message.edit.await_count == 4  # 2 matches x 2 opening runs
 
 
-# ---- a bracket bye is not a swiss bye ---------------------------------------------
-
-@pytest.mark.asyncio
-async def test_a_bracket_bye_is_not_posted_as_an_auto_win(test_db):
-    """A swiss bye is a RESULT: _award_bye grants points and a match win, so
-    "BYE (auto win)" is accurate there. A bracket bye is the absence of a
-    match -- swiss records are frozen and nothing is scored -- so posting it
-    as an auto win tells organizers the opposite of what the code does."""
-    from cogs.tournament_commands import TournamentCog
-    from models.tournament import TournamentMatch, TournamentRound
-
-    async with test_db() as session:
-        tournament = await create_tournament(session, "g1", "Cup", 3, cut_to=4)
-        await session.commit()
-        alpha, _ = await register_team(session, tournament.id, "Alpha", "1")
-        await session.commit()
-        round_ = TournamentRound(tournament_id=tournament.id, round_number=4,
-                                 stage="playoff")
-        session.add(round_)
-        await session.flush()
-        session.add(TournamentMatch(round_id=round_.id,
-                                    team_a_participant_id=alpha.id,
-                                    team_b_participant_id=None, is_bye=True))
-        await session.commit()
-        round_id = round_.id
-
-    cog = TournamentCog.__new__(TournamentCog)
-    channel = MagicMock()
-    channel.send = AsyncMock(return_value=MagicMock())
-
-    with patch("cogs.tournament_commands.db_session", _fake_db_session(test_db)):
-        await cog._post_round_messages(channel, round_id, 4)
-
-    texts = [c.args[0] for c in channel.send.call_args_list]
-    bye_line = next(t for t in texts if "Alpha" in t)
-    assert "auto win" not in bye_line
-    assert "no match" in bye_line
-
-
 # ---- sync_linked_result -------------------------------------------------------------
 
 @asynccontextmanager
@@ -708,7 +679,7 @@ async def test_sync_updates_a_score_that_grew_after_the_clinch(test_db):
 
     with patch("services.tournament_service.db_session", lambda: _committing(test_db)):
         await record_linked_result(match_id, 5, 2)      # clinch
-        match = await sync_linked_result(match_id, 7, 2)  # final
+        match, _done = await sync_linked_result(match_id, 7, 2)  # final
 
     assert match is not None, "a changed score must be written"
     assert (match.team_a_wins, match.team_b_wins) == (7, 2)
@@ -735,7 +706,7 @@ async def test_sync_records_a_match_that_has_no_result_yet(test_db):
     match_id, _ = await _one_match(test_db)
 
     with patch("services.tournament_service.db_session", lambda: _committing(test_db)):
-        match = await sync_linked_result(match_id, 5, 0)
+        match, _done = await sync_linked_result(match_id, 5, 0)
 
     assert match is not None
     assert (match.team_a_wins, match.team_b_wins) == (5, 0)

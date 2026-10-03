@@ -1,3 +1,4 @@
+import asyncio
 import random
 
 import discord
@@ -17,7 +18,8 @@ from helpers.money_gate import gate_serve, linked_username
 from helpers.display_names import get_display_name
 from helpers.permissions import bot_manager_button, has_bot_manager_role, is_bot_manager
 from helpers.pin_helpers import safe_pin
-from helpers.utils import ui_button
+from helpers.utils import not_none, ui_button
+from notification_service import send_dm
 from match_control_view import (
     MatchControlView,
     create_match_room,
@@ -26,6 +28,7 @@ from match_control_view import (
     safe_refresh_match_views,
 )
 from models.tournament import (
+    BRACKET_STAGES,
     STAGE_SWISS,
     Tournament,
     TournamentMatch,
@@ -34,15 +37,18 @@ from models.tournament import (
 )
 from sqlalchemy import or_, select
 from services.tournament_formatter import (
+    create_bracket_embed,
     create_registration_embed,
     create_standings_embed,
     post_registration_board,
     refresh_boards,
     round_label,
     round_name,
+    update_bracket_message,
     update_standings_message,
 )
 from services.tournament_service import (
+    _cut_eligible,
     advance_round,
     add_match,
     drop_team as drop_team_service,
@@ -56,14 +62,20 @@ from services.tournament_service import (
     find_participant_by_name,
     find_participants_for_captain,
     get_active_tournament,
+    bracket_rows,
     get_final_placement,
     get_latest_completed_tournament,
     get_rosters,
     get_tournament_id_for_match,
     get_standings_with_omw,
+    propose_play_in,
+    _playoff_rounds,
     is_playoff,
     list_participants,
     match_in_guild,
+    ready_bracket_matches,
+    record_result,
+    roomless_posted_bracket_matches,
     reportable_match_choices,
     other_teams_for_user,
     register_team,
@@ -110,6 +122,7 @@ async def re_register_tournament_views(bot):
                 or_(
                     Tournament.format != "swiss",
                     TournamentRound.round_number == Tournament.current_round,
+                    TournamentRound.stage.in_(BRACKET_STAGES),
                 ),
                 TournamentMatch.pairings_message_id.isnot(None),
                 TournamentMatch.team_a_wins.is_(None),
@@ -121,6 +134,233 @@ async def re_register_tournament_views(bot):
         for m in matches:
             bot.add_view(MatchControlView(m.id), message_id=int(m.control_message_id))
     logger.info(f"Re-registered {len(matches)} tournament control views")
+
+
+async def _delete_quietly(message):
+    try:
+        await message.delete()
+    except discord.HTTPException as e:
+        logger.warning(f"Could not remove message {message.id}: {e}")
+
+
+async def _post_match_room(bot, channel, match_id, a_name, b_name, stage, create_room=True):
+    """Post one playable match's pairing line, persist where it lives, open its
+    room, and link the room from the line. Returns False if the line could not
+    be posted (the match stays unposted, so the next sweep retries it)."""
+    try:
+        message = await channel.send(
+            render_pairing_line(a_name, b_name, match_id=match_id, stage=stage))
+    except discord.HTTPException as e:
+        logger.error(f"Could not post the pairing line for match {match_id}; skipping it: {e}")
+        return False
+    try:
+        async with db_session() as session:
+            m = await session.get(TournamentMatch, match_id)
+            if m is not None:
+                m.pairings_channel_id = str(message.channel.id)
+                m.pairings_message_id = str(message.id)
+    except Exception:
+        # Left posted but unrecorded, the next sweep would post it again.
+        await _delete_quietly(message)
+        raise
+    if m is None:
+        logger.error(f"Match {match_id} vanished after its line was posted; removing the line")
+        await _delete_quietly(message)
+        return False
+    if create_room:
+        await open_room_for_posted_match(bot, match_id)
+    return True
+
+
+_BRACKET_LOCKS: dict[int, asyncio.Lock] = {}
+
+async def open_ready_bracket_matches(bot, tournament_id):
+    """Open a room for every bracket match whose two teams are now known.
+
+    Serialised per tournament: two feeders decided together would otherwise
+    both see the parent unposted and post it twice. Matches already posted are
+    skipped, so running this again is always safe -- it is also the repair
+    sweep."""
+    async with _BRACKET_LOCKS.setdefault(tournament_id, asyncio.Lock()):
+        async with db_session() as session:
+            tournament = await session.get(Tournament, tournament_id)
+            if tournament is None or tournament.bracket_channel_id is None:
+                return []
+            channel_id = int(tournament.bracket_channel_id)
+            ready = await ready_bracket_matches(session, tournament_id)
+        opened = []
+        if ready:
+            channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+            opened = [match_id for match_id, a_name, b_name, stage in ready
+                      if await _post_match_room(bot, channel, match_id, a_name, b_name, stage)]
+        async with db_session() as session:
+            roomless = await roomless_posted_bracket_matches(session, tournament_id)
+        for match_id in roomless:
+            if match_id in opened:
+                continue              # just posted above; its room was tried then
+            if await open_room_for_posted_match(bot, match_id):
+                opened.append(match_id)
+        # Rooms change the bracket's links; a failed refresh must not hide
+        # which rooms opened.
+        try:
+            await update_bracket_message(bot, tournament_id)
+        except Exception:
+            logger.exception(f"Could not refresh the bracket of tournament {tournament_id}")
+        return opened
+
+
+async def after_bracket_result(bot, match_id, completed_now=False):
+    """Everything a recorded bracket result sets off, after its commit: rooms
+    for the matches it made playable and, only when this very result completed
+    the tournament (completed_now), the champion's announcement. No-op for a
+    match outside a bracket. Never raises: the result is already recorded, and
+    its callers have nothing better to do with a Discord or DB error than log it."""
+    try:
+        async with db_session() as session:
+            match = await session.get(TournamentMatch, match_id)
+            round_ = await session.get(TournamentRound, match.round_id) if match else None
+            if not is_playoff(round_) or round_ is None:
+                return
+            tournament = await session.get(Tournament, round_.tournament_id)
+            if tournament is None:
+                return
+            tournament_id, name = tournament.id, tournament.name
+            guild_id = int(tournament.guild_id)
+            channel_id = (int(tournament.bracket_channel_id)
+                          if tournament.bracket_channel_id else None)
+    except Exception:
+        logger.exception(f"Could not look up match {match_id} after its result")
+        return
+    opened: list[int] = []
+    failures: list[str] = []
+    try:
+        opened = await open_ready_bracket_matches(bot, tournament_id)
+    except Exception:
+        logger.exception(f"Could not open rooms for tournament {tournament_id}")
+        failures.append("couldn't open the rooms this result unlocked — run /tournament open_rooms")
+    champion = None
+    if completed_now:
+        try:
+            async with db_session() as session:
+                # The same champion /tournament finish names: dropped teams are out.
+                placement = [p for p in await get_final_placement(session, tournament_id)
+                             if p.dropped_at is None]
+            if placement:
+                champion = placement[0].team_name
+                if channel_id is not None:
+                    channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+                    await channel.send(
+                        f"🏁 **{name}** is complete! Champion: **{champion}** 🏆")
+        except Exception:
+            logger.exception(f"Could not announce the champion of tournament {tournament_id}")
+            failures.append("champion announcement failed — post it manually")
+        try:
+            await update_standings_message(bot, tournament_id)
+        except Exception:
+            logger.exception(f"Could not refresh the standings of tournament {tournament_id}")
+        try:
+            cog = bot.get_cog("TournamentCog")
+            guild = bot.get_guild(guild_id)
+            if cog is not None and guild is not None:
+                await cog._drop_team_roles(guild, tournament_id)
+        except Exception:
+            logger.exception(f"Could not drop the team roles of tournament {tournament_id}")
+    try:
+        await _dm_organizer(bot, tournament_id, match_id, opened, champion, failures)
+    except Exception:
+        logger.exception(f"Could not DM the organizer of tournament {tournament_id}")
+
+
+def _bracket_dm_text(result_line, opened, champion, drawn, failures=()):
+    """What the organizer is told about one recorded bracket result."""
+    lines = [result_line] if result_line else []
+    if drawn:
+        lines.append("This bracket match is drawn and needs settling before anyone advances.")
+    lines += [f"Opened {o}." for o in opened]
+    lines += [f"⚠️ {f}" for f in failures]
+    if champion:
+        lines.append(f"Champion: {champion} — run `/tournament payout`.")
+    lines.append("Republish the league site when you're ready.")
+    return "\n".join(lines)
+
+
+def _bracket_line(row):
+    a = row.a[1] if row.a else "TBD"
+    b = row.b[1] if row.b else "TBD"
+    return f"#{row.match_id} {row.stage}: {a} vs {b}"
+
+
+async def _dm_organizer(bot, tournament_id, match_id, opened, champion, failures):
+    async with db_session() as session:
+        tournament = await session.get(Tournament, tournament_id)
+        organizer = tournament.organizer_user_id if tournament else None
+        if not organizer:
+            return
+        rows = {r.match_id: r for r in await bracket_rows(session, tournament_id)}
+    result_line, drawn = None, False
+    row = rows.get(match_id)
+    if row is not None and row.a and row.b and row.a_wins is not None and row.b_wins is not None:
+        a, b, x, y = row.a[1], row.b[1], row.a_wins, row.b_wins
+        drawn = x == y
+        if drawn:
+            result_line = f"#{match_id} {row.stage}: {a} {x}–{y} {b}"
+        else:
+            winner, loser = (a, b) if x > y else (b, a)
+            result_line = (f"#{match_id} {row.stage}: {winner} beat {loser} "
+                           f"{max(x, y)}–{min(x, y)}")
+    opened_lines = [_bracket_line(rows[i]) for i in opened if i in rows]
+    text = _bracket_dm_text(result_line, opened_lines, champion, drawn, failures)
+    if not await send_dm(bot, organizer, text, label="bracket result"):
+        logger.warning(f"Could not DM the organizer of tournament {tournament_id} "
+                       f"about match {match_id}")
+
+
+async def open_room_for_posted_match(bot, match_id):
+    """Open the room for a match whose pairing line is already posted, then link
+    it from the line. Shared by /tournament open_rooms and the bracket repair
+    sweep. Returns True if a room was opened."""
+    async with db_session() as session:
+        facts = await match_facts(session, match_id, swiss_noun="Week")
+    if facts is None:
+        return False
+    match, a_name, b_name, stage, _draft = facts
+    if not match.pairings_channel_id or not match.pairings_message_id:
+        return False
+    channel = bot.get_channel(int(match.pairings_channel_id))
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(int(match.pairings_channel_id))
+        except discord.HTTPException as e:
+            logger.warning(f"open_rooms: pairings channel for match {match_id} unreachable: {e}")
+            return False
+    try:
+        message = await channel.fetch_message(int(match.pairings_message_id))
+    except discord.HTTPException as e:
+        logger.warning(f"open_rooms: pairing message for match {match_id} unreachable: {e}")
+        return False
+    thread = await create_match_room(message, match_id)
+    if thread is None:
+        return False
+    try:
+        await message.edit(content=render_pairing_line(
+            a_name, b_name, str(thread.id), match_id=match_id, stage=stage))
+    except discord.HTTPException as e:
+        logger.warning(f"open_rooms: could not add the room link for match {match_id}: {e}")
+    return True
+
+
+async def sweep_brackets(bot):
+    """Open any room a crash left unopened, for every live bracket."""
+    async with db_session() as session:
+        ids = (await session.execute(
+            select(Tournament.id).where(
+                Tournament.status == "active",
+                Tournament.bracket_channel_id.is_not(None)))).scalars().all()
+    for tournament_id in ids:
+        try:
+            await open_ready_bracket_matches(bot, tournament_id)
+        except Exception:
+            logger.exception(f"Bracket sweep failed for tournament {tournament_id}")
 
 
 _PLACE_MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
@@ -225,6 +465,42 @@ class PayoutConfirmView(discord.ui.View):
                 pass
 
 
+def _ordinal(n):
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+class PlayInModal(discord.ui.Modal):
+    """Pick the two teams for the last seat's play-in by name."""
+
+    def __init__(self, prompt):
+        super().__init__(title="Play-in for the last seat")
+        self.prompt = prompt
+        self.higher = discord.ui.InputText(label="Higher-ranked team")
+        self.lower = discord.ui.InputText(label="Lower-ranked team")
+        self.add_item(self.higher)
+        self.add_item(self.lower)
+
+    async def callback(self, interaction):
+        async with db_session() as session:
+            teams = [await find_participant_by_name(
+                session, self.prompt.tournament_id, str(field.value))
+                for field in (self.higher, self.lower)]
+        for team, field in zip(teams, (self.higher, self.lower)):
+            if team is None:
+                await interaction.response.send_message(
+                    f"❌ '{field.value}' is not in this tournament.", ephemeral=True)
+                return
+        # Refused before the prompt closes: start_playoff would refuse the same
+        # entries, but only after the public prompt had lost its buttons.
+        if teams[0].id == teams[1].id or len(_cut_eligible(teams)) != 2:
+            await interaction.response.send_message(
+                "❌ A play-in needs two different teams that can make the cut.",
+                ephemeral=True)
+            return
+        await self.prompt.run_with_play_in(interaction, (teams[0].id, teams[1].id))
+
+
 class PlayoffPromptView(discord.ui.View):
     """End-of-swiss choice: start the bracket, or finish now.
 
@@ -232,7 +508,7 @@ class PlayoffPromptView(discord.ui.View):
     explicit path — a TO returning later must not be stranded by a dead prompt.
     """
 
-    def __init__(self, cog, tournament_id, cut_to, disabled=False):
+    def __init__(self, cog, tournament_id, cut_to, disabled=False, proposal=None):
         super().__init__(timeout=900)
         self.cog = cog
         self.tournament_id = tournament_id
@@ -243,6 +519,14 @@ class PlayoffPromptView(discord.ui.View):
         self.message = None
         self.start_playoff_button.disabled = disabled
         self.start_playoff_button.label = f"Start top-{cut_to} playoff"
+        self.proposal = proposal
+        if proposal is None:
+            self.remove_item(self.start_with_play_in_button)
+            self.remove_item(self.edit_play_in_button)
+        else:
+            self.start_playoff_button.label = "Start without"
+            if proposal.teams is None:
+                self.remove_item(self.start_with_play_in_button)
 
     async def _rewrite(self, content):
         """Replace the prompt's text and take its buttons away, if we have the
@@ -320,6 +604,29 @@ class PlayoffPromptView(discord.ui.View):
             return
         await self._settled(f"✅ Cut to the top {self.cut_to} — the bracket is posted.")
         await interaction.followup.send(f"🏆 Top {self.cut_to} playoff started.")
+        self.stop()
+
+    @bot_manager_button
+    @ui_button(label="Start with play-in", style=discord.ButtonStyle.success)
+    async def start_with_play_in_button(self, button, interaction):
+        a, b = not_none(self.proposal).teams
+        await self.run_with_play_in(interaction, (a.id, b.id))
+
+    @bot_manager_button
+    @ui_button(label="Edit play-in…", style=discord.ButtonStyle.secondary)
+    async def edit_play_in_button(self, button, interaction):
+        await interaction.response.send_modal(PlayInModal(self))
+
+    async def run_with_play_in(self, interaction, play_in):
+        await self._answer(interaction, f"⏳ Cutting to the top {self.cut_to} with a play-in…")
+        try:
+            await self.cog._run_playoff(interaction, self.tournament_id, play_in=play_in)
+        except ValueError as e:
+            await self._failed(interaction, f"❌ {e}")
+            return
+        await self._settled(
+            f"✅ Cut to the top {self.cut_to} with a play-in — the bracket is posted.")
+        await interaction.followup.send(f"🏆 Top {self.cut_to} playoff started with a play-in.")
         self.stop()
 
     @bot_manager_button
@@ -1116,7 +1423,8 @@ class TournamentCog(commands.Cog):
                 if found is None:
                     await ctx.followup.send(f"No match **#{match}** on this server.", ephemeral=True)
                     return
-                updated = await set_result(session, found.id, team_a_wins, team_b_wins)
+                updated, completed_now = await record_result(
+                    session, found.id, team_a_wins, team_b_wins)
                 part_a = await session.get(TournamentParticipant, updated.team_a_participant_id)
                 part_b = await session.get(TournamentParticipant, updated.team_b_participant_id)
                 tournament_id = await get_tournament_id_for_match(session, updated.id)
@@ -1125,6 +1433,9 @@ class TournamentCog(commands.Cog):
             await ctx.followup.send(
                 f"✅ **#{match}** recorded: **{part_a.team_name}** {team_a_wins}–"
                 f"{team_b_wins} **{part_b.team_name}**")
+            # First: it is fully contained, and the champion's announcement
+            # must not depend on the refreshes below succeeding.
+            await after_bracket_result(self.bot, match, completed_now)
             await update_standings_message(self.bot, tournament_id)
             await safe_refresh_match_views(self.bot, match)
         except ValueError as e:
@@ -1317,6 +1628,16 @@ class TournamentCog(commands.Cog):
                     return
                 tournament_id = tournament.id
                 tournament_name = tournament.name
+                bracket_live = bool(await _playoff_rounds(session, tournament_id))
+            if bracket_live:
+                opened = await open_ready_bracket_matches(self.bot, tournament_id)
+                await ctx.followup.send(
+                    f"The bracket advances on its own. Reopened {len(opened)} missing room(s)."
+                    if opened else
+                    "The bracket advances on its own — every playable match has its room.",
+                    ephemeral=True)
+                return
+            async with db_session() as session:
                 try:
                     new_round = await advance_round(session, tournament.id, random.Random())
                 except SwissComplete as done:
@@ -1325,7 +1646,12 @@ class TournamentCog(commands.Cog):
                     # Not `done.eligible < done.cut_to`: who a cut can seat
                     # is decided once, beside the rule start_playoff refuses on.
                     short = not done.fillable
-                    view = PlayoffPromptView(self, tournament_id, done.cut_to, disabled=short)
+                    proposal = None
+                    if not short:
+                        ranked, omw = await get_standings_with_omw(session, tournament_id)
+                        proposal = propose_play_in(ranked, omw, done.cut_to)
+                    view = PlayoffPromptView(self, tournament_id, done.cut_to,
+                                             disabled=short, proposal=proposal)
                     # `top:` has min_value=2, so suggesting top:1 (or top:0)
                     # hands the TO a command Discord will refuse to send.
                     fallback = (
@@ -1337,13 +1663,24 @@ class TournamentCog(commands.Cog):
                         f"\n\n⚠️ Only **{done.eligible}** eligible team(s) — not enough for a "
                         f"top {done.cut_to}.{fallback}"
                     ) if short else ""
+                    if proposal is not None and proposal.teams is not None:
+                        a, b = proposal.teams
+                        note = (
+                            f"\n\n**{a.team_name}** and **{b.team_name}** are tied for the "
+                            f"{_ordinal(done.cut_to)} seat ({a.points} pts, "
+                            f"OMW {omw[a.id]:.1%}). Play it off?")
+                    elif proposal is not None:
+                        note = (
+                            f"\n\n{proposal.tied} teams are tied for the "
+                            f"{_ordinal(done.cut_to)} seat — edit the play-in to pick two, "
+                            "or start without.")
                     view.message = await ctx.followup.send(
                         f"Swiss is over for **{tournament_name}**. Cut to top "
                         f"**{done.cut_to}**?{note}", view=view)
                     return
                 if new_round is None:
-                    # Finishing order, not standings: after a bracket the
-                    # champion is whoever won the final, not the swiss leader.
+                    # A live bracket returned above, so this is a swiss
+                    # tournament with no cut and placement is plain standings.
                     placement = await get_final_placement(session, tournament.id)
                     # Defensive, not reachable today: start_tournament refuses
                     # fewer than 2 paid teams and remove_team refuses once
@@ -1387,24 +1724,41 @@ class TournamentCog(commands.Cog):
             int, "Cut size (defaults to the size declared at creation)",
             min_value=2, max_value=32, required=False, default=None,
         ),
+        play_in_a: discord.Option(
+            str, "Play-in team (higher-ranked)", required=False, default=None),
+        play_in_b: discord.Option(
+            str, "Play-in team (lower-ranked)", required=False, default=None),
     ):
         if not await self._check_enabled(ctx):
             return
+        if (play_in_a is None) != (play_in_b is None):
+            await ctx.respond("❌ Name both play-in teams, or neither.", ephemeral=True)
+            return
         await ctx.defer()
+        play_in = None
         async with db_session() as session:
             tournament = await get_active_tournament(session, ctx.guild.id)
             if tournament is None:
                 await ctx.followup.send("There is no active tournament.", ephemeral=True)
                 return
             tournament_id = tournament.id
+            if play_in_a is not None and play_in_b is not None:
+                teams = [await find_participant_by_name(session, tournament_id, n)
+                         for n in (play_in_a, play_in_b)]
+                missing = [n for n, t in zip((play_in_a, play_in_b), teams) if t is None]
+                if missing:
+                    await ctx.followup.send(
+                        f"❌ '{missing[0]}' is not in this tournament.", ephemeral=True)
+                    return
+                play_in = (teams[0].id, teams[1].id)
         try:
-            play, size = await self._run_playoff(ctx, tournament_id, top)
+            play, size = await self._run_playoff(ctx, tournament_id, top, play_in)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
             return
         await ctx.followup.send(f"🏆 Top {size} playoff started — bracket posted in {play.mention}.")
 
-    async def _run_playoff(self, source, tournament_id, size=None):
+    async def _run_playoff(self, source, tournament_id, size=None, play_in=None):
         """Cut to the bracket, post its round, and refresh the pinned standings.
 
         Shared by /tournament playoff and the end-of-swiss prompt's "Start
@@ -1422,10 +1776,22 @@ class TournamentCog(commands.Cog):
         async with db_session() as session:
             tournament = await session.get(Tournament, tournament_id)
             declared = tournament.cut_to if tournament is not None else None
-            new_round = await start_playoff(session, tournament_id, size)
-            round_id, round_number = new_round.id, new_round.round_number
-        play = self._destination(source, PAIRINGS.setting)
-        await self._post_round_messages(play, round_id, round_number)
+            play = self._destination(source, PAIRINGS.setting)
+            await start_playoff(session, tournament_id, size, play_in)
+            # Stamped with the cut itself, so a crash cannot leave a bracket
+            # the startup sweep does not know where to post.
+            tournament = await session.get(Tournament, tournament_id)
+            tournament.bracket_channel_id = str(play.id)
+            organizer = getattr(source, "user", None) or getattr(source, "author", None)
+            tournament.organizer_user_id = str(organizer.id) if organizer else None
+            embed = create_bracket_embed(
+                tournament.name, await bracket_rows(session, tournament_id))
+        message = await play.send(embed=embed)
+        await safe_pin(message)
+        async with db_session() as session:
+            tournament = await session.get(Tournament, tournament_id)
+            tournament.bracket_message_id = str(message.id)
+        await open_ready_bracket_matches(self.bot, tournament_id)
         await update_standings_message(self.bot, tournament_id)
         return play, size or declared
 
@@ -1477,34 +1843,8 @@ class TournamentCog(commands.Cog):
 
         opened = 0
         for match_id in match_ids:
-            async with db_session() as session:
-                facts = await match_facts(session, match_id, swiss_noun="Week")
-            if facts is None:
-                continue
-            match, a_name, b_name, stage, _draft = facts
-            if not match.pairings_channel_id or not match.pairings_message_id:
-                continue
-            channel = self.bot.get_channel(int(match.pairings_channel_id))
-            if channel is None:
-                try:
-                    channel = await self.bot.fetch_channel(int(match.pairings_channel_id))
-                except discord.HTTPException as e:
-                    logger.warning(f"open_rooms: pairings channel for match {match_id} unreachable: {e}")
-                    continue
-            try:
-                message = await channel.fetch_message(int(match.pairings_message_id))
-            except discord.HTTPException as e:
-                logger.warning(f"open_rooms: pairing message for match {match_id} unreachable: {e}")
-                continue
-            thread = await create_match_room(message, match_id)
-            if thread is None:
-                continue
-            try:
-                await message.edit(content=render_pairing_line(
-                    a_name, b_name, str(thread.id), match_id=match_id, stage=stage))
-            except discord.HTTPException as e:
-                logger.warning(f"open_rooms: could not add the room link for match {match_id}: {e}")
-            opened += 1
+            if await open_room_for_posted_match(self.bot, match_id):
+                opened += 1
 
         logger.info(f"open_rooms opened {opened} room(s) for "
                     f"{target_name} of tournament "
@@ -1605,17 +1945,9 @@ class TournamentCog(commands.Cog):
             matches = (await session.execute(
                 select(TournamentMatch).where(TournamentMatch.round_id == round_id)
             )).scalars().all()
-            # A swiss bye is a result (points are awarded); a bracket bye is
-            # the absence of a match — the seed simply sits this round out and
-            # scores nothing, so it must not be announced as an "auto win".
             round_ = await session.get(TournamentRound, round_id)
-            bye_note = ("— bye, advances (no match, no points)"
-                        if is_playoff(round_)
-                        else "— BYE (auto win)")
             tournament = (await session.get(Tournament, round_.tournament_id)
                           if round_ is not None else None)
-            # Bracket rounds are numbered past total_rounds, so the header used
-            # to post the semifinal of a 3-round swiss as "Week 4 pairings".
             label = round_label(
                 tournament.total_rounds if tournament is not None else round_number,
                 round_number,
@@ -1625,7 +1957,7 @@ class TournamentCog(commands.Cog):
             for m in matches:
                 part_a = await session.get(TournamentParticipant, m.team_a_participant_id)
                 if m.is_bye:
-                    rows.append((m.id, f"• **{part_a.team_name}** {bye_note}", None))
+                    rows.append((m.id, f"• **{part_a.team_name}** — BYE (auto win)", None))
                 else:
                     part_b = await session.get(TournamentParticipant, m.team_b_participant_id)
                     if m.team_a_wins is None:
@@ -1654,26 +1986,11 @@ class TournamentCog(commands.Cog):
                 a_name, b_name = names
                 async with db_session() as session:
                     stage = await pairing_round_name(session, match_id)
-                message = await channel.send(
-                    render_pairing_line(a_name, b_name, match_id=match_id, stage=stage))
             except discord.HTTPException as e:
-                logger.error(f"Could not post the pairing line for match {match_id}; skipping it: {e}")
+                logger.error(f"Could not post the round's line for match {match_id}; skipping it: {e}")
                 continue
-            async with db_session() as session:
-                m = await session.get(TournamentMatch, match_id)
-                m.pairings_channel_id = str(message.channel.id)
-                m.pairings_message_id = str(message.id)
-            if not create_rooms:
-                continue
-            thread = await create_match_room(message, match_id)
-            if thread is not None:
-                try:
-                    await message.edit(content=render_pairing_line(
-                        a_name, b_name, str(thread.id), match_id=match_id, stage=stage))
-                except discord.HTTPException as e:
-                    # The room exists and the control message is in it; losing the
-                    # link costs discoverability, not the round.
-                    logger.warning(f"Could not add the room link for match {match_id}: {e}")
+            await _post_match_room(self.bot, channel, match_id, a_name, b_name, stage,
+                                   create_room=create_rooms)
 
     async def _post_standings(self, channel, tournament_id):
         """Post the standings message and remember it for in-place updates.

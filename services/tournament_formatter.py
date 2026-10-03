@@ -19,6 +19,7 @@ from models.tournament import (
 )
 from services.tournament_escrow_service import describe_structure
 from services.tournament_service import (
+    bracket_rows,
     current_round_stage,
     cut_after_rank,
     get_standings_with_omw,
@@ -69,11 +70,14 @@ async def round_name(session, round_, total_rounds, swiss_noun="Round"):
 
 
 def _round_line(tournament, stage):
-    """The "**Round:** …" line. A bracket round is named, not counted: the
-    swiss "N of M" form reads "Round: 4/3" once the bracket starts."""
+    """The "**Round:** …" line. A bracket is one pinned message, not a round
+    count: the swiss "N of M" form reads "Round: 4/3" once the bracket starts."""
     if stage in BRACKET_STAGES:
-        return (f"**Round:** "
-                f"{round_label(tournament.total_rounds, tournament.current_round, stage)}")
+        link = ""
+        if tournament.bracket_channel_id and tournament.bracket_message_id:
+            link = (f" (https://discord.com/channels/{tournament.guild_id}/"
+                    f"{tournament.bracket_channel_id}/{tournament.bracket_message_id})")
+        return f"**Round:** Playoff — see bracket{link}"
     return f"**Round:** {tournament.current_round}/{tournament.total_rounds}"
 
 
@@ -96,6 +100,35 @@ def _add_chunked_field(embed, label, lines, cont_label=None):
     cont = cont_label or f"{label} (cont.)"
     for i, chunk in enumerate(split_content_for_embed(lines, max_length=_FIELD_LIMIT)):
         embed.add_field(name=label if i == 0 else cont, value=chunk, inline=False)
+
+
+def _bracket_side(side, feeder, won):
+    if side is None:
+        return f"winner of #{feeder}" if feeder else "TBD"
+    seed, name = side
+    text = f"({seed}) {name}" if seed is not None else name
+    return f"**{text}**" if won else text
+
+
+def create_bracket_embed(tournament_name, rows):
+    """The live bracket: one aligned line per match, earliest first.
+
+    The id and stage sit in a code span padded to one width, the same
+    technique as the standings board, so every team name starts at the same
+    x however wide its emoji renders."""
+    embed = discord.Embed(title=f"🏆 {tournament_name} — Bracket", color=discord.Color.gold())
+    shown = [r for r in rows if not r.is_bye]
+    width = max((len(f"#{r.match_id} {r.stage}") for r in shown), default=0)
+    lines = []
+    for r in shown:
+        decided = r.a_wins is not None and r.b_wins is not None and r.a_wins != r.b_wins
+        a = _bracket_side(r.a, r.a_from, decided and r.a_wins > r.b_wins)
+        b = _bracket_side(r.b, r.b_from, decided and r.b_wins > r.a_wins)
+        middle = f" {r.a_wins}–{r.b_wins} " if r.a_wins is not None else " vs "
+        room = f" — <#{r.thread_id}>" if r.thread_id and r.a_wins is None else ""
+        lines.append(f"`{f'#{r.match_id} {r.stage}'.ljust(width)}` {a}{middle}{b}{room}")
+    _add_chunked_field(embed, "Matches", lines)
+    return embed
 
 
 def _standings_rows(participants, omw):
@@ -309,6 +342,24 @@ async def update_standings_message(bot, tournament_id):
         logger.warning(f"Standings message {message_id} gone for tournament {tournament_id}")
     except discord.HTTPException as e:
         logger.error(f"Failed to update standings message for tournament {tournament_id}: {e}")
+
+
+async def update_bracket_message(bot, tournament_id):
+    """Edit the live bracket in place. No-op until it has been posted; Discord
+    errors are logged, not raised."""
+    async with db_session() as session:
+        tournament = await session.get(Tournament, tournament_id)
+        if tournament is None or not tournament.bracket_message_id:
+            return
+        embed = create_bracket_embed(
+            tournament.name, await bracket_rows(session, tournament_id))
+        channel_id = int(tournament.bracket_channel_id)
+        message_id = int(tournament.bracket_message_id)
+    try:
+        channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        await channel.get_partial_message(message_id).edit(embed=embed)
+    except discord.HTTPException as e:
+        logger.warning(f"Could not update the bracket for tournament {tournament_id}: {e}")
 
 
 async def _board_state(session, tournament):

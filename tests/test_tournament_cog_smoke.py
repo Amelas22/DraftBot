@@ -830,6 +830,7 @@ async def test_short_field_only_suggests_a_playoff_size_the_option_accepts(eligi
          patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
          patch("cogs.tournament_commands.get_active_tournament",
                AsyncMock(return_value=tournament)), \
+         patch("cogs.tournament_commands._playoff_rounds", AsyncMock(return_value=[])), \
          patch("cogs.tournament_commands.advance_round",
                AsyncMock(side_effect=SwissComplete(4, eligible, eligible >= 4))):
         await TournamentCog.next_round.callback(cog, ctx)
@@ -900,24 +901,27 @@ async def test_start_playoff_button_refreshes_the_pinned_standings():
     from cogs.tournament_commands import PlayoffPromptView, TournamentCog
 
     cog = TournamentCog(MagicMock())
-    cog._destination = MagicMock(return_value=MagicMock())
-    cog._post_round_messages = AsyncMock()
+    play = MagicMock()
+    play.send = AsyncMock(return_value=MagicMock(id=88, pin=AsyncMock()))
+    cog._destination = MagicMock(return_value=play)
     tournament = MagicMock()
     tournament.cut_to = 4
-    new_round = MagicMock()
-    new_round.id, new_round.round_number = 11, 4
 
     with patch("cogs.tournament_commands.db_session",
                _fake_db_session(_session_stub(tournament))), \
          patch("cogs.tournament_commands.start_playoff",
-               AsyncMock(return_value=new_round)), \
+               AsyncMock()), \
+         patch("cogs.tournament_commands.bracket_rows", AsyncMock(return_value=[])), \
+         patch("cogs.tournament_commands.create_bracket_embed", MagicMock()), \
+         patch("cogs.tournament_commands.open_ready_bracket_matches",
+               AsyncMock()) as open_rooms, \
          patch("cogs.tournament_commands.update_standings_message",
                AsyncMock()) as refresh, \
          patch("helpers.permissions.get_config", return_value={}):
         view = PlayoffPromptView(cog, tournament_id=7, cut_to=4)
         await view.start_playoff_button.callback(_manager_interaction())
 
-    cog._post_round_messages.assert_awaited_once()
+    open_rooms.assert_awaited_once_with(cog.bot, 7)
     refresh.assert_awaited_once_with(cog.bot, 7)
 
 
@@ -1205,6 +1209,7 @@ async def test_completing_via_next_round_also_deletes_the_team_roles():
          patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
          patch("cogs.tournament_commands.get_active_tournament",
                AsyncMock(return_value=SimpleNamespace(id=1, name="Cup", total_rounds=3))), \
+         patch("cogs.tournament_commands._playoff_rounds", AsyncMock(return_value=[])), \
          patch("cogs.tournament_commands.advance_round", AsyncMock(return_value=None)), \
          patch("cogs.tournament_commands.get_final_placement", AsyncMock(return_value=[MagicMock()])), \
          patch("cogs.tournament_commands.update_standings_message", AsyncMock()), \
@@ -1320,6 +1325,7 @@ async def test_next_round_announces_the_champion_before_dropping_roles():
          patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
          patch("cogs.tournament_commands.get_active_tournament",
                AsyncMock(return_value=SimpleNamespace(id=1, name="Cup", total_rounds=3))), \
+         patch("cogs.tournament_commands._playoff_rounds", AsyncMock(return_value=[])), \
          patch("cogs.tournament_commands.advance_round", AsyncMock(return_value=None)), \
          patch("cogs.tournament_commands.get_final_placement", AsyncMock(return_value=[MagicMock()])), \
          patch("cogs.tournament_commands.update_standings_message", AsyncMock()), \
@@ -1652,3 +1658,49 @@ async def test_a_team_that_had_the_bye_is_not_told_to_report_it(test_db):  # noq
     reply = ctx.followup.send.await_args.args[0]
     assert "❌" not in reply, reply
     assert "set_result" not in reply, reply
+
+
+@pytest.mark.asyncio
+async def test_prompt_offers_start_with_play_in_when_a_pair_is_proposed():
+    from cogs.tournament_commands import PlayoffPromptView
+    from services.tournament_service import PlayInProposal
+    a, b = SimpleNamespace(id=1, team_name="gypsy caravan"), SimpleNamespace(id=2, team_name="18 lands")
+    view = PlayoffPromptView(MagicMock(), 3, 8, proposal=PlayInProposal((a, b), 2))
+    labels = [c.label for c in view.children]
+    assert "Start with play-in" in labels and "Start without" in labels and "Edit play-in…" in labels
+
+
+@pytest.mark.asyncio
+async def test_prompt_without_a_pair_has_no_start_with_play_in():
+    from cogs.tournament_commands import PlayoffPromptView
+    from services.tournament_service import PlayInProposal
+    view = PlayoffPromptView(MagicMock(), 3, 8, proposal=PlayInProposal(None, 3))
+    labels = [c.label for c in view.children]
+    assert "Start with play-in" not in labels and "Edit play-in…" in labels
+
+
+@pytest.mark.asyncio
+async def test_prompt_without_a_proposal_is_unchanged():
+    from cogs.tournament_commands import PlayoffPromptView
+    view = PlayoffPromptView(MagicMock(), 3, 8)
+    assert [c.label for c in view.children] == [
+        "Start top-8 playoff", "Finish now — crown the Swiss leader"]
+
+
+@pytest.mark.asyncio
+async def test_play_in_modal_refuses_a_duplicate_pair_without_closing_the_prompt():
+    from cogs.tournament_commands import PlayInModal, PlayoffPromptView
+    team = SimpleNamespace(id=1, team_name="alpha", status="paid", dropped_at=None)
+    cog = MagicMock()
+    cog._run_playoff = AsyncMock()
+    view = PlayoffPromptView(cog, 3, 8)
+    modal = PlayInModal(view)
+    modal.higher.value = modal.lower.value = "alpha"
+    interaction = _playoff_prompt_interaction()
+    with patch("cogs.tournament_commands.db_session"), \
+         patch("cogs.tournament_commands.find_participant_by_name", AsyncMock(return_value=team)):
+        await modal.callback(interaction)
+    cog._run_playoff.assert_not_awaited()
+    interaction.response.edit_message.assert_not_awaited()
+    assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
+    assert not any(c.disabled for c in view.children)

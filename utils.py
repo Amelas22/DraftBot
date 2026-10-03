@@ -957,10 +957,20 @@ async def _sync_linked_tournament_match(bot, match_id, team_a_wins, team_b_wins,
     from services.tournament_service import sync_linked_result
     from services.tournament_formatter import update_standings_message_for_match
     try:
-        if await sync_linked_result(match_id, team_a_wins, team_b_wins) is None:
+        written = await sync_linked_result(match_id, team_a_wins, team_b_wins)
+        if written is None:
             return
+        _match, completed_now = written
         logger.info(f"Tournament match {match_id} auto-recorded "
                     f"{team_a_wins}-{team_b_wins} from draft {draft_session_id}")
+        # First, so a refresh failing below cannot skip the champion's
+        # announcement.
+        try:
+            from cogs.tournament_commands import after_bracket_result
+            await after_bracket_result(bot, match_id, completed_now)
+        except Exception:
+            # Draft victory processing must never be aborted by the bracket.
+            logger.exception(f"Bracket follow-up failed for match {match_id}")
         await update_standings_message_for_match(bot, match_id)
         from match_control_view import safe_refresh_match_views
         await safe_refresh_match_views(bot, match_id)

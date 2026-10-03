@@ -5,6 +5,7 @@ opaque. Sits beside swiss.py, which owns the pairing maths for the rounds
 that decide these seeds.
 """
 
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -34,8 +35,8 @@ def build_bracket(seed_count: int) -> list[tuple[int, int | None]]:
     """First-round pairings, in bracket order.
 
     `None` as the second element means the seat is empty and that seed has a
-    bye. Later rounds are NOT returned: they come from `advance_pairs`, which
-    pairs adjacent winners in this same order.
+    bye. Later rounds are NOT returned: `bracket_tree` derives them by pairing
+    adjacent winners in this same order.
     """
     if seed_count < 2:
         raise ValueError("A bracket needs at least 2 seeds.")
@@ -45,19 +46,6 @@ def build_bracket(seed_count: int) -> list[tuple[int, int | None]]:
         high, low = min(a, b), max(a, b)
         pairs.append((high, None if low > seed_count else low))
     return pairs
-
-
-def advance_pairs(winners: list[Any]) -> list[tuple[Any, Any]]:
-    """Pair adjacent winners, in order, to form the next round.
-
-    This is the invariant the whole bracket rests on: the order matches
-    `build_bracket`'s output, so pairing neighbours preserves the halves.
-    An odd count means a round was mis-built, not a bye -- byes live in the
-    first round only.
-    """
-    if len(winners) % 2:
-        raise ValueError(f"Cannot pair {len(winners)} winners into a round.")
-    return list(zip(winners[::2], winners[1::2]))
 
 
 def final_placement(rounds: list[list[tuple[Any, Any | None]]], seeds: dict[Any, int]) -> list[Any]:
@@ -102,3 +90,31 @@ def final_placement(rounds: list[list[tuple[Any, Any | None]]], seeds: dict[Any,
     for rnd in reversed(rounds):
         _place(sorted((loser for _, loser in rnd if loser is not None), key=_seed_key))
     return order
+
+
+@dataclass(frozen=True)
+class BracketNode:
+    """One match of a single-elimination bracket, before any team is known
+    beyond round 0's seeds. `feeds` names the parent match and slot its
+    winner moves into -- neighbours in bracket order share a parent, slot
+    'a' then 'b', the invariant `bracket_tree` encodes."""
+    round: int
+    index: int
+    a_seed: int | None
+    b_seed: int | None
+    feeds: tuple[int, int, str] | None
+
+
+def bracket_tree(seed_count: int) -> list[BracketNode]:
+    """Every match of the bracket, round-major and in bracket order."""
+    first = build_bracket(seed_count)
+    rounds = [len(first)]
+    while rounds[-1] > 1:
+        rounds.append(rounds[-1] // 2)
+    nodes = []
+    for r, count in enumerate(rounds):
+        for i in range(count):
+            seeds = first[i] if r == 0 else (None, None)
+            feeds = None if r == len(rounds) - 1 else (r + 1, i // 2, "ab"[i % 2])
+            nodes.append(BracketNode(r, i, seeds[0], seeds[1], feeds))
+    return nodes

@@ -122,6 +122,8 @@ async def main():
         bot.add_view(PublicSettleDebtsView())
         from cogs.tournament_commands import re_register_tournament_views
         await re_register_tournament_views(bot)
+        from cogs.tournament_commands import sweep_brackets
+        await sweep_brackets(bot)
         from tournament_nudge import re_register_premade_nudges
         await re_register_premade_nudges(bot)
         from livedrafts import re_register_live_drafts

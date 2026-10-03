@@ -162,6 +162,12 @@ async def link_draft_to_match(session, session_id, match_id, actor_id):
         match.team_a_participant_id, match.team_b_participant_id = (
             match.team_b_participant_id, match.team_a_participant_id)
         a_name, b_name = b_name, a_name
+        # Matches that feed this one name the slot their winner sits in; the
+        # sides just swapped, so those names swap with them.
+        feeders = (await session.execute(select(TournamentMatch).where(
+            TournamentMatch.feeds_match_id == match.id))).scalars().all()
+        for feeder in feeders:
+            feeder.feeds_slot = "b" if feeder.feeds_slot == "a" else "a"
 
     draft.tournament_match_id = match.id
     return LinkOutcome(status="linked", a_name=a_name, b_name=b_name,
