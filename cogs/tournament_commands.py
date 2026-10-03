@@ -22,6 +22,7 @@ from match_control_view import (
     MatchControlView,
     create_match_room,
     match_facts,
+    pairing_round_name,
     safe_refresh_match_views,
 )
 from models.tournament import (
@@ -38,6 +39,7 @@ from services.tournament_formatter import (
     post_registration_board,
     refresh_boards,
     round_label,
+    round_name,
     update_standings_message,
 )
 from services.tournament_service import (
@@ -57,9 +59,12 @@ from services.tournament_service import (
     get_final_placement,
     get_latest_completed_tournament,
     get_rosters,
+    get_tournament_id_for_match,
     get_standings_with_omw,
     is_playoff,
     list_participants,
+    match_in_guild,
+    reportable_match_choices,
     other_teams_for_user,
     register_team,
     remove_teammate,
@@ -974,6 +979,7 @@ class TournamentCog(commands.Cog):
             # byes, so the note would send the organizer somewhere that says no.
             match_open = (open_match is not None and not open_match.is_bye
                           and open_match.team_a_wins is None)
+            open_match_id = open_match.id if open_match is not None else None
 
         # Both displays, the way every other state-changing command here does it:
         # the board carries the roster, but the *(dropped)* marker lives in the
@@ -982,8 +988,8 @@ class TournamentCog(commands.Cog):
         await update_standings_message(self.bot, t_id)
         note = ""
         if match_open:
-            note = (f" Their round {round_number} match still needs a result — "
-                    f"record it with `/tournament set_result`.")
+            note = (f" Their round {round_number} match (#{open_match_id}) still needs a "
+                    f"result — record it with `/tournament set_result match:{open_match_id}`.")
         # Naming round N+1 past the last swiss round would point at a round nobody
         # will ever see: what follows the final round is the cut, or the finish.
         when = (f"They will not be paired from round {round_number + 1}."
@@ -1082,49 +1088,45 @@ class TournamentCog(commands.Cog):
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
 
+    async def _match_autocomplete(ctx: discord.AutocompleteContext):
+        """Suggest this server's reportable matches by id, name and teams."""
+        async with db_session() as session:
+            rows = await reportable_match_choices(
+                session, ctx.interaction.guild_id, ctx.value or "")
+        return [discord.OptionChoice(name=label[:100], value=match_id)
+                for match_id, label in rows]
+
     @tournament.command(name="set_result", description="Admin: record or correct a match result")
     @has_bot_manager_role()
     async def set_result(
         self,
         ctx,
-        team: discord.Option(str, "Either team in the match"),
-        team_wins: discord.Option(int, "Game wins for that team", min_value=0, max_value=10),
-        opponent_wins: discord.Option(int, "Game wins for their opponent", min_value=0, max_value=10),
+        match: discord.Option(
+            int, "Match id, shown as #id on its pairing line",
+            autocomplete=_match_autocomplete),
+        team_a_wins: discord.Option(int, "Game wins for the first-named team", min_value=0, max_value=10),
+        team_b_wins: discord.Option(int, "Game wins for the second-named team", min_value=0, max_value=10),
     ):
         if not await self._check_enabled(ctx):
             return
         await ctx.defer()
         try:
             async with db_session() as session:
-                tournament = await get_active_tournament(session, ctx.guild.id)
-                if tournament is None:
-                    await ctx.followup.send("There is no active tournament.", ephemeral=True)
+                found = await match_in_guild(session, match, ctx.guild.id)
+                if found is None:
+                    await ctx.followup.send(f"No match **#{match}** on this server.", ephemeral=True)
                     return
-                match = await find_current_match(session, tournament.id, team)
-                if match is None:
-                    await ctx.followup.send(
-                        f"No current-round match found for **{team}**.", ephemeral=True
-                    )
-                    return
-                part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
-                # Map the named team onto side A/B of the stored match
-                if part_a.team_name.lower() == team.strip().lower():
-                    a_wins, b_wins = team_wins, opponent_wins
-                else:
-                    a_wins, b_wins = opponent_wins, team_wins
-                match = await set_result(session, match.id, a_wins, b_wins)
-                part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
-                tournament_id = tournament.id
-            logger.info(
-                f"Result set for match {match.id} ({part_a.team_name} {match.team_a_wins}-"
-                f"{match.team_b_wins} {part_b.team_name}) by {ctx.author.id}"
-            )
+                updated = await set_result(session, found.id, team_a_wins, team_b_wins)
+                part_a = await session.get(TournamentParticipant, updated.team_a_participant_id)
+                part_b = await session.get(TournamentParticipant, updated.team_b_participant_id)
+                tournament_id = await get_tournament_id_for_match(session, updated.id)
+            logger.info(f"Result set for match {match} ({part_a.team_name} {team_a_wins}-"
+                        f"{team_b_wins} {part_b.team_name}) by {ctx.author.id}")
             await ctx.followup.send(
-                f"✅ Result recorded: **{part_a.team_name}** {match.team_a_wins}–"
-                f"{match.team_b_wins} **{part_b.team_name}**"
-            )
+                f"✅ **#{match}** recorded: **{part_a.team_name}** {team_a_wins}–"
+                f"{team_b_wins} **{part_b.team_name}**")
             await update_standings_message(self.bot, tournament_id)
-            await safe_refresh_match_views(self.bot, match.id)
+            await safe_refresh_match_views(self.bot, match)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
 
@@ -1359,9 +1361,8 @@ class TournamentCog(commands.Cog):
                 else:
                     new_round_id = new_round.id
                     new_round_number = new_round.round_number
-                    new_round_label = round_label(
-                        tournament.total_rounds, new_round_number, new_round.stage,
-                        swiss_noun="Week")
+                    new_round_label = await round_name(
+                        session, new_round, tournament.total_rounds, swiss_noun="Week")
             # Outside the session: both of these do Discord work, and the role
             # cleanup opens a session of its own.
             if completed is not None:
@@ -1450,11 +1451,22 @@ class TournamentCog(commands.Cog):
             target_round, target_stage, match_ids = await self._rooms_needed(
                 session, tournament.id, round_number)
             total_rounds = tournament.total_rounds
+            # Named inside the session: a bracket round is named by its match
+            # count, which is a query.
+            number = target_round or round_number
+            named_round = (await session.execute(
+                select(TournamentRound).where(
+                    TournamentRound.tournament_id == tournament.id,
+                    TournamentRound.round_number == number))).scalars().first()
+            target_name = (
+                await round_name(session, named_round, total_rounds, swiss_noun="Week")
+                if named_round is not None
+                else round_label(total_rounds, number, STAGE_SWISS, swiss_noun="Week"))
 
         if not match_ids:
             if round_number is not None:
                 await ctx.followup.send(
-                    f"Nothing to do — {round_label(total_rounds, round_number, target_stage, swiss_noun='Week')} "
+                    f"Nothing to do — {target_name} "
                     f"has no room-less matches "
                     f"(every playable match already has a room, or that round doesn't exist).",
                     ephemeral=True)
@@ -1466,10 +1478,10 @@ class TournamentCog(commands.Cog):
         opened = 0
         for match_id in match_ids:
             async with db_session() as session:
-                facts = await match_facts(session, match_id)
+                facts = await match_facts(session, match_id, swiss_noun="Week")
             if facts is None:
                 continue
-            match, a_name, b_name, _label, _draft = facts
+            match, a_name, b_name, stage, _draft = facts
             if not match.pairings_channel_id or not match.pairings_message_id:
                 continue
             channel = self.bot.get_channel(int(match.pairings_channel_id))
@@ -1488,23 +1500,24 @@ class TournamentCog(commands.Cog):
             if thread is None:
                 continue
             try:
-                await message.edit(content=render_pairing_line(a_name, b_name, str(thread.id)))
+                await message.edit(content=render_pairing_line(
+                    a_name, b_name, str(thread.id), match_id=match_id, stage=stage))
             except discord.HTTPException as e:
                 logger.warning(f"open_rooms: could not add the room link for match {match_id}: {e}")
             opened += 1
 
         logger.info(f"open_rooms opened {opened} room(s) for "
-                    f"{round_label(total_rounds, target_round, target_stage, swiss_noun='Week')} of tournament "
+                    f"{target_name} of tournament "
                     f"{tournament.id} by {ctx.author.id}")
         if opened == 0:
             await ctx.followup.send(
-                f"Nothing to do — {round_label(total_rounds, target_round, target_stage, swiss_noun='Week')}'s "
+                f"Nothing to do — {target_name}'s "
                 f"matches already have rooms, or Discord "
                 f"refused every one of them.", ephemeral=True)
         else:
             await ctx.followup.send(
                 f"✅ Opened {opened} room(s) for "
-                f"{round_label(total_rounds, target_round, target_stage, swiss_noun='Week')}.",
+                f"{target_name}.",
                 ephemeral=True)
 
     async def _rooms_needed(self, session, tournament_id, round_number):
@@ -1607,7 +1620,7 @@ class TournamentCog(commands.Cog):
                 tournament.total_rounds if tournament is not None else round_number,
                 round_number,
                 round_.stage if round_ is not None else STAGE_SWISS,
-                swiss_noun="Week")
+                swiss_noun="Week", matches_in_round=len(matches))
             rows = []
             for m in matches:
                 part_a = await session.get(TournamentParticipant, m.team_a_participant_id)
@@ -1639,7 +1652,10 @@ class TournamentCog(commands.Cog):
                     await channel.send(text)
                     continue
                 a_name, b_name = names
-                message = await channel.send(render_pairing_line(a_name, b_name))
+                async with db_session() as session:
+                    stage = await pairing_round_name(session, match_id)
+                message = await channel.send(
+                    render_pairing_line(a_name, b_name, match_id=match_id, stage=stage))
             except discord.HTTPException as e:
                 logger.error(f"Could not post the pairing line for match {match_id}; skipping it: {e}")
                 continue
@@ -1652,7 +1668,8 @@ class TournamentCog(commands.Cog):
             thread = await create_match_room(message, match_id)
             if thread is not None:
                 try:
-                    await message.edit(content=render_pairing_line(a_name, b_name, str(thread.id)))
+                    await message.edit(content=render_pairing_line(
+                        a_name, b_name, str(thread.id), match_id=match_id, stage=stage))
                 except discord.HTTPException as e:
                     # The room exists and the control message is in it; losing the
                     # link costs discoverability, not the round.

@@ -1305,3 +1305,15 @@ async def test_pairing_ranks_on_the_same_omw_the_board_shows(test_db, monkeypatc
 
     assert seen["omw"] is not None, "pairing must be given the field-wide OMW"
     assert seen["omw"] == board, "pairing and the board must rank on one set of numbers"
+
+
+@pytest.mark.asyncio
+async def test_set_result_by_id_refuses_a_match_from_another_guild(test_db):
+    from services.tournament_service import match_in_guild
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 4)    # guild "g1"
+        matches = await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+        assert await match_in_guild(session, matches[0].id, "g1") is not None
+        assert await match_in_guild(session, matches[0].id, "other-guild") is None
+        assert await match_in_guild(session, 999999, "g1") is None

@@ -6,7 +6,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import delete, select
 
-from models.tournament import TournamentMatch, TournamentParticipant, TournamentRound
+from models.tournament import STAGE_PLAY_IN, STAGE_SWISS, TournamentMatch, TournamentParticipant, TournamentRound
 from services.tournament_escrow_service import compute_allocations
 from services.tournament_service import (
     SwissComplete,
@@ -16,6 +16,7 @@ from services.tournament_service import (
     finish_tournament,
     get_final_placement,
     get_standings_data,
+    get_standings_with_omw,
     register_team,
     set_result,
     start_playoff,
@@ -674,3 +675,111 @@ async def test_start_playoff_seeds_past_a_dropped_team_rather_than_over_it(sessi
     seeded = {p.team_name: p.seed for p in await _participants(session, t.id)
               if p.seed is not None}
     assert seeded == {"Team2": 1, "Team3": 2, "Team4": 3, "Team5": 4}
+
+
+
+@pytest.mark.asyncio
+async def test_a_play_in_match_does_not_affect_swiss_standings(session):
+    """A play-in match is left out of OMW; counted, Alpha's OMW would be ~0.667, not 1/3."""
+    t = await create_tournament(session, "g1", "Play-in Filter Test", 1)
+    alpha, _ = await register_team(session, t.id, "Alpha", "cap_a")
+    bravo, _ = await register_team(session, t.id, "Bravo", "cap_b")
+    charlie, _ = await register_team(session, t.id, "Charlie", "cap_c")
+    for p in [alpha, bravo, charlie]:
+        p.status = "paid"
+    await session.flush()
+
+    # Create one Swiss round: Alpha beats Bravo
+    r1 = TournamentRound(tournament_id=t.id, round_number=1, stage=STAGE_SWISS)
+    session.add(r1)
+    await session.flush()
+    m1 = TournamentMatch(round_id=r1.id, team_a_participant_id=alpha.id,
+                         team_b_participant_id=bravo.id, team_a_wins=1, team_b_wins=0)
+    session.add(m1)
+    alpha.match_wins = 1
+    alpha.points = 3  # 1 win * 3 points
+    bravo.match_losses = 1
+    bravo.points = 0
+    charlie.match_wins = 1  # 1 win, 0 losses
+    charlie.points = 3  # 1 win * 3 points
+    await session.flush()
+
+    # Get OMW before play-in
+    standings_before, omw_before = await get_standings_with_omw(session, t.id)
+    omw_before_map = dict(omw_before)
+
+    # Create play-in: Alpha vs Charlie
+    playin = TournamentRound(tournament_id=t.id, round_number=2, stage=STAGE_PLAY_IN)
+    session.add(playin)
+    await session.flush()
+    pm = TournamentMatch(round_id=playin.id, team_a_participant_id=alpha.id,
+                         team_b_participant_id=charlie.id, team_a_wins=1, team_b_wins=0)
+    session.add(pm)
+    await session.flush()
+
+    # Get OMW after play-in
+    standings_after, omw_after = await get_standings_with_omw(session, t.id)
+    omw_after_map = dict(omw_after)
+
+    assert omw_before_map == omw_after_map, \
+        f"Play-in match changed OMW: before {omw_before_map}, after {omw_after_map}"
+
+
+async def _match_ids(session, tournament_id, stage="swiss"):
+    return [m.id for m in (await session.execute(
+        select(TournamentMatch).join(
+            TournamentRound, TournamentMatch.round_id == TournamentRound.id)
+        .where(TournamentRound.tournament_id == tournament_id,
+               TournamentRound.stage == stage)
+        .order_by(TournamentMatch.id))).scalars().all()]
+
+
+@pytest.mark.asyncio
+async def test_set_result_refuses_a_swiss_match_of_a_completed_tournament(session):
+    t, _ = await _played_swiss(session, cut_to=None)
+    match_id = (await _match_ids(session, t.id))[0]
+    t.status = "completed"
+    await session.flush()
+    before = (await session.get(TournamentMatch, match_id)).team_a_wins
+
+    with pytest.raises(ValueError, match="final"):
+        await set_result(session, match_id, 0, 2)
+
+    assert (await session.get(TournamentMatch, match_id)).team_a_wins == before
+
+
+@pytest.mark.asyncio
+async def test_set_result_refuses_a_swiss_match_once_the_cut_is_made(session):
+    t, _ = await _played_swiss(session, cut_to=4)
+    await start_playoff(session, t.id)
+    match = await session.get(TournamentMatch, (await _match_ids(session, t.id))[0])
+    before = (match.team_a_wins, match.team_b_wins)
+
+    with pytest.raises(ValueError, match="froze at the cut"):
+        await set_result(session, match.id, before[1], before[0])
+
+    assert (match.team_a_wins, match.team_b_wins) == before
+
+
+@pytest.mark.asyncio
+async def test_set_result_still_corrects_a_swiss_match_mid_swiss(session):
+    t, _ = await _played_swiss(session, cut_to=4)
+    match_id = (await _match_ids(session, t.id))[0]
+
+    match = await set_result(session, match_id, 0, 2)
+
+    assert (match.team_a_wins, match.team_b_wins) == (0, 2)
+
+
+@pytest.mark.asyncio
+async def test_round_replies_name_bracket_rounds_by_match_count(session):
+    """next_round and open_rooms reply with the round's name, not "Playoff
+    round N"; the name needs the round's match count, so it is queried."""
+    from services.tournament_formatter import round_name
+
+    t, _ = await _played_swiss(session, cut_to=4)
+    semi = await start_playoff(session, t.id)
+    swiss_3 = TournamentRound(tournament_id=t.id, round_number=3, stage=STAGE_SWISS)
+
+    assert await round_name(session, semi, 3, swiss_noun="Week") == "Semifinal"
+    assert await round_name(session, swiss_3, 3, swiss_noun="Week") == "Week 3"
