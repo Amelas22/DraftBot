@@ -134,6 +134,10 @@ PAYOUT_STRUCTURES = {
     "top2": [65, 35],
     "top3": [50, 30, 20],
     "top4": [40, 30, 20, 10],
+    # A top-8 bracket paid by how far each team got: champion, finalist, the
+    # two semifinal losers alike, the four quarterfinal losers alike. On a
+    # 6,000-tix pool: 1,800 / 1,200 / 750 / 750 / 375 x4.
+    "top8": [24, 16, 10, 10, 5, 5, 5, 5],
 }
 
 # top25pct — the league-page structure — pays 25% of the field (rounded down,

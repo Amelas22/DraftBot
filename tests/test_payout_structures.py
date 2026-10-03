@@ -119,3 +119,20 @@ class TestStructureWiring:
     def test_describe_static_structures_unchanged(self):
         assert describe_structure("winner_take_all") == "winner-take-all"
         assert describe_structure("top3") == "top 3 (50/30/20)"
+
+
+class TestTop8:
+    """The Lotus League 2026 split, as published on the league page."""
+
+    def test_six_thousand_pays_the_published_amounts(self):
+        allocs = compute_allocations(6000, "top8", ranked(27))
+        assert [a[3] for a in allocs] == [1800, 1200, 750, 750, 375, 375, 375, 375]
+
+    def test_only_the_bracket_is_paid(self):
+        assert len(compute_allocations(6000, "top8", ranked(40))) == 8
+
+    def test_is_offered_by_the_commands(self):
+        assert "top8" in PAYOUT_CHOICES
+
+    def test_describes_its_tiers(self):
+        assert describe_structure("top8") == "top 8 (24/16/10/10/5/5/5/5)"
