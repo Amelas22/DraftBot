@@ -9,6 +9,7 @@ Teams are plain dicts: {"id": <participant id>, "points": int, "byes": int}.
 ``previous_matchups`` is a set of frozenset({id_a, id_b}).
 """
 import random
+from fractions import Fraction
 from typing import Any
 
 
@@ -44,18 +45,19 @@ def round_robin_schedule(team_ids, rng=None):
     return rounds
 
 
-MWP_FLOOR = 1 / 3
+MWP_FLOOR = Fraction(1, 3)
 
 
 def match_win_percentage(match_points, rounds_played, floor=MWP_FLOOR):
-    """A participant's match-win percentage, floored (MTR convention).
+    """A participant's match-win percentage, floored (MTR convention), exact.
 
     match_points are 3 per win / 1 per draw; the denominator is 3 per round
-    played. Zero rounds returns the floor.
+    played. Zero rounds returns the floor. A Fraction, not a float, so the
+    averages built from it in `omw_percentages` are exact too.
     """
     if rounds_played <= 0:
         return floor
-    return max(floor, match_points / (3 * rounds_played))
+    return max(floor, Fraction(match_points, 3 * rounds_played))
 
 
 def omw_percentages(participants, matches):
@@ -68,6 +70,12 @@ def omw_percentages(participants, matches):
     Split out of rank_standings so a caller that has to *show* the tiebreak
     (the public league page) reads the same numbers the sort used, instead of
     reimplementing them and drifting.
+
+    Averaged exactly and converted to float once, at the end. Summed as floats,
+    two averages that are mathematically equal can differ in the last bit
+    depending on the order the opponents were played -- and the sort then
+    ranks one team above the other on that noise instead of reaching game
+    diff. Equal fractions always round to the same float, so a tie stays a tie.
     """
     by_id = {p.id: p for p in participants}
     opponents = {p.id: [] for p in participants}
@@ -84,8 +92,8 @@ def omw_percentages(participants, matches):
         return match_win_percentage(p.points, rounds)
 
     return {
-        p.id: (sum(mwp(by_id[oid]) for oid in opponents[p.id]) / len(opponents[p.id])
-               if opponents[p.id] else MWP_FLOOR)
+        p.id: float(sum(mwp(by_id[oid]) for oid in opponents[p.id]) / len(opponents[p.id])
+                    if opponents[p.id] else MWP_FLOOR)
         for p in participants
     }
 
@@ -94,10 +102,10 @@ def _ranking_key(participant: Any, omw: "dict[Any, float]") -> "tuple[Any, ...]"
     """What separates two teams, strongest signal first.
 
     Shared by the board and by pairing so the two cannot drift. They differ
-    only in what happens once this is exhausted: the board appends the team
-    name, so it holds still between refreshes, and pairing appends nothing and
-    lets the caller's shuffle decide -- see `pairing_order` for why a name must
-    never choose an opponent.
+    only in what happens once this is exhausted: the board appends the
+    participant id, so it holds still between refreshes, and pairing appends
+    nothing and lets the caller's shuffle decide -- see `pairing_order` for why
+    a fixed order must never choose an opponent.
     """
     return (-participant.points,
             participant.match_wins + participant.match_losses + participant.match_draws,
@@ -106,7 +114,8 @@ def _ranking_key(participant: Any, omw: "dict[Any, float]") -> "tuple[Any, ...]"
 
 
 def rank_standings(participants, matches, omw=None):
-    """Sort by points, then fewest rounds played, then OMW%, then game diff, then name.
+    """Sort by points, then fewest rounds played, then OMW%, then game diff, then
+    registration order.
 
     Rounds played comes before OMW% because standings update live: a team that
     has not played this round yet is compared against teams that have. Both
@@ -131,7 +140,9 @@ def rank_standings(participants, matches, omw=None):
     """
     if omw is None:
         omw = omw_percentages(participants, matches)
-    return sorted(participants, key=lambda p: (*_ranking_key(p, omw), p.team_name))
+    # Registration order (participant id), not team name, settles a total tie:
+    # a name is something a team picks, and it would decide a seed.
+    return sorted(participants, key=lambda p: (*_ranking_key(p, omw), p.id))
 
 
 def pairing_order(participants: "list[Any]", matches: "list[Any]",
@@ -140,14 +151,14 @@ def pairing_order(participants: "list[Any]", matches: "list[Any]",
     """The field in the order a round should PAIR it, best first.
 
     The same keys `rank_standings` ranks on, with one deliberate difference:
-    an exact tie is broken by the rng rather than by team name.
+    an exact tie is broken by the rng rather than by participant id.
 
     That difference is the whole reason this exists separately. The board ends
-    on team_name so it holds still between refreshes, which is right for
+    on participant id so it holds still between refreshes, which is right for
     something people read. Pairing must not: in round one nobody has played,
-    every other key is level for everybody, and ranking on name would pair the
-    first round alphabetically -- fixed before a card is drawn, and choosable
-    by anyone willing to rename their team.
+    every other key is level for everybody, and ranking on a fixed key would
+    pair the first round in that order -- settled before a card is drawn, and
+    choosable by anyone who times their registration (or, on name, picks it).
 
     Pure apart from consuming `rng`. ``participants`` and ``matches`` are
     read-only.

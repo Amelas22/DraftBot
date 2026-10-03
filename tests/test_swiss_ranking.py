@@ -80,7 +80,7 @@ def test_no_real_opponents_uses_floor():
 
 
 def test_falls_through_to_game_diff_then_name():
-    # Equal points and equal OMW% -> game diff, then name.
+    # Equal points and equal OMW% -> game diff, then registration order.
     a = participant(1, points=3, w=1, gw=2, gl=0, name="Alpha")
     b = participant(2, points=3, w=1, gw=2, gl=1, name="Bravo")
     oa = participant(3, points=0, l=1, name="OppA")
@@ -90,6 +90,35 @@ def test_falls_through_to_game_diff_then_name():
     ranked = rank_standings([b, a, ob, oa], matches)
     # a and b: equal pts(3), equal OMW(0.33). a has better game diff(+2 vs +1).
     assert ranked.index(a) < ranked.index(b)
+
+
+def test_an_exactly_equal_omw_reaches_game_diff_whatever_order_it_was_summed_in():
+    """Two 4-2 teams whose opponents average exactly 7/12 each.
+
+    Summed as floats, in the order the rounds were played, the first comes out
+    0.5833...34 and the second 0.5833...33 -- so the sort ranked `lucky` above
+    `better` on rounding noise and never looked at game diff. This is the
+    Lotus League 2026 top-8 bubble, with the real opponents' records.
+    """
+    lucky = participant(1, points=12, w=4, l=2, gw=25, gl=25, name="Lucky")
+    better = participant(2, points=12, w=4, l=2, gw=24, gl=16, name="Better")
+    shared = participant(10, points=12, w=4, l=2)
+    lucky_opps = [participant(11, points=0, l=2), participant(12, points=3, w=1, l=4),
+                  participant(13, points=9, w=3, l=3), shared,
+                  participant(14, points=15, w=5, l=1), participant(15, points=15, w=5, l=1)]
+    better_opps = [participant(21, points=9, w=3, l=3), participant(22, points=3, w=1, l=3),
+                   shared, participant(23, points=12, w=4, l=2),
+                   participant(24, points=12, w=4, l=2), participant(25, points=12, w=4, l=2)]
+    matches = ([match(1, o.id) for o in lucky_opps]
+               + [match(2, o.id) for o in better_opps])
+    field = [lucky, better, shared, *lucky_opps[:3], *lucky_opps[4:],
+             *better_opps[:2], *better_opps[3:]]
+
+    omw = omw_percentages(field, matches)
+    ranked = rank_standings(field, matches)
+
+    assert omw[1] == omw[2], "both average exactly 7/12"
+    assert ranked.index(better) < ranked.index(lucky), "+8 game diff beats +0"
 
 
 # ---- omw_percentages: the same numbers, exposed for display ----------------------
@@ -186,13 +215,13 @@ def test_pairing_order_uses_the_same_tiebreaks_the_board_shows():
         "the team that beat a winner outranks the team that beat a loser"
 
 
-def test_an_exact_tie_is_broken_randomly_not_alphabetically():
+def test_an_exact_tie_is_broken_randomly_not_in_a_fixed_order():
     """Round one, where nobody has played and every tiebreak is level.
 
-    The display sort ends on team_name so the board holds still between
-    refreshes. Pairing must NOT: alphabetical pairings are fixed before a card
-    is drawn, and anyone who notices can pick their team name to choose an
-    opponent.
+    The display sort ends on participant id so the board holds still between
+    refreshes. Pairing must NOT: pairings in a fixed order are settled before a
+    card is drawn, and anyone who notices can time their registration to
+    choose an opponent.
     """
     field = [participant(i, name=chr(ord("A") + i)) for i in range(8)]
 
@@ -201,14 +230,16 @@ def test_an_exact_tie_is_broken_randomly_not_alphabetically():
     assert len(seen) > 1, "round one pairing order must not be deterministic"
 
 
-def test_the_board_still_breaks_that_same_tie_by_name():
-    """The other half of the split: rank_standings stays stable."""
+def test_the_board_breaks_that_same_tie_by_registration_order():
+    """The other half of the split: rank_standings stays stable, and a team
+    tied on every key goes below the team that registered before it -- not
+    below whichever name sorts first, which a team picks for itself."""
     field = [participant(i, name=chr(ord("Z") - i)) for i in range(4)]
 
     twice = [[p.id for p in rank_standings(field, [])] for _ in range(2)]
 
     assert twice[0] == twice[1]
-    assert [p.team_name for p in rank_standings(field, [])] == ["W", "X", "Y", "Z"]
+    assert [p.id for p in rank_standings(list(reversed(field)), [])] == [0, 1, 2, 3]
 
 
 # ---- every ranking key has to actually decide something --------------------
