@@ -9,6 +9,7 @@ Teams are plain dicts: {"id": <participant id>, "points": int, "byes": int}.
 ``previous_matchups`` is a set of frozenset({id_a, id_b}).
 """
 import random
+from fractions import Fraction
 from typing import Any
 
 
@@ -44,18 +45,18 @@ def round_robin_schedule(team_ids, rng=None):
     return rounds
 
 
-MWP_FLOOR = 1 / 3
+MWP_FLOOR = Fraction(1, 3)
 
 
 def match_win_percentage(match_points, rounds_played, floor=MWP_FLOOR):
-    """A participant's match-win percentage, floored (MTR convention).
+    """A participant's match-win percentage, floored (MTR convention), exact.
 
     match_points are 3 per win / 1 per draw; the denominator is 3 per round
     played. Zero rounds returns the floor.
     """
     if rounds_played <= 0:
         return floor
-    return max(floor, match_points / (3 * rounds_played))
+    return max(floor, Fraction(match_points, 3 * rounds_played))
 
 
 def omw_percentages(participants, matches):
@@ -68,6 +69,10 @@ def omw_percentages(participants, matches):
     Split out of rank_standings so a caller that has to *show* the tiebreak
     (the public league page) reads the same numbers the sort used, instead of
     reimplementing them and drifting.
+
+    Averaged exactly, then converted to float once: a float sum of equal
+    averages can differ in the last bit by summation order, and the sort would
+    rank on that noise instead of treating it as the tie it is.
     """
     by_id = {p.id: p for p in participants}
     opponents = {p.id: [] for p in participants}
@@ -84,8 +89,8 @@ def omw_percentages(participants, matches):
         return match_win_percentage(p.points, rounds)
 
     return {
-        p.id: (sum(mwp(by_id[oid]) for oid in opponents[p.id]) / len(opponents[p.id])
-               if opponents[p.id] else MWP_FLOOR)
+        p.id: float(sum(mwp(by_id[oid]) for oid in opponents[p.id]) / len(opponents[p.id])
+                    if opponents[p.id] else MWP_FLOOR)
         for p in participants
     }
 
@@ -94,19 +99,24 @@ def _ranking_key(participant: Any, omw: "dict[Any, float]") -> "tuple[Any, ...]"
     """What separates two teams, strongest signal first.
 
     Shared by the board and by pairing so the two cannot drift. They differ
-    only in what happens once this is exhausted: the board appends the team
-    name, so it holds still between refreshes, and pairing appends nothing and
-    lets the caller's shuffle decide -- see `pairing_order` for why a name must
-    never choose an opponent.
+    only in what happens once this is exhausted: the board appends the
+    stored draw number, so it holds still between refreshes, and pairing appends
+    nothing and lets the caller's shuffle decide -- see `pairing_order` for why
+    a fixed order must never choose an opponent.
     """
     return (-participant.points,
             participant.match_wins + participant.match_losses + participant.match_draws,
-            -omw[participant.id],
-            -(participant.game_wins - participant.game_losses))
+            -omw[participant.id])
 
 
 def rank_standings(participants, matches, omw=None):
-    """Sort by points, then fewest rounds played, then OMW%, then game diff, then name.
+    """Sort by points, then fewest rounds played, then OMW%, then draw number.
+
+    Game differential is NOT a tiebreak. Winning the round is the achievement;
+    every match inside it is played out whatever the score, so the difference
+    mostly measures how thoroughly a beaten team was beaten -- one blowout can
+    outweigh a season. The counts are still recorded and shown on the league
+    page; they do not order anybody.
 
     Rounds played comes before OMW% because standings update live: a team that
     has not played this round yet is compared against teams that have. Both
@@ -131,7 +141,12 @@ def rank_standings(participants, matches, omw=None):
     """
     if omw is None:
         omw = omw_percentages(participants, matches)
-    return sorted(participants, key=lambda p: (*_ranking_key(p, omw), p.team_name))
+    # Draw number: see TournamentParticipant.draw_number. Undrawn rows -- from
+    # tournaments finished before it existed -- go last, by the game diff then
+    # name they were published in, so finished standings do not reorder.
+    return sorted(participants, key=lambda p: (
+        *_ranking_key(p, omw), p.draw_number is None, p.draw_number,
+        0 if p.draw_number is not None else p.game_losses - p.game_wins, p.team_name))
 
 
 def pairing_order(participants: "list[Any]", matches: "list[Any]",
@@ -140,14 +155,14 @@ def pairing_order(participants: "list[Any]", matches: "list[Any]",
     """The field in the order a round should PAIR it, best first.
 
     The same keys `rank_standings` ranks on, with one deliberate difference:
-    an exact tie is broken by the rng rather than by team name.
+    an exact tie is broken by the rng rather than by the stored draw number.
 
     That difference is the whole reason this exists separately. The board ends
-    on team_name so it holds still between refreshes, which is right for
-    something people read. Pairing must not: in round one nobody has played,
-    every other key is level for everybody, and ranking on name would pair the
-    first round alphabetically -- fixed before a card is drawn, and choosable
-    by anyone willing to rename their team.
+    on the stored draw number so it holds still between refreshes, which is
+    right for something people read. Pairing must not: in round one nobody has
+    played, every other key is level for everybody, and ranking on any stored
+    key would pair the first round in that order -- and every later round's
+    exact ties the same way each time, rather than afresh.
 
     Pure apart from consuming `rng`. ``participants`` and ``matches`` are
     read-only.
@@ -350,9 +365,9 @@ def pair_round(teams: "list[dict[str, Any]]",
     `teams` arrive in PAIRING ORDER, best first -- this does not rank them.
     Rank belongs to the caller, because the tiebreaks need the whole match
     history, and because pairing order and DISPLAY order are deliberately
-    different: the board settles an exact tie by name so it holds still
-    between refreshes, and pairing settles it at random, or round one would be
-    paired alphabetically.
+    different: the board settles an exact tie by a stored draw number so it
+    holds still between refreshes, and pairing settles it afresh at random,
+    or every exact tie would be paired the same way each time.
 
     The pairing is the maximum-weight perfect matching over
     `pairing_weights`, so it is the best pairing available under those

@@ -93,6 +93,12 @@ class TournamentParticipant(Base):
     # recomputed because it is the number players were told, and it is what
     # makes 3rd/4th well-defined between two semifinal losers.
     seed = Column(Integer, nullable=True)
+    # The standings' last tiebreak: one shuffled 1..N over the field, drawn when
+    # the tournament starts. Random so that neither the name a team picks nor
+    # when it registered can decide a seed; stored so the board holds still.
+    # Internal -- never displayed. NULL until the tournament starts (no team can
+    # join after), and for tournaments that finished before draw numbers existed.
+    draw_number = Column(Integer, nullable=True)
     # The team's Discord role for THIS tournament. NULL means no role: the
     # tournament has not started, predates this feature, or has completed and
     # had its roles deleted. Stored as an id rather than a name so cleanup

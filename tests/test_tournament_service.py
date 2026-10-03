@@ -254,6 +254,22 @@ async def test_start_tournament_activates_and_pairs_round_one(test_db):
 
 
 @pytest.mark.asyncio
+async def test_start_tournament_draws_each_team_a_distinct_number(test_db):
+    """The last standings tiebreak: one shuffled 1..N over the field, so no
+    two teams can still be tied after it."""
+    async with test_db() as session:
+        tournament = await _tournament_with_teams(session, 5)
+        unpaid, _ = await register_team(session, tournament.id, "Unpaid", "99")
+        unpaid.status = "pending"           # ranked by the standings, so drawn too
+        await start_tournament(session, tournament.id, random.Random(7))
+        await session.commit()
+
+        draws = [p.draw_number for p in await list_participants(session, tournament.id)]
+        assert sorted(draws) == [1, 2, 3, 4, 5, 6]
+        assert draws != [1, 2, 3, 4, 5, 6], "drawn at random, not in registration order"
+
+
+@pytest.mark.asyncio
 async def test_start_tournament_odd_count_scores_the_bye(test_db):
     async with test_db() as session:
         tournament = await _tournament_with_teams(session, 5)
@@ -477,7 +493,7 @@ async def test_standings_uses_omw_to_break_points_tie(test_db):
 
 
 @pytest.mark.asyncio
-async def test_standings_sorted_by_points_then_game_diff(test_db):
+async def test_standings_tied_on_points_and_omw_go_to_the_draw_not_game_diff(test_db):
     async with test_db() as session:
         tournament = await _tournament_with_teams(session, 4)
         matches = await start_tournament(session, tournament.id, random.Random(7))
@@ -488,8 +504,8 @@ async def test_standings_sorted_by_points_then_game_diff(test_db):
 
         standings = await get_standings_data(session, tournament.id)
         assert [p.points for p in standings] == [3, 3, 0, 0]
-        assert standings[0].id == matches[0].team_a_participant_id  # better game diff first
-        assert standings[1].id == matches[1].team_a_participant_id
+        winners = sorted((p for p in standings[:2]), key=lambda p: p.draw_number)
+        assert standings[:2] == winners, "the lower draw ranks first, whatever the game diff"
 
 
 # ---- slice 6: round-robin format + finish ----------------------------------------

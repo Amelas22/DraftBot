@@ -12,10 +12,11 @@ from draft_organization.swiss import (
 FLOOR = 1 / 3
 
 
-def participant(pid, points=0, w=0, l=0, d=0, gw=0, gl=0, name=None):
+def participant(pid, points=0, w=0, l=0, d=0, gw=0, gl=0, name=None, draw=None):
     return SimpleNamespace(
         id=pid, points=points, match_wins=w, match_losses=l, match_draws=d,
         game_wins=gw, game_losses=gl, team_name=name or f"T{pid}",
+        draw_number=draw,
     )
 
 
@@ -68,28 +69,62 @@ def test_byes_excluded_from_opponents():
 
 def test_no_real_opponents_uses_floor():
     # A team whose only game was a bye has no opponents -> OMW% floors, doesn't crash.
-    only_bye = participant(1, points=3, w=1, name="ByeOnly")
-    played = participant(2, points=3, w=1, gw=2, name="Played")
-    opp = participant(3, points=0, l=1, gl=2, name="Opp")
+    only_bye = participant(1, points=3, w=1, name="ByeOnly", draw=2)
+    played = participant(2, points=3, w=1, gw=2, name="Played", draw=1)
+    opp = participant(3, points=0, l=1, gl=2, name="Opp", draw=3)
     matches = [match(1, None, is_bye=True), match(2, 3)]
 
+    assert omw_percentages([only_bye, played, opp], matches)[1] == pytest.approx(FLOOR)
     ranked = rank_standings([only_bye, played, opp], matches)
     # Played (OMW 0.33 from a 0-pt opp) ties only_bye (OMW floor 0.33) on OMW;
-    # both 3 pts, so fall through to game diff: Played (+2) over only_bye (0).
+    # both 3 pts, so the draw settles it.
     assert ranked.index(played) < ranked.index(only_bye)
 
 
-def test_falls_through_to_game_diff_then_name():
-    # Equal points and equal OMW% -> game diff, then name.
-    a = participant(1, points=3, w=1, gw=2, gl=0, name="Alpha")
-    b = participant(2, points=3, w=1, gw=2, gl=1, name="Bravo")
-    oa = participant(3, points=0, l=1, name="OppA")
-    ob = participant(4, points=0, l=1, name="OppB")
+def test_game_diff_does_not_order_teams():
+    # Equal points and equal OMW% are a tie; the draw settles it, however much
+    # more thoroughly one of them won.
+    a = participant(1, points=3, w=1, gw=2, gl=0, name="Alpha", draw=2)
+    b = participant(2, points=3, w=1, gw=2, gl=1, name="Bravo", draw=1)
+    oa = participant(3, points=0, l=1, name="OppA", draw=3)
+    ob = participant(4, points=0, l=1, name="OppB", draw=4)
     matches = [match(1, 3), match(2, 4)]
 
-    ranked = rank_standings([b, a, ob, oa], matches)
-    # a and b: equal pts(3), equal OMW(0.33). a has better game diff(+2 vs +1).
-    assert ranked.index(a) < ranked.index(b)
+    ranked = rank_standings([a, b, ob, oa], matches)
+    assert ranked.index(b) < ranked.index(a)
+
+
+def test_an_exactly_equal_omw_is_a_tie_whatever_order_it_was_summed_in():
+    """Two 4-2 teams whose opponents average exactly 7/12 each.
+
+    Summed as floats, in the order the rounds were played, the first came out
+    0.5833...34 and the second 0.5833...33 -- so the sort ranked one above the
+    other on rounding noise. This is the Lotus League 2026 top-8 bubble, with
+    the real opponents' records: an exact tie, settled by the draw both ways.
+    """
+    def field_with(lucky_draw, better_draw):
+        lucky = participant(1, points=12, w=4, l=2, gw=25, gl=25, name="Lucky", draw=lucky_draw)
+        better = participant(2, points=12, w=4, l=2, gw=24, gl=16, name="Better", draw=better_draw)
+        shared = participant(10, points=12, w=4, l=2)
+        lucky_opps = [participant(11, points=0, l=2), participant(12, points=3, w=1, l=4),
+                      participant(13, points=9, w=3, l=3), shared,
+                      participant(14, points=15, w=5, l=1), participant(15, points=15, w=5, l=1)]
+        better_opps = [participant(21, points=9, w=3, l=3), participant(22, points=3, w=1, l=3),
+                       shared, participant(23, points=12, w=4, l=2),
+                       participant(24, points=12, w=4, l=2), participant(25, points=12, w=4, l=2)]
+        matches = ([match(1, o.id) for o in lucky_opps]
+                   + [match(2, o.id) for o in better_opps])
+        field = [lucky, better, shared, *lucky_opps[:3], *lucky_opps[4:],
+                 *better_opps[:2], *better_opps[3:]]
+        return field, matches
+
+    field, matches = field_with(lucky_draw=1, better_draw=2)
+    omw = omw_percentages(field, matches)
+    assert omw[1] == omw[2], "both average exactly 7/12"
+    assert [p.id for p in rank_standings(field, matches) if p.id in (1, 2)] == [1, 2]
+
+    field, matches = field_with(lucky_draw=2, better_draw=1)
+    assert [p.id for p in rank_standings(field, matches) if p.id in (1, 2)] == [2, 1]
 
 
 # ---- omw_percentages: the same numbers, exposed for display ----------------------
@@ -186,13 +221,12 @@ def test_pairing_order_uses_the_same_tiebreaks_the_board_shows():
         "the team that beat a winner outranks the team that beat a loser"
 
 
-def test_an_exact_tie_is_broken_randomly_not_alphabetically():
+def test_an_exact_tie_is_broken_randomly_not_in_a_fixed_order():
     """Round one, where nobody has played and every tiebreak is level.
 
-    The display sort ends on team_name so the board holds still between
-    refreshes. Pairing must NOT: alphabetical pairings are fixed before a card
-    is drawn, and anyone who notices can pick their team name to choose an
-    opponent.
+    The display sort ends on the stored draw number so the board holds still
+    between refreshes. Pairing must NOT: a stored order pairs every exact tie
+    the same way each time, rather than afresh.
     """
     field = [participant(i, name=chr(ord("A") + i)) for i in range(8)]
 
@@ -201,14 +235,28 @@ def test_an_exact_tie_is_broken_randomly_not_alphabetically():
     assert len(seen) > 1, "round one pairing order must not be deterministic"
 
 
-def test_the_board_still_breaks_that_same_tie_by_name():
-    """The other half of the split: rank_standings stays stable."""
-    field = [participant(i, name=chr(ord("Z") - i)) for i in range(4)]
+def test_the_board_breaks_that_same_tie_by_draw_number():
+    """The other half of the split: rank_standings stays stable, and a total
+    tie goes to the lower draw number -- not to the name."""
+    field = [participant(i, name=chr(ord("A") + i), draw=draw)
+             for i, draw in enumerate([3, 1, 4, 2])]
 
     twice = [[p.id for p in rank_standings(field, [])] for _ in range(2)]
 
     assert twice[0] == twice[1]
-    assert [p.team_name for p in rank_standings(field, [])] == ["W", "X", "Y", "Z"]
+    assert [p.id for p in rank_standings(field, [])] == [1, 3, 0, 2]
+
+
+def test_a_team_with_no_draw_number_goes_below_the_drawn_ones():
+    """A row from before draw numbers existed has none. It must still sort --
+    None cannot be compared with an int -- and goes after every drawn team,
+    tied among the undrawn by game diff then name, as it always was, so a
+    finished tournament's published standings do not reorder."""
+    field = [participant(5, name="Alpha"), participant(4, name="Zeta"),
+             participant(9, draw=2), participant(8, draw=1),
+             participant(7, gw=2, gl=0, name="Omega")]
+
+    assert [p.id for p in rank_standings(field, [])] == [8, 9, 7, 5, 4]
 
 
 # ---- every ranking key has to actually decide something --------------------
@@ -235,10 +283,13 @@ def test_a_round_in_hand_outranks_a_round_already_spent():
              participant(2, points=3, w=1)], [], [2, 1])
 
 
-def test_game_differential_separates_teams_level_on_everything_else():
+def test_game_differential_does_not_separate_teams_for_pairing_either():
+    """The other side of `_always`: two teams level on every key but game
+    differential are an exact tie, so the shuffle orders them both ways."""
     same = dict(points=3, w=1, l=0)
-    _always([participant(1, gw=2, gl=1, **same),
-             participant(2, gw=2, gl=0, **same)], [], [2, 1])
+    field = [participant(1, gw=2, gl=1, **same), participant(2, gw=2, gl=0, **same)]
+    orders = {tuple(_order(field, [], seed=s)) for s in SEEDS}
+    assert orders == {(1, 2), (2, 1)}, f"game diff still decides pairing: {orders}"
 
 
 def test_the_omw_handed_in_is_the_omw_ranked_on():

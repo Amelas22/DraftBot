@@ -732,7 +732,8 @@ async def start_tournament(session, tournament_id, rng):
     # of having it -- nothing can have dropped before a tournament is active, so
     # this is the same list either way, and it stays the same list if that ever
     # changes.
-    paid = _pairable(await list_participants(session, tournament_id))
+    everyone = await list_participants(session, tournament_id)
+    paid = _pairable(everyone)
     if len(paid) < 2:
         raise ValueError(
             "At least 2 teams must have completed registration (entry fee paid) to start."
@@ -740,13 +741,18 @@ async def start_tournament(session, tournament_id, rng):
 
     tournament.status = "active"
     if tournament.format == "round_robin":
-        return await _build_round_robin(session, tournament, paid, rng)
-    if tournament.format == "manual":
-        return await _open_manual_schedule(session, tournament)
-
-    _, matches = await _create_round_with_pairings(
-        session, tournament, paid, set(), rng
-    )
+        matches = await _build_round_robin(session, tournament, paid, rng)
+    elif tournament.format == "manual":
+        matches = await _open_manual_schedule(session, tournament)
+    else:
+        _, matches = await _create_round_with_pairings(
+            session, tournament, paid, set(), rng
+        )
+    # Drawn after the schedule so it consumes nothing the pairing reads: a
+    # seeded rng pairs round one exactly as it did before draw numbers existed.
+    # Over every row the standings rank, so none is left undrawn.
+    for participant, number in zip(everyone, rng.sample(range(1, len(everyone) + 1), len(everyone))):
+        participant.draw_number = number
     return matches
 
 
@@ -1112,8 +1118,8 @@ async def advance_round(session, tournament_id, rng):
 
 
 async def get_standings_data(session, tournament_id):
-    """Participants ranked by points, then fewest rounds played, then OMW%,
-    then game diff, then name.
+    """Participants ranked by ``swiss.rank_standings``; the key, and why game
+    differential is not part of it, live there.
 
     OMW% (opponents' match-win %, byes excluded) needs the full match graph, so
     we load participants and matches and rank in memory (tournaments are small).
