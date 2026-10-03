@@ -1118,8 +1118,8 @@ async def advance_round(session, tournament_id, rng):
 
 
 async def get_standings_data(session, tournament_id):
-    """Participants ranked by points, then fewest rounds played, then OMW%,
-    then game diff, then draw number.
+    """Participants ranked by ``swiss.rank_standings``; the key, and why game
+    differential is not part of it, live there.
 
     OMW% (opponents' match-win %, byes excluded) needs the full match graph, so
     we load participants and matches and rank in memory (tournaments are small).

@@ -493,7 +493,7 @@ async def test_standings_uses_omw_to_break_points_tie(test_db):
 
 
 @pytest.mark.asyncio
-async def test_standings_sorted_by_points_then_game_diff(test_db):
+async def test_standings_tied_on_points_and_omw_go_to_the_draw_not_game_diff(test_db):
     async with test_db() as session:
         tournament = await _tournament_with_teams(session, 4)
         matches = await start_tournament(session, tournament.id, random.Random(7))
@@ -504,8 +504,8 @@ async def test_standings_sorted_by_points_then_game_diff(test_db):
 
         standings = await get_standings_data(session, tournament.id)
         assert [p.points for p in standings] == [3, 3, 0, 0]
-        assert standings[0].id == matches[0].team_a_participant_id  # better game diff first
-        assert standings[1].id == matches[1].team_a_participant_id
+        winners = sorted((p for p in standings[:2]), key=lambda p: p.draw_number)
+        assert standings[:2] == winners, "the lower draw ranks first, whatever the game diff"
 
 
 # ---- slice 6: round-robin format + finish ----------------------------------------

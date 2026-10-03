@@ -69,57 +69,62 @@ def test_byes_excluded_from_opponents():
 
 def test_no_real_opponents_uses_floor():
     # A team whose only game was a bye has no opponents -> OMW% floors, doesn't crash.
-    only_bye = participant(1, points=3, w=1, name="ByeOnly")
-    played = participant(2, points=3, w=1, gw=2, name="Played")
-    opp = participant(3, points=0, l=1, gl=2, name="Opp")
+    only_bye = participant(1, points=3, w=1, name="ByeOnly", draw=2)
+    played = participant(2, points=3, w=1, gw=2, name="Played", draw=1)
+    opp = participant(3, points=0, l=1, gl=2, name="Opp", draw=3)
     matches = [match(1, None, is_bye=True), match(2, 3)]
 
+    assert omw_percentages([only_bye, played, opp], matches)[1] == pytest.approx(FLOOR)
     ranked = rank_standings([only_bye, played, opp], matches)
     # Played (OMW 0.33 from a 0-pt opp) ties only_bye (OMW floor 0.33) on OMW;
-    # both 3 pts, so fall through to game diff: Played (+2) over only_bye (0).
+    # both 3 pts, so the draw settles it.
     assert ranked.index(played) < ranked.index(only_bye)
 
 
-def test_falls_through_to_game_diff():
-    # Equal points and equal OMW% -> game diff.
-    a = participant(1, points=3, w=1, gw=2, gl=0, name="Alpha")
-    b = participant(2, points=3, w=1, gw=2, gl=1, name="Bravo")
-    oa = participant(3, points=0, l=1, name="OppA")
-    ob = participant(4, points=0, l=1, name="OppB")
+def test_game_diff_does_not_order_teams():
+    # Equal points and equal OMW% are a tie; the draw settles it, however much
+    # more thoroughly one of them won.
+    a = participant(1, points=3, w=1, gw=2, gl=0, name="Alpha", draw=2)
+    b = participant(2, points=3, w=1, gw=2, gl=1, name="Bravo", draw=1)
+    oa = participant(3, points=0, l=1, name="OppA", draw=3)
+    ob = participant(4, points=0, l=1, name="OppB", draw=4)
     matches = [match(1, 3), match(2, 4)]
 
-    ranked = rank_standings([b, a, ob, oa], matches)
-    # a and b: equal pts(3), equal OMW(0.33). a has better game diff(+2 vs +1).
-    assert ranked.index(a) < ranked.index(b)
+    ranked = rank_standings([a, b, ob, oa], matches)
+    assert ranked.index(b) < ranked.index(a)
 
 
-def test_an_exactly_equal_omw_reaches_game_diff_whatever_order_it_was_summed_in():
+def test_an_exactly_equal_omw_is_a_tie_whatever_order_it_was_summed_in():
     """Two 4-2 teams whose opponents average exactly 7/12 each.
 
-    Summed as floats, in the order the rounds were played, the first comes out
-    0.5833...34 and the second 0.5833...33 -- so the sort ranked `lucky` above
-    `better` on rounding noise and never looked at game diff. This is the
-    Lotus League 2026 top-8 bubble, with the real opponents' records.
+    Summed as floats, in the order the rounds were played, the first came out
+    0.5833...34 and the second 0.5833...33 -- so the sort ranked one above the
+    other on rounding noise. This is the Lotus League 2026 top-8 bubble, with
+    the real opponents' records: an exact tie, settled by the draw both ways.
     """
-    lucky = participant(1, points=12, w=4, l=2, gw=25, gl=25, name="Lucky")
-    better = participant(2, points=12, w=4, l=2, gw=24, gl=16, name="Better")
-    shared = participant(10, points=12, w=4, l=2)
-    lucky_opps = [participant(11, points=0, l=2), participant(12, points=3, w=1, l=4),
-                  participant(13, points=9, w=3, l=3), shared,
-                  participant(14, points=15, w=5, l=1), participant(15, points=15, w=5, l=1)]
-    better_opps = [participant(21, points=9, w=3, l=3), participant(22, points=3, w=1, l=3),
-                   shared, participant(23, points=12, w=4, l=2),
-                   participant(24, points=12, w=4, l=2), participant(25, points=12, w=4, l=2)]
-    matches = ([match(1, o.id) for o in lucky_opps]
-               + [match(2, o.id) for o in better_opps])
-    field = [lucky, better, shared, *lucky_opps[:3], *lucky_opps[4:],
-             *better_opps[:2], *better_opps[3:]]
+    def field_with(lucky_draw, better_draw):
+        lucky = participant(1, points=12, w=4, l=2, gw=25, gl=25, name="Lucky", draw=lucky_draw)
+        better = participant(2, points=12, w=4, l=2, gw=24, gl=16, name="Better", draw=better_draw)
+        shared = participant(10, points=12, w=4, l=2)
+        lucky_opps = [participant(11, points=0, l=2), participant(12, points=3, w=1, l=4),
+                      participant(13, points=9, w=3, l=3), shared,
+                      participant(14, points=15, w=5, l=1), participant(15, points=15, w=5, l=1)]
+        better_opps = [participant(21, points=9, w=3, l=3), participant(22, points=3, w=1, l=3),
+                       shared, participant(23, points=12, w=4, l=2),
+                       participant(24, points=12, w=4, l=2), participant(25, points=12, w=4, l=2)]
+        matches = ([match(1, o.id) for o in lucky_opps]
+                   + [match(2, o.id) for o in better_opps])
+        field = [lucky, better, shared, *lucky_opps[:3], *lucky_opps[4:],
+                 *better_opps[:2], *better_opps[3:]]
+        return field, matches
 
+    field, matches = field_with(lucky_draw=1, better_draw=2)
     omw = omw_percentages(field, matches)
-    ranked = rank_standings(field, matches)
-
     assert omw[1] == omw[2], "both average exactly 7/12"
-    assert ranked.index(better) < ranked.index(lucky), "+8 game diff beats +0"
+    assert [p.id for p in rank_standings(field, matches) if p.id in (1, 2)] == [1, 2]
+
+    field, matches = field_with(lucky_draw=2, better_draw=1)
+    assert [p.id for p in rank_standings(field, matches) if p.id in (1, 2)] == [2, 1]
 
 
 # ---- omw_percentages: the same numbers, exposed for display ----------------------
@@ -277,10 +282,13 @@ def test_a_round_in_hand_outranks_a_round_already_spent():
              participant(2, points=3, w=1)], [], [2, 1])
 
 
-def test_game_differential_separates_teams_level_on_everything_else():
+def test_game_differential_does_not_separate_teams_for_pairing_either():
+    """The other side of `_always`: two teams level on every key but game
+    differential are an exact tie, so the shuffle orders them both ways."""
     same = dict(points=3, w=1, l=0)
-    _always([participant(1, gw=2, gl=1, **same),
-             participant(2, gw=2, gl=0, **same)], [], [2, 1])
+    field = [participant(1, gw=2, gl=1, **same), participant(2, gw=2, gl=0, **same)]
+    orders = {tuple(_order(field, [], seed=s)) for s in SEEDS}
+    assert orders == {(1, 2), (2, 1)}, f"game diff still decides pairing: {orders}"
 
 
 def test_the_omw_handed_in_is_the_omw_ranked_on():

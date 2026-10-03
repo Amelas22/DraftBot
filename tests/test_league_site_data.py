@@ -223,6 +223,10 @@ async def test_standings_carry_the_omw_tiebreak(match_control_db):
     # No matches played: every team sits at the MTR floor. Rounded for the
     # payload -- the page shows one decimal place of a percentage.
     assert data["standings"][0]["omw"] == round(1 / 3, 4)
+    # The game counts ride along for the page's Games column. They are no
+    # longer a tiebreak, which is when an export nothing asserts gets dropped
+    # as dead weight -- so this is where that must be caught.
+    assert {"game_wins", "game_losses"} <= data["standings"][0].keys()
 
 
 # ---- pairings ---------------------------------------------------------------

@@ -72,7 +72,7 @@ def omw_percentages(participants, matches):
 
     Averaged exactly, then converted to float once: a float sum of equal
     averages can differ in the last bit by summation order, and the sort would
-    rank on that noise instead of reaching game diff.
+    rank on that noise instead of treating it as the tie it is.
     """
     by_id = {p.id: p for p in participants}
     opponents = {p.id: [] for p in participants}
@@ -106,13 +106,17 @@ def _ranking_key(participant: Any, omw: "dict[Any, float]") -> "tuple[Any, ...]"
     """
     return (-participant.points,
             participant.match_wins + participant.match_losses + participant.match_draws,
-            -omw[participant.id],
-            -(participant.game_wins - participant.game_losses))
+            -omw[participant.id])
 
 
 def rank_standings(participants, matches, omw=None):
-    """Sort by points, then fewest rounds played, then OMW%, then game diff, then
-    draw number.
+    """Sort by points, then fewest rounds played, then OMW%, then draw number.
+
+    Game differential is NOT a tiebreak. Winning the round is the achievement;
+    every match inside it is played out whatever the score, so the difference
+    mostly measures how thoroughly a beaten team was beaten -- one blowout can
+    outweigh a season. The counts are still recorded and shown on the league
+    page; they do not order anybody.
 
     Rounds played comes before OMW% because standings update live: a team that
     has not played this round yet is compared against teams that have. Both
