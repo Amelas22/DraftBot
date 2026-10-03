@@ -244,10 +244,13 @@ def test_the_board_breaks_that_same_tie_by_draw_number():
 
 def test_a_team_with_no_draw_number_goes_below_the_drawn_ones():
     """A row from before draw numbers existed has none. It must still sort --
-    None cannot be compared with an int -- and goes after every drawn team."""
-    field = [participant(5), participant(4), participant(9, draw=2), participant(8, draw=1)]
+    None cannot be compared with an int -- and goes after every drawn team,
+    tied among the undrawn by name as it always was, so a finished
+    tournament's published standings do not reorder."""
+    field = [participant(5, name="Alpha"), participant(4, name="Zeta"),
+             participant(9, draw=2), participant(8, draw=1)]
 
-    assert [p.id for p in rank_standings(field, [])] == [8, 9, 4, 5]
+    assert [p.id for p in rank_standings(field, [])] == [8, 9, 5, 4]
 
 
 # ---- every ranking key has to actually decide something --------------------

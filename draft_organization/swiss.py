@@ -137,9 +137,10 @@ def rank_standings(participants, matches, omw=None):
     """
     if omw is None:
         omw = omw_percentages(participants, matches)
-    # Draw number: see TournamentParticipant.draw_number. Undrawn rows go last.
+    # Draw number: see TournamentParticipant.draw_number. Undrawn rows -- from
+    # tournaments finished before it existed -- go last, by name as they were.
     return sorted(participants, key=lambda p: (
-        *_ranking_key(p, omw), p.draw_number is None, p.draw_number, p.id))
+        *_ranking_key(p, omw), p.draw_number is None, p.draw_number, p.team_name))
 
 
 def pairing_order(participants: "list[Any]", matches: "list[Any]",
@@ -358,7 +359,7 @@ def pair_round(teams: "list[dict[str, Any]]",
     `teams` arrive in PAIRING ORDER, best first -- this does not rank them.
     Rank belongs to the caller, because the tiebreaks need the whole match
     history, and because pairing order and DISPLAY order are deliberately
-    different: the board settles an exact tie by name so it holds still
+    different: the board settles an exact tie by draw number so it holds still
     between refreshes, and pairing settles it at random, or round one would be
     paired alphabetically.
 

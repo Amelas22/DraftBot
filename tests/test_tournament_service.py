@@ -259,12 +259,14 @@ async def test_start_tournament_draws_each_team_a_distinct_number(test_db):
     two teams can still be tied after it."""
     async with test_db() as session:
         tournament = await _tournament_with_teams(session, 5)
+        unpaid, _ = await register_team(session, tournament.id, "Unpaid", "99")
+        unpaid.status = "pending"           # ranked by the standings, so drawn too
         await start_tournament(session, tournament.id, random.Random(7))
         await session.commit()
 
         draws = [p.draw_number for p in await list_participants(session, tournament.id)]
-        assert sorted(draws) == [1, 2, 3, 4, 5]
-        assert draws != [1, 2, 3, 4, 5], "drawn at random, not in registration order"
+        assert sorted(draws) == [1, 2, 3, 4, 5, 6]
+        assert draws != [1, 2, 3, 4, 5, 6], "drawn at random, not in registration order"
 
 
 @pytest.mark.asyncio

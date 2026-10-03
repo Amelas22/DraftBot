@@ -749,7 +749,9 @@ async def start_tournament(session, tournament_id, rng):
         )
     # Drawn after the schedule so it consumes nothing the pairing reads: a
     # seeded rng pairs round one exactly as it did before draw numbers existed.
-    for participant, number in zip(paid, rng.sample(range(1, len(paid) + 1), len(paid))):
+    # Over every row, not just `paid`: the standings rank them all.
+    everyone = await list_participants(session, tournament_id)
+    for participant, number in zip(everyone, rng.sample(range(1, len(everyone) + 1), len(everyone))):
         participant.draw_number = number
     return matches
 
@@ -1117,7 +1119,7 @@ async def advance_round(session, tournament_id, rng):
 
 async def get_standings_data(session, tournament_id):
     """Participants ranked by points, then fewest rounds played, then OMW%,
-    then game diff, then name.
+    then game diff, then draw number.
 
     OMW% (opponents' match-win %, byes excluded) needs the full match graph, so
     we load participants and matches and rank in memory (tournaments are small).
