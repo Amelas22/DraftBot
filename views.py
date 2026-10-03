@@ -214,9 +214,9 @@ class PersistentView(discord.ui.View):
 
     def _add_premade_buttons(self):
         red, blue = labels_for(self)
-        self._add_button(red.name, "green", "Team_A", self.team_assignment_callback)
-        self._add_button(blue.name, "red", "Team_B", self.team_assignment_callback)
-        self._add_button("Generate Seating Order", "primary", "generate_seating", self.randomize_teams_callback)
+        self._add_button(red.name, "red", "Team_A", self.team_assignment_callback)
+        self._add_button(blue.name, "blurple", "Team_B", self.team_assignment_callback)
+        self._add_button("Generate Seating Order", "grey", "generate_seating", self.randomize_teams_callback)
 
         # Add test button only if global test mode is enabled
         if is_test_mode():
