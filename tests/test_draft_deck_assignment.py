@@ -782,44 +782,75 @@ async def test_an_unsettled_draft_is_not_cached_as_finished(test_db, library_on)
     assert await svc.assign_drafted_decks(SESSION) == 2, "they are back in play"
 
 
-async def test_a_draft_that_has_gone_quiet_offers_nobody_a_deck(
+async def _stamp_draft(**fields):
+    from sqlalchemy import select as _select
+    async with AsyncSessionLocal() as s:
+        row = await s.scalar(
+            _select(DraftSession).where(DraftSession.session_id == SESSION))
+        for k, v in fields.items():
+            setattr(row, k, v)
+        await s.commit()
+
+
+async def test_a_draft_ended_over_an_hour_ago_offers_nobody_a_deck(
         test_db, library_on):
     """A draft that stalls satisfies neither half of the rule on its own: it
     never settles, and its last matches are never reported. Without a backstop
     the offer is immortal -- the cards stay reserved and the drafter's one
     active-loan slot stays occupied, so they are silently skipped at every
-    later draft. An hour without a report is taken as over.
+    later draft. An hour after the draft ends the offer window is closed.
+    (Clock moved from last activity to logs_captured_at: team creation precedes
+    the draft, so measuring from it closed the window before anyone played.)
     """
     from datetime import datetime, timedelta
-    from sqlalchemy import select as _select
 
     await _seed()
     await _reported(SESSION, [(ALICE, BOB, False)])
-    long_ago = datetime.now() - timedelta(hours=3)
-    async with AsyncSessionLocal() as s:
-        row = await s.scalar(
-            _select(DraftSession).where(DraftSession.session_id == SESSION))
-        row.draft_start_time = row.teams_start_time = long_ago
-        await s.commit()
+    await _stamp_draft(logs_captured_at=datetime.now() - timedelta(minutes=61))
 
     assert await svc.assign_drafted_decks(SESSION) == 0
     assert await _loans() == {}
 
 
-async def test_a_draft_reported_recently_is_still_live(test_db, library_on):
-    """The clock runs from the last sign of life, not from the draft's start:
-    a long draft still reporting results is not stale."""
+async def test_a_long_draft_is_still_offered_when_it_has_just_ended(
+        test_db, library_on):
+    """Teams form before the draft runs: 70 minutes of drafting must not use up
+    the window. The clock starts when the draft ends."""
     from datetime import datetime, timedelta
-    from sqlalchemy import select as _select
+
+    await _seed()
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", False)])
+    await _stamp_draft(
+        teams_start_time=datetime.now() - timedelta(minutes=70),
+        draft_start_time=datetime.now() - timedelta(minutes=70),
+        logs_captured_at=datetime.now())
+
+    assert await svc.assign_drafted_decks(SESSION) == 2
+    assert set(await _loans()) == {ALICE, BOB}
+
+
+async def test_a_draft_that_ended_recently_is_offered_despite_old_teams(
+        test_db, library_on):
+    """Results and team creation do not move the clock; only the end does."""
+    from datetime import datetime, timedelta
+
+    await _seed()
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", False)])
+    await _stamp_draft(
+        teams_start_time=datetime.now() - timedelta(hours=2),
+        logs_captured_at=datetime.now() - timedelta(minutes=30))
+
+    assert await svc.assign_drafted_decks(SESSION) == 2
+
+
+async def test_a_draft_reported_long_ago_but_ending_now_is_live(
+        test_db, library_on):
+    """An old result no longer closes the window; the draft's end opens it."""
+    from datetime import datetime, timedelta
 
     await _seed()
     await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", True)])
-    long_ago = datetime.now() - timedelta(hours=5)
-    async with AsyncSessionLocal() as s:
-        row = await s.scalar(
-            _select(DraftSession).where(DraftSession.session_id == SESSION))
-        row.draft_start_time = row.teams_start_time = long_ago
-        await s.commit()
+    await _stamp_draft(logs_captured_at=datetime.now() - timedelta(minutes=5))
 
-    assert await svc.assign_drafted_decks(SESSION) == 1, "Bob reported just now"
+    assert await svc.assign_drafted_decks(SESSION) == 1, "Bob reported"
     assert ALICE in await _loans()

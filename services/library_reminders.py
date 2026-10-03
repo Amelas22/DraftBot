@@ -35,13 +35,16 @@ from loguru import logger
 REMIND_AFTER_FINISH = timedelta(hours=1)
 REPEAT_AFTER = timedelta(hours=1)
 
-# A draft with no sign of life for this long is treated as over. Without it an
-# offer can be immortal: a draft that is partly reported and then fizzles never
-# settles and never finishes its matches, so neither half of the rule in
-# who_can_still_use ever fires. The cards stay reserved and -- least visibly and
-# most damagingly -- the borrower's one active-loan slot stays occupied, so they
-# are silently passed over at every later draft.
-QUIET_AFTER = timedelta(hours=1)
+# How long a deck offer stays good after the draft ends. The drafter's matches
+# start when the draft does, so an hour is room to collect and play; past it they
+# have shown they do not need the deck, and the offer is retracted -- for good,
+# because an expired loan counts as done and is never re-offered. Without a
+# limit an offer can be immortal: a draft that is partly reported and then
+# fizzles never settles, so the cards stay reserved and the borrower's one
+# active-loan slot stays occupied and they are passed over at every later draft.
+# Measured from the draft's END (DraftState.ended_at), never from team creation
+# or results: teams form before the Draftmancer draft even runs.
+OFFER_WINDOW = timedelta(hours=1)
 
 # The one state with anything to give back. An 'assigned' loan is an offer
 # nobody collected, which expire_stale_assignments retracts on its own, and the
@@ -325,31 +328,29 @@ class DraftState(NamedTuple):
     done_at: "dict[str, datetime]"      # finished players -> when they reported their last match
     settled: bool                       # see draft_state
     last_result: Optional[datetime]     # latest reported result; None if nothing was reported
-    # Newest sign of life: the latest result, else when teams were made or the
-    # draft started. None when there is nothing to measure from. See gone_quiet.
-    last_activity: Optional[datetime] = None
+    # When the draft ended: logs_captured_at, else rooms_created_at. None when
+    # neither is known, which counts as not yet ended. See offer_window_closed.
+    ended_at: Optional[datetime] = None
 
-    def gone_quiet(self, now: Optional[datetime] = None) -> bool:
-        """Has this draft shown no sign of life for QUIET_AFTER?
+    def offer_window_closed(self, now: Optional[datetime] = None) -> bool:
+        """Has OFFER_WINDOW passed since this draft ended?
 
-        Measured from the last thing that happened, not from the draft's start,
-        so a long evening that is still reporting results is not stale. A draft
-        with nothing to measure from is left alone.
+        A draft that has not (visibly) ended has no window to close.
         """
-        if self.last_activity is None:
+        if self.ended_at is None:
             return False
-        return (now or datetime.now()) - self.last_activity > QUIET_AFTER
+        return (now or datetime.now()) - self.ended_at > OFFER_WINDOW
 
 
 def who_can_still_use(state: DraftState, player_ids: Any,
                       now: Optional[datetime] = None) -> "set[str]":
     """Which of these players still have a match that can change this draft.
 
-    The library's one rule about time: the moment this stops including somebody
-    is the moment reminder_due starts asking them for the deck BACK (done_at and
-    settled are exactly what send_due_reminders reads). Handing one out, taking
-    an uncollected offer back and chasing a collected one are the same question
-    asked from three sides, so they read the same DraftState.
+    The one rule shared by handing a deck out (assign_drafted_decks) and taking
+    an uncollected offer back (expire_stale_assignments), so both read the same
+    DraftState. Collected decks are never touched by it. Reminders for a
+    collected deck read done_at and settled directly, not this answer, and are
+    not subject to OFFER_WINDOW.
 
     Asked per PLAYER, never per pod. One drafter reporting says nothing about
     whether another still needs their cards, and refusing a whole pod on the
@@ -357,14 +358,14 @@ def who_can_still_use(state: DraftState, player_ids: Any,
 
     Empty when the draft is decided: a side clinching settles it with dead
     rubbers still unreported, and cards should not go out for those. Empty too
-    when it has simply gone quiet -- see DraftState.gone_quiet, which is what
-    stops a fizzled draft pinning a deck and a loan slot for good.
+    once the offer window has closed -- see DraftState.offer_window_closed,
+    which is what stops a fizzled draft pinning a deck and a loan slot for good.
 
     Note the per-player half is vacuous for a progressively-paired format, where
     done_at cannot answer from the rows that exist yet: for those only
-    settlement and silence end it.
+    settlement and the offer window end it.
     """
-    if state.settled or state.gone_quiet(now):
+    if state.settled or state.offer_window_closed(now):
         return set()
     return {str(p) for p in player_ids if str(p) not in state.done_at}
 
@@ -401,8 +402,9 @@ async def draft_state(session_id: Any) -> DraftState:
     a dead rubber reported after the clinch (which only ever makes the first ask
     later, never early).
 
-    last_activity -- the newest of last_result, teams_start_time and
-    draft_start_time: what DraftState.gone_quiet measures silence from.
+    ended_at -- when the draft ended: logs_captured_at (written when the draft
+    ends, before decks are assigned), else rooms_created_at, else None. What
+    DraftState.offer_window_closed measures from.
     """
     from sqlalchemy import select
 
@@ -424,11 +426,9 @@ async def draft_state(session_id: Any) -> DraftState:
 
     settled = row.session_stage in FINISHED_STAGES or is_finished_draft(row)
     last_result = max((t for _, _, t in results if t is not None), default=None)
-    last_activity = max((t for t in (last_result, row.teams_start_time,
-                                     row.draft_start_time) if t is not None),
-                        default=None)
+    ended_at = row.logs_captured_at or row.rooms_created_at
     if row.session_type not in FULLY_PAIRED_TYPES:
-        return DraftState({}, settled, last_result, last_activity)
+        return DraftState({}, settled, last_result, ended_at)
 
     last_played: "dict[str, datetime]" = {}
     outstanding: "set[str]" = set()
@@ -442,4 +442,4 @@ async def draft_state(session_id: Any) -> DraftState:
             elif pid not in last_played or submitted_at > last_played[pid]:
                 last_played[pid] = submitted_at
     done_at = {pid: t for pid, t in last_played.items() if pid not in outstanding}
-    return DraftState(done_at, settled, last_result, last_activity)
+    return DraftState(done_at, settled, last_result, ended_at)

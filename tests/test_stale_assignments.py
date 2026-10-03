@@ -226,32 +226,88 @@ async def test_an_offer_expires_once_its_own_borrower_is_done(test_db):
     assert await _state(loan) == "expired"
 
 
+async def _stamp_draft(**fields):
+    from sqlalchemy import select
+    async with AsyncSessionLocal() as s:
+        row = await s.scalar(
+            select(DraftSession).where(DraftSession.session_id == SESSION))
+        for k, v in fields.items():
+            setattr(row, k, v)
+        await s.commit()
+
+
 async def test_an_offer_for_a_fizzled_draft_does_not_live_forever(test_db):
     """The case that has no other backstop.
 
     A draft that is partly reported and then stops -- no victory message, the
     stage never leaves 'pairings', nobody abandons it -- never settles and
-    never finishes its matches. Eight drafts in the production database have
-    exactly that shape. Without a clock the offer is permanent: the cards stay
-    reserved, and the borrower's one active-loan slot stays occupied so they
-    are skipped at every later draft.
+    never finishes its matches. Without a clock the offer is permanent: the
+    cards stay reserved, and the borrower's one active-loan slot stays occupied
+    so they are skipped at every later draft. The clock is the draft's end.
     """
     from datetime import timedelta
 
-    from sqlalchemy import select
-
     await _pod(matches=[(BORROWER, "x", False), ("y", "z", True)])
     loan = await _assigned()
-    long_ago = datetime.now() - timedelta(hours=4)
-    async with AsyncSessionLocal() as s:
-        row = await s.scalar(
-            select(DraftSession).where(DraftSession.session_id == SESSION))
-        row.draft_start_time = row.teams_start_time = long_ago
-        for m in (await s.scalars(select(MatchResult).where(
-                MatchResult.session_id == SESSION))).all():
-            if m.result_submitted_at is not None:
-                m.result_submitted_at = long_ago
-        await s.commit()
+    await _stamp_draft(logs_captured_at=datetime.now() - timedelta(minutes=61))
 
     assert await svc.expire_stale_assignments() == 1
     assert await _state(loan) == "expired"
+
+
+async def test_a_retracted_offer_is_not_made_again_by_a_later_result(test_db):
+    from datetime import timedelta
+
+    await _pod(matches=[(BORROWER, "x", False)])
+    loan = await _assigned()
+    await _stamp_draft(logs_captured_at=datetime.now() - timedelta(minutes=61))
+    assert await svc.expire_stale_assignments() == 1
+
+    async with AsyncSessionLocal() as s:
+        s.add(MatchResult(session_id=SESSION, match_number=99, player1_id="y",
+                          player2_id="z", result_submitted_at=datetime.now()))
+        await s.commit()
+
+    assert await svc.expire_stale_assignments() == 0
+    assert await _state(loan) == "expired", "expiry is terminal"
+
+
+async def test_an_offer_survives_a_long_draft_that_just_ended(test_db):
+    """Teams were made 70 minutes ago, before the draft ran; the draft ended
+    just now. Nothing has been played, and the offer must stand."""
+    from datetime import timedelta
+
+    await _pod(matches=[(BORROWER, "x", False)])
+    loan = await _assigned()
+    await _stamp_draft(teams_start_time=datetime.now() - timedelta(minutes=70),
+                       logs_captured_at=datetime.now())
+
+    assert await svc.expire_stale_assignments() == 0
+    assert await _state(loan) == "assigned"
+
+
+async def test_an_offer_stands_within_an_hour_of_the_end_despite_old_teams(test_db):
+    from datetime import timedelta
+
+    await _pod(matches=[(BORROWER, "x", False)])
+    loan = await _assigned()
+    await _stamp_draft(teams_start_time=datetime.now() - timedelta(hours=2),
+                       logs_captured_at=datetime.now() - timedelta(minutes=30))
+
+    assert await svc.expire_stale_assignments() == 0
+    assert await _state(loan) == "assigned"
+
+
+async def test_a_collected_deck_is_untouched_however_long_ago_the_draft_ended(
+        test_db):
+    from datetime import timedelta
+
+    await _pod(matches=[(BORROWER, "x", False)])
+    loan = await _assigned()
+    async with AsyncSessionLocal() as s:
+        (await s.get(CardLoan, loan)).state = "borrowed"
+        await s.commit()
+    await _stamp_draft(logs_captured_at=datetime.now() - timedelta(hours=5))
+
+    assert await svc.expire_stale_assignments() == 0
+    assert await _state(loan) == "borrowed"

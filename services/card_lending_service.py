@@ -507,7 +507,9 @@ async def expire_stale_assignments() -> int:
     An assignment is a promise to a drafter who might still collect it. It
     stops being one when that drafter has no match left that can change the
     draft -- their own results are all in, or the draft has been decided and
-    what remains is dead rubbers.
+    what remains is dead rubbers. It also stops being one OFFER_WINDOW after the
+    draft ends: a drafter who has not collected by then does not need the deck,
+    and the retraction is terminal -- the offer is not made again.
 
     Asked per BORROWER, not per draft. Retracting the whole pod on its first
     reported result took the deck away from players who still had matches to
