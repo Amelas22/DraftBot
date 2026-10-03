@@ -277,3 +277,25 @@ async def test_match_summary_returns_none_for_missing_match(test_db):
         await _make_tournament(s)
         out = await match_summary(s, 999999)
     assert out is None
+
+
+@pytest.mark.asyncio
+async def test_a_reversed_link_swaps_the_feeders_slots_with_the_sides(test_db):
+    async with test_db() as s:
+        t, r, parts = await _make_tournament(s, n_parts=4)
+        final = TournamentMatch(round_id=r.id, team_a_participant_id=parts[0].id,
+                                team_b_participant_id=parts[1].id)
+        s.add(final); await s.flush()
+        semi_a = TournamentMatch(round_id=r.id, team_a_participant_id=parts[0].id,
+                                 team_b_participant_id=parts[2].id,
+                                 feeds_match_id=final.id, feeds_slot="a")
+        semi_b = TournamentMatch(round_id=r.id, team_a_participant_id=parts[1].id,
+                                 team_b_participant_id=parts[3].id,
+                                 feeds_match_id=final.id, feeds_slot="b")
+        s.add_all([semi_a, semi_b]); await s.flush()
+        # the draft names the teams in the opposite order to the match
+        await _draft(s, "d1", a=parts[1].team_name, b=parts[0].team_name)
+        out = await link_draft_to_match(s, "d1", final.id, "u1")
+    assert out.status == "linked"
+    assert (final.team_a_participant_id, final.team_b_participant_id) == (parts[1].id, parts[0].id)
+    assert (semi_a.feeds_slot, semi_b.feeds_slot) == ("b", "a")

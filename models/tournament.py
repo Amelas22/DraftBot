@@ -47,6 +47,14 @@ class Tournament(Base):
     # edited in place until the tournament starts. Same shape as standings_*.
     board_channel_id = Column(String(64), nullable=True)
     board_message_id = Column(String(64), nullable=True)
+    # Where the bracket's matches are posted as they become playable. Stamped at
+    # the cut from the pairings destination, so later rooms open without a ctx.
+    bracket_channel_id = Column(String(64), nullable=True)
+    # The pinned live bracket message in bracket_channel_id, edited in place
+    bracket_message_id = Column(String(64), nullable=True)
+    # Who runs the tournament: the user who created it, allowed to settle a
+    # match the players cannot (see the bracket's organizer actions).
+    organizer_user_id = Column(String(64), nullable=True)
 
     def __repr__(self):
         return f"<Tournament(id={self.id}, name={self.name!r}, status={self.status})>"
@@ -247,7 +255,13 @@ class TournamentMatch(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     round_id = Column(Integer, ForeignKey('tournament_rounds.id'), nullable=False)
-    team_a_participant_id = Column(Integer, ForeignKey('tournament_participants.id'), nullable=False)
+    # Null only for a bracket match still waiting on its feeders (see feeds_match_id)
+    team_a_participant_id = Column(Integer, ForeignKey('tournament_participants.id'), nullable=True)
+    # A bracket match's winner moves into slot `feeds_slot` ('a'/'b') of match
+    # `feeds_match_id`. NULL on the final and on every swiss match. Until both
+    # of a bracket match's feeders are decided its team columns are NULL.
+    feeds_match_id = Column(Integer, ForeignKey('tournament_matches.id'), nullable=True)
+    feeds_slot = Column(String(1), nullable=True)
     # Null for a bye "match" (team A gets the bye)
     team_b_participant_id = Column(Integer, ForeignKey('tournament_participants.id'), nullable=True)
     team_a_wins = Column(Integer, nullable=True)

@@ -900,3 +900,12 @@ def stub_library(monkeypatch, module, *, collateral=0, library_id="lib",
     assert patched, f"{module.__name__} looks up no library to stub"
 
     return library
+
+
+@pytest_asyncio.fixture
+async def session(match_control_db):
+    """One open session per test -- every test below wants a session, not a
+    factory, and unwrapping conftest's shared factory once here keeps the tests
+    about the bracket."""
+    async with match_control_db() as open_session:
+        yield open_session

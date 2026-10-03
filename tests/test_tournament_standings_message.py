@@ -210,7 +210,7 @@ def test_standings_embed_labels_playoff_rounds_instead_of_counting_past_the_end(
     tournament.current_round = 5           # second bracket round
     embed = create_standings_embed(tournament, [], "playoff")
     assert "5/3" not in embed.description
-    assert "Playoff round 2" in embed.description
+    assert "Playoff — see bracket" in embed.description
 
 
 def test_standings_embed_still_counts_swiss_rounds_normally():
@@ -469,7 +469,7 @@ async def test_update_standings_message_names_the_bracket_round(test_db):
         await update_standings_message(bot, tid)
 
     description = message.edit.call_args.kwargs["embed"].description
-    assert "Playoff round 1" in description and "4/3" not in description
+    assert "Playoff — see bracket" in description and "4/3" not in description
 
 
 def test_standings_embed_splits_across_fields_past_discords_cap():
@@ -546,3 +546,13 @@ def test_standings_embed_keeps_a_draw_that_was_actually_recorded():
         tournament, [_participant("Alpha", 4, wins=1, losses=0, draws=1)])
 
     assert "1-0-1" in "\n".join(f.value for f in embed.fields)
+
+
+def test_standings_embed_points_at_the_bracket_once_it_starts():
+    tournament = Tournament(guild_id="1", name="Spring Cup", total_rounds=3)
+    tournament.status = "active"
+    tournament.current_round = 5
+    tournament.bracket_channel_id, tournament.bracket_message_id = "77", "88"
+    embed = create_standings_embed(tournament, [], "playoff")
+    assert "Playoff — see bracket" in embed.description
+    assert "https://discord.com/channels/1/77/88" in embed.description

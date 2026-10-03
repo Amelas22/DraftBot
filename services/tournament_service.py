@@ -7,16 +7,17 @@ All functions take an AsyncSession so callers control the transaction and tests
 can point them at a temp database (mirrors the leaderboard_service convention).
 """
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
 from database.db_session import db_session
-from draft_organization.bracket import advance_pairs, build_bracket, final_placement
+from draft_organization.bracket import bracket_tree, build_bracket, final_placement
 from draft_organization.swiss import (
     omw_percentages,
     pair_round,
@@ -25,9 +26,11 @@ from draft_organization.swiss import (
     round_robin_schedule,
 )
 from helpers.match_control import match_tag
+from models.draft_session import DraftSession
 from models.team import Team
 from models.tournament import (
     BRACKET_STAGES,
+    STAGE_PLAY_IN,
     STAGE_PLAYOFF,
     STAGE_SWISS,
     Tournament,
@@ -104,6 +107,77 @@ def _seated_by_cut(standings, cut_to):
         return []
     eligible = _cut_eligible(standings)
     return list(eligible[:cut_to]) if len(eligible) >= cut_to else []
+
+
+@dataclass(frozen=True)
+class BracketRow:
+    match_id: int
+    stage: str                       # "Quarterfinal", "Play-in", ...
+    a: tuple[int | None, str] | None  # (seed, team name), None while waiting
+    b: tuple[int | None, str] | None
+    a_from: int | None               # feeder match id for an empty slot
+    b_from: int | None
+    a_wins: int | None
+    b_wins: int | None
+    thread_id: str | None
+    is_bye: bool
+
+
+async def bracket_rows(session, tournament_id):
+    """Every bracket match as a BracketRow, ordered by round, then match id."""
+    from services.tournament_formatter import round_name  # formatter imports this module
+    tournament = await session.get(Tournament, tournament_id)
+    participants = {p.id: p for p in await list_participants(session, tournament_id)}
+    feeders = {}                                   # (parent id, slot) -> child id
+    matches = []
+    for round_ in await _playoff_rounds(session, tournament_id):
+        name = await round_name(session, round_, tournament.total_rounds)
+        for m in await _round_matches(session, round_.id):
+            matches.append((m, name, round_.round_number))
+            if m.feeds_match_id is not None:
+                feeders[(m.feeds_match_id, m.feeds_slot)] = m.id
+
+    def side(participant_id):
+        if participant_id is None:
+            return None
+        p = participants[participant_id]
+        return (p.seed, p.team_name)
+
+    rows = [BracketRow(m.id, name, side(m.team_a_participant_id),
+                       side(m.team_b_participant_id),
+                       feeders.get((m.id, "a")), feeders.get((m.id, "b")),
+                       m.team_a_wins, m.team_b_wins, m.thread_id, m.is_bye)
+            for m, name, _ in matches]
+    order = {m.id: (number, m.id) for m, _, number in matches}
+    return sorted(rows, key=lambda r: order[r.match_id])
+
+
+@dataclass(frozen=True)
+class PlayInProposal:
+    teams: tuple[Any, Any] | None
+    tied: int
+
+
+def propose_play_in(standings, omw, cut_to):
+    """A play-in for the last seat when the team in it and the first team out
+    are level on everything but the draw: points, rounds played, exact OMW%.
+
+    Only a two-team tie is proposed. A wider one is reported (`teams` None)
+    so the organizer can pick two or skip; None means there is no tie at the
+    line at all. Eligibility is _cut_eligible's, so this can never propose a
+    team the cut would not seat."""
+    eligible = _cut_eligible(standings)
+    if not cut_to or len(eligible) <= cut_to:
+        return None
+
+    def key(p):
+        return (p.points, p.match_wins + p.match_losses + p.match_draws, omw[p.id])
+
+    last, first_out = eligible[cut_to - 1], eligible[cut_to]
+    if key(last) != key(first_out):
+        return None
+    tied = [p for p in eligible if key(p) == key(last)]
+    return PlayInProposal((last, first_out) if len(tied) == 2 else None, len(tied))
 
 
 def cut_after_rank(standings: list[Any], cut_to: int | None) -> int | None:
@@ -626,12 +700,15 @@ async def _swiss_frozen(session, tournament):
         await _playoff_rounds(session, tournament.id))
 
 
-async def start_playoff(session, tournament_id, size=None):
+async def start_playoff(session, tournament_id, size=None, play_in=None):
     """Cut to the top `size` and create the first playoff round.
 
     Seeds are stamped from final swiss standings and never recomputed: they
     are the numbers players were told, and they are what orders teams that
     went out at the same depth.
+
+    `play_in` is two participant ids tied for the last seat: they take seeds
+    size and size+1 and play one match whose winner fills seed size's slot.
     """
     tournament = await session.get(Tournament, tournament_id)
     if tournament is None:
@@ -673,6 +750,21 @@ async def start_playoff(session, tournament_id, size=None):
         )
 
     standings = await get_standings_data(session, tournament_id)
+    if play_in is not None:
+        eligible = _cut_eligible(standings)
+        pair = [p for p in eligible if p.id in play_in]
+        if len(set(play_in)) != 2 or len(pair) != 2:
+            raise ValueError("A play-in needs two different teams that can make the cut.")
+        rest = [p for p in eligible if p.id not in play_in][: size - 1]
+        if len(rest) < size - 1:
+            raise ValueError(f"Not enough eligible teams for a top {size} with a play-in.")
+        for position, p in enumerate(rest, start=1):
+            p.seed = position
+        pair[0].seed, pair[1].seed = size, size + 1       # eligible order: higher first
+        by_seed = {position: p.id for position, p in enumerate(rest, start=1)}
+        rounds = await _build_bracket(session, tournament, by_seed, size,
+                                      tournament.total_rounds + 2)
+        return await _attach_play_in(session, tournament, rounds, pair)
     cut = _seated_by_cut(standings, size)
     if not cut:
         raise ValueError(
@@ -683,49 +775,148 @@ async def start_playoff(session, tournament_id, size=None):
         participant.seed = position
     by_seed = {position: p.id for position, p in enumerate(cut, start=1)}
 
-    pairs = [
-        (by_seed[seed_a], None if seed_b is None else by_seed[seed_b])
-        for seed_a, seed_b in build_bracket(size)
-    ]
-    return await _create_playoff_round(
-        session, tournament, tournament.total_rounds + 1, pairs)
+    rounds = await _build_bracket(session, tournament, by_seed, size,
+                                  tournament.total_rounds + 1)
+    return rounds[0]
 
 
-async def _create_playoff_round(session, tournament, round_number, pairs):
-    """Create a bracket round and its matches, and move the tournament onto it.
-
-    ``pairs`` is (participant_id, partner_id_or_None) in bracket order; a None
-    partner is a bye. Deliberately NOT merged with _create_round_with_pairings:
-    a swiss round pairs itself from standings and SCORES its bye, and a bracket
-    bye is the absence of a match -- nothing is awarded, because swiss records
-    are frozen at the cut.
-    """
-    new_round = TournamentRound(
-        tournament_id=tournament.id, round_number=round_number, stage=STAGE_PLAYOFF
-    )
-    session.add(new_round)
+async def _attach_play_in(session, tournament, rounds, pair):
+    """Create the play-in round ahead of the bracket and wire its winner into
+    the slot left empty for the last seed. Its match is created last, so its id
+    is higher than the final's; rounds, not ids, order the display."""
+    play_in_round = TournamentRound(tournament_id=tournament.id,
+                                    round_number=tournament.total_rounds + 1,
+                                    stage=STAGE_PLAY_IN)
+    session.add(play_in_round)
     await session.flush()
-    for id_a, id_b in pairs:
-        session.add(TournamentMatch(
-            round_id=new_round.id,
-            team_a_participant_id=id_a,
-            team_b_participant_id=id_b,
-            is_bye=id_b is None,
-        ))
-    tournament.current_round = round_number
+    first = await _round_matches(session, rounds[0].id)
+    target = next(m for m in first if m.team_b_participant_id is None and not m.is_bye)
+    session.add(TournamentMatch(round_id=play_in_round.id,
+                                team_a_participant_id=pair[0].id,
+                                team_b_participant_id=pair[1].id,
+                                feeds_match_id=target.id, feeds_slot="b"))
+    tournament.current_round = play_in_round.round_number
     await session.flush()
-    return new_round
+    return play_in_round
+
+
+async def _build_bracket(session, tournament, seat_ids, size, first_round_number):
+    """Create every round and match of the bracket, linked by feeds_match_id/
+    feeds_slot. Earlier rounds get lower ids; a bye is created decided and its
+    team written straight into the parent slot, awarding nothing."""
+    nodes = bracket_tree(size)
+    round_rows = []
+    for r in range(max(n.round for n in nodes) + 1):
+        row = TournamentRound(tournament_id=tournament.id,
+                              round_number=first_round_number + r, stage=STAGE_PLAYOFF)
+        session.add(row)
+        round_rows.append(row)
+    await session.flush()
+
+    by_node = {}
+    for n in nodes:
+        is_bye = n.round == 0 and n.b_seed is None
+        m = TournamentMatch(
+            round_id=round_rows[n.round].id,
+            team_a_participant_id=seat_ids.get(n.a_seed) if n.a_seed else None,
+            team_b_participant_id=seat_ids.get(n.b_seed) if n.b_seed else None,
+            is_bye=is_bye,
+        )
+        session.add(m)
+        by_node[(n.round, n.index)] = m
+    await session.flush()
+
+    for n in nodes:
+        if n.feeds is None:
+            continue
+        child = by_node[(n.round, n.index)]
+        parent = by_node[(n.feeds[0], n.feeds[1])]
+        child.feeds_match_id, child.feeds_slot = parent.id, n.feeds[2]
+        if child.is_bye:
+            setattr(parent, _slot_column(n.feeds[2]), child.team_a_participant_id)
+    # A bye can put both teams of a later match in place at the cut.
+    playable = [n.round for n in nodes
+                if not by_node[(n.round, n.index)].is_bye
+                and by_node[(n.round, n.index)].team_a_participant_id is not None
+                and by_node[(n.round, n.index)].team_b_participant_id is not None]
+    tournament.current_round = first_round_number + max(playable, default=0)
+    await session.flush()
+    return round_rows
+
+
+def _slot_column(slot):
+    return "team_a_participant_id" if slot == "a" else "team_b_participant_id"
+
+
+def _decided_winner(match, a_wins, b_wins):
+    """The participant id that wins `match` on this score, or None for a draw."""
+    if a_wins == b_wins:
+        return None
+    return match.team_a_participant_id if a_wins > b_wins else match.team_b_participant_id
+
+
+def _refuse_flip_in_closed_event(tournament, old_winner, new_winner):
+    """A completed tournament has been announced and, on a money event, paid
+    out from its bracket: only the score may follow a draft that finishes after
+    the close, never the winner."""
+    if (tournament.status != "completed" or old_winner is None
+            or new_winner != old_winner):
+        raise ValueError(
+            f"'{tournament.name}' is {tournament.status} — a finished "
+            "tournament's playoff results are final."
+        )
+
+
+def _stored_winner(match):
+    """The winner of a match's recorded result, or None if undecided or drawn."""
+    if match.team_a_wins is None:
+        return None
+    return _decided_winner(match, match.team_a_wins, match.team_b_wins)
+
+
+async def _advance_into_parent(session, match, new_winner):
+    """Move `match`'s winner into its parent's feeds_slot. The same team already
+    in either slot is a no-op; changing a filled slot is refused once the parent
+    has a room, a linked draft or a result."""
+    if match.feeds_match_id is None:
+        return
+    parent = await session.get(TournamentMatch, match.feeds_match_id)
+    slots = (parent.team_a_participant_id, parent.team_b_participant_id)
+    if new_winner is not None and new_winner in slots:
+        return
+    column = _slot_column(match.feeds_slot)
+    current = getattr(parent, column)
+    if current == new_winner:
+        return
+    if current is not None:
+        if parent.pairings_message_id is not None or parent.thread_id is not None:
+            raise ValueError(
+                f"#{parent.id} is already open with the previous winner — this "
+                f"result can change its score but not its winner.")
+        if parent.team_a_wins is not None:
+            raise ValueError(
+                f"#{parent.id} already has a result — this result can change "
+                f"its score but not its winner.")
+        linked = (await session.execute(
+            select(DraftSession.id).where(DraftSession.tournament_match_id == parent.id)
+            .limit(1))).first()
+        if linked is not None:
+            raise ValueError(
+                f"#{parent.id} has a linked draft — this result can change "
+                f"its score but not its winner.")
+    setattr(parent, column, new_winner)
+    if parent.team_a_participant_id is not None and parent.team_b_participant_id is not None:
+        parent_round = await session.get(TournamentRound, parent.round_id)
+        tournament = await session.get(Tournament, parent_round.tournament_id)
+        tournament.current_round = max(tournament.current_round, parent_round.round_number)
 
 
 def _winner_loser(match):
     """(winner_id, loser_id) for a decided playoff match; loser is None for a bye.
 
-    Raises ValueError on a draw -- single elimination has no drawn match, and
-    both the advancement and the payout order depend on this answer being the
-    same one. The two copies of this decision had already drifted: the
-    placement copy fell through to "team B won" on a draw, so /tournament
-    finish could complete a tournament -- and pay it out -- on a team nobody
-    beat.
+    Advancement uses _decided_winner; get_final_placement skips drawn matches
+    before calling this, so the raise on a draw is a defensive assertion that
+    keeps a level score from ever falling through to "team B won".
     """
     if match.is_bye:
         return match.team_a_participant_id, None
@@ -738,23 +929,6 @@ def _winner_loser(match):
     if match.team_a_wins > match.team_b_wins:
         return match.team_a_participant_id, match.team_b_participant_id
     return match.team_b_participant_id, match.team_a_participant_id
-
-
-async def _advance_playoff(session, tournament, last_round):
-    """Pair the winners of `last_round` into the next bracket round, or
-    complete the tournament when the final has been decided.
-
-    `last_round` is the round advance_round already fetched and checked for
-    unreported matches -- the same object, so this does not re-check it and
-    cannot disagree with it.
-    """
-    winners = [_winner_loser(m)[0] for m in await _round_matches(session, last_round.id)]
-    if len(winners) == 1:
-        tournament.status = "completed"
-        await session.flush()
-        return None
-    return await _create_playoff_round(
-        session, tournament, last_round.round_number + 1, advance_pairs(winners))
 
 
 async def start_tournament(session, tournament_id, rng):
@@ -910,6 +1084,20 @@ async def finish_tournament(session, tournament_id):
         raise ValueError("Tournament not found.")
     if tournament.status != "active":
         raise ValueError(f"'{tournament.name}' is not active.")
+    # A drawn bracket match advances nobody and placement skips it, so finishing
+    # now would crown (and pay) whoever seeds higher -- and a completed
+    # tournament can no longer be corrected.
+    drawn = (await session.execute(
+        _playable_bracket_stmt(tournament_id, TournamentMatch.id)
+        .where(TournamentMatch.team_a_wins.isnot(None),
+               TournamentMatch.team_a_wins == TournamentMatch.team_b_wins)
+        .order_by(TournamentMatch.id))).scalars().all()
+    if drawn:
+        tags = ", ".join(f"#{mid}" for mid in drawn)
+        raise ValueError(
+            f"{tags} {'is' if len(drawn) == 1 else 'are'} drawn — settle "
+            f"{'it' if len(drawn) == 1 else 'them'} with /tournament set_result "
+            f"before finishing.")
     tournament.status = "completed"
     await session.flush()
     placement = [p for p in await get_final_placement(session, tournament_id)
@@ -918,11 +1106,19 @@ async def finish_tournament(session, tournament_id):
 
 
 async def set_result(session, match_id, team_a_wins, team_b_wins):
-    """Record or correct a match result (admin override path).
+    """Record or correct a match result (admin override path); returns the match.
 
     Correction-safe: if the match already has a result, the old stats are
     reverted before the new ones are applied.
     """
+    match, _completed_now = await record_result(session, match_id, team_a_wins, team_b_wins)
+    return match
+
+
+async def record_result(session, match_id, team_a_wins, team_b_wins):
+    """set_result, also reporting whether THIS call completed the tournament
+    (the decided final of an active bracket) -- the one call that should
+    announce the champion."""
     if team_a_wins < 0 or team_b_wins < 0:
         raise ValueError("Game wins cannot be negative.")
     match = await session.get(TournamentMatch, match_id)
@@ -930,6 +1126,7 @@ async def set_result(session, match_id, team_a_wins, team_b_wins):
         raise ValueError("Match not found.")
     round_ = await session.get(TournamentRound, match.round_id)
     playoff_round = is_playoff(round_)
+    completed_now = False
     if match.is_bye:
         # A swiss bye is a RESULT (points awarded); a bracket bye is the
         # absence of a match. Neither can be reported, but saying "scored
@@ -948,21 +1145,39 @@ async def set_result(session, match_id, team_a_wins, team_b_wins):
         # closed event. The later-round guard below cannot catch it: the final
         # has no later round.
         tournament = await session.get(Tournament, round_.tournament_id)
-        if tournament is not None and tournament.status != "active":
-            raise ValueError(
-                f"'{tournament.name}' is {tournament.status} — a finished "
-                "tournament's playoff results are final."
-            )
-        # A bracket round closes the moment the next one is paired: its winners
-        # are already playing on. Rewriting it would recompute placement from a
-        # contradictory bracket — the round-1 loser could end up "champion", and
-        # a team that lost twice could be paid two prize slots.
-        latest = (await _playoff_rounds(session, round_.tournament_id))[-1]
-        if latest.id != round_.id:
-            raise ValueError(
-                f"Playoff round {round_.round_number} is already decided; its "
-                "result cannot be changed once a later bracket round exists."
-            )
+        # Lock the tournament first: the copies read so far may be stale.
+        # rowcount 0 means it is no longer active.
+        locked = await session.execute(
+            update(Tournament)
+            .where(Tournament.id == round_.tournament_id, Tournament.status == "active")
+            .values(status=Tournament.status)
+            .execution_options(synchronize_session=False))
+        still_active = locked.rowcount == 1
+        if tournament is not None:
+            await session.refresh(tournament)
+        await session.refresh(match)
+        if match.feeds_match_id is not None:
+            await session.refresh(await session.get(TournamentMatch, match.feeds_match_id))
+        if match.team_a_participant_id is None or match.team_b_participant_id is None:
+            raise ValueError(f"#{match.id} is still waiting for its teams — "
+                             "report the matches that feed it first.")
+        old_winner = _stored_winner(match)
+        new_winner = _decided_winner(match, team_a_wins, team_b_wins)
+        if tournament is not None and not still_active:
+            _refuse_flip_in_closed_event(tournament, old_winner, new_winner)
+        else:
+            if (tournament is not None and match.feeds_match_id is None
+                    and new_winner is not None):
+                # The final is decided. Conditional on still being active, so
+                # of any two completions racing, exactly one sees rowcount 1.
+                done = await session.execute(
+                    update(Tournament)
+                    .where(Tournament.id == tournament.id, Tournament.status == "active")
+                    .values(status="completed")
+                    .execution_options(synchronize_session=False))
+                completed_now = done.rowcount == 1
+                await session.refresh(tournament)
+            await _advance_into_parent(session, match, new_winner)
 
     if round_ is not None and not playoff_round:
         # Match ids span the server, so a swiss result can be aimed at a finished
@@ -991,7 +1206,7 @@ async def set_result(session, match_id, team_a_wins, team_b_wins):
     match.team_a_wins = team_a_wins
     match.team_b_wins = team_b_wins
     await session.flush()
-    return match
+    return match, completed_now
 
 
 async def record_linked_result(tournament_match_id, team_a_wins, team_b_wins):
@@ -1017,7 +1232,8 @@ async def sync_linked_result(tournament_match_id, team_a_wins, team_b_wins):
     past its clinch ends up holding the true score, without re-posting the
     standings for the reports that changed nothing.
 
-    Returns the match when it wrote, or None when the score already matched.
+    Returns (match, completed_now) when it wrote, or None when the score already
+    matched; completed_now is True only for the write that completed the tournament.
     """
     async with db_session() as session:
         match = await session.get(TournamentMatch, tournament_match_id)
@@ -1035,8 +1251,62 @@ async def sync_linked_result(tournament_match_id, team_a_wins, team_b_wins):
         tournament = (await session.get(Tournament, tournament_id)
                       if tournament_id is not None else None)
         if tournament is not None and tournament.status != "active":
-            return None
-        return await set_result(session, tournament_match_id, team_a_wins, team_b_wins)
+            # A bracket match's score still follows its draft after the close
+            # as long as its winner holds; anything else is a closed event.
+            round_ = await session.get(TournamentRound, match.round_id)
+            stored = _stored_winner(match)
+            same_winner = (stored is not None
+                           and stored == _decided_winner(match, team_a_wins, team_b_wins))
+            if not (is_playoff(round_) and tournament.status == "completed" and same_winner):
+                return None
+        return await record_result(session, tournament_match_id, team_a_wins, team_b_wins)
+
+
+def _playable_bracket_stmt(tournament_id, *columns):
+    """Select over a tournament's non-bye bracket matches with both teams set."""
+    return (select(*columns)
+            .join(TournamentRound, TournamentMatch.round_id == TournamentRound.id)
+            .where(TournamentRound.tournament_id == tournament_id,
+                   TournamentRound.stage.in_(BRACKET_STAGES),
+                   TournamentMatch.is_bye.is_(False),
+                   TournamentMatch.team_a_participant_id.is_not(None),
+                   TournamentMatch.team_b_participant_id.is_not(None)))
+
+
+async def ready_bracket_matches(session, tournament_id):
+    """Bracket matches that can be played and have not been posted yet, as
+    (match_id, team_a_name, team_b_name, stage_name), in match-id order."""
+    # The formatter imports this module, so it cannot be imported at the top.
+    from services.tournament_formatter import round_name
+    rows = (await session.execute(
+        _playable_bracket_stmt(tournament_id, TournamentMatch, TournamentRound)
+        .where(TournamentMatch.team_a_wins.is_(None),
+               TournamentMatch.pairings_message_id.is_(None))
+        .order_by(TournamentMatch.id))).all()
+    tournament = await session.get(Tournament, tournament_id)
+    if tournament is None or tournament.status != "active":
+        return []         # no rooms in a closed event
+    out = []
+    for match, round_ in rows:
+        stage = await round_name(session, round_, tournament.total_rounds)
+        part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
+        part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
+        out.append((match.id, part_a.team_name, part_b.team_name, stage))
+    return out
+
+
+async def roomless_posted_bracket_matches(session, tournament_id):
+    """Ids of playable bracket matches whose pairing line is posted but whose
+    room never opened, in match-id order."""
+    tournament = await session.get(Tournament, tournament_id)
+    if tournament is None or tournament.status != "active":
+        return []
+    return list((await session.execute(
+        _playable_bracket_stmt(tournament_id, TournamentMatch.id)
+        .where(TournamentMatch.team_a_wins.is_(None),
+               TournamentMatch.pairings_message_id.is_not(None),
+               TournamentMatch.thread_id.is_(None))
+        .order_by(TournamentMatch.id))).scalars().all())
 
 
 async def get_tournament_id_for_match(session, match_id):
@@ -1072,7 +1342,7 @@ async def _round_matches(session, round_id):
     """A round's matches, in creation order.
 
     The order is load-bearing in the bracket -- creation order IS bracket order,
-    which is the invariant advance_pairs rests on -- and free for the swiss
+    which is the invariant bracket_tree rests on -- and free for the swiss
     callers, which only ask which matches are unreported.
     """
     stmt = (
@@ -1191,6 +1461,11 @@ async def advance_round(session, tournament_id, rng):
             f"Round {tournament.current_round} has no round row — "
             f"'{tournament.name}' cannot be advanced."
         )
+    if is_playoff(round_):
+        raise ValueError(
+            "The bracket advances on its own as results come in — "
+            "/tournament next_round reopens any room that is missing."
+        )
     matches = await _round_matches(session, round_.id)
     unreported = [m for m in matches if not m.is_bye and m.team_a_wins is None]
     if unreported:
@@ -1198,9 +1473,6 @@ async def advance_round(session, tournament_id, rng):
             f"{len(unreported)} match(es) in round {tournament.current_round} "
             "still need results."
         )
-
-    if is_playoff(round_):
-        return await _advance_playoff(session, tournament, round_)
 
     if tournament.current_round >= tournament.total_rounds:
         if tournament.cut_to:
@@ -1283,13 +1555,11 @@ async def get_final_placement(session, tournament_id):
     tournament with no cut behaves exactly as it always has, and callers
     (payout, the champion announcement) never learn what a bracket is.
 
-    A round counts as played only when every one of its non-bye matches has
-    a result. `/tournament finish` can end a tournament with the bracket
-    mid-stream, so we stop at the first incomplete round rather than skip
-    past individual unreported matches within it — a later round's results
-    cannot be trusted once an earlier one is incomplete, and `final_placement`
-    ranks any team that never lost in the rounds given above every eliminated
+    Every decided match counts, even in a round still waiting on others:
+    `/tournament finish` can end a tournament with the bracket mid-stream, and
+    `final_placement` ranks any team that never lost above every eliminated
     team, so a live team is never mistaken for one that missed the cut.
+    Draws and undecided matches advance nobody and count for nothing.
     """
     standings = await get_standings_data(session, tournament_id)
     rounds = await _playoff_rounds(session, tournament_id)
@@ -1298,15 +1568,28 @@ async def get_final_placement(session, tournament_id):
 
     by_id = {p.id: p for p in standings}
     seeds = {p.id: p.seed for p in standings if p.seed is not None}
+    # Rounds finish unevenly, so every decided match counts, whatever else its
+    # round is still waiting on. A later match only has teams once its feeders
+    # are decided, so a later result can always be trusted.
     results = []
     for round_ in rounds:
-        matches = await _round_matches(session, round_.id)
-        playable = [m for m in matches if not m.is_bye]
-        if any(m.team_a_wins is None for m in playable):
-            break
-        pairs = [_winner_loser(m) for m in matches]
+        pairs = []
+        for m in await _round_matches(session, round_.id):
+            if m.is_bye:
+                pairs.append((m.team_a_participant_id, None))
+            elif (m.team_a_wins is not None and m.team_a_participant_id is not None
+                  and m.team_b_participant_id is not None
+                  and m.team_a_wins != m.team_b_wins):
+                pairs.append(_winner_loser(m))
         if pairs:
             results.append(pairs)
+    # Seeded teams with no decided match yet are still alive: they rank with
+    # the never-beaten, above everyone eliminated (final_placement orders
+    # never-lost teams by seed).
+    placed = {pid for rnd in results for pair in rnd for pid in pair if pid is not None}
+    waiting = [(pid, None) for pid in seeds if pid not in placed]
+    if waiting:
+        results.insert(0, waiting)
 
     ordered = [by_id[pid] for pid in final_placement(results, seeds) if pid in by_id]
     ranked_ids = {p.id for p in ordered}
