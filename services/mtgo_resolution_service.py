@@ -23,11 +23,11 @@ background task within Discord's interaction window.
 import asyncio
 import uuid
 from collections.abc import Callable, Iterable
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 
 from database.db_session import db_session
 from database.retry import with_db_retry
@@ -35,7 +35,8 @@ from models.mtgo_job import MtgoJob
 from models.wallet_tx import WalletTx
 from models.debt_ledger import DebtLedger
 from helpers.money_gate import serve_busy_reason, spawn_followup
-from services.mtgo_tradebot_client import get_client, max_cards_per_trade
+from services.mtgo_tradebot_client import (JobListUnavailable, ORDER_TIMEOUT_S, get_client,
+                                           max_cards_per_trade)
 from services import wallet_service
 from services import debt_service
 # Module scope, unlike the notifier below: preference_service reaches only config,
@@ -92,31 +93,169 @@ async def _record_job(job_id: str, kind: str, guild_id: str, player_id: str, mtg
     await with_db_retry(_do)
 
 
-async def _resolve_job(job_id: str, status: str):
+# The recoverable middle of a settlement: claimed for this outcome, money not yet
+# confirmed booked. Fits the 16-char status column.
+_SETTLING = "settle-"
+
+
+async def _move_status(job_id: str, frm: str, to: str) -> bool:
+    """Atomically move a job from one status to another. True only for the caller that did it."""
     async def _do():
         async with db_session() as session:
-            job = await session.get(MtgoJob, job_id)
-            if job is not None and job.status == "pending":
-                job.status = status
-                job.resolved_at = datetime.now()
-    await with_db_retry(_do)
+            res = await session.execute(
+                update(MtgoJob)
+                .where(MtgoJob.job_id == job_id, MtgoJob.status == frm)
+                .values(status=to, resolved_at=datetime.now()))
+            return res.rowcount == 1
+    return await with_db_retry(_do)
+
+
+async def _settle(job_id: str, status: str, book: "Callable[[], Any] | None" = None) -> bool:
+    """Claim the job, book, then mark it final. False if another poller already claimed it.
+
+    Settlement claims FIRST and moves money only if it won: a command's poller and the
+    watchdog's resumed poller can both reach a terminal state for one job, and if they
+    read different replies (failed, then done) each used to book its own -- a refund AND
+    a debit, or money moved under a row still marked held.
+
+    The claim is to 'settle-<status>', not straight to the final status, so a process that
+    dies between claim and booking leaves a row that says so: _finish_settlements re-runs
+    the booking (every booking is idempotent by its key) instead of the job reading as
+    settled with nothing booked."""
+    middle = f"{_SETTLING}{status}" if book is not None else status
+    if not await _move_status(job_id, "pending", middle):
+        return False
+    if book is not None:
+        # No rollback if the booking raises: it may already have committed (a refund's
+        # transfer lands before its inflow sweep runs), and putting the job back to
+        # pending would let a later "done" book a debit on top. It stays claimed for
+        # this outcome, and _finish_settlements completes it -- every booking is
+        # idempotent, so whatever already landed is not repeated.
+        await book()
+        await _move_status(job_id, middle, status)
+    return True
+
+
+async def _settled_elsewhere(job_id: str) -> dict[str, Any]:
+    """What a poller that lost the claim reports: whatever the winner decided (or is
+    finishing booking -- a settle-* row is that outcome, already claimed)."""
+    async with db_session() as session:
+        row = await session.get(MtgoJob, job_id)
+    status = row.status if row else None
+    if status and status.startswith(_SETTLING):
+        # Claimed, booking not yet confirmed -- and a booking that raises puts the job
+        # back to pending. Report it as still open until the final status lands.
+        return {"ok": False, "outcome": "pending"}
+    if status == "done":
+        return {"ok": True, "outcome": "done",
+                "credited": row.amount if row and row.kind == "deposit" else 0}
+    if status == REVIEW:
+        return {"ok": False, "outcome": REVIEW, "review": True,
+                "error": "the trade didn't confirm cleanly -- an admin is checking it"}
+    if status == "failed":
+        return {"ok": False, "outcome": "failed", "error": "trade failed"}
+    # pending (the winner's booking raised and put it back) or unknown: not an answer yet.
+    return {"ok": False, "outcome": "pending"}
+
+
+# A job the house can't settle safely on its own: the money stays where it is (a
+# withdraw's tix stay committed to in-flight, a deposit stays uncredited) and the row
+# leaves 'pending' so no poller acts on it again. An admin resolves it against the
+# serve's ledger and vault.
+REVIEW = "review"
+
+
+async def _hold_for_review(job_id: str, why: str, player_msg: str) -> dict[str, Any]:
+    """Hold a job and return the result its caller reports."""
+    if not await _settle(job_id, REVIEW):
+        return await _settled_elsewhere(job_id)
+    logger.error(f"MTGO job {job_id} HELD FOR REVIEW -- {why}")
+    return {"ok": False, "outcome": REVIEW, "review": True, "error": player_msg}
+
+
+async def _hold_lost_post(kind: str, guild_id: str, player_id: str, mtgo_user: str,
+                          n: int, why: str, player_msg: str) -> dict[str, Any]:
+    """A POST whose outcome is unknown and whose job we couldn't look for: a trade may
+    exist. A placeholder row keeps it findable, since no real job id ever came back."""
+    placeholder = f"lost-{uuid.uuid4().hex}"[:64]
+    await _record_job(placeholder, kind, guild_id, player_id, mtgo_user, n)
+    return await _hold_for_review(placeholder, why, player_msg)
+
+
+async def _known_job_ids(mtgo_user: str) -> "set[str]":
+    """Every job already booked for this MTGO user. Adoption matches on type, user and
+    amount over minutes, so without this an ambiguous POST that created nothing could
+    adopt an EARLIER, already-booked trade -- and idempotent booking would then quietly
+    book nothing for the new one."""
+    # Case-insensitive, as adoption's own user match is.
+    async with db_session() as session:
+        rows = await session.execute(select(MtgoJob.job_id).where(
+            func.lower(MtgoJob.mtgo_user) == mtgo_user.lower()))
+    return {r[0] for r in rows.all()}
+
+
+# How long after a lost POST a job it created can still be adopted. The POST itself may
+# take ORDER_TIMEOUT_S before it gives up, so a job created at its start is already that
+# old when we look; a shorter window would refund a trade that is still live.
+_ADOPT_WINDOW_S = ORDER_TIMEOUT_S + 120
+
+
+def _post_stamp() -> datetime:
+    """When a job-creating POST is about to go out, in the serve's terms (UTC), less a
+    few seconds of slack for the two clocks."""
+    from datetime import timezone
+    return datetime.now(timezone.utc) - timedelta(seconds=5)
+
+
+def _ambiguous(resp: dict[str, Any] | None) -> bool:
+    """The client's flag for a POST that may have reached the serve with only the
+    reply lost -- the one case where "no job" can't be taken as "no trade"."""
+    return bool(resp and resp.get("_ambiguous"))
+
+
+async def _adopt_or_none(resp: dict[str, Any] | None, job_type: str, mtgo_user: str, n: int,
+                         exclude_ids: "Iterable[str]", sent_at: datetime) -> dict[str, Any] | None:
+    """The lost POST's job if it can be found, else None. Whether None is then safe to
+    act on is the caller's question: only a definite rejection (not ambiguous) is.
+
+    ``sent_at`` is when THIS post went out: a job created before it is an earlier trade,
+    however well it matches. A serve clock running behind ours can hide the right job,
+    which then holds for review -- never adopts the wrong one."""
+    try:
+        job = await _recover_lost_job(resp, job_type, mtgo_user, n, exclude_ids=exclude_ids,
+                                      not_before=sent_at)
+    except JobListUnavailable:
+        return None
+    if job:
+        logger.warning(f"adopted {job_type} job {job.get('id')} after a lost POST response")
+    return job if job and job.get("id") else None
 
 
 async def _recover_lost_job(resp: dict[str, Any] | None, job_type: str,
                             mtgo_user: str, n: int,
-                            exclude_ids: "Iterable[str]" = ()) -> dict[str, Any] | None:
+                            exclude_ids: "Iterable[str]" = (),
+                            not_before: "datetime | None" = None) -> dict[str, Any] | None:
     """Recovery for a failed job POST. Runs the /jobs adoption scan ONLY when the client
     flagged the failure as ambiguous (delivered-but-response-lost is possible); a definite
     rejection or never-connected error returns None immediately — no job can exist, and
-    the caller may fail fast. One retry covers a brief flap."""
+    the caller may fail fast. One retry covers a brief flap.
+
+    Raises JobListUnavailable when it could not LOOK -- a read of the serve's job
+    list that failed is not a list without the job, and treating it as one refunded
+    withdraws whose trade was still live."""
     if not (resp and resp.get("_ambiguous")):
         return None
     client = get_client()
-    job = await client.find_recent_job(job_type, mtgo_user, n, exclude_ids=exclude_ids)
-    if job is None:
-        await asyncio.sleep(2)
-        job = await client.find_recent_job(job_type, mtgo_user, n, exclude_ids=exclude_ids)
-    return job
+    excluded = set(exclude_ids or ()) | await _known_job_ids(mtgo_user)
+    for attempt in range(2):
+        if attempt:
+            await asyncio.sleep(2)
+        job = await client.find_recent_job(job_type, mtgo_user, n, max_age_s=_ADOPT_WINDOW_S,
+                                           exclude_ids=excluded, strict=True,
+                                           not_before=not_before)
+        if job is not None:
+            return job
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -176,14 +315,17 @@ async def _run_order(start: "Callable[..., Any]", finish: "Callable[..., Any]",
     stopped on a trade that is still OPEN rather than one that failed, which
     the caller must keep apart: the watchdog will settle a pending trade, so
     telling the player to send that part again would have them send it twice.
+    ``review`` says it stopped on a chunk held for an admin, and ``open`` is then
+    that chunk's size: neither moved nor back in the wallet, so the caller must
+    not describe it as either.
     """
     if trade_count(n) > MAX_TRADES_PER_ORDER:
         return {"moved": 0, "jobs": [],
                 "error": (f"That would take {trade_count(n)} separate MTGO trades. "
                           f"The most one command runs is {MAX_TRADES_PER_ORDER} "
                           f"-- split it across a few commands."),
-                "busy": False, "pending": False, "open": 0}
-    moved, error, busy, pending, open_part = 0, None, False, False, 0
+                "busy": False, "pending": False, "review": False, "open": 0}
+    moved, error, busy, pending, review, open_part = 0, None, False, False, False, 0
     jobs: "list[str]" = []
     for part in chunk_amounts(n, max_cards_per_trade()):
         started = await start(guild_id, player_id, mtgo_user, part,
@@ -191,21 +333,24 @@ async def _run_order(start: "Callable[..., Any]", finish: "Callable[..., Any]",
                               exclude_ids=jobs)
         if not started.get("ok"):
             error, busy = started.get("error"), bool(started.get("busy"))
+            review = bool(started.get("review"))
+            open_part = part if review else 0
             break
         jobs.append(started["job_id"])
         res = await finish(started["job_id"], guild_id, player_id, part, mtgo_user)
         if not res.get("ok"):
             pending = res.get("outcome") == "pending"
+            review = res.get("outcome") == REVIEW
             # The chunk that is still open, so the caller can say how much is
             # really in that trade. Only ONE chunk is ever open -- the run
             # stops here -- and saying "the rest" counts undispatched chunks
             # the player still has to ask for.
-            open_part = part if pending else 0
+            open_part = part if (pending or review) else 0
             error = res.get("error") or res.get("outcome")
             break
         moved += part
     return {"moved": moved, "jobs": jobs, "error": error,
-            "busy": busy, "pending": pending, "open": open_part}
+            "busy": busy, "pending": pending, "review": review, "open": open_part}
 
 
 async def run_deposit_order(guild_id: str, player_id: str, mtgo_user: str, n: int, *,
@@ -256,16 +401,24 @@ async def start_deposit(guild_id: str, player_id: str, mtgo_user: str, n: int, *
     busy = await serve_busy_reason()   # one trade at a time; don't queue behind another
     if busy:
         return {"ok": False, "error": busy, "busy": True}
+    sent_at = _post_stamp()
     resp = await client.deposit_tix(mtgo_user, n, commit=commit, wait_minutes=wait_minutes)
     if not resp or not resp.get("id"):
         # If the POST may have reached the serve with only the response lost, the trade
         # can still fire — adopt the job rather than orphan it. Definite failures skip
         # the scan and fail fast.
-        resp = await _recover_lost_job(resp, "deposit", mtgo_user, n,
-                                       exclude_ids=exclude_ids)
-        if not resp or not resp.get("id"):
+        adopted = await _adopt_or_none(resp, "deposit", mtgo_user, n, exclude_ids, sent_at)
+        if adopted is None and _ambiguous(resp):
+            # Nothing is committed for a deposit, but the POST may still create a trade
+            # that moves tix with no job to credit them. Held, so it can be reconciled.
+            return await _hold_lost_post(
+                "deposit", guild_id, player_id, mtgo_user, n,
+                f"deposit POST outcome unknown and no job found for it ({mtgo_user}, {n} tix)",
+                "couldn't confirm whether the deposit was queued -- if a trade invite arrives, "
+                "decline it and ask an admin")
+        if adopted is None:
             return {"ok": False, "error": "serve did not accept the deposit (unreachable or rejected)"}
-        logger.warning(f"start_deposit: adopted job {resp['id']} after lost POST response")
+        resp = adopted
     await _record_job(resp["id"], "deposit", guild_id, player_id, mtgo_user, n)
     return {"ok": True, "job_id": resp["id"]}
 
@@ -275,13 +428,26 @@ async def finish_deposit(job_id: str, guild_id: str, player_id: str, n: int, mtg
     """Poll the deposit job; on 'done' credit the wallet (idempotent by job_id)."""
     outcome, job = await _poll_job(job_id, timeout_s)
     if outcome == "done":
-        await wallet_service.credit_done(
-            guild_id, player_id, n,
-            job_id=job_id, counterparty_id=mtgo_user, source="serve", notes=f"deposit {n} tix")
-        await _resolve_job(job_id, "done")
+        async def credit():
+            await wallet_service.credit_done(
+                guild_id, player_id, n,
+                job_id=job_id, counterparty_id=mtgo_user, source="serve", notes=f"deposit {n} tix")
+        if not await _settle(job_id, "done", credit):
+            return await _settled_elsewhere(job_id)
         return {"ok": True, "outcome": "done", "credited": n}
     if outcome == "failed":
-        await _resolve_job(job_id, "failed")
+        if job.get("refundable") is not True:
+            # Final only with the serve's proof that nothing arrived (the same `refundable`
+            # proof a withdraw needs). Without it -- an unverified outcome, or a serve that
+            # doesn't say -- the tix may have come: hold it for an admin rather than tell
+            # the player it simply failed, and have them send the tix again.
+            return await _hold_for_review(
+                job_id, f"deposit of {n} tix could not be verified against the vault: "
+                        f"{job.get('detail')}",
+                "the trade didn't confirm cleanly -- an admin will check whether your tix "
+                "arrived and credit them if they did")
+        if not await _settle(job_id, "failed"):
+            return await _settled_elsewhere(job_id)
         return {"ok": False, "outcome": "failed", "error": job.get("detail") or "trade failed"}
     return {"ok": False, "outcome": "pending"}
 
@@ -376,16 +542,26 @@ async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, 
     except ValueError as e:
         return {"ok": False, "error": str(e)}
 
+    sent_at = _post_stamp()
     resp = await client.withdraw_tix(mtgo_user, n, commit=commit, wait_minutes=wait_minutes)
     if not resp or not resp.get("id"):
-        resp = await _recover_lost_job(resp, "request", mtgo_user, n,
-                                       exclude_ids=exclude_ids)
-        if not resp or not resp.get("id"):
-            # Definite rejection, or an ambiguous failure whose job-list scan shows no
-            # job — either way no trade can have been opened; give the tix back.
+        adopted = await _adopt_or_none(resp, "request", mtgo_user, n, exclude_ids, sent_at)
+        if adopted is None and _ambiguous(resp):
+            # The POST may have created a trade -- possibly after we looked -- and nothing
+            # proves it didn't. A refund now pays twice if it did, so the tix stay
+            # committed, held for an admin.
+            return await _hold_lost_post(
+                "withdraw", guild_id, player_id, mtgo_user, n,
+                f"withdraw POST outcome unknown and no job found for it "
+                f"({mtgo_user}, {n} tix committed, commit wd:{commit_key})",
+                "couldn't confirm whether the withdraw was queued -- your tix are held "
+                "safely until an admin checks it")
+        if adopted is None:
+            # A DEFINITE rejection: the serve refused it or was never reached, so no trade
+            # can exist -- the one failure that is its own proof. Give the tix back.
             await _return_in_flight(guild_id, player_id, n, f"wd:{commit_key}")
             return {"ok": False, "error": "serve did not accept the withdraw (unreachable or rejected)"}
-        logger.warning(f"start_withdraw: adopted job {resp['id']} after lost POST response")
+        resp = adopted
     await _record_job(resp["id"], "withdraw", guild_id, player_id, mtgo_user, n)
     return {"ok": True, "job_id": resp["id"]}
 
@@ -399,15 +575,30 @@ async def finish_withdraw(job_id: str, guild_id: str, player_id: str, n: int,
     in-flight — the watchdog resolves it later."""
     outcome, job = await _poll_job(job_id, timeout_s)
     if outcome == "done":
-        await wallet_service.debit_done(
-            guild_id, wallet_service.SYSTEM_IN_FLIGHT, n, job_id=job_id,
-            counterparty_id=mtgo_user, notes=f"withdraw {n} tix delivered to {mtgo_user}")
-        await _resolve_job(job_id, "done")
+        async def debit():
+            await wallet_service.debit_done(
+                guild_id, wallet_service.SYSTEM_IN_FLIGHT, n, job_id=job_id,
+                counterparty_id=mtgo_user, notes=f"withdraw {n} tix delivered to {mtgo_user}")
+        if not await _settle(job_id, "done", debit):
+            return await _settled_elsewhere(job_id)
         return {"ok": True, "outcome": "done"}
     if outcome == "failed":
-        await _return_in_flight(guild_id, player_id, n, job_id)
-        await _resolve_job(job_id, "failed")
-        return {"ok": False, "outcome": "failed", "error": job.get("detail") or "trade failed"}
+        # REFUND ONLY WITH PROOF. The serve marks a failure refundable only when nothing can
+        # have moved: its final approve never went out, or its vault showed no change once
+        # the trade was over. 2026-10-03: a withdraw that had left the vault came back
+        # "failed", the refund paid the player twice. Without the proof the tix stay in
+        # in-flight -- where a refund can still happen once an admin checks the vault, but a
+        # double payment can't.
+        if job.get("refundable") is True:
+            if not await _settle(job_id, "failed",
+                                 lambda: _return_in_flight(guild_id, player_id, n, job_id)):
+                return await _settled_elsewhere(job_id)
+            return {"ok": False, "outcome": "failed", "error": job.get("detail") or "trade failed"}
+        return await _hold_for_review(
+            job_id, f"withdraw of {n} tix reported failed without proof nothing moved "
+                    f"(vault={job.get('vault')!r}): {job.get('detail')}",
+            "the trade didn't confirm cleanly -- your tix are held safely until an admin "
+            "checks whether they were delivered")
     return {"ok": False, "outcome": "pending"}
 
 
@@ -425,6 +616,7 @@ async def resume_pending_jobs() -> int:
     its ledger side when the job reaches a terminal state. Booking is idempotent
     (job_id unique index), so racing a still-live command poller is safe. Returns the
     number of jobs picked up."""
+    await _finish_settlements()
     async with db_session() as session:
         pending = (await session.execute(
             select(MtgoJob).where(MtgoJob.status == "pending"))).scalars().all()
@@ -454,6 +646,48 @@ async def resume_pending_jobs() -> int:
         spawn_followup(f"resume {job.kind} {job.job_id}", _resume(job))
     logger.info(f"resume_pending_jobs: picked up {len(pending)} unresolved MTGO job(s)")
     return len(pending)
+
+
+# Long enough that a live settler has finished; a booking is a couple of DB writes.
+_STALE_SETTLEMENT_S = 5 * 60
+
+
+async def _finish_settlements() -> int:
+    """Complete tix settlements a process died in the middle of: claimed for an outcome,
+    booking not confirmed. Re-running a booking is safe -- each is idempotent by its key
+    (job_id for the boundary rows, return:<job_id> for a refund) -- so a booking that DID
+    land is not repeated, and one that didn't is made."""
+    cutoff = datetime.now() - timedelta(seconds=_STALE_SETTLEMENT_S)
+    async with db_session() as session:
+        rows = (await session.execute(select(MtgoJob).where(
+            MtgoJob.status.like(f"{_SETTLING}%"),
+            MtgoJob.kind.in_(("deposit", "withdraw")),
+            MtgoJob.resolved_at < cutoff))).scalars().all()
+    done = 0
+    for job in rows:
+        target = job.status[len(_SETTLING):]
+        try:
+            if job.kind == "deposit" and target == "done":
+                await wallet_service.credit_done(
+                    job.guild_id, job.player_id, job.amount, job_id=job.job_id,
+                    counterparty_id=job.mtgo_user, source="serve", notes=f"deposit {job.amount} tix")
+            elif job.kind == "withdraw" and target == "done":
+                await wallet_service.debit_done(
+                    job.guild_id, wallet_service.SYSTEM_IN_FLIGHT, job.amount, job_id=job.job_id,
+                    counterparty_id=job.mtgo_user, notes=f"withdraw {job.amount} tix delivered to {job.mtgo_user}")
+            elif job.kind == "withdraw" and target == "failed":
+                await _return_in_flight(job.guild_id, job.player_id, job.amount, job.job_id)
+            if job.kind == "deposit" and target == "done":
+                # Entry before debts, as the live and resumed deposit paths do -- and
+                # BEFORE the row goes final, so a crash in between re-runs both (the
+                # credit is idempotent and the sweep draws only what is there).
+                await settle_deposit_inflow(job.guild_id, job.player_id)
+            await _move_status(job.job_id, job.status, target)
+            logger.warning(f"finished an interrupted settlement: {job.kind} {job.job_id} -> {target}")
+            done += 1
+        except Exception as e:
+            logger.error(f"could not finish settlement {job.job_id} ({job.status}): {e}")
+    return done
 
 
 async def pending_jobs_watchdog(bot: Any = None) -> None:

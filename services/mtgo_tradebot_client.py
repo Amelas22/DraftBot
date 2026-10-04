@@ -169,6 +169,12 @@ def _order_body(user: str, cards, qty: int, commit: bool,
     return body
 
 
+class JobListUnavailable(Exception):
+    """The serve's job list could not be read. NOT the same as "no such job": a
+    caller that refunds on "no job" must not refund on this, because the trade it
+    is looking for may be live."""
+
+
 class MtgoTradeBotClient:
     """Thin async wrapper over the serve API. All methods return the parsed JSON dict on success,
     or ``None`` on any failure / when disabled (they never raise to the caller)."""
@@ -342,6 +348,22 @@ class MtgoTradeBotClient:
                 text = await resp.text()
                 if resp.status == 404 and mark_missing:
                     return {"_missing": True}
+                if mark_ambiguous and (resp.status >= 500 or 200 <= resp.status < 300):
+                    # For a POST that creates a job, only a REFUSAL (4xx) proves no job
+                    # exists. A 5xx can come after the job was queued, and a 2xx means it
+                    # WAS accepted -- so either without a job id to follow is ambiguous,
+                    # never a definite failure the caller would unwind (refund) on.
+                    parsed = None
+                    if 200 <= resp.status < 300 and text:
+                        try:
+                            parsed = await resp.json()
+                        except Exception:
+                            parsed = None
+                    if isinstance(parsed, dict) and parsed.get("id"):
+                        return parsed
+                    logger.error(f"TradeBot {method} {path} -> HTTP {resp.status} without a job id; "
+                                 f"treating as ambiguous: {text[:200]}")
+                    return {"_ambiguous": True}
                 if resp.status < 200 or resp.status >= 300:
                     logger.warning(f"TradeBot {method} {path} -> HTTP {resp.status}: {text[:200]}")
                     return None
@@ -377,9 +399,12 @@ class MtgoTradeBotClient:
         return await self._call("GET", "/vault")
 
     async def _list_jobs(self) -> Optional[list]:
-        """The serve's job listing, newest first, or None if it can't be read."""
+        """The serve's job listing, newest first, or None if it can't be read --
+        including a reply that isn't a listing at all, which must not pass for an
+        empty one."""
         listing = await self._call("GET", "/jobs")
-        return None if not listing else listing.get("jobs", [])
+        jobs = listing.get("jobs") if isinstance(listing, dict) else None
+        return jobs if isinstance(jobs, list) else None
 
     async def active_jobs(self) -> Optional[list]:
         """Jobs the serve is actually working (queued or running). NOT derived from
@@ -396,7 +421,8 @@ class MtgoTradeBotClient:
     _JOB_ITEMS = {"deposit": "receive", "return": "receive"}
 
     async def _find_recent(self, job_type: str, mtgo_user: str, matches,
-                           max_age_s: float, exclude_ids: "Iterable[str]" = ()):
+                           max_age_s: float, exclude_ids: "Iterable[str]" = (),
+                           strict: bool = False, not_before: "Optional[datetime]" = None):
         """Newest non-failed job of this type and user, created within
         ``max_age_s``, whose items satisfy ``matches``. Or None.
 
@@ -414,11 +440,17 @@ class MtgoTradeBotClient:
         """
         excluded = set(exclude_ids or ())
         jobs = await self._list_jobs()
+        if jobs is None and strict:
+            # ``strict`` callers act on "no job" with money; an unreadable list is not that.
+            raise JobListUnavailable()
         if not jobs:
             return None
         now = datetime.now(timezone.utc)
         for job in jobs:  # serve lists newest first
-            if job.get("type") != job_type or job.get("state") == "failed":
+            # A failed job is skipped for adoption -- except by a strict caller, for whom
+            # "the trade failed" and "no trade exists" are different answers: a failed job
+            # may still have moved what it carried, and only its own proof says otherwise.
+            if job.get("type") != job_type or (job.get("state") == "failed" and not strict):
                 continue
             if job.get("id") in excluded:
                 continue
@@ -430,19 +462,28 @@ class MtgoTradeBotClient:
                 ts = datetime.fromisoformat(job.get("createdAt") or "")
                 if now - ts > timedelta(seconds=max_age_s):
                     continue
-            except ValueError:
-                pass  # unparseable timestamp: still adopt (better than stranding a live trade)
+                # A job created before THIS post was sent can't be its job -- however
+                # well type, user and amount match, it is an earlier trade.
+                if not_before is not None and ts < not_before:
+                    continue
+            except (ValueError, TypeError):
+                if strict:
+                    continue  # can't place it in time, so can't call it ours
+                # lenient callers: still adopt (better than stranding a live trade)
             return job
         return None
 
     async def find_recent_job(self, job_type: str, mtgo_user: str, qty: int,
-                              max_age_s: float = 120.0, exclude_ids: "Iterable[str]" = ()):
-        """Adopt a lost TIX job -- ``qty`` event tickets moving one way."""
+                              max_age_s: float = 120.0, exclude_ids: "Iterable[str]" = (),
+                              strict: bool = False, not_before: "Optional[datetime]" = None):
+        """Adopt a lost TIX job -- ``qty`` event tickets moving one way. With
+        ``strict``, an unreadable job list raises JobListUnavailable instead of
+        reading as "no job"."""
         def matches(items):
             return bool(items) and (items[0].get("name") == EVENT_TICKET
                                     and items[0].get("qty") == qty)
         return await self._find_recent(job_type, mtgo_user, matches, max_age_s,
-                                       exclude_ids)
+                                       exclude_ids, strict=strict, not_before=not_before)
 
     async def find_recent_deck_job(self, job_type: str, mtgo_user: str, cards,
                                    max_age_s: float = 120.0,

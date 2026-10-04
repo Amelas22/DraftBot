@@ -58,7 +58,7 @@ class MtgoJob(Base):
     # card and `amount` is the quantity. A card job needs no printing — the serve records
     # which printings crossed and pins them itself on the way back.
     card_name = Column(String(128), nullable=True)
-    status = Column(String(16), nullable=False, default='pending', index=True)  # pending | done | failed
+    status = Column(String(16), nullable=False, default='pending', index=True)  # pending | settle-done | settle-failed | done | failed | review
     created_at = Column(DateTime, default=datetime.now)
     resolved_at = Column(DateTime, nullable=True)
 

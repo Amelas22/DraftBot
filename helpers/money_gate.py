@@ -169,6 +169,11 @@ async def serve_busy_reason(client=None) -> str | None:
         return ("The MTGO custodian is reconnecting to the client. Try again in a few "
                 "minutes.")
     active = await client.active_jobs()
+    if active is None:
+        # Unreadable is not idle: dispatching behind a trade we can't see is how two
+        # trades end up open at once.
+        return ("The MTGO custodian's trade list can't be read right now. Try again in a "
+                "few minutes — nothing has been charged.")
     if active:
         return (f"The MTGO custodian is busy with {len(active)} other trade(s) — it can "
                 f"only trade with one person at a time. Try again in a few minutes.")

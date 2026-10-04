@@ -239,7 +239,7 @@ async def test_a_lost_post_does_not_adopt_the_previous_chunks_job(test_db, monke
             return {"id": "job-1"} if len(posts) == 1 else {"_ambiguous": True}
 
         async def find_recent_job(self, job_type, user, qty, max_age_s=120.0,
-                                  exclude_ids=()):
+                                  exclude_ids=(), strict=False, not_before=None):
             seen_exclusions.append(set(exclude_ids or ()))
             # The serve really does still list chunk 1: same type, user and qty.
             return None if "job-1" in (exclude_ids or ()) else {"id": "job-1"}

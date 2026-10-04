@@ -69,6 +69,17 @@ def _why(res: "dict") -> str:
     return reason if res.get("busy") else explain_trade_failure(reason)
 
 
+def _held_deposit_note(n: int, unsent: int = 0) -> str:
+    """A deposit chunk held for review. NOT "failed, send again": those tix may
+    have arrived, and asking for them again could have them sent twice. What came
+    after it was never sent, and does need asking for again."""
+    note = (f"⚠️ The trade for **{n}** tix didn't confirm cleanly — an admin will check "
+            f"whether they arrived and credit them if they did. Don't send them again.")
+    if unsent:
+        note += f" The remaining **{unsent}** were not sent; run the command again for them."
+    return note
+
+
 def _long_order_note(n: int) -> str:
     """Warn that a long order will not report back here.
 
@@ -184,7 +195,11 @@ class WalletCommands(commands.Cog):
                 await refresh_boards(
                     bot, set(completed) | set(await escrow.open_boards_for_captain(player_id)))
                 msg = f"✅ Deposit confirmed: **+{credited} tix**. Balance: **{bal} tix**."
-                if credited < amount and res.get("pending"):
+                if credited < amount and res.get("review"):
+                    # Held, not failed: those tix may have arrived. Asking for them
+                    # again could have the player send them twice.
+                    msg += "\n" + _held_deposit_note(res["open"], amount - credited - res["open"])
+                elif credited < amount and res.get("pending"):
                     # Only the OPEN chunk is in a trade; anything after it was
                     # never dispatched. Telling them to deposit the open part
                     # again would have them send those tix twice -- the
@@ -209,6 +224,8 @@ class WalletCommands(commands.Cog):
                 if drawn:
                     total = sum(d.get("amount", 0) for d in drawn)
                     msg += f" Auto-applied **{total} tix** to {len(drawn)} debt(s)."
+            elif res.get("review"):
+                msg = _held_deposit_note(res["open"], amount - res["open"])
             elif res.get("pending"):
                 msg = ("⏳ The trade is still open — accept it in MTGO and your tix "
                        "credit automatically.")
@@ -259,6 +276,19 @@ class WalletCommands(commands.Cog):
             bal = await wallet_service.get_balance(guild_id, player_id)
             if delivered == amount:
                 msg = f"✅ Withdraw confirmed: **−{delivered} tix**. Balance: **{bal} tix**."
+            elif res.get("review"):
+                # Held, not returned: the trade couldn't be confirmed either way, so
+                # those tix are neither delivered nor back in the wallet. Anything
+                # after the held chunk was never sent and never left the wallet.
+                held = res["open"]
+                unsent = amount - delivered - held
+                msg = ((f"✅ **{delivered}** tix delivered. " if delivered else "")
+                       + f"⚠️ **{held}** tix are held for an admin to check — the trade "
+                       f"didn't confirm cleanly. They're safe: you'll get them back, or "
+                       f"they'll be confirmed as delivered."
+                       + (f" The other **{unsent}** were not sent and are still in your "
+                          f"wallet." if unsent else "")
+                       + f" Balance: **{bal} tix**.")
             elif res.get("pending"):
                 # Those tix are committed to a trade that is still open. They
                 # are NOT back in the wallet, and must not be described as if
