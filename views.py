@@ -1962,6 +1962,25 @@ async def create_pairings_view(bot, guild, session_id, match_results, team_a=Non
     return view
 
 
+def match_result_view(bot, session_id, match_number, player1_name, player2_name):
+    """The result dropdown for one match, in a View, built the one way.
+
+    Three callers used to assemble this by hand -- the /report_results command,
+    the "Match N Results" button, and "Change result" -- so a change to the menu
+    had to be made three times and the two entry points had already drifted on
+    how they named the players.
+    """
+    view = View(timeout=None)
+    view.add_item(MatchResultSelect(
+        bot=bot,
+        match_number=match_number,
+        session_id=session_id,
+        player1_name=player1_name,
+        player2_name=player2_name,
+    ))
+    return view
+
+
 class MatchResultButton(Button):
     def __init__(self, bot, session_id, match_id, match_number, label, *args, **kwargs):
         super().__init__(label=label, *args, **kwargs)
@@ -1981,18 +2000,8 @@ class MatchResultButton(Button):
                 await interaction.followup.send("Error: Could not fetch match details.", ephemeral=True)
                 return
 
-            # Create a Select menu for reporting the result
-            match_result_select = MatchResultSelect(
-                match_number=self.match_number,
-                bot = self.bot,
-                session_id=self.session_id, 
-                player1_name=player1_name, 
-                player2_name=player2_name
-            )
-
-            # Create and send a new View containing the Select menu
-            view = View(timeout=None)
-            view.add_item(match_result_select)
+            view = match_result_view(self.bot, self.session_id, self.match_number,
+                                      player1_name, player2_name)
             await interaction.followup.send("Please select the match result:", view=view, ephemeral=True)
         except Exception as e:
             logger.exception(f"Error in match result button: {e}")
@@ -2079,14 +2088,11 @@ class ConfirmDecisiveResultView(View):
 
     @discord.ui.button(label="Change result", style=discord.ButtonStyle.secondary)
     async def change_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        view = View(timeout=None)
-        view.add_item(MatchResultSelect(
-            bot=self.select.bot,
-            match_number=self.select.match_number,
-            session_id=self.select.session_id,
-            player1_name=self.select.player1_name,
-            player2_name=self.select.player2_name,
-        ))
+        # The names are already resolved on the select we came from, so this
+        # re-wraps rather than re-reading them -- there is no second naming here.
+        view = match_result_view(
+            self.select.bot, self.select.session_id, self.select.match_number,
+            self.select.player1_name, self.select.player2_name)
         await interaction.response.edit_message(
             content="Nothing was recorded. Please select the match result:", view=view)
         self.stop()

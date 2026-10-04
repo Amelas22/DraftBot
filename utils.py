@@ -42,7 +42,8 @@ from services.crown_roles import update_crown_roles_for_guild
 # Module-level dict to track match streak extensions for ring bearer checks
 # {session_id: {player_id: {win_streak_increased: bool, perfect_streak_increased: bool}}}
 MATCH_STREAK_EXTENSIONS = {}
-from helpers.display_names import format_seating_order, get_display_name, get_display_name_by_id
+from helpers.display_names import (format_seating_order, get_display_name,
+                                   get_display_name_by_id, get_member_name_plain)
 from helpers.skill import (
     PRIOR_MU,
     PRIOR_SIGMA,
@@ -855,12 +856,18 @@ async def fetch_match_details(bot, session_id: str, match_number: int):
         print("Guild not found.")
         return "Unknown Player", "Unknown Player"
 
-    player1 = guild.get_member(int(match_result.player1_id))
-    player2 = guild.get_member(int(match_result.player2_id))
-    player1_name = player1.display_name if player1 else "Unknown Player"
-    player2_name = player2.display_name if player2 else "Unknown Player"
-
-    return player1_name, player2_name
+    # get_member_name_plain, which is what display_names.py prescribes for a
+    # dropdown. NOT get_display_name: Discord renders no markdown in a SelectOption
+    # label or a placeholder, so its escape_markdown() puts a literal backslash in
+    # front of any _ * ~ ` in a name, and its ring-bearer/crown icons arrive in a
+    # menu that is explicitly meant not to have them. /report_results used to do
+    # exactly that, so the same match was named two ways depending on whether you
+    # opened it from the command or from the Match N Results button.
+    #
+    # It also names a player who has left the guild ("User 123...") where this
+    # returned "Unknown Player" for both of them indistinguishably.
+    return (get_member_name_plain(guild, match_result.player1_id),
+            get_member_name_plain(guild, match_result.player2_id))
 
 
 async def update_draft_summary_message(bot, draft_session_id):

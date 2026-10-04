@@ -5,7 +5,8 @@ from modals import CubeDraftSelectionView, StakedCubeDraftSelectionView
 
 from database.db_session import db_session
 from session import DraftSession, MatchResult
-from views import MatchResultSelect
+from views import match_result_view
+from utils import fetch_match_details
 from config import is_money_server
 from preference_service import get_player_dm_notification_preference, update_player_dm_notification_preference
 from helpers.display_names import get_display_name
@@ -125,32 +126,26 @@ class DraftCommands(commands.Cog):
         await self._send_match_result_selector(ctx, match, draft_session.session_id)
 
     async def _send_match_result_selector(self, ctx, match, session_id):
-        """Create and send the match result selection UI."""
-        # Get player names
-        player1 = ctx.guild.get_member(int(match.player1_id))
-        player2 = ctx.guild.get_member(int(match.player2_id))
-        
-        if not player1 or not player2:
-            await ctx.followup.send("Could not find one or both players for this match.", ephemeral=True)
+        """Create and send the match result selection UI.
+
+        Names and dropdown both come from the shared helpers the "Match N Results"
+        button uses, so one match reads the same whichever way it was opened. This
+        used to resolve the two members itself and name them with get_display_name,
+        which decorates a name with ring-bearer/crown icons and escape_markdown --
+        neither of which a SelectOption renders, so the dropdown showed the icons
+        literally and a backslash before any _ * ~ ` in a player's name.
+
+        A player who has since left the guild is now named "User {id}" rather than
+        refusing the report outright: their opponent still needs to file it.
+        """
+        player1_name, player2_name = await fetch_match_details(
+            self.bot, session_id, match.match_number)
+        if not player1_name or not player2_name:
+            await ctx.followup.send("Could not find this match.", ephemeral=True)
             return
-            
-        player1_name = get_display_name(player1, ctx.guild)
-        player2_name = get_display_name(player2, ctx.guild)
-        
-        # Create the select menu
-        select_menu = MatchResultSelect(
-            bot=self.bot,
-            match_number=match.match_number,
-            session_id=session_id,
-            player1_name=player1_name,
-            player2_name=player2_name
-        )
-        
-        # Create a view and add the select menu
-        view = discord.ui.View()
-        view.add_item(select_menu)
-        
-        # Send the response with the select menu
+
+        view = match_result_view(self.bot, session_id, match.match_number,
+                                 player1_name, player2_name)
         await ctx.followup.send(
             f"Report result for Match {match.match_number}: {player1_name} vs {player2_name}",
             view=view,
