@@ -43,7 +43,7 @@ from services.card_library_inventory import cube_as_the_library_sees_it
 from services.card_lending_service import (
     active_loan,
     borrow_when_free,
-    deposit_shortfall,
+    hold_shortfall,
     library_busy_reason,
     poll_until_settled,
     trim_to_available,
@@ -70,7 +70,7 @@ _SETUP_MESSAGES = {
 
 # Two tables, not one, for everything else. The same status means opposite
 # things depending on which way the cards were going: a borrow that never
-# dispatched has a deposit to give back, a deposit that never dispatched has
+# dispatched has a hold to give back, a card deposit that never dispatched has
 # nothing to undo. Folding those together would have to pick one wording for
 # both, and the wrong half of every pair would then be telling the player
 # something untrue.
@@ -81,13 +81,13 @@ _LOAN_MESSAGES = {
     "already_borrowed": "📦 You already have your deck. Use `/library return` "
                         "when you're done with it.",
     "not_borrowed": "📭 You don't have a deck out from the library.",
-    "no_wallet": "💸 This library asks for a tix deposit, but the wallet isn't enabled "
+    "no_wallet": "💸 This library asks for a tix hold, but the wallet isn't enabled "
                  "on this server. Ask an admin to sort one or the other.",
     "still_busy": "🕑 The library is still busy after a long wait. Nothing has moved and "
                   "nothing has been charged — try again shortly.",
-    # Normally rendered by describe_deposit_shortfall, which has the real
+    # Normally rendered by describe_hold_shortfall, which has the real
     # figures. This is the fallback for when the wallet cannot be read.
-    "short_funds": "💰 You don't have enough tix to cover the deposit on this deck. "
+    "short_funds": "💰 You don't have enough tix to cover the hold on this deck. "
                    "Top up with `/wallet` and try again — nothing has been charged.",
     "short_cards": "📦 This library can no longer cover that offer. Run "
                    "`/library borrow` again to see what's available.",
@@ -100,13 +100,13 @@ _LOAN_MESSAGES = {
     "too_large": lambda: (f"📦 That deck is bigger than MTGO will move in one trade "
                           f"({max_cards_per_trade()} cards). Ask an admin — the "
                           f"library can't hand over a deck this size yet."),
-    "dispatch_failed": "⚠️ MTGO didn't accept the trade request. Your deposit is back "
+    "dispatch_failed": "⚠️ MTGO didn't accept the trade request. Your hold is back "
                        "— try again in a minute.",
     # Deliberately does NOT invite a retry: the request may have reached MTGO
     # and opened a real trade, and a second one would hand out a second deck.
     "dispatch_unknown": "⚠️ We lost contact with MTGO while setting up the trade, so we can't "
                         "tell whether it started. Check MTGO for a message from the library "
-                        "bot — if there isn't one, ask an admin to sort out your deposit.",
+                        "bot — if there isn't one, ask an admin to sort out your hold.",
 }
 
 
@@ -149,18 +149,18 @@ _NO_LIBRARY = ("📭 This server isn't set up to borrow from a card library. "
                "Ask whoever runs the library to point it here.")
 
 
-def describe_deposit_shortfall(figures: "dict[str, int]") -> str:
+def describe_hold_shortfall(figures: "dict[str, int]") -> str:
     """Why the borrow could not be paid for, in the numbers the player needs.
 
-    All of them: the deposit this deck carries, the week's pass where one is
+    All of them: the hold this deck carries, the week's pass where one is
     owed, what their wallet holds, and the difference. Without the gap a player
     cannot tell whether they are one tix short or ten, so the only way forward
     is to top up blind and retry until it works -- which is the same dead end
     /library borrow used to be when the library was short of cards.
 
     """
-    cost = f"a **{figures['deposit']} tix** deposit"
-    return (f"💰 Borrowing this deck needs {cost}, and your wallet holds "
+    cost = f"a **{figures['hold']} tix** hold"
+    return (f"💰 Borrowing this deck needs {cost}, and your wallet has "
             f"**{figures['have']}**. Add **{figures['short']}** more with "
             f"`/wallet` and run the command again — nothing has been charged.")
 
@@ -448,11 +448,11 @@ class LibraryCommands(commands.Cog):
             # raise -- and a raise here leaves the interaction deferred and
             # never answered, which Discord shows as "did not respond".
             try:
-                figures = await deposit_shortfall(ctx.guild_id, ctx.author.id)
-                said = (describe_deposit_shortfall(figures) if figures
+                figures = await hold_shortfall(ctx.guild_id, ctx.author.id)
+                said = (describe_hold_shortfall(figures) if figures
                         else _LOAN_MESSAGES[status])
             except Exception:
-                logger.exception("library: could not read the deposit figures for {}",
+                logger.exception("library: could not read the hold figures for {}",
                                  ctx.author.id)
                 said = _LOAN_MESSAGES[status]
             await ctx.followup.send(said, ephemeral=True)
@@ -564,7 +564,7 @@ class LibraryCommands(commands.Cog):
             else:
                 await ctx.followup.send(
                     f"❌ The trade didn't complete, so no cards moved — your deck is "
-                    f"**still reserved** and your deposit is back.\n\n{why}\n\n"
+                    f"**still reserved** and your hold is back.\n\n{why}\n\n"
                     f"Run `/library borrow` again when you're ready — it costs no more.",
                     ephemeral=True)
         # still running: the watchdog will settle it; saying nothing is correct

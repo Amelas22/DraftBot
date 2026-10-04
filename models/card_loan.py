@@ -36,7 +36,7 @@ from database.models_base import Base
 # time -- see the partial unique index below.
 # 'dispatch_unknown': a trade we cannot say happened or not -- the request
 # reached the serve and only the answer was lost, with no job to adopt. The
-# deposit stays held and a human unpicks it. It is ACTIVE on purpose: the
+# hold stays and a human unpicks it. It is ACTIVE on purpose: the
 # borrower's slot stays occupied, so they cannot take a second deck while a
 # first may be on its way to them, and a retry cannot pass the dispatcher's
 # "assigned" check and open a second trade against a live one.

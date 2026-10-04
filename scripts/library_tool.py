@@ -3,17 +3,17 @@
 
 Everything here is deliberately OUT of Discord. A server admin can rewrite
 `configs/<guild>.json` through the bot's own commands, so anything they could
-reach is a deposit they could lower, a cube they could make free, or a library
+reach is a hold they could lower, a cube they could make free, or a library
 they could repoint their server at.
 
     # a communal library for Cube Night, free, and the server that draws on it
     pipenv run python scripts/library_tool.py create cubenight "Cube Night" \
-        --kind communal --deposit 0
+        --kind communal --hold 0
     pipenv run python scripts/library_tool.py bind 1234567890 cubenight
 
-    # a rental library, 100 tix deposit and 2 tix a week
+    # a rental library, a 100 tix hold and 2 tix a week
     pipenv run python scripts/library_tool.py create lotuslounge "Lotus Lounge" \
-        --kind rental --deposit 100
+        --kind rental --hold 100
 
     pipenv run python scripts/library_tool.py list
     pipenv run python scripts/library_tool.py offer lotuslounge PowerLSV
@@ -39,24 +39,24 @@ import services.library_access_service as access                 # noqa: E402
 import services.library_service as libs                          # noqa: E402
 
 
-async def _create(library_id, name, kind, deposit, by, replace):
+async def _create(library_id, name, kind, hold, by, replace):
     async with AsyncSessionLocal() as s:
         row = await s.get(Library, library_id)
         if row is not None and not replace:
-            print(f"{library_id} already exists: {row.kind}, deposit={row.collateral_tix} "
+            print(f"{library_id} already exists: {row.kind}, hold={row.collateral_tix} "
                   )
             print("   Pass --replace to change its terms. Everything already "
                   "deposited stays\n       where it is; only what borrowing costs moves.")
             return
         if row is None:
             s.add(Library(id=library_id, name=name, kind=kind,
-                          collateral_tix=deposit, created_by=by))
-            print(f"{library_id}: created — {kind}, deposit={deposit}")
+                          collateral_tix=hold, created_by=by))
+            print(f"{library_id}: created — {kind}, hold={hold}")
         else:
-            was = f"{row.kind}, deposit={row.collateral_tix}"
-            row.kind, row.collateral_tix = kind, deposit
+            was = f"{row.kind}, hold={row.collateral_tix}"
+            row.kind, row.collateral_tix = kind, hold
             row.name = name
-            print(f"{library_id}: now {kind}, deposit={deposit} (was {was})")
+            print(f"{library_id}: now {kind}, hold={hold} (was {was})")
         await s.commit()
     if kind == "communal":
         print("   ⚠️  Communal means any member's deposit LISTS a cube here.")
@@ -76,7 +76,7 @@ async def _list():
         servers = [b.guild_id for b in bindings if b.library_id == lib.id]
         offered = sorted(c.cube_id for c in cubes if c.library_id == lib.id)
         members = await access.members(lib.id)
-        print(f"{lib.id}  ({lib.kind})  deposit={lib.collateral_tix}")
+        print(f"{lib.id}  ({lib.kind})  hold={lib.collateral_tix}")
         print(f"   servers: {', '.join(servers) or 'NONE — nobody can borrow'}")
         print(f"   cubes  : {', '.join(offered) or 'none'}")
         listed = (f"invite-only, {len(members)} member(s)" if members
@@ -180,7 +180,7 @@ def main():
     p.add_argument("library")
     p.add_argument("name")
     p.add_argument("--kind", choices=list(KINDS), default="rental")
-    p.add_argument("--deposit", type=int, default=0, help="refundable, in tix")
+    p.add_argument("--hold", type=int, default=0, help="refundable, in tix")
     p.add_argument("--replace", action="store_true", help="change existing terms")
     p.add_argument("--by", default=who)
 
@@ -217,7 +217,7 @@ def main():
     a = ap.parse_args()
     match a.cmd:
         case "create":
-            asyncio.run(_create(a.library, a.name, a.kind, a.deposit,
+            asyncio.run(_create(a.library, a.name, a.kind, a.hold,
                                 a.by, a.replace))
         case "list":
             asyncio.run(_list())

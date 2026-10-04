@@ -12,7 +12,7 @@ may borrow, which is the answer that lends nothing.
 
 In the database rather than `configs/<guild>.json` because guild config is
 writable by a server admin through the bot's own commands. A server able to
-repoint itself at a cheaper library would be able to set its own deposit,
+repoint itself at a cheaper library would be able to set its own hold,
 which is the one thing the shell-tool rule exists to prevent.
 """
 from datetime import datetime

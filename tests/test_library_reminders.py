@@ -149,16 +149,24 @@ def test_the_ready_dm_says_how_to_collect():
     assert "/library borrow" in deck_ready_message([{"name": "Swamp", "qty": 4}], 0)
 
 
-def test_the_ready_dm_names_the_deposit_when_there_is_one():
+def test_the_ready_dm_names_the_hold_when_there_is_one():
     """What it costs decides whether they can take it, so it cannot be a
     surprise discovered at /library borrow."""
     assert "25" in deck_ready_message([{"name": "Swamp", "qty": 4}], 25)
 
 
-def test_the_ready_dm_does_not_invent_a_deposit_when_there_is_none():
+def test_the_ready_dm_does_not_invent_a_hold_when_there_is_none():
+    """Checks for a FIGURE, not for a word.
+
+    This asserted `"deposit" not in msg`, which stopped testing anything the
+    moment the wording became "hold" -- and a vacuous assertion is worse than no
+    assertion, because the surface reads as covered. A free library must quote no
+    number, whatever the sentence around it ends up saying.
+    """
     msg = deck_ready_message([{"name": "Swamp", "qty": 4}], 0)
 
-    assert "deposit" not in msg.lower(), msg
+    assert "hold" not in msg.lower(), msg
+    assert not re.search(r"\d+\s*tix", msg), msg
 
 
 def test_the_return_dm_says_how_to_return():
