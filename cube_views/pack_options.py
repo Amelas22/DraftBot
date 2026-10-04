@@ -226,7 +226,7 @@ def _library_note(collateral: int) -> str:
     """
     if collateral == 0:
         return "🆓 Free cube — borrow a deck free"
-    return f"🏛️ Library cube — {collateral} tix deposit"
+    return f"🏛️ Library cube — {collateral} tix hold"
 
 
 def _shortfall_note(short: int, stocked: bool) -> "tuple[str, str]":
@@ -382,8 +382,8 @@ async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
     if collateral == 0:
         return "🆓 **No cards needed** — borrow your deck from the library free."
 
-    # Says the deposit comes back, because that is the part that decides
+    # Says the hold comes back, because that is the part that decides
     # whether somebody can afford to play: 100 tix they get back is a very
     # different proposition from 100 tix spent.
     return (f"🏛️ **No cards needed** — borrow your deck for a "
-            f"**{collateral} tix** deposit, refunded when you return it.")
+            f"**{collateral} tix** hold, refunded when you return it.")

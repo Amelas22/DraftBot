@@ -152,12 +152,12 @@ async def main():
         # Same idea for the card library's trades, against the other serve: a
         # borrow whose command poller died would otherwise sit in 'out_pending'
         # forever, with the borrower holding cards the ledger says are still on
-        # the shelf and a deposit nothing will ever release. It also retracts
+        # the shelf and a hold nothing will ever release. It also retracts
         # offers for drafts that are over, which hold both cards and their
         # borrower's one loan slot.
         #
         # Referenced, not fire-and-forget: this is the sole recovery path for
-        # every stranded loan and deposit.
+        # every stranded loan and hold.
         from services.card_lending_service import lending_jobs_watchdog
         ensure_running(bot, "_lending_watchdog_task", lambda: lending_jobs_watchdog(bot))
         logger.info("Re-registered team finder")

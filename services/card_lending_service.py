@@ -96,7 +96,7 @@ async def _when_free(dispatch: "Callable[[], Awaitable[tuple[str, Any]]]",
     # Started BEFORE the lock, not after: a deadline set inside it gives every
     # waiter its own fresh five minutes, so three people queued can outlast
     # Discord's 15-minute followup window -- and the player who was told "you're
-    # next" then gets no "your turn", after a deposit has been taken and a real
+    # next" then gets no "your turn", after a hold has been taken and a real
     # trade opened that nobody told them to accept.
     deadline = time.monotonic() + timeout_s
     async with _DISPATCH_LOCK:
@@ -153,8 +153,8 @@ async def set_collateral(guild_id: Any, borrower_id: Any, loan_id: Any,
     """Make this borrower's holding in the library's collateral wallet equal
     `amount`. Returns {"ok": True} or {"ok": False, "deficit": n}.
 
-    A TARGET, not a hold -- the same rule draft_pool_service.set_entry uses for
-    a stake, and for the same reasons. Taking a deposit is set_collateral(5);
+    A TARGET, not a delta -- the same rule draft_pool_service.set_entry uses for
+    a stake, and for the same reasons. Taking a hold is set_collateral(5);
     giving it back is set_collateral(0); a retry after a failed handover is
     set_collateral(5) again. Each reads what is actually held and moves only the
     difference, so calling it twice cannot charge twice and calling it from a
@@ -170,11 +170,18 @@ async def set_collateral(guild_id: Any, borrower_id: Any, loan_id: Any,
     case: an unaccepted MTGO trade times out and the player is told to run
     /borrow again.
 
+    The column and these helpers stay "collateral"; the word a PLAYER sees is a
+    "hold" (library_commands, library_reminders, cube_views/pack_options). Renaming
+    the column would reach a migration and three unrelated modules for no player
+    benefit, so the two vocabularies are deliberate rather than drift. The `notes=`
+    strings below likewise still say "deposit": wallet history is append-only and
+    its descriptions are frozen at birth.
+
     `expect_job` makes this conditional on the loan still being on that trade,
     checked INSIDE the transaction that moves the money. A settler decides to
     refund, then has to wait for the money lock; in that gap the loan can settle
     and the borrower can retry, and "give back whatever is held" would then hand
-    back the NEW attempt's deposit while its trade is live -- leaving them with
+    back the NEW attempt's hold while its trade is live -- leaving them with
     a deck and their tix. Checking beforehand does not help: the check and the
     money have to be the same transaction, or the window simply moves.
 
@@ -187,7 +194,7 @@ async def set_collateral(guild_id: Any, borrower_id: Any, loan_id: Any,
         raise ValueError("Collateral cannot be negative")
     # Stringified ONCE. wallet_tx.guild_id is a String column, so a raw int
     # written here and a str read back match only because SQLite coerces on
-    # insert; on any other backend the deposit would be booked under a key the
+    # insert; on any other backend the hold would be booked under a key the
     # next read cannot find, and the borrower would be charged again.
     guild = str(guild_id)
     holder = collateral_holder(guild)
@@ -199,7 +206,7 @@ async def set_collateral(guild_id: Any, borrower_id: Any, loan_id: Any,
                 loan = await session.get(CardLoan, loan_id)
                 if loan is None or loan.job_id != expect_job:
                     logger.info("library: loan {} moved on ({} != {}), leaving its "
-                                "deposit alone", loan_id, getattr(loan, "job_id", None),
+                                "hold alone", loan_id, getattr(loan, "job_id", None),
                                 expect_job)
                     # The settler discards this: its own state write re-checks
                     # job_id and skips too, so the outcome is already correct.
@@ -214,7 +221,7 @@ async def set_collateral(guild_id: Any, borrower_id: Any, loan_id: Any,
             moves = await wallet_service.movements_in(
                 session, guild, holder, borrower)
             # The direction is in the prefix, not just the figures, so
-            # wallet_history can tell "I paid a deposit" from "I got it back"
+            # wallet_history can tell "tix held" from "tix returned"
             # without re-deriving it from the sign of a leg.
             going_back = amount < held
             prefix = "loan-back:" if going_back else "loan-hold:"
@@ -295,13 +302,13 @@ async def available_now() -> "dict[str, int]":
     return {name: max(0, qty) for name, qty in stock.items()}
 
 
-async def deposit_shortfall(guild_id: Any, borrower_id: Any
+async def hold_shortfall(guild_id: Any, borrower_id: Any
                             ) -> "Optional[dict[str, int]]":
     """What borrowing costs here, what the borrower holds, and the gap.
 
     None where there are no figures to quote -- no loan, or a cube with no
     price in this server. That is a refusal, not a price of nothing, and
-    folding it to 0 rendered a deck that "needs a 0 tix deposit".
+    folding it to 0 rendered a deck that "needs a 0 tix hold".
 
     Read for the MESSAGE, after the borrow has already been refused -- the
     refusal itself is decided inside set_collateral under the money lock, where
@@ -310,13 +317,13 @@ async def deposit_shortfall(guild_id: Any, borrower_id: Any
     nothing; holding the lock open to narrate is the version that costs.
     """
     loan = await active_loan(borrower_id)
-    deposit = await collateral_for(loan, guild_id) if loan else None
-    if deposit is None:
+    hold = await collateral_for(loan, guild_id) if loan else None
+    if hold is None:
         return None
     async with db_session() as session:
         have = await wallet_service.balance_in(session, str(guild_id), str(borrower_id))
-    return {"deposit": deposit, "have": have,
-            "short": max(0, deposit - have)}
+    return {"hold": hold, "have": have,
+            "short": max(0, hold - have)}
 
 
 async def library_behind(loan: Any, guild_id: Any) -> "Optional[Any]":
@@ -570,7 +577,7 @@ async def _retract(session: Any, loans: "list[Any]") -> int:
     Those were loaded before the queries above, and a borrow can dispatch in
     that gap: assigning state would then write "expired" over a loan that had
     become out_pending, leaving the row finished with a live job_id on it. The
-    cards leave, settlement stops looking, the deposit stays held, and the
+    cards leave, settlement stops looking, the hold stays, and the
     borrower's slot is handed back while they are holding a deck.
 
     The WHERE clause settles it in the database, so it holds against another
@@ -668,7 +675,7 @@ async def _dispatch(guild_id: Any, borrower_id: Any, *, from_state: str, to_stat
                     loan.id, max_cards_per_trade())
         return ("too_large", loan)
 
-    # The deposit is taken BEFORE the cards leave: a deposit that cannot be
+    # The hold is taken BEFORE the cards leave: a hold that cannot be
     # taken costs nothing, where cards handed out against one that never landed
     # cannot be recalled. Only on the way out -- a return takes nothing.
     collateral = 0
@@ -678,7 +685,7 @@ async def _dispatch(guild_id: Any, borrower_id: Any, *, from_state: str, to_stat
         if library is None:
             # The guild has no usable library config. The cog's gate should have
             # caught this, so reaching here means something changed underneath
-            # us -- refuse rather than lend without the deposit it asked for.
+            # us -- refuse rather than lend without the hold it asked for.
             logger.warning("library: refusing to lend in {} -- this cube has no "
                            "price here", guild_id)
             return ("unavailable", loan)
@@ -748,10 +755,10 @@ async def _dispatch(guild_id: Any, borrower_id: Any, *, from_state: str, to_stat
             if not jobs:
                 # Nothing to adopt, so the request may genuinely never have
                 # landed. Refunding and inviting a retry is how a second deck
-                # goes out against no deposit: the deposit stays, and a human
+                # goes out against no hold: the hold stays, and a human
                 # unpicks the rest.
                 logger.error("Library trade for loan {} ({}) may or may not have been "
-                             "accepted and no matching job was found -- deposit held, "
+                             "accepted and no matching job was found -- hold kept, "
                              "needs a look", loan.id, handle)
                 await _park_for_review(loan)
                 return ("dispatch_unknown", loan)
@@ -761,18 +768,18 @@ async def _dispatch(guild_id: Any, borrower_id: Any, *, from_state: str, to_stat
             # The serve answered with something we could not book -- a split
             # whose parts do not sum to the order, or a shape we do not know.
             # Trades may be LIVE, so this is NOT a refusal: refunding here is
-            # how cards go out against no deposit.
-            logger.error("Library {} for loan {} came back unbookable ({}) -- deposit "
-                         "held, needs a look", job_type, loan.id, list(job))
+            # how cards go out against no hold.
+            logger.error("Library {} for loan {} came back unbookable ({}) -- hold "
+                         "kept, needs a look", job_type, loan.id, list(job))
             await _park_for_review(loan)
             return ("dispatch_unknown", loan)
 
     if not jobs:
         logger.warning("Library trade was not accepted for loan {} ({})", loan.id, handle)
         # Unconditional, on the same terms as settlement: a refusal moved
-        # nothing, so the deposit goes back now, and nothing else would ever
+        # nothing, so the hold goes back now, and nothing else would ever
         # look at this loan again -- it has no job to settle. Gating on the
-        # figure this attempt computed would strand a deposit taken when the
+        # figure this attempt computed would strand a hold taken when the
         # guild was charging more than it is now.
         if to_state == "out_pending":
             await set_collateral(loan.guild_id, borrower_id, loan.id, 0)

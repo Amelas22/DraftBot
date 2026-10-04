@@ -1,7 +1,7 @@
-"""Telling a borrower they cannot afford the deposit, in numbers.
+"""Telling a borrower they cannot afford the hold, in numbers.
 
-"You don't have enough tix to cover the deposit" leaves a player guessing at
-every figure that matters: what the deposit is, what they hold, and how much to
+"You don't have enough tix to cover the hold" leaves a player guessing at
+every figure that matters: what the hold is, what they have, and how much to
 top up. They cannot even tell whether they are one tix short or ten, so the
 only way forward is to add some and try again until it works.
 
@@ -16,16 +16,16 @@ from conftest import stub_library
 from database.db_session import db_session
 from services import wallet_service
 import services.card_lending_service as svc
-from cogs.library_commands import describe_deposit_shortfall
+from cogs.library_commands import describe_hold_shortfall
 
 GUILD, BORROWER = "g1", "u1"
 
 
-def test_the_message_names_the_deposit_what_they_have_and_the_gap():
-    text = describe_deposit_shortfall({"deposit": 5, "have": 2, "short": 3})
+def test_the_message_names_the_hold_what_they_have_and_the_gap():
+    text = describe_hold_shortfall({"hold": 5, "have": 2, "short": 3})
 
-    assert "5" in text, "what the deck's deposit is"
-    assert "2" in text, "what they hold"
+    assert "5" in text, "what the deck's hold is"
+    assert "2" in text, "what they have"
     assert "3" in text, "and how much to top up"
     assert "nothing has been charged" in text.lower()
 
@@ -33,13 +33,13 @@ def test_the_message_names_the_deposit_what_they_have_and_the_gap():
 def test_an_empty_wallet_still_reads_as_a_number():
     """`0` must survive the templating -- a falsy figure dropped from the text
     is exactly the case where the player is most confused."""
-    text = describe_deposit_shortfall({"deposit": 5, "have": 0, "short": 5})
+    text = describe_hold_shortfall({"hold": 5, "have": 0, "short": 5})
 
     assert "0" in text
 
 
 async def _a_loan_for(borrower):
-    """A deck waiting to be collected -- deposit_shortfall only ever runs to
+    """A deck waiting to be collected -- hold_shortfall only ever runs to
     explain why a particular borrow could not be paid for."""
     from models.card_loan import CardLoan
     from database.db_session import AsyncSessionLocal
@@ -62,8 +62,8 @@ async def test_the_figures_come_from_the_loan_and_the_wallet(test_db, monkeypatc
         await wallet_service.transfer_in(s, GUILD, "system:test-seed", BORROWER, 2,
                                          "seed:test", notes="opening")
 
-    assert await svc.deposit_shortfall(GUILD, BORROWER) == {
-        "deposit": 5, "have": 2, "short": 3}
+    assert await svc.hold_shortfall(GUILD, BORROWER) == {
+        "hold": 5, "have": 2, "short": 3}
 
 
 @pytest.mark.asyncio
@@ -71,5 +71,5 @@ async def test_a_library_that_charges_nothing_is_never_short(test_db, monkeypatc
     stub_library(monkeypatch, svc, collateral=0)
     await _a_loan_for(BORROWER)
 
-    assert await svc.deposit_shortfall(GUILD, BORROWER) == {
-        "deposit": 0, "have": 0, "short": 0}
+    assert await svc.hold_shortfall(GUILD, BORROWER) == {
+        "hold": 0, "have": 0, "short": 0}

@@ -220,12 +220,12 @@ async def test_giving_up_on_a_long_queue_says_nothing_was_charged(monkeypatch):
     assert "nothing has been charged" in said.lower()
 
 
-async def test_a_short_wallet_is_told_the_deposit_and_the_gap(monkeypatch):
+async def test_a_short_wallet_is_told_the_hold_and_the_gap(monkeypatch):
     """Straight through the command, not just the string: the figures have to
     be fetched and rendered on the path the player actually walks."""
     import cogs.library_commands as mod
-    monkeypatch.setattr(mod, "deposit_shortfall",
-                        AsyncMock(return_value={"deposit": 5, "have": 2, "short": 3}))
+    monkeypatch.setattr(mod, "hold_shortfall",
+                        AsyncMock(return_value={"hold": 5, "have": 2, "short": 3}))
 
     said = await _run(monkeypatch, "borrow", "short_funds")
 
@@ -277,12 +277,12 @@ async def test_a_short_wallet_still_gets_an_answer_if_the_figures_fail(monkeypat
 
     async def unreadable(*a, **k):
         raise RuntimeError("wallet unavailable")
-    monkeypatch.setattr(mod, "deposit_shortfall", unreadable)
+    monkeypatch.setattr(mod, "hold_shortfall", unreadable)
 
     said = await _run(monkeypatch, "borrow", "short_funds")
 
     assert said.strip(), "the player must still be told something"
-    assert "deposit" in said.lower()
+    assert "hold" in said.lower()
 
 
 async def test_an_unconfigured_library_says_so_instead_of_queueing(monkeypatch):

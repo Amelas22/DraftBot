@@ -108,7 +108,7 @@ def _deck_summary(cards: Any) -> str:
 def deck_ready_message(cards: Any, collateral: int) -> str:
     """The DM that replaces what the shared board used to say.
 
-    Names the deposit when there is one, because what it costs is what decides
+    Names the hold when there is one, because what it costs is what decides
     whether they can take it -- finding that out at /library borrow is the
     version that wastes their evening. Today's price is the right figure here,
     unlike in return_message: they have not paid yet.
@@ -116,7 +116,7 @@ def deck_ready_message(cards: Any, collateral: int) -> str:
     msg = (f"📚 Your drafted deck is ready to borrow — **{_deck_summary(cards)}**.\n"
            "Run `/library borrow` to have it traded to you.")
     if collateral:
-        msg += (f"\nThis library asks for a **{collateral} tix** deposit, "
+        msg += (f"\nThis library asks for a **{collateral} tix** hold, "
                 "refunded when you return the deck.")
     return msg
 
@@ -131,8 +131,8 @@ def return_message(loan: Any) -> str:
     real one at the moment it hands it back, where it cannot be stale.
     """
     return (f"📦 Please return your borrowed deck — **{_deck_summary(loan.cards)}**.\n"
-            "Run `/library return` and the library will collect it, and any "
-            "deposit you put up comes back with it.\n"
+            "Run `/library return` and the library will collect it, and the "
+            "hold comes back with it.\n"
             "Other drafters are waiting on those cards.")
 
 
@@ -219,7 +219,7 @@ async def announce_one(loan_id: Any, at: Optional[datetime] = None) -> bool:
     except Exception:
         logger.opt(exception=True).warning(
             "library reminders: could not read the terms behind loan {}; "
-            "announcing without naming a deposit", loan_id)
+            "announcing without naming a hold", loan_id)
 
     if not await _dm(loan, deck_ready_message(loan.cards, collateral), "deck ready"):
         return False
