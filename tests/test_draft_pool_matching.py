@@ -579,48 +579,35 @@ def test_every_path_into_matching_holds_the_team_creation_flag():
         f"expected the known entry points into team creation, found {callers}")
 
 
-def test_the_queue_explainer_does_not_describe_the_retired_matcher():
-    """The embed makes falsifiable claims about level_side, and prose cannot be
-    typechecked. This is the cheapest anchor: the vocabulary of the retired
-    tiered matcher must not reappear in the text a player reads.
+def test_the_queue_explainer_is_the_wallet_and_not_the_pool():
+    """The queue button explains the WALLET now; the pool explainer is gone.
 
-    It caught nothing when written -- the rewrite came first. It exists because
-    the explainer and the rule live in different files, and the last time they
-    drifted the embed described a system that had not run for months.
+    What this replaces banned the retired tiered matcher's vocabulary from the pool
+    explainer, because prose cannot be typechecked and that embed made falsifiable
+    claims about level_side. There is no pool explainer left to check, so that list
+    was re-pointed at a function it does not describe and guarded nothing.
 
-    Two later changes proved the anchor is worth widening rather than merely
-    keeping. The cap moved from reading the OPPOSING side to reading your own,
-    and the copy was renamed off "bet" entirely; neither retirement was listed
-    here, so nothing failed when the explainer went on describing the old rule.
-    A reviewer found that instead, which is precisely the job this test exists
-    to do.
-
-    "opponent" is deliberately NOT banned: the live copy says the cap depends on
-    your team and "not your opponents", which is the correct statement of the new
-    rule. What is banned is the vocabulary that can only belong to the old one.
+    The live risk is a pool explanation being written back here from memory, and the
+    assertion for that is the absence of the old callback: it fails the moment one
+    returns, at which point the banned vocabulary needs reinstating with it. The
+    entry/bet wording check stays, because the wallet copy IS player-facing prose
+    about entries.
     """
     import inspect
     import re
 
     from views import PersistentView
 
-    text = inspect.getsource(PersistentView.explain_stakes_callback).lower()
+    assert not hasattr(PersistentView, "explain_stakes_callback"), (
+        "explain_stakes_callback is back -- if the pool explainer returned, restore the "
+        "retired-vocabulary assertions (proportional / tiered / opposing / bucket / "
+        "median / minimum requirement) that this test used to carry")
 
-    for retired in ("proportional", "tiered", "minimum requirement",
-                    "player-to-player", "betting pair", "bet score",
-                    # the cap used to measure against the other side
-                    "opposing", "biggest opponent", "highest opponent",
-                    # and used to snap to a fixed ladder, then to a median
-                    "bucket", "median"):
-        assert retired not in text, (
-            f"the queue explainer still uses {retired!r}, which belongs to a "
-            f"retired rule, not the one the pool runs today")
-
-    # Whole words only: "bet" is a substring of "between" and "better", either of
-    # which a future edit could legitimately introduce.
+    # Whole words only: "bet" is a substring of "between" and "better".
+    text = inspect.getsource(PersistentView.explain_wallet_callback).lower()
     stale = re.findall(r"\b(bet|bets|betting|bettor|better)\b", text)
     assert not stale, (
-        f"the queue explainer still calls it a bet ({sorted(set(stale))}); the "
+        f"the queue explainer calls it a bet ({sorted(set(stale))}); the "
         "player-facing term is an entry")
 
 

@@ -17,7 +17,7 @@ from models import SignUpHistory
 from sqlalchemy import update, select, and_
 from sqlalchemy.orm import selectinload
 from helpers.utils import get_cube_thumbnail_url
-from helpers.money_gate import wallet_howto
+from helpers.money_gate import add_wallet_howto, wallet_howto
 from helpers.display_names import get_display_name, get_display_name_by_id
 from helpers.signup_board import (FIELD_SPLIT_THRESHOLD, build_board,
                                   entry_cap_phrase)
@@ -132,6 +132,13 @@ def rooms_creation_lock(session_id):
     return lock
 
 
+# Which colour each side wears, in the one place that decides it. Read by the premade
+# sign-up buttons and by the pairing grid: those two surfaces must never disagree about
+# which side is which, and before this they each spelled it out separately.
+TEAM_A_STYLE = discord.ButtonStyle.danger    # red
+TEAM_B_STYLE = discord.ButtonStyle.primary   # blurple
+
+
 class PersistentView(discord.ui.View):
 
     # AUTO_PAIRINGS_TASKS = {}  # session_id -> task
@@ -187,7 +194,7 @@ class PersistentView(discord.ui.View):
 
         if self.session_type != "test":
             self._add_button("Ready Check", "green", "ready_check", self.ready_check_callback)
-            self._add_button("Create Rooms & Post Pairings", "primary", "create_rooms_pairings", self.create_rooms_pairings_callback, disabled=True)
+            self._add_button("Create Rooms & Post Pairings", "grey", "create_rooms_pairings", self.create_rooms_pairings_callback, disabled=True)
 
         self._apply_stage_button_disabling()
 
@@ -198,14 +205,14 @@ class PersistentView(discord.ui.View):
 
 
     def _add_signup_buttons(self):
-        self._add_button("Sign Up", "green", "sign_up", self.sign_up_callback)
+        self._add_button("Sign Up", "blurple", "sign_up", self.sign_up_callback)
         self._add_button("Cancel Sign Up", "red", "cancel_sign_up", self.cancel_sign_up_callback)
 
 
     def _add_shared_buttons(self):
         self._add_button("Cancel Draft", "grey", "cancel_draft", self.cancel_draft_callback)
         self._add_button("Remove User", "grey", "remove_user", self.remove_user_button_callback)
-        self._add_button("Update Cube", "blurple", "update_cube", self.update_cube_callback)
+        self._add_button("Update Cube", "green", "update_cube", self.update_cube_callback)
 
 
     def _add_winston_specific_buttons(self):
@@ -214,9 +221,9 @@ class PersistentView(discord.ui.View):
 
     def _add_premade_buttons(self):
         red, blue = labels_for(self)
-        self._add_button(red.name, "green", "Team_A", self.team_assignment_callback)
-        self._add_button(blue.name, "red", "Team_B", self.team_assignment_callback)
-        self._add_button("Generate Seating Order", "primary", "generate_seating", self.randomize_teams_callback)
+        self._add_button(red.name, TEAM_A_STYLE.name, "Team_A", self.team_assignment_callback)
+        self._add_button(blue.name, TEAM_B_STYLE.name, "Team_B", self.team_assignment_callback)
+        self._add_button("Generate Seating Order", "grey", "generate_seating", self.randomize_teams_callback)
 
         # Add test button only if global test mode is enabled
         if is_test_mode():
@@ -226,15 +233,15 @@ class PersistentView(discord.ui.View):
 
     def _add_generic_buttons(self):
         if self.session_type == "swiss":
-            self._add_button("Generate Seating Order", "blurple", "randomize_teams", self.randomize_teams_callback)
+            self._add_button("Generate Seating Order", "grey", "randomize_teams", self.randomize_teams_callback)
         elif self.session_type in {"test", "schedule"}:
             # "Cancel Draft" and "Remove User" already added via shared buttons
             return
         else:
-            self._add_button("Create Teams", "blurple", "randomize_teams", self.randomize_teams_callback)
+            self._add_button("Create Teams", "grey", "randomize_teams", self.randomize_teams_callback)
 
         if self.session_type == "staked" and self.session_stage != "teams":
-            self._add_button("How the Prize Pool Works 💰", "green", "explain_stakes", self.explain_stakes_callback)
+            self._add_button("How the Wallet Works 💰", "green", "explain_stakes", self.explain_wallet_callback)
 
         # Add test button only if global test mode is enabled
         if is_test_mode():
@@ -1104,104 +1111,47 @@ class PersistentView(discord.ui.View):
             # Always clean up the processing flag
             state_manager.set_creating_teams(session_id, False)
 
-    async def explain_stakes_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Explain how the prize pool works, for a player at the queue."""
+    async def explain_wallet_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Explain the tix wallet, for a player at the queue.
+
+        The command list is money_gate's wallet_howto, not a copy of it. That text already
+        appears on payouts, balances and the debt panels, and a fourth wording of it here is
+        exactly how the explainer this replaced came to describe a system that had not run
+        for months.
+
+        The custom_id stays "explain_stakes": it is baked into the buttons of every draft
+        message already posted, and a renamed id would leave those dead.
+        """
         embed = discord.Embed(
-            title="How the Prize Pool Works",
+            title="How the Wallet Works",
             description=(
-                "Everyone enters what they are comfortable with. Your tix go into the draft's "
-                "prize pool when you sign up, and the winners are paid from it when the draft is "
-                "decided, in proportion to what each of them had matched. "
-                "Nobody ever owes anybody: the money is already there before a game is played."
+                "Your tix live in a wallet the bot keeps for you. Entry fees are paid out of it, "
+                "winnings are paid back into it, and you move tix in and out by trading with the bot."
             ),
             color=discord.Color.blue()
         )
 
-        embed.add_field(
-            name="Core Principles",
-            value=(
-                "• **Your entry is the ceiling**: it is the most this draft can cost you, and "
-                "nothing is ever added on top whatever anyone else enters\n"
-                "• **Random teams**: teams are drawn before any money is levelled, so your entry "
-                "never affects which side you land on\n"
-                "• **Nothing to settle afterwards**: a prize pool draft can never leave you owing "
-                "another player — your entry is paid up front and anything unmatched comes back"
-            ),
-            inline=False
-        )
+        # The command list itself, from its one home.
+        add_wallet_howto(embed, interaction.guild_id)
 
+        # Only what money_gate does not already say. Restating `/wallet deposit`,
+        # `/wallet show` or `/wallet pay` here would put two wordings of one command
+        # in a single embed -- the drift wallet_howto exists to prevent.
         embed.add_field(
-            name="Process Overview",
+            name="Moving tix in and out",
             value=(
-                "1. **Entry**: your tix move into the pool when you sign up\n"
-                "2. **Entry Cap**: your entry is trimmed to your share of your team — "
-                "**on by default**, and you can turn it off\n"
-                "3. **Levelling**: the two teams are brought to the same total\n"
-                "4. **Payout**: the winning team splits the pool"
-            ),
-            inline=False
-        )
-
-        embed.add_field(
-            name="Capping Your Entry",
-            value=(
-                "• The cap is **on unless you turn it off** (🧢 capped / 🏎️ uncapped)\n"
-                "• A capped entry is trimmed so you never hold more than **55% of your "
-                "own team's total** — you can be the biggest entry on your side, but not "
-                "most of it\n"
-                "• It depends on your team, not your opponents: 50 alongside three "
-                "teammates on 20 is fine, but alongside a single 20 it is trimmed\n"
-                "• Applied before anything else, and the excess is returned immediately\n"
-                "• Because it lowers your team's total, a large capped entry can also "
-                "reduce how much of your teammates' entries get matched"
-            ),
-            inline=False
-        )
-
-        embed.add_field(
-            name="Levelling the Two Teams",
-            value=(
-                "A tix on one side has to be covered by a tix on the other, so the heavier side "
-                "is brought down to the lighter side's total and the excess is returned before "
-                "the draft starts. Only that side gets money back — the lighter side is "
-                "already fully matched.\n\n"
-                "Inside a team there is one **cut-off**, and you hold the lower of your entry "
-                "and that cut-off. It is set as high as the team's budget allows, so the "
-                "largest entries absorb the whole reduction and the smaller ones are "
-                "usually untouched."
-            ),
-            inline=False
-        )
-
-        embed.add_field(
-            name="What That Means For You",
-            value=(
-                "• Entering more never leaves you holding less than someone who entered less\n"
-                "• If the other side cannot cover even the small entries, everyone on your side is "
-                "cut to the same figure — below the draft minimum if that is what it takes. A "
-                "small entry is usually untouched, but it is not protected"
-            ),
-            inline=False
-        )
-
-        embed.add_field(
-            name="Winning, Losing and Draws",
-            value=(
-                "• Both teams have the same amount in, so a winner takes exactly **double** "
-                "what they had matched\n"
-                "• Every matched tix pays at the same rate, so a teammate's entry can change "
-                "how much of yours is matched, never what it pays\n"
-                "• If your team loses, the matched part of your entry is gone — it is already in "
-                "the pool and the winners take it\n"
-                "• On a draw, or if the draft is cancelled or abandoned, everyone gets their "
-                "entry back"
+                "• `/wallet withdraw <n>` — the bot trades tix back to you\n"
+                "• Deposits and withdrawals are real MTGO trades: link your MTGO name with "
+                "`/link_mtgo` first, and be at your client to accept\n"
+                "• A large amount goes as several trades back to back, and can outlast the "
+                "window Discord allows a reply in — the wallet is the record either way\n"
+                "• `/wallet pay` needs no trade at all: it moves tix between wallets directly"
             ),
             inline=False
         )
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-                    
     async def team_assignment_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         session = await get_draft_session(self.draft_session_id)
         if not session:
@@ -1936,9 +1886,9 @@ def pairing_button_style(match_result, team_a, team_b):
     blurple = Team B won, grey = not yet reported."""
     if match_result.winner_id:
         if match_result.winner_id in team_a:
-            return discord.ButtonStyle.danger
+            return TEAM_A_STYLE
         if match_result.winner_id in team_b:
-            return discord.ButtonStyle.primary
+            return TEAM_B_STYLE
     return discord.ButtonStyle.secondary
 
 
