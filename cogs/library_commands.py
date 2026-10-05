@@ -273,6 +273,23 @@ async def defer_if_usable(ctx: Any) -> bool:
     return True
 
 
+async def library_or_say(ctx: Any) -> Optional[Any]:
+    """The library this server draws on, or None having already said there isn't one.
+
+    Four commands open this way and each carried the same four lines. One voice
+    matters here specifically: "this server isn't set up to borrow" is the first
+    thing a new server sees from the feature, and four copies is four chances
+    for one of them to say something subtly different about how to fix it.
+
+    Assumes the interaction is already answered -- every caller is past
+    defer_if_usable, or defers itself.
+    """
+    library = await library_for(ctx.guild_id)
+    if library is None:
+        await ctx.followup.send(_NO_LIBRARY, ephemeral=True)
+    return library
+
+
 def list_cube_in_guild(guild_id: Any, cube_id: Any) -> bool:
     """Offer this cube in the server's own cube list. True if it was added.
 
@@ -633,15 +650,15 @@ class LibraryCommands(commands.Cog):
         if not await defer_if_usable(ctx):
             return
 
-        library = await library_for(ctx.guild_id)
+        library = await library_or_say(ctx)
         if library is None:
-            await ctx.followup.send(_NO_LIBRARY, ephemeral=True)
             return
         if not await may_borrow(library.id, ctx.author.id):
             await ctx.followup.send(_LOAN_MESSAGES["not_invited"], ephemeral=True)
             return
 
-        draft = await DraftSession.get_filling_draft_for_user(ctx.channel_id, ctx.author.id)
+        draft = await DraftSession.get_filling_draft_for_user(
+            ctx.channel_id, ctx.author.id)
         if draft is None:
             await ctx.followup.send(
                 "📭 Nothing to hold: run this in the channel of a draft you've "
@@ -662,20 +679,22 @@ class LibraryCommands(commands.Cog):
                 f"📭 The library doesn't stock `{draft.cube}`, so there's nothing "
                 f"to hold for this draft.", ephemeral=True)
             return
-        if not answer["ok"]:
+        if not answer.ok:
             # Named, not merely refused: "busy" with no figure reads as broken,
-            # and the player can judge for themselves whether to wait.
+            # and the player can judge for themselves whether to wait. The total
+            # rather than describe_shortfall's per-card list: a whole cube can be
+            # hundreds of copies short, and nobody is sourcing those tonight.
             await ctx.followup.send(
-                f"🔒 `{draft.cube}` is in use — the library is **{answer['short']}** "
-                f"cards short of covering a second draft of it right now, so "
-                f"nothing is held for you.\n"
+                f"🔒 `{draft.cube}` is in use — the library is "
+                f"**{answer.cards_short}** cards short of covering a second "
+                f"draft of it right now, so nothing is held for you.\n"
                 f"Ask again while this draft is filling and you'll get it if it "
                 f"frees up. Either way `/library borrow` afterwards gives you "
                 f"whatever the shelf can cover.", ephemeral=True)
             return
 
         others = len(await record_request(draft, ctx.author.id)) - 1
-        shared = ("" if others < 1 else
+        shared = ("" if not others else
                   f" You're sharing it with {others} other"
                   f"{'s' if others > 1 else ''} here — you all draft from the "
                   f"same copy, so one hold covers the table.")
@@ -698,7 +717,8 @@ class LibraryCommands(commands.Cog):
         logger.info("/library unrequest by {} in guild {}", ctx.author.id, ctx.guild_id)
         if not await defer_if_usable(ctx):
             return
-        draft = await DraftSession.get_filling_draft_for_user(ctx.channel_id, ctx.author.id)
+        draft = await DraftSession.get_filling_draft_for_user(
+            ctx.channel_id, ctx.author.id)
         if draft is None or str(ctx.author.id) not in requested_ids(draft):
             await ctx.followup.send(
                 "📭 You haven't asked for the library on this draft.", ephemeral=True)
@@ -724,9 +744,8 @@ class LibraryCommands(commands.Cog):
                     cube, ctx.author.id, ctx.guild_id, copies, full_copy)
         if not await defer_if_usable(ctx):
             return
-        library = await library_for(ctx.guild_id)
+        library = await library_or_say(ctx)
         if library is None:
-            await ctx.followup.send(_NO_LIBRARY, ephemeral=True)
             return
 
         seen = await cube_as_the_library_sees_it(cube)
@@ -910,9 +929,8 @@ class LibraryCommands(commands.Cog):
         logger.info("/library withdraw by {} in guild {}", ctx.author.id, ctx.guild_id)
         if not await defer_if_usable(ctx):
             return
-        library = await library_for(ctx.guild_id)
+        library = await library_or_say(ctx)
         if library is None:
-            await ctx.followup.send(_NO_LIBRARY, ephemeral=True)
             return
         spawn_followup("card-library withdraw",
                        self._withdraw_and_watch(ctx, library.id))
@@ -994,9 +1012,8 @@ class LibraryCommands(commands.Cog):
                       description="The cards of yours the library is holding for you")
     async def deposits(self, ctx: discord.ApplicationContext) -> None:
         await ctx.defer(ephemeral=True)
-        library = await library_for(ctx.guild_id)
+        library = await library_or_say(ctx)
         if library is None:
-            await ctx.followup.send(_NO_LIBRARY, ephemeral=True)
             return
         held = await held_for(ctx.author.id, library.id)
         if not held:

@@ -27,7 +27,7 @@ import cogs.library_commands as cog_mod
 import services.card_deposit_service as deposit_svc
 import services.card_lending_service as lending_svc
 import services.card_library_inventory as inventory
-from conftest import FakeLendingServe, a_library
+from conftest import FakeLendingServe, a_library, library_ctx, sent_to_invoker
 from database.db_session import AsyncSessionLocal
 from models.draft_session import DraftSession
 from models.mtgo_account import MtgoAccount
@@ -143,16 +143,7 @@ CUBE_CARDS = [{"name": "Lightning Bolt", "qty": 2},
 
 def _ctx(who=ALICE):
     """A context that records what the player was told."""
-    return SimpleNamespace(
-        author=SimpleNamespace(id=who),
-        guild=SimpleNamespace(id=GUILD), guild_id=GUILD,
-        defer=AsyncMock(),
-        followup=SimpleNamespace(send=AsyncMock()))
-
-
-def _said(ctx):
-    return "\n".join(str(c.args[0]) for c in ctx.followup.send.await_args_list
-                     if c.args)
+    return library_ctx(author=who, guild=GUILD)
 
 
 @pytest_asyncio.fixture
@@ -229,7 +220,7 @@ async def test_a_cube_deposited_is_held_listed_and_handed_back(library):
                                    "Island": 1}, "and they physically arrived"
 
     listed = await _run(library, "deposits")
-    assert "Lightning Bolt" in _said(listed)
+    assert "Lightning Bolt" in sent_to_invoker(listed)
 
     await _run(library, "withdraw")
 
@@ -244,7 +235,7 @@ async def test_a_second_deposit_of_the_same_cube_asks_for_nothing(library):
     await _run(library, "deposit", CUBE)
     before = len(library.serve.deposited)
 
-    said = _said(await _run(library, "deposit", CUBE))
+    said = sent_to_invoker(await _run(library, "deposit", CUBE))
 
     assert len(library.serve.deposited) == before, "nothing was offered"
     assert "already has enough" in said, said
@@ -257,7 +248,7 @@ async def test_what_one_person_deposits_is_not_owed_to_another(library):
     await _run(library, "deposit", CUBE)
 
     assert await _owed_to(BOB) == {}
-    said = _said(await _run(library, "withdraw", who=BOB))
+    said = sent_to_invoker(await _run(library, "withdraw", who=BOB))
     assert "isn't holding any of your cards" in said, said
     assert await _owed_to(ALICE), "and hers are untouched"
 
@@ -303,7 +294,7 @@ async def test_a_drafter_collects_their_pool_and_gives_it_back(library):
     waiting = await lending_svc.active_loan(ALICE)
     assert waiting.state == "assigned"
 
-    said = _said(await _run(library, "deck"))
+    said = sent_to_invoker(await _run(library, "deck"))
     assert "run `/library borrow`" in said, said
 
     await _run(library, "borrow")
@@ -329,7 +320,7 @@ async def test_a_deck_out_on_loan_cannot_also_be_withdrawn(library):
     await assign_drafted_decks(SESSION)
     await _run(library, "borrow")
 
-    said = _said(await _run(library, "withdraw", who=BOB))
+    said = sent_to_invoker(await _run(library, "withdraw", who=BOB))
 
     assert "out on loan" in said, said
     assert "Lightning Bolt" in said, "and it says which"

@@ -81,7 +81,9 @@ async def test_a_drafting_cube_reserves_cards_under_the_name_custody_uses(test_d
                            teams_start_time=datetime.now()))
         await s.commit()
 
-    held = await _being_drafted(_returns(CUBE), "lib")
+    # The guilds and the invite list are resolved once per availability read and
+    # passed in now; this library serves one guild and lends to everyone.
+    held = await _being_drafted(_returns(CUBE), "lib", ["g-draft"], set())
 
     assert held.get("Goben, Gene-Splice Savant") == 1, held
     assert "Norman Osborn" not in held

@@ -10,7 +10,8 @@ import discord
 from loguru import logger
 from config import get_cube_options
 from services.card_library_inventory import (
-    cube_as_the_library_sees_it, cube_support, library_available, library_holdings,
+    cube_as_the_library_sees_it, cube_coverage, cube_support, library_available,
+    library_holdings,
 )
 
 # Default pack structure (standard MTG draft / Draftmancer defaults).
@@ -321,17 +322,15 @@ async def mark_library_cubes(options: list, guild_id) -> list:
 
 LIBRARY_FIELD_NAME = "Cards:"
 
-# What a player does with the line below, on either answer.
+# What a player does with the line below.
 #
 # The note is computed once when the draft is created and never recomputed, so
 # every answer in it is a reading of the shelf at that moment -- and the shelf
 # moves while a queue fills, in both directions. `/library request` is the only
 # thing that makes a yes still true at fire time, and the only way to find out
-# that a no has stopped being one. Appended to both so the board never states a
-# coverage answer without saying what to do about it.
+# that a no has stopped being one. So both answers name it, and the board never
+# states a coverage answer without saying what to do about it.
 _HOLD_IT = " Run `/library request` to hold it for this draft."
-_ASK_AGAIN = (" The shelf frees up between drafts — `/library request` while "
-              "this fills says whether it has.")
 
 
 async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
@@ -372,12 +371,12 @@ async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
             # people only the room is told nothing, and the named are DMed
             # instead (services/library_reminders).
             return None
-        seen = await cube_as_the_library_sees_it(cube_id)
-        if not (seen and seen.cards):
+        # The same question /library request asks, asked in the same place, so
+        # the board and the command cannot give a room different answers.
+        support = await cube_coverage(library.id, cube_id)
+        if support is None:
             return None
-        cards = seen.cards
-        available = await library_available(library.id)
-        covered = cube_support(cards, available).ok
+        covered = support.ok
     except Exception:
         logger.opt(exception=True).warning(
             "signup board: could not check the library for {}", cube_id)
@@ -385,7 +384,8 @@ async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
 
     if not covered:
         return ("⚠️ **Bring your own cards** — the library can't cover this "
-                "cube right now." + _ASK_AGAIN)
+                "cube right now. The shelf frees up between drafts — "
+                "`/library request` while this fills says whether it has.")
 
     collateral = price_of(library) or 0
     # Unqualified, because by here the library lends to everyone in the room:

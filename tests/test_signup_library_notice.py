@@ -33,6 +33,10 @@ def _shelf(monkeypatch, held, available, cards):
     # Both inventory reads take a library now and both ignore it here: which
     # library is the subject of its own tests, and these are about what the
     # board says once the shelf is known.
+    #
+    # Patched on BOTH modules, because the board reaches the shelf two ways: the
+    # cube dropdown calls the names imported into pack_options, while the note
+    # goes through cube_coverage, which calls the inventory module's own.
     async def _held(_library_id):
         return dict(held)
 
@@ -41,8 +45,9 @@ def _shelf(monkeypatch, held, available, cards):
 
     async def _fetch(cube_id):
         return cards
-    monkeypatch.setattr(mod, "library_holdings", _held)
-    monkeypatch.setattr(mod, "library_available", _avail)
+    for module in (mod, inventory):
+        monkeypatch.setattr(module, "library_holdings", _held)
+        monkeypatch.setattr(module, "library_available", _avail)
     monkeypatch.setattr(inventory, "fetch_cube", _fetch)
 
 
@@ -111,12 +116,18 @@ async def test_an_unreadable_cube_does_not_promise_anything(test_db, monkeypatch
 @pytest.mark.asyncio
 async def test_a_failure_to_check_does_not_break_the_signup_board(
         test_db, monkeypatch):
-    """A draft being created must not fail because the library was unreadable."""
+    """A draft being created must not fail because the library was unreadable.
+
+    Broken where the read actually happens. The note reaches the shelf through
+    cube_coverage, which calls the inventory module's own library_available --
+    patching the name imported into pack_options leaves the real one running and
+    tests the happy path instead, which is how this stopped simulating anything.
+    """
     await _price(0)
 
-    async def boom():
+    async def boom(*_a, **_k):
         raise RuntimeError("ledger down")
-    monkeypatch.setattr(mod, "library_available", boom)
+    monkeypatch.setattr(inventory, "library_available", boom)
 
     async def _fetch(cube_id):
         return CUBE_CARDS
@@ -204,7 +215,11 @@ async def test_a_whitelisted_library_says_nothing_on_the_shared_board(
         test_db, monkeypatch, collateral, available):
     """The board is one message for the whole room, so it cannot address only
     the people who may borrow. While a library lends to named people only, the
-    room is told nothing whatever the terms, and the named are DMed instead."""
+    room is told nothing whatever the terms, and the named are DMed instead.
+
+    Nothing INCLUDES the instruction: a room told nothing about the library must
+    not be told to run its commands either, because there is nothing there to
+    hold for them."""
     await _price(collateral)
     await _list_a_member()
     _shelf(monkeypatch, {"Swamp": 4}, available, CUBE_CARDS)
@@ -274,15 +289,3 @@ async def test_both_answers_point_at_the_request_command(
     note = await library_signup_note(CUBE, GUILD)
 
     assert "/library request" in note, note
-
-
-@pytest.mark.asyncio
-async def test_a_cube_the_library_does_not_lend_for_offers_no_hold(
-        test_db, monkeypatch):
-    """The suppression rules win. A room told nothing about the library must
-    not be told to run its commands either -- there is nothing to hold."""
-    await _price(0)
-    await _list_a_member()
-    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
-
-    assert await library_signup_note(CUBE, GUILD) is None

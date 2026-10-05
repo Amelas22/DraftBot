@@ -52,7 +52,7 @@ def test_one_cog_carries_the_whole_feature():
 def test_every_command_is_reachable_as_its_own_method():
     """The callback still hangs off the class under the method's own name,
     which is how every test in the suite drives these commands."""
-    for name in ("deposit", "withdraw", "deposits", "borrow", "deck",
-                 "request", "unrequest"):
+    for name in GROUPED - {"return"}:
         assert hasattr(getattr(LibraryCommands, name), "callback"), name
-    assert hasattr(LibraryCommands.return_cards, "callback")
+    assert hasattr(LibraryCommands.return_cards, "callback"), \
+        "/library return is `return_cards` -- `return` is a keyword"

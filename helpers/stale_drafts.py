@@ -33,6 +33,26 @@ def is_finished_draft(session) -> bool:
     )
 
 
+def rooms_reaped(session, now: datetime | None = None) -> bool:
+    """Whether cleanup has already deleted this draft's rooms.
+
+    Cleanup deletes a draft's channels -- and an unstarted queue's row -- at its
+    `deletion_time`, which activity keeps pushing back. Past it, the draft can
+    neither be reported into nor filled, so nothing it was holding is still
+    holding anything.
+
+    A row with no `deletion_time` is NOT reaped: it has no deadline to be past,
+    and reading it as over would retire a draft nothing has said is finished.
+
+    Shared because two subsystems ask it for the same reason and would otherwise
+    each carry the rule: stake_funding, to stop a never-played draft claiming a
+    player's stake for a year, and the card library, to stop a dead queue
+    holding a cube forever.
+    """
+    deadline = getattr(session, "deletion_time", None)
+    return deadline is not None and deadline < (now or datetime.now())
+
+
 def is_stale_draft(session) -> bool:
     """Fired (teams were created) but never finished. Sessions that never
     fired are the queue-inactivity cleanup's job, not this command's."""

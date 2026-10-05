@@ -43,7 +43,7 @@ import random
 import tempfile
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -607,6 +607,33 @@ def make_draft_stub(session_stage="pairings", sign_ups=None, **overrides):
     )
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+def cube_lists(mapping):
+    """A stand-in for the CubeCobra fetch, so no test reaches the network.
+
+    Returns the callable the library's `fetch=` parameters take: a cube in the
+    mapping reads as those cards, a cube missing from it reads as unreadable
+    (None), which is a different case the library treats differently.
+    """
+    async def fetch(cube_id):
+        return mapping.get(str(cube_id))
+
+    return fetch
+
+
+def library_ctx(author=1234, guild=99, channel="chan1"):
+    """The ApplicationContext double the /library command suites drive.
+
+    One copy, because all three of them assert on what the command SAID: a
+    widening here (an embed, a kwargs-passed body) has to reach every suite at
+    once or one of them silently keeps the narrower notion of "what did it say".
+    See sent_to_invoker, centralised for the same reason.
+    """
+    return SimpleNamespace(
+        author=SimpleNamespace(id=author),
+        guild=SimpleNamespace(id=guild), guild_id=guild, channel_id=channel,
+        defer=AsyncMock(), followup=SimpleNamespace(send=AsyncMock()))
 
 
 def sent_to_invoker(ctx):

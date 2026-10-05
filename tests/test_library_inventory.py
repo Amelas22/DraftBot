@@ -20,6 +20,7 @@ from database.db_session import AsyncSessionLocal
 from models.card_loan import CardLoan
 from models.draft_session import DraftSession
 from models.library_server import LibraryServer
+from conftest import cube_lists
 from services import debt_service, wallet_service
 import services.card_library_inventory as inv
 
@@ -31,6 +32,9 @@ CUBE = "mycube"
 # name the one this file's shelf belongs to. Which library serves which server
 # is the subject of test_library_resolution.py.
 LIB = "lib"
+
+# teams_start=None means STILL FILLING, so the default needs its own marker.
+_UNSET = object()
 
 
 async def _deposit(owner, name, qty, source):
@@ -51,51 +55,47 @@ async def _loan(borrower, cards, state, source="draft:s1", guild="g1"):
 
 
 async def _draft(session_id="s1", cube=CUBE, minutes_ago=5, stage="pairings",
-                 sign_ups=None):
-    """A draft underway in a server this library serves.
+                 sign_ups=None, requests=None, teams_start=_UNSET,
+                 deletion_time=None, guild="g1"):
+    """A draft in a server this library serves.
 
-    The binding is what makes it count: a draft in a room drawing on a
-    different library takes its cards off that library's shelf, so holding
-    this one's cube against it would make a cube undraftable because an
-    unrelated community happened to be playing it.
+    By default one UNDERWAY: its teams formed `minutes_ago`, which is what makes
+    it hold its cube. `teams_start=None` makes it one still FILLING, which holds
+    its cube on the same terms for a different reason -- see _filling, which is
+    this with the sign-up arguments named.
+
+    The binding is what makes either count: a draft in a room drawing on a
+    different library takes its cards off that library's shelf, so holding this
+    one's cube against it would make a cube undraftable because an unrelated
+    community happened to be playing it. `guild` is how the not-served case is
+    expressed.
     """
     async with AsyncSessionLocal() as s:
         if await s.get(LibraryServer, "g1") is None:
             s.add(LibraryServer(guild_id="g1", library_id=LIB, bound_by="test"))
         s.add(DraftSession(
-            session_id=session_id, guild_id="g1", cube=cube, session_stage=stage,
+            session_id=session_id, guild_id=guild, cube=cube, session_stage=stage,
             sign_ups=sign_ups if sign_ups is not None else {ALICE: "Alice", BOB: "Bob"},
+            library_requests=requests, deletion_time=deletion_time,
             draft_start_time=datetime.now() - timedelta(minutes=minutes_ago + 60),
-            teams_start_time=datetime.now() - timedelta(minutes=minutes_ago)))
+            teams_start_time=(datetime.now() - timedelta(minutes=minutes_ago)
+                              if teams_start is _UNSET else teams_start)))
         await s.commit()
 
 
-async def _filling(session_id="s2", cube=CUBE, requests=None, sign_ups=None,
-                   stage="signups", teams_start=None, deletion_time=None):
-    """A draft still taking sign-ups, in a server this library serves.
+async def _filling(session_id="s2", stage="signups", requests=None,
+                   sign_ups=None, **kw):
+    """A draft still taking sign-ups, with somebody asking for library cards.
 
-    `requests` is library_requests -- everybody who has asked. `sign_ups` is who
-    is still in the queue. They are separate arguments because the gap between
-    them is the release mechanism: a requester missing from sign_ups has left,
-    and the hold is simply no longer computed for them.
+    `requests` is library_requests -- everybody who has ASKED. `sign_ups` is who
+    is still IN the queue. They are separate because the gap between them is the
+    release mechanism: a requester missing from sign_ups has left, and the hold
+    is simply no longer computed for them.
     """
-    async with AsyncSessionLocal() as s:
-        if await s.get(LibraryServer, "g1") is None:
-            s.add(LibraryServer(guild_id="g1", library_id=LIB, bound_by="test"))
-        s.add(DraftSession(
-            session_id=session_id, guild_id="g1", cube=cube, session_stage=stage,
-            sign_ups=sign_ups if sign_ups is not None else {ALICE: "Alice"},
-            library_requests=[ALICE] if requests is None else requests,
-            draft_start_time=datetime.now(), teams_start_time=teams_start,
-            deletion_time=deletion_time))
-        await s.commit()
-
-
-def _cubes(mapping):
-    """Stand-in for the CubeCobra fetch, so no test reaches the network."""
-    async def fetch(cube_id):
-        return mapping.get(cube_id)
-    return fetch
+    await _draft(session_id=session_id, stage=stage, teams_start=None,
+                 requests=[ALICE] if requests is None else requests,
+                 sign_ups={ALICE: "Alice"} if sign_ups is None else sign_ups,
+                 **kw)
 
 
 # --- what the library owns --------------------------------------------------
@@ -136,14 +136,14 @@ async def test_a_withdrawn_card_is_no_longer_held(test_db):
 async def test_nothing_spoken_for_means_everything_is_available(test_db):
     await _deposit(ALICE, "Swamp", 4, "d1")
 
-    assert await inv.library_available(LIB, fetch=_cubes({})) == {"Swamp": 4}
+    assert await inv.library_available(LIB, fetch=cube_lists({})) == {"Swamp": 4}
 
 
 async def test_cards_out_on_loan_are_not_available(test_db):
     await _deposit(ALICE, "Swamp", 4, "d1")
     await _loan(BOB, [{"name": "Swamp", "qty": 3}], "borrowed")
 
-    assert await inv.library_available(LIB, fetch=_cubes({})) == {"Swamp": 1}
+    assert await inv.library_available(LIB, fetch=cube_lists({})) == {"Swamp": 1}
 
 
 async def test_an_assigned_deck_is_a_reservation(test_db):
@@ -152,7 +152,7 @@ async def test_an_assigned_deck_is_a_reservation(test_db):
     await _deposit(ALICE, "Swamp", 4, "d1")
     await _loan(BOB, [{"name": "Swamp", "qty": 3}], "assigned")
 
-    assert await inv.library_available(LIB, fetch=_cubes({})) == {"Swamp": 1}
+    assert await inv.library_available(LIB, fetch=cube_lists({})) == {"Swamp": 1}
 
 
 async def test_a_draft_underway_holds_its_WHOLE_cube(test_db):
@@ -165,7 +165,7 @@ async def test_a_draft_underway_holds_its_WHOLE_cube(test_db):
 
     available = await inv.library_available(
         LIB,
-        fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+        fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]}))
 
     assert available == {"Swamp": 1, "Island": 2}
 
@@ -180,7 +180,7 @@ async def test_the_whole_cube_hold_ends_once_decks_are_assigned(test_db):
 
     available = await inv.library_available(
         LIB,
-        fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+        fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]}))
 
     assert available == {"Swamp": 3}, "the loan, not the cube"
 
@@ -195,7 +195,7 @@ async def test_a_draft_that_never_assigned_releases_its_cube_eventually(test_db)
 
     available = await inv.library_available(
         LIB,
-        fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+        fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]}))
 
     assert available == {"Swamp": 4}
 
@@ -213,7 +213,7 @@ async def test_a_draft_nobody_asked_about_holds_nothing_while_it_fills(test_db):
 
     available = await inv.library_available(
         LIB,
-        fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+        fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]}))
 
     assert available == {"Swamp": 4}
 
@@ -224,7 +224,7 @@ async def test_a_finished_draft_holds_nothing(test_db):
 
     available = await inv.library_available(
         LIB,
-        fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+        fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]}))
 
     assert available == {"Swamp": 4}
 
@@ -236,7 +236,7 @@ async def test_availability_never_reads_negative(test_db):
     await _deposit(ALICE, "Swamp", 1, "d1")
     await _loan(BOB, [{"name": "Swamp", "qty": 3}], "borrowed")
 
-    assert await inv.library_available(LIB, fetch=_cubes({})) == {}
+    assert await inv.library_available(LIB, fetch=cube_lists({})) == {}
 
 
 async def test_a_cube_that_cannot_be_read_holds_nothing_rather_than_everything(
@@ -246,7 +246,7 @@ async def test_a_cube_that_cannot_be_read_holds_nothing_rather_than_everything(
     await _deposit(ALICE, "Swamp", 4, "d1")
     await _draft()
 
-    assert await inv.library_available(LIB, fetch=_cubes({})) == {"Swamp": 4}
+    assert await inv.library_available(LIB, fetch=cube_lists({})) == {"Swamp": 4}
 
 
 
@@ -271,7 +271,7 @@ async def test_a_later_drafts_whole_cube_hold_does_not_take_an_earlier_drafts_de
     await _draft("second", minutes_ago=15)
 
     available = await inv.library_available(
-        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 1}]}),
+        LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 1}]}),
         exclude_loan_id=mine)
 
     assert available == {"Swamp": 1}
@@ -288,7 +288,7 @@ async def test_an_earlier_drafts_whole_cube_hold_still_takes_a_later_drafts_deck
                        source="draft:second")
 
     available = await inv.library_available(
-        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 1}]}),
+        LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 1}]}),
         exclude_loan_id=mine)
 
     assert available == {}
@@ -307,7 +307,7 @@ async def test_a_later_drafts_uncollected_deck_does_not_take_an_earlier_drafts_d
                 source="draft:second")
 
     available = await inv.library_available(
-        LIB, fetch=_cubes({}), exclude_loan_id=mine)
+        LIB, fetch=cube_lists({}), exclude_loan_id=mine)
 
     assert available == {"Swamp": 1}
 
@@ -324,7 +324,7 @@ async def test_a_collected_deck_counts_whichever_draft_it_came_from(test_db):
                 source="draft:second")
 
     available = await inv.library_available(
-        LIB, fetch=_cubes({}), exclude_loan_id=mine)
+        LIB, fetch=cube_lists({}), exclude_loan_id=mine)
 
     assert available == {}
 
@@ -341,7 +341,7 @@ async def test_a_draft_nobody_in_it_may_borrow_from_holds_nothing(test_db):
     await _draft(sign_ups={BOB: "Bob", "u3": "Carol"})
 
     available = await inv.library_available(
-        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+        LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]}))
 
     assert available == {"Swamp": 4}
 
@@ -355,7 +355,7 @@ async def test_one_invited_drafter_is_enough_to_hold_the_cube(test_db):
     await _draft(sign_ups={ALICE: "Alice", "u3": "Carol"})
 
     available = await inv.library_available(
-        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+        LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]}))
 
     assert available == {"Swamp": 1}
 
@@ -376,7 +376,7 @@ async def test_a_requested_draft_holds_its_whole_cube_while_it_fills(test_db):
     await _filling()
 
     available = await inv.library_available(
-        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+        LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]}))
 
     assert available == {"Swamp": 1, "Island": 2}
 
@@ -388,23 +388,28 @@ async def test_one_requester_holds_as_much_as_several(test_db):
     await _filling(requests=[ALICE, BOB], sign_ups={ALICE: "Alice", BOB: "Bob"})
 
     available = await inv.library_available(
-        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+        LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]}))
 
     assert available == {"Swamp": 1}
 
 
-async def test_the_last_requester_leaving_releases_the_hold(test_db):
+@pytest.mark.parametrize("requests,sign_ups,why", [
+    ([ALICE], {BOB: "Bob"}, "the last requester left"),
+    (["ghost"], {ALICE: "Alice"}, "a stale id that was never in the draft"),
+])
+async def test_a_hold_nobody_active_is_asking_for_releases(
+        test_db, requests, sign_ups, why):
     """Release is DERIVED, not evented. Nothing clears library_requests when a
     player leaves -- they drop out of sign_ups by the ordinary cancel path, the
     intersection empties, and the hold stops being computed. So there is no
-    leave path that can be missed and no hold that can go stale."""
+    leave path that can be missed, and a stale id holds nothing either."""
     await _deposit(ALICE, "Swamp", 4, "d1")
-    await _filling(requests=[ALICE], sign_ups={BOB: "Bob"})
+    await _filling(requests=requests, sign_ups=sign_ups)
 
     available = await inv.library_available(
-        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+        LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]}))
 
-    assert available == {"Swamp": 4}
+    assert available == {"Swamp": 4}, why
 
 
 async def test_one_requester_leaving_does_not_release_the_other(test_db):
@@ -414,21 +419,9 @@ async def test_one_requester_leaving_does_not_release_the_other(test_db):
     await _filling(requests=[ALICE, BOB], sign_ups={BOB: "Bob"})
 
     available = await inv.library_available(
-        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+        LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]}))
 
     assert available == {"Swamp": 1}
-
-
-async def test_an_id_that_was_never_in_the_draft_holds_nothing(test_db):
-    """A stale request written by a retry or a repair holds nothing, because
-    the hold is read against sign_ups rather than trusted from the column."""
-    await _deposit(ALICE, "Swamp", 4, "d1")
-    await _filling(requests=["ghost"], sign_ups={ALICE: "Alice"})
-
-    available = await inv.library_available(
-        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
-
-    assert available == {"Swamp": 4}
 
 
 async def test_the_signup_hold_hands_over_to_the_underway_hold(test_db):
@@ -441,11 +434,10 @@ async def test_the_signup_hold_hands_over_to_the_underway_hold(test_db):
     on it being set.
     """
     await _deposit(ALICE, "Swamp", 4, "d1")
-    await _filling(stage="pairings",
-                   teams_start=datetime.now() - timedelta(minutes=5))
+    await _draft(requests=[ALICE], sign_ups={ALICE: "Alice"})
 
     available = await inv.library_available(
-        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+        LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]}))
 
     assert available == {"Swamp": 1}, "held once, by the underway hold"
 
@@ -458,7 +450,7 @@ async def test_a_finished_draft_releases_its_requested_cube(test_db):
     await _filling(stage="completed")
 
     available = await inv.library_available(
-        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+        LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]}))
 
     assert available == {"Swamp": 4}
 
@@ -469,7 +461,7 @@ async def test_a_requested_cube_that_cannot_be_read_holds_nothing(test_db):
     await _deposit(ALICE, "Swamp", 4, "d1")
     await _filling()
 
-    assert await inv.library_available(LIB, fetch=_cubes({})) == {"Swamp": 4}
+    assert await inv.library_available(LIB, fetch=cube_lists({})) == {"Swamp": 4}
 
 
 async def test_a_requester_the_library_would_refuse_holds_nothing(test_db):
@@ -481,7 +473,7 @@ async def test_a_requester_the_library_would_refuse_holds_nothing(test_db):
     await _filling(requests=[BOB], sign_ups={ALICE: "Alice", BOB: "Bob"})
 
     available = await inv.library_available(
-        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+        LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]}))
 
     assert available == {"Swamp": 4}, "Alice is invited but did not ask"
 
@@ -491,16 +483,10 @@ async def test_a_request_in_a_room_this_library_does_not_serve_holds_nothing(
     """The binding is what makes a hold count, here as everywhere else: a draft
     drawing on another library's shelf must not take cards off this one."""
     await _deposit(ALICE, "Swamp", 4, "d1")
-    async with AsyncSessionLocal() as s:
-        s.add(LibraryServer(guild_id="g1", library_id=LIB, bound_by="test"))
-        s.add(DraftSession(session_id="elsewhere", guild_id="g-other", cube=CUBE,
-                           session_stage="signups", sign_ups={ALICE: "Alice"},
-                           library_requests=[ALICE],
-                           draft_start_time=datetime.now(), teams_start_time=None))
-        await s.commit()
+    await _filling(session_id="elsewhere", guild="g-other")
 
     available = await inv.library_available(
-        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+        LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]}))
 
     assert available == {"Swamp": 4}
 
@@ -519,7 +505,7 @@ async def test_a_queue_already_due_for_cancellation_holds_nothing(test_db):
     await _filling(deletion_time=datetime.now() - timedelta(minutes=1))
 
     available = await inv.library_available(
-        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+        LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]}))
 
     assert available == {"Swamp": 4}
 
@@ -531,6 +517,31 @@ async def test_a_queue_still_within_its_inactivity_window_holds_its_cube(test_db
     await _filling(deletion_time=datetime.now() + timedelta(hours=3))
 
     available = await inv.library_available(
-        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+        LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]}))
 
     assert available == {"Swamp": 1}
+
+
+async def test_a_borrow_is_not_blocked_by_a_queue_that_has_not_fired(test_db):
+    """The priority rule for the two in one sentence: a draft handing out decks
+    never waits on a sign-up hold.
+
+    Its players have already drafted, so refusing them is the harm the hold
+    exists to prevent, while the queue can be told no and ask again -- which is
+    what its refusal says to do, and it hears that while still filling rather
+    than after a wasted evening.
+    """
+    await _deposit(ALICE, "Swamp", 1, "d1")
+    await _draft("underway", minutes_ago=5)
+    mine = await _loan(BOB, [{"name": "Swamp", "qty": 1}], "assigned",
+                       source="draft:underway")
+    await _filling("queue")
+
+    asked_for_the_loan = await inv.library_available(
+        LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 1}]}),
+        exclude_loan_id=mine)
+    asked_in_general = await inv.library_available(
+        LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 1}]}))
+
+    assert asked_for_the_loan == {"Swamp": 1}, "the deck can be collected"
+    assert asked_in_general == {}, "and the queue still holds it against others"
