@@ -43,7 +43,7 @@ import random
 import tempfile
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -607,6 +607,65 @@ def make_draft_stub(session_stage="pairings", sign_ups=None, **overrides):
     )
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+def cube_lists(mapping):
+    """A stand-in for the CubeCobra fetch, so no test reaches the network.
+
+    Returns the callable the library's `fetch=` parameters take: a cube in the
+    mapping reads as those cards, a cube missing from it reads as unreadable
+    (None), which is a different case the library treats differently.
+    """
+    async def fetch(cube_id):
+        return mapping.get(str(cube_id))
+
+    return fetch
+
+
+def stub_shelf(monkeypatch, held, available, cards):
+    """Fix what the shelf holds, what is free of it, and what the cube lists.
+
+    For tests about what a SURFACE says once the shelf is known -- the signup
+    board, the cube dropdown -- rather than about how the shelf is counted,
+    which is test_library_inventory's subject.
+
+    Patched on BOTH modules, and that is the point of having one copy: a surface
+    can reach the shelf two ways. The cube dropdown calls the names imported
+    into cube_views.pack_options, while the signup note goes through
+    cube_coverage, which calls the inventory module's own. A stub that patches
+    one of them silently tests the real ledger instead, and two separate test
+    files learned that the hard way.
+    """
+    import cube_views.pack_options as pack_options
+    import services.card_library_inventory as inventory
+
+    async def _held(_library_id):
+        return dict(held)
+
+    async def _avail(_library_id, *_a, **_k):
+        return dict(available)
+
+    async def _fetch(_cube_id):
+        return cards
+
+    for module in (pack_options, inventory):
+        monkeypatch.setattr(module, "library_holdings", _held)
+        monkeypatch.setattr(module, "library_available", _avail)
+    monkeypatch.setattr(inventory, "fetch_cube", _fetch)
+
+
+def library_ctx(author=1234, guild=99, channel="chan1"):
+    """The ApplicationContext double the /library command suites drive.
+
+    One copy, because all three of them assert on what the command SAID: a
+    widening here (an embed, a kwargs-passed body) has to reach every suite at
+    once or one of them silently keeps the narrower notion of "what did it say".
+    See sent_to_invoker, centralised for the same reason.
+    """
+    return SimpleNamespace(
+        author=SimpleNamespace(id=author),
+        guild=SimpleNamespace(id=guild), guild_id=guild, channel_id=channel,
+        defer=AsyncMock(), followup=SimpleNamespace(send=AsyncMock()))
 
 
 def sent_to_invoker(ctx):

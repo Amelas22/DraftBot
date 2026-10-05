@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from conftest import stub_library
+from conftest import library_ctx, sent_to_invoker, stub_library
 
 from cogs.library_commands import LibraryCommands
 
@@ -24,24 +24,10 @@ DECK = [{"name": "Swamp", "qty": 7}, {"name": "Ghostly Wings", "qty": 1}]
 _STOCK = {c["name"]: 99 for c in DECK}
 
 
-def _ctx():
-    ctx = SimpleNamespace()
-    ctx.author = SimpleNamespace(id=1234)
-    ctx.guild = SimpleNamespace(id=99)
-    ctx.guild_id = 99
-    ctx.defer = AsyncMock()
-    ctx.followup = SimpleNamespace(send=AsyncMock())
-    return ctx
-
-
-def _said(ctx):
-    return " ".join(str(c.args[0]) for c in ctx.followup.send.await_args_list if c.args)
-
-
 async def _run(monkeypatch, command, status, loan=None, busy=None, waited=False):
     import cogs.library_commands as mod
     cog = LibraryCommands(bot=SimpleNamespace())
-    ctx = _ctx()
+    ctx = library_ctx()
     # Borrows and returns both queue behind the serve and report out of band,
     # so both are driven through the same detached followup below.
     monkeypatch.setattr(mod, "borrow_when_free", AsyncMock(return_value=(status, waited)))
@@ -70,7 +56,7 @@ async def _run(monkeypatch, command, status, loan=None, busy=None, waited=False)
     await getattr(cog, command).callback(cog, ctx)
     for coro in detached:
         await coro
-    return _said(ctx)
+    return sent_to_invoker(ctx)
 
 
 # --- borrowing --------------------------------------------------------------
@@ -144,9 +130,9 @@ async def test_a_guild_without_a_library_is_told_so(monkeypatch):
     import cogs.library_commands as mod
     monkeypatch.setattr(mod, "library_gate", lambda ctx: "The card library isn't set up here.")
     cog = LibraryCommands(bot=SimpleNamespace())
-    ctx = _ctx()
+    ctx = library_ctx()
     await cog.borrow.callback(cog, ctx)
-    assert "isn't set up" in _said(ctx)
+    assert "isn't set up" in sent_to_invoker(ctx)
 
 
 async def test_the_gate_does_not_price_anything(monkeypatch):
@@ -174,7 +160,7 @@ async def test_a_free_library_needs_no_money_server(monkeypatch):
     the gate refused everyone."""
     import cogs.library_commands as mod
     monkeypatch.setattr(mod, "is_money_server", lambda gid: False)
-    assert mod.library_gate(_ctx()) is None
+    assert mod.library_gate(library_ctx()) is None
 
 
 async def test_the_borrower_is_told_which_bot_is_trading_with_them(monkeypatch):
@@ -298,7 +284,7 @@ async def test_an_unconfigured_library_says_so_instead_of_queueing(monkeypatch):
     monkeypatch.setattr(mod, "get_lending_client",
                         lambda: SimpleNamespace(enabled=False))
 
-    blocked = mod.library_gate(_ctx())
+    blocked = mod.library_gate(library_ctx())
 
     assert blocked, "a library that cannot reach its serve must refuse up front"
     assert "configured" in blocked.lower() or "unavailable" in blocked.lower()
@@ -316,7 +302,7 @@ async def test_an_uninvited_borrower_is_turned_away(monkeypatch):
     import cogs.library_commands as mod
 
     cog = LibraryCommands(bot=SimpleNamespace())
-    ctx = _ctx()
+    ctx = library_ctx()
     monkeypatch.setattr(mod, "library_gate", lambda ctx: None)
     stub_library(monkeypatch, mod, stock=_STOCK)
     monkeypatch.setattr(mod, "may_borrow", AsyncMock(return_value=False))
@@ -357,11 +343,11 @@ async def test_depositing_is_not_gated_by_the_invite_list(test_db, monkeypatch):
     monkeypatch.setattr(mod, "cube_as_the_library_sees_it",
                         AsyncMock(return_value=None))
 
-    ctx = _ctx()
+    ctx = library_ctx()
     cog = LibraryCommands(bot=SimpleNamespace())
     await cog.deposit.callback(cog, ctx, "somecube")
 
-    said = _said(ctx)
+    said = sent_to_invoker(ctx)
     assert "not on the list" not in said and "invite" not in said, said
     assert "CubeCobra" in said, \
         "it got as far as reading the cube, which is past every gate"

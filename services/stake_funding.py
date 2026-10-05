@@ -23,7 +23,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from database.db_session import db_session
-from helpers.stale_drafts import is_finished_draft
+from helpers.stale_drafts import is_finished_draft, rooms_reaped
 from models.draft_session import DraftSession
 from models.stake import StakeInfo
 from services import debt_service, wallet_service
@@ -65,9 +65,7 @@ def _is_over(row: Any, now: datetime) -> bool:
 
     A row with no deletion_time keeps its claim -- nothing here says it is over.
     """
-    if is_finished_draft(row):
-        return True
-    return row.deletion_time is not None and row.deletion_time < now
+    return is_finished_draft(row) or rooms_reaped(row, now)
 
 
 async def potential_losses(guild_id: str, player_id: str,

@@ -35,6 +35,12 @@ class DraftSession(Base):
     matches = Column(JSON)
     match_counter = Column(Integer, default=1)
     sign_ups = Column(JSON)
+    # Discord ids of players who asked for library cards for THIS draft. A list,
+    # not a dict: the name is already in sign_ups, and the pair of them is what
+    # makes the release derived rather than evented -- an active requester is one
+    # who is in BOTH, so leaving the queue releases the hold with nothing to
+    # listen for. See services/library_request_service.active_requesters.
+    library_requests = Column(JSON)
     channel_ids = Column(JSON)
     session_type = Column(String(64))
     session_stage = Column(String(64))
@@ -164,47 +170,43 @@ class DraftSession(Base):
                     return draft
         return None
 
+    @classmethod
+    async def get_filling_draft_for_user(cls, channel_id: str, user_id: str):
+        """The draft in this channel that is still taking sign-ups and has this
+        user in it, or None.
+
+        A fourth finder because the other three cannot see a draft at this stage,
+        and this is the only stage that matters for a sign-up-time question:
+
+        * get_by_channel_id keys on draft_chat_channel, which does not exist
+          until rooms are created.
+        * get_by_any_channel_id adds channel_ids, created at the same time.
+
+        So both return None for a queue that is still filling, silently. There
+        was a third, get_active_draft_for_user, which keyed on the right column
+        and then required session_stage IS NOT NULL -- the stage is NULL for the
+        whole of sign-up, and 'completed' and 'abandoned' are not, so it both
+        excluded every queue and included finished drafts, the opposite of what
+        its docstring claimed. It had no callers and is gone rather than left
+        next to this as a trap.
+
+        Keyed on teams_start_time IS NULL, the same fact the library's sign-up
+        hold keys on, so "still filling" means one thing in both places.
+        """
+        async with db_session() as session:
+            stmt = (select(cls)
+                    .where(cls.draft_channel_id == str(channel_id),
+                           cls.teams_start_time.is_(None))
+                    .order_by(desc(cls.draft_start_time)))
+            for draft in (await session.execute(stmt)).scalars().all():
+                if str(user_id) in (draft.sign_ups or {}):
+                    return draft
+            return None
+
     def is_user_participating(self, user_id: str) -> bool:
         """Check if a user is participating in this draft session"""
         return user_id in self.team_a or user_id in self.team_b
     
-    @classmethod
-    async def get_active_draft_for_user(cls, channel_id: str, user_id: str):
-        """
-        Find the most recent active draft where:
-        1. The channel matches draft_channel_id
-        2. The user is in the sign_ups
-        3. The draft is not completed
-        
-        Args:
-            channel_id: The Discord channel ID
-            user_id: The Discord user ID
-            
-        Returns:
-            The most recent matching DraftSession or None
-        """
-        async with db_session() as session:
-            from sqlalchemy import select, and_, desc
-            
-            # Create query to find matching drafts
-            stmt = select(cls).where(
-                and_(
-                    cls.draft_channel_id == channel_id,
-                    cls.session_stage.isnot(None)
-                )
-            ).order_by(desc(cls.draft_start_time))  # Most recent first
-            
-            result = await session.execute(stmt)
-            draft_sessions = result.scalars().all()
-            
-            # Filter for drafts where user is in sign_ups
-            for draft in draft_sessions:
-                sign_ups = draft.sign_ups or {}
-                if user_id in sign_ups:
-                    return draft
-                    
-            return None
-        
     @classmethod
     async def create_session(cls, **kwargs):
         """Create a new draft session with the given attributes"""

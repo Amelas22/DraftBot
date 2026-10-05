@@ -12,8 +12,7 @@ import pytest
 import services.card_library_inventory as inventory
 
 import cogs.library_commands as deposit_mod
-import cube_views.pack_options as mod
-from conftest import a_library
+from conftest import a_library, stub_shelf
 from cube_views.pack_options import library_signup_note
 
 GUILD = "g-untradeable"
@@ -28,26 +27,12 @@ CUBE_CARDS = [
 SHELF = {"Swamp": 4}
 
 
-def _shelf(monkeypatch, held, available, cards):
-    async def _held(_library_id):
-        return dict(held)
-
-    async def _avail(_library_id, *_a, **_k):
-        return dict(available)
-
-    async def _fetch(_cube_id):
-        return cards
-    monkeypatch.setattr(mod, "library_holdings", _held)
-    monkeypatch.setattr(mod, "library_available", _avail)
-    monkeypatch.setattr(inventory, "fetch_cube", _fetch)
-
-
 @pytest.mark.asyncio
 async def test_a_cube_is_covered_though_its_conspiracies_never_can_be(
         test_db, monkeypatch):
     """The library holds every card it could ever hold, so the board says so."""
     await a_library("lib", guild=GUILD, collateral=0, cubes=(CUBE,))
-    _shelf(monkeypatch, SHELF, SHELF, CUBE_CARDS)
+    stub_shelf(monkeypatch, SHELF, SHELF, CUBE_CARDS)
 
     note = await library_signup_note(CUBE, GUILD)
 
