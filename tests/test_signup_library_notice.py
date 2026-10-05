@@ -12,8 +12,7 @@ import pytest
 import services.card_library_inventory as inventory
 
 from database.db_session import AsyncSessionLocal
-from conftest import a_library
-import cube_views.pack_options as mod
+from conftest import a_library, stub_shelf
 from cube_views.pack_options import library_signup_note
 
 GUILD, CUBE = "g1", "mycube"
@@ -29,35 +28,13 @@ async def _price(collateral=0):
                     cubes=(CUBE,))
 
 
-def _shelf(monkeypatch, held, available, cards):
-    # Both inventory reads take a library now and both ignore it here: which
-    # library is the subject of its own tests, and these are about what the
-    # board says once the shelf is known.
-    #
-    # Patched on BOTH modules, because the board reaches the shelf two ways: the
-    # cube dropdown calls the names imported into pack_options, while the note
-    # goes through cube_coverage, which calls the inventory module's own.
-    async def _held(_library_id):
-        return dict(held)
-
-    async def _avail(_library_id, *_a, **_k):
-        return dict(available)
-
-    async def _fetch(cube_id):
-        return cards
-    for module in (mod, inventory):
-        monkeypatch.setattr(module, "library_holdings", _held)
-        monkeypatch.setattr(module, "library_available", _avail)
-    monkeypatch.setattr(inventory, "fetch_cube", _fetch)
-
-
 CUBE_CARDS = [{"name": "Swamp", "qty": 4}]
 
 
 @pytest.mark.asyncio
 async def test_a_free_covered_cube_says_no_cards_needed(test_db, monkeypatch):
     await _price(0)
-    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
+    stub_shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
 
     note = await library_signup_note(CUBE, GUILD)
 
@@ -69,7 +46,7 @@ async def test_a_free_covered_cube_says_no_cards_needed(test_db, monkeypatch):
 async def test_a_priced_cube_names_what_borrowing_costs(test_db, monkeypatch):
     """Whether they can afford it is part of whether they can play."""
     await _price(25)
-    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
+    stub_shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
 
     note = await library_signup_note(CUBE, GUILD)
 
@@ -83,7 +60,7 @@ async def test_a_cube_the_library_cannot_cover_says_bring_your_own(
     """The case this exists for. Signing up expecting to borrow, and finding
     out at fire time, wastes the whole pod's evening."""
     await _price(0)
-    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 1}, CUBE_CARDS)
+    stub_shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 1}, CUBE_CARDS)
 
     note = await library_signup_note(CUBE, GUILD)
 
@@ -96,7 +73,7 @@ async def test_a_cube_the_library_does_not_lend_for_says_nothing(
         test_db, monkeypatch):
     """Most drafts have nothing to do with the library. A field on every one of
     them would be noise on the majority to inform a minority."""
-    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
+    stub_shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
 
     assert await library_signup_note(CUBE, GUILD) is None
 
@@ -106,7 +83,7 @@ async def test_an_unreadable_cube_does_not_promise_anything(test_db, monkeypatch
     """If we cannot check coverage we must not claim it. Saying "no cards
     needed" on a guess is the failure this is meant to prevent."""
     await _price(0)
-    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, None)
+    stub_shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, None)
 
     note = await library_signup_note(CUBE, GUILD)
 
@@ -182,7 +159,7 @@ async def test_a_paid_library_says_the_deposit_comes_back(
     deposit is returned -- 100 tix they get back is a very different
     proposition from 100 tix spent, and they need it BEFORE they sign up."""
     await _price(collateral=100)
-    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
+    stub_shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
 
     note = await library_signup_note(CUBE, GUILD)
 
@@ -222,7 +199,7 @@ async def test_a_whitelisted_library_says_nothing_on_the_shared_board(
     hold for them."""
     await _price(collateral)
     await _list_a_member()
-    _shelf(monkeypatch, {"Swamp": 4}, available, CUBE_CARDS)
+    stub_shelf(monkeypatch, {"Swamp": 4}, available, CUBE_CARDS)
 
     assert await library_signup_note(CUBE, GUILD) is None
 
@@ -232,7 +209,7 @@ async def test_a_communal_library_still_warns_about_coverage(test_db, monkeypatc
     """The guard that whitelist mode is the only thing suppressed: with nobody
     listed the library lends to everyone reading, so the warning is theirs."""
     await _price(0)
-    _shelf(monkeypatch, {"Swamp": 4}, {}, CUBE_CARDS)
+    stub_shelf(monkeypatch, {"Swamp": 4}, {}, CUBE_CARDS)
 
     note = await library_signup_note(CUBE, GUILD)
 
@@ -248,7 +225,7 @@ async def test_a_whitelisted_library_leaves_the_cube_dropdown_unmarked(
 
     await _price(0)
     await _list_a_member()
-    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
+    stub_shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
     options = [{"value": CUBE, "label": CUBE, "description": "a cube"}]
 
     marked = await mark_library_cubes(options, GUILD)
@@ -261,7 +238,7 @@ async def test_a_communal_library_still_marks_the_cube_dropdown(test_db, monkeyp
     from cube_views.pack_options import mark_library_cubes
 
     await _price(0)
-    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
+    stub_shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
     options = [{"value": CUBE, "label": CUBE, "description": "a cube"}]
 
     marked = await mark_library_cubes(options, GUILD)
@@ -284,7 +261,7 @@ async def test_both_answers_point_at_the_request_command(
     can take the cube before this one fires; the uncovered line needs it
     because the shelf frees up between drafts and nothing else would tell them."""
     await _price(0)
-    _shelf(monkeypatch, {"Swamp": 4}, available, CUBE_CARDS)
+    stub_shelf(monkeypatch, {"Swamp": 4}, available, CUBE_CARDS)
 
     note = await library_signup_note(CUBE, GUILD)
 
