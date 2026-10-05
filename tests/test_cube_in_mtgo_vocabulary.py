@@ -3,7 +3,7 @@
 A CubeCobra list arrives in paper vocabulary. Custody, orders and the ledger
 all speak MTGO's, because MTGO is the party that has to recognise a name and it
 refuses a whole order over one it does not know. Translating at each consumer
-instead left the rule a call-site convention: `_being_drafted` never got it, so
+instead left the rule a call-site convention: the whole-cube hold never got it, so
 a Universes Beyond card in a drafting cube reserved nothing and stayed lendable
 to a second draft at the same time.
 """
@@ -72,18 +72,19 @@ async def test_a_drafting_cube_reserves_cards_under_the_name_custody_uses(test_d
     from models.draft_session import DraftSession
     from database.db_session import AsyncSessionLocal
     from datetime import datetime
-    from services.card_library_inventory import _being_drafted
+    from services.card_library_inventory import _held_by_drafts
 
     await learn_substitutions(SUBS, job_id="j1")
     await a_library("lib", guild="g-draft")
     async with AsyncSessionLocal() as s:
         s.add(DraftSession(session_id="s1", guild_id="g-draft", cube="c",
+                           sign_ups={"u1": "Ada"}, library_requests=["u1"],
                            teams_start_time=datetime.now()))
         await s.commit()
 
     # The guilds and the invite list are resolved once per availability read and
     # passed in now; this library serves one guild and lends to everyone.
-    held = await _being_drafted(_returns(CUBE), "lib", ["g-draft"], set())
+    held = await _held_by_drafts(_returns(CUBE), "lib", ["g-draft"], set())
 
     assert held.get("Goben, Gene-Splice Savant") == 1, held
     assert "Norman Osborn" not in held

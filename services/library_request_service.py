@@ -6,7 +6,7 @@ cover it. Nothing before that moment asked the question, so the answer arrived
 after the only point at which it was still useful.
 
 So a player asks AT SIGN-UP, and the answer is given then. Granting a request
-holds the cube for that draft (services/card_library_inventory._requested_at_signup),
+holds the cube for that draft (services/card_library_inventory._held_by_drafts),
 which is why it can be refused: the shelf has one copy of each card, and a draft
 already holding it is a draft that will be short if a second one is promised the
 same cards.
@@ -47,7 +47,7 @@ def active_requesters(draft: Any) -> "set[str]":
     The intersection IS the release mechanism. A requester who leaves the draft
     is removed from sign_ups by the ordinary cancel path, so they fall out of
     here on the next read and the cube stops being held for them. When the last
-    one goes the set is empty and _requested_at_signup skips the draft entirely.
+    one goes the set is empty and _held_by_drafts skips the draft entirely.
 
     Reading sign_ups rather than trusting library_requests also means a draft
     cannot hold the shelf for somebody who was never in it -- a stale id written

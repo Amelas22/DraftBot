@@ -3,8 +3,15 @@
 Two questions, two answers, and conflating them is the mistake this exists to
 prevent. A donor asking "what does this cube still need?" means everything on
 the shelf. A drafter asking "can I borrow this?" means what is not already
-spoken for -- a cube being drafted at this moment has its cards in players'
-hands and may not support a second draft alongside it.
+spoken for -- a cube somebody has asked the library for has its cards promised
+and may not support a second draft alongside it.
+
+What is spoken for is what somebody ASKED for. A draft holds its cube because a
+player in it ran /library request, from that moment until its own loans can
+answer precisely; a draft nobody asked about holds nothing and takes what is
+free when its players borrow. The alternative -- every draft that fires holding
+its cube whether or not anyone wanted the library -- is what made the players
+who did ask wait on drafts that never cared.
 
 Read from the LEDGER, not from the serve's `/vault`. The vault truncates its
 listing, which is why the withdrawal path has to presume an unlisted card is
@@ -22,7 +29,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from database.db_session import AsyncSessionLocal
 from helpers.cube_list import fetch_cube
@@ -90,7 +97,7 @@ async def cube_as_the_library_sees_it(
         and refuses it whole), and
       * everything else is renamed to what MTGO calls it.
 
-    Applying these per consumer is what left `_being_drafted` without them: a
+    Applying these per consumer is what left the whole-cube hold without them: a
     Universes Beyond card in a drafting cube never matched the ledger's name for
     it, so it reserved nothing and stayed lendable to a second draft at once.
 
@@ -129,13 +136,17 @@ async def library_available(
 ) -> "dict[str, int]":
     """What THIS library could actually lend right now: {name: copies}.
 
-    Holdings minus what is spoken for. The three sources of commitment are
-    phase-disjoint by construction rather than by arithmetic, which is why they
-    add rather than needing a union. A draft holds its whole cube from sign-up
-    (requested, no teams_start_time), then still holds it while dealing packs
-    (underway, teams_start_time set, no loans yet), and from then on its loans
-    speak for it. Each draft is in exactly one of those phases, so no card can
-    be counted twice.
+    Holdings minus what is spoken for. Two sources of commitment, and they are
+    disjoint by construction rather than by arithmetic, which is why they add
+    rather than needing a union: a draft holds its WHOLE cube only until its
+    loans exist, and from then on those loans speak for it. No card is counted
+    by both.
+
+    A HOLD IS EARNED BY ASKING. Only a draft somebody asked the library for
+    holds anything -- from sign-up, through the packs being dealt, until its
+    loans take over. A draft that fires with nobody asking holds nothing and
+    takes what is free when its players borrow; if a queue that did ask is
+    holding the cube, that borrow is blocked, which is what asking buys.
 
     `exclude_loan_id` asks on behalf of that loan, which does two things: the
     loan is not counted against itself, and the earlier reservation wins -- a
@@ -145,24 +156,8 @@ async def library_available(
     drafts of the same cube, and the one that reserved second waits. Cards
     somebody has actually collected count whichever draft they came from.
 
-    A LOAN OUTRANKS EVERY SIGN-UP HOLD, which is why the third term is skipped
-    entirely when asked on behalf of one. A draft handing out decks is never
-    made to wait on a queue that has not fired: its players have already
-    drafted, so refusing them is the harm this whole feature exists to prevent,
-    while a queue can be told no and ask again. It is the rule for any such
-    pair rather than for the earlier of the two, which is why nothing has to
-    record when a request was made.
-
-    The cost, stated because it is the one thing a hold does not cover: a draft
-    that fires without anybody requesting still holds its whole cube (the term
-    above, which asks nobody's permission), and its borrows will take cards a
-    filling queue was holding. The queue's players find out by asking again,
-    which is what the refusal tells them to do, and they find out while the
-    queue is still filling rather than after drafting.
-
-    A draft's own sign-up hold never blocks its own borrow: forming teams sets
-    teams_start_time, so it leaves the third term and enters the second before
-    any loan of its exists.
+    A draft's own hold never blocks its own borrow: by then it has loans, so it
+    has left the first term for the second.
 
     `fetch` reads a cube's list and defaults to CubeCobra; tests pass their own
     so nothing here reaches the network.
@@ -175,17 +170,11 @@ async def library_available(
 
     held = await library_holdings(library_id)
     since = await _reserved_since(exclude_loan_id)
-    holds = [await _on_loan(library_id, exclude_loan_id=exclude_loan_id,
-                            yield_after=since),
-             await _being_drafted(read, library_id, guilds, invited,
-                                  yield_after=since)]
-    if exclude_loan_id is None:
-        holds.append(await _requested_at_signup(read, library_id, guilds, invited))
-
-    spoken_for: "dict[str, int]" = {}
-    for hold in holds:
-        for name, qty in hold.items():
-            spoken_for[name] = spoken_for.get(name, 0) + qty
+    spoken_for = await _on_loan(library_id, exclude_loan_id=exclude_loan_id,
+                                yield_after=since)
+    for name, qty in (await _held_by_drafts(read, library_id, guilds, invited,
+                                            yield_after=since)).items():
+        spoken_for[name] = spoken_for.get(name, 0) + qty
 
     available: "dict[str, int]" = {}
     for name, qty in held.items():
@@ -289,64 +278,93 @@ def _tally(cards: "list[dict[str, Any]]", *, into: "Optional[dict[str, int]]" = 
     return out
 
 
-async def _requested_at_signup(read: "Callable[[str], Any]", library_id: Any,
-                               guilds: "list[str]", invited: "set[str]",
-                               ) -> "dict[str, int]":
-    """The cubes of this library's drafts that are still filling and have
-    somebody asking for library cards.
+async def _held_by_drafts(read: "Callable[[str], Any]", library_id: Any,
+                          guilds: "list[str]", invited: "set[str]", *,
+                          yield_after: Optional[datetime] = None
+                          ) -> "dict[str, int]":
+    """The whole cubes of drafts somebody asked this library for.
 
-    The whole cube, for the same reason _being_drafted holds the whole cube: what
-    a requester will end up drafting is unknowable until the packs are dealt, so
-    anything less is a promise the shelf cannot keep. One requester holds all of
+    ONE term for what used to be two. A hold is EARNED BY ASKING and then
+    follows the draft: granted while the queue fills, kept through the packs
+    being dealt, and replaced by the draft's own loans once those exist and can
+    answer precisely. Keyed on teams_start_time from opposite sides, those were
+    two functions that differed only in their bounds -- a split that only made
+    sense while a draft nobody had asked about held its cube anyway.
+
+    A DRAFT NOBODY ASKED ABOUT HOLDS NOTHING, however far along it is. It takes
+    what the shelf has free when its players borrow, and if a queue that did ask
+    is holding the cube, it is blocked -- which is the point of asking. The cost
+    is real and chosen: a draft that fires without asking can be short of cards
+    its players physically drafted. Holding the cube for every draft that fires
+    is the alternative, and it means the players who did ask are refused by
+    drafts that never cared.
+
+    The whole cube, because what a requester ends up drafting is unknowable
+    until the packs are dealt -- and after that, until the pools are recorded.
+    Anything less is a promise the shelf cannot keep. One requester holds all of
     it; several in one draft share it, because they draft from the same copy.
 
-    Only drafts STILL IN SIGN-UP. Once teams form, _being_drafted holds the cube
-    on the same terms and this must stop, or one draft would be counted twice.
+    An ACTIVE requester is one who is still in sign_ups, so nothing has to
+    listen for somebody leaving: they drop out, the intersection empties, and
+    the hold is no longer computed. sign_ups survives teams forming, which is
+    what lets one request carry the hold across the phase boundary instead of
+    having to be re-earned there. And -- where the library is invite-only --
+    only requesters who could actually borrow, since holding a cube for somebody
+    the library would refuse only blocks the people it would not.
 
-    An ACTIVE requester is one who is still in sign_ups. Nothing has to listen
-    for somebody leaving the queue: they drop out of sign_ups, the intersection
-    empties, and the hold is simply no longer computed. A draft whose requesters
-    have all gone holds nothing without anybody telling it so.
+    Two bounds, one per phase, because a draft can stop being live in two ways.
+    A QUEUE is bounded by its own inactivity deadline: nobody leaves a dead
+    queue, they stop coming back, so a row that cleanup is about to delete holds
+    nothing (helpers.stale_drafts.rooms_reaped, shared with stake_funding, which
+    drops a dead draft's claim on a stake for the same reason). A DRAFT UNDERWAY
+    is bounded by DRAFTING_WINDOW: teams-formed to decks-assigned is 20 minutes
+    median and never exceeded 31, so one still unassigned an hour later is not
+    drafting, it broke.
 
-    And -- where the library is invite-only -- only requesters who could actually
-    borrow. Holding a cube for somebody the library would refuse only blocks the
-    people it would not.
-
-    A QUEUE CLEANUP HAS REAPED HOLDS NOTHING, and this is the only hold that
-    needs saying so. The other two end when a draft produces loans or runs out
-    of DRAFTING_WINDOW; this one would end when its requesters left, except that
-    nobody leaves a dead queue -- they stop coming back. What ends it is the
-    queue's own inactivity deadline, which every sign-up pushes back and which
-    cleanup deletes the row at (helpers.stale_drafts.rooms_reaped, shared with
-    stake_funding, which drops a dead draft's claim on a stake for the same
-    reason).
+    A draft whose teams formed after `yield_after` holds nothing: see
+    library_available.
     """
     if not guilds:
         return {}
+    cutoff = datetime.now() - DRAFTING_WINDOW
     async with AsyncSessionLocal() as session:
-        filling = list((await session.scalars(
+        asking = list((await session.scalars(
             select(DraftSession).where(
-                DraftSession.teams_start_time.is_(None),
+                # The selective one, and asked in SQL for that reason: almost no
+                # draft has anybody requesting, and without it every availability
+                # read loads every queue the guild has ever opened.
+                DraftSession.library_requests.isnot(None),
                 DraftSession.cube.isnot(None),
                 DraftSession.guild_id.in_(guilds),
-                # Asked in SQL because it is the selective one: almost no draft
-                # has anybody requesting, and without it every availability read
-                # loads every queue the guild has ever opened.
-                DraftSession.library_requests.isnot(None),
+                or_(DraftSession.teams_start_time.is_(None),
+                    DraftSession.teams_start_time >= cutoff),
             ))).all())
-    if not filling:
-        return {}
+        if not asking:
+            return {}
+        assigned = {
+            str(source) for source in (await session.scalars(
+                select(CardLoan.source).where(
+                    CardLoan.source.in_([f"draft:{d.session_id}" for d in asking])
+                ))).all()
+        }
 
     now = datetime.now()
     held = []
-    for draft in filling:
-        if draft.session_stage in FINISHED_STAGES or rooms_reaped(draft, now):
-            continue                      # over, or already due to be deleted
+    for draft in asking:
+        if draft.session_stage in FINISHED_STAGES:
+            continue
         asked = active_requesters(draft)
         if not asked:
             continue                      # everybody who asked has left
         if invited and not invited & asked:
             continue                      # nobody asking could collect a deck
+        if draft.teams_start_time is None:
+            if rooms_reaped(draft, now):
+                continue                  # the queue is already due for deletion
+        elif f"draft:{draft.session_id}" in assigned:
+            continue                      # its loans speak for it now
+        elif _later(draft.teams_start_time, yield_after):
+            continue                      # reserved after the loan asking
         held.append(draft)
     return await _whole_cubes(held, read)
 
@@ -428,60 +446,6 @@ def _later(formed: Optional[datetime], than: Optional[datetime]) -> bool:
     """Strictly later. An unknown or tied time does not yield: holding is the
     safe way to be wrong, since the borrower is told what is short."""
     return formed is not None and than is not None and formed > than
-
-
-async def _being_drafted(read: "Callable[[str], Any]", library_id: Any,
-                         guilds: "list[str]", invited: "set[str]", *,
-                         yield_after: Optional[datetime] = None
-                         ) -> "dict[str, int]":
-    """The cubes of THIS library's drafts that are underway but not yet assigned.
-
-    Between teams forming and decks being assigned the packs are dealt but the
-    pools are not recorded anywhere, so there is no way to say which cards went
-    to whom -- the whole cube is at risk rather than the part that happens to
-    have been borrowed. Once any loan exists for the draft, the assignment is
-    the precise answer and replaces this one.
-
-    And only drafts somebody in could borrow from. In an invite-only library a
-    table of uninvited players will never collect a deck, so holding the cube
-    for them only blocks the people who can. One invited drafter is enough to
-    hold all of it: which cards they will end up with is unknown until now.
-
-    A draft whose teams formed after `yield_after` holds nothing: see
-    library_available.
-    """
-    if not guilds:
-        return {}
-    cutoff = datetime.now() - DRAFTING_WINDOW
-    async with AsyncSessionLocal() as session:
-        underway = list((await session.scalars(
-            select(DraftSession).where(
-                DraftSession.teams_start_time.isnot(None),
-                DraftSession.teams_start_time >= cutoff,
-                DraftSession.cube.isnot(None),
-                DraftSession.guild_id.in_(guilds),
-            ))).all())
-        if not underway:
-            return {}
-        assigned = {
-            str(s) for s in (await session.scalars(
-                select(CardLoan.source).where(
-                    CardLoan.source.in_([f"draft:{d.session_id}" for d in underway])
-                ))).all()
-        }
-
-    held = []
-    for draft in underway:
-        if draft.session_stage in FINISHED_STAGES:
-            continue
-        if f"draft:{draft.session_id}" in assigned:
-            continue                      # its loans speak for it now
-        if _later(draft.teams_start_time, yield_after):
-            continue                      # reserved after the loan asking
-        if invited and not invited & set(draft.sign_ups or {}):
-            continue                      # nobody here could collect a deck
-        held.append(draft)
-    return await _whole_cubes(held, read)
 
 
 @dataclass

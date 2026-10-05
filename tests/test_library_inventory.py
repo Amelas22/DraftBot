@@ -6,12 +6,15 @@ means everything on the shelf. A drafter asks "can I borrow this?" and means
 what is not already spoken for -- a cube being drafted right now has its cards
 in players' hands, and may not support a second draft at the same time.
 
-Three things are spoken for, and they are phase-disjoint by construction rather
-than by arithmetic. A draft somebody asked the library for holds its whole cube
-while it fills; once teams form it keeps holding the cube until it has loans;
-from then on its loans speak for it. Every draft is in exactly one of those
-phases, so the totals add rather than needing a union -- which is what the
-boundary tests at the end of each section are checking.
+A HOLD IS EARNED BY ASKING, and that is what most of these are about. A draft
+somebody ran /library request on holds its whole cube from that moment -- while
+it fills, and on through the packs being dealt -- until its own loans exist and
+can answer precisely. A draft nobody asked about holds nothing however far along
+it is, and takes what is free when its players borrow.
+
+So two things are spoken for, disjoint by construction rather than by
+arithmetic: the hold, and the loans that replace it. The totals add rather than
+needing a union, which is what the boundary tests check.
 """
 import pytest
 from datetime import datetime, timedelta
@@ -20,6 +23,8 @@ from database.db_session import AsyncSessionLocal
 from models.card_loan import CardLoan
 from models.draft_session import DraftSession
 from models.library_server import LibraryServer
+from sqlalchemy import select
+
 from conftest import cube_lists
 from services import debt_service, wallet_service
 import services.card_library_inventory as inv
@@ -55,14 +60,17 @@ async def _loan(borrower, cards, state, source="draft:s1", guild="g1"):
 
 
 async def _draft(session_id="s1", cube=CUBE, minutes_ago=5, stage="pairings",
-                 sign_ups=None, requests=None, teams_start=_UNSET,
+                 sign_ups=None, requests=_UNSET, teams_start=_UNSET,
                  deletion_time=None, guild="g1"):
-    """A draft in a server this library serves.
+    """A draft in a server this library serves, that somebody asked about.
 
-    By default one UNDERWAY: its teams formed `minutes_ago`, which is what makes
-    it hold its cube. `teams_start=None` makes it one still FILLING, which holds
-    its cube on the same terms for a different reason -- see _filling, which is
-    this with the sign-up arguments named.
+    By default one UNDERWAY: its teams formed `minutes_ago`. Asking is what makes
+    it hold its cube at all -- `requests=None` is a draft nobody asked the
+    library for, which holds nothing however far along it is.
+
+    `teams_start=None` makes it one still FILLING, which holds its cube on the
+    same terms by the same request -- see _filling, which is this with the
+    sign-up arguments named.
 
     The binding is what makes either count: a draft in a room drawing on a
     different library takes its cards off that library's shelf, so holding this
@@ -76,7 +84,8 @@ async def _draft(session_id="s1", cube=CUBE, minutes_ago=5, stage="pairings",
         s.add(DraftSession(
             session_id=session_id, guild_id=guild, cube=cube, session_stage=stage,
             sign_ups=sign_ups if sign_ups is not None else {ALICE: "Alice", BOB: "Bob"},
-            library_requests=requests, deletion_time=deletion_time,
+            library_requests=([ALICE] if requests is _UNSET else requests),
+            deletion_time=deletion_time,
             draft_start_time=datetime.now() - timedelta(minutes=minutes_ago + 60),
             teams_start_time=(datetime.now() - timedelta(minutes=minutes_ago)
                               if teams_start is _UNSET else teams_start)))
@@ -338,7 +347,7 @@ async def test_a_draft_nobody_in_it_may_borrow_from_holds_nothing(test_db):
     from services.library_access_service import invite
     await _deposit(ALICE, "Swamp", 4, "d1")
     await invite(LIB, ALICE, added_by="test")
-    await _draft(sign_ups={BOB: "Bob", "u3": "Carol"})
+    await _draft(requests=[BOB], sign_ups={BOB: "Bob", "u3": "Carol"})
 
     available = await inv.library_available(
         LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]}))
@@ -457,7 +466,7 @@ async def test_a_finished_draft_releases_its_requested_cube(test_db):
 
 async def test_a_requested_cube_that_cannot_be_read_holds_nothing(test_db):
     """CubeCobra being down must not empty the shelf -- the same call
-    _being_drafted makes, for the same reason."""
+    a draft underway makes, for the same reason."""
     await _deposit(ALICE, "Swamp", 4, "d1")
     await _filling()
 
@@ -522,26 +531,55 @@ async def test_a_queue_still_within_its_inactivity_window_holds_its_cube(test_db
     assert available == {"Swamp": 1}
 
 
-async def test_a_borrow_is_not_blocked_by_a_queue_that_has_not_fired(test_db):
-    """The priority rule for the two in one sentence: a draft handing out decks
-    never waits on a sign-up hold.
+async def test_a_borrow_from_a_draft_nobody_asked_about_is_blocked_by_a_queue(
+        test_db):
+    """What asking buys, from the other side.
 
-    Its players have already drafted, so refusing them is the harm the hold
-    exists to prevent, while the queue can be told no and ask again -- which is
-    what its refusal says to do, and it hears that while still filling rather
-    than after a wasted evening.
+    A draft that fired without anybody requesting holds nothing, so when its
+    players come to borrow they get what is free -- and a queue that DID ask is
+    holding this cube, so nothing is. That is the trade: the draft can be short
+    of cards its players physically drafted, and the players who asked are not
+    made to wait on a draft that never cared.
     """
     await _deposit(ALICE, "Swamp", 1, "d1")
-    await _draft("underway", minutes_ago=5)
+    await _draft("underway", minutes_ago=5, requests=None)
     mine = await _loan(BOB, [{"name": "Swamp", "qty": 1}], "assigned",
                        source="draft:underway")
     await _filling("queue")
 
-    asked_for_the_loan = await inv.library_available(
+    available = await inv.library_available(
         LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 1}]}),
         exclude_loan_id=mine)
-    asked_in_general = await inv.library_available(
-        LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 1}]}))
 
-    assert asked_for_the_loan == {"Swamp": 1}, "the deck can be collected"
-    assert asked_in_general == {}, "and the queue still holds it against others"
+    assert available == {}
+
+
+async def test_a_draft_that_fires_with_nobody_asking_holds_nothing(test_db):
+    """The rule itself. Firing is not a claim on the shelf -- asking is."""
+    await _deposit(ALICE, "Swamp", 4, "d1")
+    await _draft(requests=None)
+
+    available = await inv.library_available(
+        LIB, fetch=cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]}))
+
+    assert available == {"Swamp": 4}
+
+
+async def test_a_hold_asked_for_at_signup_survives_teams_forming(test_db):
+    """And the rule's other half: one request, one hold, carried across the
+    phase boundary rather than re-earned at it. The same draft, the same
+    requester, before and after its teams form."""
+    await _deposit(ALICE, "Swamp", 4, "d1")
+    await _filling("q", requests=[ALICE], sign_ups={ALICE: "Alice"})
+    cubes = cube_lists({CUBE: [{"name": "Swamp", "qty": 3}]})
+
+    while_filling = await inv.library_available(LIB, fetch=cubes)
+    async with AsyncSessionLocal() as session:
+        draft = await session.scalar(
+            select(DraftSession).where(DraftSession.session_id == "q"))
+        draft.teams_start_time = datetime.now()
+        draft.session_stage = "pairings"
+        await session.commit()
+    once_underway = await inv.library_available(LIB, fetch=cubes)
+
+    assert while_filling == once_underway == {"Swamp": 1}

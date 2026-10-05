@@ -642,6 +642,11 @@ class LibraryCommands(commands.Cog):
         a player who finds out then has already spent the evening building a deck
         the shelf cannot cover. The hold starts now and the answer is given now.
 
+        And nothing else starts it. A draft holds its cube because somebody in it
+        ran this -- firing is not a claim on the shelf. A draft nobody asked
+        about takes whatever is free when its players borrow, and is blocked by a
+        queue that did ask.
+
         A refusal is not final, and says so. The shelf frees up constantly and the
         draft is still filling, so asking again is the recovery -- there is nothing
         to queue and nothing to remember.
