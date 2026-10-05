@@ -7,9 +7,11 @@ what is not already spoken for -- a cube being drafted right now has its cards
 in players' hands, and may not support a second draft at the same time.
 
 Three things are spoken for, and they are phase-disjoint by construction rather
-than by arithmetic: a draft holds its WHOLE cube only while it has no loans yet,
-and loans only exist once decks are assigned. So the two never overlap and the
-totals add rather than needing a union.
+than by arithmetic. A draft somebody asked the library for holds its whole cube
+while it fills; once teams form it keeps holding the cube until it has loans;
+from then on its loans speak for it. Every draft is in exactly one of those
+phases, so the totals add rather than needing a union -- which is what the
+boundary tests at the end of each section are checking.
 """
 import pytest
 from datetime import datetime, timedelta
@@ -65,6 +67,27 @@ async def _draft(session_id="s1", cube=CUBE, minutes_ago=5, stage="pairings",
             sign_ups=sign_ups if sign_ups is not None else {ALICE: "Alice", BOB: "Bob"},
             draft_start_time=datetime.now() - timedelta(minutes=minutes_ago + 60),
             teams_start_time=datetime.now() - timedelta(minutes=minutes_ago)))
+        await s.commit()
+
+
+async def _filling(session_id="s2", cube=CUBE, requests=None, sign_ups=None,
+                   stage="signups", teams_start=None, deletion_time=None):
+    """A draft still taking sign-ups, in a server this library serves.
+
+    `requests` is library_requests -- everybody who has asked. `sign_ups` is who
+    is still in the queue. They are separate arguments because the gap between
+    them is the release mechanism: a requester missing from sign_ups has left,
+    and the hold is simply no longer computed for them.
+    """
+    async with AsyncSessionLocal() as s:
+        if await s.get(LibraryServer, "g1") is None:
+            s.add(LibraryServer(guild_id="g1", library_id=LIB, bound_by="test"))
+        s.add(DraftSession(
+            session_id=session_id, guild_id="g1", cube=cube, session_stage=stage,
+            sign_ups=sign_ups if sign_ups is not None else {ALICE: "Alice"},
+            library_requests=[ALICE] if requests is None else requests,
+            draft_start_time=datetime.now(), teams_start_time=teams_start,
+            deletion_time=deletion_time))
         await s.commit()
 
 
@@ -177,10 +200,10 @@ async def test_a_draft_that_never_assigned_releases_its_cube_eventually(test_db)
     assert available == {"Swamp": 4}
 
 
-async def test_a_draft_that_has_not_started_holds_nothing(test_db):
-    """Anchored on teams forming, not on signups opening. A draft sitting open
-    waiting to fill would otherwise block its cube for hours -- and forever if
-    it never fills."""
+async def test_a_draft_nobody_asked_about_holds_nothing_while_it_fills(test_db):
+    """A draft sitting open blocks nothing by existing. Holding every filling
+    draft's cube would block it for hours -- and forever if it never fills --
+    so the hold is something a player asks for, and this one nobody did."""
     await _deposit(ALICE, "Swamp", 4, "d1")
     async with AsyncSessionLocal() as s:
         s.add(DraftSession(session_id="s9", guild_id="g1", cube=CUBE,
@@ -330,6 +353,182 @@ async def test_one_invited_drafter_is_enough_to_hold_the_cube(test_db):
     await _deposit(ALICE, "Swamp", 4, "d1")
     await invite(LIB, ALICE, added_by="test")
     await _draft(sign_ups={ALICE: "Alice", "u3": "Carol"})
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+
+    assert available == {"Swamp": 1}
+
+
+# --- a draft holds its cube from sign-up, if somebody asked for it ----------
+#
+# The hold a player asks for with /library request. It exists because the
+# alternative answer -- "the shelf cannot cover your deck" -- used to arrive
+# after forty-five minutes of drafting, which is after the only point at which
+# it was still useful.
+
+async def test_a_requested_draft_holds_its_whole_cube_while_it_fills(test_db):
+    """The whole cube, for the reason the underway hold holds the whole cube:
+    which cards a requester ends up with is unknowable until the packs are
+    dealt, so anything less is a promise the shelf cannot keep."""
+    await _deposit(ALICE, "Swamp", 4, "d1")
+    await _deposit(ALICE, "Island", 2, "d2")
+    await _filling()
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+
+    assert available == {"Swamp": 1, "Island": 2}
+
+
+async def test_one_requester_holds_as_much_as_several(test_db):
+    """They draft from the same copy, so the hold is the cube either way. A
+    per-player share would promise eight players an eighth of a cube each."""
+    await _deposit(ALICE, "Swamp", 4, "d1")
+    await _filling(requests=[ALICE, BOB], sign_ups={ALICE: "Alice", BOB: "Bob"})
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+
+    assert available == {"Swamp": 1}
+
+
+async def test_the_last_requester_leaving_releases_the_hold(test_db):
+    """Release is DERIVED, not evented. Nothing clears library_requests when a
+    player leaves -- they drop out of sign_ups by the ordinary cancel path, the
+    intersection empties, and the hold stops being computed. So there is no
+    leave path that can be missed and no hold that can go stale."""
+    await _deposit(ALICE, "Swamp", 4, "d1")
+    await _filling(requests=[ALICE], sign_ups={BOB: "Bob"})
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+
+    assert available == {"Swamp": 4}
+
+
+async def test_one_requester_leaving_does_not_release_the_other(test_db):
+    """The same mechanism from the other side: the hold is for whoever is still
+    in the queue, and one of them is enough."""
+    await _deposit(ALICE, "Swamp", 4, "d1")
+    await _filling(requests=[ALICE, BOB], sign_ups={BOB: "Bob"})
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+
+    assert available == {"Swamp": 1}
+
+
+async def test_an_id_that_was_never_in_the_draft_holds_nothing(test_db):
+    """A stale request written by a retry or a repair holds nothing, because
+    the hold is read against sign_ups rather than trusted from the column."""
+    await _deposit(ALICE, "Swamp", 4, "d1")
+    await _filling(requests=["ghost"], sign_ups={ALICE: "Alice"})
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+
+    assert available == {"Swamp": 4}
+
+
+async def test_the_signup_hold_hands_over_to_the_underway_hold(test_db):
+    """The boundary that keeps the two from being counted twice.
+
+    Both hold the whole cube, so a draft counted by both would subtract its
+    cube twice -- 4 held less 3 less 3 reads as 0 available, and every borrow
+    in the guild is refused while the shelf is full. They are keyed on the same
+    fact from opposite sides: this one on teams_start_time being unset, that one
+    on it being set.
+    """
+    await _deposit(ALICE, "Swamp", 4, "d1")
+    await _filling(stage="pairings",
+                   teams_start=datetime.now() - timedelta(minutes=5))
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+
+    assert available == {"Swamp": 1}, "held once, by the underway hold"
+
+
+async def test_a_finished_draft_releases_its_requested_cube(test_db):
+    """A draft that was cancelled without its teams ever forming keeps its
+    requests forever. Without the stage check it would hold the cube forever
+    too, and the queue-filling hold is the one place that can happen."""
+    await _deposit(ALICE, "Swamp", 4, "d1")
+    await _filling(stage="completed")
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+
+    assert available == {"Swamp": 4}
+
+
+async def test_a_requested_cube_that_cannot_be_read_holds_nothing(test_db):
+    """CubeCobra being down must not empty the shelf -- the same call
+    _being_drafted makes, for the same reason."""
+    await _deposit(ALICE, "Swamp", 4, "d1")
+    await _filling()
+
+    assert await inv.library_available(LIB, fetch=_cubes({})) == {"Swamp": 4}
+
+
+async def test_a_requester_the_library_would_refuse_holds_nothing(test_db):
+    """In an invite-only library an uninvited requester will never collect a
+    deck, so holding the cube for them only blocks the people who can."""
+    from services.library_access_service import invite
+    await _deposit(ALICE, "Swamp", 4, "d1")
+    await invite(LIB, ALICE, added_by="test")
+    await _filling(requests=[BOB], sign_ups={ALICE: "Alice", BOB: "Bob"})
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+
+    assert available == {"Swamp": 4}, "Alice is invited but did not ask"
+
+
+async def test_a_request_in_a_room_this_library_does_not_serve_holds_nothing(
+        test_db):
+    """The binding is what makes a hold count, here as everywhere else: a draft
+    drawing on another library's shelf must not take cards off this one."""
+    await _deposit(ALICE, "Swamp", 4, "d1")
+    async with AsyncSessionLocal() as s:
+        s.add(LibraryServer(guild_id="g1", library_id=LIB, bound_by="test"))
+        s.add(DraftSession(session_id="elsewhere", guild_id="g-other", cube=CUBE,
+                           session_stage="signups", sign_ups={ALICE: "Alice"},
+                           library_requests=[ALICE],
+                           draft_start_time=datetime.now(), teams_start_time=None))
+        await s.commit()
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+
+    assert available == {"Swamp": 4}
+
+
+async def test_a_queue_already_due_for_cancellation_holds_nothing(test_db):
+    """The one hold that would otherwise have no end.
+
+    A requester does not leave a dead queue, they stop coming back -- so the
+    intersection that releases every other hold never empties here. What ends it
+    is the queue's own inactivity clock: every sign-up pushes deletion_time
+    back, so a row past it has been quiet for three hours and the next cleanup
+    pass deletes it. In a cleanup-exempt guild the row never goes at all, and
+    without this the cube would be held for good.
+    """
+    await _deposit(ALICE, "Swamp", 4, "d1")
+    await _filling(deletion_time=datetime.now() - timedelta(minutes=1))
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+
+    assert available == {"Swamp": 4}
+
+
+async def test_a_queue_still_within_its_inactivity_window_holds_its_cube(test_db):
+    """The other side of the same clock: a live queue is one somebody has
+    signed up to recently, and that is exactly what pushes the clock out."""
+    await _deposit(ALICE, "Swamp", 4, "d1")
+    await _filling(deletion_time=datetime.now() + timedelta(hours=3))
 
     available = await inv.library_available(
         LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))

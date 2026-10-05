@@ -1,4 +1,4 @@
-"""The six library commands are one group, and say so in what they tell people.
+"""The library commands are one group, and say so in what they tell people.
 
 They were six top-level commands across two cogs. At the top level `/borrow`,
 `/return` and `/deposit` are words a Discord server uses for plenty that has
@@ -16,17 +16,18 @@ import re
 import cogs.library_commands as mod
 from cogs.library_commands import LibraryCommands
 
-GROUPED = {"deposit", "withdraw", "deposits", "borrow", "return", "deck"}
+GROUPED = {"deposit", "withdraw", "deposits", "borrow", "return", "deck",
+           "request", "unrequest"}
 
 
-def test_the_six_library_commands_are_one_group():
+def test_every_library_command_is_in_the_one_group():
     assert {c.name for c in LibraryCommands.library.subcommands} == GROUPED
 
 
 def test_nothing_the_library_says_names_a_command_that_no_longer_exists():
     """Every `/x` in a user-facing string has to be a command that exists.
 
-    Read off the module's own source rather than a list kept here: a seventh
+    Read off the module's own source rather than a list kept here: a new
     command, or a new message quoting an old name, has to be caught by this
     without anyone remembering to update it.
     """
@@ -51,6 +52,7 @@ def test_one_cog_carries_the_whole_feature():
 def test_every_command_is_reachable_as_its_own_method():
     """The callback still hangs off the class under the method's own name,
     which is how every test in the suite drives these commands."""
-    for name in ("deposit", "withdraw", "deposits", "borrow", "deck"):
+    for name in ("deposit", "withdraw", "deposits", "borrow", "deck",
+                 "request", "unrequest"):
         assert hasattr(getattr(LibraryCommands, name), "callback"), name
     assert hasattr(LibraryCommands.return_cards, "callback")

@@ -1,5 +1,7 @@
 """The card library: borrowing a deck, and lending your cards to it.
 
+    /library request   hold this draft's cube while the queue fills
+    /library unrequest give that hold back
     /library borrow    collect the deck the library is holding for you
     /library return    hand it back
     /library deck      what it has for you, and where it is
@@ -7,7 +9,7 @@
     /library withdraw  take your cards back
     /library deposits  what it is holding of yours
 
-One cog and one command group, because the six are one feature: /library
+One cog and one command group, because the eight are one feature: /library
 deposit is what puts the cards on the shelf that /library borrow hands out,
 and they share their gate, their message budget and their view of what the
 shelf holds. Split across two cogs, half of that was imported across the
@@ -50,7 +52,10 @@ from services.card_lending_service import (
     return_when_free,
     shortfall,
 )
+from models.draft_session import DraftSession
 from services.library_access_service import may_borrow
+from services.library_request_service import (coverage, record_release,
+                                              record_request, requested_ids)
 from services.library_service import (
     is_communal, library_for, library_id_for, offer_cube,
 )
@@ -610,6 +615,99 @@ class LibraryCommands(commands.Cog):
         }.get(loan.state, loan.state)
         await ctx.followup.send(f"📦 Your deck is **{where}**:\n{_deck_lines(loan)}",
                                 ephemeral=True)
+
+    @library.command(name="request",
+                      description="Ask the library to hold this draft's cube for you")
+    async def request(self, ctx: discord.ApplicationContext) -> None:
+        """Hold the cube for this draft, or say who has it.
+
+        Asked HERE rather than at /library borrow because that is after the draft:
+        a player who finds out then has already spent the evening building a deck
+        the shelf cannot cover. The hold starts now and the answer is given now.
+
+        A refusal is not final, and says so. The shelf frees up constantly and the
+        draft is still filling, so asking again is the recovery -- there is nothing
+        to queue and nothing to remember.
+        """
+        logger.info("/library request by {} in guild {}", ctx.author.id, ctx.guild_id)
+        if not await defer_if_usable(ctx):
+            return
+
+        library = await library_for(ctx.guild_id)
+        if library is None:
+            await ctx.followup.send(_NO_LIBRARY, ephemeral=True)
+            return
+        if not await may_borrow(library.id, ctx.author.id):
+            await ctx.followup.send(_LOAN_MESSAGES["not_invited"], ephemeral=True)
+            return
+
+        draft = await DraftSession.get_filling_draft_for_user(ctx.channel_id, ctx.author.id)
+        if draft is None:
+            await ctx.followup.send(
+                "📭 Nothing to hold: run this in the channel of a draft you've "
+                "signed up to, while it's still filling. Once it starts, "
+                "`/library borrow` gives you whatever the shelf can cover.",
+                ephemeral=True)
+            return
+
+        if str(ctx.author.id) in requested_ids(draft):
+            await ctx.followup.send(
+                f"✅ You've already asked, and `{draft.cube}` is held for this "
+                f"draft. It frees up if everyone who asked leaves.", ephemeral=True)
+            return
+
+        answer = await coverage(draft, library.id)
+        if answer is None:
+            await ctx.followup.send(
+                f"📭 The library doesn't stock `{draft.cube}`, so there's nothing "
+                f"to hold for this draft.", ephemeral=True)
+            return
+        if not answer["ok"]:
+            # Named, not merely refused: "busy" with no figure reads as broken,
+            # and the player can judge for themselves whether to wait.
+            await ctx.followup.send(
+                f"🔒 `{draft.cube}` is in use — the library is **{answer['short']}** "
+                f"cards short of covering a second draft of it right now, so "
+                f"nothing is held for you.\n"
+                f"Ask again while this draft is filling and you'll get it if it "
+                f"frees up. Either way `/library borrow` afterwards gives you "
+                f"whatever the shelf can cover.", ephemeral=True)
+            return
+
+        others = len(await record_request(draft, ctx.author.id)) - 1
+        shared = ("" if others < 1 else
+                  f" You're sharing it with {others} other"
+                  f"{'s' if others > 1 else ''} here — you all draft from the "
+                  f"same copy, so one hold covers the table.")
+        await ctx.followup.send(
+            f"📚 Held — `{draft.cube}` is reserved for this draft, so what you "
+            f"draft will be there when you run `/library borrow`.{shared}\n"
+            f"-# Releases if everyone who asked leaves the draft. "
+            f"`/library unrequest` to hand it back without leaving.",
+            ephemeral=True)
+
+    @library.command(name="unrequest",
+                      description="Give up your claim on this draft's cube")
+    async def unrequest(self, ctx: discord.ApplicationContext) -> None:
+        """Release your own claim without leaving the draft.
+
+        Leaving the draft already releases it, because active_requesters reads the
+        intersection with sign_ups. This is only for the player who wants to keep
+        drafting and give the shelf back.
+        """
+        logger.info("/library unrequest by {} in guild {}", ctx.author.id, ctx.guild_id)
+        if not await defer_if_usable(ctx):
+            return
+        draft = await DraftSession.get_filling_draft_for_user(ctx.channel_id, ctx.author.id)
+        if draft is None or str(ctx.author.id) not in requested_ids(draft):
+            await ctx.followup.send(
+                "📭 You haven't asked for the library on this draft.", ephemeral=True)
+            return
+        left = await record_release(draft, ctx.author.id)
+        await ctx.followup.send(
+            "📭 Released." + ("" if left else
+                              f" Nobody else asked, so `{draft.cube}` is free again."),
+            ephemeral=True)
 
     @library.command(name="deposit",
                       description="Lend a cube's cards to the card library")

@@ -321,6 +321,18 @@ async def mark_library_cubes(options: list, guild_id) -> list:
 
 LIBRARY_FIELD_NAME = "Cards:"
 
+# What a player does with the line below, on either answer.
+#
+# The note is computed once when the draft is created and never recomputed, so
+# every answer in it is a reading of the shelf at that moment -- and the shelf
+# moves while a queue fills, in both directions. `/library request` is the only
+# thing that makes a yes still true at fire time, and the only way to find out
+# that a no has stopped being one. Appended to both so the board never states a
+# coverage answer without saying what to do about it.
+_HOLD_IT = " Run `/library request` to hold it for this draft."
+_ASK_AGAIN = (" The shelf frees up between drafts — `/library request` while "
+              "this fills says whether it has.")
+
 
 async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
     """One line for the signup board, or None if the library is not involved.
@@ -373,17 +385,19 @@ async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
 
     if not covered:
         return ("⚠️ **Bring your own cards** — the library can't cover this "
-                "cube right now.")
+                "cube right now." + _ASK_AGAIN)
 
     collateral = price_of(library) or 0
     # Unqualified, because by here the library lends to everyone in the room:
     # the invite-only case returned above rather than promising a deck to people
     # who would be turned away at /borrow.
     if collateral == 0:
-        return "🆓 **No cards needed** — borrow your deck from the library free."
+        return ("🆓 **No cards needed** — borrow your deck from the library "
+                "free." + _HOLD_IT)
 
     # Says the deposit comes back, because that is the part that decides
     # whether somebody can afford to play: 100 tix they get back is a very
     # different proposition from 100 tix spent.
     return (f"🏛️ **No cards needed** — borrow your deck for a "
-            f"**{collateral} tix** deposit, refunded when you return it.")
+            f"**{collateral} tix** deposit, refunded when you return it."
+            + _HOLD_IT)

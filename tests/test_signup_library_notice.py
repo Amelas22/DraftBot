@@ -252,3 +252,37 @@ async def test_a_communal_library_still_marks_the_cube_dropdown(test_db, monkeyp
     marked = await mark_library_cubes(options, GUILD)
 
     assert marked != options, "a communal library should still badge its cubes"
+
+
+# ---- the note says what to do about its own answer -------------------------
+#
+# Computed once at draft creation and never recomputed, so both answers in it
+# are a reading of a shelf that moves while the queue fills. On either answer
+# the next move is the same command, and a board that states coverage without
+# naming it leaves a player with a figure and nothing to do with it.
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("available", [{"Swamp": 4}, {"Swamp": 1}])
+async def test_both_answers_point_at_the_request_command(
+        test_db, monkeypatch, available):
+    """Covered and not covered. The covered line needs it because another draft
+    can take the cube before this one fires; the uncovered line needs it
+    because the shelf frees up between drafts and nothing else would tell them."""
+    await _price(0)
+    _shelf(monkeypatch, {"Swamp": 4}, available, CUBE_CARDS)
+
+    note = await library_signup_note(CUBE, GUILD)
+
+    assert "/library request" in note, note
+
+
+@pytest.mark.asyncio
+async def test_a_cube_the_library_does_not_lend_for_offers_no_hold(
+        test_db, monkeypatch):
+    """The suppression rules win. A room told nothing about the library must
+    not be told to run its commands either -- there is nothing to hold."""
+    await _price(0)
+    await _list_a_member()
+    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
+
+    assert await library_signup_note(CUBE, GUILD) is None

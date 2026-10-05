@@ -35,6 +35,12 @@ class DraftSession(Base):
     matches = Column(JSON)
     match_counter = Column(Integer, default=1)
     sign_ups = Column(JSON)
+    # Discord ids of players who asked for library cards for THIS draft. A list,
+    # not a dict: the name is already in sign_ups, and the pair of them is what
+    # makes the release derived rather than evented -- an active requester is one
+    # who is in BOTH, so leaving the queue releases the hold with nothing to
+    # listen for. See services/library_request_service.active_requesters.
+    library_requests = Column(JSON)
     channel_ids = Column(JSON)
     session_type = Column(String(64))
     session_stage = Column(String(64))
@@ -163,6 +169,35 @@ class DraftSession(Base):
                 if channel_ids_contains(draft.channel_ids, channel_id):
                     return draft
         return None
+
+    @classmethod
+    async def get_filling_draft_for_user(cls, channel_id: str, user_id: str):
+        """The draft in this channel that is still taking sign-ups and has this
+        user in it, or None.
+
+        A fourth finder because the other three cannot see a draft at this stage,
+        and this is the only stage that matters for a sign-up-time question:
+
+        * get_by_channel_id keys on draft_chat_channel, which does not exist
+          until rooms are created.
+        * get_by_any_channel_id adds channel_ids, created at the same time.
+        * get_active_draft_for_user keys on draft_channel_id -- right channel --
+          but requires session_stage IS NOT NULL, and the stage is NULL for the
+          whole of sign-up.
+
+        So each of them returns None for a queue that is still filling, silently.
+        Keyed on teams_start_time IS NULL, the same fact the library's sign-up
+        hold keys on, so "still filling" means one thing in both places.
+        """
+        async with db_session() as session:
+            stmt = (select(cls)
+                    .where(cls.draft_channel_id == str(channel_id),
+                           cls.teams_start_time.is_(None))
+                    .order_by(desc(cls.draft_start_time)))
+            for draft in (await session.execute(stmt)).scalars().all():
+                if str(user_id) in (draft.sign_ups or {}):
+                    return draft
+            return None
 
     def is_user_participating(self, user_id: str) -> bool:
         """Check if a user is participating in this draft session"""
