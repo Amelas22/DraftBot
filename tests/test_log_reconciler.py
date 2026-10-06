@@ -209,6 +209,48 @@ async def test_reconcile_capture_spawns_and_captures_uncaptured_drafts():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("minutes_ago,chased,why", [
+    (5, True, "mid-draft: the log has not been delivered yet"),
+    (32, True, "the slowest capture ever measured, and it worked"),
+    (59, True, "inside the window, with the headroom deliberate"),
+    (90, False, "the room is an hour gone; there is nothing left to rejoin"),
+])
+async def test_reconcile_capture_only_chases_a_log_that_could_still_exist(
+        test_db, minutes_ago, chased, why):
+    """The sibling of the predicate above, on the other axis of the same select.
+
+    Draftmancer keeps a finished room about 28 minutes and the log lives nowhere
+    else, so a rejoin past that captures nothing however often it runs. The
+    window was 12 HOURS under a docstring that said it was "bounded by
+    Draftmancer's ~28-min retention", so a draft that could not capture had a
+    full DraftSetupManager rebuilt for it every 60 seconds for the rest of those
+    twelve hours -- up to 720 attempts, of which at most the first 28 could have
+    worked. On 2026-10-05 one draft in The Divination spent 2h14m doing exactly
+    that, and the 68 "Bot No Longer Managing This Draft" embeds its channel
+    received were one per attempt.
+
+    The cases bracket the measured distribution rather than a guess: 764
+    captures in the 120 days to 2026-10-05 ran 20.4 minutes median and never
+    exceeded 31.9.
+    """
+    async with AsyncSessionLocal() as session:
+        session.add(DraftSession(
+            session_id="WINDOW1", draft_id="d-window1", cube="c-window1",
+            guild_id="1", session_type="team", session_stage="pairings",
+            logs_captured_at=None,
+            teams_start_time=datetime.now() - timedelta(minutes=minutes_ago),
+        ))
+        await session.commit()
+
+    spawn = AsyncMock(return_value=None)
+    with patch.object(DraftSetupManager, "spawn_for_existing_session", spawn), \
+         patch("services.log_reconciler.asyncio.sleep", AsyncMock()):
+        await reconcile_capture(MagicMock())
+
+    assert spawn.await_count == (1 if chased else 0), why
+
+
+@pytest.mark.asyncio
 async def test_run_log_reconciler_guards_against_concurrent_start():
     """on_ready fires on every gateway reconnect, so bot.py's on_ready could
     call run_log_reconciler more than once per process -> duplicate concurrent
