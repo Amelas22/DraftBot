@@ -69,6 +69,17 @@ def _why(res: "dict") -> str:
     return reason if res.get("busy") else explain_trade_failure(reason)
 
 
+def _held_deposit_note(n: int, unsent: int = 0) -> str:
+    """A deposit chunk held for review. NOT "failed, send again": those tix may
+    have arrived, and asking for them again could have them sent twice. What came
+    after it was never sent, and does need asking for again."""
+    note = (f"⚠️ The trade for **{n}** tix didn't confirm cleanly — an admin will check "
+            f"whether they arrived and credit them if they did. Don't send them again.")
+    if unsent:
+        note += f" The remaining **{unsent}** were not sent; run the command again for them."
+    return note
+
+
 def _long_order_note(n: int) -> str:
     """Warn that a long order will not report back here.
 
@@ -184,7 +195,9 @@ class WalletCommands(commands.Cog):
                 await refresh_boards(
                     bot, set(completed) | set(await escrow.open_boards_for_captain(player_id)))
                 msg = f"✅ Deposit confirmed: **+{credited} tix**. Balance: **{bal} tix**."
-                if credited < amount and res.get("pending"):
+                if credited < amount and res.get("review"):
+                    msg += "\n" + _held_deposit_note(res["open"], amount - credited - res["open"])
+                elif credited < amount and res.get("pending"):
                     # Only the OPEN chunk is in a trade; anything after it was
                     # never dispatched. Telling them to deposit the open part
                     # again would have them send those tix twice -- the
@@ -192,7 +205,10 @@ class WalletCommands(commands.Cog):
                     # loses it silently.
                     still_open = res.get("open", 0)
                     rest = amount - credited - still_open
-                    msg += (f"\n⏳ The trade for **{still_open}** is still open — accept "
+                    msg += (f"\n⏳ The trade for **{still_open}** finished; it credits as "
+                            f"soon as the vault confirms it — nothing more to do in MTGO."
+                            if res.get("confirming") else
+                            f"\n⏳ The trade for **{still_open}** is still open — accept "
                             f"it in MTGO and it credits automatically.")
                     if rest:
                         msg += (f" The remaining **{rest}** was not sent; run the "
@@ -209,9 +225,21 @@ class WalletCommands(commands.Cog):
                 if drawn:
                     total = sum(d.get("amount", 0) for d in drawn)
                     msg += f" Auto-applied **{total} tix** to {len(drawn)} debt(s)."
-            elif res.get("pending"):
-                msg = ("⏳ The trade is still open — accept it in MTGO and your tix "
-                       "credit automatically.")
+            elif res.get("review"):
+                msg = _held_deposit_note(res["open"], amount - res["open"])
+            elif res.get("confirming") or res.get("pending"):
+                # Confirming: the trade is over and only the vault check is outstanding --
+                # not "accept it in MTGO", there is nothing left there to accept.
+                msg = (f"⏳ The trade for **{res['open']}** finished — it credits as soon as "
+                       f"the vault confirms it. Nothing more to do in MTGO."
+                       if res.get("confirming") else
+                       f"⏳ The trade for **{res['open']}** is still open — accept it in "
+                       f"MTGO and it credits automatically.")
+                # The run stops at the open chunk, so a multi-trade order's later chunks
+                # were never sent; "nothing more to do" must not swallow them.
+                if amount - res["open"]:
+                    msg += (f" The remaining **{amount - res['open']}** was not sent; run "
+                            f"the command again for it.")
             elif res.get("busy"):
                 msg = f"⏳ {res.get('error')}"
             else:
@@ -259,16 +287,34 @@ class WalletCommands(commands.Cog):
             bal = await wallet_service.get_balance(guild_id, player_id)
             if delivered == amount:
                 msg = f"✅ Withdraw confirmed: **−{delivered} tix**. Balance: **{bal} tix**."
-            elif res.get("pending"):
-                # Those tix are committed to a trade that is still open. They
-                # are NOT back in the wallet, and must not be described as if
-                # they were -- the watchdog resolves the trade either way.
-                msg = (f"⏳ **{delivered}** tix delivered; the trade for the rest is still "
-                       f"open — accept it in MTGO. Those tix stay committed until it "
-                       f"resolves. Balance: **{bal} tix**."
-                       if delivered else
-                       f"⏳ The trade is still open — accept it in MTGO. Your tix stay "
-                       f"committed until it resolves. Balance: **{bal} tix**.")
+            elif res.get("review"):
+                # Held, not returned: neither delivered nor back in the wallet. Anything
+                # after the held chunk was never sent and never left the wallet.
+                held = res["open"]
+                unsent = amount - delivered - held
+                msg = ((f"✅ **{delivered}** tix delivered. " if delivered else "")
+                       + f"⚠️ **{held}** tix are held for an admin to check — the trade "
+                       f"didn't confirm cleanly. They're safe: you'll get them back, or "
+                       f"they'll be confirmed as delivered."
+                       + (f" The other **{unsent}** were not sent and are still in your "
+                          f"wallet." if unsent else "")
+                       + f" Balance: **{bal} tix**.")
+            elif res.get("confirming") or res.get("pending"):
+                # Those tix are committed to ONE trade -- still open, or finished and
+                # awaiting its vault check. They are NOT back in the wallet, and must not
+                # be described as if they were -- the watchdog resolves the trade either
+                # way. The run stopped there, so any later chunk was never sent.
+                open_n = res["open"]
+                unsent = amount - delivered - open_n
+                msg = ((f"✅ **{delivered}** tix delivered. " if delivered else "")
+                       + (f"⏳ The trade for **{open_n}** finished and is being confirmed "
+                          f"against the vault — nothing more to do in MTGO."
+                          if res.get("confirming") else
+                          f"⏳ The trade for **{open_n}** is still open — accept it in MTGO.")
+                       + " Those tix stay committed until it resolves."
+                       + (f" The other **{unsent}** were not sent and are still in your "
+                          f"wallet — run the command again for them." if unsent else "")
+                       + f" Balance: **{bal} tix**.")
             elif delivered:
                 # Each trade commits only its own tix, so whatever did not go
                 # out was never taken from the wallet. Nothing to unwind.

@@ -58,9 +58,14 @@ class MtgoJob(Base):
     # card and `amount` is the quantity. A card job needs no printing — the serve records
     # which printings crossed and pins them itself on the way back.
     card_name = Column(String(128), nullable=True)
-    status = Column(String(16), nullable=False, default='pending', index=True)  # pending | done | failed
+    status = Column(String(16), nullable=False, default='pending', index=True)  # pending | done | failed | review
     created_at = Column(DateTime, default=datetime.now)
     resolved_at = Column(DateTime, nullable=True)
+    # The vault's tix count just before this trade went out, and when the serve read it
+    # (UTC). Settling compares the vault afterwards against it, so the booking follows what
+    # physically moved. NULL on jobs written before the check existed, and on card jobs.
+    vault_before = Column(Integer, nullable=True)
+    vault_before_at = Column(DateTime, nullable=True)
 
     def __repr__(self):
         return (f"<MtgoJob(job={self.job_id}, kind={self.kind}, player={self.player_id}, "
