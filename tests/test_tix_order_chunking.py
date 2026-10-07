@@ -33,6 +33,15 @@ def _serve_is_free(monkeypatch):
         return None
     monkeypatch.setattr(resolution, "serve_busy_reason", free)
 
+    # Likewise the vault baseline every tix trade now takes first: these tests are
+    # about the order loop, not the vault check (tests/test_vault_reconcile.py is).
+    from datetime import datetime, timezone
+    from services.vault_check import VaultReading
+
+    async def baseline(client):
+        return VaultReading(1000, datetime.now(timezone.utc))
+    monkeypatch.setattr(resolution.vault_check, "baseline", baseline)
+
 
 # ---- the plan ---------------------------------------------------------------------
 
@@ -239,7 +248,7 @@ async def test_a_lost_post_does_not_adopt_the_previous_chunks_job(test_db, monke
             return {"id": "job-1"} if len(posts) == 1 else {"_ambiguous": True}
 
         async def find_recent_job(self, job_type, user, qty, max_age_s=120.0,
-                                  exclude_ids=()):
+                                  exclude_ids=(), not_before=None):
             seen_exclusions.append(set(exclude_ids or ()))
             # The serve really does still list chunk 1: same type, user and qty.
             return None if "job-1" in (exclude_ids or ()) else {"id": "job-1"}
@@ -256,7 +265,8 @@ async def test_a_lost_post_does_not_adopt_the_previous_chunks_job(test_db, monke
     assert "job-1" in seen_exclusions[0], \
         "the scan must be told which jobs this run already owns"
     assert res["moved"] == 300, "only the trade that really happened counts"
-    assert res["jobs"] == ["job-1"], "chunk 1's job is not claimed twice"
+    assert res["jobs"][0] == "job-1" and res["jobs"].count("job-1") == 1,         "chunk 1's job is not claimed twice"
+    assert res["review"] and res["open"] == 300, "the lost chunk is held, not failed"
 
 
 # ---- what a stopped run says is still moving ---------------------------------------
