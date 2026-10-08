@@ -212,26 +212,31 @@ async def test_reconcile_capture_spawns_and_captures_uncaptured_drafts():
 @pytest.mark.parametrize("minutes_ago,chased,why", [
     (5, True, "mid-draft: the log has not been delivered yet"),
     (32, True, "the slowest capture ever measured, and it worked"),
-    (59, True, "inside the window, with the headroom deliberate"),
-    (90, False, "the room is an hour gone; there is nothing left to rejoin"),
+    (90, True, "the draft is over, but a player still in the room keeps it -- and its log -- alive"),
+    (179, True, "inside the window: a room can outlive its draft by as long as anyone stays"),
+    (200, False, "past the window; the loop that rebuilds a manager every minute has to end"),
 ])
 async def test_reconcile_capture_only_chases_a_log_that_could_still_exist(
         test_db, minutes_ago, chased, why):
     """The sibling of the predicate above, on the other axis of the same select.
 
-    Draftmancer keeps a finished room about 28 minutes and the log lives nowhere
-    else, so a rejoin past that captures nothing however often it runs. The
-    window was 12 HOURS under a docstring that said it was "bounded by
-    Draftmancer's ~28-min retention", so a draft that could not capture had a
-    full DraftSetupManager rebuilt for it every 60 seconds for the rest of those
-    twelve hours -- up to 720 attempts, of which at most the first 28 could have
-    worked. On 2026-10-05 one draft in The Divination spent 2h14m doing exactly
-    that, and the 68 "Bot No Longer Managing This Draft" embeds its channel
-    received were one per attempt.
+    Draftmancer deletes a room only once its LAST USER has left (and the bot is
+    not connected as its owner), and then keeps it about 28 minutes more: ten,
+    plus an extra the unlock timer adds (server.ts, removeUserFromSession). So
+    the 28 minutes run from whenever the room empties, which can be long after
+    the draft ends. A player who leaves the tab open keeps the room alive, and a
+    bot that restarted mid-draft can still rejoin it and be re-sent the log.
 
-    The cases bracket the measured distribution rather than a guess: 764
-    captures in the 120 days to 2026-10-05 ran 20.4 minutes median and never
-    exceeded 31.9.
+    The window was 12 HOURS, and a draft that could not capture had a full
+    DraftSetupManager rebuilt for it every 60 seconds for all of them. On
+    2026-10-05 one draft in The Divination spent 2h14m doing exactly that, and
+    the 68 "Bot No Longer Managing This Draft" embeds its channel received were
+    one per attempt. Bounding the window is half that fix; stopping once the bot
+    has been refused (reconciler-stops-after-standdown) is the other half.
+
+    The cases bracket the measured distribution: 764 captures in the 120 days to
+    2026-10-05 ran 20.4 minutes from teams forming, median, and never exceeded
+    31.9 -- so everything past that is a room someone kept open.
     """
     async with AsyncSessionLocal() as session:
         session.add(DraftSession(
