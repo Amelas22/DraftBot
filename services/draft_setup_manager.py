@@ -110,6 +110,21 @@ load_dotenv()
 # Global registry to track active manager instances
 ACTIVE_MANAGERS = {}
 
+# Draftmancer sessions the room has already been told the bot has given up on.
+#
+# Held at MODULE level, which is the whole point: _stand_down tells the room
+# once per manager INSTANCE, and a rebuilt manager's "once" is a first time. On
+# 2026-10-05 that put 68 identical embeds in The Divination's draft channel, one
+# every 71 seconds, as log_reconciler rebuilt a manager for an uncaptured draft.
+#
+# Keyed per Draftmancer session, not per draft: regenerate_draft_session mints a
+# new one and announces it, so losing THAT one is a fact the room has not heard.
+# The session_id rides along so two drafts cannot collide on a missing draft_id.
+#
+# Process-local, so a restart may re-tell a room once, which is the right way
+# round to be wrong.
+_TOLD_NOT_MANAGING: "set[tuple[str, str]]" = set()
+
 
 def mpt_embed_field_value(direct_url):
     """Embed field value for one player's MagicProTools link, or an unavailable
@@ -1344,6 +1359,9 @@ class DraftSetupManager:
         sends is discarded. Continuing to issue them -- and to report them as
         done -- is worse than leaving: the room is told things that did not
         happen. Tell them once, hand back the session URL, and disconnect.
+
+        "Once" is enforced in _notify_bot_no_longer_managing, not here: standing
+        down is one of six ways the bot discovers it has lost a session.
         """
         self.logger.warning(f"Standing down: {reason}")
         await self._notify_bot_no_longer_managing(include_session_url=True)
@@ -1354,11 +1372,20 @@ class DraftSetupManager:
         await self._cleanup_and_disconnect(reason)
 
     async def _notify_bot_no_longer_managing(self, include_session_url: bool = True):
-        """Send a notification that the bot can no longer manage this draft session.
+        """Tell the room, once, that the bot can no longer manage this draft.
+
+        The guard lives here rather than in the six callers so that none of them
+        has to remember it: all six mean the same thing, and the room needs that
+        fact once however many times the bot rediscovers it. See
+        _TOLD_NOT_MANAGING.
 
         Args:
             include_session_url: If True, include the Draftmancer session URL so users can continue manually.
         """
+        told = (str(self.session_id), str(self.draft_id))
+        if told in _TOLD_NOT_MANAGING:
+            return
+
         channel = await self._get_draft_channel()
         if not channel:
             return
@@ -1394,6 +1421,9 @@ class DraftSetupManager:
         )
 
         if await self._update_or_send_message(channel, None, embed=embed):
+            # Marked only on a send that worked, so a channel the bot could not
+            # post to is still told when it can be.
+            _TOLD_NOT_MANAGING.add(told)
             self.logger.info(f"Sent 'bot no longer managing' notification to channel {self.draft_channel_id}")
 
     async def connect_to_new_session(self):

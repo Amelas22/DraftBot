@@ -124,6 +124,7 @@ async def seed_session(session_id="s1", guild="g", stype="staked",
                        stage="completed", victory=None, teams=None,
                        matches=(), start=None, sign_ups=None,
                        cube="TestCube", draft_chat_channel=None,
+                       draft_channel_id=None,
                        channel_ids=None, draft_id=None, rooms_created_at=None,
                        match_counter=1, friendly_id=None,
                        draft_data=None, spaces_object_key=None,
@@ -135,6 +136,8 @@ async def seed_session(session_id="s1", guild="g", stype="staked",
     draft_chat_channel / channel_ids: the draft's rooms, for tests that resolve a
     session from a channel. Note the type asymmetry production stores them with --
     the chat as a string, channel_ids as JSON ints.
+    draft_channel_id: the channel the draft was POSTED in, which is a different
+    channel from the rooms above and is where the bot addresses the whole room.
     draft_data / spaces_object_key: the draft's Draftmancer log and its Spaces
     path. spaces_object_key is what makes a row quiz-eligible; draft_data is the
     fat JSON column the quiz paths must never load.
@@ -158,6 +161,7 @@ async def seed_session(session_id="s1", guild="g", stype="staked",
             team_b=list(teams[1]) if teams else None,
             draft_start_time=when, teams_start_time=when,
             draft_chat_channel=draft_chat_channel,
+            draft_channel_id=draft_channel_id,
             channel_ids=channel_ids,
             draft_id=draft_id, rooms_created_at=rooms_created_at,
             sign_ups=sign_ups, cube=cube,
