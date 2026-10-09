@@ -15,7 +15,31 @@ from services.draft_deck_assignment import assign_drafted_decks
 from services.draft_setup_manager import ACTIVE_MANAGERS, DraftSetupManager
 
 RECONCILE_INTERVAL_SECONDS: int = 60
-CAPTURE_RETRY_WINDOW_HOURS: int = 12   # only chase recently-active drafts
+# How long after its teams form a draft is still worth rejoining for its log.
+#
+# The log exists nowhere but the Draftmancer room (see
+# draft_setup_manager.must_preserve_draft_room), and a rejoin re-delivers it for
+# as long as the room exists. Draftmancer deletes a room only after its LAST USER
+# has left -- and the bot is not connected as its owner -- and then keeps it
+# about 28 minutes more (10, plus an extra the unlock timer adds;
+# removeUserFromSession in its server.ts). So those 28 minutes run from whenever
+# the room empties, not from the end of the draft: a player who leaves the tab
+# open keeps the log retrievable for as long as they stay.
+#
+# Measured over 764 captures in the 120 days to 2026-10-05: teams forming to log
+# captured is 20.4 minutes median and never exceeded 31.9. Past that, only a
+# room someone kept open can still yield a log -- which is the case this window
+# exists for: a bot that restarted mid-draft, missed endDraft, and must rejoin.
+#
+# Three hours, matching the unlock timer: generous, because a rejoin that can
+# still work is the only copy of the log. The cost of a draft that never yields
+# one is what keeps it cheap, and it has two shapes. A bot REFUSED by the room
+# (someone else owns it) stood down and was rebuilt every minute -- the
+# 2026-10-05 loop -- which reconciler-stops-after-standdown ends. A room that
+# was deleted refuses nobody: the rejoin gets an empty room and one idle manager,
+# reused on every later tick and bounded by MANAGER_MAX_LIFETIME_MINUTES.
+CAPTURE_RETRY_WINDOW_MINUTES: int = 180
+
 # How long a draft stays eligible to have its decks handed out. Its own
 # constant, not the team-post window it happens to equal today: that one is
 # justified by how long a teammate might still want a pool posted, and retuning
@@ -42,8 +66,9 @@ _RECONCILER_RUNNING: bool = False  # guards against on_ready firing on every gat
 async def reconcile_capture(bot) -> None:
     """Backup for a missed endDraft push: reconnect the owner socket for
     uncaptured, recently-active drafts and capture the log the session
-    re-delivers on join. Bounded by Draftmancer's ~28-min retention."""
-    cutoff = datetime.now() - timedelta(hours=CAPTURE_RETRY_WINDOW_HOURS)
+    re-delivers on join, for as long as the room can still exist (see
+    CAPTURE_RETRY_WINDOW_MINUTES)."""
+    cutoff = datetime.now() - timedelta(minutes=CAPTURE_RETRY_WINDOW_MINUTES)
     async with db_session() as session:
         uncaptured = (await session.execute(
             select(DraftSession).filter(
