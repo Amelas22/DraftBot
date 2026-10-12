@@ -870,6 +870,7 @@ class PersistentView(discord.ui.View):
                 view=cube_selection,
                 ephemeral=True
             )
+            cube_selection.mark_once_sent(interaction)
             
         except Exception as e:
             logger.exception(f"Error in update_cube_callback: {e}")

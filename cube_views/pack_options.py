@@ -7,6 +7,7 @@ without the circular import that ``modals`` -> ``sessions`` -> ``views`` would
 otherwise create.
 """
 import asyncio
+from typing import Any
 
 import discord
 from loguru import logger
@@ -166,11 +167,12 @@ class BaseCubeSelectionView(discord.ui.View):
         self.submit_button.callback = self.submit_callback
         self.add_item(self.submit_button)
 
-    async def show_library_prices(self) -> None:
+    async def show_library_prices(self) -> bool:
         """Mark the cubes this server can borrow from, with what it costs.
+        True if any cube was marked.
 
         Separate from __init__ because the price lives in the database and a
-        view is constructed synchronously. Callers await it before sending.
+        view is constructed synchronously; see mark_once_sent for when it runs.
 
         A failure here leaves the list unmarked rather than failing the draft:
         not knowing what borrowing costs is a worse dropdown, but no dropdown
@@ -181,12 +183,35 @@ class BaseCubeSelectionView(discord.ui.View):
         except Exception:
             logger.opt(exception=True).warning(
                 "cube list: could not read library prices; cubes left unmarked")
-            return
+            return False
+        if marked == self._cube_options:
+            return False
         options = [discord.SelectOption(**opt) for opt in marked]
         options.append(discord.SelectOption(label="Custom Cube...", value="custom"))
         for opt in options:
             opt.default = (opt.value == self.cube_choice)
         self.cube_select.options = options
+        return True
+
+    def mark_once_sent(self, interaction: discord.Interaction) -> "asyncio.Task[None]":
+        """Mark the library's cubes on a picker already sent, and edit it.
+
+        After sending, not before: marking reads each library cube from
+        CubeCobra, and a picker has three seconds to reach Discord. The picker
+        appears at once, unmarked, and gains its badges a moment later; a
+        server with no library, or a read that fails, leaves it as it was.
+        """
+        async def mark() -> None:
+            try:
+                if await self.show_library_prices():
+                    await interaction.edit_original_response(view=self)
+            except Exception:
+                logger.opt(exception=True).warning(
+                    "cube list: could not mark the library's cubes")
+        task = asyncio.create_task(mark())
+        _MARKING.add(task)
+        task.add_done_callback(_MARKING.discard)
+        return task
 
     async def advanced_options_callback(self, interaction: discord.Interaction):
         await interaction.response.send_modal(AdvancedOptionsModal(self))
@@ -213,22 +238,29 @@ class BaseCubeSelectionView(discord.ui.View):
         raise NotImplementedError
 
 
+# Running mark_once_sent tasks, held so a task is not collected half way.
+_MARKING: "set[asyncio.Task[None]]" = set()
+
 # Discord rejects a SelectOption description longer than this, taking the whole
 # dropdown with it rather than truncating.
 _JOIN = " · "
 _DESCRIPTION_LIMIT = 100
 
 
-def _library_note(collateral: int) -> str:
+def _library_note(least: int, most: int) -> str:
     """How a cube's borrowing price reads in the list.
 
     The NUMBER, not merely that there is one: "costs tix" leaves a player
     guessing whether they can afford it, and being able to answer that before
-    joining is the whole reason this is shown here.
+    joining is the whole reason this is shown here. Both figures for a tiered
+    library, as on the signup board: the list is read by the whole room and
+    cannot know which applies to the reader.
     """
-    if collateral == 0:
+    if most == 0:
         return "🆓 Free cube — borrow a deck free"
-    return f"🏛️ Library cube — {collateral} tix hold"
+    if least == most:
+        return f"🏛️ Library cube — {most} tix hold"
+    return f"🏛️ Library cube — {least}–{most} tix hold"
 
 
 def _shortfall_note(short: int, stocked: bool) -> "tuple[str, str]":
@@ -262,7 +294,9 @@ async def mark_library_cubes(options: list, guild_id) -> list:
     make the marked ones invisible -- which is also why only the priced ones
     cost a CubeCobra read.
     """
-    from services.library_service import library_id_for, prices_for
+    from models.library import RENTAL
+    from services.card_library_inventory import fetch_cube, read_once
+    from services.library_service import library_for, price_range_of, prices_for
 
     prices = await prices_for([o.get("value") for o in options], guild_id)
     if not prices:
@@ -271,14 +305,21 @@ async def mark_library_cubes(options: list, guild_id) -> list:
     # Resolved once, after prices_for has already established there IS a
     # library here -- so the common case, a server that borrows nothing, pays
     # a single lookup and stops.
-    library_id = await library_id_for(guild_id)
+    library = await library_for(guild_id)
+    if library is None:
+        return list(options)
+    library_id = library.id
+    least, most = price_range_of(library) or (0, 0)
     from services.library_access_service import is_invite_only
     if await is_invite_only(library_id):
         # Same rule as library_signup_note, and the gate sits here so a
         # whitelisted library also skips the CubeCobra reads below.
         return list(options)
+    # One read of each cube for the whole list: the shelf check and the
+    # per-cube coverage below would otherwise each fetch it from CubeCobra.
+    read = read_once(fetch_cube)
     held = await library_holdings(library_id)
-    available = await library_available(library_id)
+    available = await library_available(library_id, fetch=read)
 
     marked = []
     for opt in options:
@@ -288,11 +329,10 @@ async def mark_library_cubes(options: list, guild_id) -> list:
             marked.append(opt)
             continue
 
-        collateral = priced
-        emoji = "🆓" if collateral == 0 else "🏛️"
-        parts = [_library_note(collateral)]
+        emoji = "🆓" if most == 0 else "🏛️"
+        parts = [_library_note(least, most)]
         try:
-            seen = await cube_as_the_library_sees_it(cube)
+            seen = await cube_as_the_library_sees_it(cube, fetch=read)
             cards = seen.cards if seen else None
         except Exception:
             logger.opt(exception=True).warning(
@@ -301,8 +341,13 @@ async def mark_library_cubes(options: list, guild_id) -> list:
         if cards:
             short = cube_support(cards, available).cards_short
             if short:
-                emoji, caveat = _shortfall_note(
-                    short, stocked=cube_support(cards, held).ok)
+                stocked = cube_support(cards, held).ok
+                emoji, caveat = _shortfall_note(short, stocked=stocked)
+                if stocked and library.kind == RENTAL and await _held_by_a_queue(
+                        guild_id, cube):
+                    # The whole cube is out because a queue reserved it, not
+                    # because cards are scattered on loan: say where it is.
+                    emoji, caveat = "⏳", "in use by another queue"
                 parts.append(caveat)
 
         note = " · ".join(parts)
@@ -319,6 +364,16 @@ async def mark_library_cubes(options: list, guild_id) -> list:
         marked.append({**opt, "description": description[:_DESCRIPTION_LIMIT],
                        "emoji": emoji})
     return marked
+
+
+async def _held_by_a_queue(guild_id: Any, cube_id: Any) -> bool:
+    try:
+        from services.library_reservation import queue_holding
+        return await queue_holding(guild_id, cube_id) is not None
+    except Exception:
+        logger.opt(exception=True).warning(
+            "cube list: could not see who holds {}", cube_id)
+        return False
 
 
 LIBRARY_FIELD_NAME = "Cards:"

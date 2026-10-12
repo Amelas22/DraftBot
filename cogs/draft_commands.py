@@ -39,6 +39,8 @@ class DraftCommands(commands.Cog):
             logger.info(f"Using standard draft view for free server {ctx.guild.id}")
             view = CubeDraftSelectionView(session_type="random", guild_id=ctx.guild.id)
             await ctx.response.send_message("Select a cube:", view=view, ephemeral=True)
+        # The library's cubes gain their badges once the picker is up.
+        view.mark_once_sent(ctx.interaction)
 
     # @discord.slash_command(name='start_draft', description='Start a team draft with random teams', guild_ids=None)
     # async def start_draft(self, ctx):
@@ -84,6 +86,7 @@ class DraftCommands(commands.Cog):
         view = CubeDraftSelectionView(session_type="premade", guild_id=ctx.guild.id,
                                       session_details_overrides=overrides)
         await ctx.response.send_message("Select a cube:", view=view, ephemeral=True)
+        view.mark_once_sent(ctx.interaction)
         
     # @discord.slash_command(name='dynamic_stake', description='Start a team draft with random teams and customizable stakes')
     # async def staked_draft(self, ctx):
