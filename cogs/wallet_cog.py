@@ -69,12 +69,14 @@ def _why(res: "dict") -> str:
     return reason if res.get("busy") else explain_trade_failure(reason)
 
 
-def _held_deposit_note(n: int, unsent: int = 0) -> str:
-    """A deposit chunk held for review. NOT "failed, send again": those tix may
-    have arrived, and asking for them again could have them sent twice. What came
-    after it was never sent, and does need asking for again."""
-    note = (f"⚠️ The trade for **{n}** tix didn't confirm cleanly — an admin will check "
-            f"whether they arrived and credit them if they did. Don't send them again.")
+def _assumed_deposit_note(n: int, unsent: int = 0) -> str:
+    """A deposit chunk that couldn't be confirmed, so nothing was credited. NOT
+    "failed, send again": those tix may have arrived, and asking for them again could
+    have them sent twice. What came after it was never sent, and does need asking for
+    again."""
+    note = (f"⚠️ The trade for **{n}** tix couldn't be confirmed, so nothing was credited. "
+            f"An admin has been told and will credit them once the vault shows they "
+            f"arrived. Don't send them again.")
     if unsent:
         note += f" The remaining **{unsent}** were not sent; run the command again for them."
     return note
@@ -195,8 +197,8 @@ class WalletCommands(commands.Cog):
                 await refresh_boards(
                     bot, set(completed) | set(await escrow.open_boards_for_captain(player_id)))
                 msg = f"✅ Deposit confirmed: **+{credited} tix**. Balance: **{bal} tix**."
-                if credited < amount and res.get("review"):
-                    msg += "\n" + _held_deposit_note(res["open"], amount - credited - res["open"])
+                if credited < amount and res.get("assumed"):
+                    msg += "\n" + _assumed_deposit_note(res["open"], amount - credited - res["open"])
                 elif credited < amount and res.get("pending"):
                     # Only the OPEN chunk is in a trade; anything after it was
                     # never dispatched. Telling them to deposit the open part
@@ -225,8 +227,8 @@ class WalletCommands(commands.Cog):
                 if drawn:
                     total = sum(d.get("amount", 0) for d in drawn)
                     msg += f" Auto-applied **{total} tix** to {len(drawn)} debt(s)."
-            elif res.get("review"):
-                msg = _held_deposit_note(res["open"], amount - res["open"])
+            elif res.get("assumed"):
+                msg = _assumed_deposit_note(res["open"], amount - res["open"])
             elif res.get("confirming") or res.get("pending"):
                 # Confirming: the trade is over and only the vault check is outstanding --
                 # not "accept it in MTGO", there is nothing left there to accept.
@@ -287,15 +289,16 @@ class WalletCommands(commands.Cog):
             bal = await wallet_service.get_balance(guild_id, player_id)
             if delivered == amount:
                 msg = f"✅ Withdraw confirmed: **−{delivered} tix**. Balance: **{bal} tix**."
-            elif res.get("review"):
-                # Held, not returned: neither delivered nor back in the wallet. Anything
-                # after the held chunk was never sent and never left the wallet.
+            elif res.get("assumed"):
+                # Recorded as delivered: the trade couldn't be confirmed, and a refund that
+                # turned out wrong would pay twice. Anything after that chunk was never
+                # sent and never left the wallet.
                 held = res["open"]
                 unsent = amount - delivered - held
                 msg = ((f"✅ **{delivered}** tix delivered. " if delivered else "")
-                       + f"⚠️ **{held}** tix are held for an admin to check — the trade "
-                       f"didn't confirm cleanly. They're safe: you'll get them back, or "
-                       f"they'll be confirmed as delivered."
+                       + f"⚠️ The trade for **{held}** tix couldn't be confirmed, so it is "
+                       f"recorded as delivered. If they didn't reach you, an admin has been "
+                       f"told and will return them once the vault shows they never left."
                        + (f" The other **{unsent}** were not sent and are still in your "
                           f"wallet." if unsent else "")
                        + f" Balance: **{bal} tix**.")

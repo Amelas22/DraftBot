@@ -6,10 +6,12 @@ tix trade now records the vault's count before it goes out, and settling
 compares the vault afterwards:
 
   withdraw  dropped by n  -> delivered, never refunded -- whatever the serve said
-            unchanged     -> refunded only if the serve also said failed
+            unchanged     -> refunded only if the serve's failure PROVES the trade closed
   deposit   rose by n     -> credited -- whatever the serve said
-            unchanged     -> failed only if the serve also said failed
-  anything else           -> held for an admin; an unreadable vault waits
+            unchanged     -> failed
+  anything else           -> settled on the assumption that protects the vault: a
+                             withdraw delivered, a deposit not arrived; an admin is told.
+                             An unreadable vault waits, then is assumed too.
 """
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
@@ -22,6 +24,10 @@ from models.mtgo_job import MtgoJob
 from services import mtgo_resolution_service as resolution
 from services import vault_check, wallet_service
 from services.vault_check import VaultReading, classify
+
+CLOSED = "trade closed before approval"                       # proves nothing moved
+NEVER_CONFIRMED = ("the trade never confirmed as complete — treat as NOT completed")
+# ^ what the serve reports while the trade can still be open on MTGO's confirm screen
 
 GUILD, PLAYER, MTGO = "g1", "p1", "Someone"
 NOW = datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
@@ -110,6 +116,12 @@ async def _status(job_id):
         return row.status if row else None
 
 
+async def _assumed(job_id):
+    async with db_session() as s:
+        row = await s.get(MtgoJob, job_id)
+        return row.assumed if row else None
+
+
 async def _withdraw_out(job_id, n=100, baseline=1000):
     """A withdraw as start_withdraw leaves it: n committed to in-flight, job pending."""
     await _fund(n)
@@ -119,24 +131,27 @@ async def _withdraw_out(job_id, n=100, baseline=1000):
     await resolution._record_job(job_id, "withdraw", GUILD, PLAYER, MTGO, n, reading)
 
 
-def _settle_with(serve_state, vault_after):
-    """The serve reports `serve_state`; the vault then reads `vault_after` (None: unreadable)."""
+def _settle_with(serve_state, vault_after, detail="x"):
+    """The serve reports `serve_state` (with `detail`); the vault then reads `vault_after`
+    (None: unreadable). A `serve_state` of "missing" is the serve answering 404."""
     client = AsyncMock(enabled=True)
-    client.get_job = AsyncMock(return_value={"state": serve_state, "detail": "x",
-                                             "finishedAt": datetime.now(timezone.utc).isoformat()})
+    client.get_job = AsyncMock(return_value=(
+        {"_missing": True} if serve_state == "missing" else
+        {"state": serve_state, "detail": detail,
+         "finishedAt": datetime.now(timezone.utc).isoformat()}))
     reading = VaultReading(vault_after, NOW + timedelta(minutes=1)) if vault_after is not None else None
     return (patch("services.mtgo_resolution_service.get_client", return_value=client),
             patch.object(resolution.vault_check, "after", AsyncMock(return_value=reading)))
 
 
-async def _finish_withdraw(job_id, serve_state, vault_after, n=100):
-    a, b = _settle_with(serve_state, vault_after)
+async def _finish_withdraw(job_id, serve_state, vault_after, n=100, detail="x"):
+    a, b = _settle_with(serve_state, vault_after, detail)
     with a, b:
         return await resolution.finish_withdraw(job_id, GUILD, PLAYER, n, MTGO, timeout_s=1)
 
 
-async def _finish_deposit(job_id, serve_state, vault_after, n=50):
-    a, b = _settle_with(serve_state, vault_after)
+async def _finish_deposit(job_id, serve_state, vault_after, n=50, detail="x"):
+    a, b = _settle_with(serve_state, vault_after, detail)
     with a, b:
         return await resolution.finish_deposit(job_id, GUILD, PLAYER, n, MTGO, timeout_s=1)
 
@@ -152,33 +167,58 @@ async def test_a_withdraw_reported_failed_that_left_the_vault_is_not_refunded(te
 
 
 @pytest.mark.asyncio
-async def test_a_failed_withdraw_the_vault_confirms_is_refunded(test_db):  # noqa: F811
+async def test_a_withdraw_proven_closed_with_the_vault_unchanged_is_refunded(test_db):  # noqa: F811
     await _withdraw_out("w2")
-    res = await _finish_withdraw("w2", "failed", 1000)
+    res = await _finish_withdraw("w2", "failed", 1000, detail=CLOSED)
 
     assert res["outcome"] == "failed"
     assert await _balances() == (100, 0)
+    assert await _assumed("w2") is None
 
 
 @pytest.mark.asyncio
-async def test_a_done_withdraw_the_vault_doesnt_show_is_held(test_db):  # noqa: F811
-    """Debiting tix that never left would short the player; refunding a 'done' trade
-    could pay twice. Neither is safe to do alone."""
+async def test_a_withdraw_still_open_on_the_confirm_screen_is_never_refunded(test_db):  # noqa: F811
+    """The double-pay that survived the vault check: the partner sits on MTGO's final
+    confirm, the serve gives up and says failed with the trade still open, the vault
+    reads unchanged -- and the player confirms afterwards. Unchanged + "never confirmed"
+    is not proof, so it is booked as delivered."""
+    await _withdraw_out("w2b")
+    res = await _finish_withdraw("w2b", "failed", 1000, detail=NEVER_CONFIRMED)
+
+    assert res["outcome"] == resolution.ASSUMED and res["assumed"]
+    assert await _balances() == (0, 0), "debited as delivered, not refunded"
+    assert await _status("w2b") == "done" and await _assumed("w2b")
+
+
+@pytest.mark.asyncio
+async def test_a_done_withdraw_the_vault_doesnt_show_is_assumed_delivered(test_db):  # noqa: F811
+    """Refunding a 'done' trade could pay twice; debiting one that never left only
+    shorts the player until an admin returns it."""
     await _withdraw_out("w3")
     res = await _finish_withdraw("w3", "done", 1000)
 
-    assert res["outcome"] == resolution.REVIEW
-    assert await _balances() == (0, 100), "still committed"
-    assert await _status("w3") == resolution.REVIEW
+    assert res["outcome"] == resolution.ASSUMED
+    assert await _balances() == (0, 0)
+    assert await _status("w3") == "done" and await _assumed("w3")
 
 
 @pytest.mark.asyncio
-async def test_a_partial_change_is_held(test_db):  # noqa: F811
+async def test_a_partial_change_is_assumed_delivered(test_db):  # noqa: F811
     await _withdraw_out("w4")
-    res = await _finish_withdraw("w4", "failed", 950)
+    res = await _finish_withdraw("w4", "failed", 950, detail=CLOSED)
 
-    assert res["outcome"] == resolution.REVIEW
-    assert await _balances() == (0, 100)
+    assert res["outcome"] == resolution.ASSUMED
+    assert await _balances() == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_a_withdraw_the_serve_forgot_is_assumed_delivered(test_db):  # noqa: F811
+    """A 404 is the serve restarting and losing its job list -- not the trade failing."""
+    await _withdraw_out("w4b")
+    res = await _finish_withdraw("w4b", "missing", None)
+
+    assert res["outcome"] == resolution.ASSUMED
+    assert await _balances() == (0, 0)
 
 
 @pytest.mark.asyncio
@@ -194,12 +234,21 @@ async def test_an_unreadable_vault_leaves_the_job_for_later(test_db):  # noqa: F
 
 
 @pytest.mark.asyncio
-async def test_a_job_from_before_the_check_settles_as_reported(test_db):  # noqa: F811
+async def test_a_job_from_before_the_check_is_refunded_only_on_proof(test_db):  # noqa: F811
     await _withdraw_out("w6", baseline=None)
-    res = await _finish_withdraw("w6", "failed", None)
+    res = await _finish_withdraw("w6", "failed", None, detail=CLOSED)
 
     assert res["outcome"] == "failed"
     assert await _balances() == (100, 0)
+
+
+@pytest.mark.asyncio
+async def test_a_job_from_before_the_check_without_proof_is_assumed_delivered(test_db):  # noqa: F811
+    await _withdraw_out("w6b", baseline=None)
+    res = await _finish_withdraw("w6b", "failed", None, detail=NEVER_CONFIRMED)
+
+    assert res["outcome"] == resolution.ASSUMED
+    assert await _balances() == (0, 0)
 
 
 @pytest.mark.asyncio
@@ -211,11 +260,20 @@ async def test_a_deposit_is_credited_only_when_the_vault_rose(test_db):  # noqa:
 
 
 @pytest.mark.asyncio
-async def test_a_done_deposit_the_vault_doesnt_show_is_held_not_credited(test_db):  # noqa: F811
+async def test_a_done_deposit_the_vault_doesnt_show_is_assumed_not_arrived(test_db):  # noqa: F811
     await resolution._record_job("d2", "deposit", GUILD, PLAYER, MTGO, 50, VaultReading(1000, NOW))
     res = await _finish_deposit("d2", "done", 1000)
 
-    assert res["outcome"] == resolution.REVIEW and await _balances() == (0, 0)
+    assert res["outcome"] == resolution.ASSUMED and await _balances() == (0, 0)
+    assert await _status("d2") == "failed" and await _assumed("d2")
+
+
+@pytest.mark.asyncio
+async def test_a_deposit_the_serve_forgot_is_not_credited(test_db):  # noqa: F811
+    await resolution._record_job("d2b", "deposit", GUILD, PLAYER, MTGO, 50, VaultReading(1000, NOW))
+    res = await _finish_deposit("d2b", "missing", None)
+
+    assert res["outcome"] == resolution.ASSUMED and await _balances() == (0, 0)
 
 
 @pytest.mark.asyncio
@@ -227,11 +285,23 @@ async def test_a_deposit_reported_failed_that_arrived_is_credited(test_db):  # n
 
 
 @pytest.mark.asyncio
-async def test_a_failed_deposit_the_vault_confirms_is_failed(test_db):  # noqa: F811
+async def test_a_deposit_proven_closed_is_failed(test_db):  # noqa: F811
     await resolution._record_job("d4", "deposit", GUILD, PLAYER, MTGO, 50, VaultReading(1000, NOW))
-    res = await _finish_deposit("d4", "failed", 1000)
+    res = await _finish_deposit("d4", "failed", 1000, detail=CLOSED)
 
     assert res["outcome"] == "failed" and await _balances() == (0, 0)
+    assert await _assumed("d4") is None
+
+
+@pytest.mark.asyncio
+async def test_a_deposit_that_may_still_be_open_is_not_credited_and_flagged(test_db):  # noqa: F811
+    """Its tix can still arrive once the player confirms; nothing is credited on a guess,
+    and an admin is told to watch for them."""
+    await resolution._record_job("d4b", "deposit", GUILD, PLAYER, MTGO, 50, VaultReading(1000, NOW))
+    res = await _finish_deposit("d4b", "failed", 1000, detail=NEVER_CONFIRMED)
+
+    assert res["outcome"] == resolution.ASSUMED and await _balances() == (0, 0)
+    assert await _assumed("d4b")
 
 
 # ---- starting -----------------------------------------------------------------------------------
@@ -265,20 +335,20 @@ async def test_a_started_trade_records_its_baseline(test_db, monkeypatch):  # no
 
 
 @pytest.mark.asyncio
-async def test_a_held_chunk_is_reported_as_held(test_db, monkeypatch):  # noqa: F811
+async def test_an_assumed_chunk_is_reported_as_assumed(test_db, monkeypatch):  # noqa: F811
     monkeypatch.setenv("MTGO_MAX_CARDS_PER_TRADE", "300")
 
     async def start(g, p, u, n, **kw):
         return {"ok": True, "job_id": "only"}
 
     async def finish(job_id, g, p, n, u):
-        return {"ok": False, "outcome": resolution.REVIEW, "error": "held"}
+        return {"ok": False, "outcome": resolution.ASSUMED, "error": "assumed"}
 
     monkeypatch.setattr(resolution, "start_withdraw", start)
     monkeypatch.setattr(resolution, "finish_withdraw", finish)
     res = await resolution.run_withdraw_order(GUILD, PLAYER, MTGO, 200)
 
-    assert res["review"] and not res["pending"] and res["open"] == 200
+    assert res["assumed"] and not res["pending"] and res["open"] == 200
 
 
 # ---- the reading's window -----------------------------------------------------------------------
@@ -347,10 +417,10 @@ async def test_an_interrupted_settlement_is_finished_by_the_watchdog(test_db):  
     assert await _status("w8") == "done" and await _balances() == (0, 0)
 
 
-# ---- a lost POST is held, never refunded on a guess ---------------------------------------------------
+# ---- a lost POST is assumed delivered, never refunded on a guess --------------------------------------
 
 @pytest.mark.asyncio
-async def test_an_ambiguous_withdraw_post_with_no_job_found_is_held(test_db, monkeypatch):  # noqa: F811
+async def test_an_ambiguous_withdraw_post_with_no_job_found_is_assumed_delivered(test_db, monkeypatch):  # noqa: F811
     await _fund(100)
     monkeypatch.setattr(resolution.vault_check, "baseline",
                         AsyncMock(return_value=VaultReading(1000, NOW)))
@@ -361,12 +431,13 @@ async def test_an_ambiguous_withdraw_post_with_no_job_found_is_held(test_db, mon
          patch("services.mtgo_resolution_service.asyncio.sleep", AsyncMock()):
         res = await resolution.start_withdraw(GUILD, PLAYER, MTGO, 100)
 
-    assert not res["ok"] and res["review"]
-    assert await _balances() == (0, 100), "committed, not refunded"
+    assert not res["ok"] and res["assumed"]
+    assert await _balances() == (0, 0), "debited as delivered, not refunded"
     async with db_session() as s:
         held = [r for r in (await s.execute(MtgoJob.__table__.select())).all()
-                if r.status == resolution.REVIEW]
+                if r.assumed]
     assert len(held) == 1 and held[0].job_id.startswith("lost-") and held[0].vault_before == 1000
+    assert held[0].status == "done"
 
 
 @pytest.mark.asyncio
@@ -379,7 +450,7 @@ async def test_a_definite_refusal_is_refunded(test_db, monkeypatch):  # noqa: F8
     with patch("services.mtgo_resolution_service.get_client", return_value=client):
         res = await resolution.start_withdraw(GUILD, PLAYER, MTGO, 100)
 
-    assert not res["ok"] and not res.get("review")
+    assert not res["ok"] and not res.get("assumed")
     assert await _balances() == (100, 0)
 
 
@@ -517,19 +588,19 @@ async def test_a_lost_post_never_adopts_a_job_already_booked(test_db, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_a_start_held_for_review_is_reported_held_not_failed(test_db, monkeypatch):  # noqa: F811
-    """A lost POST leaves its chunk committed. Reporting it as a plain failure would tell
-    the player the tix are back in the wallet and to try again."""
+async def test_an_assumed_start_is_reported_assumed_not_failed(test_db, monkeypatch):  # noqa: F811
+    """A lost POST is booked as delivered. Reporting it as a plain failure would tell the
+    player the tix are back in the wallet and to try again."""
     monkeypatch.setenv("MTGO_MAX_CARDS_PER_TRADE", "300")
 
     async def start(g, p, u, n, **kw):
-        return {"ok": False, "review": True, "outcome": resolution.REVIEW,
-                "error": "held", "job_id": "lost-abc"}
+        return {"ok": False, "assumed": True, "outcome": resolution.ASSUMED,
+                "error": "assumed", "job_id": "lost-abc"}
 
     monkeypatch.setattr(resolution, "start_withdraw", start)
     res = await resolution.run_withdraw_order(GUILD, PLAYER, MTGO, 200)
 
-    assert res["review"] and res["open"] == 200 and res["jobs"] == ["lost-abc"]
+    assert res["assumed"] and res["open"] == 200 and res["jobs"] == ["lost-abc"]
 
 
 # ---- round 4: nothing else may trade between the baseline and the after-reading ----------------
@@ -594,7 +665,7 @@ async def test_a_trade_over_before_the_baseline_does_not_void_the_reading(monkey
 
 
 @pytest.mark.asyncio
-async def test_a_reading_that_never_comes_is_held_for_review_not_confirmed_forever(test_db):  # noqa: F811
+async def test_a_reading_that_never_comes_is_assumed_not_confirmed_forever(test_db):  # noqa: F811
     """A window another trade broke stays broken; the player must not wait on it forever."""
     await _withdraw_out("w20")
     client = AsyncMock(enabled=True)
@@ -604,12 +675,12 @@ async def test_a_reading_that_never_comes_is_held_for_review_not_confirmed_forev
     with patch("services.mtgo_resolution_service.get_client", return_value=client), \
          patch.object(resolution.vault_check, "after", AsyncMock(return_value=None)):
         await resolution.finish_withdraw("w20", GUILD, PLAYER, 100, MTGO)
-    assert await _status("w20") == resolution.REVIEW
-    assert await _balances() == (0, 100), "neither refunded nor debited"
+    assert await _status("w20") == "done" and await _assumed("w20")
+    assert await _balances() == (0, 0), "assumed delivered, not refunded"
 
 
 @pytest.mark.asyncio
-async def test_a_job_with_no_finish_time_still_reaches_review(test_db):  # noqa: F811
+async def test_a_job_with_no_finish_time_is_still_settled(test_db):  # noqa: F811
     """No finishedAt means no reading ever; it must not wait forever either."""
     await _withdraw_out("w21", baseline=None)
     async with db_session() as s:
@@ -621,5 +692,57 @@ async def test_a_job_with_no_finish_time_still_reaches_review(test_db):  # noqa:
     client.get_job = AsyncMock(return_value={"state": "failed", "detail": "x"})
     with patch("services.mtgo_resolution_service.get_client", return_value=client):
         await resolution.finish_withdraw("w21", GUILD, PLAYER, 100, MTGO)
-    assert await _status("w21") == resolution.REVIEW
-    assert await _balances() == (0, 100)
+    assert await _status("w21") == "done" and await _assumed("w21")
+    assert await _balances() == (0, 0)
+
+
+# ---- what proves a trade closed -----------------------------------------------------------------
+
+def test_only_a_failure_that_proves_the_trade_closed_counts():
+    assert resolution.proves_closed(CLOSED)
+    assert resolution.proves_closed("the trade closed as 'Cancelled' — treat as NOT completed")
+    assert resolution.proves_closed("cancelled before it started")
+    assert not resolution.proves_closed(NEVER_CONFIRMED), "can still be open on the confirm screen"
+    assert not resolution.proves_closed("the trade wasn't completed in time")
+    assert not resolution.proves_closed("x")
+    assert not resolution.proves_closed(None)
+    assert not resolution.proves_closed("")
+
+
+# ---- an admin is told about every assumption, and a failed DM is retried ------------------------
+
+async def _assumed_row(job_id):
+    await _withdraw_out(job_id)
+    await _finish_withdraw(job_id, "failed", 1000, detail=NEVER_CONFIRMED)
+
+
+async def _alerted(job_id):
+    async with db_session() as s:
+        row = await s.get(MtgoJob, job_id)
+        return row.alerted_at
+
+
+@pytest.mark.asyncio
+async def test_an_assumption_is_dmed_and_marked_only_once_it_went(test_db, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("SERVE_ALERT_DISCORD_ID", "42")
+    sent = AsyncMock(side_effect=[False, True])     # the first DM can't be delivered
+    monkeypatch.setattr("notification_service.send_dm", sent)
+    monkeypatch.setattr("bot_registry.get_bot", lambda: object())
+
+    await _assumed_row("a1")                         # alerts at once: the DM fails
+    assert await _alerted("a1") is None, "an alert that didn't go out isn't recorded as sent"
+
+    assert await resolution.alert_assumed() == 1     # the watchdog's retry gets through
+    assert await _alerted("a1") is not None
+    assert sent.await_args.args[1] == "42" and "a1" in sent.await_args.args[2]
+
+    assert await resolution.alert_assumed() == 0, "told once, not every pass"
+
+
+@pytest.mark.asyncio
+async def test_no_alert_target_means_nothing_is_marked_alerted(test_db, monkeypatch):  # noqa: F811
+    monkeypatch.delenv("SERVE_ALERT_DISCORD_ID", raising=False)
+    await _assumed_row("a2")
+
+    assert await resolution.alert_assumed() == 0
+    assert await _alerted("a2") is None, "kept for when a target is set"

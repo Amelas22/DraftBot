@@ -58,7 +58,7 @@ class MtgoJob(Base):
     # card and `amount` is the quantity. A card job needs no printing — the serve records
     # which printings crossed and pins them itself on the way back.
     card_name = Column(String(128), nullable=True)
-    status = Column(String(16), nullable=False, default='pending', index=True)  # pending | done | failed | review
+    status = Column(String(16), nullable=False, default='pending', index=True)  # pending | settle-<x> | done | failed
     created_at = Column(DateTime, default=datetime.now)
     resolved_at = Column(DateTime, nullable=True)
     # The vault's tix count just before this trade went out, and when the serve read it
@@ -66,6 +66,13 @@ class MtgoJob(Base):
     # physically moved. NULL on jobs written before the check existed, and on card jobs.
     vault_before = Column(Integer, nullable=True)
     vault_before_at = Column(DateTime, nullable=True)
+    # Set when the outcome was ASSUMED rather than proven: the vault and the serve could
+    # not show what the trade did, so it was settled the way that leaves the player's
+    # wallet lower (a withdraw as delivered, a deposit as not arrived). Says why. An
+    # admin checks these against the vault; alerted_at is when one was told -- only
+    # once a DM actually went out, so a failed alert is retried.
+    assumed = Column(String(255), nullable=True)
+    alerted_at = Column(DateTime, nullable=True)
 
     def __repr__(self):
         return (f"<MtgoJob(job={self.job_id}, kind={self.kind}, player={self.player_id}, "

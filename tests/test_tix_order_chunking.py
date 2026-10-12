@@ -266,7 +266,7 @@ async def test_a_lost_post_does_not_adopt_the_previous_chunks_job(test_db, monke
         "the scan must be told which jobs this run already owns"
     assert res["moved"] == 300, "only the trade that really happened counts"
     assert res["jobs"][0] == "job-1" and res["jobs"].count("job-1") == 1,         "chunk 1's job is not claimed twice"
-    assert res["review"] and res["open"] == 300, "the lost chunk is held, not failed"
+    assert res["assumed"] and res["open"] == 300, "the lost chunk is assumed delivered, not failed"
 
 
 # ---- what a stopped run says is still moving ---------------------------------------

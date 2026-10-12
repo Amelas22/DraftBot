@@ -57,13 +57,17 @@ _DEFAULT_POLL_TIMEOUT_S = 14 * 60
 # ---------------------------------------------------------------------------
 async def _poll_job(job_id: str, timeout_s: float):
     """Poll GET /jobs/{id} until terminal. Returns (outcome, job) where outcome is
-    'done' | 'failed' | 'pending' ('pending' = still running when the timeout hit)."""
+    'done' | 'failed' | 'missing' | 'pending' ('pending' = still running when the timeout
+    hit; 'missing' = the serve says it has no such job -- it restarted and lost its list,
+    which says nothing about whether the trade happened)."""
     client = get_client()
     waited = 0.0
     interval = _POLL_INTERVAL_S
     last = None
     while waited < timeout_s:
-        job = await client.get_job(job_id)
+        job = await client.get_job(job_id, mark_missing=True)
+        if isinstance(job, dict) and job.get("_missing"):
+            return "missing", {"id": job_id, "state": "missing"}
         if job is not None:
             last = job
             state = (job.get("state") or "").lower()
@@ -95,10 +99,13 @@ async def _record_job(job_id: str, kind: str, guild_id: str, player_id: str, mtg
     await with_db_retry(_do)
 
 
-# A trade the vault couldn't confirm either way: the money stays where it is (a
-# withdraw's tix stay committed to in-flight, a deposit stays uncredited) and the row
-# leaves 'pending' so no poller acts on it again. An admin settles it against the vault.
-REVIEW = "review"
+# A trade the vault couldn't confirm either way is settled on an ASSUMPTION, never left
+# for someone to find. The assumption always protects the vault, never the wallet: a
+# withdraw is booked as delivered, a deposit as not arrived. A player left short is put
+# right from the vault by an admin, who is DMed about every one; a vault paid out twice
+# cannot be put right at all (2026-10-03).
+ASSUMED = "assumed"
+UNPROVEN = "unproven"     # a verdict: neither the vault nor the serve proves an outcome
 
 # A finished trade whose vault reading isn't in yet: nothing more to do in MTGO, the
 # booking follows once the vault can be read (the watchdog re-checks pending jobs).
@@ -111,21 +118,79 @@ _CONFIRM_GIVE_UP = timedelta(minutes=15)
 _TIX_DISPATCH_LOCK = asyncio.Lock()
 
 
-async def _hold_for_review(job_id: str, why: str, player_msg: str) -> dict[str, Any]:
-    if not await _settle(job_id, REVIEW):
+# What the player is told when their trade was settled on an assumption.
+_ASSUMED_DELIVERED_MSG = ("the trade couldn't be confirmed, so it is recorded as delivered. "
+                          "If the tix didn't reach you, an admin has been told and will "
+                          "return them once the vault shows they never left")
+_ASSUMED_NOT_ARRIVED_MSG = ("the trade couldn't be confirmed, so nothing was credited. If you "
+                            "sent the tix, don't send them again: an admin has been told and "
+                            "will credit them once the vault shows they arrived")
+
+
+async def _assume(job_id: str, kind: str, guild_id: str, player_id: str, n: int,
+                  mtgo_user: str | None, why: str) -> dict[str, Any]:
+    """Settle a trade whose outcome can't be proven, the way that protects the vault: a
+    withdraw as DELIVERED (its tix leave in-flight across the boundary), a deposit as
+    NOT ARRIVED (nothing credited). Records why, and tells an admin."""
+    if kind == "withdraw":
+        async def debit():
+            await wallet_service.debit_done(
+                guild_id, wallet_service.SYSTEM_IN_FLIGHT, n, job_id=job_id,
+                counterparty_id=mtgo_user,
+                notes=f"withdraw {n} tix to {mtgo_user} -- ASSUMED delivered: {why}")
+        claimed = await _settle(job_id, "done", debit, assumed=why)
+        player_msg = _ASSUMED_DELIVERED_MSG
+    else:
+        claimed = await _settle(job_id, "failed", assumed=why)
+        player_msg = _ASSUMED_NOT_ARRIVED_MSG
+    if not claimed:
         return await _settled_elsewhere(job_id)
-    logger.error(f"MTGO job {job_id} HELD FOR REVIEW -- {why}")
-    return {"ok": False, "outcome": REVIEW, "review": True, "error": player_msg}
+    logger.error(f"MTGO {kind} job {job_id} ({n} tix, {mtgo_user}) settled on an ASSUMPTION "
+                 f"-- {why}")
+    await alert_assumed()
+    return {"ok": False, "outcome": ASSUMED, "assumed": True, "error": player_msg}
 
 
-async def _hold_lost_post(kind: str, guild_id: str, player_id: str, mtgo_user: str, n: int,
-                          before: "vault_check.VaultReading", why: str,
-                          player_msg: str) -> dict[str, Any]:
-    """A POST whose outcome is unknown: a trade may exist that we have no id for. A
-    placeholder row -- with the baseline, so the vault can settle it -- keeps it findable."""
+async def _settle_lost_post(kind: str, guild_id: str, player_id: str, mtgo_user: str, n: int,
+                            before: "vault_check.VaultReading", why: str) -> dict[str, Any]:
+    """A POST whose outcome is unknown: a trade may exist that we have no id for, and may
+    still fire later. A placeholder row keeps it findable (with its baseline for the
+    admin), and it is settled at once on the assumption that protects the vault."""
     placeholder = f"lost-{uuid.uuid4().hex}"[:64]
     await _record_job(placeholder, kind, guild_id, player_id, mtgo_user, n, before)
-    return {**await _hold_for_review(placeholder, why, player_msg), "job_id": placeholder}
+    res = await _assume(placeholder, kind, guild_id, player_id, n, mtgo_user, why)
+    return {**res, "job_id": placeholder}
+
+
+# Failure details from the serve that prove the trade is CLOSED with nothing moved --
+# matched as prefixes of the detail the serve reports (MTGOSDK-serve Program.cs and
+# TradeService.cs). Deliberately an allowlist: any detail not here, including "the
+# trade never confirmed as complete" (reported while the trade can still be open on
+# MTGO's confirm screen), is not proof, and a withdraw without proof is booked as
+# delivered. A detail the serve rewords therefore costs a player a wrong debit an admin
+# can reverse -- never the vault a refund it can't.
+_CLOSED_WITH_NOTHING_MOVED = (
+    "cancelled before it started",
+    "trade closed before approval",
+    "a DIFFERENT trade replaced ours before approval",
+    "never reached approval-ready",
+    "the verified trade was replaced before the final check",
+    "guardrail re-check failed at approval",
+    "the trade was replaced just before the final approve",
+    "the final approve was not accepted by the client (nothing moved)",
+    "the trade closed as '",
+    "could not resolve '",
+    "could not reach negotiation",
+    "no YES from the partner in time",
+    "the open trade is with '",
+    "the partner closed the trade before it was complete",
+    "a DIFFERENT trade replaced ours mid-negotiation",
+)
+
+
+def proves_closed(detail: Any) -> bool:
+    """Whether a failed job's detail proves its trade closed with nothing moved."""
+    return isinstance(detail, str) and detail.strip().startswith(_CLOSED_WITH_NOTHING_MOVED)
 
 
 # What the vault said about a finished trade.
@@ -136,16 +201,26 @@ _NO_BASELINE = "legacy"      # a job recorded before the check existed: book as 
 async def _vault_verdict(job_id: str, job: dict[str, Any], outcome: str,
                          expected_delta: int) -> str:
     """'moved' -- the vault changed by expected_delta, whatever the serve said;
-    'none' -- it didn't change AND the serve said failed; 'confirming' -- no reading
-    yet; 'review' -- anything else (a partial or contradicting change, or a 'done' the
-    vault doesn't show). The serve's report alone decides only for a job recorded before
-    baselines existed. ONE table for deposit and withdraw: they differ only in sign."""
+    'none' -- it didn't change AND the serve's failure proves the trade closed
+    (proves_closed); 'confirming' -- no reading yet; 'unproven' -- anything else: a
+    partial or contradicting change, a 'done' the vault doesn't show, a failure that
+    doesn't prove the trade closed, or a job the serve has forgotten. ONE table for
+    deposit and withdraw: they differ only in sign, and the CALLER turns 'unproven' into
+    the assumption that protects the vault."""
+    if outcome == "missing":
+        # The serve restarted and lost the job: it can't say when the trade ran, so no
+        # vault reading can be placed against it.
+        return UNPROVEN
+    closed = outcome == "failed" and proves_closed(job.get("detail"))
     async with db_session() as session:
         row = await session.get(MtgoJob, job_id)
     if row is None or row.vault_before is None:
-        return "moved" if outcome == "done" else "none"
+        # Recorded before baselines existed: only the serve's word, and only its proof.
+        if outcome == "done":
+            return "moved"
+        return "none" if closed else UNPROVEN
     if row.vault_before_at is None:
-        return REVIEW   # a count with no time can't be placed against the job list
+        return UNPROVEN   # a count with no time can't be placed against the job list
     since = row.vault_before_at.replace(tzinfo=timezone.utc)
     reading = await vault_check.after(get_client(), job, since)
     if reading is None:
@@ -157,8 +232,8 @@ async def _vault_verdict(job_id: str, job: dict[str, Any], outcome: str,
                     or since + timedelta(seconds=ORDER_TIMEOUT_S))
         if datetime.now(timezone.utc) - finished > _CONFIRM_GIVE_UP:
             logger.warning(f"job {job_id}: no usable vault reading {_CONFIRM_GIVE_UP} after "
-                           f"it finished -- holding for review")
-            return REVIEW
+                           f"it finished -- unproven")
+            return UNPROVEN
         return CONFIRMING
     moved = vault_check.classify(row.vault_before, reading.tix, expected_delta)
     logger.info(f"vault check {job_id}: {row.vault_before} -> {reading.tix} "
@@ -168,9 +243,9 @@ async def _vault_verdict(job_id: str, job: dict[str, Any], outcome: str,
             logger.warning(f"job {job_id}: serve said {outcome} but the vault moved by "
                            f"{expected_delta:+d} -- booking it as done")
         return "moved"
-    if moved == "none" and outcome == "failed":
+    if moved == "none" and closed:
         return "none"
-    return REVIEW
+    return UNPROVEN
 
 
 # Settlement claims the job BEFORE money moves: pending -> settle-<outcome> -> booking ->
@@ -181,24 +256,30 @@ async def _vault_verdict(job_id: str, job: dict[str, Any], outcome: str,
 _SETTLING = "settle-"
 
 
-async def _move_status(job_id: str, frm: str, to: str) -> bool:
-    """Atomically move a job from one status to another. True only for the caller that did it."""
+async def _move_status(job_id: str, frm: str, to: str, assumed: str | None = None) -> bool:
+    """Atomically move a job from one status to another. True only for the caller that did
+    it. ``assumed`` records, in the same write, why its outcome was assumed."""
+    values: dict[str, Any] = {"status": to, "resolved_at": datetime.now()}
+    if assumed is not None:
+        values["assumed"] = assumed[:255]
+
     async def _do():
         async with db_session() as session:
             res = await session.execute(
                 update(MtgoJob)
                 .where(MtgoJob.job_id == job_id, MtgoJob.status == frm)
-                .values(status=to, resolved_at=datetime.now()))
+                .values(**values))
             return res.rowcount == 1
     return await with_db_retry(_do)
 
 
-async def _settle(job_id: str, status: str, book: "Callable[[], Any] | None" = None) -> bool:
+async def _settle(job_id: str, status: str, book: "Callable[[], Any] | None" = None,
+                  assumed: str | None = None) -> bool:
     """Claim the job, book, then mark it final. False if another poller claimed it first.
     No rollback if the booking raises -- it may already have committed; the row stays
     claimed and _finish_settlements completes it."""
     middle = f"{_SETTLING}{status}" if book is not None else status
-    if not await _move_status(job_id, "pending", middle):
+    if not await _move_status(job_id, "pending", middle, assumed):
         return False
     if book is not None:
         await book()
@@ -211,12 +292,13 @@ async def _settled_elsewhere(job_id: str) -> dict[str, Any]:
     async with db_session() as session:
         row = await session.get(MtgoJob, job_id)
     status = row.status if row else None
+    if row is not None and row.assumed and status in ("done", "failed"):
+        return {"ok": False, "outcome": ASSUMED, "assumed": True,
+                "error": (_ASSUMED_DELIVERED_MSG if row.kind == "withdraw"
+                          else _ASSUMED_NOT_ARRIVED_MSG)}
     if status == "done":
         return {"ok": True, "outcome": "done",
                 "credited": row.amount if row and row.kind == "deposit" else 0}
-    if status == REVIEW:
-        return {"ok": False, "outcome": REVIEW, "review": True,
-                "error": "the trade didn't confirm cleanly -- an admin is checking it"}
     if status == "failed":
         return {"ok": False, "outcome": "failed", "error": "trade failed"}
     # still being booked, or put back: not an answer yet
@@ -236,7 +318,7 @@ async def _known_job_ids(mtgo_user: str) -> "set[str]":
 def _post_stamp() -> datetime:
     """When a job-creating POST is about to go out, in the serve's terms (UTC), less a few
     seconds of slack for the two clocks. A serve clock behind ours can hide the right job,
-    which then holds for review -- never adopts the wrong one."""
+    which is then settled on an assumption -- never adopts the wrong one."""
     return datetime.now(timezone.utc) - timedelta(seconds=5)
 
 
@@ -319,8 +401,9 @@ async def _run_order(start: "Callable[..., Any]", finish: "Callable[..., Any]",
 
     ``confirming`` says the open chunk's trade has FINISHED and only its vault check is
     outstanding -- no MTGO action left, unlike a still-open trade.
-    ``review`` says it stopped on a chunk held for an admin (``open`` is its size):
-    neither moved nor back in the wallet, so the caller must describe it as neither.
+    ``assumed`` says it stopped on a chunk settled on an assumption (``open`` is its
+    size): a withdraw recorded as delivered, a deposit as not arrived, an admin told --
+    so the caller must say so, not "moved" and not "failed, send again".
     ``moved`` counts only chunks that finished. ``pending`` says the run
     stopped on a trade that is still OPEN rather than one that failed, which
     the caller must keep apart: the watchdog will settle a pending trade, so
@@ -331,8 +414,8 @@ async def _run_order(start: "Callable[..., Any]", finish: "Callable[..., Any]",
                 "error": (f"That would take {trade_count(n)} separate MTGO trades. "
                           f"The most one command runs is {MAX_TRADES_PER_ORDER} "
                           f"-- split it across a few commands."),
-                "busy": False, "pending": False, "confirming": False, "review": False, "open": 0}
-    moved, error, busy, pending, review, open_part = 0, None, False, False, False, 0
+                "busy": False, "pending": False, "confirming": False, "assumed": False, "open": 0}
+    moved, error, busy, pending, assumed, open_part = 0, None, False, False, False, 0
     confirming = False
     jobs: "list[str]" = []
     for part in chunk_amounts(n, max_cards_per_trade()):
@@ -341,10 +424,10 @@ async def _run_order(start: "Callable[..., Any]", finish: "Callable[..., Any]",
                               exclude_ids=jobs)
         if not started.get("ok"):
             error, busy = started.get("error"), bool(started.get("busy"))
-            # A start held for review (a lost POST) committed its chunk: neither moved nor
-            # back in the wallet, so it is reported like any held chunk -- with its job.
-            review = bool(started.get("review"))
-            open_part = part if review else 0
+            # A start settled on an assumption (a lost POST) is reported like any other
+            # assumed chunk -- with its job.
+            assumed = bool(started.get("assumed"))
+            open_part = part if assumed else 0
             if started.get("job_id"):
                 jobs.append(started["job_id"])
             break
@@ -353,17 +436,17 @@ async def _run_order(start: "Callable[..., Any]", finish: "Callable[..., Any]",
         if not res.get("ok"):
             pending = res.get("outcome") in ("pending", CONFIRMING)
             confirming = res.get("outcome") == CONFIRMING
-            review = res.get("outcome") == REVIEW
+            assumed = res.get("outcome") == ASSUMED
             # The chunk that is still open, so the caller can say how much is
             # really in that trade. Only ONE chunk is ever open -- the run
             # stops here -- and saying "the rest" counts undispatched chunks
             # the player still has to ask for.
-            open_part = part if (pending or review) else 0
+            open_part = part if (pending or assumed) else 0
             error = res.get("error") or res.get("outcome")
             break
         moved += part
     return {"moved": moved, "jobs": jobs, "error": error, "busy": busy, "pending": pending,
-            "confirming": confirming, "review": review, "open": open_part}
+            "confirming": confirming, "assumed": assumed, "open": open_part}
 
 
 async def run_deposit_order(guild_id: str, player_id: str, mtgo_user: str, n: int, *,
@@ -429,12 +512,14 @@ async def start_deposit(guild_id: str, player_id: str, mtgo_user: str, n: int, *
                 resp = adopted
             elif resp and resp.get("_ambiguous"):
                 # The POST may still create a trade that moves tix with no job to credit
-                # them. Held, with its baseline, so the vault can settle it.
-                return await _hold_lost_post(
+                # them: assumed not arrived, and the player told not to accept it.
+                res = await _settle_lost_post(
                     "deposit", guild_id, player_id, mtgo_user, n, before,
-                    f"deposit POST outcome unknown and no job found for it ({mtgo_user}, {n} tix)",
-                    "couldn't confirm whether the deposit was queued -- if a trade invite "
-                    "arrives, decline it and ask an admin")
+                    f"deposit POST outcome unknown and no job found for it ({mtgo_user}, {n} tix)")
+                if res.get("assumed"):
+                    res["error"] = ("couldn't confirm whether the deposit was queued, so nothing "
+                                    "was credited -- if a trade invite arrives, DECLINE it")
+                return res
             else:
                 return {"ok": False, "error": "serve did not accept the deposit (unreachable or rejected)"}
         await _record_job(resp["id"], "deposit", guild_id, player_id, mtgo_user, n, before)
@@ -464,10 +549,10 @@ async def finish_deposit(job_id: str, guild_id: str, player_id: str, n: int, mtg
         if not await _settle(job_id, "failed"):
             return await _settled_elsewhere(job_id)
         return {"ok": False, "outcome": "failed", "error": job.get("detail") or "trade failed"}
-    return await _hold_for_review(
-        job_id, f"deposit of {n} tix: serve said {outcome}, the vault doesn't agree",
-        "the trade didn't confirm cleanly -- an admin will check whether your tix arrived "
-        "and credit them if they did")
+    return await _assume(
+        job_id, "deposit", guild_id, player_id, n, mtgo_user,
+        f"deposit of {n} tix: serve said {outcome} ({job.get('detail')}), the vault "
+        f"doesn't prove they arrived")
 
 
 # ---------------------------------------------------------------------------
@@ -541,7 +626,7 @@ async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, 
 
     The commitment is returned to the player ONLY when the serve definitely refused the
     job. An ambiguous POST failure keeps it committed (the trade may still fire), adopting
-    the job when it can and otherwise holding it -- with its vault baseline -- for review."""
+    the job when it can and otherwise assuming the trade delivered (see _settle_lost_post)."""
     if n <= 0:
         return {"ok": False, "error": "amount must be positive"}
     client = get_client()
@@ -576,14 +661,12 @@ async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, 
                 resp = adopted
             elif resp and resp.get("_ambiguous"):
                 # The POST may have created a trade -- possibly after we looked -- and
-                # nothing proves it didn't. A refund now pays twice if it did, so the tix
-                # stay committed, held with the baseline the vault can settle it against.
-                return await _hold_lost_post(
+                # nothing proves it didn't. A refund now pays twice if it did, so it is
+                # assumed delivered.
+                return await _settle_lost_post(
                     "withdraw", guild_id, player_id, mtgo_user, n, before,
                     f"withdraw POST outcome unknown and no job found for it "
-                    f"({mtgo_user}, {n} tix committed, commit wd:{commit_key})",
-                    "couldn't confirm whether the withdraw was queued -- your tix are held "
-                    "safely until an admin checks it")
+                    f"({mtgo_user}, {n} tix committed, commit wd:{commit_key})")
             else:
                 # A DEFINITE refusal: the serve rejected it or was never reached, so no
                 # trade can exist -- its own proof. Give the tix back.
@@ -599,8 +682,9 @@ async def finish_withdraw(job_id: str, guild_id: str, player_id: str, n: int,
     """Poll the withdraw job, then book what the VAULT says left. REFUND ONLY WHEN IT SAYS
     NOTHING LEFT: 2026-10-03, a withdraw that had left the vault came back "failed" and
     the refund paid the player twice. A drop of n is a delivery whatever the serve said;
-    no change plus a failed report is the only proof a refund is safe; anything else stays
-    committed for an admin. On timeout the tix stay in in-flight for the watchdog."""
+    no change plus a failure that proves the trade closed is the only proof a refund is
+    safe; anything else is assumed delivered, and an admin told. On timeout the tix stay
+    in in-flight for the watchdog."""
     outcome, job = await _poll_job(job_id, timeout_s)
     if outcome == "pending":
         return {"ok": False, "outcome": "pending"}
@@ -620,14 +704,56 @@ async def finish_withdraw(job_id: str, guild_id: str, player_id: str, n: int,
                              lambda: _return_in_flight(guild_id, player_id, n, job_id)):
             return await _settled_elsewhere(job_id)
         return {"ok": False, "outcome": "failed", "error": job.get("detail") or "trade failed"}
-    return await _hold_for_review(
-        job_id, f"withdraw of {n} tix: serve said {outcome}, the vault doesn't agree",
-        "the trade didn't confirm cleanly -- your tix are held safely until an admin "
-        "checks whether they were delivered")
+    return await _assume(
+        job_id, "withdraw", guild_id, player_id, n, mtgo_user,
+        f"withdraw of {n} tix: serve said {outcome} ({job.get('detail')}), the vault "
+        f"doesn't prove nothing left")
 
 
 _NO_VAULT_MSG = ("The MTGO custodian's vault can't be read right now, so the trade couldn't "
                  "be checked. Try again in a few minutes — nothing has been charged.")
+
+
+# ---------------------------------------------------------------------------
+# admin alert for assumed settlements
+# ---------------------------------------------------------------------------
+async def alert_assumed() -> int:
+    """DM the custodian's maintainer (SERVE_ALERT_DISCORD_ID, as the health monitor) about
+    every assumed settlement not yet reported. A row is marked alerted only once a DM
+    actually went out, so an alert that couldn't be sent is sent on a later pass instead
+    of being lost. Returns how many were reported."""
+    import os
+    to = os.getenv("SERVE_ALERT_DISCORD_ID", "").strip()
+    async with db_session() as session:
+        rows = (await session.execute(select(MtgoJob).where(
+            MtgoJob.assumed.isnot(None), MtgoJob.alerted_at.is_(None),
+            MtgoJob.status.in_(("done", "failed"))))).scalars().all()
+    if not rows:
+        return 0
+    if not to:
+        logger.error(f"{len(rows)} assumed tix settlement(s) and SERVE_ALERT_DISCORD_ID is "
+                     f"not set -- nobody can be told")
+        return 0
+    from bot_registry import get_bot
+    from notification_service import send_dm
+    bot = get_bot()
+    if bot is None:
+        return 0
+    sent = 0
+    for row in rows:
+        booked = "booked as DELIVERED" if row.kind == "withdraw" else "NOT credited"
+        msg = (f"⚠️ Tix {row.kind} `{row.job_id}` — {row.amount} tix, MTGO `{row.mtgo_user}`, "
+               f"player <@{row.player_id}> — couldn't be confirmed and was {booked}.\n"
+               f"Why: {row.assumed}\n"
+               f"Check the vault; if that's wrong, repair it from the shell.")
+        if await send_dm(bot, to, msg, label="custodian maintainer"):
+            async def _mark(job_id: str = row.job_id):
+                async with db_session() as s2:
+                    await s2.execute(update(MtgoJob).where(MtgoJob.job_id == job_id)
+                                     .values(alerted_at=datetime.now()))
+            await with_db_retry(_mark)
+            sent += 1
+    return sent
 
 
 # ---------------------------------------------------------------------------
@@ -732,6 +858,7 @@ async def pending_jobs_watchdog(bot: Any = None) -> None:
     while True:
         try:
             await resume_pending_jobs()
+            await alert_assumed()   # retries any alert that couldn't be sent at the time
             # Funds can also land outside a tracked job (a plain /wallet deposit, a
             # teammate's /wallet pay), so finish any entry the wallet can now cover.
             from services import tournament_escrow_service as escrow
