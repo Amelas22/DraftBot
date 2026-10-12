@@ -34,6 +34,7 @@ from models.library import Library
 from services.card_library_inventory import library_available
 from services.library_service import library_for, library_id_for
 from services.library_access_service import may_borrow
+from services.library_trust_service import hold_for
 from helpers.money_gate import linked_username, serve_busy_reason
 from services import wallet_service
 from models.mtgo_job import MtgoJob
@@ -351,19 +352,30 @@ async def library_behind(loan: Any, guild_id: Any) -> "Optional[Any]":
 
 
 async def collateral_for(loan: Any, guild_id: Any) -> Optional[int]:
-    """What this deck costs to borrow, or None if it cannot be borrowed.
+    """What this deck costs THIS borrower, or None if it cannot be borrowed.
 
     The price belongs to the LIBRARY the cards came from, not to the server. A
     server admin can rewrite `configs/<guild>.json` through the bot's own
     commands, so anything they can reach is a number they can lower -- and a
     library's terms are set by whoever runs it, from a shell tool.
 
+    Per borrower, because a tiered library asks less of somebody who has been
+    drafting there for years than of somebody it has never seen
+    (services/library_trust_service). The loan carries the borrower, so this
+    needed no new argument -- and THE ONE PLACE is the point: what a player is
+    told they need (hold_shortfall), what the dispatcher actually takes, and
+    what the return DM says is held all come through here. Two of those used to
+    read library.collateral_tix themselves, which agreed only because there was
+    one figure to read.
+
     None means there is no library here, which is not the same as free: zero is
     a price somebody chose, and reading "nobody configured this" as free is how
     an unbound server would start giving cards away.
     """
     library = await library_behind(loan, guild_id)
-    return None if library is None else int(library.collateral_tix or 0)
+    if library is None:
+        return None
+    return await hold_for(library, loan.borrower_id)
 
 
 async def shortfall(guild_id: Any, cards: "list[dict[str, Any]]",
@@ -703,7 +715,10 @@ async def _dispatch(guild_id: Any, borrower_id: Any, *, from_state: str, to_stat
         available = await lendable_now(library_id, exclude_loan_id=loan.id)
         if _cap(available, requested) != requested:
             return ("short_cards", loan)
-        collateral = int(library.collateral_tix or 0)
+        # Through collateral_for, not off the row: a tiered library's figure
+        # depends on the borrower, and reading the column here would quote one
+        # number in /library deck and charge another at the trade.
+        collateral = await collateral_for(loan, guild_id) or 0
         if collateral and not is_money_server(guild_id):
             # A library that charges needs the wallet, and finding that out at
             # transfer time -- after the borrower has been promised a deck --

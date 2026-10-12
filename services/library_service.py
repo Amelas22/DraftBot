@@ -72,6 +72,26 @@ def price_of(library: "Optional[Library]") -> "Optional[int]":
     return int(library.collateral_tix or 0)
 
 
+def price_range_of(library: "Optional[Library]") -> "Optional[tuple[int, int]]":
+    """(least, most) this library asks of a borrower, or None if there isn't one.
+
+    For the surfaces that cannot know who is reading them -- the signup board
+    and the cube dropdown are one message for a whole room, the same reason
+    neither can address only the people who may borrow. A tiered library asks
+    two different figures and such a surface has to name both or name the
+    larger; it must not name the smaller, which would read as a promise to
+    somebody about to be asked for twice that.
+
+    Equal when the library is not tiered, so a caller can render the pair
+    without first asking whether tiering is on.
+    """
+    trusted = price_of(library)
+    if trusted is None:
+        return None
+    untrusted = getattr(library, "collateral_tix_untrusted", None)
+    return (trusted, trusted if untrusted is None else int(untrusted))
+
+
 async def offers(library_id: Any, cube_id: Any) -> bool:
     """Has this library been set up to lend for this cube?
 
@@ -113,7 +133,11 @@ async def prices_for(cube_ids: "list[Any]",
     do not each have to know that.
     """
     library = await library_for(guild_id)
-    price = price_of(library)
+    # The MOST it might ask, because a dropdown is read by the whole room and
+    # cannot know which figure applies to the reader. Quoting the lower one
+    # would surprise exactly the borrowers who can least afford it.
+    prices = price_range_of(library)
+    price = None if prices is None else prices[1]
     if price is None or library is None:
         return {}
     offered = await offered_among(library.id, cube_ids)

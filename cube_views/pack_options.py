@@ -340,7 +340,7 @@ async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
     that may not be there -- which is the exact failure it exists to prevent.
     """
     from services.library_access_service import is_invite_only
-    from services.library_service import library_for, offers, price_of
+    from services.library_service import library_for, offers, price_range_of
 
     try:
         library = await library_for(guild_id)
@@ -375,15 +375,23 @@ async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
         return ("⚠️ **Bring your own cards** — the library can't cover this "
                 "cube right now.")
 
-    collateral = price_of(library) or 0
+    least, most = price_range_of(library) or (0, 0)
     # Unqualified, because by here the library lends to everyone in the room:
     # the invite-only case returned above rather than promising a deck to people
     # who would be turned away at /borrow.
-    if collateral == 0:
+    if most == 0:
         return "🆓 **No cards needed** — borrow your deck from the library free."
 
     # Says the hold comes back, because that is the part that decides
     # whether somebody can afford to play: 100 tix they get back is a very
     # different proposition from 100 tix spent.
+    if least == most:
+        return (f"🏛️ **No cards needed** — borrow your deck for a "
+                f"**{most} tix** hold, refunded when you return it.")
+    # Both figures, because the board is one message for the whole room and
+    # cannot know which applies to the reader. Naming only the lower would
+    # promise a price to the very people about to be asked for the higher one;
+    # naming only the higher would put off regulars who will never pay it.
     return (f"🏛️ **No cards needed** — borrow your deck for a "
-            f"**{collateral} tix** hold, refunded when you return it.")
+            f"**{least}–{most} tix** hold, refunded when you return it. "
+            f"Regulars here pay {least}.")
