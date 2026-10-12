@@ -436,7 +436,7 @@ async def test_an_ambiguous_withdraw_post_with_no_job_found_is_assumed_delivered
     async with db_session() as s:
         held = [r for r in (await s.execute(MtgoJob.__table__.select())).all()
                 if r.assumed]
-    assert len(held) == 1 and held[0].job_id.startswith("lost-") and held[0].vault_before == 1000
+    assert len(held) == 1 and held[0].job_id.startswith("send-") and held[0].vault_before == 1000
     assert held[0].status == "done"
 
 
@@ -746,3 +746,100 @@ async def test_no_alert_target_means_nothing_is_marked_alerted(test_db, monkeypa
 
     assert await resolution.alert_assumed() == 0
     assert await _alerted("a2") is None, "kept for when a target is set"
+
+
+# ---- a trade is recorded before anything moves ----------------------------------------------------
+
+async def _rows():
+    async with db_session() as s:
+        return {r.job_id: r for r in (await s.execute(MtgoJob.__table__.select())).all()}
+
+
+async def _age(job_id, seconds):
+    async with db_session() as s:
+        row = await s.get(MtgoJob, job_id)
+        row.created_at = datetime.now() - timedelta(seconds=seconds)
+
+
+@pytest.mark.asyncio
+async def test_a_sent_trade_binds_its_intent_to_the_job(test_db, monkeypatch):  # noqa: F811
+    await _fund(100)
+    monkeypatch.setattr(resolution.vault_check, "baseline",
+                        AsyncMock(return_value=VaultReading(1000, NOW)))
+    client = AsyncMock(enabled=True)
+    client.withdraw_tix = AsyncMock(return_value={"id": "w30"})
+    with patch("services.mtgo_resolution_service.get_client", return_value=client):
+        await resolution.start_withdraw(GUILD, PLAYER, MTGO, 100)
+
+    rows = await _rows()
+    assert list(rows) == ["w30"] and rows["w30"].status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_withdraw_closes_its_intent_and_refunds(test_db, monkeypatch):  # noqa: F811
+    await _fund(100)
+    monkeypatch.setattr(resolution.vault_check, "baseline",
+                        AsyncMock(return_value=VaultReading(1000, NOW)))
+    client = AsyncMock(enabled=True)
+    client.withdraw_tix = AsyncMock(return_value=None)
+    with patch("services.mtgo_resolution_service.get_client", return_value=client):
+        await resolution.start_withdraw(GUILD, PLAYER, MTGO, 100)
+
+    (row,) = (await _rows()).values()
+    assert row.status == "failed" and row.assumed is None
+    assert await _balances() == (100, 0)
+
+
+async def _crashed_withdraw(committed):
+    """A withdraw whose process died after recording it -- before or after its commit."""
+    await _fund(100)
+    intent = await resolution._record_intent("withdraw", GUILD, PLAYER, MTGO, 100,
+                                             VaultReading(1000, NOW))
+    if committed:
+        await wallet_service.pay(GUILD, PLAYER, wallet_service.SYSTEM_IN_FLIGHT, 100,
+                                 source=f"wd:{intent}", notes="commit")
+    await _age(intent, resolution._INTENT_ABANDONED_S + 60)
+    return intent
+
+
+@pytest.mark.asyncio
+async def test_a_crash_after_the_commit_is_assumed_delivered(test_db, monkeypatch):  # noqa: F811
+    """The POST may have gone out and the trade fired: refunding could pay twice."""
+    monkeypatch.delenv("SERVE_ALERT_DISCORD_ID", raising=False)
+    intent = await _crashed_withdraw(committed=True)
+
+    assert await resolution.recover_unsent_intents() == 1
+    assert await _status(intent) == "done" and await _assumed(intent)
+    assert await _balances() == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_a_crash_before_the_commit_moved_nothing(test_db):  # noqa: F811
+    """The commit precedes the POST, so with no commit there can be no trade."""
+    intent = await _crashed_withdraw(committed=False)
+
+    await resolution.recover_unsent_intents()
+    assert await _status(intent) == "failed" and await _assumed(intent) is None
+    assert await _balances() == (100, 0)
+
+
+@pytest.mark.asyncio
+async def test_a_crashed_deposit_is_not_credited(test_db, monkeypatch):  # noqa: F811
+    monkeypatch.delenv("SERVE_ALERT_DISCORD_ID", raising=False)
+    intent = await resolution._record_intent("deposit", GUILD, PLAYER, MTGO, 50,
+                                             VaultReading(1000, NOW))
+    await _age(intent, resolution._INTENT_ABANDONED_S + 60)
+
+    await resolution.recover_unsent_intents()
+    assert await _status(intent) == "failed" and await _assumed(intent)
+    assert await _balances() == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_an_intent_still_inside_its_post_is_left_alone(test_db):  # noqa: F811
+    """A slow POST is still being waited on by its sender."""
+    intent = await resolution._record_intent("withdraw", GUILD, PLAYER, MTGO, 100,
+                                             VaultReading(1000, NOW))
+
+    assert await resolution.recover_unsent_intents() == 0
+    assert await _status(intent) == "sending"
