@@ -583,3 +583,22 @@ async def test_changing_entry_or_team_keeps_a_dont_need_it(test_db, shelf):
     assert PLAYER not in await library_users(await _row())
     said = interaction.followup.send.await_args.args[0]
     assert "held for this draft" in said and prompt.AGREE_LABEL in said, said
+
+
+async def test_the_library_step_runs_in_the_background_and_is_kept_alive(test_db):
+    """Started after the confirmation and not awaited by the sign-up, so it is
+    held until it finishes rather than left to the loop's weak reference."""
+    import asyncio
+    from unittest.mock import patch
+    ran = asyncio.Event()
+
+    async def step(interaction, draft):
+        await asyncio.sleep(0)
+        ran.set()
+
+    with patch.object(prompt, "library_after_sign_up", step):
+        task = prompt.library_after_sign_up_soon(_interaction(), SimpleNamespace(session_id="q1"))
+        assert task in prompt._RUNNING
+        await asyncio.wait_for(task, 1)
+
+    assert ran.is_set() and task not in prompt._RUNNING

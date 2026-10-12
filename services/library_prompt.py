@@ -21,6 +21,7 @@ The preference changes from a row like the entry cap's: on the draft's Change
 Entry / Settings panel, or behind the Library button other boards carry
 instead (services/library_boards).
 """
+import asyncio
 from typing import Any, Optional
 
 from typing_extensions import override
@@ -323,6 +324,28 @@ class LibraryPreferenceView(discord.ui.View):
 
 UNANSWERED = ("Not saved. To borrow your deck from the library, use "
               f"{WHERE_TO_CHANGE}, or answer next time you sign up.")
+
+
+# Running library steps, held so the event loop's weak reference is not the
+# only one and a task cannot be collected half way.
+_RUNNING: "set[asyncio.Task[None]]" = set()
+
+
+def library_after_sign_up_soon(interaction: discord.Interaction,
+                               draft: Any) -> "asyncio.Task[None]":
+    """Start the library step for a sign-up already confirmed, and return.
+
+    Called straight after the confirmation, before the board is redrawn, so
+    neither waits on the other: a redraw that fails cannot skip the question
+    -- an unasked or unreserved player gets no deck -- and the first reserve's
+    cube read does not hold up everybody's view of the sign-ups. Safe to leave
+    running: library_after_sign_up never raises, and a follow-up stays valid
+    for fifteen minutes.
+    """
+    task = asyncio.create_task(library_after_sign_up(interaction, draft))
+    _RUNNING.add(task)
+    task.add_done_callback(_RUNNING.discard)
+    return task
 
 
 async def library_after_sign_up(interaction: discord.Interaction, draft: Any) -> None:

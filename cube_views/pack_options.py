@@ -429,21 +429,25 @@ async def _library_signup_line(cube_id, guild_id) -> "Optional[str]":
         who = f" Open to players with {library.min_drafts_to_borrow}+ drafts here."
     if library.kind == RENTAL:
         who += " Signing up holds it for this draft; agree before it fires to keep it."
+    # A rental library is said to be one, beside its terms. A communal library
+    # keeps the line it has always had.
+    lead = ("Library available, no cards needed" if library.kind == RENTAL
+            else "No cards needed")
 
     if most == 0:
-        return ("🆓 **Library available, no cards needed** — borrow your deck from the library "
+        return (f"🆓 **{lead}** — borrow your deck from the library "
                 f"free.{who}")
 
     # Says the hold comes back, because that is the part that decides
     # whether somebody can afford to play: 100 tix they get back is a very
     # different proposition from 100 tix spent.
     if least == most:
-        return (f"🏛️ **Library available, no cards needed** — borrow your deck for a "
+        return (f"🏛️ **{lead}** — borrow your deck for a "
                 f"**{most} tix** hold, refunded when you return it.{who}")
     # Both figures, because the board is one message for the whole room and
     # cannot know which applies to the reader. Naming only the lower would
     # promise a price to the very people about to be asked for the higher one;
     # naming only the higher would put off members who will never pay it.
-    return (f"🏛️ **Library available, no cards needed** — borrow your deck for a "
+    return (f"🏛️ **{lead}** — borrow your deck for a "
             f"**{least}–{most} tix** hold, refunded when you return it. "
             f"Members pay {least}.{who}")

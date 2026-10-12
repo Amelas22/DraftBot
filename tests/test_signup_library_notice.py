@@ -228,6 +228,19 @@ async def test_a_communal_library_still_warns_about_coverage(test_db, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_a_communal_library_keeps_its_line(test_db, monkeypatch):
+    """The Divination's board read "No cards needed" before rental libraries
+    opened up, and still does; only a rental library is called one."""
+    await a_library("lib", guild=GUILD, kind="communal", collateral=0, cubes=(CUBE,))
+    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
+
+    note = await library_signup_note(CUBE, GUILD)
+
+    assert note.startswith("🆓 **No cards needed** — borrow your deck from the library free."), note
+    assert "Library available" not in note and "Signing up holds" not in note, note
+
+
+@pytest.mark.asyncio
 async def test_a_whitelisted_library_leaves_the_cube_dropdown_unmarked(
         test_db, monkeypatch):
     """The other shared surface: the cube list an organiser picks from is seen

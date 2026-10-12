@@ -59,7 +59,7 @@ from loguru import logger
 from services.state_manager import state_manager
 from services import stake_funding, wallet_service
 from services.library_boards import has_library_button
-from services.library_prompt import (library_after_sign_up, library_agree_button,
+from services.library_prompt import (library_after_sign_up_soon, library_agree_button,
                                      library_setting_buttons, library_settings_panel,
                                      library_to_ask_about)
 from services.library_reservation import cube_changed as library_cube_changed
@@ -644,6 +644,9 @@ class PersistentView(discord.ui.View):
             # Confirm signup (link provided after teams created)
             signup_confirmation_message = "You are now signed up! Your Draftmancer link will be provided once teams are created."
             await interaction.response.send_message(signup_confirmation_message, ephemeral=True)
+            # The library: ask once, or reserve its copy for this queue
+            # (services/library_prompt). Started now, so nothing below can skip it.
+            library_after_sign_up_soon(interaction, draft_session_updated)
 
             # Send ping if needed (6th player and haven't pinged yet)
             if should_ping:
@@ -669,9 +672,6 @@ class PersistentView(discord.ui.View):
 
             # If a ready check is active, add the new player to no_response and refresh the embed
             await ReadyCheckSession.sync_added_player(self.draft_session_id, user_id, draft_session_updated, interaction)
-
-            # The library: ask once, or reserve its copy for this queue (services/library_prompt)
-            await library_after_sign_up(interaction, draft_session_updated)
 
             if self.session_type == "winston":
                 if len(sign_ups) == 2:
@@ -1268,13 +1268,14 @@ class PersistentView(discord.ui.View):
 
         await interaction.response.send_message(action_message, ephemeral=True)
 
-        # Optionally update the message view to reflect the new team compositions
-        await self.update_team_view(interaction)
-
         # A premade draft has no stake step, so joining a team is where a player
         # is asked about the library, or reserves its copy for this draft.
+        # Started now, so a failed redraw below cannot skip it.
         if not leaving:
-            await library_after_sign_up(interaction, session)
+            library_after_sign_up_soon(interaction, session)
+
+        # Optionally update the message view to reflect the new team compositions
+        await self.update_team_view(interaction)
 
     async def cancel_draft_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Get the guild config for the interaction's guild
@@ -3002,12 +3003,12 @@ class StakeOptionsSelect(discord.ui.Select):
 
         # Send confirmation message
         await interaction.response.send_message(signup_message, ephemeral=True)
-        
+        # The library: ask once, or reserve its copy for this queue
+        # (services/library_prompt). Started now, so nothing below can skip it.
+        library_after_sign_up_soon(interaction, draft_session_updated)
+
         # Update the draft message to reflect the new list of sign-ups
         await update_draft_message(interaction.client, self.draft_session_id)
-
-        # The library: ask once, or reserve its copy for this queue (services/library_prompt)
-        await library_after_sign_up(interaction, draft_session_updated)
 
 
 class StakeOptionsView(discord.ui.View):
@@ -3187,12 +3188,12 @@ class StakeModal(discord.ui.Modal):
 
             # Send the confirmation
             await interaction.response.send_message(signup_message, ephemeral=True)
-            
+            # The library: ask once, or reserve its copy for this queue
+            # (services/library_prompt). Started now, so nothing below can skip it.
+            library_after_sign_up_soon(interaction, draft_session)
+
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
-
-            # The library: ask once, or reserve its copy for this queue (services/library_prompt)
-            await library_after_sign_up(interaction, draft_session)
 
         except _EntryAborted:
             # A refused entry, not a fault: the transaction rolled back, so
