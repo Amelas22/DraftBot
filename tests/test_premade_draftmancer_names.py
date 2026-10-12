@@ -37,6 +37,7 @@ async def test_premade_join_stores_plain_name_not_emoji_decorated():
         session_id="s1", sign_ups={"99": "Bob"},
         team_a=[], team_b=[], team_a_name="Team A", team_b_name="Team B",
         entry_fee=None,          # a free premade draft, as before
+        cube=None,
     )
     view = PersistentView(
         bot=MagicMock(), draft_session_id="s1", session_type="premade",
@@ -57,7 +58,8 @@ async def test_premade_join_stores_plain_name_not_emoji_decorated():
     decorated = "<:coveted_jewel:1460802711694999613> Alice"
     with patch("views.get_draft_session", AsyncMock(return_value=session)), \
          patch("views.AsyncSessionLocal", _async_session_local_mock()), \
-         patch("views.get_display_name", lambda member, guild=None: decorated):
+         patch("views.get_display_name", lambda member, guild=None: decorated), \
+         patch("views.maybe_ask_library_preference", AsyncMock()):
         await view.team_assignment_callback(interaction, button)
 
     assert session.sign_ups["1"] == "Alice"

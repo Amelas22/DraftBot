@@ -24,7 +24,7 @@ from services.card_lending_service import assign_deck
 pytestmark = pytest.mark.asyncio
 
 GUILD, SESSION, LIBRARY = "g1", "sess-1", "lib"
-ALICE, BOB = "disc_a", "disc_b"
+ALICE, BOB = "1001", "1002"  # snowflake-shaped: a preference key cannot hold "_"
 
 
 def _log():
@@ -703,8 +703,30 @@ async def test_a_draft_threshold_offers_decks_to_the_experienced(
     _recording_dm(monkeypatch)
     await _seed()
 
+    from preference_service import set_uses_library
+    await set_uses_library(ALICE, GUILD, True)
+    await set_uses_library(BOB, GUILD, True)
+
     assert await svc.assign_drafted_decks(SESSION) == 1
     assert set(await _loans()) == {ALICE}, "Bob has two drafts, one short"
+
+
+async def test_a_rental_library_offers_decks_only_to_those_who_asked(
+        test_db, monkeypatch):
+    """An offer nobody wanted still takes their one loan slot and a deck's
+    worth of the shelf until it expires. Not asked counts as no."""
+    from conftest import a_library
+    from preference_service import set_uses_library
+
+    await a_library(LIBRARY, guild=GUILD, kind="rental", collateral=5,
+                    cubes=(CUBE,))
+    await set_uses_library(ALICE, GUILD, True)
+    told = _recording_dm(monkeypatch)
+    await _seed()
+
+    assert await svc.assign_drafted_decks(SESSION) == 1
+    assert set(await _loans()) == {ALICE}, "Bob never said he wanted one"
+    assert [who for who, _ in told] == [ALICE]
 
 
 # --- who can still use a deck ------------------------------------------------

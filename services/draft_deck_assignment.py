@@ -28,6 +28,8 @@ from sqlalchemy.orm import undefer
 
 from services.library_service import library_for, offers
 from services.library_access_service import may_borrow_many
+from models.library import RENTAL
+from preference_service import get_players_using_library
 from services.library_reminders import draft_state, who_can_still_use
 from database.db_session import AsyncSessionLocal
 from helpers.mtgo_names import mtgo_name
@@ -291,18 +293,34 @@ async def assign_drafted_decks(session_id: Any) -> int:
     allowed = await may_borrow_many(library.id, candidates)
     not_invited = [d for d in candidates
                    if d not in busy and str(d) not in allowed]
-    assignable = [d for d in candidates
-                  if d not in busy and d not in set(not_invited)]
+    # And a rental library lends only to the players who said they want its
+    # decks (services/library_prompt). Not asked and "no" both leave a drafter
+    # out: an offer they never wanted would still take their one loan slot and
+    # a deck's worth of the shelf until it expired. A communal library lends
+    # to everyone in the pod, as it always has.
+    not_opted: "list[str]" = []
+    if library.kind == RENTAL:
+        wanting: "set[str]" = await get_players_using_library(candidates, guild_id) or set()
+        not_opted = [d for d in candidates
+                     if d not in busy and str(d) in allowed and str(d) not in wanting]
+    refused = set(not_invited) | set(not_opted)
+    assignable = [d for d in candidates if d not in busy and d not in refused]
     if finished:
         logger.debug("deck assignment: {} drafter(s) on {} have no match left "
                      "to play", len(finished), session_id)
     if not assignable:
-        _say_once(f"busy:{session_id}",
-                  "deck assignment: nobody on {} can be given a deck -- {} of {} "
-                  "drafters are still holding one. They are not queued, and the "
-                  "horizon is the draft ending, not the reconciler's window: once "
-                  "it is over their pools are gone.",
-                  session_id, len(busy), len(sign_ups))
+        if busy:
+            _say_once(f"busy:{session_id}",
+                      "deck assignment: nobody on {} can be given a deck -- {} of {} "
+                      "drafters are still holding one. They are not queued, and the "
+                      "horizon is the draft ending, not the reconciler's window: "
+                      "once it is over their pools are gone.",
+                      session_id, len(busy), len(sign_ups))
+        else:
+            _say_once(f"none:{session_id}",
+                      "deck assignment: nobody on {} wants or may borrow a deck "
+                      "({} not allowed, {} not opted in, of {} drafters)",
+                      session_id, len(not_invited), len(not_opted), len(sign_ups))
         return 0
 
     draft_data = await _draft_log(session_id)
@@ -405,7 +423,8 @@ async def assign_drafted_decks(session_id: Any) -> int:
     for loan_id, discord_id in announce:
         await _say_it_is_ready(loan_id, discord_id)
 
-    _report(session_id, sign_ups, assigned, done, busy, empty, failed, not_invited)
+    _report(session_id, sign_ups, assigned, done, busy, empty, failed, not_invited,
+            not_opted)
     return assigned
 
 
@@ -431,7 +450,8 @@ async def _say_it_is_ready(loan_id: Any, discord_id: Any) -> None:
 
 def _report(session_id: Any, sign_ups: "dict[str, Any]", assigned: int,
             done: "set[str]", busy: "set[str]", empty: "list[str]",
-            failed: "list[str]", not_invited: "Sequence[Any]" = ()) -> None:
+            failed: "list[str]", not_invited: "Sequence[Any]" = (),
+            not_opted: "Sequence[Any]" = ()) -> None:
     """Say what happened, every time, including when the answer is "nothing".
 
     Logging only on success is how a whole draft assigns nobody in silence: the
@@ -448,6 +468,7 @@ def _report(session_id: Any, sign_ups: "dict[str, Any]", assigned: int,
     tail = (f"{assigned} assigned, {len(done)} already had one, {len(busy)} "
             f"holding a deck, {len(empty)} with nothing to lend, "
             f"{len(not_invited)} not allowed to borrow, "
+            f"{len(not_opted)} not opted in, "
             f"{len(failed)} failed, of {len(sign_ups)} drafters")
     if failed or empty:
         logger.warning("deck assignment for {}: {} -- nothing-to-lend={} failed={}",

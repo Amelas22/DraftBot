@@ -158,6 +158,26 @@ class DraftCommands(commands.Cog):
         )
 
     @discord.slash_command(
+        name='toggle_library',
+        description="Switch whether you borrow your deck from this server's card library",
+        guild_ids=None
+    )
+    async def toggle_library(self, ctx):
+        """Flip the saved answer the sign-up flow asks for (services/library_prompt)."""
+        from services.library_prompt import rental_library_for, saved_text, toggle_uses_library
+
+        await ctx.response.defer(ephemeral=True)
+        if await rental_library_for(ctx.guild.id) is None:
+            await ctx.followup.send(
+                "📭 This server doesn't have a card library to borrow from.",
+                ephemeral=True)
+            return
+        new = await toggle_uses_library(ctx.author.id, ctx.guild.id)
+        await ctx.followup.send(
+            "Failed to update your library preference. Please try again later."
+            if new is None else saved_text(new), ephemeral=True)
+
+    @discord.slash_command(
         name='toggle_dm_notifications',
         description='Toggle DM notifications for ready checks',
         guild_ids=None

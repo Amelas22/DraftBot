@@ -58,6 +58,9 @@ from loguru import logger
 
 from services.state_manager import state_manager
 from services import stake_funding, wallet_service
+from services.library_prompt import (LibraryToggleButton, library_to_ask_about,
+                                     maybe_ask_library_preference)
+from preference_service import get_uses_library
 # Debounce/timeout constants live in ready_check.py so the ordering invariant
 # between them is asserted in one place; re-exported here for the cooldown logic.
 from ready_check import READY_CHECK_DEBOUNCE_SECONDS
@@ -1244,6 +1247,11 @@ class PersistentView(discord.ui.View):
 
         # Optionally update the message view to reflect the new team compositions
         await self.update_team_view(interaction)
+
+        # A premade draft has no stake step, so joining a team is where a player
+        # is asked, once, whether they want the library's decks.
+        if not leaving:
+            await maybe_ask_library_preference(interaction, session.cube)
 
     async def cancel_draft_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Get the guild config for the interaction's guild
@@ -2975,6 +2983,9 @@ class StakeOptionsSelect(discord.ui.Select):
         # Update the draft message to reflect the new list of sign-ups
         await update_draft_message(interaction.client, self.draft_session_id)
 
+        # Once per player: do they want the library's decks? (services/library_prompt)
+        await maybe_ask_library_preference(interaction, draft_session_updated.cube)
+
 
 class StakeOptionsView(discord.ui.View):
     def __init__(self, draft_session_id, draft_link, user_display_name, min_stake, has_draftmancer_role=False):
@@ -3157,6 +3168,9 @@ class StakeModal(discord.ui.Modal):
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
 
+            # Once per player: do they want the library's decks? (services/library_prompt)
+            await maybe_ask_library_preference(interaction, draft_session.cube)
+
         except _EntryAborted:
             # A refused entry, not a fault: the transaction rolled back, so
             # answer here rather than inside it, where a Discord round trip
@@ -3311,6 +3325,13 @@ class BetCapToggleButton(CallbackButton):
                 
                 no_button.callback = no_callback
                 combined_view.add_item(no_button)
+
+                # The library switch, where there is a rental library this
+                # player could borrow this cube from (services/library_prompt).
+                library = await library_to_ask_about(guild_id, draft_session.cube, user_id)
+                if library is not None:
+                    combined_view.add_item(LibraryToggleButton(
+                        user_id, guild_id, await get_uses_library(user_id, guild_id)))
                 
                 # Send the ephemeral message with the combined view
                 message_content = f"You are in for {current_stake} tix, with your entry cap **{status}**.\n"
