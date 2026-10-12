@@ -142,28 +142,6 @@ async def offered_among(library_id: Any, cube_ids: "list[Any]") -> "set[str]":
     return {str(r) for r in rows}
 
 
-async def prices_for(cube_ids: "list[Any]",
-                     guild_id: Any) -> "dict[str, int]":
-    """`{cube_id: deposit}` for those of these cubes this server can borrow
-    from. A cube the library does not offer is simply absent, which is what
-    tells a caller to leave it alone rather than mark it free.
-
-    Every offered cube carries the SAME number, because the price belongs to
-    the library. Returned per cube anyway so the callers that render a dropdown
-    do not each have to know that.
-    """
-    library = await library_for(guild_id)
-    # The MOST it might ask, because a dropdown is read by the whole room and
-    # cannot know which figure applies to the reader. Quoting the lower one
-    # would surprise exactly the borrowers who can least afford it.
-    prices = price_range_of(library)
-    price = None if prices is None else prices[1]
-    if price is None or library is None:
-        return {}
-    offered = await offered_among(library.id, cube_ids)
-    return {cube: price for cube in offered}
-
-
 async def offer_cube(library_id: Any, cube_id: Any, added_by: str) -> bool:
     """List a cube for this library. True if this added it."""
     async with AsyncSessionLocal() as session:

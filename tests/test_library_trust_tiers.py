@@ -140,15 +140,3 @@ async def test_an_untiered_board_still_names_one_figure(test_db, monkeypatch):
     note = await library_signup_note("mycube", GUILD)
 
     assert "**50 tix**" in note and "–" not in note, note
-
-
-async def test_the_cube_dropdown_quotes_the_higher_figure(test_db):
-    """One short description per cube and no room for a range, so it names the
-    most anyone might be asked. Understating it would surprise the borrowers
-    who can least afford the surprise."""
-    from services.library_service import prices_for
-
-    await a_library(LIB, guild=GUILD, kind="rental", collateral=50,
-                    collateral_untrusted=100, cubes=("mycube",))
-
-    assert await prices_for(["mycube"], GUILD) == {"mycube": 100}

@@ -52,7 +52,7 @@ async def test_a_tiered_library_is_quoted_as_a_range(test_db):
         "a cube the library doesn't lend for is left alone"
 
 
-async def test_a_rental_cube_another_queue_reserved_says_it_is_in_use(test_db):
+async def _reserved_queue():
     import services.library_reservation as resv
     from database.db_session import AsyncSessionLocal
     from models.draft_session import DraftSession
@@ -71,10 +71,41 @@ async def test_a_rental_cube_another_queue_reserved_says_it_is_in_use(test_db):
     await prefs.set_uses_library("1001", GUILD, True)
     assert (await resv.reserve("q1")).status == "reserved"
 
+
+async def test_a_rental_cube_another_queue_reserved_says_it_is_in_use(test_db):
+    await _reserved_queue()
+
     marked = await mark_library_cubes(_options(), GUILD)
 
     mine = next(o for o in marked if o["value"] == CUBE)
     assert mine["emoji"] == "⏳" and "in use by another queue" in mine["description"], mine
+
+
+async def test_update_cube_does_not_call_its_own_copy_in_use(test_db):
+    """The queue that reserved the copy, changing its cube: its current cube is
+    held for it, not "in use by another queue" and not "cards out"."""
+    await _reserved_queue()
+
+    marked = await mark_library_cubes(_options(), GUILD, own_session_id="q1")
+
+    mine = next(o for o in marked if o["value"] == CUBE)
+    assert mine["description"] == "🏛️ Library cube — 50–100 tix hold", mine
+    assert mine["emoji"] == "🏛️"
+
+
+async def test_each_cube_is_read_once_for_the_whole_picker(test_db, monkeypatch):
+    calls = []
+
+    async def fetch(cube_id):
+        calls.append(cube_id)
+        return list(DECK) if cube_id == CUBE else None
+    monkeypatch.setattr(inventory, "fetch_cube", fetch)
+    await _reserved_queue()
+    calls.clear()
+
+    await mark_library_cubes(_options(), GUILD)
+
+    assert calls.count(CUBE) == 1, calls
 
 
 # --- sent first, marked after -------------------------------------------------

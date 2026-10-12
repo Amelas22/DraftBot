@@ -132,24 +132,6 @@ async def test_two_libraries_do_not_share_their_cube_lists(test_db):
     assert await svc.offers(LOUNGE, "budget") is False
 
 
-async def test_pricing_a_dropdown_names_only_the_offered_cubes(test_db):
-    await _library()
-    await _bind(SERVER_A, LOUNGE)
-    await _offer(LOUNGE, "powerlsv", "vintage")
-
-    prices = await svc.prices_for(["powerlsv", "vintage", "unrelated"], SERVER_A)
-
-    assert prices == {"powerlsv": 100, "vintage": 100}
-    assert "unrelated" not in prices, "left alone rather than marked free"
-
-
-async def test_an_unbound_server_prices_nothing(test_db):
-    await _library()
-    await _offer(LOUNGE, "powerlsv")
-
-    assert await svc.prices_for(["powerlsv"], UNBOUND) == {}
-
-
 async def test_listing_a_cube_twice_is_not_an_error(test_db):
     await _library()
 

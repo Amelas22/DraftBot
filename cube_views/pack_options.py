@@ -7,7 +7,6 @@ without the circular import that ``modals`` -> ``sessions`` -> ``views`` would
 otherwise create.
 """
 import asyncio
-from typing import Any
 
 import discord
 from loguru import logger
@@ -138,9 +137,12 @@ class BaseCubeSelectionView(discord.ui.View):
     submit_label = "Start Draft"
     submit_emoji = "✅"
 
-    def __init__(self, session_type, guild_id, current_cube=None):
+    def __init__(self, session_type, guild_id, current_cube=None, own_session_id=None):
         super().__init__()
         self.session_type = session_type
+        # The draft this picker changes, for Update Cube: a copy it reserved
+        # itself is not "in use by another queue".
+        self.own_session_id = own_session_id
         self.cube_choice = current_cube
         self.packs_per_player = DEFAULT_PACKS_PER_PLAYER
         self.cards_per_pack = DEFAULT_CARDS_PER_PACK
@@ -179,7 +181,8 @@ class BaseCubeSelectionView(discord.ui.View):
         at all stops the draft that was being created.
         """
         try:
-            marked = await mark_library_cubes(self._cube_options, self.guild_id)
+            marked = await mark_library_cubes(self._cube_options, self.guild_id,
+                                              own_session_id=self.own_session_id)
         except Exception:
             logger.opt(exception=True).warning(
                 "cube list: could not read library prices; cubes left unmarked")
@@ -276,7 +279,7 @@ def _shortfall_note(short: int, stocked: bool) -> "tuple[str, str]":
     return ("⚠️", f"{short} cards out right now")
 
 
-async def mark_library_cubes(options: list, guild_id) -> list:
+async def mark_library_cubes(options: list, guild_id, own_session_id=None) -> list:
     """Copy of `options` with the borrowable cubes marked.
 
     Shown where cubes are CHOSEN because a drafter has to know whether they can
@@ -296,19 +299,18 @@ async def mark_library_cubes(options: list, guild_id) -> list:
     """
     from models.library import RENTAL
     from services.card_library_inventory import fetch_cube, read_once
-    from services.library_service import library_for, price_range_of, prices_for
+    from services.library_reservation import reservations
+    from services.library_service import library_for, offered_among, price_range_of
 
-    prices = await prices_for([o.get("value") for o in options], guild_id)
-    if not prices:
-        return list(options)
-
-    # Resolved once, after prices_for has already established there IS a
-    # library here -- so the common case, a server that borrows nothing, pays
-    # a single lookup and stops.
+    # The common case, a server that borrows nothing, pays this one lookup
+    # and stops.
     library = await library_for(guild_id)
     if library is None:
         return list(options)
     library_id = library.id
+    offered = await offered_among(library_id, [o.get("value") for o in options])
+    if not offered:
+        return list(options)
     least, most = price_range_of(library) or (0, 0)
     from services.library_access_service import is_invite_only
     if await is_invite_only(library_id):
@@ -320,12 +322,18 @@ async def mark_library_cubes(options: list, guild_id) -> list:
     read = read_once(fetch_cube)
     held = await library_holdings(library_id)
     available = await library_available(library_id, fetch=read)
+    # Which cubes a queue has reserved, read once for the whole list: another
+    # queue's is "in use"; this draft's own (Update Cube) is held for it.
+    by_others, by_us = set(), set()
+    if library.kind == RENTAL:
+        for draft in await reservations(library_id):
+            mine = own_session_id is not None and str(draft.session_id) == str(own_session_id)
+            (by_us if mine else by_others).add(draft.cube)
 
     marked = []
     for opt in options:
         cube = opt.get("value")
-        priced = prices.get(cube)
-        if priced is None:
+        if cube not in offered:
             marked.append(opt)
             continue
 
@@ -338,13 +346,12 @@ async def mark_library_cubes(options: list, guild_id) -> list:
             logger.opt(exception=True).warning(
                 "cube list: could not read {} to check availability", cube)
             cards = None
-        if cards:
+        if cards and cube not in by_us:
             short = cube_support(cards, available).cards_short
             if short:
                 stocked = cube_support(cards, held).ok
                 emoji, caveat = _shortfall_note(short, stocked=stocked)
-                if stocked and library.kind == RENTAL and await _held_by_a_queue(
-                        guild_id, cube):
+                if stocked and cube in by_others:
                     # The whole cube is out because a queue reserved it, not
                     # because cards are scattered on loan: say where it is.
                     emoji, caveat = "⏳", "in use by another queue"
@@ -364,16 +371,6 @@ async def mark_library_cubes(options: list, guild_id) -> list:
         marked.append({**opt, "description": description[:_DESCRIPTION_LIMIT],
                        "emoji": emoji})
     return marked
-
-
-async def _held_by_a_queue(guild_id: Any, cube_id: Any) -> bool:
-    try:
-        from services.library_reservation import queue_holding
-        return await queue_holding(guild_id, cube_id) is not None
-    except Exception:
-        logger.opt(exception=True).warning(
-            "cube list: could not see who holds {}", cube_id)
-        return False
 
 
 LIBRARY_FIELD_NAME = "Cards:"
