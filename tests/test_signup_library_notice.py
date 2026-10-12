@@ -299,7 +299,7 @@ async def test_a_gated_rental_library_says_who_may_borrow(test_db, monkeypatch):
     note = await library_signup_note(CUBE, GUILD)
 
     assert "**50–100 tix**" in note and "Members pay 50" in note, note
-    assert "3+ drafts" in note and "asked when you sign up" in note, note
+    assert "3+ drafts" in note and "Signing up reserves it" in note, note
 
 
 class _Health:

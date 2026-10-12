@@ -69,6 +69,15 @@ class DraftSession(Base):
     draft_data = deferred(Column(JSON))
     data_received = Column(Boolean, default=False)
     logs_captured_at = Column(DateTime)  # set when the log is captured to DB/Spaces (pre-publish)
+    # A rental library's copy of this draft's cube, reserved for it
+    # (services/library_reservation). Set when an eligible player who borrows
+    # signs up to the queue and a copy is free; released for good, with
+    # library_released_at, once nobody in the draft needs it. Both NULL: the
+    # draft never reserved, and gets no library decks.
+    library_reserved_at = Column(DateTime)
+    library_released_at = Column(DateTime)
+    # Players who said they don't need the library for THIS draft.
+    library_released = Column(JSON)
     spaces_object_key = Column(String(256), nullable=True)  # DigitalOcean Spaces object path
     unlock_at = Column(DateTime)              # when the public embed may publish (logs_captured_at + PUBLISH_DELAY; manual release = now)
     drafttable_url = Column(String(512))   # published draft table page, once it exists

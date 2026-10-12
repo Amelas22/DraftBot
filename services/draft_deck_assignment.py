@@ -29,7 +29,7 @@ from sqlalchemy.orm import undefer
 from services.library_service import library_for, offers
 from services.library_access_service import may_borrow_many
 from models.library import RENTAL
-from preference_service import get_players_using_library
+from services.library_reservation import library_users, still_reserved
 from services.library_reminders import draft_state, who_can_still_use
 from database.db_session import AsyncSessionLocal
 from helpers.mtgo_names import mtgo_name
@@ -293,15 +293,18 @@ async def assign_drafted_decks(session_id: Any) -> int:
     allowed = await may_borrow_many(library.id, candidates)
     not_invited = [d for d in candidates
                    if d not in busy and str(d) not in allowed]
-    # And a rental library lends only to the players who said they want its
-    # decks (services/library_prompt). Not asked and "no" both leave a drafter
-    # out: an offer they never wanted would still take their one loan slot and
-    # a deck's worth of the shelf until it expired. A communal library lends
-    # to everyone in the pod, as it always has.
+    # And a rental library lends only to a draft that reserved its copy of the
+    # cube, and within it only to the players who still need it -- who said
+    # they borrow, and have not released it (services/library_reservation). An
+    # offer nobody needed would still take their one loan slot and a deck's
+    # worth of the shelf until it expired. A communal library lends to
+    # everyone in the pod, as it always has.
     eligible = [d for d in candidates if d not in busy and str(d) in allowed]
     not_opted: "list[str]" = []
     if library.kind == RENTAL:
-        wanting: "set[str]" = await get_players_using_library(candidates, guild_id)
+        draft = await _draft_row(session_id)
+        wanting = (await library_users(draft)
+                   if draft is not None and await still_reserved(draft) else set())
         not_opted = [d for d in eligible if str(d) not in wanting]
     assignable = [d for d in eligible if d not in set(not_opted)]
     if finished:
@@ -318,7 +321,7 @@ async def assign_drafted_decks(session_id: Any) -> int:
         else:
             _say_once(f"none:{session_id}",
                       "deck assignment: nobody on {} wants or may borrow a deck "
-                      "({} not allowed, {} not opted in, of {} drafters)",
+                      "({} not allowed, {} not using the library, of {} drafters)",
                       session_id, len(not_invited), len(not_opted), len(sign_ups))
         return 0
 
@@ -427,6 +430,12 @@ async def assign_drafted_decks(session_id: Any) -> int:
     return assigned
 
 
+async def _draft_row(session_id: Any) -> "Optional[DraftSession]":
+    async with AsyncSessionLocal() as session:
+        return (await session.execute(select(DraftSession).where(
+            DraftSession.session_id == str(session_id)))).scalar_one_or_none()
+
+
 async def _say_it_is_ready(loan_id: Any, discord_id: Any) -> None:
     """Tell one drafter their deck is waiting, and never let that failure cost
     anybody else theirs -- the same rule every other per-player step here
@@ -467,7 +476,7 @@ def _report(session_id: Any, sign_ups: "dict[str, Any]", assigned: int,
     tail = (f"{assigned} assigned, {len(done)} already had one, {len(busy)} "
             f"holding a deck, {len(empty)} with nothing to lend, "
             f"{len(not_invited)} not allowed to borrow, "
-            f"{len(not_opted)} not opted in, "
+            f"{len(not_opted)} not using the library, "
             f"{len(failed)} failed, of {len(sign_ups)} drafters")
     if failed or empty:
         logger.warning("deck assignment for {}: {} -- nothing-to-lend={} failed={}",

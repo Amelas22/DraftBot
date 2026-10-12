@@ -58,8 +58,8 @@ from loguru import logger
 
 from services.state_manager import state_manager
 from services import stake_funding, wallet_service
-from services.library_prompt import (LibraryToggleButton, library_to_ask_about,
-                                     maybe_ask_library_preference)
+from services.library_prompt import (LibraryToggleButton, library_after_sign_up,
+                                     library_to_ask_about)
 from preference_service import get_uses_library
 # Debounce/timeout constants live in ready_check.py so the ordering invariant
 # between them is asserted in one place; re-exported here for the cooldown logic.
@@ -661,8 +661,8 @@ class PersistentView(discord.ui.View):
             # If a ready check is active, add the new player to no_response and refresh the embed
             await ReadyCheckSession.sync_added_player(self.draft_session_id, user_id, draft_session_updated, interaction)
 
-            # Once per player: do they want the library's decks? (services/library_prompt)
-            await maybe_ask_library_preference(interaction, draft_session_updated.cube)
+            # The library: ask once, or reserve its copy for this queue (services/library_prompt)
+            await library_after_sign_up(interaction, draft_session_updated)
 
             if self.session_type == "winston":
                 if len(sign_ups) == 2:
@@ -1252,9 +1252,9 @@ class PersistentView(discord.ui.View):
         await self.update_team_view(interaction)
 
         # A premade draft has no stake step, so joining a team is where a player
-        # is asked, once, whether they want the library's decks.
+        # is asked about the library, or reserves its copy for this draft.
         if not leaving:
-            await maybe_ask_library_preference(interaction, session.cube)
+            await library_after_sign_up(interaction, session)
 
     async def cancel_draft_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Get the guild config for the interaction's guild
@@ -2986,8 +2986,8 @@ class StakeOptionsSelect(discord.ui.Select):
         # Update the draft message to reflect the new list of sign-ups
         await update_draft_message(interaction.client, self.draft_session_id)
 
-        # Once per player: do they want the library's decks? (services/library_prompt)
-        await maybe_ask_library_preference(interaction, draft_session_updated.cube)
+        # The library: ask once, or reserve its copy for this queue (services/library_prompt)
+        await library_after_sign_up(interaction, draft_session_updated)
 
 
 class StakeOptionsView(discord.ui.View):
@@ -3171,8 +3171,8 @@ class StakeModal(discord.ui.Modal):
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
 
-            # Once per player: do they want the library's decks? (services/library_prompt)
-            await maybe_ask_library_preference(interaction, draft_session.cube)
+            # The library: ask once, or reserve its copy for this queue (services/library_prompt)
+            await library_after_sign_up(interaction, draft_session)
 
         except _EntryAborted:
             # A refused entry, not a fault: the transaction rolled back, so
@@ -3336,7 +3336,8 @@ class BetCapToggleButton(CallbackButton):
                     library = await library_to_ask_about(guild_id, draft_session.cube, user_id)
                     if library is not None:
                         combined_view.add_item(LibraryToggleButton(
-                            user_id, guild_id, await get_uses_library(user_id, guild_id)))
+                            user_id, guild_id, await get_uses_library(user_id, guild_id),
+                            draft=draft_session, library=library))
                 except Exception:
                     logger.exception("settings panel: library check failed for {} on {}",
                                      user_id, self.draft_session_id)

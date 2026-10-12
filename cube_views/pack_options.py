@@ -387,6 +387,20 @@ async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
             custodian.cancel()
 
     if not covered:
+        # Where the copy is, when another queue reserved it: those players can
+        # join that one and fire it (services/library_reservation).
+        try:
+            from services.library_reservation import queue_holding, queue_link
+            holder = await queue_holding(guild_id, cube_id)
+        except Exception:
+            logger.opt(exception=True).warning(
+                "signup board: could not see who holds {}", cube_id)
+            holder = None
+        link = queue_link(holder) if holder is not None else None
+        if holder is not None and holder.teams_start_time is None and link:
+            return (f"⏳ **Library in use** — its copy of this cube is reserved "
+                    f"by [another queue]({link}). Join that one to fire it, or "
+                    f"bring your own cards.")
         return ("⚠️ **Bring your own cards** — the library can't cover this "
                 "cube right now.")
     if up is False:
@@ -400,7 +414,7 @@ async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
     if library.min_drafts_to_borrow is not None:
         who = f" Open to players with {library.min_drafts_to_borrow}+ drafts here."
     if library.kind == RENTAL:
-        who += " You'll be asked when you sign up."
+        who += " Signing up reserves it for this draft."
 
     if most == 0:
         return ("🆓 **Library available, no cards needed** — borrow your deck from the library "

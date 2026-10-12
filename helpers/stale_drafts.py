@@ -37,3 +37,19 @@ def is_stale_draft(session) -> bool:
     """Fired (teams were created) but never finished. Sessions that never
     fired are the queue-inactivity cleanup's job, not this command's."""
     return session.teams_start_time is not None and not is_finished_draft(session)
+
+
+def rooms_reaped(session, now: datetime | None = None) -> bool:
+    """Whether cleanup has already deleted this draft's rooms.
+
+    Cleanup deletes a draft's channels -- and an unstarted queue's row -- at its
+    `deletion_time`, which activity keeps pushing back. Past it, the draft can
+    neither be reported into nor filled, so nothing it was holding is still
+    holding anything. Nobody leaves a dead queue; they stop coming back, so
+    this is what ends a queue's claim on the library's cards.
+
+    A row with no `deletion_time` is NOT reaped: it has no deadline to be past,
+    and reading it as over would retire a draft nothing has said is finished.
+    """
+    deadline = getattr(session, "deletion_time", None)
+    return deadline is not None and deadline < (now or datetime.now())

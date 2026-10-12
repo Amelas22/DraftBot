@@ -245,37 +245,26 @@ def _later(formed: Optional[datetime], than: Optional[datetime]) -> bool:
 
 async def _could_collect(library_id: Any,
                          drafts: "list[Any]") -> "Optional[dict[str, set[str]]]":
-    """Per draft, who in it would be offered a deck: the same rule deck
-    assignment applies -- may borrow, and for a rental library has said they
-    want its decks. A draft nobody in could collect from holds nothing.
+    """Per draft underway, who in it may borrow from this library -- the rule
+    deck assignment applies. A draft nobody in could collect from holds nothing.
 
-    None for a library that restricts nobody -- communal, no members, no
-    threshold -- where every draft underway holds its cube, as it always has.
+    For a library that is not rental; a rental library's drafts hold what they
+    reserved instead (services/library_reservation).
 
-    One access read for every drafter underway, and one preference read per
-    server, rather than a pair per draft.
+    None for a library that restricts nobody -- no members, no threshold --
+    where every draft underway holds its cube, as it always has.
     """
-    from models.library import RENTAL, Library
-    from preference_service import get_players_using_library
+    from models.library import Library
     from services.library_access_service import may_borrow_many, members
 
     async with AsyncSessionLocal() as session:
         library = await session.get(Library, str(library_id))
-    rental = library is not None and library.kind == RENTAL
     threshold = None if library is None else library.min_drafts_to_borrow
-    if not rental and threshold is None and not await members(library_id):
+    if threshold is None and not await members(library_id):
         return None
     seats = {str(d.session_id): {str(p) for p in (d.sign_ups or {})} for d in drafts}
     allowed = await may_borrow_many(library_id, set().union(*seats.values()))
-    if not rental:
-        return {sid: who & allowed for sid, who in seats.items()}
-    wanting: "dict[str, set[str]]" = {}
-    for guild in {str(d.guild_id) for d in drafts}:
-        here = [p for d in drafts if str(d.guild_id) == guild
-                for p in seats[str(d.session_id)]]
-        wanting[guild] = await get_players_using_library(here, guild)
-    return {str(d.session_id): seats[str(d.session_id)] & allowed
-            & wanting[str(d.guild_id)] for d in drafts}
+    return {sid: who & allowed for sid, who in seats.items()}
 
 
 async def _being_drafted(fetch: "Callable[[str], Any]", library_id: Any, *,
@@ -303,22 +292,40 @@ async def _being_drafted(fetch: "Callable[[str], Any]", library_id: Any, *,
     A draft whose teams formed after `yield_after` holds nothing: see
     library_available.
     """
+    from models.library import RENTAL, Library
+    from services.library_reservation import reservations
+
     cutoff = datetime.now() - DRAFTING_WINDOW
     async with AsyncSessionLocal() as session:
-        guilds = [str(g) for g in (await session.scalars(
-            select(LibraryServer.guild_id).where(
-                LibraryServer.library_id == str(library_id)))).all()]
-        if not guilds:
-            return {}
-        underway = list((await session.scalars(
-            select(DraftSession).where(
-                DraftSession.teams_start_time.isnot(None),
-                DraftSession.teams_start_time >= cutoff,
-                DraftSession.cube.isnot(None),
-                DraftSession.guild_id.in_(guilds),
-            ))).all())
-        if not underway:
-            return {}
+        library = await session.get(Library, str(library_id))
+    rental = library is not None and library.kind == RENTAL
+    collectors: "Optional[dict[str, set[str]]]" = None
+    if rental:
+        # A rental library's drafts hold exactly what they reserved, from the
+        # queue filling to their decks existing (services/library_reservation).
+        # A draft that fired without a reservation gets no decks, so it holds
+        # nothing.
+        underway = [d for d in await reservations(library_id)
+                    if d.teams_start_time is None or d.teams_start_time >= cutoff]
+    else:
+        async with AsyncSessionLocal() as session:
+            guilds = [str(g) for g in (await session.scalars(
+                select(LibraryServer.guild_id).where(
+                    LibraryServer.library_id == str(library_id)))).all()]
+            if not guilds:
+                return {}
+            underway = list((await session.scalars(
+                select(DraftSession).where(
+                    DraftSession.teams_start_time.isnot(None),
+                    DraftSession.teams_start_time >= cutoff,
+                    DraftSession.cube.isnot(None),
+                    DraftSession.guild_id.in_(guilds),
+                ))).all())
+        if underway:
+            collectors = await _could_collect(library_id, underway)
+    if not underway:
+        return {}
+    async with AsyncSessionLocal() as session:
         assigned = {
             str(s) for s in (await session.scalars(
                 select(CardLoan.source).where(
@@ -326,7 +333,6 @@ async def _being_drafted(fetch: "Callable[[str], Any]", library_id: Any, *,
                 ))).all()
         }
 
-    collectors = await _could_collect(library_id, underway)
     committed: "dict[str, int]" = {}
     for draft in underway:
         if draft.session_stage in FINISHED_STAGES:

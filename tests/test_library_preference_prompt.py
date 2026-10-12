@@ -30,10 +30,11 @@ def _interaction(player=PLAYER, guild=GUILD):
         response=SimpleNamespace(edit_message=AsyncMock(), send_message=AsyncMock()))
 
 
-async def _lounge(kind="rental"):
+async def _lounge(kind="rental", stock=None):
     """Fifty from a member, a hundred from anybody with three drafts."""
     await a_library(LIB, guild=GUILD, kind=kind, collateral=50,
-                    collateral_untrusted=100, cubes=(CUBE,), min_drafts=3)
+                    collateral_untrusted=100, cubes=(CUBE,), min_drafts=3,
+                    stock=stock)
     await access.invite(LIB, MEMBER, "test")
 
 
@@ -80,14 +81,36 @@ async def test_the_switch_turns_an_unasked_player_on_then_off(test_db):
 
 # --- when it is asked -------------------------------------------------------
 
+@pytest.fixture
+def shelf(monkeypatch):
+    """One copy of the cube, so a reserve attempt can be answered offline."""
+    import services.card_library_inventory as inv
+
+    async def fetch(cube_id):
+        return [{"name": "Swamp", "qty": 4}] if cube_id == CUBE else None
+    monkeypatch.setattr(inv, "fetch_cube", fetch)
+
+
+async def _queue(players, sid="q1", cube=CUBE):
+    from datetime import datetime, timedelta
+    from models.draft_session import DraftSession
+    async with AsyncSessionLocal() as s:
+        s.add(DraftSession(session_id=sid, guild_id=GUILD, cube=cube,
+                           sign_ups={p: p for p in players},
+                           deletion_time=datetime.now() + timedelta(hours=3),
+                           draft_channel_id="chan", message_id=f"msg-{sid}"))
+        await s.commit()
+    return SimpleNamespace(session_id=sid, cube=cube)
+
+
 @pytest.mark.parametrize("player,hold", [(MEMBER, 50), (PLAYER, 100)])
 async def test_an_unasked_eligible_player_is_asked_with_their_own_hold(
-        test_db, player, hold):
+        test_db, shelf, player, hold):
     await _lounge()
     await _drafted(PLAYER, 3)
     interaction = _interaction(player)
 
-    await prompt.maybe_ask_library_preference(interaction, CUBE)
+    await prompt.library_after_sign_up(interaction, await _queue([player]))
 
     interaction.followup.send.assert_awaited_once()
     text = interaction.followup.send.await_args.args[0]
@@ -95,75 +118,125 @@ async def test_an_unasked_eligible_player_is_asked_with_their_own_hold(
     assert interaction.followup.send.await_args.kwargs["ephemeral"] is True
 
 
-async def test_somebody_who_has_answered_is_not_asked_again(test_db):
+async def test_a_borrower_is_not_asked_but_told_it_is_reserved(test_db, shelf):
+    await _lounge(stock={"Swamp": 4})
+    await prefs.set_uses_library(MEMBER, GUILD, True)
+    interaction = _interaction(MEMBER)
+
+    await prompt.library_after_sign_up(interaction, await _queue([MEMBER]))
+
+    text = interaction.followup.send.await_args.args[0]
+    assert "reserved for this draft" in text, text
+    assert "view" in interaction.followup.send.await_args.kwargs, \
+        "with the button to say they don't need it"
+
+
+async def test_a_borrower_in_a_second_queue_is_pointed_at_the_first(test_db, shelf):
+    await _lounge(stock={"Swamp": 4})
+    await _drafted(PLAYER, 3)
+    for p in (MEMBER, PLAYER):
+        await prefs.set_uses_library(p, GUILD, True)
+    await prompt.library_after_sign_up(_interaction(MEMBER), await _queue([MEMBER], "q1"))
+    interaction = _interaction(PLAYER)
+
+    await prompt.library_after_sign_up(interaction, await _queue([PLAYER], "q2"))
+
+    text = interaction.followup.send.await_args.args[0]
+    assert "in use" in text and "/chan/msg-q1" in text and "Join that one" in text, text
+
+
+async def test_somebody_who_said_no_is_told_nothing(test_db, shelf):
     await _lounge()
     await prefs.set_uses_library(MEMBER, GUILD, False)
     interaction = _interaction(MEMBER)
 
-    await prompt.maybe_ask_library_preference(interaction, CUBE)
+    await prompt.library_after_sign_up(interaction, await _queue([MEMBER]))
 
     interaction.followup.send.assert_not_awaited()
 
 
-async def test_somebody_who_may_not_borrow_is_not_asked(test_db):
+async def test_somebody_who_may_not_borrow_is_not_asked(test_db, shelf):
     await _lounge()
     await _drafted(PLAYER, 2)
     interaction = _interaction(PLAYER)
 
-    await prompt.maybe_ask_library_preference(interaction, CUBE)
+    await prompt.library_after_sign_up(interaction, await _queue([PLAYER]))
 
     interaction.followup.send.assert_not_awaited()
 
 
-async def test_a_cube_the_library_does_not_offer_asks_nothing(test_db):
+async def test_a_cube_the_library_does_not_offer_asks_nothing(test_db, shelf):
     await _lounge()
     interaction = _interaction(MEMBER)
 
-    await prompt.maybe_ask_library_preference(interaction, "another-cube")
+    await prompt.library_after_sign_up(
+        interaction, await _queue([MEMBER], cube="another-cube"))
 
     interaction.followup.send.assert_not_awaited()
 
 
-async def test_a_communal_library_asks_nothing(test_db):
+async def test_a_communal_library_asks_nothing(test_db, shelf):
     """It lends to everybody, as it always has; there is nothing to answer."""
     await _lounge(kind="communal")
     interaction = _interaction(MEMBER)
 
-    await prompt.maybe_ask_library_preference(interaction, CUBE)
+    await prompt.library_after_sign_up(interaction, await _queue([MEMBER]))
 
     interaction.followup.send.assert_not_awaited()
 
 
-async def test_a_failure_never_reaches_the_sign_up(test_db, monkeypatch):
-    """The player is already signed up; the prompt failing must not look like
-    the sign-up did."""
-    await _lounge()
-    monkeypatch.setattr(prompt, "library_to_ask_about",
-                        AsyncMock(side_effect=RuntimeError("db gone")))
-
-    await prompt.maybe_ask_library_preference(_interaction(MEMBER), CUBE)
-
-
 # --- answering it -----------------------------------------------------------
 
-@pytest.mark.parametrize("answer", [True, False])
-async def test_a_click_saves_the_answer_and_closes_the_prompt(test_db, answer):
-    view = prompt.LibraryPreferenceView(PLAYER, GUILD)
-    button = next(b for b in view.children if b.uses_library is answer)
+async def _view(player=PLAYER):
+    from services.library_service import library_for
+    draft = await _queue([player])
+    return prompt.LibraryPreferenceView(player, GUILD, draft, await library_for(GUILD))
+
+
+async def test_yes_saves_it_and_reserves_the_copy(test_db, shelf):
+    await _lounge(stock={"Swamp": 4})
+    await _drafted(PLAYER, 3)
+    view = await _view()
+    button = next(b for b in view.children if b.uses_library is True)
     interaction = _interaction(PLAYER)
 
     await button.callback(interaction)
 
-    assert await prefs.get_uses_library(PLAYER, GUILD) is answer
+    assert await prefs.get_uses_library(PLAYER, GUILD) is True
+    text = interaction.response.edit_message.await_args.kwargs["content"]
+    assert "reserved for this draft" in text, text
+
+
+async def test_no_saves_it_and_closes_the_prompt(test_db, shelf):
+    await _lounge()
+    view = await _view()
+    button = next(b for b in view.children if b.uses_library is False)
+    interaction = _interaction(PLAYER)
+
+    await button.callback(interaction)
+
+    assert await prefs.get_uses_library(PLAYER, GUILD) is False
     assert interaction.response.edit_message.await_args.kwargs["view"] is None
 
 
-async def test_ignoring_the_prompt_saves_nothing(test_db):
+async def test_ignoring_the_prompt_saves_nothing(test_db, shelf):
     """No click, no answer: asked again at the next sign-up."""
-    view = prompt.LibraryPreferenceView(PLAYER, GUILD)
+    await _lounge()
+    view = await _view()
     await view.on_timeout()
 
     assert await prefs.get_uses_library(PLAYER, GUILD) is None
+
+
+async def test_an_unanswered_prompt_closes_itself(test_db, shelf):
+    await _lounge()
+    view = await _view()
+    view.sent = SimpleNamespace(edit=AsyncMock())
+
+    await view.on_timeout()
+
+    kwargs = view.sent.edit.await_args.kwargs
+    assert kwargs["view"] is None and "/toggle_library" in kwargs["content"]
 
 
 # --- when something goes wrong ----------------------------------------------
@@ -180,33 +253,24 @@ async def test_a_failed_read_does_not_flip_the_switch(test_db, monkeypatch):
     assert await prefs.get_uses_library(PLAYER, GUILD) is True
 
 
-async def test_a_prompt_that_fails_says_how_to_opt_in(test_db, monkeypatch):
-    """Unanswered means no deck at the end of the draft, so the player is told
-    the way round rather than left to find out then."""
+async def test_a_failure_says_how_to_opt_in_and_never_reaches_the_sign_up(
+        test_db, shelf, monkeypatch):
+    """The player is already signed up; and unanswered means no deck, so they
+    are told the way round rather than left to find out at the end."""
     await _lounge()
     monkeypatch.setattr(prompt, "hold_for",
                         AsyncMock(side_effect=RuntimeError("db gone")))
     interaction = _interaction(MEMBER)
 
-    await prompt.maybe_ask_library_preference(interaction, CUBE)
+    await prompt.library_after_sign_up(interaction, await _queue([MEMBER]))
 
     said = interaction.followup.send.await_args.args[0]
     assert "/toggle_library" in said, said
 
 
-async def test_a_server_with_no_library_is_not_told_anything(test_db, monkeypatch):
+async def test_a_server_with_no_library_is_not_told_anything(test_db):
     interaction = _interaction(MEMBER)
 
-    await prompt.maybe_ask_library_preference(interaction, CUBE)
+    await prompt.library_after_sign_up(interaction, SimpleNamespace(session_id="x", cube=CUBE))
 
     interaction.followup.send.assert_not_awaited()
-
-
-async def test_an_unanswered_prompt_closes_itself(test_db):
-    view = prompt.LibraryPreferenceView(PLAYER, GUILD)
-    view.sent = SimpleNamespace(edit=AsyncMock())
-
-    await view.on_timeout()
-
-    kwargs = view.sent.edit.await_args.kwargs
-    assert kwargs["view"] is None and "/toggle_library" in kwargs["content"]

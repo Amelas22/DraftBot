@@ -679,6 +679,17 @@ async def test_a_communal_library_lends_to_everyone_in_the_pod(
     assert assigned > 0 and len(told) == assigned
 
 
+async def _reserved(session_id=SESSION):
+    """The draft reserved the library's copy while it filled."""
+    from datetime import datetime
+    from sqlalchemy import select as _select
+    async with AsyncSessionLocal() as s:
+        row = (await s.execute(_select(DraftSession).where(
+            DraftSession.session_id == session_id))).scalar_one()
+        row.library_reserved_at = datetime.now()
+        await s.commit()
+
+
 async def _drafted(player, n):
     from models.player import PlayerStats
     async with AsyncSessionLocal() as s:
@@ -706,6 +717,7 @@ async def test_a_draft_threshold_offers_decks_to_the_experienced(
     from preference_service import set_uses_library
     await set_uses_library(ALICE, GUILD, True)
     await set_uses_library(BOB, GUILD, True)
+    await _reserved()
 
     assert await svc.assign_drafted_decks(SESSION) == 1
     assert set(await _loans()) == {ALICE}, "Bob has two drafts, one short"
@@ -723,10 +735,28 @@ async def test_a_rental_library_offers_decks_only_to_those_who_asked(
     await set_uses_library(ALICE, GUILD, True)
     told = _recording_dm(monkeypatch)
     await _seed()
+    await _reserved()
 
     assert await svc.assign_drafted_decks(SESSION) == 1
     assert set(await _loans()) == {ALICE}, "Bob never said he wanted one"
     assert [who for who, _ in told] == [ALICE]
+
+
+async def test_a_rental_draft_that_never_reserved_gets_no_decks(
+        test_db, monkeypatch):
+    """To use the library a draft must have reserved its copy while it filled;
+    one that fired without it gets nothing, however many asked."""
+    from conftest import a_library
+    from preference_service import set_uses_library
+
+    await a_library(LIBRARY, guild=GUILD, kind="rental", collateral=5,
+                    cubes=(CUBE,))
+    await set_uses_library(ALICE, GUILD, True)
+    _recording_dm(monkeypatch)
+    await _seed()
+
+    assert await svc.assign_drafted_decks(SESSION) == 0
+    assert await _loans() == {}
 
 
 async def test_a_preference_read_that_fails_is_not_read_as_nobody_asking(
@@ -738,10 +768,12 @@ async def test_a_preference_read_that_fails_is_not_read_as_nobody_asking(
 
     await a_library(LIBRARY, guild=GUILD, kind="rental", collateral=5,
                     cubes=(CUBE,))
-    monkeypatch.setattr(svc, "get_players_using_library",
+    import preference_service
+    monkeypatch.setattr(preference_service, "get_players_using_library",
                         AsyncMock(side_effect=RuntimeError("db gone")))
     _recording_dm(monkeypatch)
     await _seed()
+    await _reserved()
 
     with pytest.raises(RuntimeError):
         await svc.assign_drafted_decks(SESSION)
