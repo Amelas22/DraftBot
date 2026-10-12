@@ -75,6 +75,25 @@ async def library_busy_reason() -> Optional[str]:
     return await serve_busy_reason(get_lending_client())
 
 
+async def lending_custodian_up(timeout_s: float = 0.6) -> bool:
+    """Is the library's MTGO custodian reachable and connected to its client?
+
+    Only reachability, not whether it is free: busy with somebody's trade now
+    says nothing about a draft that ends an hour from now, and that is the
+    question the signup board asks. Bounded on its own, short of the board's
+    one-second budget, so a slow serve reads as down rather than dropping the
+    board's whole library line.
+    """
+    client = get_lending_client()
+    if not client.enabled:
+        return False
+    try:
+        health = await asyncio.wait_for(client.health(), timeout=timeout_s)
+    except Exception:
+        return False
+    return bool(health and health.get("ok") and not health.get("reconnecting"))
+
+
 async def _when_free(dispatch: "Callable[[], Awaitable[tuple[str, Any]]]",
                      borrower_id: Any, poll_s: float,
                      timeout_s: float) -> "tuple[str, bool]":

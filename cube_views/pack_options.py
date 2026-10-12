@@ -6,6 +6,8 @@ draft-start flow (``modals.py``) and the in-draft Update Cube flow
 without the circular import that ``modals`` -> ``sessions`` -> ``views`` would
 otherwise create.
 """
+import asyncio
+
 import discord
 from loguru import logger
 from config import get_cube_options
@@ -338,10 +340,15 @@ async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
     Never claims coverage it has not checked. If the cube cannot be read, or
     the ledger cannot be reached, it says nothing rather than promising a deck
     that may not be there -- which is the exact failure it exists to prevent.
+    And a library whose custodian is unreachable or reconnecting is said to be
+    offline: the shelf may cover the cube, but nobody can borrow from it.
     """
+    from models.library import RENTAL
+    from services.card_lending_service import lending_custodian_up
     from services.library_access_service import is_invite_only
     from services.library_service import library_for, offers, price_range_of
 
+    custodian = None
     try:
         library = await library_for(guild_id)
         if library is None or not await offers(library.id, cube_id):
@@ -350,8 +357,7 @@ async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
             # Before the reads below, not after: this runs inline in draft
             # creation under a one-second budget, and cube_as_the_library_sees_it
             # is an uncached CubeCobra fetch. Computing coverage and then
-            # discarding it spent that whole budget on nothing -- in the only
-            # mode the feature is deployed in.
+            # discarding it spent that whole budget on nothing.
             #
             # The board is ONE message for the whole room, so it cannot address
             # only the people who may borrow. It used to state the terms and add
@@ -360,38 +366,54 @@ async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
             # people only the room is told nothing, and the named are DMed
             # instead (services/library_reminders).
             return None
+        # Alongside the coverage reads rather than after them, so the two share
+        # the budget instead of queueing for it.
+        custodian = asyncio.create_task(lending_custodian_up())
         seen = await cube_as_the_library_sees_it(cube_id)
         if not (seen and seen.cards):
             return None
         cards = seen.cards
         available = await library_available(library.id)
         covered = cube_support(cards, available).ok
+        up = await custodian
     except Exception:
         logger.opt(exception=True).warning(
             "signup board: could not check the library for {}", cube_id)
         return None
+    finally:
+        if custodian is not None and not custodian.done():
+            custodian.cancel()
 
     if not covered:
         return ("⚠️ **Bring your own cards** — the library can't cover this "
                 "cube right now.")
+    if not up:
+        return ("⚠️ **Bring your own cards** — the library is offline right "
+                "now.")
 
     least, most = price_range_of(library) or (0, 0)
-    # Unqualified, because by here the library lends to everyone in the room:
-    # the invite-only case returned above rather than promising a deck to people
-    # who would be turned away at /borrow.
+    # Who may borrow, where that is not simply everybody here: a library that
+    # lends to members and to experienced drafters says where the line is.
+    who = ""
+    if library.min_drafts_to_borrow is not None:
+        who = f" Open to players with {library.min_drafts_to_borrow}+ drafts here."
+    if library.kind == RENTAL:
+        who += " You'll be asked when you sign up."
+
     if most == 0:
-        return "🆓 **No cards needed** — borrow your deck from the library free."
+        return ("🆓 **Library available, no cards needed** — borrow your deck from the library "
+                f"free.{who}")
 
     # Says the hold comes back, because that is the part that decides
     # whether somebody can afford to play: 100 tix they get back is a very
     # different proposition from 100 tix spent.
     if least == most:
-        return (f"🏛️ **No cards needed** — borrow your deck for a "
-                f"**{most} tix** hold, refunded when you return it.")
+        return (f"🏛️ **Library available, no cards needed** — borrow your deck for a "
+                f"**{most} tix** hold, refunded when you return it.{who}")
     # Both figures, because the board is one message for the whole room and
     # cannot know which applies to the reader. Naming only the lower would
     # promise a price to the very people about to be asked for the higher one;
-    # naming only the higher would put off regulars who will never pay it.
-    return (f"🏛️ **No cards needed** — borrow your deck for a "
+    # naming only the higher would put off members who will never pay it.
+    return (f"🏛️ **Library available, no cards needed** — borrow your deck for a "
             f"**{least}–{most} tix** hold, refunded when you return it. "
-            f"Regulars here pay {least}.")
+            f"Members pay {least}.{who}")
