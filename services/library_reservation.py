@@ -67,6 +67,8 @@ class ReserveAnswer:
     """What a reserve attempt found.
 
     status: "reserved" (taken now), "held" (this draft already had it),
+    "unknown" (the cube could not be read, so whether a copy is free is not
+    known),
     "in_use" (another draft's reservation is using the copy; `by` is it when
     it is a draft of the same cube), "short" (the shelf can't cover the cube for
     another reason), "fired" (teams already formed -- too late to reserve), or
@@ -136,6 +138,14 @@ async def library_users(draft: Any, library_id: Any = None) -> "set[str]":
             if p not in ended and not (p in played and p not in collected)}
 
 
+async def _has_decks(draft: Any) -> bool:
+    """Whether any deck was ever assigned from this draft."""
+    async with AsyncSessionLocal() as session:
+        found = await session.scalar(select(CardLoan.id).where(
+            CardLoan.source == f"draft:{draft.session_id}").limit(1))
+    return found is not None
+
+
 async def _why_released(draft: Any, now: datetime,
                         users: "Optional[set[str]]" = None) -> Optional[str]:
     from services.library_reminders import draft_state
@@ -146,6 +156,12 @@ async def _why_released(draft: Any, now: datetime,
         return "the queue went quiet"
     if draft.teams_start_time is not None and (await draft_state(draft.session_id)).settled:
         return "the draft is decided"
+    if draft.teams_start_time is not None and rooms_reaped(draft, now) \
+            and not await _has_decks(draft):
+        # Fired, then nothing: no log, so no decks, and nobody abandoned it.
+        # Cleanup has taken its rooms; with no deck out there is nothing left
+        # to hold the copy for.
+        return "its rooms were cleaned up without any decks"
     if not (await library_users(draft) if users is None else users):
         return "nobody in it needs the library any more"
     return None
@@ -164,8 +180,10 @@ async def still_reserved(draft: Any, now: Optional[datetime] = None, *,
     why = await _why_released(draft, when, await library_users(draft, library_id))
     if why is None:
         return True
-    # Only the reservation that was judged: a re-reserve, or a borrower joining
-    # while this was being worked out, must not be undone by a stale verdict.
+    # Only the reservation that was judged: a re-reserve while this was being
+    # worked out must not be undone by a stale verdict. (A borrower who joined
+    # meanwhile is not guarded here; their sign-up reserves again, and so does
+    # their "I agree".)
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             update(DraftSession)
@@ -233,14 +251,21 @@ async def reserve(session_id: Any) -> ReserveAnswer:
 
         read = read_once(fetch_cube)
         seen = await cube_as_the_library_sees_it(draft.cube, fetch=read)
-        if seen and seen.cards and cube_support(
+        if seen is None:
+            # A failed read, not an empty cube: whether the shelf covers it is
+            # unknown, and saying "can't cover" would send them off to find cards.
+            logger.warning("library: could not read {} to reserve it for draft {}",
+                           draft.cube, draft.session_id)
+            return ReserveAnswer("unknown")
+        if seen.cards and cube_support(
                 seen.cards, await library_available(library.id, fetch=read)).ok:
             async with AsyncSessionLocal() as session:
                 row = await session.get(DraftSession, draft.id)
-                if row is not None:
-                    row.library_reserved_at = datetime.now()
-                    row.library_released_at = None
-                    await session.commit()
+                if row is None:
+                    return ReserveAnswer("not_applicable")
+                row.library_reserved_at = datetime.now()
+                row.library_released_at = None
+                await session.commit()
             logger.info("library: draft {} reserved {} from {}",
                         draft.session_id, draft.cube, library.id)
             return ReserveAnswer("reserved")
@@ -270,7 +295,13 @@ async def release_player(session_id: Any, player_id: Any) -> bool:
             row.library_released = released + [str(player_id)]
             await session.commit()
         draft = row
-    await still_reserved(draft)
+    try:
+        await still_reserved(draft)
+    except Exception:
+        # Recorded either way; the reservation is judged again at its next read.
+        logger.opt(exception=True).warning(
+            "library: released {} from {} but could not re-check its reservation",
+            player_id, session_id)
     return True
 
 
@@ -295,6 +326,35 @@ async def agree_player(session_id: Any, player_id: Any) -> ReserveAnswer:
         row.library_agreed = sorted(agreed(row) | {player})
         row.library_released = [p for p in (row.library_released or [])
                                 if str(p) != player]
+        await session.commit()
+    return await reserve(session_id)
+
+
+async def reclaim_player(session_id: Any, player_id: Any) -> None:
+    """Take back this player's own "don't need it" for this draft: they have
+    asked for the library again, by signing up with borrowing on or switching
+    it on."""
+    player = str(player_id)
+    async with _LISTS_LOCK, AsyncSessionLocal() as session:
+        row = (await session.execute(select(DraftSession).where(
+            DraftSession.session_id == str(session_id)))).scalar_one_or_none()
+        if row is None or player not in {str(p) for p in (row.library_released or [])}:
+            return
+        row.library_released = [p for p in row.library_released if str(p) != player]
+        await session.commit()
+
+
+async def cube_changed(session_id: Any) -> ReserveAnswer:
+    """The queue switched cube. What it held was the old cube's copy, so that
+    goes, and the new cube is reserved if it is the library's and somebody in
+    the queue wants it."""
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            update(DraftSession)
+            .where(DraftSession.session_id == str(session_id),
+                   DraftSession.library_reserved_at.isnot(None),
+                   DraftSession.library_released_at.is_(None))
+            .values(library_released_at=datetime.now()))
         await session.commit()
     return await reserve(session_id)
 

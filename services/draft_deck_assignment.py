@@ -303,6 +303,9 @@ async def assign_drafted_decks(session_id: Any) -> int:
     not_opted: "list[str]" = []
     if library.kind == RENTAL:
         draft = await DraftSession.get_by_session_id(str(session_id))
+        if draft is None:
+            logger.warning("deck assignment: draft {} is gone, so it holds no "
+                           "reservation and nobody is offered a deck", session_id)
         wanting = await users_if_reserved(draft) if draft is not None else set()
         not_opted = [d for d in eligible if str(d) not in wanting]
     assignable = [d for d in eligible if d not in set(not_opted)]

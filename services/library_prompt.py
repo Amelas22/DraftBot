@@ -34,7 +34,7 @@ from services.library_access_service import may_borrow
 from models.draft_session import DraftSession
 from services.library_reservation import (ReserveAnswer, agree_player, agreed,
                                           joinable_link, owes_agreement,
-                                          release_player, reserve)
+                                          reclaim_player, release_player, reserve)
 from services.library_service import offers, rental_library_for
 from services.library_trust_service import hold_for
 
@@ -76,6 +76,9 @@ WHERE_TO_CHANGE = ("the draft's **Change Entry / Settings** button "
                    "(**Library 🏛️** on other drafts)")
 TOO_LATE = ("⚠️ Too late to agree: this draft has already started, so it "
             "won't borrow from the library.")
+COULD_NOT_CHECK = ("⚠️ Couldn't check the library just now. Try again in a minute "
+                   "from the draft's **Change Entry / Settings** button "
+                   "(**Library 🏛️** on other drafts).")
 
 
 def reservation_text(answer: ReserveAnswer, cube: Any, hold: int,
@@ -101,6 +104,9 @@ def reservation_text(answer: ReserveAnswer, cube: Any, hold: int,
     if answer.status == "short":
         return (f"⚠️ The library can't cover **{cube}** right now, so bring "
                 f"your own cards for this draft.")
+    if answer.status == "unknown":
+        return (f"⚠️ Couldn't check the library's shelf for **{cube}** just now. "
+                f"Press **Borrow from the library** on {WHERE_TO_CHANGE} to try again.")
     return None
 
 
@@ -116,11 +122,23 @@ class _Release(discord.ui.Button[Any]):
 
     @override
     async def callback(self, interaction: discord.Interaction) -> None:
-        if not await release_player(self.session_id, self.player_id):
-            await interaction.response.send_message(
+        # Answered first: what follows reads the database, and Discord gives
+        # up on an interaction after three seconds.
+        await interaction.response.defer()
+        try:
+            found = await release_player(self.session_id, self.player_id)
+        except Exception:
+            logger.exception("library: could not release {} from {}",
+                             self.player_id, self.session_id)
+            await interaction.followup.send(
+                "⚠️ Couldn't record that just now. Press it again in a minute.",
+                ephemeral=True)
+            return
+        if not found:
+            await interaction.followup.send(
                 "⚠️ Couldn't find that draft any more.", ephemeral=True)
             return
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=("👍 Noted: no library deck for you this draft. If nobody "
                      "else here needs it, the copy goes to the next queue."),
             view=None)
@@ -163,16 +181,26 @@ class _Agree(discord.ui.Button[Any]):
             await interaction.response.send_message("This button is not for you.",
                                                     ephemeral=True)
             return
-        text, view = await _agree_and_say(self.player_id, self.session_id,
-                                          self.cube, self.hold)
+        # Answered first: agreeing can reserve, which reads the cube list, and
+        # Discord gives up on an interaction after three seconds.
+        await interaction.response.defer()
+        try:
+            text, view = await _agree_and_say(self.player_id, self.session_id,
+                                              self.cube, self.hold)
+        except Exception:
+            logger.exception("library: could not record {} agreeing in {}",
+                             self.player_id, self.session_id)
+            text, view = COULD_NOT_CHECK, None
+            await interaction.followup.send(text, ephemeral=True)
+            return
         if self.in_place:
-            await interaction.response.edit_message(content=text, view=view)
+            await interaction.edit_original_response(content=text, view=view)
             if self.view is not None:
                 self.view.stop()
         elif view is None:
-            await interaction.response.send_message(text, ephemeral=True)
+            await interaction.followup.send(text, ephemeral=True)
         else:
-            await interaction.response.send_message(text, view=view, ephemeral=True)
+            await interaction.followup.send(text, view=view, ephemeral=True)
 
 
 def library_agree_button(player_id: str, session_id: str, cube: Any,
@@ -201,10 +229,17 @@ async def _reserve_and_say(player_id: str, draft: Any, library: Library,
         answer = await agree_player(session_id, player_id)
         has_agreed = True
     else:
+        # Asking again takes back their own "don't need it" for this draft;
+        # left in place, it would quietly keep them from the deck.
+        await reclaim_player(session_id, player_id)
         answer = await reserve(session_id)
         # Read afresh: somebody re-joining a queue they already agreed in.
         current = await DraftSession.get_by_session_id(session_id)
         has_agreed = current is not None and str(player_id) in agreed(current)
+        if (not has_agreed and current is not None
+                and current.teams_start_time is not None
+                and answer.status in ("reserved", "held")):
+            return TOO_LATE, None
     text = reservation_text(answer, draft.cube, hold, has_agreed)
     view = (_release_view(player_id, session_id, draft.cube, hold, owes=not has_agreed)
             if answer.status in ("reserved", "held") else None)
@@ -230,19 +265,27 @@ class _Answer(discord.ui.Button[Any]):
 
     @override
     async def callback(self, interaction: discord.Interaction) -> None:
+        # Answered first: a yes reserves, which reads the cube list, and Discord
+        # gives up on an interaction after three seconds.
+        await interaction.response.defer()
         if not await set_uses_library(self.player_id, self.guild_id, self.uses_library):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"⚠️ Couldn't save that just now. Try again from {WHERE_TO_CHANGE}.",
                 ephemeral=True)
             return
         text, view = saved_text(self.uses_library), None
         if self.uses_library:
             # The question quoted the hold, so answering yes is agreeing.
-            said, view = await _reserve_and_say(self.player_id, self.draft,
-                                                self.library, agree=True)
+            try:
+                said, view = await _reserve_and_say(self.player_id, self.draft,
+                                                    self.library, agree=True)
+            except Exception:
+                logger.exception("library: saved {}'s yes but could not reserve in {}",
+                                 self.player_id, self.draft.session_id)
+                said, view = COULD_NOT_CHECK, None
             if said:
                 text += "\n" + said
-        await interaction.response.edit_message(content=text, view=view)
+        await interaction.edit_original_response(content=text, view=view)
         if self.view is not None:
             self.view.stop()
 
@@ -375,7 +418,12 @@ class _SetLibrary(discord.ui.Button[Any]):
 
         text, view = saved_text(self.uses_library), None
         if self.uses_library and self.draft is not None and self.library is not None:
-            said, view = await _reserve_and_say(self.player_id, self.draft, self.library)
+            try:
+                said, view = await _reserve_and_say(self.player_id, self.draft, self.library)
+            except Exception:
+                logger.exception("library: saved {}'s yes but could not reserve in {}",
+                                 self.player_id, self.draft.session_id)
+                said, view = COULD_NOT_CHECK, None
             if said:
                 text += "\n" + said
         if view is None:
@@ -400,29 +448,42 @@ def library_setting_buttons(player_id: str, guild_id: str,
 async def library_settings_panel(interaction: discord.Interaction, session_id: Any) -> None:
     """The library row on its own, behind the Library button of a board with no
     Change Entry / Settings panel."""
+    # Answered first: the row reads the preference, the reservation and the
+    # hold, and Discord gives up on an interaction after three seconds.
+    await interaction.response.defer(ephemeral=True)
+    try:
+        text, view = await _settings_row(interaction, session_id)
+    except Exception:
+        logger.exception("library: could not open the library row for {} on {}",
+                         getattr(interaction.user, "id", None), session_id)
+        text, view = COULD_NOT_CHECK, None
+    if view is None:
+        await interaction.followup.send(text, ephemeral=True)
+    else:
+        await interaction.followup.send(text, view=view, ephemeral=True)
+
+
+async def _settings_row(interaction: discord.Interaction, session_id: Any
+                        ) -> "tuple[str, Optional[discord.ui.View]]":
     if interaction.user is None or interaction.guild_id is None:
-        return
+        return "Open this from the draft's board in its server.", None
     player_id, guild_id = str(interaction.user.id), str(interaction.guild_id)
     draft = await DraftSession.get_by_session_id(str(session_id))
     if draft is None:
-        await interaction.response.send_message("⚠️ Couldn't find that draft any more.",
-                                                ephemeral=True)
-        return
+        return "⚠️ Couldn't find that draft any more.", None
     library = await library_to_ask_about(guild_id, draft.cube, player_id)
     if library is None:
-        await interaction.response.send_message(
-            "The library doesn't lend this draft's cube to you, so there's "
-            "nothing to set here.", ephemeral=True)
-        return
-    view = discord.ui.View(timeout=600)
-    for item in library_setting_buttons(player_id, guild_id,
-                                        await get_uses_library(player_id, guild_id),
-                                        draft=draft, library=library):
-        view.add_item(item)
+        return ("The library doesn't lend this draft's cube to you, so there's "
+                "nothing to set here."), None
+    items = library_setting_buttons(player_id, guild_id,
+                                    await get_uses_library(player_id, guild_id),
+                                    draft=draft, library=library)
     if player_id in {str(p) for p in (draft.sign_ups or {})} \
             and await owes_agreement(draft, player_id):
-        view.add_item(library_agree_button(player_id, str(draft.session_id), draft.cube,
-                                           await hold_for(library, player_id) or 0))
-    await interaction.response.send_message(
-        f"🏛️ Borrowing from the **{library.name}** library. Your answer is "
-        f"remembered for drafts here.", view=view, ephemeral=True)
+        items.append(library_agree_button(player_id, str(draft.session_id), draft.cube,
+                                          await hold_for(library, player_id) or 0))
+    view = discord.ui.View(timeout=600)
+    for item in items:
+        view.add_item(item)
+    return (f"🏛️ Borrowing from the **{library.name}** library. Your answer is "
+            f"remembered for drafts here."), view

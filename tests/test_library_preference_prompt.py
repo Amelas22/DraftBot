@@ -30,7 +30,9 @@ def _interaction(player=PLAYER, guild=GUILD):
     return SimpleNamespace(
         user=SimpleNamespace(id=player), guild_id=guild,
         followup=SimpleNamespace(send=AsyncMock()),
-        response=SimpleNamespace(edit_message=AsyncMock(), send_message=AsyncMock()))
+        edit_original_response=AsyncMock(),
+        response=SimpleNamespace(edit_message=AsyncMock(), send_message=AsyncMock(),
+                                 defer=AsyncMock()))
 
 
 async def _lounge(kind="rental", stock=None):
@@ -155,7 +157,7 @@ async def test_agreeing_from_the_note_keeps_the_copy(test_db, shelf):
 
     await agree.callback(interaction)
 
-    sent = interaction.response.edit_message.await_args.kwargs
+    sent = interaction.edit_original_response.await_args.kwargs
     assert "reserved for this draft" in sent["content"], sent["content"]
     assert _labels(sent["view"]) == ["I don't need the library this draft"]
     assert (await _row()).library_agreed == [MEMBER]
@@ -169,7 +171,8 @@ async def test_nobody_else_can_agree_for_you(test_db, shelf):
 
     await agree.callback(interaction)
 
-    interaction.response.edit_message.assert_not_awaited()
+    interaction.edit_original_response.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once()
     assert not (await _row()).library_agreed
 
 
@@ -182,7 +185,7 @@ async def test_an_old_agree_button_after_switching_off_says_so(test_db, shelf):
 
     await agree.callback(interaction)
 
-    said = interaction.response.edit_message.await_args.kwargs["content"]
+    said = interaction.edit_original_response.await_args.kwargs["content"]
     assert "isn't holding a copy for you" in said, said
 
 
@@ -202,7 +205,7 @@ async def test_agreeing_once_the_draft_fired_is_too_late(test_db, shelf):
 
     await agree.callback(interaction)
 
-    assert interaction.response.edit_message.await_args.kwargs["content"] == prompt.TOO_LATE
+    assert interaction.edit_original_response.await_args.kwargs["content"] == prompt.TOO_LATE
     assert not (await _row()).library_agreed
 
 
@@ -278,7 +281,7 @@ async def test_yes_saves_it_and_reserves_the_copy(test_db, shelf):
     await button.callback(interaction)
 
     assert await prefs.get_uses_library(PLAYER, GUILD) is True
-    sent = interaction.response.edit_message.await_args.kwargs
+    sent = interaction.edit_original_response.await_args.kwargs
     assert "reserved for this draft" in sent["content"], sent["content"]
     assert (await _row()).library_agreed == [PLAYER], \
         "the question quoted the hold, so yes is agreeing"
@@ -294,7 +297,7 @@ async def test_no_saves_it_and_closes_the_prompt(test_db, shelf):
     await button.callback(interaction)
 
     assert await prefs.get_uses_library(PLAYER, GUILD) is False
-    assert interaction.response.edit_message.await_args.kwargs["view"] is None
+    assert interaction.edit_original_response.await_args.kwargs["view"] is None
 
 
 async def test_ignoring_the_prompt_saves_nothing(test_db, shelf):
@@ -439,7 +442,7 @@ async def test_the_library_button_opens_the_row(test_db, shelf):
 
     await prompt.library_settings_panel(interaction, "q1")
 
-    sent = interaction.response.send_message.await_args
+    sent = interaction.followup.send.await_args
     assert "remembered for drafts here" in sent.args[0], sent.args[0]
     assert _labels(sent.kwargs["view"]) == [
         "Library: not set", "Borrow from the library 🏛️", "Bring my own cards 🃏"]
@@ -452,7 +455,7 @@ async def test_the_library_button_says_so_when_you_cannot_borrow(test_db, shelf)
 
     await prompt.library_settings_panel(interaction, "q1")
 
-    sent = interaction.response.send_message.await_args
+    sent = interaction.followup.send.await_args
     assert "view" not in sent.kwargs and "nothing to set" in sent.args[0]
 
 
@@ -479,3 +482,80 @@ async def test_a_server_with_no_library_is_not_told_anything(test_db):
     await prompt.library_after_sign_up(interaction, SimpleNamespace(session_id="x", cube=CUBE))
 
     interaction.followup.send.assert_not_awaited()
+
+
+# --- asking again after "don't need it", and things going wrong --------------
+
+async def test_switching_back_on_after_dont_need_it_asks_to_agree_again(test_db, shelf):
+    """Agreed, then "don't need it", then Borrow on the panel: the player must
+    not be told "reserved, collect your deck" while still marked as released."""
+    from services.library_reservation import library_users, release_player
+    await _lounge(stock={"Swamp": 4})
+    await _drafted(PLAYER, 3)
+    await prefs.set_uses_library(PLAYER, GUILD, True)
+    await prefs.set_uses_library(MEMBER, GUILD, True)
+    await _queue([MEMBER, PLAYER])
+    from services.library_reservation import agree_player
+    await agree_player("q1", MEMBER)
+    await agree_player("q1", PLAYER)
+    await release_player("q1", PLAYER)
+    from services.library_service import library_for
+    _, borrow, _ = prompt.library_setting_buttons(
+        PLAYER, GUILD, True, draft=await _row(), library=await library_for(GUILD))
+    from discord.ui import View
+    View().add_item(borrow)
+    interaction = _panel_interaction()
+
+    await borrow.callback(interaction)
+
+    assert PLAYER in await library_users(await _row()), "back among those who need it"
+    said = interaction.followup.send.await_args.args[0]
+    assert "reserved for this draft" in said, said
+
+
+async def test_a_yes_that_cannot_reserve_says_it_was_saved_and_how_to_retry(
+        test_db, shelf, monkeypatch):
+    await _lounge(stock={"Swamp": 4})
+    await _drafted(PLAYER, 3)
+    view = await _view()
+    monkeypatch.setattr(prompt, "agree_player",
+                        AsyncMock(side_effect=RuntimeError("db gone")))
+    button = next(b for b in view.children if b.uses_library is True)
+    interaction = _interaction(PLAYER)
+
+    await button.callback(interaction)
+
+    interaction.response.defer.assert_awaited_once()
+    assert await prefs.get_uses_library(PLAYER, GUILD) is True
+    said = interaction.edit_original_response.await_args.kwargs["content"]
+    assert "Saved" in said and "Couldn't check the library" in said, said
+
+
+async def test_the_library_button_answers_even_when_the_row_cannot_be_built(
+        test_db, shelf, monkeypatch):
+    await _lounge()
+    await _queue([PLAYER])
+    monkeypatch.setattr(prompt, "library_to_ask_about",
+                        AsyncMock(side_effect=RuntimeError("db gone")))
+    interaction = _interaction(PLAYER)
+
+    await prompt.library_settings_panel(interaction, "q1")
+
+    interaction.response.defer.assert_awaited_once()
+    assert interaction.followup.send.await_args.args[0] == prompt.COULD_NOT_CHECK
+
+
+async def test_a_board_rebuilt_after_startup_keeps_its_library_button(test_db):
+    """What re_register_views does on a restart, after on_ready has loaded the
+    boards: the view it re-attaches must still carry the button."""
+    import services.library_boards as boards
+    from views import PersistentView
+    await _lounge()
+    await _queue([PLAYER], "open-q")
+    boards._BOARDS.clear()
+
+    await boards.load_boards()
+    for stage in (None, "teams"):
+        view = PersistentView(bot=None, draft_session_id="open-q",
+                              session_type="premade", session_stage=stage)
+        assert "Library 🏛️" in [getattr(c, "label", None) for c in view.children]

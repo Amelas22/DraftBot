@@ -122,8 +122,9 @@ async def main():
         try:
             from services.library_boards import load_boards
             await load_boards()
-        except Exception as e:
-            logger.error(f"Error loading library boards: {e}")
+        except Exception:
+            # Every open library board loses its Library button on re-attach.
+            logger.exception("Error loading library boards")
         from debt_views.settle_views import PublicSettleDebtsView
         bot.add_view(PublicSettleDebtsView())
         from cogs.tournament_commands import re_register_tournament_views

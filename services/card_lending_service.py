@@ -751,10 +751,17 @@ async def _dispatch(guild_id: Any, borrower_id: Any, *, from_state: str, to_stat
         available = await lendable_now(library_id, exclude_loan_id=loan.id)
         if _cap(available, requested) != requested:
             return ("short_cards", loan)
-        # Through collateral_for, not off the row: a tiered library's figure
-        # depends on the borrower, and reading the column here would quote one
-        # number in /library deck and charge another at the trade.
-        collateral = await collateral_for(loan, guild_id) or 0
+        # Through hold_for, the figure collateral_for quotes, not off the row:
+        # a tiered library's figure depends on the borrower, and reading the
+        # column here would quote one number in /library deck and charge
+        # another at the trade. Off the library in hand, never a second
+        # lookup that could come back empty and read as free.
+        held = await hold_for(library, borrower_id)
+        if held is None:
+            logger.warning("library: refusing to lend in {} -- no hold for {} "
+                           "from {}", guild_id, borrower_id, library_id)
+            return ("unavailable", loan)
+        collateral = held
         if collateral and not is_money_server(guild_id):
             # A library that charges needs the wallet, and finding that out at
             # transfer time -- after the borrower has been promised a deck --

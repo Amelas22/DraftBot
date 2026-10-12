@@ -132,3 +132,18 @@ async def test_the_refund_returns_what_was_taken_even_if_membership_changed(
     assert await _held_by_the_library(STRANGER) == 0, "all 100 came back"
     async with db_session() as session:
         assert await wallet_service.balance_in(session, GUILD, STRANGER) == 200
+
+
+async def test_a_hold_that_cannot_be_worked_out_never_lends_for_free(
+        test_db, serve, monkeypatch):
+    """No figure is not a figure of zero: the deck stays on the shelf."""
+    from unittest.mock import AsyncMock
+    await _tiered_library()
+    await _drafter(STRANGER, False, funds=200)
+    monkeypatch.setattr(svc, "hold_for", AsyncMock(return_value=None))
+
+    status, _ = await svc.start_borrow(GUILD, STRANGER)
+
+    assert status == "unavailable"
+    assert not serve.lent, "no trade was opened"
+    assert await _held_by_the_library(STRANGER) == 0

@@ -62,6 +62,7 @@ from services.library_boards import has_library_button
 from services.library_prompt import (library_after_sign_up, library_agree_button,
                                      library_setting_buttons, library_settings_panel,
                                      library_to_ask_about)
+from services.library_reservation import cube_changed as library_cube_changed
 from services.library_reservation import owes_agreement
 from services.library_trust_service import hold_for
 from preference_service import get_uses_library
@@ -819,6 +820,14 @@ class PersistentView(discord.ui.View):
                                 .values(**new_values)
                             )
                             await db_session.commit()
+
+                    if cube_changed:
+                        # What the queue held was the old cube's copy.
+                        try:
+                            await library_cube_changed(draft_session.session_id)
+                        except Exception:
+                            logger.exception("cube update: could not move the library "
+                                             "reservation for {}", draft_session.session_id)
 
                     await update_draft_message(select_interaction.client, draft_session.session_id)
 
@@ -3343,26 +3352,32 @@ class BetCapToggleButton(CallbackButton):
                 # The library switch, where there is a rental library this
                 # player could borrow this cube from (services/library_prompt).
                 # Guarded: a library hiccup must not take the stake panel with it.
+                # Built whole, then added: a row missing its agree button would
+                # leave a player who owes one no way to give it.
+                library_note = ""
                 try:
                     library = await library_to_ask_about(guild_id, draft_session.cube, user_id)
                     if library is not None:
-                        for item in library_setting_buttons(
-                                user_id, guild_id, await get_uses_library(user_id, guild_id),
-                                draft=draft_session, library=library):
-                            combined_view.add_item(item)
+                        library_items = library_setting_buttons(
+                            user_id, guild_id, await get_uses_library(user_id, guild_id),
+                            draft=draft_session, library=library)
                         # Waiting on this player's agreement before it fires.
                         if await owes_agreement(draft_session, user_id):
-                            combined_view.add_item(library_agree_button(
+                            library_items.append(library_agree_button(
                                 str(user_id), str(draft_session.session_id),
                                 draft_session.cube, await hold_for(library, user_id) or 0))
+                        for item in library_items:
+                            combined_view.add_item(item)
                 except Exception:
                     logger.exception("settings panel: library check failed for {} on {}",
                                      user_id, self.draft_session_id)
+                    library_note = "\nLibrary settings are unavailable right now; try again in a minute."
                 
                 # Send the ephemeral message with the combined view
                 message_content = f"You are in for {current_stake} tix, with your entry cap **{status}**.\n"
                 message_content += f"Minimum entry is {min_stake} tix. Choose a new maximum, or change your cap.\n"
                 message_content += "Your cap setting is remembered for future drafts."
+                message_content += library_note
                 
                 await interaction.response.send_message(
                     content=message_content,

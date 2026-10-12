@@ -360,3 +360,126 @@ async def test_nobody_left_to_need_it_reserves_nothing(lounge):
 
     assert (await resv.reserve("q1")).status == "not_applicable"
     assert (await _row("q1")).library_reserved_at is None
+
+
+# --- every way a fired draft lets it go --------------------------------------
+
+async def _fired_and_agreed(sid="q1"):
+    await _borrower(ANN)
+    await _queue(sid, [ANN])
+    await resv.agree_player(sid, ANN)
+    await _set(sid, teams_start_time=datetime.now() - timedelta(hours=3))
+
+
+@pytest.mark.parametrize("ending", [
+    {"session_stage": "abandoned"},
+    {"session_stage": "completed"},
+    {"victory_message_id_results_channel": "1"},
+])
+async def test_a_fired_draft_that_ends_gives_the_copy_back(lounge, ending):
+    await _fired_and_agreed()
+    assert await _available() == {}
+
+    await _set("q1", **ending)
+
+    assert not await resv.still_reserved(await _row("q1"))
+    assert await _available() == {"Swamp": 4}
+
+
+async def test_a_fired_draft_that_fizzled_gives_it_back_once_its_rooms_are_gone(lounge):
+    """No log, so no decks, and nobody abandoned it: once cleanup has taken its
+    rooms nothing is left to hold the copy for. Without this the library's only
+    copy stayed locked until somebody abandoned the draft by hand."""
+    await _fired_and_agreed()
+    await _set("q1", session_stage="teams",
+               deletion_time=datetime.now() - timedelta(days=1))
+
+    assert not await resv.still_reserved(await _row("q1"))
+    assert await _available() == {"Swamp": 4}
+
+
+async def test_a_reaped_draft_with_decks_out_keeps_holding_them(lounge):
+    await _fired_and_agreed()
+    async with AsyncSessionLocal() as s:
+        s.add(CardLoan(guild_id=GUILD, borrower_id=ANN, library_id=LIB,
+                       cards=[{"name": "Swamp", "qty": 1}], state="borrowed",
+                       source="draft:q1"))
+        await s.commit()
+    await _set("q1", deletion_time=datetime.now() - timedelta(days=1))
+
+    assert await resv.still_reserved(await _row("q1")), "a deck is still out"
+
+
+# --- a library behind two servers --------------------------------------------
+
+async def test_a_queue_in_another_server_of_the_library_is_told_it_is_in_use(lounge):
+    """One shelf, one copy: a regression that scoped reservations by server
+    would hand the same copy to both."""
+    from models.library_server import LibraryServer
+    async with AsyncSessionLocal() as s:
+        s.add(LibraryServer(guild_id="g2", library_id=LIB, bound_by="test"))
+        s.add(PlayerStats(player_id=BEN, guild_id="g2", display_name=BEN,
+                          drafts_participated=5))
+        await s.commit()
+    await prefs.set_uses_library(BEN, "g2", True)
+    await _borrower(ANN)
+    await _queue("q1", [ANN])
+    await resv.reserve("q1")
+    async with AsyncSessionLocal() as s:
+        now = datetime.now()
+        s.add(DraftSession(session_id="q2", guild_id="g2", cube=CUBE,
+                           sign_ups={BEN: BEN}, draft_start_time=now,
+                           deletion_time=now + timedelta(hours=3),
+                           draft_channel_id="chan2", message_id="msg-q2"))
+        await s.commit()
+
+    answer = await resv.reserve("q2")
+
+    assert answer.status == "in_use" and answer.by.session_id == "q1"
+
+
+# --- the queue changing cube, and the cube that can't be read -----------------
+
+async def test_switching_cube_lets_the_old_copy_go(lounge):
+    await _borrower(ANN)
+    await _queue("q1", [ANN])
+    await resv.reserve("q1")
+    await _set("q1", cube="some-other-cube")
+
+    answer = await resv.cube_changed("q1")
+
+    assert answer.status == "not_applicable", "the library doesn't offer it"
+    assert (await _row("q1")).library_released_at is not None
+    assert await _available() == {"Swamp": 4}
+
+
+async def test_switching_to_the_librarys_cube_reserves_it(lounge):
+    await _borrower(ANN)
+    await _queue("q1", [ANN])
+    await _set("q1", cube="some-other-cube")
+    assert (await resv.reserve("q1")).status == "not_applicable"
+    await _set("q1", cube=CUBE)
+
+    assert (await resv.cube_changed("q1")).status == "reserved"
+
+
+async def test_a_cube_that_cannot_be_read_is_unknown_not_short(lounge, monkeypatch):
+    async def unreadable(cube_id):
+        return None
+    monkeypatch.setattr(inv, "fetch_cube", unreadable)
+    await _borrower(ANN)
+    await _queue("q1", [ANN])
+
+    assert (await resv.reserve("q1")).status == "unknown"
+    assert (await _row("q1")).library_reserved_at is None
+
+
+async def test_asking_again_takes_back_your_own_dont_need_it(lounge):
+    await _borrower(ANN, BEN)
+    await _queue("q1", [ANN, BEN])
+    await resv.reserve("q1")
+    await resv.release_player("q1", ANN)
+
+    await resv.reclaim_player("q1", ANN)
+
+    assert ANN in await resv.library_users(await _row("q1"))
