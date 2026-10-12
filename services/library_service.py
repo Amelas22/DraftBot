@@ -21,7 +21,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from database.db_session import AsyncSessionLocal
-from models.library import COMMUNAL, Library
+from models.library import COMMUNAL, RENTAL, Library
 from models.library_cube import LibraryCube
 from models.library_server import LibraryServer
 
@@ -48,6 +48,12 @@ async def library_id_for(guild_id: Any) -> "Optional[str]":
     """Just the id, for the callers that only need something to scope by."""
     library = await library_for(guild_id)
     return str(library.id) if library else None
+
+
+async def rental_library_for(guild_id: Any) -> "Optional[Library]":
+    """The rental library behind this server, or None if it has none."""
+    library = await library_for(guild_id)
+    return library if library is not None and library.kind == RENTAL else None
 
 
 def is_communal(library: "Optional[Library]") -> bool:

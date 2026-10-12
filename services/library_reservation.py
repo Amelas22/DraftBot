@@ -38,7 +38,6 @@ from database.db_session import AsyncSessionLocal
 from helpers.stale_drafts import rooms_reaped
 from models.card_loan import CardLoan
 from models.draft_session import DraftSession
-from models.library import RENTAL, Library
 from models.library_server import LibraryServer
 from models.match import MatchResult
 
@@ -68,6 +67,13 @@ class ReserveAnswer:
     by: "Optional[DraftSession]" = None
 
 
+def joinable_link(draft: Any) -> Optional[str]:
+    """A link to point players at, if `draft` is a queue they can still join."""
+    if draft is None or draft.teams_start_time is not None:
+        return None
+    return queue_link(draft)
+
+
 def queue_link(draft: Any) -> Optional[str]:
     """A link to a draft's signup message, if it has one."""
     if not (draft.guild_id and draft.draft_channel_id and draft.message_id):
@@ -76,14 +82,7 @@ def queue_link(draft: Any) -> Optional[str]:
             f"{draft.draft_channel_id}/{draft.message_id}")
 
 
-async def _rental_library(guild_id: Any) -> "Optional[Library]":
-    from services.library_service import library_for
-
-    library = await library_for(guild_id)
-    return library if library is not None and library.kind == RENTAL else None
-
-
-async def library_users(draft: Any) -> "set[str]":
+async def library_users(draft: Any, library_id: Any = None) -> "set[str]":
     """Who in this draft still needs the library's copy of its cube.
 
     Signed up, allowed to borrow, saved as borrowing, and not finished with it:
@@ -94,7 +93,8 @@ async def library_users(draft: Any) -> "set[str]":
     from services.library_access_service import may_borrow_many
     from services.library_service import library_id_for
 
-    library_id = await library_id_for(draft.guild_id)
+    if library_id is None:
+        library_id = await library_id_for(draft.guild_id)
     if library_id is None:
         return set()
     seated = {str(p) for p in (draft.sign_ups or {})}
@@ -120,7 +120,8 @@ async def library_users(draft: Any) -> "set[str]":
             if p not in ended and not (p in played and p not in collected)}
 
 
-async def _why_released(draft: Any, now: datetime) -> Optional[str]:
+async def _why_released(draft: Any, now: datetime,
+                        users: "Optional[set[str]]" = None) -> Optional[str]:
     from services.library_reminders import draft_state
 
     if draft.session_stage in FINISHED_STAGES:
@@ -129,12 +130,13 @@ async def _why_released(draft: Any, now: datetime) -> Optional[str]:
         return "the queue went quiet"
     if draft.teams_start_time is not None and (await draft_state(draft.session_id)).settled:
         return "the draft is decided"
-    if not await library_users(draft):
+    if not (await library_users(draft) if users is None else users):
         return "nobody in it needs the library any more"
     return None
 
 
-async def still_reserved(draft: Any, now: Optional[datetime] = None) -> bool:
+async def still_reserved(draft: Any, now: Optional[datetime] = None, *,
+                         library_id: Any = None) -> bool:
     """Whether this draft holds the library's copy right now.
 
     The first time it finds the reservation has no reason left to stand, it
@@ -143,7 +145,7 @@ async def still_reserved(draft: Any, now: Optional[datetime] = None) -> bool:
     if draft.library_reserved_at is None or draft.library_released_at is not None:
         return False
     when = now or datetime.now()
-    why = await _why_released(draft, when)
+    why = await _why_released(draft, when, await library_users(draft, library_id))
     if why is None:
         return True
     # Only the reservation that was judged: a re-reserve, or a borrower joining
@@ -174,7 +176,18 @@ async def reservations(library_id: Any) -> "list[DraftSession]":
                 DraftSession.library_reserved_at.isnot(None),
                 DraftSession.library_released_at.is_(None),
                 DraftSession.guild_id.in_(guilds)))).all())
-    return [d for d in candidates if await still_reserved(d)]
+    return [d for d in candidates if await still_reserved(d, library_id=library_id)]
+
+
+async def users_if_reserved(draft: Any) -> "set[str]":
+    """Who still needs the copy, if this draft holds it; nobody otherwise."""
+    if draft.library_reserved_at is None or draft.library_released_at is not None:
+        return set()
+    users = await library_users(draft)
+    if await _why_released(draft, datetime.now(), users) is not None:
+        await still_reserved(draft)        # records the release
+        return set()
+    return users
 
 
 async def reserve(session_id: Any) -> ReserveAnswer:
@@ -182,7 +195,7 @@ async def reserve(session_id: Any) -> ReserveAnswer:
     from services.card_library_inventory import (
         cube_as_the_library_sees_it, cube_support, fetch_cube, library_available,
         read_once)
-    from services.library_service import offers
+    from services.library_service import offers, rental_library_for
 
     async with _RESERVE_LOCK:
         async with AsyncSessionLocal() as session:
@@ -190,7 +203,7 @@ async def reserve(session_id: Any) -> ReserveAnswer:
                 DraftSession.session_id == str(session_id)))).scalar_one_or_none()
         if draft is None or not draft.cube:
             return ReserveAnswer("not_applicable")
-        library = await _rental_library(draft.guild_id)
+        library = await rental_library_for(draft.guild_id)
         if library is None or not await offers(library.id, draft.cube):
             return ReserveAnswer("not_applicable")
         if await still_reserved(draft):

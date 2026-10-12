@@ -164,7 +164,8 @@ class DraftCommands(commands.Cog):
     )
     async def toggle_library(self, ctx):
         """Flip the saved answer the sign-up flow asks for (services/library_prompt)."""
-        from services.library_prompt import rental_library_for, saved_text, toggle_uses_library
+        from services.library_prompt import saved_text, toggle_uses_library
+        from services.library_service import rental_library_for
 
         await ctx.response.defer(ephemeral=True)
         if ctx.guild is None:

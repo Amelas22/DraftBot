@@ -262,7 +262,7 @@ def _later(formed: Optional[datetime], than: Optional[datetime]) -> bool:
     return formed is not None and than is not None and formed > than
 
 
-async def _could_collect(library_id: Any,
+async def _could_collect(library_id: Any, library: Any,
                          drafts: "list[Any]") -> "Optional[dict[str, set[str]]]":
     """Per draft underway, who in it may borrow from this library -- the rule
     deck assignment applies. A draft nobody in could collect from holds nothing.
@@ -273,11 +273,8 @@ async def _could_collect(library_id: Any,
     None for a library that restricts nobody -- no members, no threshold --
     where every draft underway holds its cube, as it always has.
     """
-    from models.library import Library
     from services.library_access_service import may_borrow_many, members
 
-    async with AsyncSessionLocal() as session:
-        library = await session.get(Library, str(library_id))
     threshold = None if library is None else library.min_drafts_to_borrow
     if threshold is None and not await members(library_id):
         return None
@@ -342,8 +339,9 @@ async def _being_drafted(fetch: "Callable[[str], Any]", library_id: Any, *,
                     DraftSession.cube.isnot(None),
                     DraftSession.guild_id.in_(guilds),
                 ))).all())
-        if underway:
-            collectors = await _could_collect(library_id, underway)
+        if not underway:
+            return {}
+        collectors = await _could_collect(library_id, library, underway)
     if not underway:
         return {}
     async with AsyncSessionLocal() as session:

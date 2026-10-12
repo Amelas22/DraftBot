@@ -393,14 +393,13 @@ async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
         # Where the copy is, when another queue reserved it: those players can
         # join that one and fire it (services/library_reservation).
         try:
-            from services.library_reservation import queue_holding, queue_link
-            holder = await queue_holding(guild_id, cube_id)
+            from services.library_reservation import joinable_link, queue_holding
+            link = joinable_link(await queue_holding(guild_id, cube_id))
         except Exception:
             logger.opt(exception=True).warning(
                 "signup board: could not see who holds {}", cube_id)
-            holder = None
-        link = queue_link(holder) if holder is not None else None
-        if holder is not None and holder.teams_start_time is None and link:
+            link = None
+        if link:
             return (f"⏳ **Library in use** — its copy of this cube is reserved "
                     f"by [another queue]({link}). Join that one to fire it, or "
                     f"bring your own cards.")

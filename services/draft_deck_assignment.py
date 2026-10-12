@@ -29,7 +29,7 @@ from sqlalchemy.orm import undefer
 from services.library_service import library_for, offers
 from services.library_access_service import may_borrow_many
 from models.library import RENTAL
-from services.library_reservation import library_users, still_reserved
+from services.library_reservation import users_if_reserved
 from services.library_reminders import draft_state, who_can_still_use
 from database.db_session import AsyncSessionLocal
 from helpers.mtgo_names import mtgo_name
@@ -302,9 +302,8 @@ async def assign_drafted_decks(session_id: Any) -> int:
     eligible = [d for d in candidates if d not in busy and str(d) in allowed]
     not_opted: "list[str]" = []
     if library.kind == RENTAL:
-        draft = await _draft_row(session_id)
-        wanting = (await library_users(draft)
-                   if draft is not None and await still_reserved(draft) else set())
+        draft = await DraftSession.get_by_session_id(str(session_id))
+        wanting = await users_if_reserved(draft) if draft is not None else set()
         not_opted = [d for d in eligible if str(d) not in wanting]
     assignable = [d for d in eligible if d not in set(not_opted)]
     if finished:
@@ -428,12 +427,6 @@ async def assign_drafted_decks(session_id: Any) -> int:
     _report(session_id, sign_ups, assigned, done, busy, empty, failed, not_invited,
             not_opted)
     return assigned
-
-
-async def _draft_row(session_id: Any) -> "Optional[DraftSession]":
-    async with AsyncSessionLocal() as session:
-        return (await session.execute(select(DraftSession).where(
-            DraftSession.session_id == str(session_id)))).scalar_one_or_none()
 
 
 async def _say_it_is_ready(loan_id: Any, discord_id: Any) -> None:

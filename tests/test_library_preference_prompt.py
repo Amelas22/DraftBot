@@ -2,8 +2,9 @@
 
 The answer is a saved preference per player and server. It is asked right after
 sign-up, only while unset, and only where it can matter: a rental library behind
-the server, offering the draft's cube, that the player may borrow from. Deck
-assignment then offers a rental library's decks only to the players who said yes.
+the server, offering the draft's cube, that the player may borrow from. A
+borrower who has answered is told instead whether their draft holds the
+library's copy, or which queue does (services/library_reservation).
 """
 from types import SimpleNamespace
 from unittest.mock import AsyncMock

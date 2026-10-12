@@ -25,21 +25,13 @@ from typing_extensions import override
 import discord
 from loguru import logger
 
-from models.library import RENTAL, Library
+from models.library import Library
 from preference_service import get_uses_library, set_uses_library
 from services.library_access_service import may_borrow
-from services.library_reservation import (ReserveAnswer, queue_link,
+from services.library_reservation import (ReserveAnswer, joinable_link,
                                           release_player, reserve)
-from services.library_service import library_for, offers
+from services.library_service import offers, rental_library_for
 from services.library_trust_service import hold_for
-
-
-async def rental_library_for(guild_id: Any) -> "Optional[Library]":
-    """The rental library behind this server, or None if it has none."""
-    library = await library_for(guild_id)
-    if library is None or library.kind != RENTAL:
-        return None
-    return library
 
 
 async def library_to_ask_about(guild_id: Any, cube_id: Any,
@@ -80,9 +72,8 @@ def reservation_text(answer: ReserveAnswer, cube: Any, hold: int) -> Optional[st
                 f"Collect your deck with `/library borrow` once it's drafted."
                 f"{held}")
     if answer.status == "in_use":
-        by = answer.by
-        link = queue_link(by) if by is not None else None
-        if by is not None and by.teams_start_time is None and link:
+        link = joinable_link(answer.by)
+        if link:
             return (f"⏳ The library's copy of **{cube}** is in use by "
                     f"[another queue]({link}). Join that one to fire it and "
                     f"borrow there, or bring your own cards for this draft.")
